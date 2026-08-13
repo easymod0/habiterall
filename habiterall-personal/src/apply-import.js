@@ -8,7 +8,7 @@
 import { db, UNSET, YES, SKIP } from './db.js';
 // Loop stores colours as a palette index, so imported habits need the same
 // index -> hex mapping the parsers use.
-import { normalizeColor } from '@habiterall/shared/import.js';
+import { normaliseImportedHabit } from '@habiterall/shared/import.js';
 
 /* ---------- statements ---------- */
 
@@ -62,7 +62,10 @@ export function applyImport(habits, mode = 'merge') {
         continue;
       }
 
-      const type = h.type === 'numerical' ? 'numerical' : 'boolean';
+      // Every field rule is in shared: the two editions' writers had drifted,
+      // and this one had no length clamps at all.
+      const clean = normaliseImportedHabit(h);
+      const type = clean.type;
       const existing = mode === 'merge' ? findHabitByName.get(name) : null;
 
       let habitId;
@@ -70,27 +73,21 @@ export function applyImport(habits, mode = 'merge') {
         habitId = existing.id;
         result.habitsMerged++;
       } else {
-        const num = Math.max(1, Number(h.freq_numerator) || 1);
-        let den = Math.max(1, Number(h.freq_denominator) || 1);
-        if (num > den) den = num; // Loop permits shapes our validation rejects
-
         const info = insertHabit.run(
-          name,
-          String(h.description ?? ''),
-          type,
-          String(h.unit ?? ''),
-          Number(h.target_value) || 0,
-          h.target_type === 'at_most' ? 'at_most' : 'at_least',
-          num,
-          den,
-          normalizeColor(h.color),
-          /^([01]\d|2[0-3]):[0-5]\d$/.test(h.reminder_time ?? '') ? h.reminder_time : '',
-          // One line, capped: the same rule parseHabit applies, because an
-          // imported prompt lands in the Android client's line-delimited cache
-          // exactly like one typed into the dialog.
-          String(h.reminder_message ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200),
+          clean.name,
+          clean.description,
+          clean.type,
+          clean.unit,
+          clean.target_value,
+          clean.target_type,
+          clean.freq_numerator,
+          clean.freq_denominator,
+          clean.color,
+          clean.reminder_time,
+          clean.reminder_message,
           position++,
-          h.archived ? 1 : 0
+          // SQLite has no boolean.
+          clean.archived ? 1 : 0
         );
         habitId = info.lastInsertRowid;
         result.habitsCreated++;

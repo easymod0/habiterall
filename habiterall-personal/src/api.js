@@ -1,6 +1,7 @@
 import express from 'express';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { db, UNSET, YES, SKIP } from './db.js';
 import {
@@ -17,17 +18,15 @@ const SUMMARY_WINDOW_DAYS = 400;
  * habit instead of O(lifetime). Matches the cloud edition.
  */
 const STREAK_HISTORY_DAYS = 1830;
-import {
-  parseHabiterallJSON, parseLoopDatabase,
-  parseLoopCheckmarksCSV, parseLoopHabitsCSV,
-} from '@habiterall/shared/import.js';
+// Format sniffing and every parser live in shared: the two editions had
+// separate copies of the sniffing, and they had drifted.
+import { parseUpload } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
 import { sendTest } from './notifier.js';
 import {
   parseHabit, parseEntry, parseSettings, entryWrite, assertDate, assertNotFuture,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
-import { unzip } from '@habiterall/shared/unzip.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 
@@ -483,7 +482,10 @@ api.get('/export.csv', (req, res) => {
  */
 api.get('/export-loop.db', (req, res, next) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
-  const path = join(tmpdir(), `habiterall-loop-${process.pid}-${Date.now()}.db`);
+  // A random name, matching the cloud edition: a predictable one in a shared
+  // /tmp is a file another local user can wait for, and this one holds every
+  // habit and entry.
+  const path = join(tmpdir(), `habiterall-loop-${randomUUID()}.db`);
 
   writeLoopDatabase(path, habits, (id) => q.entriesFor.all(id))
     .then(() => {
@@ -522,62 +524,5 @@ api.post('/import', (req, res, next) => {
     })
     .catch(next);
 });
-
-/**
- * Sniff the upload format by magic bytes, then structure.
- *   PK\x03\x04            -> zip (Loop CSV export)
- *   "SQLite format 3\0"   -> Loop .db backup
- *   otherwise             -> text: habiterall JSON or a bare CSV
- */
-async function parseUpload(buf) {
-  if (buf.length >= 4 && buf.toString('latin1', 0, 4) === 'PK\x03\x04') {
-    return parseZipExport(buf);
-  }
-
-  if (buf.length >= 16 && buf.toString('latin1', 0, 15) === 'SQLite format 3') {
-    // node:sqlite can only open a path, so stage the upload on disk.
-    const path = join(tmpdir(), `habiterall-import-${process.pid}-${Date.now()}.db`);
-    writeFileSync(path, buf);
-    try {
-      return await parseLoopDatabase(path);
-    } finally {
-      try { unlinkSync(path); } catch { /* best effort */ }
-    }
-  }
-
-  const text = buf.toString('utf8').replace(/^﻿/, '');
-  const head = text.trimStart();
-
-  if (head.startsWith('{') || head.startsWith('[')) {
-    return parseHabiterallJSON(head.startsWith('[') ? { habits: JSON.parse(head) } : text);
-  }
-
-  if (/^"?date"?\s*,/i.test(head)) return parseLoopCheckmarksCSV(text);
-
-  throw httpError(400,
-    'unrecognized file: expected a habiterall JSON backup, a Loop .db backup, or a Loop CSV export');
-}
-
-/** Pull Habits.csv + Checkmarks.csv out of a Loop CSV export zip. */
-function parseZipExport(buf) {
-  const files = unzip(buf);
-
-  const find = (suffix) => {
-    for (const [name, contents] of files) {
-      if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
-    }
-    return null;
-  };
-
-  const habitsCsv = find('habits.csv');
-  const checkmarksCsv = find('checkmarks.csv');
-
-  if (!checkmarksCsv) {
-    throw httpError(400, 'zip does not contain a Checkmarks.csv');
-  }
-
-  const meta = habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map();
-  return parseLoopCheckmarksCSV(checkmarksCsv, meta);
-}
 
 export default api;

@@ -19,6 +19,7 @@
 
 import { withUser } from './db/pool.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
+import { normaliseImportedHabit } from '@habiterall/shared/import.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -133,9 +134,9 @@ export async function applyImport(userId, habits, mode = 'merge') {
       }
 
       if (habitId === null) {
-        const num = Math.max(1, Number(h.freq_numerator) || 1);
-        let den = Math.max(1, Number(h.freq_denominator) || 1);
-        if (num > den) den = num;
+        // Every field rule is in shared, so an imported habit is clamped the
+        // same way in both editions — and to the same limits the API enforces.
+        const clean = normaliseImportedHabit(h);
 
         const { rows } = await db.query(
           `INSERT INTO habits (user_id, name, description, type, unit,
@@ -146,22 +147,19 @@ export async function applyImport(userId, habits, mode = 'merge') {
            RETURNING id`,
           [
             userId,                                   // from the session, always
-            name,
-            String(h.description ?? '').slice(0, 500),
-            type,
-            String(h.unit ?? '').slice(0, 20),
-            Math.max(0, Number(h.target_value) || 0),
-            h.target_type === 'at_most' ? 'at_most' : 'at_least',
-            num,
-            Math.min(den, 365),
-            /^#[0-9a-fA-F]{6}$/.test(h.color ?? '') ? h.color : '#3b82f6',
-            /^([01]\d|2[0-3]):[0-5]\d$/.test(h.reminder_time ?? '') ? h.reminder_time : '',
-            // One line, capped: the same rule parseHabit applies, and the
-            // column's own CHECK constraints would reject anything else with a
-            // 500 rather than a skipped field.
-            String(h.reminder_message ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200),
+            clean.name,
+            clean.description,
+            clean.type,
+            clean.unit,
+            clean.target_value,
+            clean.target_type,
+            clean.freq_numerator,
+            clean.freq_denominator,
+            clean.color,
+            clean.reminder_time,
+            clean.reminder_message,
             position++,
-            !!h.archived,
+            clean.archived,
           ]
         );
         habitId = rows[0].id;
