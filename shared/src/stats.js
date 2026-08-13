@@ -27,8 +27,15 @@ export function addDays(iso, n) {
   return toISO(d);
 }
 
+/**
+ * Whole days from `a` to `b`. Math.round absorbs the +/- 1 hour a DST
+ * transition introduces, which is why this is correct across timezones.
+ * @param {string} a 'YYYY-MM-DD'
+ * @param {string} b 'YYYY-MM-DD'
+ * @returns {number}
+ */
 export function daysBetween(a, b) {
-  return Math.round((fromISO(b) - fromISO(a)) / 86400000);
+  return Math.round((fromISO(b).getTime() - fromISO(a).getTime()) / 86400000);
 }
 
 export function today() {
@@ -335,6 +342,12 @@ export function computeFrequency(habit, entryMap, start, end) {
 
 /* ---------- top-level summary ---------- */
 
+/**
+ * @param {import('./types.js').Habit} habit
+ * @param {import('./types.js').Entry[]} entries
+ * @param {{start?: string, end?: string, granularity?: string}} [opts]
+ * @returns {import('./types.js').Stats}
+ */
 export function computeStats(habit, entries, { start, end, granularity = 'day' } = {}) {
   // Preserve `status` alongside the value so skips stay distinguishable from
   // a numerical habit legitimately recording the value 3.

@@ -14,7 +14,15 @@
  * on activate so a deploy cannot strand users on stale JS.
  */
 
-const CACHE_VERSION = 'v3';
+/**
+ * `self` in a service worker is a ServiceWorkerGlobalScope, not a Window;
+ * without this the checker rejects skipWaiting() and clients.claim().
+ * @type {ServiceWorkerGlobalScope & typeof globalThis}
+ */
+// @ts-ignore -- redeclaring the global for type purposes only
+const sw = self;
+
+const CACHE_VERSION = 'v4';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -32,16 +40,16 @@ const SHELL = [
 /** GET endpoints worth keeping a copy of for offline rendering. */
 const CACHEABLE_API = [/^\/api\/overview/, /^\/api\/habits/, /^\/api\/me$/];
 
-self.addEventListener('install', (event) => {
+sw.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(SHELL_CACHE)
       // Individual failures must not abort the whole install.
       .then((cache) => Promise.allSettled(SHELL.map((url) => cache.add(url))))
-      .then(() => self.skipWaiting())
+      .then(() => sw.skipWaiting())
   );
 });
 
-self.addEventListener('activate', (event) => {
+sw.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(
@@ -50,20 +58,20 @@ self.addEventListener('activate', (event) => {
                          k !== SHELL_CACHE && k !== DATA_CACHE)
           .map((k) => caches.delete(k))
       ))
-      .then(() => self.clients.claim())
+      .then(() => sw.clients.claim())
   );
 });
 
-self.addEventListener('message', (event) => {
-  if (event.data === 'skip-waiting') self.skipWaiting();
+sw.addEventListener('message', (event) => {
+  if (event.data === 'skip-waiting') sw.skipWaiting();
 });
 
-self.addEventListener('fetch', (event) => {
+sw.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;          // writes are the outbox's job
 
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin) return;
+  if (url.origin !== sw.location.origin) return;
 
   // Auth endpoints must always hit the network: a cached redirect or a stale
   // session response would break login in confusing ways.
@@ -116,6 +124,14 @@ async function networkFirst(request, url) {
 async function shellFirst(request) {
   const cached = await caches.match(request);
 
+  // Navigations and stylesheets go network-first when we are online: serving
+  // them stale means a deploy (or a local edit) needs two loads to appear,
+  // and the first one renders with mismatched HTML and CSS. Scripts and
+  // everything else stay cache-first for speed.
+  const revalidateFirst = request.mode === 'navigate' ||
+    request.destination === 'style' ||
+    request.destination === 'document';
+
   const network = fetch(request)
     .then(async (response) => {
       if (response.ok) {
@@ -126,7 +142,13 @@ async function shellFirst(request) {
     })
     .catch(() => null);
 
-  if (cached) return cached;
+  if (revalidateFirst) {
+    const fresh = await network;
+    if (fresh) return fresh;
+    if (cached) return cached;       // offline: stale is better than nothing
+  } else if (cached) {
+    return cached;                   // fast path; the fetch above refreshes it
+  }
 
   const fresh = await network;
   if (fresh) return fresh;

@@ -51,7 +51,8 @@ export function applyImport(habits, mode = 'merge') {
       clearAllHabits.run();
     }
 
-    let position = maxPosition.get().p;
+    // node:sqlite may hand back a bigint; the column is a small integer.
+    let position = Number(maxPosition.get().p);
 
     for (const h of habits) {
       const name = String(h.name ?? '').trim();

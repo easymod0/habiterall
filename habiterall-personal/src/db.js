@@ -57,6 +57,15 @@ db.exec(`
     PRIMARY KEY (habit_id, date)
   );
 
+  -- Preferences. A single-row key/value table rather than a users table,
+  -- because this edition has exactly one implicit user. Keeping it in the
+  -- database (not localStorage) means settings survive a browser reset and
+  -- are captured by the same backup as the habits.
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
   CREATE INDEX IF NOT EXISTS idx_habits_pos  ON habits(position, id);
 `);

@@ -5,6 +5,11 @@ import {
 import {
   enqueue, flush, pendingCount, watchConnectivity,
 } from '/shared/offline.js';
+import {
+  iso, datesEndingOn, freqLabel, targetLabel, todayISO, addDaysISO,
+} from '/shared/ui/dates.js';
+import { initTheme, toggleTheme } from '/shared/ui/theme.js';
+import * as settings from '/shared/ui/settings.js';
 
 /**
  * Auth adapter, injected by the edition's entry point (app-personal.js or
@@ -17,12 +22,23 @@ const UNSET = 0;
 const YES = 2;
 const SKIP = 3;
 
-const GRID_DAYS = 14;         // day columns on the dashboard (wide screens)
-const GRID_DAYS_NARROW = 7;   // fewer, larger columns on phones
+const GRID_DAYS = 14;         // most columns we will ever show
+const GRID_DAYS_NARROW = 7;   // phone layout: fewer, wider columns
+const GRID_DAYS_MEDIUM = 10;  // tablets, where 14 would crush the habit name
 
-/** Day columns that fit the current viewport without cramping tap targets. */
+/**
+ * How many day columns fit without squeezing the habit name out of existence.
+ *
+ * Chosen from the actual viewport width rather than a single breakpoint: at
+ * 768px the 14-column desktop layout needed 668px of a 698px row, leaving
+ * nothing for the name. Under 640px the CSS switches to flexible columns, so
+ * the narrow count applies there.
+ */
 function gridDays() {
-  return window.matchMedia('(max-width: 640px)').matches ? GRID_DAYS_NARROW : GRID_DAYS;
+  const w = window.innerWidth;
+  if (w <= 640) return GRID_DAYS_NARROW;
+  if (w <= 900) return GRID_DAYS_MEDIUM;
+  return GRID_DAYS;
 }
 const STREAK_LIMIT = 5;    // longest streaks listed on the detail view
 const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
@@ -51,10 +67,15 @@ const els = {
   daySave: $('#day-save'),
   starters: $('#starters'),
   emptyArchived: $('#empty-archived'),
-  emptyOnboarding: [...document.querySelectorAll(
+  // querySelectorAll yields Element, which has no `hidden`; these are all
+  // HTMLElements in practice.
+  emptyOnboarding: /** @type {HTMLElement[]} */ ([...document.querySelectorAll(
     '.empty-title, .empty-sub:not(#empty-archived), #starters, .empty-actions, .empty-note'
-  )],
+  )]),
   listHead: $('#list-head'),
+  gridHead: $('#grid-head'),
+  settingsDialog: $('#settings-dialog'),
+  settingsBody: $('#settings-body'),
   toggleArchived: $('#toggle-archived'),
   archivedWrap: $('#archived-wrap'),
   dataDialog: $('#data-dialog'),
@@ -76,6 +97,7 @@ let state = {
   dayEdit: null,       // { habitId, date, type } while the day dialog is open
   showArchived: false, // dashboard is showing the archive rather than active
   hasArchived: false,  // any archived habits exist at all
+  gridEnd: null,       // last day column shown; null = today
   offline: false,      // showing cached data / writes are being queued
   pending: 0,          // writes waiting in the outbox
 };
@@ -205,38 +227,6 @@ function toast(message, { actionLabel = null, onAction = null } = {}) {
     actionLabel ? 9000 : 2600);
 }
 
-/* ---------- date helpers ---------- */
-
-const iso = (d) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
-function lastNDates(n) {
-  const out = [];
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  for (let i = n - 1; i >= 0; i--) {
-    const c = new Date(d);
-    c.setDate(c.getDate() - i);
-    out.push(c);
-  }
-  return out;
-}
-
-function freqLabel(h) {
-  const { freq_numerator: n, freq_denominator: d } = h;
-  if (n === d) return 'Every day';
-  if (d === 7) return `${n}× per week`;
-  if (d === 30 || d === 31) return `${n}× per month`;
-  if (n === 1) return `Every ${d} days`;
-  return `${n}× per ${d} days`;
-}
-
-function targetLabel(h) {
-  if (h.type !== 'numerical') return '';
-  const dir = h.target_type === 'at_most' ? '≤' : '≥';
-  return `${dir} ${h.target_value}${h.unit ? ' ' + h.unit : ''}`;
-}
-
 /* ---------- dashboard ---------- */
 
 async function loadDashboard() {
@@ -272,8 +262,12 @@ function renderDashboard() {
 
   if (isEmpty && !state.showArchived) renderStarters();
 
-  const dates = lastNDates(gridDays());
-  const todayIso = iso(new Date());
+  const todayIso = todayISO();
+  // datesEndingOn always returns oldest-first; flip it when the user wants
+  // today on the left. Everything downstream just walks the array.
+  const dates = datesEndingOn(gridDays(), state.gridEnd ?? todayIso);
+  if (settings.get('dayOrder') === 'newest-left') dates.reverse();
+  renderGridHeader(dates, todayIso);
 
   for (const habit of state.habits) {
     const row = document.createElement('div');
@@ -349,6 +343,177 @@ function renderDashboard() {
     row.append(meta, checks);
     els.grid.append(row);
   }
+}
+
+/**
+ * Column header: the month/day above each column, plus navigation.
+ *
+ * Without this the grid showed only weekday letters, so there was no way to
+ * tell which column was which date — or to look at any day but the most
+ * recent fortnight.
+ */
+function renderGridHeader(dates, todayIso) {
+  els.gridHead.replaceChildren();
+  if (!state.habits.length) { els.gridHead.hidden = true; return; }
+  els.gridHead.hidden = false;
+
+  const label = document.createElement('span');
+  label.className = 'grid-range';
+  label.textContent = rangeLabel(dates);
+
+  const nav = document.createElement('div');
+  nav.className = 'grid-nav';
+
+  const step = gridDays();
+
+  // The arrows follow the layout, not the calendar: when today sits on the
+  // left, "back in time" is to the RIGHT, so the glyphs swap. An arrow that
+  // points away from the direction the days actually move is worse than no
+  // arrow at all.
+  const newestLeft = settings.get('dayOrder') === 'newest-left';
+  const olderGlyph = newestLeft ? '›' : '‹';
+  const newerGlyph = newestLeft ? '‹' : '›';
+
+  const mk = (text, aria, delta, disabled = false) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-sm';
+    b.textContent = text;
+    b.setAttribute('aria-label', aria);
+    b.disabled = disabled;
+    b.addEventListener('click', () => shiftGrid(delta));
+    return b;
+  };
+
+  // Never scroll past today: there is nothing to record in the future.
+  const atToday = (state.gridEnd ?? todayIso) >= todayIso;
+
+  // Order the buttons so they read left-to-right in the direction they move.
+  const older = mk(olderGlyph, `Previous ${step} days`, -step);
+  const newer = mk(newerGlyph, `Next ${step} days`, step, atToday);
+  nav.append(...(newestLeft ? [newer, older] : [older, newer]));
+
+  if (!atToday) {
+    const today = document.createElement('button');
+    today.type = 'button';
+    today.className = 'btn btn-sm';
+    today.textContent = 'Today';
+    today.addEventListener('click', () => { state.gridEnd = null; renderDashboard(); });
+    nav.append(today);
+  }
+
+  // Date row, aligned to the checkbox columns below.
+  const cols = document.createElement('div');
+  cols.className = 'grid-dates';
+  for (const d of dates) {
+    const cell = document.createElement('div');
+    const dIso = iso(d);
+    cell.className = 'grid-date' + (dIso === todayIso ? ' is-today' : '');
+    // Only show the month on the first column and when it changes, so the
+    // row stays readable at seven columns on a phone.
+    const dayNum = document.createElement('span');
+    dayNum.className = 'grid-date-num';
+    dayNum.textContent = String(d.getDate());
+    const mon = document.createElement('span');
+    mon.className = 'grid-date-mon';
+    mon.textContent = d.getDate() === 1 || d === dates[0] ? MONTHS[d.getMonth()] : '';
+    cell.append(mon, dayNum);
+    cols.append(cell);
+  }
+
+  els.gridHead.append(label, nav, cols);
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "3 – 16 Aug 2026", collapsing the repeated month and year. */
+function rangeLabel(dates) {
+  // The label always reads oldest to newest, whichever way the row is drawn.
+  const [a, b] = dates[0] <= dates[dates.length - 1]
+    ? [dates[0], dates[dates.length - 1]]
+    : [dates[dates.length - 1], dates[0]];
+  const sameMonth = a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear();
+  const left = sameMonth ? String(a.getDate()) : `${a.getDate()} ${MONTHS[a.getMonth()]}`;
+  return `${left} – ${b.getDate()} ${MONTHS[b.getMonth()]} ${b.getFullYear()}`;
+}
+
+/** Move the visible window, clamped so it never runs past today. */
+function shiftGrid(deltaDays) {
+  const today = todayISO();
+  let next = addDaysISO(state.gridEnd ?? today, deltaDays);
+  if (next > today) next = today;
+  state.gridEnd = next === today ? null : next;
+  renderDashboard();
+}
+
+/* ---------- settings ---------- */
+
+/**
+ * Build the settings dialog from the registry, so adding an option needs no
+ * changes here — only a new entry in SETTINGS.
+ */
+function openSettings() {
+  els.settingsBody.replaceChildren();
+  const current = settings.load();
+
+  for (const section of settings.sections()) {
+    const group = document.createElement('section');
+    group.className = 'data-section';
+
+    const heading = document.createElement('h3');
+    heading.textContent = section;
+    group.append(heading);
+
+    for (const [key, def] of Object.entries(settings.SETTINGS)) {
+      if ((def.section ?? 'General') !== section) continue;
+
+      const label = document.createElement('label');
+      label.className = def.type === 'toggle' ? 'checkbox' : '';
+
+      if (def.type === 'select') {
+        const text = document.createElement('span');
+        text.textContent = def.label;
+        const select = document.createElement('select');
+        for (const opt of def.options) {
+          const o = document.createElement('option');
+          o.value = opt.value;
+          o.textContent = opt.label;
+          o.selected = current[key] === opt.value;
+          select.append(o);
+        }
+        select.addEventListener('change', () => applySetting(key, select.value));
+        label.append(text, select);
+      } else {
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = !!current[key];
+        box.addEventListener('change', () => applySetting(key, box.checked));
+        const text = document.createElement('span');
+        text.textContent = def.label;
+        label.append(box, text);
+      }
+
+      group.append(label);
+
+      if (def.help) {
+        const help = document.createElement('p');
+        help.className = 'hint setting-help';
+        help.textContent = def.help;
+        group.append(help);
+      }
+    }
+    els.settingsBody.append(group);
+  }
+
+  els.settingsDialog.showModal();
+}
+
+/** Persist a setting and re-render whatever it affects. */
+function applySetting(key, value) {
+  if (!settings.set(key, value)) return;
+  renderDashboard();
+  if (state.openHabitId != null) showDetail(state.openHabitId);
 }
 
 /* ---------- empty state ---------- */
@@ -892,7 +1057,9 @@ async function deleteHabit() {
     const habit = await api(`/habits/${id}`);
     const entries = await api(`/habits/${id}/entries`);
 
-    if (!confirm(
+    // The delete is undoable from the toast that follows, so the confirm is
+    // a preference rather than a safety requirement.
+    if (settings.get('confirmDelete') && !confirm(
       `Delete "${habit.name}" and its ${entries.length} recorded ` +
       `${entries.length === 1 ? 'day' : 'days'}?`
     )) return;
@@ -941,14 +1108,6 @@ async function restoreHabit(habit, entries) {
 
 /* ---------- day editor ---------- */
 
-const todayISO = () => iso(new Date());
-
-function addDaysISO(isoDate, n) {
-  const [y, m, d] = isoDate.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  date.setDate(date.getDate() + n);
-  return iso(date);
-}
 
 /**
  * Edit a single day from the calendar. Works for any date up to today, which
@@ -1102,25 +1261,16 @@ async function runImport() {
   }
 }
 
-/* ---------- theme ---------- */
-
-function initTheme() {
-  const saved = localStorage.getItem('habiterall-theme');
-  const prefersDark = matchMedia('(prefers-color-scheme: dark)').matches;
-  document.documentElement.dataset.theme = saved ?? (prefersDark ? 'dark' : 'light');
-}
-
-function toggleTheme() {
-  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = next;
-  localStorage.setItem('habiterall-theme', next);
-  // Charts read theme colors at draw time, so redraw whatever is on screen.
-  if (state.openHabitId != null) showDetail(state.openHabitId);
-}
-
 /* ---------- wire up ---------- */
 
 $('#btn-new').addEventListener('click', () => openDialog());
+$('#btn-settings').addEventListener('click', openSettings);
+$('#settings-close').addEventListener('click', () => els.settingsDialog.close());
+$('#settings-reset').addEventListener('click', async () => {
+  await settings.reset();
+  openSettings();          // redraw the controls at their defaults
+  renderDashboard();
+});
 $('#empty-new').addEventListener('click', () => openDialog());
 $('#empty-import').addEventListener('click', openDataDialog);
 els.toggleArchived.addEventListener('click', () => {
@@ -1128,7 +1278,10 @@ els.toggleArchived.addEventListener('click', () => {
   loadDashboard().catch((e) => toast(e.message));
 });
 $('#btn-data').addEventListener('click', openDataDialog);
-$('#btn-theme').addEventListener('click', toggleTheme);
+$('#btn-theme').addEventListener('click', () => toggleTheme(() => {
+  // Charts read theme colours at draw time, so redraw whatever is on screen.
+  if (state.openHabitId != null) showDetail(state.openHabitId);
+}));
 $('#data-close').addEventListener('click', () => els.dataDialog.close());
 $('#export-json').addEventListener('click',
   () => download('/api/export?download=true', 'habiterall-backup.json'));
@@ -1231,6 +1384,10 @@ export async function start(adapter) {
     const user = await auth.load();
     auth.render(user);
     if (!user) return;            // signed out: the sign-in view is showing
+
+    // Preferences are server-side, so they must arrive before the first
+    // render or the dashboard paints with the wrong day order and flips.
+    await settings.init();
 
     await loadDashboard();
     handleLaunchAction();

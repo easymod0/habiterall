@@ -21,7 +21,8 @@ export const auth = {
 
   /**
    * Reflect the session in the chrome.
-   * @param {object|null} user  null renders the signed-out state
+   * @param {{id:number,name?:string,email?:string}|null} user
+   *   null renders the signed-out state
    */
   render(user) {
     const signin = $('#view-signin');

@@ -16,7 +16,7 @@ import {
 } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
 import {
-  parseHabit, parseEntry, assertDate, assertNotFuture, DATE_RE,
+  parseHabit, parseEntry, parseSettings, assertDate, assertNotFuture, DATE_RE,
 } from '@habiterall/shared/validate.js';
 import { unzip } from '@habiterall/shared/unzip.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
@@ -66,6 +66,12 @@ const q = {
                                               notes = excluded.notes
   `),
   deleteEntry: db.prepare(`DELETE FROM entries WHERE habit_id = ? AND date = ?`),
+  allSettings: db.prepare(`SELECT key, value FROM settings`),
+  putSetting: db.prepare(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `),
+  clearSettings: db.prepare(`DELETE FROM settings`),
 };
 
 /* ---------- validation ---------- */
@@ -80,11 +86,25 @@ function habitRow(body) {
   return { ...h, archived: h.archived ? 1 : 0 };
 }
 
+/**
+ * An Error carrying the HTTP status the API should return.
+ * @param {number} status
+ * @param {string} message
+ * @returns {Error & {status: number}}
+ */
 function httpError(status, message) {
-  const err = new Error(message);
+  const err = /** @type {Error & {status: number}} */ (new Error(message));
   err.status = status;
   return err;
 }
+
+/**
+ * node:sqlite returns loosely-typed rows; this is the one place we assert the
+ * shape our own schema guarantees.
+ * @param {unknown} row
+ * @returns {import('@habiterall/shared/types.js').Habit}
+ */
+const asHabit = (row) => /** @type {any} */ (row);
 
 /* ---------- habits ---------- */
 
@@ -103,7 +123,7 @@ api.post('/habits', (req, res) => {
 });
 
 api.get('/habits/:id', (req, res) => {
-  const habit = q.habitById.get(Number(req.params.id));
+  const habit = asHabit(q.habitById.get(Number(req.params.id)));
   if (!habit) throw httpError(404, 'habit not found');
   res.json(habit);
 });
@@ -153,7 +173,7 @@ api.get('/habits/:id/entries', (req, res) => {
 api.put('/habits/:id/entries/:date', (req, res) => {
   const id = Number(req.params.id);
   const date = req.params.date;
-  const habit = q.habitById.get(id);
+  const habit = asHabit(q.habitById.get(id));
 
   if (!habit) throw httpError(404, 'habit not found');
   assertDate(date);
@@ -196,7 +216,7 @@ api.delete('/habits/:id/entries/:date', (req, res) => {
 
 api.get('/habits/:id/stats', (req, res) => {
   const id = Number(req.params.id);
-  const habit = q.habitById.get(id);
+  const habit = asHabit(q.habitById.get(id));
   if (!habit) throw httpError(404, 'habit not found');
 
   // Never compute past today, and never span more than MAX_RANGE_DAYS: the
@@ -215,7 +235,7 @@ api.get('/habits/:id/stats', (req, res) => {
 
   const granularity = req.query.granularity ?? 'day';
 
-  const entries = q.entriesFor.all(id);
+  const entries = /** @type {any} */ (q.entriesFor.all(id));
   res.json({ habit, ...computeStats(habit, entries, { start, end, granularity }) });
 });
 
@@ -229,9 +249,9 @@ api.get('/overview', (req, res) => {
   const start = addDays(end, -(days - 1));
 
   // Archived habits are hidden by default but can be requested explicitly.
-  const habits = req.query.archived === 'true'
+  const habits = /** @type {any[]} */ (req.query.archived === 'true'
     ? q.allHabits.all(1)
-    : q.allHabits.all(0);
+    : q.allHabits.all(0));
   const rows = q.entriesInRange.all(start, end);
 
   // For the grid the frontend only needs something paintable, so skips are
@@ -244,10 +264,10 @@ api.get('/overview', (req, res) => {
     const bucket = byHabit.get(r.habit_id);
     if (!bucket) continue;
     if (r.status === 'skip') {
-      bucket[r.date] = SKIP;
-      skipsByHabit.get(r.habit_id).push(r.date);
+      bucket[/** @type {string} */ (r.date)] = SKIP;
+      skipsByHabit.get(r.habit_id).push(/** @type {string} */ (r.date));
     } else {
-      bucket[r.date] = r.value;
+      bucket[/** @type {string} */ (r.date)] = r.value;
     }
   }
 
@@ -259,8 +279,8 @@ api.get('/overview', (req, res) => {
       // half-life the score has long since converged, and streaks that matter
       // here are recent. This keeps the dashboard O(window) rather than
       // O(lifetime) per habit.
-      const entries = q.entriesFor.all(h.id);
-      const windowed = q.entriesForSince.all(h.id, addDays(end, -SUMMARY_WINDOW_DAYS));
+      const entries = /** @type {any} */ (q.entriesFor.all(h.id));
+      const windowed = /** @type {any} */ (q.entriesForSince.all(h.id, addDays(end, -SUMMARY_WINDOW_DAYS)));
       const stats = computeStats(h, windowed, { end });
 
       // Lifetime figures still need every entry, but a single pass is cheap
@@ -287,6 +307,37 @@ api.get('/overview', (req, res) => {
       };
     }),
   });
+});
+
+/* ---------- settings ---------- */
+
+/**
+ * Preferences live server-side so they survive a browser reset and are
+ * captured by the same backup as the habits. Values are stored as JSON text
+ * because SQLite has no boolean.
+ */
+api.get('/settings', (req, res) => {
+  const out = {};
+  for (const { key, value } of q.allSettings.all()) {
+    // node:sqlite returns loosely-typed columns; both are TEXT by schema.
+    try { out[String(key)] = JSON.parse(String(value)); }
+    catch { /* skip a corrupt row rather than fail the whole request */ }
+  }
+  res.json(out);
+});
+
+/** Merge a patch. Unknown or invalid keys are dropped, not rejected. */
+api.put('/settings', (req, res) => {
+  const { accepted, rejected } = parseSettings(req.body);
+  for (const [key, value] of Object.entries(accepted)) {
+    q.putSetting.run(key, JSON.stringify(value));
+  }
+  res.json({ settings: accepted, ignored: rejected });
+});
+
+api.delete('/settings', (req, res) => {
+  q.clearSettings.run();
+  res.json({});
 });
 
 /* ---------- export / import ---------- */

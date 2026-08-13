@@ -1,9 +1,10 @@
 # Build and test on every pull request and push to main.
 #
-# Four jobs, deliberately separate so a failure names the thing that broke
+# Five jobs, deliberately separate so a failure names the thing that broke
 # rather than "CI failed":
 #
 #   test     unit tests (fast, no services)
+#   types    JSDoc type checking via tsc --noEmit
 #   browser  the real-browser UI suites against a running personal instance
 #   tenancy  the adversarial multi-tenant isolation attacks, against Postgres
 #   docker   both images actually build
@@ -37,6 +38,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+
+  types:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # JSDoc types checked with tsc --noEmit: no build step, but a renamed
+      # field in `shared` now fails here instead of at runtime in two apps.
+      - run: npm run typecheck
 
   browser:
     name: Browser suites

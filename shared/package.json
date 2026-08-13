@@ -11,7 +11,8 @@
     "./export-loop.js": "./src/export-loop.js",
     "./unzip.js": "./src/unzip.js",
     "./constants.js": "./src/constants.js",
-    "./charts.js": "./public/charts.js"
+    "./charts.js": "./public/charts.js",
+    "./types.js": "./src/types.js"
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
