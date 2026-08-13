@@ -39,6 +39,8 @@ const MILLIS_PER_DAY = 86_400_000;
  * UTC getters so a local timezone west of UTC doesn't shift every date back
  * by one day.
  */
+import { unzip } from './unzip.js';
+
 export function loopTimestampToISO(millis) {
   const n = Number(millis);
   if (!Number.isFinite(n)) return null;
@@ -420,4 +422,95 @@ export function parseLoopHabitsCSV(text) {
     });
   }
   return out;
+}
+
+/* ---------- what arrived in the request body ---------- */
+
+/**
+ * Work out what an uploaded file is, and parse it.
+ *
+ * Sniffed from the bytes rather than trusted from the client:
+ *
+ *   PK\x03\x04           -> zip (a Loop CSV export)
+ *   "SQLite format 3\0"  -> a Loop .db backup
+ *   otherwise            -> text: a habiterall JSON backup, or a bare CSV
+ *
+ * This lived in both editions' api.js, and the two copies had already drifted in
+ * a way worth recording. The staged temp file was named
+ * `habiterall-import-${pid}-${Date.now()}.db` with default permissions in the
+ * personal edition, and `randomUUID()` with mode 0600 in cloud: a predictable
+ * name and a world-readable file, holding somebody's entire habit history, fixed
+ * once and never carried back. The safer pair is what survives here.
+ *
+ * Errors carry `status: 400` — an unreadable upload is the client's problem, and
+ * both editions' error middleware reads that field.
+ *
+ * @param {Buffer} buf the raw request body
+ * @returns {Promise<object[]>} normalised habits, ready for applyImport
+ */
+export async function parseUpload(buf) {
+  const fail = (message) => Object.assign(new Error(message), { status: 400 });
+
+  if (buf.length >= 4 && buf.toString('latin1', 0, 4) === 'PK\x03\x04') {
+    return parseZipExport(buf, fail);
+  }
+
+  if (buf.length >= 16 && buf.toString('latin1', 0, 15) === 'SQLite format 3') {
+    // node:sqlite can only open a path, so the upload has to be staged on disk.
+    // A random name because a predictable one in a shared /tmp is a file another
+    // local user can wait for, and 0600 because the contents are private.
+    const { writeFileSync, unlinkSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { randomUUID } = await import('node:crypto');
+
+    const path = join(tmpdir(), `habiterall-import-${randomUUID()}.db`);
+    writeFileSync(path, buf, { mode: 0o600 });
+    try {
+      return await parseLoopDatabase(path);
+    } finally {
+      try { unlinkSync(path); } catch { /* best effort */ }
+    }
+  }
+
+  // A BOM survives a round trip through Windows editors and would otherwise
+  // make `JSON.parse` fail on a file that is perfectly valid.
+  const text = buf.toString('utf8').replace(/^﻿/, '');
+  const head = text.trimStart();
+
+  if (head.startsWith('{') || head.startsWith('[')) {
+    return parseHabiterallJSON(head.startsWith('[') ? { habits: JSON.parse(head) } : text);
+  }
+
+  if (/^"?date"?\s*,/i.test(head)) return parseLoopCheckmarksCSV(text);
+
+  throw fail(
+    'unrecognized file: expected a habiterall JSON backup, a Loop .db backup, ' +
+    'or a Loop CSV export'
+  );
+}
+
+/**
+ * Pull Habits.csv and Checkmarks.csv out of a Loop CSV export.
+ *
+ * Both are needed. Checkmarks.csv has one column per habit and nothing saying
+ * what a habit IS, so parsed alone every column defaults to boolean — and a
+ * measurable habit's 3 is then read as Loop's SKIP sentinel.
+ */
+function parseZipExport(buf, fail) {
+  const files = unzip(buf);
+
+  const find = (suffix) => {
+    for (const [name, contents] of files) {
+      if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
+    }
+    return null;
+  };
+
+  const checkmarksCsv = find('checkmarks.csv');
+  if (!checkmarksCsv) throw fail('zip does not contain a Checkmarks.csv');
+
+  const habitsCsv = find('habits.csv');
+  const meta = habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map();
+  return parseLoopCheckmarksCSV(checkmarksCsv, meta);
 }

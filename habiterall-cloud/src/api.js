@@ -13,13 +13,11 @@ import { randomUUID } from 'node:crypto';
 import { withUser } from './db/pool.js';
 import { applyImport } from './apply-import.js';
 import { sendTest } from './notifier.js';
-import { unzip } from '@habiterall/shared/unzip.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
-import {
-  parseHabiterallJSON, parseLoopDatabase,
-  parseLoopCheckmarksCSV, parseLoopHabitsCSV,
-} from '@habiterall/shared/import.js';
+// Format sniffing and every parser live in shared: the two editions had
+// separate copies of the sniffing, and they had drifted.
+import { parseUpload } from '@habiterall/shared/import.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
   parseHabit, parseEntry, parseSettings, entryWrite, assertDate, assertNotFuture,
@@ -560,48 +558,6 @@ api.post('/import', route(async (req, res) => {
   const result = await applyImport(uid(req), habits, mode);
   res.json({ mode, ...result });
 }));
-
-/** Sniff the format by magic bytes, then structure. */
-async function parseUpload(buf) {
-  if (buf.length >= 4 && buf.toString('latin1', 0, 4) === 'PK\x03\x04') {
-    const files = unzip(buf);
-    const find = (suffix) => {
-      for (const [name, contents] of files) {
-        if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
-      }
-      return null;
-    };
-    const checkmarks = find('checkmarks.csv');
-    if (!checkmarks) throw httpError(400, 'zip does not contain a Checkmarks.csv');
-    const habitsCsv = find('habits.csv');
-    return parseLoopCheckmarksCSV(
-      checkmarks, habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map()
-    );
-  }
-
-  if (buf.length >= 16 && buf.toString('latin1', 0, 15) === 'SQLite format 3') {
-    // node:sqlite can only open a path, so stage the upload on disk under a
-    // name that cannot collide between concurrent users.
-    const path = join(tmpdir(), `habiterall-import-${randomUUID()}.db`);
-    writeFileSync(path, buf, { mode: 0o600 });
-    try {
-      return await parseLoopDatabase(path);
-    } finally {
-      try { unlinkSync(path); } catch { /* best effort */ }
-    }
-  }
-
-  const text = buf.toString('utf8').replace(/^﻿/, '');
-  const head = text.trimStart();
-
-  if (head.startsWith('{') || head.startsWith('[')) {
-    return parseHabiterallJSON(head.startsWith('[') ? { habits: JSON.parse(head) } : text);
-  }
-  if (/^"?date"?\s*,/i.test(head)) return parseLoopCheckmarksCSV(text);
-
-  throw httpError(400,
-    'unrecognized file: expected a habiterall JSON backup, a Loop .db backup, or a Loop CSV export');
-}
 
 /* ---------- helpers ---------- */
 

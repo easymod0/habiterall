@@ -350,3 +350,66 @@ test('several blank columns keep every habit aligned', () => {
   // C is boolean by default and 3 is Loop's SKIP sentinel there.
   assert.equal(habits[2].entries[0].status, 'skip', 'C = 3 -> skip on a boolean');
 });
+
+/* ---------- sniffing what arrived in the request body ---------- */
+
+const { parseUpload } = await import('../src/import.js');
+const { buildCsvArchive } = await import('../src/export-csv.js');
+
+test('a habiterall JSON backup is recognised from its bytes', async () => {
+  const backup = JSON.stringify({
+    version: 1, app: 'habiterall',
+    habits: [{ name: 'Meditate', type: 'boolean', entries: [] }],
+  });
+  const habits = await parseUpload(Buffer.from(backup, 'utf8'));
+  assert.equal(habits.length, 1);
+  assert.equal(habits[0].name, 'Meditate');
+});
+
+test('a bare array is accepted too, and a BOM does not defeat it', async () => {
+  // A BOM survives a round trip through several Windows editors, and would
+  // otherwise make JSON.parse fail on a file that is perfectly valid.
+  const bare = JSON.stringify([{ name: 'Gym', type: 'boolean', entries: [] }]);
+  assert.equal((await parseUpload(Buffer.from(bare, 'utf8')))[0].name, 'Gym');
+  assert.equal((await parseUpload(Buffer.from('﻿' + bare, 'utf8')))[0].name, 'Gym');
+});
+
+test('a Loop CSV zip is recognised, and needs its Habits.csv', async () => {
+  // buildCsvArchive produces exactly what Loop's export looks like, so the
+  // sniffing is exercised against the real shape rather than a hand-made zip.
+  const habits = [{
+    id: 1, name: 'Water', type: 'numerical', unit: 'glasses', target_value: 8,
+    target_type: 'at_least', freq_numerator: 1, freq_denominator: 1,
+    color: '#22c55e', description: '', archived: 0,
+  }];
+  const zip = buildCsvArchive(habits, () => [
+    { date: '2026-01-05', value: 3, status: '', notes: '' },
+  ]);
+
+  const parsed = await parseUpload(zip);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].type, 'numerical',
+    'without Habits.csv the type is unknown and a 3 reads as Loop\'s SKIP');
+  assert.equal(parsed[0].entries[0].value, 3);
+});
+
+test('an unrecognised upload is a 400, not a 500', async () => {
+  for (const body of ['not a backup at all', '<html></html>', '']) {
+    await assert.rejects(
+      () => parseUpload(Buffer.from(body, 'utf8')),
+      (err) => {
+        assert.equal(err.status, 400, 'the error must carry a client status');
+        return true;
+      },
+      `accepted ${JSON.stringify(body)}`
+    );
+  }
+});
+
+test('a zip without a Checkmarks.csv says so', async () => {
+  const { zip } = await import('../src/zip.js');
+  // zip() takes {name, data}, not a pair — the CSV export is its only other
+  // caller, so this is easy to get wrong from memory.
+  const bogus = zip([{ name: 'Habits.csv', data: 'Name\nMeditate\n' }]);
+  await assert.rejects(() => parseUpload(bogus), /Checkmarks\.csv/);
+});
