@@ -361,6 +361,7 @@ export function completedIds(habits, rows) {
  * @param {(habitId: number, date: string) => boolean} [args.alreadySent]
  * @param {Set<number>} [args.doneToday]
  * @param {number} [args.catchUpMinutes]
+ * @param {(habit: import('./types.js').Habit, reason: string, detail: Record<string, any>) => void} [args.onSkip]
  * @returns {{habit: import('./types.js').Habit, date: string, time: string}[]}
  */
 export function dueReminders({
@@ -370,21 +371,40 @@ export function dueReminders({
   alreadySent = () => false,
   doneToday = new Set(),
   catchUpMinutes = CATCH_UP_MINUTES,
+  onSkip = () => {},
 }) {
   const clock = zonedClock(instant, timeZone);
   const due = [];
 
+  /**
+   * Every `continue` below reports itself.
+   *
+   * Six conditions decide this and all six are invisible from outside: a
+   * reminder that does not arrive looks exactly like a broken webhook, which
+   * sends people to check the thing that is working. `too_late` in particular
+   * is unguessable — a time already past on this clock is not late, it is gone
+   * until tomorrow — and it is what an unset container timezone produces.
+   */
+  const skip = (habit, reason, detail) => {
+    onSkip(habit, reason, { now: clock.time, date: clock.date, zone: timeZone || 'system', ...detail });
+    return undefined;
+  };
+
   for (const habit of habits) {
-    if (habit.archived) continue;
+    if (habit.archived) { skip(habit, 'archived'); continue; }
 
     const at = minutesOfDay(habit.reminder_time);
-    if (at === null) continue;                       // '' — no reminder set
+    if (at === null) { skip(habit, 'no_reminder_time'); continue; }   // '' — none set
 
     const late = clock.minutes - at;
-    if (late < 0 || late > catchUpMinutes) continue;
+    if (late < 0) { skip(habit, 'not_yet', { at: habit.reminder_time, in_minutes: -late }); continue; }
+    if (late > catchUpMinutes) {
+      skip(habit, 'too_late', { at: habit.reminder_time, late_minutes: late, catch_up: catchUpMinutes });
+      continue;
+    }
 
-    if (doneToday.has(habit.id)) continue;
-    if (alreadySent(habit.id, clock.date)) continue;
+    if (doneToday.has(habit.id)) { skip(habit, 'done_today'); continue; }
+    if (alreadySent(habit.id, clock.date)) { skip(habit, 'already_sent'); continue; }
 
     due.push({ habit, date: clock.date, time: habit.reminder_time });
   }

@@ -298,6 +298,55 @@ test('habits without a reminder, or archived, are never due', () => {
   assert.deepEqual(dueAt('2026-08-13T08:00:00Z', { archived: true }), []);
 });
 
+test('every reason a reminder is not sent reports itself', () => {
+  // Six conditions decide this and none is visible from outside, so a reminder
+  // that does not arrive looks identical to a broken webhook — which sends
+  // people to check the part that is working. `too_late` is the one nobody
+  // guesses: a time already past on the server's clock is not late, it is gone
+  // until tomorrow, and that is what an unset container timezone produces.
+  const reasons = (instant, over = {}, extra = {}) => {
+    const seen = [];
+    dueReminders({
+      habits: [habit(over)], instant: new Date(instant), timeZone: 'UTC',
+      onSkip: (h, reason, detail) => seen.push({ reason, ...detail }),
+      ...extra,
+    });
+    return seen;
+  };
+
+  assert.deepEqual(reasons('2026-08-13T08:00:00Z'), [], 'a due reminder is not a skip');
+
+  assert.equal(reasons('2026-08-13T08:00:00Z', { archived: true })[0].reason, 'archived');
+  assert.equal(reasons('2026-08-13T08:00:00Z', { reminder_time: '' })[0].reason,
+    'no_reminder_time');
+
+  const early = reasons('2026-08-13T07:30:00Z')[0];
+  assert.deepEqual(
+    { reason: early.reason, at: early.at, in_minutes: early.in_minutes },
+    { reason: 'not_yet', at: '08:00', in_minutes: 30 }
+  );
+
+  const late = reasons('2026-08-13T20:23:00Z')[0];
+  assert.deepEqual(
+    { reason: late.reason, late_minutes: late.late_minutes, catch_up: late.catch_up },
+    { reason: 'too_late', late_minutes: 743, catch_up: CATCH_UP_MINUTES }
+  );
+
+  assert.equal(
+    reasons('2026-08-13T08:00:00Z', {}, { doneToday: new Set([1]) })[0].reason,
+    'done_today');
+  assert.equal(
+    reasons('2026-08-13T08:00:00Z', {}, { alreadySent: () => true })[0].reason,
+    'already_sent');
+
+  // The clock it judged against, on every skip — the field that makes a
+  // timezone mistake self-evident instead of a hypothesis.
+  assert.deepEqual(
+    { now: late.now, date: late.date, zone: late.zone },
+    { now: '20:23', date: '2026-08-13', zone: 'UTC' }
+  );
+});
+
 test('a habit already done today is not nagged', () => {
   const done = dueAt('2026-08-13T08:00:00Z', {}, { doneToday: new Set([1]) });
   assert.deepEqual(done, []);
@@ -507,7 +556,7 @@ test('a tick delivers what is due and records it', async () => {
     fetch,
   });
 
-  assert.deepEqual(result, { accounts: 1, sent: 1, failed: 0 });
+  assert.deepEqual(result, { accounts: 1, sent: 1, failed: 0, skipped: {} });
   assert.deepEqual(marked, [[7, 1, 'discord', '2026-08-13']]);
   assert.equal(fetch.calls.length, 1);
   assert.match(fetch.calls[0].url, /^https:\/\/discord\.com\/api\/webhooks\//);
@@ -535,7 +584,7 @@ test('a failed send is not recorded, so the next tick retries it', async () => {
     log: { warn: () => {} },
   });
 
-  assert.deepEqual(result, { sent: 0, failed: 1 });
+  assert.deepEqual(result, { sent: 0, failed: 1, skipped: {} });
   assert.deepEqual(marked, [], 'a retryable failure must leave the slot open');
 });
 
@@ -556,7 +605,7 @@ test('an account with no server destination costs no requests', async () => {
     account({ settings: { notifyChannels: ['android'] } }),
     { instant: utc(2026, 8, 13, 8, 0), mark: () => {}, fetch }
   );
-  assert.deepEqual(result, { sent: 0, failed: 0 });
+  assert.deepEqual(result, { sent: 0, failed: 0, skipped: {} });
   assert.equal(fetch.calls.length, 0);
 });
 
@@ -610,7 +659,7 @@ test('a rate-limited send waits the requested time and retries once', async () =
     fetch,
   });
 
-  assert.deepEqual(result, { sent: 1, failed: 0 });
+  assert.deepEqual(result, { sent: 1, failed: 0, skipped: {} });
   assert.equal(fetch.calls.length, 2, 'the retry must actually be sent');
   assert.equal(marked.length, 1, 'and recorded once, not twice');
 });
@@ -624,7 +673,7 @@ test('a second rate limit gives up rather than looping', async () => {
     log: { warn: () => {} },
   });
 
-  assert.deepEqual(result, { sent: 0, failed: 1 });
+  assert.deepEqual(result, { sent: 0, failed: 1, skipped: {} });
   assert.equal(fetch.calls.length, 2);
 });
 

@@ -4,11 +4,17 @@ import { dirname, join, resolve } from 'node:path';
 import { api } from './api.js';
 import { db } from './db.js';
 import { start as startNotifier } from './notifier.js';
+import { log } from '@habiterall/shared/log.js';
+import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 
 const app = express();
+
+// First, so every later line can carry the request id and every response
+// carries it back.
+app.use(requestLog(log));
 
 // Imports arrive as raw bytes (JSON backup, SQLite file, or zip), so this must
 // be registered before the JSON parser to keep the body unparsed.
@@ -47,7 +53,9 @@ app.use('/api', api);
 // Express 4 needs errors from sync route handlers funnelled through here.
 app.use((err, req, res, next) => {
   const status = err.status ?? 500;
-  if (status >= 500) console.error(err);
+  // The stack, with the id the response also carries; requestLog reports the
+  // status separately, so this line exists purely to say what threw.
+  if (status >= 500) (req.log ?? log).error('unhandled', { path: req.path }, err);
   res.status(status).json({ error: err.message ?? 'internal error' });
 });
 
@@ -61,8 +69,18 @@ const isEntryPoint = process.argv[1] != null &&
 
 if (isEntryPoint) {
   const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`habiterall listening on http://localhost:${PORT}`);
+    logStartup(log, {
+      edition: 'personal',
+      port: PORT,
+      db: process.env.HABITERALL_DB ?? './data/habiterall.db',
+      notify: (process.env.HABITERALL_NOTIFY ?? 'on').toLowerCase(),
+      // Whether buttons are possible at all, without printing the token.
+      discord_bot: !!process.env.DISCORD_BOT_TOKEN,
+      log_level: log.level,
+    });
   });
+
+  const runtime = watchRuntime(log);
 
   // Only from the entry point, exactly like `listen`: a test that imports this
   // module for its routes must not start posting real reminders to whatever
@@ -71,6 +89,8 @@ if (isEntryPoint) {
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.on(signal, () => {
+      log.info('shutdown', { signal });
+      runtime.stop();
       notifier?.stop();
       server.close(() => {
         db.close();

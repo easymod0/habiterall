@@ -6,10 +6,12 @@ import rateLimit from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { pool, closePool } from './db/pool.js';
+import { pool, closePool, poolGauge } from './db/pool.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api } from './api.js';
 import { start as startNotifier } from './notifier.js';
+import { log } from '@habiterall/shared/log.js';
+import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -22,20 +24,24 @@ const isProd = process.env.NODE_ENV === 'production';
 const publicIsHttps = (process.env.PUBLIC_URL ?? '').startsWith('https://');
 
 if (isProd && !publicIsHttps) {
-  console.warn(
-    'WARNING: PUBLIC_URL is not https — session cookies will NOT be marked ' +
-    'Secure. Use this only for local testing; put TLS in front in production.'
-  );
+  log.warn('insecure_cookies', {
+    reason: 'PUBLIC_URL is not https',
+    consequence: 'session cookies will not be marked Secure; login breaks behind TLS',
+  });
 }
 
 for (const required of ['DATABASE_URL', 'SESSION_SECRET', 'PUBLIC_URL']) {
   if (!process.env[required]) {
-    console.error(`${required} must be set`);
+    log.error('config_missing', { variable: required });
     process.exit(1);
   }
 }
 
 const app = express();
+
+// Before everything, so a request rejected by a limiter or by helmet still
+// carries an id and still gets counted.
+app.use(requestLog(log));
 
 /**
  * How many reverse proxies sit in front of the app.
@@ -227,7 +233,8 @@ app.get('/sw.js', (req, res) => {
 
 app.use((err, req, res, next) => {
   const status = err.status ?? 500;
-  if (status >= 500) console.error(err);
+  // requestLog reports the status; this is the only place the stack appears.
+  if (status >= 500) (req.log ?? log).error('unhandled', { path: req.path }, err);
   // Never leak internals to the client.
   res.status(status).json({
     error: status >= 500 ? 'internal error' : (err.message ?? 'request failed'),
@@ -241,16 +248,35 @@ const server = await start();
 // a real webhook. Nothing schedules the Android channel: the phone does that.
 const notifier = startNotifier();
 
+// One line a minute, and the one to graph: event-loop lag is what turns a heavy
+// dashboard into everybody's latency, and pool exhaustion is what a replica
+// count that outgrew Postgres looks like.
+const runtime = watchRuntime(log, { extra: poolGauge });
+
 async function start() {
   await initAuth();
   const s = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`habiterall-cloud listening on :${PORT}`);
+    logStartup(log, {
+      edition: 'cloud',
+      port: PORT,
+      public_url: process.env.PUBLIC_URL,
+      secure_cookies: publicIsHttps,
+      trust_proxy: trustProxy,
+      // The number that decides how many replicas Postgres can carry:
+      // max × replicas must stay under the server's max_connections.
+      pg_pool_max: Number(process.env.PG_POOL_MAX) || 10,
+      notify: (process.env.HABITERALL_NOTIFY ?? 'on').toLowerCase(),
+      discord_bot: !!process.env.DISCORD_BOT_TOKEN,
+      log_level: log.level,
+    });
   });
   return s;
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
+    log.info('shutdown', { signal });
+    runtime.stop();
     notifier?.stop();
     server.close(async () => {
       await closePool();

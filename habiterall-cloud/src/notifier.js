@@ -32,6 +32,7 @@ import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import { entryWrite, parseEntry } from '@habiterall/shared/validate.js';
+import { log } from '@habiterall/shared/log.js';
 
 /** Channels this server delivers itself; the scan filters on these. */
 const SERVER_CHANNEL_IDS = Object.entries(CHANNELS)
@@ -73,10 +74,12 @@ async function candidates() {
   );
 
   if (rows.length > MAX_ACCOUNTS_PER_TICK) {
-    console.warn(
-      `notify: more than ${MAX_ACCOUNTS_PER_TICK} accounts have server ` +
-      'delivery enabled; the rest are not being served this tick'
-    );
+    // Whoever sorts last is silently starved, so this must be loud enough to
+    // alert on rather than a line nobody reads.
+    log.warn('notify.scan_truncated', {
+      limit: MAX_ACCOUNTS_PER_TICK,
+      found_at_least: rows.length,
+    });
   }
   return rows.slice(0, MAX_ACCOUNTS_PER_TICK);
 }
@@ -196,7 +199,11 @@ export function interactionAdapter() {
       // guessing which one meant it would write to the wrong person's history.
       if (rows.length !== 1) {
         if (rows.length > 1) {
-          console.warn(`notify: channel ${channelId} is claimed by ${rows.length} accounts`);
+          log.warn('notify.channel_ambiguous', { channel_id: String(channelId), accounts: rows.length });
+        } else {
+          // Either a stale channel or somebody else's server: the press wrote
+          // nothing, and that is worth seeing without being an error.
+          log.info('notify.channel_unclaimed', { channel_id: String(channelId) });
         }
         return null;
       }
@@ -303,9 +310,16 @@ export async function sendTest(userId, settings, deps = {}) {
 export function start(env = process.env) {
   const config = notifierConfig(env);
   if (!config.enabled) {
-    console.log('notifier disabled (HABITERALL_NOTIFY=off)');
+    log.warn('notify.disabled', { reason: 'HABITERALL_NOTIFY=off' });
     return null;
   }
+
+  log.info('notify.starting', {
+    mode: config.botToken ? 'bot' : 'webhook',
+    interval_ms: config.intervalMs,
+    app_url: config.appUrl || '(unset)',
+    max_accounts_per_tick: MAX_ACCOUNTS_PER_TICK,
+  });
 
   let lastPrunedDay = '';
 
@@ -315,12 +329,14 @@ export function start(env = process.env) {
   const gateway = config.botToken
     ? connectGateway({
       token: config.botToken,
+      log,
       onInteraction: (interaction) =>
-        handleInteraction(interaction, interactionAdapter()),
+        handleInteraction(interaction, { ...interactionAdapter(), log }),
     })
     : null;
 
   const notifier = startNotifier({
+    log,
     intervalMs: config.intervalMs,
     appUrl: config.appUrl,
     botToken: config.botToken,
@@ -334,7 +350,7 @@ export function start(env = process.env) {
         lastPrunedDay = day;
         for (const account of accounts) {
           await prune(account.id, instant).catch((err) =>
-            console.warn(`notify: pruning account ${account.id} failed:`, err.message));
+            log.warn('notify.prune_failed', { user: account.id }, err));
         }
       }
 

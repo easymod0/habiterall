@@ -170,6 +170,49 @@ try {
   ck('with only on-device delivery the notifier visits nobody',
     notifier.collect(AT_0800).length === 0);
 
+  /* ---------- bot mode, with no webhook at all ---------- */
+  //
+  // REGRESSION. `CHANNELS.discord.ready` is "a webhook URL OR (a bot AND a
+  // channel id)", and `collect` did not pass the bot half — so the recommended
+  // setup, a channel id with no webhook, reported as nothing to deliver and this
+  // returned [] on every tick, in silence, forever. `sendTest` did pass it,
+  // which is why the test button worked and only real reminders never arrived.
+  // That is a bug report that leads everyone to inspect Discord, the one part
+  // that was working.
+  await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      notifyChannels: ['discord'],
+      discordChannelId: '123456789012345678',
+      discordWebhook: '',
+    }),
+  });
+
+  const noBot = notifier.collect(AT_0800);
+  ck('without a bot token, a channel id alone is not deliverable',
+    noBot.length === 0, JSON.stringify(noBot.length));
+
+  process.env.DISCORD_BOT_TOKEN = 'test-token-not-a-real-one';
+  const withBot = notifier.collect(AT_0800);
+  ck('with a bot token, a channel id and no webhook IS collected',
+    withBot.length === 1 && withBot[0].habits.length === 1,
+    `collected ${withBot.length}`);
+
+  // And the same settings must reach the same verdict through both doors: the
+  // scheduler and the test button. They disagreed, and nothing noticed.
+  const { serverChannels } = await import('@habiterall/shared/notify.js');
+  ck('the scheduler and the test button agree on what is configured',
+    serverChannels(withBot[0].settings, { bot: true }).join() === 'discord',
+    JSON.stringify(serverChannels(withBot[0].settings, { bot: true })));
+
+  delete process.env.DISCORD_BOT_TOKEN;
+  await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      notifyChannels: ['android'], discordChannelId: '', discordWebhook: WEBHOOK,
+    }),
+  });
+
   /* ---------- the test endpoint ---------- */
 
   await api('/api/settings', {

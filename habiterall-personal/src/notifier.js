@@ -20,6 +20,7 @@ import {
 import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
 import { entryWrite, parseEntry } from '@habiterall/shared/validate.js';
+import { log } from '@habiterall/shared/log.js';
 
 /** Rows older than this are of no interest; they are only a "did we?" record. */
 const KEEP_LOG_DAYS = 45;
@@ -70,7 +71,16 @@ export function loadSettings() {
  */
 export function collect(now = new Date()) {
   const settings = loadSettings();
-  if (!needsServerDelivery(settings)) return [];
+
+  // `{ bot }` is not optional context — it is half the readiness rule.
+  // `CHANNELS.discord.ready` is "a webhook URL **or** (a bot **and** a channel
+  // id)", so omitting it here made bot-only configuration — a channel id and no
+  // webhook, which is the recommended setup — report as nothing to deliver, and
+  // this returned [] on every tick, forever, in silence. `sendTest` passed the
+  // flag, so the test button worked and only the real reminders never came.
+  // The cloud edition has always passed it; this is why that must not drift.
+  const { botToken } = notifierConfig(process.env);
+  if (!needsServerDelivery(settings, { bot: !!botToken })) return [];
 
   const habits = /** @type {any[]} */ (q.habits.all());
   if (!habits.length) return [];
@@ -206,21 +216,31 @@ export async function sendTest(deps = {}) {
 export function start(env = process.env) {
   const config = notifierConfig(env);
   if (!config.enabled) {
-    console.log('notifier disabled (HABITERALL_NOTIFY=off)');
+    log.warn('notify.disabled', { reason: 'HABITERALL_NOTIFY=off' });
     return null;
   }
+
+  // Said once, at startup, because it is the difference between buttons and
+  // plain text and there is no way to tell from the app which one you have.
+  log.info('notify.starting', {
+    mode: config.botToken ? 'bot' : 'webhook',
+    interval_ms: config.intervalMs,
+    app_url: config.appUrl || '(unset)',
+  });
 
   // The gateway is only for receiving button presses, so it is opened only when
   // there is a bot to receive them with. Sending needs no socket.
   const gateway = config.botToken
     ? connectGateway({
       token: config.botToken,
+      log,
       onInteraction: (interaction) =>
-        handleInteraction(interaction, interactionAdapter()),
+        handleInteraction(interaction, { ...interactionAdapter(), log }),
     })
     : null;
 
   const notifier = startNotifier({
+    log,
     intervalMs: config.intervalMs,
     appUrl: config.appUrl,
     botToken: config.botToken,
