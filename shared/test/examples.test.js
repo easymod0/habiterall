@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -20,9 +20,6 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 const README = readFileSync(join(root, 'README.md'), 'utf8');
 
-/** The fenced yaml blocks, in order of appearance. */
-const yamlBlocks = [...README.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
-
 /** An example file, minus its leading comment header. */
 function exampleBody(name) {
   const text = readFileSync(join(root, 'examples', name), 'utf8');
@@ -32,23 +29,21 @@ function exampleBody(name) {
   return lines.slice(start + 1).join('\n');
 }
 
-test('the README shows exactly the compose files that are in the repo', () => {
-  assert.equal(yamlBlocks.length, 2,
-    'expected the personal and cloud compose examples in README.md');
+test('every file in examples/ appears verbatim in the README', () => {
+  // Checked by containment rather than by position, because the README also
+  // carries snippets that are NOT example files (the Nginx Proxy Manager
+  // fragment, for one). What matters is that no shipped example has drifted
+  // from the copy a reader is shown.
+  const files = readdirSync(join(root, 'examples')).sort();
+  assert.ok(files.length >= 3, 'expected the two compose examples and the Caddyfile');
 
-  const expected = [
-    'docker-compose.personal.yml',
-    'docker-compose.cloud.yml',
-  ];
-
-  expected.forEach((name, i) => {
-    assert.equal(
-      yamlBlocks[i].trimEnd(),
-      exampleBody(name).trimEnd(),
-      `README.md's yaml block ${i + 1} has drifted from examples/${name}. ` +
-      'Edit the file, then copy it into the README — not the other way round.'
+  for (const name of files) {
+    assert.ok(
+      README.includes(exampleBody(name).trim()),
+      `README.md has drifted from examples/${name}. Edit the file, then copy it ` +
+      'into the README — not the other way round.'
     );
-  });
+  }
 });
 
 test('the examples pull the published images, not a local build', () => {
@@ -85,3 +80,23 @@ test('the cloud example runs migrations as a separate credential', () => {
     'the app must not hold the admin credential');
   assert.match(appBlock, /habiterall_app:/, 'the app must connect as the restricted role');
 });
+
+test('the proxy example forwards what the app needs', () => {
+  // X-Forwarded-Proto is what makes the session cookie Secure, and
+  // X-Forwarded-For is what the rate limiter keys on. Caddy sends both by
+  // default; nginx does not, so the nginx example must say so explicitly.
+  const nginx = README.slice(README.indexOf('```nginx'));
+  assert.match(nginx, /X-Forwarded-Proto/);
+  assert.match(nginx, /X-Forwarded-For/);
+});
+
+test('the reverse-proxy guidance covers TRUST_PROXY once, outside the folds', () => {
+  // It applies to every proxy, so it must not sit inside one proxy's <details>
+  // — that is how it came to be read as an nginx-only setting.
+  const section = README.slice(README.indexOf('### Put HTTPS in front'),
+    README.indexOf('## Features'));
+  const after = section.slice(section.lastIndexOf('</details>'));
+  assert.match(after, /TRUST_PROXY=1/,
+    'TRUST_PROXY is not explained after the last collapsed proxy example');
+});
+
