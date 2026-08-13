@@ -76,7 +76,15 @@ export async function load() {
 
 export function paint() {
   state.openHabitId = null;
-  views.showList();
+  const root = views.showList();
+
+  // Everything below is rebuilt from scratch, which destroys whatever had
+  // keyboard focus. A check-off repaints twice — optimistically, then again
+  // after the refetch — so without this, tabbing to a checkbox and pressing
+  // Enter dropped focus to <body> and the next Tab started from the top of
+  // the page. Same for the paging arrows, which `shiftGrid` rebuilds.
+  const focused = focusKeyOf(document.activeElement);
+
   grid.replaceChildren();
 
   listHead.hidden = !state.hasArchived;
@@ -115,6 +123,7 @@ export function paint() {
       handle.textContent = '⠿';
       handle.title = 'Drag to reorder — or focus and use ↑ / ↓';
       handle.setAttribute('aria-label', `Reorder ${habit.name}. Use arrow up or arrow down.`);
+      handle.dataset.focusKey = `handle:${habit.id}`;
       attachDragHandlers(handle, row, habit);
       row.append(handle);
     }
@@ -156,6 +165,7 @@ export function paint() {
       const btn = document.createElement('button');
       btn.className = 'check' + (date === todayIso ? ' today' : '');
       btn.title = `${habit.name} — ${date}`;
+      btn.dataset.focusKey = `check:${habit.id}:${date}`;
 
       const box = document.createElement('span');
       box.className = 'check-box';
@@ -173,6 +183,46 @@ export function paint() {
     row.append(meta, checks);
     grid.append(row);
   }
+
+  restoreFocus(root, focused);
+}
+
+/* ---------- keeping focus across a repaint ---------- */
+
+/**
+ * The identity of a control that survives being rebuilt.
+ *
+ * Every focusable thing `paint()` recreates carries a `data-focus-key` that
+ * names *what it is* rather than where it sat, so the restore still lands
+ * after a reorder moves the row or a refetch rebuilds the grid. A key that no
+ * longer exists — the column you were on after paging away — simply does not
+ * match, which is the right answer rather than a special case.
+ */
+function focusKeyOf(el) {
+  return el instanceof HTMLElement ? el.dataset.focusKey ?? null : null;
+}
+
+function restoreFocus(root, key) {
+  if (!key) return;
+
+  // Compared rather than selected: a key carries a habit name or a date, and
+  // building a selector out of either needs escaping that is easy to get
+  // wrong and pointless here.
+  const match = [...root.querySelectorAll('[data-focus-key]')]
+    .find((el) => el.dataset.focusKey === key);
+  if (!match) return;
+
+  // The control can survive but stop being operable — pressing Today disables
+  // it, since there is nowhere left to jump to. `.focus()` on a disabled
+  // button is a no-op, so fall back to its nearest working neighbour rather
+  // than leaving the keyboard at the top of the document.
+  if (!/** @type {HTMLButtonElement} */ (match).disabled) {
+    match.focus();
+    return;
+  }
+  const sibling = [...(match.parentElement?.querySelectorAll('[data-focus-key]') ?? [])]
+    .find((el) => !(/** @type {HTMLButtonElement} */ (el).disabled));
+  /** @type {HTMLElement} */ (sibling)?.focus();
 }
 
 /**
@@ -204,13 +254,14 @@ function renderGridHeader(dates, todayIso) {
   const olderGlyph = newestLeft ? '›' : '‹';
   const newerGlyph = newestLeft ? '‹' : '›';
 
-  const mk = (text, aria, delta, disabled = false) => {
+  const mk = (key, text, aria, delta, disabled = false) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'btn btn-sm';
     b.textContent = text;
     b.setAttribute('aria-label', aria);
     b.disabled = disabled;
+    b.dataset.focusKey = key;
     b.addEventListener('click', () => shiftGrid(delta));
     return b;
   };
@@ -226,6 +277,7 @@ function renderGridHeader(dates, todayIso) {
   today.type = 'button';
   today.className = 'btn btn-sm';
   today.textContent = 'Today';
+  today.dataset.focusKey = 'nav:today';
   today.addEventListener('click', () => {
     state.gridEnd = null;
     load().catch((e) => toast(e.message));
@@ -240,8 +292,8 @@ function renderGridHeader(dates, todayIso) {
   nav.append(today);
 
   // Order the arrows so they read left-to-right in the direction they move.
-  const older = mk(olderGlyph, `Previous ${step} days`, -step);
-  const newer = mk(newerGlyph, `Next ${step} days`, step, atToday);
+  const older = mk('nav:older', olderGlyph, `Previous ${step} days`, -step);
+  const newer = mk('nav:newer', newerGlyph, `Next ${step} days`, step, atToday);
   nav.append(...(newestLeft ? [newer, older] : [older, newer]));
 
   // Date row, aligned to the checkbox columns below.
@@ -312,6 +364,7 @@ function renderStarters() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'starter';
+    btn.dataset.focusKey = `starter:${preset.name}`;
 
     const dot = document.createElement('span');
     dot.className = 'habit-dot';
@@ -408,7 +461,11 @@ function moveHabit(dragId, targetId, after) {
   persistOrder(order);
 }
 
-/** Shift a habit one slot up or down, keeping keyboard focus on its handle. */
+/**
+ * Shift a habit one slot up or down. Keyboard focus follows the handle to its
+ * new position because `paint()` restores it by `data-focus-key`, which names
+ * the habit rather than the row it sat in.
+ */
 function nudgeHabit(habitId, delta) {
   const order = state.habits.map((h) => h.id);
   const from = order.indexOf(habitId);
@@ -416,23 +473,15 @@ function nudgeHabit(habitId, delta) {
   if (from === -1 || to < 0 || to >= order.length) return;
 
   order.splice(to, 0, ...order.splice(from, 1));
-  persistOrder(order, habitId);
+  persistOrder(order);
 }
 
-/**
- * Reorder optimistically so the list never appears to lag, then save.
- * `focusId` restores keyboard focus to the moved habit's handle.
- */
-async function persistOrder(order, focusId = null) {
+/** Reorder optimistically so the list never appears to lag, then save. */
+async function persistOrder(order) {
   const byId = new Map(state.habits.map((h) => [h.id, h]));
   const previous = state.habits;
   state.habits = order.map((id) => byId.get(id)).filter(Boolean);
   paint();
-
-  if (focusId != null) {
-    const row = grid.querySelector(`[data-habit-id="${focusId}"] .drag-handle`);
-    row?.focus();
-  }
 
   try {
     await api('/habits/reorder', {

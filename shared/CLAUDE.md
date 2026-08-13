@@ -163,6 +163,21 @@ box to anchor an HTML tooltip to. `<title>` stays in the markup for screen
 readers but is hidden with `display: none`, or the native bubble covers the
 popover.
 
+**A rebuilt control keeps focus via `data-focus-key`, not its position.**
+`dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single
+check-off does it twice — optimistically, then again after the refetch. That
+destroys the focused element, so tabbing to a checkbox and pressing Enter used
+to drop focus to `<body>` and send the next Tab to the top of the page. The key
+names *what a control is* (`check:<habit>:<date>`, `handle:<habit>`,
+`nav:older`), never where it sat, so the restore still lands after a reorder
+moves the row. Two consequences worth knowing: a key that no longer exists
+simply does not match, which is the right answer for a column you paged away
+from; and a control that survives but is *disabled* — Today, once there is
+nowhere to jump to — hands focus to its nearest working neighbour, because
+`.focus()` on a disabled button is a silent no-op. `persistOrder` used to
+re-focus the drag handle by hand; that special case is gone. Pinned by
+`test/browser/gridcheck.mjs` and `dragtest.mjs`.
+
 **`detail.open()` preserves scroll position.** Every control in the detail view
 re-renders through it, and `replaceChildren()` collapses the page height,
 which sends the window to the top. Preserve it on redraw of the *same* habit
