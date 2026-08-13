@@ -83,6 +83,10 @@ services:
       - habiterall-data:/data
     environment:
       HABITERALL_DB: /data/habiterall.db
+      # SET THIS. A container has no timezone, so it is UTC — and this decides
+      # both when an 08:00 reminder fires and which day a check-off lands on.
+      # Unset, an evening check-in west of UTC is filed under tomorrow.
+      TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
       # Optional, and only for reminders the SERVER sends (a Discord channel).
       # The Android app needs neither of these — it arms its own alarms.
       HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
@@ -203,6 +207,11 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
       TRUST_PROXY: 1
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      # The fallback clock: a container has no timezone, so it is UTC. Users can
+      # override it for their own reminders in ⚙ → Notifications, but this is
+      # what "the server's own timezone" means, and it is also the clock that
+      # decides which day a check-off with no explicit date belongs to.
+      TZ: ${TZ:-Etc/UTC}
     restart: unless-stopped
 
 volumes:
@@ -720,6 +729,7 @@ fork can cut a release having configured nothing. Details in
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HABITERALL_DB` | `./data/habiterall.db` | SQLite file path |
+| `TZ` | the host's, **`UTC` in a container** | The clock reminders fire on, and which day a check-off belongs to |
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 
@@ -750,6 +760,15 @@ see [`.github/workflows/README.md`](.github/workflows/README.md).
 | `HABITERALL_NOTIFY` | `on` | `off` disables server-sent reminders entirely |
 | `HABITERALL_NOTIFY_INTERVAL_MS` | `60000` | How often to check for due reminders |
 | `DISCORD_BOT_TOKEN` | — | Turns on buttons. One bot per instance; each user points it at their own channel |
+| `TZ` | the host's, **`UTC` in a container** | The clock behind "the server's own timezone" |
+
+> **Set `TZ` if you deploy with Docker.** A container has no timezone, so it is
+> UTC whatever the host is set to. Two things follow it: when an `08:00` reminder
+> fires, and — for a request that names no date — which day a check-off lands on.
+> Left at UTC, someone three hours west gets their morning reminder before dawn,
+> and an evening check-in after 21:00 is filed under tomorrow. In the cloud
+> edition a user can override the first of those in ⚙ → Notifications; there is
+> no per-user override for the second.
 
 The scheduler costs nothing until someone configures a destination for it: with
 none, it queries and stops. On-device reminders do not involve it at all.
@@ -760,6 +779,51 @@ credential, not a user's. With it set, the server also opens one outbound
 WebSocket to Discord to receive button presses — **no inbound port, no public
 hostname, and nothing to forward**, which is what makes this work on a home
 network.
+
+### Logs
+
+One JSON object per line on stdout, which is what a pod's log collector reads.
+On a TTY it switches to a readable `key=value` form instead, so a local run does
+not look like a machine talking to itself.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
+| `LOG_FORMAT` | `pretty` on a TTY, else `json` | Override the choice |
+| `LOG_REQUESTS` | `false` | A line for *every* request. Off, because the interesting ones are logged anyway |
+| `LOG_SLOW_MS` | `1000` | Above this, a request is a warning |
+| `LOG_RUNTIME_MS` | `60000` | How often to emit the `runtime` gauge |
+| `LOG_LAG_WARN_MS` | `200` | Event-loop lag that warrants a warning |
+
+Every line carries `t`, `level` and `msg`; a stack trace is a *field*, never
+extra lines, so one event stays one log entry. **No personal data is logged** —
+habit names, notes, entry values, email addresses and every credential-shaped
+key are dropped, so what you get is `habit=7 user=3`.
+
+The ones worth a dashboard or an alert:
+
+| `msg` | Level | Why you care |
+|---|---|---|
+| `startup` | info | Everything this process resolved its configuration to, including `tz` **and** the zone that produced — the pair that reveals a container running on UTC |
+| `runtime` | info | Once a minute: `loop_p99_ms`, RSS, and (cloud) `pg_waiting`. **Graph `loop_p99_ms`** |
+| `runtime.loop_blocked` | warn | The event loop stalled. On a single-threaded server that is *everyone's* latency, and it is the signal to add a replica rather than tune a query |
+| `http.error` | error | A 5xx, with the `X-Request-Id` the client was given, so a user's "it broke at 14:03" reaches a stack trace |
+| `http.slow` | warn | Over `LOG_SLOW_MS` |
+| `http.denied` / `http.rate_limited` | warn | A 401/403, or a limiter firing. Read from the response, so a new limiter cannot forget to report itself |
+| `notify.starting` | info | `mode=bot` or `mode=webhook` — whether reminders can carry buttons at all |
+| `notify.sent` | info | A reminder actually went, with the channel and how long it took |
+| `notify.failed` | warn | It did not. `permanent=true` means it will not be retried, so this is the one to alert on |
+| `notify.tick` | info / debug | Per tick: sent, failed, and a count per reason nothing was sent. Debug when it had nothing to do |
+| `notify.skip` | debug | **Why one habit was skipped**, with the clock it judged against |
+| `notify.tick_slow` | warn | A tick is overrunning its interval, so the next one is skipped and the last accounts are starved |
+| `auth.login` / `auth.suspended` | info / warn | Cloud: who signed in (id and issuer, never the subject or the email), and who was turned away |
+| `pg.client_error` | error | Cloud: a pooled connection failed |
+
+**When a reminder does not arrive, set `LOG_LEVEL=debug` and wait a minute.**
+`notify.skip` names the gate that dropped it — `not_yet`, `too_late`,
+`done_today`, `already_sent`, `archived`, `no_reminder_time` — and prints the
+clock it compared against. `too_late` with a `zone` you did not expect is the
+`TZ` problem above.
 
 ### In-app settings
 

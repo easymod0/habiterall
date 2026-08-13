@@ -14,6 +14,8 @@
     "./discord.js": "./src/discord.js",
     "./discord-gateway.js": "./src/discord-gateway.js",
     "./notify-send.js": "./src/notify-send.js",
+    "./log.js": "./src/log.js",
+    "./observe.js": "./src/observe.js",
     "./unzip.js": "./src/unzip.js",
     "./zip.js": "./src/zip.js",
     "./constants.js": "./src/constants.js",

@@ -14,6 +14,7 @@
 
 import * as client from 'openid-client';
 import { withUser, withoutUser } from './db/pool.js';
+import { log } from '@habiterall/shared/log.js';
 
 const {
   OIDC_ISSUER,
@@ -56,7 +57,12 @@ export async function initAuth() {
   );
 
   if (allowInsecure) {
-    console.warn('WARNING: OIDC over plaintext HTTP — development only');
+    // A warning, every start, on purpose: this is a development-only override
+    // and an instance that has it on in production must be noisy about it.
+    log.warn('oidc.insecure', {
+      reason: 'ALLOW_INSECURE_OIDC is set — plaintext issuer accepted',
+      production_safe: false,
+    });
   }
   return config;
 }
@@ -115,12 +121,18 @@ export async function completeLogin(req) {
     throw Object.assign(new Error('IdP returned no issuer'), { status: 401 });
   }
 
-  return upsertUser({
+  const user = await upsertUser({
     subject: claims.sub,
     issuer: claims.iss,
     email: typeof claims.email === 'string' ? claims.email : null,
     name: typeof claims.name === 'string' ? claims.name : '',
   });
+
+  // The issuer, never the subject or the email: identity here is
+  // (issuer, subject) and the subject is a stable handle on a person. An
+  // account id is enough to follow a session through the rest of the log.
+  log.info('auth.login', { user: user.id, issuer: claims.iss, blocked: !!user.blocked });
+  return user;
 }
 
 /**
@@ -197,7 +209,9 @@ async function isBlocked(userId) {
     return blocked;
   } catch {
     // Database trouble must not lock everyone out; fall back to the session
-    // snapshot, which is the behaviour we had before this check existed.
+    // snapshot, which is the behaviour we had before this check existed. Worth a
+    // line, though: it means suspensions are not being enforced right now.
+    log.warn('auth.block_check_failed', { user: userId, fell_back_to: 'session snapshot' });
     return hit?.blocked ?? false;
   }
 }
@@ -230,6 +244,7 @@ export function requireAuth(req, res, next) {
       if (!blocked) return next();
       // Destroy the session too, so the suspension survives the cache window
       // and the user is not left in a half-authenticated state.
+      log.warn('auth.suspended', { user: user.id });
       req.session.destroy(() => {
         res.status(403).json({ error: 'account suspended' });
       });

@@ -36,6 +36,18 @@ const SEND_TIMEOUT_MS = 10_000;
  */
 
 /**
+ * What a delivery attempt reports back.
+ *
+ * @typedef {object} SendResult
+ * @property {boolean} ok
+ * @property {number} [status] the HTTP status, or 0 if there was no response
+ * @property {string} [error]
+ * @property {boolean} [permanent] retrying will never work — a deleted webhook
+ * @property {number} [retryAfterMs] the wait Discord asked for
+ * @property {'bot'|'webhook'} [mode] which of the two paths answered
+ */
+
+/**
  * @typedef {object} NotifyContext
  * @property {(instant: Date|number) => Promise<NotifyAccount[]>|NotifyAccount[]} collect
  * @property {(account: NotifyAccount, habitId: number, channel: string, date: string) => any} mark
@@ -43,7 +55,7 @@ const SEND_TIMEOUT_MS = 10_000;
  * @property {string} [appUrl] this deployment's public address, for the link
  * @property {string} [botToken] DISCORD_BOT_TOKEN, when the instance has one
  * @property {typeof globalThis.fetch} [fetch]
- * @property {{warn?: Function, error?: Function}} [log]
+ * @property {{debug?: Function, info?: Function, warn?: Function, error?: Function}} [log]
  * @property {number} [intervalMs]
  */
 
@@ -59,7 +71,7 @@ const SEND_TIMEOUT_MS = 10_000;
  * @param {string} url
  * @param {unknown} payload
  * @param {{fetch?: typeof globalThis.fetch, timeoutMs?: number}} [deps]
- * @returns {Promise<{ok: boolean, status: number, error?: string, permanent?: boolean, retryAfterMs?: number}>}
+ * @returns {Promise<SendResult>}
  */
 export async function postWebhook(url, payload, deps = {}) {
   const doFetch = deps.fetch ?? globalThis.fetch;
@@ -131,6 +143,7 @@ export async function postWebhook(url, payload, deps = {}) {
  * @param {boolean} [args.test]
  * @param {string} [args.botToken] this instance's bot token, if it has one
  * @param {{fetch?: typeof globalThis.fetch}} [deps]
+ * @returns {Promise<SendResult>}
  */
 export async function sendToChannel(channel, args, deps = {}) {
   const { habit, settings, date = '', appUrl = '', test = false, botToken = '' } = args;
@@ -146,20 +159,26 @@ export async function sendToChannel(channel, args, deps = {}) {
     // buttons, so a user who has configured both gets the interactive version.
     // The webhook remains a complete fallback for anyone who would rather not
     // create an application.
+    // `mode` is carried back so a log can say which of the two answered. The
+    // difference is visible to the user — buttons or plain text — and "I am not
+    // getting buttons" is otherwise a question only the operator's environment
+    // can answer.
     if (botToken && settings.discordChannelId) {
-      return postReminder({
+      const result = await postReminder({
         token: botToken,
         channelId: settings.discordChannelId,
         habit, date, appUrl, test,
       }, deps);
+      return { mode: 'bot', ...result };
     }
 
     const message = reminderMessage(habit, { test });
-    return postWebhook(
+    const result = await postWebhook(
       settings.discordWebhook,
       discordPayload({ habit, message, date, appUrl }),
       deps
     );
+    return { mode: 'webhook', ...result };
   }
 
   return { ok: false, status: 0, error: `unknown channel ${channel}` };
@@ -174,16 +193,18 @@ export async function sendToChannel(channel, args, deps = {}) {
  *
  * @param {NotifyAccount} account
  * @param {NotifyContext} ctx
- * @returns {Promise<{sent: number, failed: number}>}
+ * @returns {Promise<{sent: number, failed: number, skipped: Record<string, number>}>}
  */
 export async function deliverAccount(account, ctx) {
   const settings = account.settings ?? {};
   const channels = serverChannels(settings, { bot: !!ctx.botToken });
-  if (!channels.length) return { sent: 0, failed: 0 };
+  if (!channels.length) return { sent: 0, failed: 0, skipped: {} };
 
   const log = ctx.log ?? console;
   let sent = 0;
   let failed = 0;
+  /** reason -> count, for the tick summary. */
+  const skipped = {};
 
   for (const channel of channels) {
     const due = dueReminders({
@@ -194,6 +215,15 @@ export async function deliverAccount(account, ctx) {
       // Per channel: adding Discord to an account must not be silenced by the
       // fact that the phone already handled that habit this morning.
       alreadySent: (habitId, date) => account.alreadySent?.(habitId, channel, date),
+      // Counted for every tick, spelled out per habit only at debug level:
+      // an instance with a hundred accounts would otherwise write a line per
+      // habit per minute, which buries the sends nobody wants to miss.
+      onSkip: (habit, reason, detail) => {
+        skipped[reason] = (skipped[reason] ?? 0) + 1;
+        log.debug?.('notify.skip', {
+          channel, habit: habit.id, user: account.id, reason, ...detail,
+        });
+      },
     });
 
     for (const item of due) {
@@ -201,6 +231,7 @@ export async function deliverAccount(account, ctx) {
         habit: item.habit, settings, date: item.date,
         appUrl: ctx.appUrl, botToken: ctx.botToken,
       };
+      const startedAt = Date.now();
       let result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
 
       // Discord's limit is a handful of posts every couple of seconds, so a
@@ -208,7 +239,13 @@ export async function deliverAccount(account, ctx) {
       // wait it asks for turns that into a delivered reminder; leaving it to
       // the next tick would trip the same limit again a minute later. Once
       // only — a second 429 means something else is wrong.
+      let throttled = false;
       if (result.retryAfterMs) {
+        throttled = true;
+        log.warn?.('notify.throttled', {
+          channel, habit: item.habit.id, user: account.id,
+          retry_after_ms: result.retryAfterMs,
+        });
         await new Promise((r) => setTimeout(r, result.retryAfterMs));
         result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
       }
@@ -216,6 +253,11 @@ export async function deliverAccount(account, ctx) {
       if (result.ok) {
         await ctx.mark(account, item.habit.id, channel, item.date);
         sent++;
+        // A handful a day per user, and the only positive proof delivery works.
+        log.info?.('notify.sent', {
+          channel, habit: item.habit.id, user: account.id, date: item.date,
+          at: item.time, mode: result.mode, ms: Date.now() - startedAt, throttled,
+        });
         continue;
       }
 
@@ -225,14 +267,17 @@ export async function deliverAccount(account, ctx) {
       // The settings dialog's test button is how the user finds out.
       if (result.permanent) await ctx.mark(account, item.habit.id, channel, item.date);
 
-      log.warn?.(
-        `notify: ${channel} failed for habit ${item.habit.id}` +
-        `${account.id != null ? ` (account ${account.id})` : ''}: ${result.error}`
-      );
+      // `permanent` is the field to alert on: it means this reminder is gone and
+      // will not be retried, so nobody finds out unless a log says so.
+      log.warn?.('notify.failed', {
+        channel, habit: item.habit.id, user: account.id, date: item.date,
+        permanent: !!result.permanent, status: result.status,
+        reason: result.error, ms: Date.now() - startedAt,
+      });
     }
   }
 
-  return { sent, failed };
+  return { sent, failed, skipped };
 }
 
 /**
@@ -249,21 +294,55 @@ export async function deliverAccount(account, ctx) {
 export async function runTick(ctx) {
   const instant = ctx.instant ?? new Date();
   const log = ctx.log ?? console;
+  const startedAt = Date.now();
   const accounts = await ctx.collect(instant);
 
   let sent = 0;
   let failed = 0;
+  let errored = 0;
+  const skipped = {};
   for (const account of accounts) {
     try {
       const result = await deliverAccount(account, { ...ctx, instant, log });
       sent += result.sent;
       failed += result.failed;
+      for (const [reason, n] of Object.entries(result.skipped ?? {})) {
+        skipped[reason] = (skipped[reason] ?? 0) + n;
+      }
     } catch (err) {
       // One account's storage error must not stop the others'.
-      log.error?.(`notify: account ${account?.id} failed:`, err);
+      errored++;
+      log.error?.('notify.account_failed', { user: account?.id }, err);
     }
   }
-  return { accounts: accounts.length, sent, failed };
+
+  const ms = Date.now() - startedAt;
+  const summary = {
+    accounts: accounts.length, sent, failed, errored, ms,
+    // Flattened as skip_too_late=1 rather than nested, so it can be graphed and
+    // alerted on without a parser that understands one level down.
+    ...Object.fromEntries(Object.entries(skipped).map(([r, n]) => [`skip_${r}`, n])),
+  };
+
+  // A tick that did nothing is the normal case, once a minute, forever — at info
+  // that is 1,440 lines a day saying "no". It goes to debug, and the tick only
+  // speaks up when it acted, took too long, or fell behind its own interval.
+  const interesting = sent || failed || errored;
+  const slow = ctx.intervalMs ? ms > ctx.intervalMs * 0.8 : ms > 30_000;
+  if (interesting) log.info?.('notify.tick', summary);
+  else log.debug?.('notify.tick', summary);
+  if (slow) {
+    log.warn?.('notify.tick_slow', {
+      ...summary,
+      // The next tick is skipped while this one runs, so overrunning does not
+      // queue — it silently starves whoever sorts last.
+      interval_ms: ctx.intervalMs ?? null,
+    });
+  }
+
+  // Deliberately no timing here: a caller asserting on this shape would be
+  // asserting on the clock. `ms` is a log field, not a result.
+  return { accounts: accounts.length, sent, failed, skipped };
 }
 
 /** Default cadence. A minute is the resolution a 'HH:MM' reminder has. */
