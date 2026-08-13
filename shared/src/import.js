@@ -40,6 +40,10 @@ const MILLIS_PER_DAY = 86_400_000;
  * by one day.
  */
 import { unzip } from './unzip.js';
+// The same limits the API enforces, so an import cannot store what a typed-in
+// habit could not.
+import { LIMITS } from './validate.js';
+import { TIME_RE } from './constants.js';
 
 export function loopTimestampToISO(millis) {
   const n = Number(millis);
@@ -513,4 +517,60 @@ function parseZipExport(buf, fail) {
   const habitsCsv = find('habits.csv');
   const meta = habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map();
   return parseLoopCheckmarksCSV(checkmarksCsv, meta);
+}
+
+/**
+ * Repair one imported habit into something both editions will store.
+ *
+ * `parseHabit` in validate.js is the sibling of this function and the difference
+ * is deliberate: that one REJECTS bad input, because a person is typing it and
+ * can be told. This one REPAIRS it, because the input is a file — often written
+ * by another application — and refusing the whole import over one over-long
+ * description would be the wrong trade.
+ *
+ * It exists because the two writers had drifted apart on exactly the rules a
+ * validator is for:
+ *
+ *   personal   no length clamps at all, and no cap on the frequency denominator
+ *   cloud      description 500, unit 20, denominator 365
+ *
+ * So the personal edition would accept, through an import, a habit its own API
+ * would have refused — and `shared/CLAUDE.md` already says why that is the worst
+ * kind of divergence: data one edition accepts and the other silently truncates
+ * on the way back in. The limits come from LIMITS rather than being restated, so
+ * they cannot drift from the ones the API enforces either.
+ *
+ * Loop permits shapes our own validation does not (a numerator above the
+ * denominator), so those are squared up rather than dropped.
+ *
+ * @param {Record<string, any>} h a habit from any parser
+ * @returns {import('./types.js').Habit & {archived: boolean}}
+ */
+export function normaliseImportedHabit(h) {
+  const num = Math.max(1, Number(h.freq_numerator) || 1);
+  let den = Math.max(1, Number(h.freq_denominator) || 1);
+  if (num > den) den = num;
+  den = Math.min(den, LIMITS.freqDenominator);
+
+  const target = Number(h.target_value);
+
+  return {
+    name: String(h.name ?? '').trim().slice(0, LIMITS.name),
+    description: String(h.description ?? '').slice(0, LIMITS.description),
+    type: h.type === 'numerical' ? 'numerical' : 'boolean',
+    unit: String(h.unit ?? '').slice(0, LIMITS.unit),
+    target_value: Number.isFinite(target) && target > 0 ? target : 0,
+    target_type: h.target_type === 'at_most' ? 'at_most' : 'at_least',
+    freq_numerator: num,
+    freq_denominator: den,
+    color: normalizeColor(h.color),
+    reminder_time: TIME_RE.test(h.reminder_time ?? '') ? h.reminder_time : '',
+    // One line and capped, the same rule parseHabit applies: an imported prompt
+    // ends up in the Android client's line-delimited reminder cache exactly like
+    // one typed into the dialog, and a newline there corrupts the record it
+    // sits in.
+    reminder_message: String(h.reminder_message ?? '')
+      .replace(/[\r\n]+/g, ' ').trim().slice(0, LIMITS.reminderMessage),
+    archived: !!h.archived,
+  };
 }

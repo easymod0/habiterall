@@ -413,3 +413,64 @@ test('a zip without a Checkmarks.csv says so', async () => {
   const bogus = zip([{ name: 'Habits.csv', data: 'Name\nMeditate\n' }]);
   await assert.rejects(() => parseUpload(bogus), /Checkmarks\.csv/);
 });
+
+/* ---------- repairing an imported habit ---------- */
+
+const { normaliseImportedHabit } = await import('../src/import.js');
+const { LIMITS } = await import('../src/validate.js');
+
+test('an imported habit is clamped to the limits the API enforces', () => {
+  // The personal edition's writer applied NO length clamps, so it accepted
+  // through an import what its own API would have refused. Both now derive the
+  // limits from the same place, so they cannot drift apart again.
+  const clean = normaliseImportedHabit({
+    name: 'n'.repeat(500),
+    description: 'd'.repeat(5000),
+    unit: 'u'.repeat(200),
+    reminder_message: 'q'.repeat(1000),
+  });
+  assert.equal(clean.name.length, LIMITS.name);
+  assert.equal(clean.description.length, LIMITS.description);
+  assert.equal(clean.unit.length, LIMITS.unit);
+  assert.equal(clean.reminder_message.length, LIMITS.reminderMessage);
+});
+
+test('a frequency Loop permits but we do not is squared up, not dropped', () => {
+  // Loop allows a numerator above the denominator; our validation does not.
+  assert.deepEqual(
+    (({ freq_numerator: n, freq_denominator: d }) => ({ n, d }))(
+      normaliseImportedHabit({ freq_numerator: 9, freq_denominator: 2 })
+    ),
+    { n: 9, d: 9 }
+  );
+  // And the denominator is capped, which one writer did and the other did not.
+  assert.equal(
+    normaliseImportedHabit({ freq_numerator: 1, freq_denominator: 100000 }).freq_denominator,
+    LIMITS.freqDenominator
+  );
+});
+
+test('a prompt from a file is flattened like one that was typed', () => {
+  // It ends up in the Android client's line-delimited reminder cache either way,
+  // where a newline corrupts the record it sits in.
+  assert.equal(
+    normaliseImportedHabit({ reminder_message: 'Did you\r\nexercise\ntoday?' }).reminder_message,
+    'Did you exercise today?'
+  );
+});
+
+test('junk is repaired rather than rejected', () => {
+  // The input is a file, often written by another application. Refusing a whole
+  // import over one bad field would be the wrong trade — that is what
+  // parseHabit is for, where a person is typing and can be told.
+  const clean = normaliseImportedHabit({
+    type: 'nonsense', target_type: 'nonsense', target_value: -5,
+    color: 'not-a-colour', reminder_time: '25:99', archived: 'yes',
+  });
+  assert.equal(clean.type, 'boolean');
+  assert.equal(clean.target_type, 'at_least');
+  assert.equal(clean.target_value, 0);
+  assert.match(clean.color, /^#[0-9a-f]{6}$/i);
+  assert.equal(clean.reminder_time, '');
+  assert.equal(clean.archived, true, 'a truthy value is archived; the writers map the type');
+});
