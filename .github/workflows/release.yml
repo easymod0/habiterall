@@ -222,13 +222,29 @@ jobs:
         id: signing
         env:
           KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PUBLISH: ${{ needs.version.outputs.publish }}
         run: |
           if [ -n "$KEYSTORE" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::ANDROID_KEYSTORE_BASE64 is not set; the APKs will be unsigned."
+            exit 0
           fi
+
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+
+          # An unsigned APK cannot be installed. Not "needs a setting changed",
+          # not "sideload only" — Android's package manager rejects it outright
+          # with INSTALL_PARSE_FAILED_NO_CERTIFICATES, which reaches the user as
+          # a bare "App not installed". Publishing one attaches a file to a
+          # release that nobody can use, and the only warning was a ::notice::
+          # nobody reads. So a real release stops here.
+          if [ "$PUBLISH" = "true" ]; then
+            echo "::error title=No signing keystore::ANDROID_KEYSTORE_BASE64 is not set, so this release would attach an APK that cannot be installed on any device. Set the four signing secrets (see .github/workflows/README.md), or run with publish disabled to build without releasing."
+            exit 1
+          fi
+
+          # A dry run is allowed to produce an unsigned APK: it proves the build
+          # works, and nothing reaches a user.
+          echo "::warning title=Unsigned APK::No keystore configured. This build will produce an APK that CANNOT be installed. Fine for validation; a publishing run would fail here."
 
       - name: Decode the keystore
         if: steps.signing.outputs.configured == 'true'
@@ -371,6 +387,14 @@ jobs:
 
       # X.Y.Z, X.Y and latest, on every registry in play, so a deployment can
       # pin as tightly as it likes.
+      #
+      # Except below 1.0.0, where the X.Y tag is dropped. A moving `1.4` tag is
+      # a promise that anything it points at is compatible with anything else it
+      # points at — which is what a minor series means once a project is
+      # stable. Under semver, 0.x carries no such guarantee: any 0.0.z may break
+      # the last. Publishing `0.0` would make that promise anyway, and at this
+      # version it is also indistinguishable from `latest`, so it says nothing
+      # while implying something untrue. It comes back on its own at 1.0.0.
       - name: Tags
         id: tags
         env:
@@ -383,6 +407,7 @@ jobs:
         run: |
           set -euo pipefail
           MINOR="${V%.*}"
+          MAJOR="${V%%.*}"
 
           # `if` rather than `[ … ] && …`: under `set -e` a test that fails as
           # the last command of a function or a block takes the whole step with
@@ -390,7 +415,9 @@ jobs:
           tags_for() {
             local repo="$1"
             if [ -n "$repo" ]; then
-              printf '%s:%s\n%s:%s\n%s:latest\n' "$repo" "$V" "$repo" "$MINOR" "$repo"
+              printf '%s:%s\n' "$repo" "$V"
+              if [ "$MAJOR" != "0" ]; then printf '%s:%s\n' "$repo" "$MINOR"; fi
+              printf '%s:latest\n' "$repo"
             fi
           }
 
@@ -505,7 +532,12 @@ jobs:
             echo "docker pull ghcr.io/$OWNER/habiterall-cloud:$V"
             echo '```'
             echo
-            echo "Also tagged \`$(echo "$V" | cut -d. -f1-2)\` and \`latest\`."
+            # Must agree with the Tags step: no moving minor tag below 1.0.0.
+            if [ "${V%%.*}" = "0" ]; then
+              echo "Also tagged \`latest\`."
+            else
+              echo "Also tagged \`$(echo "$V" | cut -d. -f1-2)\` and \`latest\`."
+            fi
             echo
 
             if ls dist/*.apk >/dev/null 2>&1; then
@@ -522,8 +554,11 @@ jobs:
                 echo "- \`$name\` (${size} MB) — $what"
               done
               echo
-              echo 'Unsigned APKs install with *Install unknown apps* enabled. A signed'
-              echo 'release needs the keystore secrets — see `.github/workflows/README.md`.'
+              echo 'Sideloading needs *Install unknown apps* enabled for whichever app'
+              echo 'you open the file with. If a previous build is installed and was'
+              echo 'signed with a different key — a debug build, for instance — uninstall'
+              echo 'it first: Android refuses the update, reporting only "App not'
+              echo 'installed".'
             fi
           } >> notes.md
 

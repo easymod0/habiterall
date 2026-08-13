@@ -153,9 +153,16 @@ every merge a release of `latest`.
 On a PR touching `android-native/` it runs the unit tests, lints, and uploads a
 **debug APK** as a build artifact. That path needs no configuration.
 
-Signing is optional: with no `ANDROID_KEYSTORE_BASE64` secret the release build
-still succeeds and produces an **unsigned** APK, which installs fine via
-`adb install`. Set the four secrets below only when you want a signed one.
+**Signing is required for a usable APK.** With no `ANDROID_KEYSTORE_BASE64`
+secret the build still succeeds, but it produces an **unsigned** APK — and
+Android will not install one under any circumstances. It is rejected by the
+package manager itself (`INSTALL_PARSE_FAILED_NO_CERTIFICATES`), so neither
+*Install unknown apps* nor `adb install` gets around it; the user just sees
+"App not installed".
+
+A publishing release therefore **fails** if the secrets are absent, rather than
+attaching a file nobody can install. A dry run still builds an unsigned APK, so
+the build itself can be validated without a keystore.
 
 ### `android-release.yml` — the TWA wrapper
 
