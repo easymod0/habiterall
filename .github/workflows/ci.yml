@@ -44,6 +44,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Which of the expensive jobs this change can possibly affect.
+  #
+  # Only for pull requests. A push to master runs everything on purpose — that
+  # run is what says master is releasable — and a `workflow_call` from
+  # release.yml has no base commit to compare against.
+  #
+  # Filtered at the JOB level, not with a workflow-level `paths:`, and that
+  # distinction matters: a workflow that is skipped by `paths` never reports a
+  # status, so a required check on it waits for a run that will never arrive and
+  # the pull request can never merge. A job skipped by `if:` reports "skipped",
+  # which branch protection accepts.
+  changes:
+    name: What changed
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.what.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Compare against the base
+        id: what
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Not a pull request — running everything."
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "$CHANGED" | sed 's/^/  /'
+
+          # Anything that is not documentation or workflow configuration. There
+          # is no finer split worth making here: the browser suites drive a real
+          # server, so a change under habiterall-personal/src reaches them, and
+          # the Postgres jobs exercise shared/src through the cloud edition. A
+          # per-directory matrix would be false precision.
+          #
+          # The one exception that must NOT be treated as docs: ci.yml itself.
+          # A change to this file has to run this file, or a broken pipeline
+          # merges green.
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/ci\.yml$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "ci.yml itself changed — running everything."
+            exit 0
+          fi
+
+          if echo "$CHANGED" | grep -qvE '(\.md$|^\.github/|^LICENSE$|^\.gitignore$)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Code changed — running everything."
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "Documentation and workflow configuration only — the expensive"
+            echo "jobs are skipped. Unit tests and the type check still run:"
+            echo "they take twenty seconds and they are the cheapest insurance"
+            echo "against a docs commit that was not only a docs commit."
+          fi
+
   test:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -73,6 +135,8 @@ jobs:
   browser:
     name: Browser suites
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -103,6 +167,8 @@ jobs:
   tenancy:
     name: Multi-tenant isolation
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     services:
       postgres:
@@ -141,6 +207,8 @@ jobs:
   cloud:
     name: Cloud API (Postgres)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     services:
       postgres:
@@ -202,6 +270,8 @@ jobs:
   roundtrip:
     name: Backup round-trip (personal)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -236,6 +306,8 @@ jobs:
   docker:
     name: Docker images
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v4
 

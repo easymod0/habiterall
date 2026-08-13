@@ -24,17 +24,38 @@ on:
     paths:
       - 'android-native/**'
       - '.github/workflows/android-native.yml'
-      # The Kotlin client hard-codes the REST contract — field names, the
-      # x1000 entry scaling, the sentinel values — so a change to either of
-      # these can break it even though no Kotlin file moved.
+      # The Kotlin client mirrors parts of the shared code BY HAND, so a change
+      # to any of these can break it even though no Kotlin file moved. Each has a
+      # counterpart in the app:
+      #
+      #   types.js / constants.js  the REST contract — field names, the x1000
+      #                            entry scaling, the sentinel values
+      #   ui/time.js               ReminderTime.kt is a deliberate mirror, pinned
+      #                            to the same examples, because both clients
+      #                            write the same reminder_time
+      #   notify.js                AppSettings.androidRemindersEnabled encodes the
+      #                            channel id and the "absent means enabled"
+      #                            default from DEFAULT_CHANNELS
+      #   validate.js              the reminder-prompt cap the dialog applies with
+      #                            .take(200)
+      #
+      # Keep this list and that set of mirrors in step. A shared file the app
+      # copies, and that is not listed here, is a change that can break the
+      # client with nothing to catch it.
       - 'shared/src/types.js'
       - 'shared/src/constants.js'
+      - 'shared/src/notify.js'
+      - 'shared/src/validate.js'
+      - 'shared/public/ui/time.js'
   pull_request:
     paths:
       - 'android-native/**'
       - '.github/workflows/android-native.yml'
       - 'shared/src/types.js'
       - 'shared/src/constants.js'
+      - 'shared/src/notify.js'
+      - 'shared/src/validate.js'
+      - 'shared/public/ui/time.js'
   workflow_dispatch:
 
 # Read-only by default; only the release job needs to publish, and it asks
