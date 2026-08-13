@@ -75,7 +75,11 @@ export function unzip(buf) {
     // Streaming writers set flag bit 3 and leave the sizes zero, deferring them
     // to a data descriptor after the payload. Fall back to the local header,
     // then to "rest of buffer" and let inflate find the end of the stream.
-    if (compressedSize === 0 && (flags & 0x08 || uncompressedSize === 0)) {
+    //
+    // Only bit 3 justifies that fallback. A genuinely empty member also has
+    // compressedSize 0, and treating it as "size unknown" made it swallow the
+    // rest of the archive.
+    if (compressedSize === 0 && (flags & 0x08) !== 0) {
       const localCompressed = buf.readUInt32LE(localOffset + 18);
       compressedSize = localCompressed || buf.length - dataStart;
     }

@@ -40,6 +40,7 @@
  * @property {number} freq_numerator   n, in "n times per m days"
  * @property {number} freq_denominator m, in "n times per m days"
  * @property {string} color            #rrggbb
+ * @property {string} [reminder_time]  local 'HH:MM', or '' for no reminder
  * @property {number} [position]       display order
  * @property {boolean|0|1} archived    boolean in Postgres, 0/1 in SQLite
  */

@@ -13,10 +13,13 @@ Postgres one.
 | `src/validate.js` | every input rule for habits, entries, and dates |
 | `src/import.js` | parsers: habiterall JSON, Loop `.db`, Loop CSV |
 | `src/export-loop.js` | writes a Loop-compatible `.db` |
+| `src/export-csv.js` | builds the `Habits.csv` + `Checkmarks.csv` archive |
 | `src/unzip.js` | minimal ZIP reader (Loop's CSV export) |
+| `src/zip.js` | minimal ZIP writer, for the CSV archive |
 | `src/constants.js` | `UNSET` / `YES` / `SKIP` wire values |
 | `public/app.js` | the whole UI; `start(authAdapter)` is the entry |
 | `public/ui/settings.js` | the preference registry and its server sync |
+| `public/ui/calendar.js` | calendar window/zoom maths, DOM-free so it is testable |
 | `public/ui/dates.js` | browser-side date helpers |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
 | `public/auth-none.js`, `auth-oidc.js` | the two auth adapters |
@@ -49,6 +52,49 @@ counts as done, `NO(0)`/`UNKNOWN(-1)` are dropped. `test/import.test.js` and
 `test/export-loop.test.js` pin all of it — if you change a conversion and
 those fail, the tests are right.
 
+**The calendar is anchored on its END, not its start.** Going back
+`weeks*7` days and *then* snapping to a Sunday shifts the whole grid earlier,
+so the last column stops short of today by however many days into the week it
+is — today's square was invisible on six days out of seven. `calendarWindow`
+owns this and `test/calendar.test.js` pins it.
+
+**Charts size themselves from the card, and must not overshoot it.**
+`svg.chart { max-width: 100% }` silently *scales* an oversized chart down, so
+one pixel too wide makes 13px cells render at 12.6px. `calendarWidth` drops
+the final column's trailing gap for exactly this reason, and `cardInnerWidth`
+measures a real `.card` rather than hardcoding padding that can drift from the
+stylesheet. Inside a `.chart-scroll` the cap is lifted so narrow screens
+scroll instead of shrinking.
+
+**`charts.js` must survive the fake DOM.** `test/browser/atmost.mjs` and
+`rendercheck.mjs` import it directly with a ~15-line stand-in for `document`
+that implements `setAttribute`/`appendChild` and nothing else. Use
+`setAttribute('data-x')` rather than `.dataset.x`, pass `class` through the
+attribute object rather than `classList.add`, and guard anything that needs
+real event or `requestAnimationFrame` APIs. Reach for a browser API here and
+those two suites crash outright rather than fail a check.
+
+**Calendar cell hover has three non-obvious requirements.** `transform-box:
+fill-box` — without it the transform origin is the SVG's origin and a hovered
+cell flies across the grid instead of scaling in place. SVG has no `z-index`,
+so the hovered cell is moved to the end of its parent or its neighbours clip
+the growth. And the popover is positioned in JS because an SVG rect has no CSS
+box to anchor an HTML tooltip to. `<title>` stays in the markup for screen
+readers but is hidden with `display: none`, or the native bubble covers the
+popover.
+
+**`showDetail` preserves scroll position.** Every control in the detail view
+re-renders through it, and `replaceChildren()` collapses the page height,
+which sends the window to the top. Preserve it on redraw of the *same* habit
+only — opening a different one should start at the top.
+
+**The CSV export must ship both files.** `Checkmarks.csv` has one column per
+habit and nothing that says what a habit *is*, so parsed alone every column
+defaults to boolean — and a measurable habit's `3` is then read as Loop's SKIP
+sentinel while `8` and `10` are dropped as unknown ones. That is why
+`/api/export.csv` returns a zip. `test/export-csv.test.js` pins the failure
+mode deliberately, so if the ambiguity ever goes away the test says so.
+
 **Adding a setting means two files.** `public/ui/settings.js` declares what
 the dialog renders; `src/validate.js` declares what the server accepts. Both,
 or the control is either unenforced or dead — `test/settings.test.js` fails if
@@ -65,6 +111,13 @@ injected adapter (`load` / `render` / `signOut` / `onUnauthorized`). Adding an
 npm test              # unit — fast, no dependencies
 npm run test:browser  # real Chrome against a running server
 ```
+
+`test/roundtrip-fixture.mjs` is shared by both editions' round-trip suites
+(`npm run test:roundtrip -w habiterall-personal`, and the same in
+`habiterall-cloud` with a Postgres). It defines the fixture *and* the
+per-format fidelity rules, so the two editions cannot disagree about what a
+faithful restore means. Add a case there when a new encoding trap appears —
+that is how the CSV skip/value collision was caught.
 
 `test/browser/` is not optional decoration: a CSS `display` rule silently
 defeating the `hidden` attribute shipped once, and no unit test could have

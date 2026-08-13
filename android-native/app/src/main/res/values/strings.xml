@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">habiterall</string>
+
+    <string name="channel_reminders">Habit reminders</string>
+    <string name="channel_reminders_desc">
+        A reminder at the time you set for each habit, with buttons to record
+        the day without opening the app.
+    </string>
+
+    <string name="reminder_boolean">Did you do it today?</string>
+    <!-- %1$s is the target, e.g. "8 glasses". -->
+    <string name="reminder_measurable">Target: %1$s</string>
+
+    <string name="action_yes">Yes</string>
+    <string name="action_no">No</string>
+    <string name="action_skip">Skip</string>
+    <string name="action_enter_count">Enter count</string>
+
+    <string name="recorded_yes">Recorded</string>
+    <string name="recorded_no">Marked not done</string>
+    <string name="recorded_skip">Skipped</string>
+    <string name="invalid_amount">Enter a number of zero or more</string>
+
+    <string name="count_hint">Amount</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+</resources>

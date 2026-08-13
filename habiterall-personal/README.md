@@ -82,7 +82,7 @@ All endpoints are under `/api`. Dates are local calendar dates, `YYYY-MM-DD`.
 | `GET` | `/habits/:id/stats` | Full statistics (`?granularity=day\|week\|month\|quarter\|year`) |
 | `GET` | `/overview` | All habits + recent entries + summary stats in one call (`?days=N`, `?archived=true`) |
 | `GET` | `/export` | Everything as JSON, for backup (`?download=true` for a file) |
-| `GET` | `/export.csv` | All checkmarks as a Loop-shaped CSV |
+| `GET` | `/export.csv` | Zip of `Habits.csv` + `Checkmarks.csv`, Loop-shaped |
 | `GET` | `/export-loop.db` | A Loop Habit Tracker `.db` backup |
 | `POST` | `/import` | Import a backup; body is the raw file (`?mode=merge\|replace`) |
 
@@ -108,7 +108,7 @@ Click **Backup** in the top bar for the full UI, or use the API directly.
 | What | Where |
 | --- | --- |
 | Full JSON backup (everything, round-trippable) | `GET /api/export` |
-| Checkmarks as CSV (Loop-shaped) | `GET /api/export.csv` |
+| CSV archive, Loop-shaped (zip of `Habits.csv` + `Checkmarks.csv`) | `GET /api/export.csv` |
 | **Loop Habit Tracker `.db` backup** | `GET /api/export-loop.db` |
 
 The Loop `.db` export writes a genuine SQLite database in Loop's own schema, so it can be restored on Android via **Loop → Settings → Import data**. It is the exact inverse of the importer: timestamps become UTC-midnight epoch millis, numerical values and targets are scaled by 1000, skips become the `SKIP` sentinel, and colours are mapped back to the nearest Loop palette index.

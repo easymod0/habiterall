@@ -20,6 +20,7 @@ import {
 } from '@habiterall/shared/validate.js';
 import { unzip } from '@habiterall/shared/unzip.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
+import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 
 export const api = express.Router();
 
@@ -32,14 +33,14 @@ const q = {
   habitById: db.prepare(`SELECT * FROM habits WHERE id = ?`),
   insertHabit: db.prepare(`
     INSERT INTO habits (name, description, type, unit, target_value, target_type,
-                        freq_numerator, freq_denominator, color, position)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        freq_numerator, freq_denominator, color, reminder_time, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
   `),
   updateHabit: db.prepare(`
     UPDATE habits SET name = ?, description = ?, type = ?, unit = ?,
       target_value = ?, target_type = ?, freq_numerator = ?,
-      freq_denominator = ?, color = ?, archived = ?
+      freq_denominator = ?, color = ?, reminder_time = ?, archived = ?
     WHERE id = ?
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
@@ -117,7 +118,7 @@ api.post('/habits', (req, res) => {
   const h = habitRow(req.body);
   const info = q.insertHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value,
-    h.target_type, h.freq_numerator, h.freq_denominator, h.color
+    h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time
   );
   res.status(201).json(q.habitById.get(info.lastInsertRowid));
 });
@@ -135,7 +136,7 @@ api.put('/habits/:id', (req, res) => {
   const h = habitRow(req.body);
   q.updateHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
-    h.freq_numerator, h.freq_denominator, h.color, h.archived, id
+    h.freq_numerator, h.freq_denominator, h.color, h.reminder_time, h.archived, id
   );
   res.json(q.habitById.get(id));
 });
@@ -380,38 +381,20 @@ api.get('/export', (req, res) => {
 });
 
 /**
- * Export every habit's checkmarks as a single CSV, in the same shape as
- * Loop's Checkmarks.csv (Date column, then one column per habit).
+ * Export as a zip of Habits.csv + Checkmarks.csv, the same shape Loop
+ * produces. Both files are needed: Checkmarks.csv alone has no habit types,
+ * so a measurable habit's 3 would be read back as Loop's SKIP sentinel.
+ *
+ * The route keeps its `.csv` name for existing bookmarks; the payload is a zip.
  */
 api.get('/export.csv', (req, res) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
+  const body = buildCsvArchive(habits, (id) => q.entriesFor.all(id));
 
-  const byHabit = habits.map((h) => ({
-    habit: h,
-    entries: new Map(q.entriesFor.all(h.id).map((e) => [e.date, e])),
-  }));
-
-  const allDates = [...new Set(byHabit.flatMap((b) => [...b.entries.keys()]))].sort();
-
-  const esc = (s) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-  const lines = [['Date', ...habits.map((h) => esc(h.name))].join(',')];
-
-  for (const date of allDates) {
-    const row = [date];
-    for (const b of byHabit) {
-      const e = b.entries.get(date);
-      if (e == null) row.push('');
-      else if (e.status === 'skip') row.push('SKIP');
-      else if (b.habit.type === 'boolean') row.push(e.value === YES ? 'YES_MANUAL' : '');
-      else row.push(String(e.value));
-    }
-    lines.push(row.join(','));
-  }
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
-    `attachment; filename="habiterall-checkmarks-${today()}.csv"`);
-  res.send(lines.join('\n') + '\n');
+    `attachment; filename="habiterall-csv-${today()}.zip"`);
+  res.send(body);
 });
 
 /**

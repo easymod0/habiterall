@@ -1,0 +1,11 @@
+.gradle/
+build/
+local.properties
+*.jks
+*.keystore
+
+# Generated in CI by `gradle wrapper` rather than committed — a binary jar
+# nobody can review in a diff.
+gradle/wrapper/gradle-wrapper.jar
+gradlew
+gradlew.bat

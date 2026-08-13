@@ -58,6 +58,19 @@ export const SETTINGS = {
       { value: 'sunday', label: 'Sunday' },
     ],
   },
+  calendarZoom: {
+    section: 'Dashboard',
+    label: 'Calendar zoom',
+    help: 'How much history the completion calendar shows at once.',
+    type: 'select',
+    default: 'default',
+    options: [
+      { value: 'closest', label: 'Closest — largest squares' },
+      { value: 'close', label: 'Close — bigger squares' },
+      { value: 'default', label: 'Default' },
+      { value: 'wide', label: 'Wide — smallest squares, most history' },
+    ],
+  },
   confirmDelete: {
     section: 'Safety',
     label: 'Confirm before deleting a habit',

@@ -14,6 +14,7 @@ import { withUser } from './db/pool.js';
 import { applyImport } from './apply-import.js';
 import { unzip } from '@habiterall/shared/unzip.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
+import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 import {
   parseHabiterallJSON, parseLoopDatabase,
   parseLoopCheckmarksCSV, parseLoopHabitsCSV,
@@ -78,12 +79,13 @@ api.post('/habits', route(async (req, res) => {
     const { rows } = await db.query(
       `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                            target_type, freq_numerator, freq_denominator, color,
-                           archived, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                           reminder_time, archived, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
                COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
        RETURNING *`,
       [uid(req), h.name, h.description, h.type, h.unit, h.target_value,
-       h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.archived]
+       h.target_type, h.freq_numerator, h.freq_denominator, h.color,
+       h.reminder_time, h.archived]
     );
     return rows[0];
   });
@@ -104,10 +106,11 @@ api.put('/habits/:id', route(async (req, res) => {
     const { rows } = await db.query(
       `UPDATE habits SET name=$1, description=$2, type=$3, unit=$4,
               target_value=$5, target_type=$6, freq_numerator=$7,
-              freq_denominator=$8, color=$9, archived=$10
-       WHERE id = $11 RETURNING *`,
+              freq_denominator=$8, color=$9, reminder_time=$10, archived=$11
+       WHERE id = $12 RETURNING *`,
       [h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
-       h.freq_numerator, h.freq_denominator, h.color, h.archived, id]
+       h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
+       h.archived, id]
     );
     return rows[0];
   });
@@ -422,29 +425,15 @@ api.get('/export.csv', route(async (req, res) => {
     return { habits, entries };
   });
 
-  const byHabit = new Map(habits.map((h) => [h.id, new Map()]));
-  for (const e of entries) byHabit.get(e.habit_id)?.set(e.date, e);
+  const byHabit = new Map(habits.map((h) => [h.id, []]));
+  for (const e of entries) byHabit.get(e.habit_id)?.push(e);
 
-  const allDates = [...new Set(entries.map((e) => e.date))].sort();
-  const esc = (s) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-  const lines = [['Date', ...habits.map((h) => esc(h.name))].join(',')];
+  const body = buildCsvArchive(habits, (id) => byHabit.get(id) ?? []);
 
-  for (const date of allDates) {
-    const row = [date];
-    for (const h of habits) {
-      const e = byHabit.get(h.id)?.get(date);
-      if (!e) row.push('');
-      else if (e.status === 'skip') row.push('SKIP');
-      else if (h.type === 'boolean') row.push(e.value === YES ? 'YES_MANUAL' : '');
-      else row.push(String(e.value));
-    }
-    lines.push(row.join(','));
-  }
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
-    `attachment; filename="habiterall-checkmarks-${today()}.csv"`);
-  res.send(lines.join('\n') + '\n');
+    `attachment; filename="habiterall-csv-${today()}.zip"`);
+  res.send(body);
 }));
 
 /** A Loop Habit Tracker .db backup of this user's data. */

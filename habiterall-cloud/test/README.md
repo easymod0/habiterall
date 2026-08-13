@@ -14,7 +14,27 @@ DATABASE_URL_ADMIN='postgres://owner:testpw@localhost:55432/habiterall' \
 APP_DB_PASSWORD='apptestpw' node src/db/migrate.js
 
 node test/tenancy.integration.mjs
+node test/api.integration.mjs
+node test/roundtrip.integration.mjs
 ```
 
-Run it after ANY change to the schema, the RLS policies, `db/pool.js`, or
+Run them after ANY change to the schema, the RLS policies, `db/pool.js`, or
 `apply-import.js`.
+
+## `roundtrip.integration.mjs`
+
+Seeds a known dataset, exports it as JSON, a Loop `.db`, and a CSV archive,
+imports each one back, and asserts nothing changed. It shares its fixture and
+comparison rules with the personal edition's suite
+(`@habiterall/shared/test/roundtrip-fixture.mjs`), so the two editions cannot
+disagree about what a faithful restore means.
+
+It also checks that a restore stays inside the importing account: Bob
+importing Alice's backup — ids and all — must leave Alice untouched, including
+in `replace` mode.
+
+Each format is held to what it can actually carry. JSON is lossless. The Loop
+`.db` and the CSV archive carry every habit attribute and entry but have
+nowhere to put per-day notes, so a day whose only content is a note is
+expected to be dropped — and the test asserts that exactly one such day
+disappears, rather than loosening the comparison.
