@@ -12,6 +12,7 @@ import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -166,6 +167,18 @@ class MainActivity : ComponentActivity() {
         var loading by remember { mutableStateOf(true) }
         var reload by remember { mutableStateOf(0) }
         var countFor by remember { mutableStateOf<Habit?>(null) }
+        var reminderFor by remember { mutableStateOf<Habit?>(null) }
+
+        /**
+         * Explicit scroll state, so it can be corrected after a reload.
+         *
+         * Without this the list kept whatever offset it had, and the offset
+         * survived the empty moment between "app resumed" and "habits
+         * fetched". Restoring it against a list that had briefly been empty
+         * left the view scrolled past the top with the first habit clipped
+         * off — reachable just by closing and reopening the app.
+         */
+        val listState = rememberLazyListState()
 
         val today = remember { LocalDate.now().toString() }
         val api = remember(serverUrl) { Api(serverUrl) }
@@ -176,6 +189,27 @@ class MainActivity : ComponentActivity() {
                 .onSuccess { habits = it.habits.filter { h -> !h.archived }; error = null }
                 .onFailure { error = it.message ?: "Could not reach the server" }
             loading = false
+        }
+
+        // Bring an out-of-range scroll position back into the list.
+        //
+        // A retained offset can outlive the list it belonged to — the app is
+        // resumed, the list is empty for a moment, and the restored offset
+        // then points past the end. Clamping only when the index no longer
+        // exists leaves a deliberate mid-list scroll alone.
+        LaunchedEffect(habits.size) {
+            if (habits.isEmpty()) return@LaunchedEffect
+
+            val index = listState.firstVisibleItemIndex
+            // Two bad states, both reachable by closing and reopening the app:
+            //   - the index points past the end of a list that shrank
+            //   - the index is 0 but a leftover pixel offset clips the first
+            //     habit, which is what "the top one was cut off" looks like
+            if (index >= habits.size ||
+                (index == 0 && listState.firstVisibleItemScrollOffset > 0)
+            ) {
+                listState.scrollToItem(0)
+            }
         }
 
         fun record(habit: Habit, value: Double?, skip: Boolean) {
@@ -217,7 +251,7 @@ class MainActivity : ComponentActivity() {
                         Text("No habits yet. Add one in the web app.")
                         TextButton(onClick = onOpenStats) { Text("Open habiterall") }
                     }
-                    else -> LazyColumn(Modifier.weight(1f)) {
+                    else -> LazyColumn(Modifier.weight(1f), state = listState) {
                         items(habits, key = { it.id }) { habit ->
                             HabitRow(
                                 habit = habit,
@@ -226,12 +260,33 @@ class MainActivity : ComponentActivity() {
                                 onYes = { record(habit, Sentinels.YES, false) },
                                 onNo = { record(habit, Sentinels.UNSET, false) },
                                 onCount = { countFor = habit },
+                                onSetReminder = { reminderFor = habit },
                             )
                             HorizontalDivider()
                         }
                     }
                 }
             }
+        }
+
+        reminderFor?.let { habit ->
+            ReminderDialog(
+                habit = habit,
+                onDismiss = { reminderFor = null },
+                onSave = { time ->
+                    reminderFor = null
+                    lifecycleScope.launch {
+                        runCatching { api.setReminder(habit, time) }
+                            .onSuccess {
+                                // Re-arm immediately: the schedule lives on the
+                                // server, but the alarm is local.
+                                Reminders.rescheduleAll(this@MainActivity)
+                                reload++
+                            }
+                            .onFailure { error = it.message ?: "Could not save the reminder" }
+                    }
+                },
+            )
         }
 
         countFor?.let { habit ->
@@ -251,6 +306,7 @@ class MainActivity : ComponentActivity() {
         skipped: Boolean,
         onYes: () -> Unit,
         onNo: () -> Unit,
+        onSetReminder: () -> Unit,
         onCount: () -> Unit,
     ) {
         val met = habit.isMet(value, skipped)
@@ -278,6 +334,21 @@ class MainActivity : ComponentActivity() {
                     color = if (met == true) Color(0xFF16a34a)
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+
+                // The reminder is the app's entire reason to exist, so setting
+                // one has to be reachable from the habit itself — it was
+                // previously only editable through the web UI, which meant the
+                // notification feature had no way to be switched on from here.
+                TextButton(
+                    onClick = onSetReminder,
+                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        if (habit.reminderTime.isBlank()) "Add reminder"
+                        else "Reminder ${habit.reminderTime}",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
             }
 
             // Measurable habits get one button that asks for a number; yes/no
@@ -324,6 +395,61 @@ class MainActivity : ComponentActivity() {
                 ) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        )
+    }
+
+    /**
+     * Set or clear a habit's reminder time.
+     *
+     * A plain HH:MM field rather than the platform picker: the value goes
+     * straight to the server as a `reminder_time` string, and a text field
+     * keeps that mapping obvious and testable. Clearing it removes the
+     * reminder, which is why "Remove" is a first-class button rather than a
+     * hidden gesture.
+     */
+    @Composable
+    private fun ReminderDialog(
+        habit: Habit,
+        onDismiss: () -> Unit,
+        onSave: (String) -> Unit,
+    ) {
+        var text by remember { mutableStateOf(habit.reminderTime) }
+        val valid = text.isBlank() || Regex("^([01]\\d|2[0-3]):[0-5]\\d$").matches(text)
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(habit.name) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "A notification with " +
+                            (if (habit.isNumerical) "a count field" else "Yes / No buttons") +
+                            " appears at this time, so you can answer without opening the app.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it.trim() },
+                        label = { Text("Time (24h, e.g. 08:30)") },
+                        singleLine = true,
+                        isError = !valid,
+                        supportingText = {
+                            if (!valid) Text("Use HH:MM, for example 07:15")
+                        },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = valid, onClick = { onSave(text) }) { Text("Save") }
+            },
+            dismissButton = {
+                Row {
+                    if (habit.reminderTime.isNotBlank()) {
+                        TextButton(onClick = { onSave("") }) { Text("Remove") }
+                    }
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                }
+            },
         )
     }
 

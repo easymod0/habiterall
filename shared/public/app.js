@@ -1436,6 +1436,7 @@ function openDialog(habit = null) {
   f.freq_numerator.value = habit?.freq_numerator ?? 1;
   f.freq_denominator.value = habit?.freq_denominator ?? 1;
   f.color.value = habit?.color ?? '#3b82f6';
+  f.reminder_time.value = habit?.reminder_time ?? '';
   f.archived.checked = !!habit?.archived;
   els.archivedWrap.hidden = !habit; // only meaningful for an existing habit
 
@@ -1463,6 +1464,9 @@ async function saveHabit(e) {
     freq_numerator: Number(f.freq_numerator.value) || 1,
     freq_denominator: Number(f.freq_denominator.value) || 1,
     color: f.color.value,
+    // An empty <input type="time"> yields '', which the validator maps to
+    // "no reminder" — so clearing the field genuinely removes it.
+    reminder_time: f.reminder_time.value,
     archived: f.archived.checked,
   };
 
