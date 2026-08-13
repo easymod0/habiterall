@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = 9294;
 const profile = mkdtempSync(join(tmpdir(), 'habcal-'));
@@ -24,11 +24,7 @@ const send = (m, p = {}, s) => new Promise((res, rej) => {
 });
 
 try {
-  let url;
-  for (let i = 0; i < 60; i++) {
-    try { url = (await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json()).webSocketDebuggerUrl; if (url) break; } catch {}
-    await sleep(250);
-  }
+  const url = await devtoolsUrl(PORT, chrome);
   ws = new globalThis.WebSocket(url);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
   ws.onmessage = (ev) => {

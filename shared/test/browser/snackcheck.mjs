@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT=9224;
 const profile=mkdtempSync(join(tmpdir(),'habsnack-'));
 const chrome=launchChrome(PORT, profile);
@@ -11,7 +11,7 @@ let ws,nid=1;const pend=new Map();
 const send=(m,p={},s)=>new Promise((res,rej)=>{const id=nid++;pend.set(id,{res,rej});
  ws.send(JSON.stringify({id,method:m,params:p,sessionId:s}));});
 try{
-  let url;for(let i=0;i<60;i++){try{url=(await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json()).webSocketDebuggerUrl;if(url)break;}catch{}await sleep(250);}
+  const url = await devtoolsUrl(PORT, chrome);
   ws=new globalThis.WebSocket(url);await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j;});
   ws.onmessage=ev=>{const m=JSON.parse(ev.data);if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(new Error(JSON.stringify(m.error))):res(m.result);}};
   const{targetId}=await send('Target.createTarget',{url:'about:blank'});
