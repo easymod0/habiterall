@@ -18,6 +18,15 @@ services:
     environment:
       - HABITERALL_DB=/data/habiterall.db
       - PORT=3000
+      # Reminders sent by the server (a Discord webhook). Idle until a
+      # destination is configured in Settings → Notifications; set to `off` to
+      # disable the loop entirely. HABITERALL_PUBLIC_URL, if set, is what a
+      # Discord message links back to.
+      - HABITERALL_NOTIFY=${HABITERALL_NOTIFY:-on}
+      - HABITERALL_PUBLIC_URL=${HABITERALL_PUBLIC_URL:-}
+      # Set to get Yes / No / Skip buttons in Discord instead of plain text.
+      # See the README: create an application, copy the bot token, invite it.
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
     restart: unless-stopped
 
 volumes:

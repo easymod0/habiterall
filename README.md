@@ -25,6 +25,7 @@ reconnect.
 - [Which edition do I want?](#which-edition-do-i-want)
 - [Quick start](#quick-start) · [personal](#personal-edition) · [cloud](#cloud-edition)
 - [Features](#features) · [Statistics](#statistics) · [Bouncing back](#bouncing-back)
+- [Reminders and notifications](#reminders-and-notifications)
 - [Install on a phone](#install-on-a-phone)
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
 - [Backup and restore](#backup-and-restore)
@@ -138,6 +139,12 @@ travel.
 **Undo** — deleting a habit offers an Undo that restores it with every entry
 and note intact.
 
+**Reminders, where you want them** — set a time on a habit, choose what the
+reminder *asks* ("Did you exercise today?"), and pick where it goes under ⚙ →
+Notifications: the Android app, a Discord channel, or both. In Discord you can
+answer with a button without leaving the chat. See
+[Reminders and notifications](#reminders-and-notifications).
+
 **Works offline** — check off habits with no signal; they queue on the device
 and sync, in order, when you reconnect. Reconnection is automatic, and does not
 rely on the browser noticing: the app re-checks when you come back to the tab
@@ -184,6 +191,97 @@ separates them.
 
 > Shown for daily habits only. For a 3×/week habit an off-day is not a
 > failure, so these figures would be measuring the wrong thing.
+
+---
+
+## Reminders and notifications
+
+A reminder has two halves, set in two places:
+
+1. **When** — a time on the habit itself, on its edit screen. Pick it from the
+   hour and minute dropdowns, or type it: `8:30`, `8:30 pm`, `830` and `8` all
+   work, and become `08:30`. No time, no reminder. It is a wall-clock time —
+   08:00 means eight in the morning, and stays there across a DST change.
+2. **Where** — under ⚙ → **Notifications**, as a list of destinations. They are
+   not exclusive; pick as many as you like.
+
+| Destination | Delivered by | Answer from it | Works offline | Needs |
+|---|---|---|---|---|
+| **Android app** | the phone, as a local alarm | Yes / No / a count, from the shade | yes | the [native app](android-native/README.md) |
+| **Discord (bot)** | your server | Yes / No / Skip buttons, and a box for an amount | no | a Discord application |
+| **Discord (webhook)** | your server | nothing — text only | no | a webhook URL |
+
+Nothing is sent for a habit you have already recorded that day.
+
+### What the reminder asks
+
+Each habit has an optional **What the reminder asks** field. Left blank you get
+the habit's name and a generated line; filled in, it leads:
+
+> **Did you exercise today?**
+> Meditate · Goal: at least 8 glasses.
+
+For a measurable habit this is where it pays off — "How many cups of water did
+you drink today?" is a question, where "Meditate / time to log this one" is a
+form. The same text is used by the Android notification and the Discord message,
+and it labels the amount box you type into.
+
+### Discord with buttons (recommended)
+
+Buttons need a Discord **application**, because Discord only accepts them on a
+message from one — a plain channel webhook is text-only, permanently.
+
+1. Go to <https://discord.com/developers/applications> → **New Application**.
+2. **Bot** → **Reset Token** → copy it. Set it as `DISCORD_BOT_TOKEN` on the
+   server (see [Configuration](#configuration)) and restart.
+3. **Installation** (or OAuth2 → URL Generator) → scope `bot`, permission
+   **Send Messages** → open the URL and add it to your server.
+4. In Discord: **User Settings → Advanced → Developer Mode** on, then
+   right-click the channel → **Copy Channel ID**.
+5. Paste that into ⚙ → Notifications → **Discord channel id**, and press
+   **Send a test notification**.
+
+The test message carries the same buttons as a real reminder, and pressing one
+answers "Nothing — this was a test message", so you can check the whole path
+before waiting for 08:00.
+
+Answering edits the reminder in place — the buttons disappear and the message
+gains a **Recorded: Done** line — so the channel ends up as a log of what you
+did rather than a pile of unanswered pings. A measurable habit's **Enter amount**
+button opens a small box; `2,5` and `2.5` are both fine.
+
+> **Anyone who can see the channel can press the buttons.** Use a private
+> channel, or set **Your Discord user id** (right-click yourself → Copy User ID)
+> and only your own clicks will count.
+
+You can answer a reminder up to two days late; older than that and it asks you
+to open the app, so a forgotten message cannot quietly rewrite last week.
+
+### Discord without a bot
+
+Paste a webhook URL instead: **Edit Channel → Integrations → Webhooks → New
+Webhook → Copy Webhook URL**. You get the reminder text with no buttons, and
+nothing to set up on the server. If both are configured, the bot wins.
+
+Two settings that matter here:
+
+- **Reminder timezone** — 08:00 on whose clock? The default is the server's own
+  timezone, which is what you want on a machine in your house. On a shared
+  instance, or a VPS in another country, set your own.
+- The webhook URL is checked against Discord's own hosts and rejected
+  otherwise. That is deliberate: your server is what makes the request, so
+  accepting any URL would turn this field into a way to make it fetch things on
+  the private network it sits in.
+
+The server checks once a minute. A reminder the server slept through is still
+sent if it is less than half an hour late, and dropped if it is more — waking
+up after a day of downtime should not fire a day of reminders at once. If a
+webhook is deleted, delivery fails permanently and is not retried; the test
+button is how you find out.
+
+> The Android app needs no server involvement at all — it arms its own alarms
+> and fires them with the server unreachable. Unticking it there stops those
+> alarms, which is the only thing that can.
 
 ---
 
@@ -296,6 +394,8 @@ Back up Authentik's database too, or you lose your user directory.
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HABITERALL_DB` | `./data/habiterall.db` | SQLite file path |
+| `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
+| `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 
 ### cloud
 
@@ -303,17 +403,36 @@ See [`.env.example`](habiterall-cloud/.env.example). Beyond the database and
 OIDC credentials: `MAX_HABITS_PER_USER`, `MAX_ENTRIES_PER_IMPORT`,
 `MAX_UPLOAD_MB`, and `PORT`.
 
+### Both editions: the reminder scheduler
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HABITERALL_NOTIFY` | `on` | `off` disables server-sent reminders entirely |
+| `HABITERALL_NOTIFY_INTERVAL_MS` | `60000` | How often to check for due reminders |
+| `DISCORD_BOT_TOKEN` | — | Turns on buttons. One bot per instance; each user points it at their own channel |
+
+The scheduler costs nothing until someone configures a destination for it: with
+none, it queries and stops. On-device reminders do not involve it at all.
+
+The bot token is read from the environment rather than the settings dialog on
+purpose: it can post to every channel the bot is in, so it is the operator's
+credential, not a user's. With it set, the server also opens one outbound
+WebSocket to Discord to receive button presses — **no inbound port, no public
+hostname, and nothing to forward**, which is what makes this work on a home
+network.
+
 ### In-app settings
 
 Under the ⚙ button: day order (today on the left or right), which day the week
-starts on, and whether deleting asks first. Preferences are stored server-side,
-so in the cloud edition they follow your account between devices.
+starts on, chart resolutions, whether deleting asks first, and where reminders
+are sent. Preferences are stored server-side, so in the cloud edition they
+follow your account between devices.
 
 ---
 
 ## API
 
-18 endpoints, identical in both editions. Dates are local calendar dates
+19 endpoints, identical in both editions. Dates are local calendar dates
 (`YYYY-MM-DD`).
 
 <details>
@@ -331,6 +450,7 @@ so in the cloud edition they follow your account between devices.
 | `GET` | `/habits/:id/stats` | Full statistics (`?granularity=day\|week\|month\|quarter\|year`) |
 | `GET` | `/overview` | Dashboard data in one call (`?days=N&end=YYYY-MM-DD`) |
 | `GET` `PUT` `DELETE` | `/settings` | User preferences |
+| `POST` | `/notify/test` | Send a test notification to each configured destination |
 | `GET` | `/export`, `/export.csv`, `/export-loop.db` | Backups |
 | `POST` | `/import` | Restore — body is the raw file (`?mode=merge\|replace`) |
 
