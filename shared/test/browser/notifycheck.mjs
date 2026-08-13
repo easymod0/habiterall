@@ -46,6 +46,10 @@ try{
     for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
     await sleep(500);};
   const open=async()=>{await ev(`document.getElementById('btn-settings').click()`);await sleep(400);};
+  // Nothing the dialog does reaches the server until Done. On a value the
+  // server refuses, Done leaves the dialog OPEN with the field showing what is
+  // actually stored, so several sections below carry on without reopening.
+  const done=async()=>{await ev(`document.getElementById('settings-close').click()`);await sleep(800);};
   // Named, not counted: there are several text fields under Notifications now,
   // and an index would quietly retarget the moment one is added above.
   const webhookField=`document.getElementById('setting-discordWebhook')`;
@@ -85,7 +89,13 @@ try{
   ck('and the timezone control, which only servers need',
      await ev(`[...document.querySelectorAll('#settings-body select')]
        .some(s=>[...s.options].some(o=>o.textContent.includes("Server's own timezone")))`)===true);
-  ck('the choice reached the server as a list',
+  // The dependent fields follow the DRAFT, so they appear the moment the box
+  // is ticked — but the tick itself is not a write.
+  ck('ticking a destination changes nothing on the server yet',
+     (await serverSettings()).notifyChannels===undefined,
+     JSON.stringify((await serverSettings()).notifyChannels));
+  await done(); await open();
+  ck('the choice reaches the server once Done is pressed',
      JSON.stringify((await serverSettings()).notifyChannels)==='["android","discord"]',
      JSON.stringify((await serverSettings()).notifyChannels));
 
@@ -93,7 +103,9 @@ try{
   await ev(`(()=>{const i=${webhookField};
     i.value='https://169.254.169.254/api/webhooks/1/a';
     i.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-  await sleep(500);
+  await done();
+  ck('the dialog stays open on a value the server refused',
+     await ev(`document.getElementById('settings-dialog').open`)===true);
   ck('the field snaps back to what is stored',
      await ev(`${webhookField}.value`)==='', await ev(`${webhookField}.value`));
   ck('and nothing was stored', (await serverSettings()).discordWebhook===undefined);
@@ -106,10 +118,14 @@ try{
   await ev(`(()=>{const i=${webhookField};
     i.value='${WEBHOOK}?wait=true';
     i.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-  await sleep(600);
+  await done();
+  ck('an accepted value closes the dialog',
+     await ev(`document.getElementById('settings-dialog').open`)===false);
+  ck('stored on the server', (await serverSettings()).discordWebhook===WEBHOOK);
+  await open();
   ck('the query string is dropped in the field too',
      await ev(`${webhookField}.value`)===WEBHOOK, await ev(`${webhookField}.value`));
-  ck('stored on the server', (await serverSettings()).discordWebhook===WEBHOOK);
+  await ev(`document.getElementById('settings-cancel').click()`); await sleep(300);
 
   console.log('--- it survives a reload ---');
   await load(); await open();
@@ -120,17 +136,20 @@ try{
   await ev(`(()=>{const i=${channelField};
     i.value='123456789012345678';
     i.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-  await sleep(600);
+  await sleep(400);
+  // Straight off the draft: the field it gates appears before anything is
+  // written, which is what makes the dialog usable while it holds one.
+  ck('the user id field appears without waiting for Done',
+     await ev(`!!document.getElementById('setting-discordUserId')`)===true);
+  await done(); await open();
   ck('the channel id is stored',
      (await serverSettings()).discordChannelId==='123456789012345678',
      JSON.stringify((await serverSettings()).discordChannelId));
-  ck('and the user id field appears',
-     await ev(`!!document.getElementById('setting-discordUserId')`)===true);
 
   await ev(`(()=>{const i=${channelField};
     i.value='not-a-snowflake';
     i.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-  await sleep(600);
+  await done();
   ck('a channel id that is not an id is refused',
      (await serverSettings()).discordChannelId==='123456789012345678',
      JSON.stringify((await serverSettings()).discordChannelId));
@@ -141,6 +160,7 @@ try{
   console.log('--- switching it off hides the field again ---');
   await ev(`${channelBox('discord')}.click()`); await sleep(500);
   ck('the field is gone', await ev(`!${webhookField}`)===true);
+  await done();
   ck('but the URL is NOT discarded — only hidden',
      (await serverSettings()).discordWebhook===WEBHOOK);
   ck('and the list no longer holds discord',

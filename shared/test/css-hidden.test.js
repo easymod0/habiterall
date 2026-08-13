@@ -26,19 +26,11 @@ test('the stylesheet forces [hidden] to win over display rules', () => {
     'any `display` rule silently defeats the hidden attribute');
 });
 
-test('every element JS hides is actually hideable', () => {
-  // Elements toggled via `.hidden` from the ui modules that also match a CSS
-  // selector setting `display` would break without the guard above.
-  const jsHidden = [
-    'day-boolean', 'day-numeric', 'day-save', 'day-clear',
-    'import-result', 'empty', 'view-list', 'view-detail', 'toast',
-  ];
-
-  for (const id of jsHidden) {
-    assert.ok(html.includes(`id="${id}"`),
-      `#${id} is toggled from app.js but is missing from index.html`);
-  }
-});
+// "every element JS hides is actually hideable" used to live here: a list of
+// nine ids that had to exist in index.html. `test/ui-modules.test.js` now
+// fails on *any* id the browser modules look up and index.html does not
+// declare, which is the same check over every element rather than a list
+// someone has to remember to extend.
 
 test('the day editor has exactly one control per habit type', () => {
   // Yes/no -> #day-boolean, measurable -> #day-numeric. Both start hidden so
@@ -54,11 +46,10 @@ test('the day editor has exactly one control per habit type', () => {
   assert.equal(choices.length, 2, 'expected exactly Done and Not done');
 });
 
-test('the day editor toggles both blocks off the same flag', () => {
-  const src = readFileSync(join(root, 'public', 'ui', 'day-dialog.js'), 'utf8');
-
-  assert.ok(/booleanBlock\.hidden\s*=\s*numeric/.test(src),
-    'the boolean block must be hidden when the habit is numerical');
-  assert.ok(/numericBlock\.hidden\s*=\s*!numeric/.test(src),
-    'the numeric block must be hidden when the habit is boolean');
-});
+// "the day editor toggles both blocks off the same flag" used to live here as
+// a regex over day-dialog.js. It caught nothing `test/browser/daydialog.mjs`
+// does not — that suite *runs* openDayDialog against a fake DOM and asserts
+// the same outcomes, and browsercheck.mjs then reads the computed visibility
+// in a real browser. Inverting the flag fails all three. What the regex added
+// was a false positive: it broke on a variable rename during the frontend
+// split, while the behaviour was never in danger.

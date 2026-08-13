@@ -246,7 +246,7 @@ export const SETTINGS = {
 let cache = null;
 
 /** Defaults for every declared setting. */
-function defaults() {
+export function defaults() {
   return Object.fromEntries(
     // Arrays are copied: a `multi` default is a mutable value, and handing the
     // registry's own array to the caller means one stray push would change
@@ -505,6 +505,66 @@ export async function save(key, value) {
 
   adopt(payload.settings);
   return { ok: true, value: get(key) };
+}
+
+/**
+ * Persist several settings at once and wait for the server's verdict.
+ *
+ * The settings dialog holds a draft and writes it when Done is pressed, so it
+ * needs one round trip rather than one per control — and one verdict, since
+ * the answer to "was that accepted?" is the same shape for nine keys as for
+ * one. The server ignores what it will not take rather than failing the whole
+ * patch, so this reports `ignored` and the caller shows what was *stored*:
+ * a webhook URL that snaps back to blank is how the user learns it was
+ * refused, instead of finding out at 08:00 tomorrow.
+ *
+ * @param {Record<string, any>} patch
+ * @returns {Promise<{ok: boolean, ignored: string[], error?: string, offline?: boolean}>}
+ */
+export async function saveAll(patch) {
+  const keys = Object.keys(patch).filter((key) => SETTINGS[key]);
+  if (!keys.length) return { ok: true, ignored: [] };
+
+  const body = JSON.stringify(Object.fromEntries(keys.map((k) => [k, patch[k]])));
+
+  let res;
+  try {
+    res = await fetch('/api/settings', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+  } catch {
+    // Offline: keep what this browser can judge and send it later, exactly as
+    // `save` does. Anything only the server can rule on is accepted here too —
+    // discarding what was typed is the worse of the two wrongs, and the queued
+    // write still gets the real verdict.
+    const accepted = {};
+    for (const key of keys) {
+      if (isValid(SETTINGS[key], patch[key])) accepted[key] = patch[key];
+    }
+    cache = { ...load(), ...accepted };
+    writeCache(cache);
+    await queueWrite(body);
+    return {
+      ok: true,
+      ignored: keys.filter((key) => !(key in accepted)),
+      offline: true,
+    };
+  }
+
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return {
+      ok: false,
+      ignored: [],
+      error: payload.error ?? `could not save (${res.status})`,
+    };
+  }
+
+  adopt(payload.settings);
+  return { ok: true, ignored: payload.ignored ?? [] };
 }
 
 /** Restore every setting to its default, on the server and locally. */

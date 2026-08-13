@@ -190,22 +190,43 @@ sentinel while `8` and `10` are dropped as unknown ones. That is why
 `/api/export.csv` returns a zip. `test/export-csv.test.js` pins the failure
 mode deliberately, so if the ambiguity ever goes away the test says so.
 
-**A setting the server normalises must be written with `save`, not `set`.**
-`set` applies locally and writes through, which is right for a value the client
-can judge and keeps it working offline. It is wrong for a webhook URL: whether
-it is acceptable depends on a host allowlist that lives with the fetch, so the
-control has to wait for the answer and then show what was *stored*. Both paths
-now `adopt` the server's reply, and `onChange` fires when it differed — that is
-what makes a pasted URL lose its query string in the field rather than only in
-the database.
+**The settings dialog holds a draft; nothing is written until Done.** It edits
+a copy taken when it opens, so Cancel — and Escape, which `<dialog>` handles
+itself — throws the whole thing away. Three consequences worth knowing before
+changing it. The dependent controls (`requires`) read the *draft*, which is
+what lets switching Discord on reveal its webhook field before anything is
+stored. The body is rebuilt only when that visible set changes, so a `multi`
+handler must read `draft[key]` at event time and never a list captured during
+render — capture it and ticking a second box silently drops the first. And a
+section action like "send a test notification" asks the server to use the
+settings it *holds*, so it is disabled while the draft is dirty rather than
+quietly testing the old value.
+
+**A setting the server normalises cannot be judged here.** Whether a webhook
+URL is acceptable depends on a host allowlist that lives with the fetch, so the
+control has to show what was *stored* rather than what was typed. `saveAll`
+writes the draft in one request and reports `ignored`; on anything refused the
+dialog stays open, redraws from the server's values and names what did not
+land. Applying is therefore partial by design — the endpoint takes a patch and
+drops what it will not have rather than failing the lot. `set` (apply locally,
+write through, works offline) is still right for the in-place calendar zoom in
+the detail view, where there is no dialog to wait in.
 
 **A setting with an in-place toggle needs a session override.** `calendarZoom`,
 `historyGranularity` and `historyMode` all have controls in the detail view as
 well as entries in the dialog. The pattern: `state.X = null` means "use the
-saved value", the toggle sets it for the session, and `applySetting` clears it
-when the dialog changes that key — otherwise the dialog appears to do nothing
-once a toggle has been touched. Read through the accessor, never
+saved value", the toggle sets it for the session, and `applyDraft` clears it
+for every key Done actually changed — otherwise the dialog appears to do
+nothing once a toggle has been touched. Read through the accessor, never
 `state.X` directly.
+
+**Saving a habit returns you to where the edit started.** `habit-dialog` emits
+`'change'` when `openHabitId` is set and `'reload'` otherwise, so editing from
+a habit's own page reloads that page and creating from the dashboard reloads
+the list. It cannot simply call the detail view — that is the import cycle the
+store exists to break — and it cannot always emit `'change'`, because on the
+dashboard that is a repaint from stale state and a newly created habit would
+not appear. Deleting still goes home: the page you were on is gone.
 
 **The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
 `android-native/.../ReminderTime.kt` accept the same inputs and produce the same

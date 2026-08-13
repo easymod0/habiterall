@@ -219,9 +219,15 @@
     <h2>Settings</h2>
     <p class="hint">Stored on the server, so they follow your account.</p>
     <div id="settings-body"></div>
+    <!--
+      Nothing here is written until Done. Cancel (and Escape, which a <dialog>
+      handles itself) throws the draft away, so a change can be backed out of —
+      it could not be before, when every control saved as it was touched.
+    -->
     <div class="dialog-actions">
       <button type="button" id="settings-reset" class="btn">Reset to defaults</button>
       <span class="spacer"></span>
+      <button type="button" id="settings-cancel" class="btn">Cancel</button>
       <button type="button" id="settings-close" class="btn btn-primary">Done</button>
     </div>
   </dialog>

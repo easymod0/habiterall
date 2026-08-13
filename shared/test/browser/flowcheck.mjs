@@ -75,6 +75,19 @@ try {
   })()`);
   await sleep(900);
 
+  // Saving an edit started from a habit's own page leaves you on that page.
+  // It used to drop back to the dashboard, which loses your place for no
+  // reason — you were reading this habit, not the list.
+  check('saving an edit stays on the habit being edited',
+    await ev(`!document.getElementById('view-detail').hidden`) === true);
+  check('and the page reloaded rather than going stale',
+    await ev(`document.querySelector('#view-detail h2')?.textContent`) === 'Meditate',
+    await ev(`document.querySelector('#view-detail h2')?.textContent`));
+
+  // Back to the list, which is where the rest of this section looks.
+  await ev(`document.getElementById('btn-home').click()`);
+  await sleep(800);
+
   const afterArchive = await ev(`(()=>({
     rows: [...document.querySelectorAll('#grid .habit-row .habit-name')].map(n=>n.textContent),
     toggleShown: !document.getElementById('list-head').hidden,
