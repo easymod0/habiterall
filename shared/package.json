@@ -1,0 +1,24 @@
+{
+  "name": "@habiterall/shared",
+  "version": "1.0.0",
+  "description": "Logic shared by habiterall-personal and habiterall-cloud: scoring, streaks, aggregation, and Loop Habit Tracker import/export",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./stats.js": "./src/stats.js",
+    "./validate.js": "./src/validate.js",
+    "./import.js": "./src/import.js",
+    "./export-loop.js": "./src/export-loop.js",
+    "./unzip.js": "./src/unzip.js",
+    "./constants.js": "./src/constants.js",
+    "./charts.js": "./public/charts.js"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:browser": "node test/browser/run.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}

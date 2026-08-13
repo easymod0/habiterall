@@ -1,0 +1,20 @@
+{
+  "name": "habiterall",
+  "version": "1.0.0",
+  "description": "Web-based habit tracker with Loop-style statistics, backed by SQLite",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node scripts/seed.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "@habiterall/shared": "*"
+  },
+  "license": "MIT"
+}

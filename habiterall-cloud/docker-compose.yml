@@ -1,0 +1,144 @@
+# Full self-hosted stack: habiterall-cloud, its Postgres, and an Authentik
+# identity provider (server + worker + Redis).
+#
+#   cp .env.example .env    # then fill in the secrets
+#   docker compose up -d
+#
+# First run: see SETUP.md for creating the Authentik admin and the OIDC
+# application. Nothing but the reverse proxy needs to be internet-facing.
+
+services:
+  # ---------------------------------------------------------------- database
+  db:
+    image: postgres:17-alpine
+    container_name: habiterall-db
+    environment:
+      POSTGRES_DB: habiterall
+      POSTGRES_USER: habiterall_owner
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?set DB_OWNER_PASSWORD in .env}
+      # Consumed by the init script that provisions Authentik's own database.
+      AUTHENTIK_DB_PASSWORD: ${AUTHENTIK_DB_PASSWORD:?set AUTHENTIK_DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Authentik keeps its own database in the same server, created on boot.
+      - ./scripts/init-authentik-db.sh:/docker-entrypoint-initdb.d/10-authentik.sh:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U habiterall_owner -d habiterall']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: habiterall-redis
+    command: --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping | grep PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- authentik
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2025.8
+    container_name: authentik-server
+    command: server
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: db
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD:?set AUTHENTIK_DB_PASSWORD}
+      # Only needed to bootstrap the first admin; harmless to leave set.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+    volumes:
+      - authentik-media:/media
+      - authentik-templates:/templates
+    ports:
+      - '${AUTHENTIK_PORT:-9000}:9000'
+    restart: unless-stopped
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2025.8
+    container_name: authentik-worker
+    command: worker
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: db
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+    volumes:
+      - authentik-media:/media
+      - authentik-templates:/templates
+      - authentik-certs:/certs
+    restart: unless-stopped
+
+  # ------------------------------------------------------------ application
+  migrate:
+    build:
+      context: ..
+      dockerfile: habiterall-cloud/Dockerfile
+    container_name: habiterall-migrate
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL_ADMIN: postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+    command: ['node', 'src/db/migrate.js']
+    restart: 'no'
+
+  app:
+    build:
+      context: ..
+      dockerfile: habiterall-cloud/Dockerfile
+    container_name: habiterall-cloud
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # The app connects as the restricted, RLS-bound role — never the owner.
+      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
+      OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      # Local HTTP testing only; never set this in a real deployment.
+      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}
+    ports:
+      - '${APP_PORT:-3100}:3000'
+    # The OIDC issuer string must be byte-identical for the browser and for
+    # this container, or token validation fails on an issuer mismatch. In a
+    # real deployment both use the public https URL; for a local stack we
+    # alias the browser-facing host to the Authentik container.
+    extra_hosts:
+      - '${OIDC_HOST_ALIAS:-localhost}:host-gateway'
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  redis-data:
+  authentik-media:
+  authentik-templates:
+  authentik-certs:
