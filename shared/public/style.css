@@ -792,6 +792,16 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   color: var(--text-dim);
   line-height: 1.45;
 }
+/* Explanatory text under a form field, quieter than the label above it. */
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
 /* Section label inside a card that holds more than one chart. */
 .card-subhead {
   margin: 16px 0 6px;
