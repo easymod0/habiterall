@@ -96,7 +96,7 @@ class Settings(private val context: Context) {
     }
 
     /** The cached answer; true until the server has said otherwise. */
-    suspend fun androidRemindersEnabled(): Boolean =
+    suspend fun cachedAndroidReminders(): Boolean =
         context.dataStore.data.first()[androidRemindersKey] ?: true
 
     /**

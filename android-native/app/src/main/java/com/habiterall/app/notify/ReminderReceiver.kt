@@ -62,7 +62,7 @@ class ReminderReceiver : BroadcastReceiver() {
             // alarm from the moment the setting changes. Check again at the
             // point of posting, or switching this destination off would appear
             // not to work until the next sync.
-            if (!settings.androidRemindersEnabled()) {
+            if (!settings.cachedAndroidReminders()) {
                 Reminders.cancel(applicationContext, habitId)
                 return Result.success()
             }

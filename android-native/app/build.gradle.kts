@@ -15,8 +15,14 @@ android {
         // which the reminder scheduling relies on.
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // Stamped by the release workflow from the git tag:
+        //   ./gradlew assembleRelease -PversionName=1.4.0 -PversionCode=140
+        // The defaults are what a local or PR build gets, so nothing has to be
+        // passed to build the app — but a released APK is never version 1 twice,
+        // which is the one thing Android will not let you fix afterwards: a
+        // versionCode that does not increase cannot install over its predecessor.
+        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "0.1.0-dev"
     }
 
     signingConfigs {

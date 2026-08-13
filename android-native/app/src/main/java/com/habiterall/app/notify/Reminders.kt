@@ -160,7 +160,7 @@ object Reminders {
                     // The cached answer, not an assumption: a phone the account
                     // has switched off as a destination must not re-arm every
                     // alarm on each reboot while it waits for connectivity.
-                    val enabled = settings.androidRemindersEnabled()
+                    val enabled = settings.cachedAndroidReminders()
                     val cached = settings.cachedReminders()
                     Notifications.ensureChannel(app)
                     cached.filter { habitId == null || it.id == habitId }
@@ -233,11 +233,14 @@ object Reminders {
             // to "enabled": one flaky request must not resurrect alarms the
             // user turned off.
             val enabled = try {
-                api.settings().androidRemindersEnabled().also {
-                    runCatching { settings.cacheAndroidReminders(it) }
-                }
+                // A property on the response, not a call — and `cachedAndroidReminders`
+                // below is the suspend read of the mirror. Two similarly-named
+                // things, so they are spelled differently on purpose.
+                val fresh = api.settings().androidRemindersEnabled
+                runCatching { settings.cacheAndroidReminders(fresh) }
+                fresh
             } catch (e: Exception) {
-                settings.androidRemindersEnabled()
+                settings.cachedAndroidReminders()
             }
 
             Notifications.ensureChannel(applicationContext)
