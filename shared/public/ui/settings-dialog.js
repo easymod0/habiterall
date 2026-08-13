@@ -3,6 +3,15 @@
  * an option needs no changes here.
  *
  * Owns `#settings-dialog`, its body, and the gear that opens it.
+ *
+ * Nothing is written until Done. The dialog edits a *draft* — a copy of the
+ * current values taken when it opens — and Cancel throws it away. Escape does
+ * the same thing for free, which it did not before: closing the dialog used to
+ * leave every change already saved, so there was no way to back out of one.
+ *
+ * The draft also drives the dependent controls (`requires`), so switching
+ * Discord on still reveals its webhook field immediately even though nothing
+ * has been stored yet.
  */
 
 import * as settings from '/shared/ui/settings.js';
@@ -13,10 +22,49 @@ const $ = (sel) => document.querySelector(sel);
 
 const dialog = $('#settings-dialog');
 const body = $('#settings-body');
+const doneBtn = $('#settings-close');
+const cancelBtn = $('#settings-cancel');
+const resetBtn = $('#settings-reset');
+
+/** Values being edited. Replaced wholesale each time the dialog opens. */
+let draft = {};
+/** What the draft looked like on open, for "has anything changed?". */
+let baseline = '{}';
+/** Reset is staged like everything else, so Cancel undoes it too. */
+let pendingReset = false;
+/** Suppresses the onChange redraw while we are the ones doing the writing. */
+let applying = false;
+/** Section actions rendered this pass, so they can be disabled while dirty. */
+let actionButtons = [];
+
+function isDirty() {
+  return pendingReset || JSON.stringify(draft) !== baseline;
+}
+
+/** Which controls `requires` currently admits — a rebuild is only needed when this changes. */
+function visibleKeys(values) {
+  return Object.keys(settings.SETTINGS)
+    .filter((key) => settings.visible(key, values))
+    .join(',');
+}
+
+/**
+ * Record a change against the draft.
+ *
+ * The body is rebuilt only when the change makes a control appear or
+ * disappear. Rebuilding on every edit would tear the control out from under
+ * the user mid-interaction — and for a text field, take its focus with it.
+ */
+function stage(key, value) {
+  const before = visibleKeys(draft);
+  draft[key] = value;
+  if (visibleKeys(draft) !== before) renderSettingsBody();
+  else refreshFooter();
+}
 
 function renderSettingsBody() {
   body.replaceChildren();
-  const current = settings.load();
+  actionButtons = [];
 
   for (const section of settings.sections()) {
     const group = document.createElement('section');
@@ -30,7 +78,7 @@ function renderSettingsBody() {
       if ((def.section ?? 'General') !== section) continue;
       // A control whose prerequisite is off is left out entirely rather than
       // disabled: the value is still stored, so nothing is lost by hiding it.
-      if (!settings.visible(key, current)) continue;
+      if (!settings.visible(key, draft)) continue;
 
       const label = document.createElement('label');
       label.className = def.type === 'toggle' ? 'checkbox' : '';
@@ -48,17 +96,17 @@ function renderSettingsBody() {
         // A stored value the option list does not carry still has to be
         // selectable, or the dialog would show the default and saving anything
         // else would quietly discard what the server had.
-        const options = def.options.some((o) => o.value === current[key])
+        const options = def.options.some((o) => o.value === draft[key])
           ? def.options
-          : [{ value: current[key], label: String(current[key]) }, ...def.options];
+          : [{ value: draft[key], label: String(draft[key]) }, ...def.options];
         for (const opt of options) {
           const o = document.createElement('option');
           o.value = opt.value;
           o.textContent = opt.label;
-          o.selected = current[key] === opt.value;
+          o.selected = draft[key] === opt.value;
           select.append(o);
         }
-        select.addEventListener('change', () => applySetting(key, select.value));
+        select.addEventListener('change', () => stage(key, select.value));
         label.append(text, select);
       } else if (def.type === 'multi') {
         // A fieldset rather than nested labels: each destination is its own
@@ -69,19 +117,23 @@ function renderSettingsBody() {
         legend.textContent = def.label;
         fieldset.append(legend);
 
-        const chosen = Array.isArray(current[key]) ? current[key] : [];
         for (const opt of def.options) {
           const row = document.createElement('label');
           row.className = 'checkbox';
           const box = document.createElement('input');
           box.id = `${controlId}-${opt.value}`;
           box.type = 'checkbox';
-          box.checked = chosen.includes(opt.value);
+          box.checked = (draft[key] ?? []).includes(opt.value);
           box.addEventListener('change', () => {
+            // Read the draft at event time, never a value captured during
+            // render: the body is no longer rebuilt after every change, so a
+            // captured list goes stale the moment a second box is ticked and
+            // the first tick would be dropped.
+            const chosen = Array.isArray(draft[key]) ? draft[key] : [];
             const next = def.options
               .map((o) => o.value)
               .filter((v) => (v === opt.value ? box.checked : chosen.includes(v)));
-            applySetting(key, next);
+            stage(key, next);
           });
           const text = document.createElement('span');
           text.textContent = opt.label;
@@ -97,29 +149,19 @@ function renderSettingsBody() {
         const input = document.createElement('input');
         input.id = controlId;
         input.type = 'text';
-        input.value = current[key] ?? '';
+        input.value = draft[key] ?? '';
         if (def.placeholder) input.placeholder = def.placeholder;
         // `change`, not `input`: a URL is pasted a character at a time as far
-        // as `input` is concerned, and each one would be a rejected PUT.
-        //
-        // `save`, not `set`: whether a webhook URL is acceptable is the
-        // server's call, so the field has to wait for the answer and then show
-        // what was actually stored — a URL that snaps back to blank is how the
-        // user learns it was refused, instead of finding out at 08:00 tomorrow.
-        input.addEventListener('change', async () => {
-          input.disabled = true;
-          const result = await settings.save(key, input.value.trim());
-          input.disabled = false;
-          if (!result.ok) toast(`${def.label}: ${result.error}`);
-          input.value = settings.get(key) ?? '';
-        });
+        // as `input` is concerned, and staging each character would flicker
+        // the dependent controls it gates.
+        input.addEventListener('change', () => stage(key, input.value.trim()));
         label.append(text, input);
       } else {
         const box = document.createElement('input');
         box.id = controlId;
         box.type = 'checkbox';
-        box.checked = !!current[key];
-        box.addEventListener('change', () => applySetting(key, box.checked));
+        box.checked = !!draft[key];
+        box.addEventListener('change', () => stage(key, box.checked));
         const text = document.createElement('span');
         text.textContent = def.label;
         label.append(box, text);
@@ -143,12 +185,32 @@ function renderSettingsBody() {
           toast(e.message);
         } finally {
           button.disabled = false;
+          refreshFooter();
         }
       });
+      actionButtons.push(button);
       group.append(button);
     }
 
     body.append(group);
+  }
+
+  refreshFooter();
+}
+
+/**
+ * Reflect the draft's state in the footer and the section actions.
+ *
+ * A section action asks the SERVER to do something with the settings it
+ * holds — "send a test notification" posts to the webhook that is stored, not
+ * the one just typed. Running it against a stale value and reporting success
+ * is worse than refusing, so it waits for Done.
+ */
+function refreshFooter() {
+  const dirty = isDirty();
+  for (const button of actionButtons) {
+    button.disabled = dirty;
+    button.title = dirty ? 'Press Done to save your changes first' : '';
   }
 }
 
@@ -160,44 +222,105 @@ function settingHelp(textContent) {
 }
 
 export function openSettings() {
+  draft = structuredClone(settings.load());
+  baseline = JSON.stringify(draft);
+  pendingReset = false;
   renderSettingsBody();
   dialog.showModal();
 }
 
-/** Persist a setting and re-render whatever it affects. */
-function applySetting(key, value) {
-  if (!settings.set(key, value)) return;
+/**
+ * Write the draft, and say so when the server would not take part of it.
+ *
+ * Partial, deliberately: the endpoint takes a patch and ignores what it will
+ * not accept rather than failing the lot, and a webhook URL cannot be judged
+ * here — its real rule is a host allowlist that lives with the fetch. So the
+ * good values land, the dialog stays open on anything refused, and the fields
+ * redraw from what was actually *stored*. A URL that snaps back to blank is
+ * how the user learns it was rejected, instead of finding out at 08:00
+ * tomorrow.
+ */
+async function applyDraft() {
+  applying = true;
+  doneBtn.disabled = true;
+  try {
+    if (pendingReset) {
+      await settings.reset();
+      pendingReset = false;
+    }
 
-  // Some settings decide whether others are shown at all (enabling Discord
-  // reveals its webhook field), so the body is rebuilt from the new values.
-  // The body, not the dialog: showModal on an open dialog throws.
-  if (dialog.open) renderSettingsBody();
+    const current = settings.load();
+    const changed = {};
+    for (const key of Object.keys(settings.SETTINGS)) {
+      if (JSON.stringify(draft[key]) !== JSON.stringify(current[key])) {
+        changed[key] = draft[key];
+      }
+    }
 
-  // The in-place toggles (calendar +/-, the history segmented controls) keep a
-  // session override. Choosing a value in the dialog is the more deliberate
-  // act, so it clears that override — otherwise the dialog would appear to do
-  // nothing whenever a toggle had been touched.
-  const overrides = {};
-  if (key === 'calendarZoom') overrides.calZoom = null;
-  if (key === 'historyGranularity') overrides.granularity = null;
-  if (key === 'historyMode') overrides.historyMode = null;
-  if (key === 'scoreGranularity') overrides.scoreGranularity = null;
-  set(overrides);   // merges the cleared overrides and repaints the open view
+    let ignored = [];
+    if (Object.keys(changed).length) {
+      const result = await settings.saveAll(changed);
+      if (!result.ok) {
+        toast(result.error);
+        return false;
+      }
+      ignored = result.ignored;
+    }
+
+    // Settings with an in-place control keep a session override, and choosing
+    // a value here is the more deliberate act — without clearing it the dialog
+    // appears to do nothing once a toggle has been touched.
+    const overrides = {};
+    if ('calendarZoom' in changed) overrides.calZoom = null;
+    if ('historyGranularity' in changed) overrides.granularity = null;
+    if ('historyMode' in changed) overrides.historyMode = null;
+    if ('scoreGranularity' in changed) overrides.scoreGranularity = null;
+
+    if (ignored.length) {
+      const names = ignored.map((key) => settings.SETTINGS[key]?.label ?? key);
+      toast(`Not saved: ${names.join(', ')}`);
+      // Redraw from what the server actually holds, so the refused field shows
+      // the stored value rather than the one that was turned away.
+      draft = structuredClone(settings.load());
+      baseline = JSON.stringify(draft);
+      renderSettingsBody();
+      set(overrides);
+      return false;
+    }
+
+    set(overrides);   // merges the cleared overrides and repaints the open view
+    return true;
+  } finally {
+    applying = false;
+    doneBtn.disabled = false;
+  }
 }
 
 export function init() {
   $('#btn-settings').addEventListener('click', openSettings);
-  $('#settings-close').addEventListener('click', () => dialog.close());
-  $('#settings-reset').addEventListener('click', async () => {
-    await settings.reset();
-    renderSettingsBody();    // redraw the controls at their defaults
-    emit('change');
+
+  doneBtn.addEventListener('click', async () => {
+    if (await applyDraft()) dialog.close();
+  });
+
+  // Cancel throws the draft away. Nothing was written, so there is nothing to
+  // undo — which is the whole point of holding one.
+  cancelBtn.addEventListener('click', () => dialog.close());
+
+  resetBtn.addEventListener('click', () => {
+    pendingReset = true;
+    draft = settings.defaults();
+    renderSettingsBody();
   });
 
   // The server may store something other than what was sent — a webhook URL
-  // keeps its host and loses its query string. Redraw when that happens, so
-  // the dialog never shows a value the server does not hold.
+  // keeps its host and loses its query string. Redraw when that happens, but
+  // never on top of edits in progress: the user's unsaved work outranks a
+  // background correction, and during our own write we redraw explicitly.
   settings.onChange(() => {
-    if (dialog.open) renderSettingsBody();
+    if (!dialog.open || applying || isDirty()) return;
+    draft = structuredClone(settings.load());
+    baseline = JSON.stringify(draft);
+    renderSettingsBody();
   });
 }

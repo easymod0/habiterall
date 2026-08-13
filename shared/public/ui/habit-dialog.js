@@ -92,7 +92,13 @@ async function saveHabit(e) {
       toast('Habit created');
     }
     dialog.close();
-    emit('reload');
+    // Land back where the edit was started. Editing a habit from its own page
+    // and being returned to the dashboard loses your place for no reason —
+    // 'change' reloads whichever view is showing, and `openHabitId` is still
+    // set because a modal dialog repaints nothing behind it. Creating from the
+    // dashboard still needs 'reload': a repaint alone would draw the old list
+    // without the habit that was just made.
+    emit(state.openHabitId != null ? 'change' : 'reload');
   } catch (err) {
     toast(err.message);
   }

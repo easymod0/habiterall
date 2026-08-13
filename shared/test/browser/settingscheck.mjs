@@ -47,12 +47,39 @@ try{
   const sections = await ev(`[...document.querySelectorAll('#settings-body h3')].map(h=>h.textContent).join(',')`);
   ck('sections rendered', sections.includes('Dashboard'), sections);
 
+  console.log('--- nothing is applied until Done ---');
+  // The dialog holds a draft. Cancel (and Escape, which <dialog> handles
+  // itself) throws it away — before this there was no way to back out, because
+  // every control wrote as it was touched.
+  const original = await ev(`[...document.querySelectorAll('.grid-date .grid-date-num')].map(e=>e.textContent).join(',')`);
+  const pick = (value) => ev(`(()=>{const s=[...document.querySelectorAll('#settings-body select')]
+      .find(s=>[...s.options].some(o=>o.value==='${value}'));
+    s.value='${value}'; s.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+
+  await pick('newest-right'); await sleep(400);
+  ck('the grid behind the dialog is untouched while editing',
+     await ev(`[...document.querySelectorAll('.grid-date .grid-date-num')].map(e=>e.textContent).join(',')`)===original);
+  ck('and the server has not been told',
+     (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder===undefined);
+
+  await ev(`document.getElementById('settings-cancel').click()`); await sleep(400);
+  ck('Cancel closes the dialog', await ev(`document.getElementById('settings-dialog').open`)===false);
+  ck('Cancel discards the change',
+     await ev(`[...document.querySelectorAll('.grid-date .grid-date-num')].map(e=>e.textContent).join(',')`)===original);
+  ck('and stores nothing',
+     (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder===undefined);
+
+  await ev(`document.getElementById('btn-settings').click()`); await sleep(400);
+  ck('reopening shows the saved value, not the abandoned draft',
+     await ev(`(()=>{const s=[...document.querySelectorAll('#settings-body select')]
+       .find(s=>[...s.options].some(o=>o.value==='newest-right'));
+       return s.value;})()`)==='newest-left');
+
   console.log('--- dayOrder flips the grid ---');
   const before = await ev(`[...document.querySelectorAll('.grid-date .grid-date-num')].map(e=>e.textContent).join(',')`);
-  await ev(`(()=>{const s=[...document.querySelectorAll('#settings-body select')]
-      .find(s=>[...s.options].some(o=>o.value==='newest-right'));
-    s.value='newest-right'; s.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-  await sleep(600);
+  await pick('newest-right');
+  await ev(`document.getElementById('settings-close').click()`);
+  await sleep(700);
   const after = await ev(`[...document.querySelectorAll('.grid-date .grid-date-num')].map(e=>e.textContent).join(',')`);
   ck('grid order reverses', before.split(',').reverse().join(',')===after, `${before} -> ${after}`);
   ck('today moves to the LAST column',
@@ -62,13 +89,10 @@ try{
      await ev(`(()=>{const b=[...document.querySelectorAll('.grid-nav button')]
        .find(b=>b.getAttribute('aria-label')?.startsWith('Previous'));
        return b?.textContent.trim();})()`) === '‹');
-  await sleep(300);
   // NOTE: column alignment is covered by gridcheck.mjs, which measures it on
   // a freshly loaded page. Measuring it here proved unreliable — this suite
   // has already registered a service worker, so the document can still be
   // styled by a cached stylesheet and reports a phantom 24px offset.
-  await ev(`document.getElementById('settings-close').click()`);
-  await sleep(300);
 
   console.log('--- persistence ---');
   await load();
@@ -82,7 +106,11 @@ try{
 
   console.log('--- reset ---');
   await ev(`document.getElementById('btn-settings').click()`); await sleep(300);
-  await ev(`document.getElementById('settings-reset').click()`); await sleep(600);
+  // Reset is staged like any other edit, so it is undoable until Done.
+  await ev(`document.getElementById('settings-reset').click()`); await sleep(400);
+  ck('reset alone does not touch the saved values',
+     (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder==='newest-right');
+  await ev(`document.getElementById('settings-close').click()`); await sleep(700);
   ck('reset restores the default (today on the left)',
      await ev(`document.querySelector('.grid-date').classList.contains('is-today')`) === true);
 
