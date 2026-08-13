@@ -69,6 +69,28 @@ body {
   font-weight: 650;
   letter-spacing: -0.02em;
 }
+/*
+ * The title is a button (it navigates home) but must not look like one —
+ * strip the control chrome and inherit the heading's type. The focus ring
+ * stays: it is the only thing telling a keyboard user this is operable.
+ */
+.brand-link {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.brand-link:hover { color: var(--accent); }
+.brand-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
 
 .topbar-actions { display: flex; gap: 8px; align-items: center; }
 
@@ -740,6 +762,17 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   color: var(--text-dim);
   line-height: 1.45;
 }
+/* Section label inside a card that holds more than one chart. */
+.card-subhead {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.card-subhead:first-of-type { margin-top: 8px; }
+
 .hint code {
   background: var(--surface-2);
   padding: 1px 4px;

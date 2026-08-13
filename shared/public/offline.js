@@ -155,14 +155,82 @@ export async function isReachable(url = '/healthz', timeoutMs = 4000) {
   }
 }
 
-/** Call `onChange(online)` when connectivity changes, and once immediately. */
-export function watchConnectivity(onChange) {
-  const emit = async () => onChange(await isReachable());
+/**
+ * Call `onChange(online)` when connectivity changes, and once immediately.
+ *
+ * The browser's `online` event is not enough on its own. It fires for changes
+ * to the *network interface*, not to the server, so several ordinary
+ * situations would otherwise strand the app in its offline state forever:
+ *
+ *   - the server restarts while the Wi-Fi never drops
+ *   - the Wi-Fi is up but the router has no route, then recovers
+ *   - a laptop wakes from sleep, where `online` is unreliable
+ *
+ * So this also re-probes when the tab becomes visible, and — only while
+ * offline — polls with a backoff. The polling stops the moment the server
+ * answers, so a healthy app makes no extra requests at all.
+ */
+export function watchConnectivity(
+  onChange,
+  // `initialDelayMs` exists so the tests can exercise several backoff steps
+  // in milliseconds rather than tens of seconds.
+  { maxDelayMs = 60_000, initialDelayMs = 2000 } = {},
+) {
+  let timer = null;
+  let delay = initialDelayMs;
+  let stopped = false;
+  let last = null;
+
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+
+  const emit = async () => {
+    if (stopped) return;
+    const online = await isReachable();
+    clear();
+
+    // Only notify on a real transition, so a poll every few seconds does not
+    // re-render the dashboard or re-toast while nothing has changed.
+    if (online !== last) {
+      last = online;
+      onChange(online);
+    }
+
+    if (online) {
+      delay = initialDelayMs;   // reset for the next outage
+    } else {
+      // Back off to a minute: a server that has been down for a while is
+      // unlikely to return within the next two seconds, and a tight loop on
+      // a phone is a battery cost for nothing.
+      timer = setTimeout(emit, delay);
+      delay = Math.min(delay * 2, maxDelayMs);
+    }
+  };
+
+  const goOffline = () => {
+    if (last !== false) { last = false; onChange(false); }
+    clear();
+    delay = initialDelayMs;
+    timer = setTimeout(emit, delay);
+  };
+
+  // Returning to a backgrounded tab is the most likely moment for the world
+  // to have changed underneath it. Named, so the cleanup can remove it —
+  // an anonymous listener here would outlive the watcher.
+  const onVisible = () => {
+    if (document.visibilityState === 'visible') emit();
+  };
+
   window.addEventListener('online', emit);
-  window.addEventListener('offline', () => onChange(false));
+  window.addEventListener('offline', goOffline);
+  document.addEventListener('visibilitychange', onVisible);
+
   emit();
+
   return () => {
+    stopped = true;
+    clear();
     window.removeEventListener('online', emit);
-    window.removeEventListener('offline', emit);
+    window.removeEventListener('offline', goOffline);
+    document.removeEventListener('visibilitychange', onVisible);
   };
 }

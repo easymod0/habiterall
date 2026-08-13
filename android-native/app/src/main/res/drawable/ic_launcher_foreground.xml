@@ -1,20 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Adaptive-icon foreground. The 108dp canvas is deliberately larger than what
-  is guaranteed visible: launchers mask it to their own shape and may crop to
-  the inner 72dp, so the checkmark is kept well inside that safe zone.
+  Adaptive-icon foreground: the bar-checkmark from shared/public/icons/logo.svg.
+
+  Nine bars whose tops and bottoms trace a tick. The 108dp canvas is larger
+  than what is guaranteed visible — launchers mask to their own shape and may
+  crop to the inner 72dp — so the mark is scaled to 0.70 about the centre,
+  keeping every bar inside that safe zone.
+
+  Paths, not rects: a vector drawable has no <rect> element.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Stroked rather than filled, so the weight matches the web icon's
-         chunky checkmark instead of reading as a thin tick. -->
     <path
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="11"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M33,55 L46,68 L75,39" />
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M28.75,46.32a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M34.66,52.23a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M40.42,57.99a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M46.32,61.83a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M52.08,55.33a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M57.99,48.98a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M63.75,42.63a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M69.65,36.13a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M75.41,29.78a2.21,2.21 0 0 1 4.43,0v8.27a2.21,2.21 0 0 1 -4.43,0z" />
 </vector>

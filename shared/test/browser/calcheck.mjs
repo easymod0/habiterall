@@ -169,8 +169,11 @@ try {
 
   const measure = () => ev(`(()=>{
     const svg=document.querySelector('[aria-label="Completion calendar"]');
-    const r=svg.querySelector('rect');
     const dated=[...svg.querySelectorAll('rect')].filter(x=>x.dataset.date);
+    // A dated cell, not svg.querySelector('rect'): hovering moves the active
+    // cell to the end of its parent, so "the first rect" is not reliably a
+    // calendar square once anything has been hovered.
+    const r=dated[0] ?? svg.querySelector('rect');
     const dates=dated.map(x=>x.dataset.date).sort();
     const btns=[...document.querySelectorAll('.cal-nav button')];
     return {

@@ -105,7 +105,56 @@
  * @property {number} totalCompleted
  * @property {HistoryBucket[]} history
  * @property {WeekdayBucket[]} weekdays
+ * @property {WeekdayMonthBucket[]} weekdayByMonth
  * @property {FrequencyBucket[]} frequency
+ * @property {Resilience} resilience
+ */
+
+/**
+ * Weekday consistency within one month. `rate` rather than a raw count,
+ * because months hold four or five of each weekday.
+ * @typedef {object} WeekdayMonthBucket
+ * @property {string} month   'YYYY-MM'
+ * @property {Array<{weekday: number, completed: number, total: number, rate: number}>} days
+ */
+
+/**
+ * How a lapse is distributed by length.
+ * @typedef {object} MissBucket
+ * @property {string} label            e.g. "4–6 days"
+ * @property {number} min              shortest run in this bucket
+ * @property {number} count
+ * @property {number} share            0..1 of all lapses
+ */
+
+/**
+ * One point on the survival curve.
+ * @typedef {object} SurvivalPoint
+ * @property {number} days             threshold length
+ * @property {number} reached          streaks that got this far
+ * @property {number} total            streaks whose fate at this length is decided
+ * @property {number} share            reached / total, 0..1
+ */
+
+/**
+ * How reliably a lapse is recovered from.
+ * @typedef {object} Recovery
+ * @property {number|null} rate        share of lapses lasting a single day;
+ *                                     null when nothing has ever been missed
+ * @property {number} recovered
+ * @property {number} lapses           closed lapses only
+ * @property {number} openRun          length of an ongoing lapse, else 0
+ */
+
+/**
+ * What happens after a miss. `applicable` is false for non-daily habits,
+ * where an off-day is not a failure and these figures would mislead.
+ * @typedef {object} Resilience
+ * @property {boolean} applicable
+ * @property {Recovery|null} recovery
+ * @property {MissBucket[]} missDistribution
+ * @property {SurvivalPoint[]} survival
+ * @property {number} worstLapse
  */
 
 /**

@@ -74,16 +74,26 @@ sideloading. To sign, set these repository secrets:
 
 ### Locally
 
-You need **JDK 17+** and the Android SDK. The Gradle wrapper jar is not
-committed — it is a binary that cannot be reviewed in a diff — so generate it
-once:
+You need **JDK 21** and the Android SDK (platform 36, build-tools 36). The
+Gradle wrapper jar is not committed — it is a binary that cannot be reviewed in
+a diff — so generate it once with a system Gradle **8.14.3**:
 
 ```bash
 cd android-native
-gradle wrapper --gradle-version 8.9   # once, needs Gradle on PATH
-./gradlew test assembleDebug
+echo "sdk.dir=/path/to/Android/sdk" > local.properties
+gradle wrapper --gradle-version 8.14.3    # once, needs Gradle 8.14.3 on PATH
+./gradlew testDebugUnitTest lintDebug assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk` (~17 MB).
+It is signed with the standard Android debug key, so it installs on a phone
+with *Install unknown apps* enabled — no keystore needed to try it.
+
+> **Gradle 9 does not work.** AGP 8.x caps out at Gradle 8, and the version
+> here is pinned in `gradle/wrapper/gradle-wrapper.properties`. If you invoke a
+> newer system Gradle directly rather than through `./gradlew`, configuration
+> fails before the wrapper is ever consulted.
 
 ## Tests
 

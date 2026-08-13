@@ -9,7 +9,7 @@ Postgres one.
 
 | file | what it owns |
 |---|---|
-| `src/stats.js` | scoring, streaks, history/weekday/frequency aggregation |
+| `src/stats.js` | scoring, streaks, resilience, history/weekday/frequency aggregation |
 | `src/validate.js` | every input rule for habits, entries, and dates |
 | `src/import.js` | parsers: habiterall JSON, Loop `.db`, Loop CSV |
 | `src/export-loop.js` | writes a Loop-compatible `.db` |
@@ -20,6 +20,8 @@ Postgres one.
 | `public/app.js` | the whole UI; `start(authAdapter)` is the entry |
 | `public/ui/settings.js` | the preference registry and its server sync |
 | `public/ui/calendar.js` | calendar window/zoom maths, DOM-free so it is testable |
+| `public/ui/window.js` | how many columns a chart fits, and which slice to show |
+| `public/ui/resample.js` | thins the daily score series for the strength chart |
 | `public/ui/dates.js` | browser-side date helpers |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
 | `public/auth-none.js`, `auth-oidc.js` | the two auth adapters |
@@ -41,6 +43,33 @@ aggregation in `stats.js` already uses the bounded form; keep it that way.
 still works for boolean habits (where `3` is unambiguously a skip) but is
 wrong for numerical ones, where `3` is a real amount.
 
+**The score constant is Loop's, read from its source.** It is
+`0.5^(sqrt(frequency)/13)` — a 13-day half-life for a daily habit, and slower
+for less frequent ones. A fixed 30-day half-life lived here for a while: the
+same shape, but so sluggish that a perfect habit took four months to look
+strong instead of one. `test/stats.test.js` pins the curve at days 13, 30 and
+60 so it cannot drift back.
+
+**Best streaks are selected by length but listed by date.** Two different
+questions: which runs to show, and how to order them. A list ordered by length
+reads as a leaderboard and hides whether the good runs were recent. Note the
+bar scale must come from `Math.max(...top)`, not `top[0]` — that stopped being
+the longest row the moment the ordering changed.
+
+**Charts with a time axis page rather than shrink.** `slot = width / count`
+silently squeezes bars to hairlines once a habit has a year of daily data.
+`ui/window.js` decides how many columns fit from a minimum per-column width,
+and `windowedChart` in app.js adds the ‹ Earlier / Later › controls. Paging
+strides by one less than the window so a column of context is shared between
+screens — `test/window.test.js` asserts no column is ever strandable.
+
+**Connectivity needs more than the `online` event.** That event tracks the
+network interface, not the server, so a restarted server left the app stuck
+offline until a manual reload. `watchConnectivity` also re-probes on
+`visibilitychange` and polls with a backoff *while offline only* — it makes no
+requests at all once the server answers. It reports transitions, not polls, or
+reconnecting would re-render the dashboard every few seconds.
+
 **The score formula is deliberate.** It feeds a trailing-window adherence
 ratio (always `[0,1]`) into an EWMA. Do not "simplify" it back to scaling a
 day's credit by `1/frequency` — that overshoots for every non-daily habit and
@@ -51,6 +80,15 @@ epoch-millis UTC-midnight timestamps, ×1000 numerical scaling, `YES_AUTO(1)`
 counts as done, `NO(0)`/`UNKNOWN(-1)` are dropped. `test/import.test.js` and
 `test/export-loop.test.js` pin all of it — if you change a conversion and
 those fail, the tests are right.
+
+**Resilience only applies to daily habits.** `computeResilience` returns
+`{applicable: false}` when `freq_numerator < freq_denominator`. For a 3×/week
+habit the four off-days are not failures, so day-level miss runs would report a
+perfectly-kept habit as lapsing every single week. Two related rules in the
+same code: an *ongoing* lapse is excluded from recovery rate (being mid-slip is
+not the same as having failed to recover) and reported as `openRun` instead;
+and a rate of `null` means "nothing has ever been missed", which is a different
+claim from 100% and must not render as a number.
 
 **The calendar is anchored on its END, not its start.** Going back
 `weeks*7` days and *then* snapping to a Sunday shifts the whole grid earlier,
@@ -94,6 +132,14 @@ defaults to boolean — and a measurable habit's `3` is then read as Loop's SKIP
 sentinel while `8` and `10` are dropped as unknown ones. That is why
 `/api/export.csv` returns a zip. `test/export-csv.test.js` pins the failure
 mode deliberately, so if the ambiguity ever goes away the test says so.
+
+**A setting with an in-place toggle needs a session override.** `calendarZoom`,
+`historyGranularity` and `historyMode` all have controls in the detail view as
+well as entries in the dialog. The pattern: `state.X = null` means "use the
+saved value", the toggle sets it for the session, and `applySetting` clears it
+when the dialog changes that key — otherwise the dialog appears to do nothing
+once a toggle has been touched. Read through the accessor, never
+`state.X` directly.
 
 **Adding a setting means two files.** `public/ui/settings.js` declares what
 the dialog renders; `src/validate.js` declares what the server accepts. Both,

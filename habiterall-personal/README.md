@@ -51,10 +51,12 @@ Requires Node 22.5+ (uses the built-in `node:sqlite`, so there is no native modu
 
 | View | What it shows |
 | --- | --- |
-| **Strength** | Exponential-decay score (30-day half-life) over trailing-window adherence, plotted across the habit's lifetime |
-| **Calendar** | Clickable heatmap — page back through history and correct any past day |
+| **Strength** | Loop's exponential-decay score over trailing-window adherence, at whatever resolution you pick |
+| **Calendar** | Clickable heatmap with streaks joined up — zoom, page back, correct any past day |
 | **History** | Completions by day / week / month / quarter / year, as a percentage or a raw count |
+| **Bouncing back** | Recovery rate, how long lapses last, and how far streaks usually get |
 | **By day of week** | Success rate per weekday — shows which days you reliably miss |
+| **Weekday consistency** | The same broken out by month, so a weekday that is slipping is visible |
 | **Times per week** | Loop's frequency chart: how many weeks each month had 1×, 2×, 3× … completions |
 
 Plus current streak, best streak, and total completions.

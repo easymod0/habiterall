@@ -15,6 +15,7 @@ shared/               EVERYTHING both editions have in common
 habiterall-personal/  single user, SQLite, no auth   (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)
 android/              Trusted Web Activity wrapper for the PWA
+android-native/       native Kotlin client, for notification actions
 ```
 
 One npm workspace. `shared` resolves as `@habiterall/shared/<file>.js`; the
@@ -43,10 +44,17 @@ npm run test:tenancy        # cloud isolation attacks — needs Postgres
 
 npm run typecheck           # JSDoc types via tsc --noEmit
 npm run test:cloud          # cloud API + Loop round trip — needs Postgres
+npm run test:roundtrip -w habiterall-personal   # backup fidelity, all formats
 
 npm run start:personal      # http://localhost:3000
 cd habiterall-cloud && docker compose up -d   # app :3100, Authentik :9000
+
+cd android-native && ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
+
+The native Android client needs JDK 21, Android SDK 36 and Gradle **8.14.3**
+— see `android-native/README.md`. AGP 8.x does not support Gradle 9, and the
+wrapper jar is generated rather than committed.
 
 ## Non-obvious decisions
 
@@ -66,7 +74,10 @@ once made a single request block the event loop for 32 seconds. Never call
 
 **The score is a trailing-window ratio**, not per-day credit scaled by
 frequency. The earlier formula overshot for every non-daily habit and was
-hidden by a clamp; a single checkmark on a 1×/365d habit reported 100%.
+hidden by a clamp; a single checkmark on a 1×/365d habit reported 100%. The
+decay constant is Loop's own, `0.5^(sqrt(frequency)/13)` — read from its
+source, not guessed. A fixed 30-day half-life sat here for a while and made a
+perfect habit take four months to look strong instead of one.
 
 **Loop compatibility is exact and verified against a real backup**: timestamps
 are epoch millis at UTC midnight, `YES_AUTO(1)` counts as done, and identity is
@@ -104,17 +115,28 @@ that is why `test/browser/` exists.
 
 ## Testing
 
-Three layers, and they catch different things:
+Several layers, and they catch different things:
 
 | | command | needs |
 |---|---|---|
 | Unit | `npm test` | nothing |
 | Types | `npm run typecheck` | nothing |
 | Browser | `npm run test:browser` | Chrome + a running server |
+| Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
+| Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
+| Android | `cd android-native && ./gradlew testDebugUnitTest lintDebug` | JDK 21 + SDK |
 
-CI runs all of these on every pull request, plus both Docker builds.
+CI runs all of these on every pull request, plus both Docker builds. Publishing
+images to a registry is a separate job that skips itself when the credentials
+are absent — see `.github/workflows/README.md`.
+
+The round-trip suites export every backup format, import it back, and assert
+nothing changed. They found two real bugs on their first run, both in the CSV
+path. Two offline suites (`atmost.mjs`, `rendercheck.mjs`) drive `charts.js`
+against a ~15-line fake DOM, so anything reaching for a browser API there
+crashes them outright rather than failing a check.
 
 `responsive.mjs` checks every major view at 360 / 390 / 768 / 1440px. It found
 the tablet bug above on its first run; most other suites only ever ran at

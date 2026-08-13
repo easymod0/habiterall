@@ -71,9 +71,20 @@ texts.forEach(t => console.log('   ', JSON.stringify(t)));
 const lengthLabels = texts.filter(t => /^\d+$/.test(t));
 check('renders exactly 5 rows', lengthLabels.length === 5, lengthLabels.join(','));
 
-// 2. sorted longest-first
-check('sorted descending', JSON.stringify(lengthLabels) === JSON.stringify(['28','20','17','13','12']),
+// 2. selected by length, then listed newest first.
+//    Two different questions: which runs to show, and how to order them. A
+//    list ordered by length reads as a leaderboard and hides whether the good
+//    runs were recent.
+check('the five longest were selected',
+  JSON.stringify([...lengthLabels].sort((a,b)=>b-a)) === JSON.stringify(['28','20','17','13','12']),
   lengthLabels.join(','));
+
+const rowDates = texts.filter(t => /\d{4}$/.test(t));
+const endOf = (label) => label.split(/\s+[–-]\s+/).pop();   // "5 Aug 2026"
+const asTime = (s) => Date.parse(s);
+check('rows are ordered newest first',
+  rowDates.every((d, i) => i === 0 || asTime(endOf(d)) <= asTime(endOf(rowDates[i-1]))),
+  rowDates.join(' | '));
 
 // 3. date ranges present and formatted
 check('date range collapses repeated year',
@@ -84,10 +95,19 @@ check('date range collapses repeated year',
 const bars = rects.filter(r => r.attrs.fill === '#8b5cf6');
 check('one bar per row', bars.length === 5, String(bars.length));
 const widths = bars.map(b => Number(b.attrs.width));
-check('widest bar corresponds to longest streak',
-  Math.max(...widths) === widths[0], widths.map(w=>w.toFixed(0)).join(','));
-check('bars are descending in width',
-  widths.every((w, i) => i === 0 || w <= widths[i-1]), widths.map(w=>w.toFixed(0)).join(','));
+// Bars scale to the longest row SHOWN, wherever it sits in the list. The
+// scale used to come from top[0], which stopped being the longest the moment
+// the ordering changed to date order.
+const longestIdx = lengthLabels.indexOf(String(Math.max(...lengthLabels.map(Number))));
+check('the widest bar is the longest streak',
+  Math.max(...widths) === widths[longestIdx],
+  widths.map(w=>w.toFixed(0)).join(','));
+check('bar widths track streak lengths',
+  widths.every((w, i) => {
+    const ratio = w / Math.max(...widths);
+    const expect = Number(lengthLabels[i]) / Math.max(...lengthLabels.map(Number));
+    return Math.abs(ratio - expect) < 0.02;
+  }), widths.map(w=>w.toFixed(0)).join(',') + ' vs ' + lengthLabels.join(','));
 
 const W = Number(svg.attrs.width);
 check('no bar overflows the canvas',
@@ -102,7 +122,7 @@ check('height fits 5 rows', Number(svg.attrs.height) === 6 + 5*30 + 6, svg.attrs
 const titles = [];
 svg.walk(n => { if (n.name === 'title') titles.push(n.text); });
 check('every bar has a tooltip', titles.length === 5, String(titles.length));
-check('tooltip names dates', titles[0]?.includes('2026-04-21'), titles[0] ?? '');
+check('tooltip names dates', /\d{4}-\d{2}-\d{2}/.test(titles[0] ?? ''), titles[0] ?? '');
 
 /* --- edge cases --- */
 const empty = streakChart([], '#8b5cf6', { limit: 5 });

@@ -1,7 +1,9 @@
 import {
   scoreChart, calendarChart, historyChart, weekdayChart, frequencyChart,
-  streakChart,
+  streakChart, missDistributionChart, survivalChart, weekdayMonthChart,
 } from '/shared/charts.js';
+import { resampleScores } from '/shared/ui/resample.js';
+import { columnsForWidth, windowSlice } from '/shared/ui/window.js';
 import {
   enqueue, flush, pendingCount, watchConnectivity,
 } from '/shared/offline.js';
@@ -41,7 +43,10 @@ function gridDays() {
   if (w <= 900) return GRID_DAYS_MEDIUM;
   return GRID_DAYS;
 }
-const STREAK_LIMIT = 5;    // longest streaks listed on the detail view
+// Longest streaks listed on the detail view. They are *selected* by length
+// and then *listed* newest first, so this is "how many of your best runs to
+// show", not "how far down the leaderboard to go".
+const STREAK_LIMIT = 10;
 const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 const $ = (sel) => document.querySelector(sel);
@@ -92,8 +97,16 @@ let state = {
   habits: [],
   editingId: null,
   openHabitId: null,   // habit shown in the detail view, null on the dashboard
-  granularity: 'day',
-  historyMode: 'percent',
+  // null means "use the saved setting". The per-habit toggles set these for
+  // the session, so trying a different view does not rewrite your default —
+  // same arrangement as calZoom below.
+  granularity: null,
+  historyMode: null,
+  scoreGranularity: null,  // resolution of the strength chart; null = default
+  // Paging position per windowed chart, keyed by chart. Columns back from the
+  // most recent, so 0 is always "now" — survives the re-render each page
+  // button triggers.
+  chartOffsets: {},
   calEnd: null,        // last date shown in the calendar; null = today
   calZoom: null,       // overrides the saved zoom for this session; null = use the setting
   dayEdit: null,       // { habitId, date, type } while the day dialog is open
@@ -531,10 +544,14 @@ function openSettings() {
 /** Persist a setting and re-render whatever it affects. */
 function applySetting(key, value) {
   if (!settings.set(key, value)) return;
-  // The calendar's +/- buttons keep a session override. Choosing a zoom in
-  // the dialog is the more deliberate act, so it clears that override —
-  // otherwise the dialog would appear to do nothing.
+  // The in-place toggles (calendar +/-, the history segmented controls) keep a
+  // session override. Choosing a value in the dialog is the more deliberate
+  // act, so it clears that override — otherwise the dialog would appear to do
+  // nothing whenever a toggle had been touched.
   if (key === 'calendarZoom') state.calZoom = null;
+  if (key === 'historyGranularity') state.granularity = null;
+  if (key === 'historyMode') state.historyMode = null;
+  if (key === 'scoreGranularity') state.scoreGranularity = null;
   renderDashboard();
   if (state.openHabitId != null) showDetail(state.openHabitId);
 }
@@ -789,6 +806,18 @@ async function onCheckClick(habit, date) {
 
 /* ---------- detail view ---------- */
 
+/**
+ * The history view's bucket and mode: a session override if the per-habit
+ * toggles were used, otherwise the saved default.
+ *
+ * Reading through these rather than `state.granularity` directly is what lets
+ * the toggles be temporary — flicking to "year" to look at something should
+ * not silently rewrite your preference.
+ */
+const historyGranularity = () => state.granularity ?? settings.get('historyGranularity');
+const historyMode = () => state.historyMode ?? settings.get('historyMode');
+const scoreGranularity = () => state.scoreGranularity ?? settings.get('scoreGranularity');
+
 async function showDetail(id) {
   // Every control in the detail view — zoom, calendar paging, granularity,
   // history mode — re-renders through here, and replaceChildren() drops the
@@ -799,8 +828,12 @@ async function showDetail(id) {
   const redraw = state.openHabitId === id;
   const scroll = redraw ? window.scrollY : 0;
 
+  // Opening a different habit starts at "now". Carrying the offsets over
+  // would drop you into 2024 on a habit you have only just opened.
+  if (!redraw) state.chartOffsets = {};
+
   try {
-    const stats = await api(`/habits/${id}/stats?granularity=${state.granularity}`);
+    const stats = await api(`/habits/${id}/stats?granularity=${historyGranularity()}`);
     const entries = await api(`/habits/${id}/entries`);
     renderDetail(stats, entries);
 
@@ -882,16 +915,41 @@ function renderDetail(stats, entries) {
   // card scrolls horizontally instead.
   const chartWidth = Math.max(320, cardInnerWidth(els.viewDetail));
 
-  /* score */
-  els.viewDetail.append(
-    card('Habit strength', scoreChart(stats.scores, color, { width: chartWidth }))
-  );
+  /* score, with its own resolution selector */
+  const scoreCard = card('Habit strength', null);
+  const scoreHead = scoreCard.querySelector('.card-head');
+  scoreHead.append(segmented(
+    ['day', 'week', 'month', 'quarter', 'year'],
+    scoreGranularity(),
+    async (g) => { state.scoreGranularity = g; await showDetail(habit.id); }
+  ));
 
-  /* best streaks */
-  els.viewDetail.append(
-    card('Best streaks',
-      streakChart(stats.streaks, color, { limit: STREAK_LIMIT, width: chartWidth }))
-  );
+  // The score is computed daily whatever this says — it is an EWMA, so
+  // skipping days would change the value rather than the resolution. The
+  // selector only thins out which points are plotted.
+  const scorePoints =
+    resampleScores(stats.scores, scoreGranularity(), settings.get('weekStart'));
+
+  windowedChart({
+    card: scoreCard,
+    key: `score:${scoreGranularity()}`,
+    items: scorePoints,
+    // A line chart stays readable at far tighter spacing than bars do, so it
+    // only pages once the vertices would overlap.
+    density: 'point',
+    width: chartWidth,
+    labelOf: (p) => p.date,
+    redraw: () => showDetail(habit.id),
+    render: (slice) => scoreChart(slice, color, { width: chartWidth }),
+  });
+  els.viewDetail.append(scoreCard);
+
+  // Built here but appended after the calendar: the calendar is the thing
+  // people come to the detail view to look at and edit, so it sits directly
+  // under the score rather than below two analysis cards.
+  const streaksCard = card('Best streaks',
+    streakChart(stats.streaks, color, { limit: STREAK_LIMIT, width: chartWidth }));
+  const resilienceCard = buildResilienceCard(stats, color, chartWidth);
 
   /* calendar — clickable, with navigation back through history */
   const calCard = card('Calendar', null);
@@ -970,6 +1028,9 @@ function renderDetail(stats, entries) {
     weeks: CAL_WEEKS,
     endDate: calEnd,
     skips: skipSet,
+    // Bands behind runs of 3+, so a good stretch reads as one thing rather
+    // than a scatter of filled squares.
+    streaks: stats.streaks,
     onPick: (date) => openDayDialog(
       habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
     ),
@@ -990,18 +1051,22 @@ function renderDetail(stats, entries) {
   calCard.append(legend);
   els.viewDetail.append(calCard);
 
+  /* streaks, then the resilience counterweight to them */
+  els.viewDetail.append(streaksCard);
+  if (resilienceCard) els.viewDetail.append(resilienceCard);
+
   /* history with granularity toggle */
   const histCard = card('History', null);
   const histHead = histCard.querySelector('.card-head');
 
   const gran = segmented(
     ['day', 'week', 'month', 'quarter', 'year'],
-    state.granularity,
+    historyGranularity(),
     async (g) => { state.granularity = g; await showDetail(habit.id); }
   );
   const mode = segmented(
     ['percent', 'count'],
-    state.historyMode,
+    historyMode(),
     async (m) => { state.historyMode = m; await showDetail(habit.id); }
   );
   const toggles = document.createElement('div');
@@ -1011,27 +1076,65 @@ function renderDetail(stats, entries) {
   toggles.append(gran, mode);
   histHead.append(toggles);
 
-  const histScroll = document.createElement('div');
-  histScroll.className = 'chart-scroll';
-  histScroll.append(historyChart(stats.history, color, {
-    showPercent: state.historyMode === 'percent',
+  windowedChart({
+    card: histCard,
+    key: `history:${historyGranularity()}`,   // per bucket: 60 weeks ≠ 60 days
+    items: stats.history,
+    density: 'bar',
     width: chartWidth,
-  }));
-  histCard.append(histScroll);
+    labelOf: (b) => b.bucket,
+    redraw: () => showDetail(habit.id),
+    render: (slice) => historyChart(slice, color, {
+      showPercent: historyMode() === 'percent',
+      width: chartWidth,
+    }),
+  });
   els.viewDetail.append(histCard);
 
-  /* weekday */
+  /* weekday — seven fixed bars, so nothing to page through */
   els.viewDetail.append(
     card('By day of week', weekdayChart(stats.weekdays, color, { width: chartWidth }))
   );
 
+  /* weekday consistency over time — the same question as the bars above,
+     but keeping the month axis so drift on one weekday is visible */
+  if (stats.weekdayByMonth?.length) {
+    const wmCard = card('Weekday consistency', null);
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent =
+      'Bigger circles mean a higher completion rate. A row that fades to the '
+      + 'right is a weekday you have been losing.';
+    wmCard.append(hint);
+    windowedChart({
+      card: wmCard,
+      key: 'weekdayByMonth',
+      items: stats.weekdayByMonth,
+      density: 'circle',
+      width: chartWidth,
+      labelOf: (m) => m.month,
+      redraw: () => showDetail(habit.id),
+      render: (slice) => weekdayMonthChart(slice, color, { width: chartWidth }),
+    });
+    els.viewDetail.append(wmCard);
+  }
+
   /* frequency */
   if (stats.frequency.length) {
-    const freqScroll = document.createElement('div');
-    freqScroll.className = 'chart-scroll';
-    freqScroll.append(frequencyChart(stats.frequency, color, { width: chartWidth }));
     const fc = card('Times per week', null);
-    fc.append(freqScroll);
+    // Months are ROWS here, so the limit is 12 rows of vertical space rather
+    // than a minimum column width — but it still silently dropped older
+    // months, which is the same problem the paging controls solve.
+    windowedChart({
+      card: fc,
+      key: 'frequency',
+      items: stats.frequency,
+      density: 60,   // ~12 rows on a typical card
+      width: chartWidth,
+      labelOf: (m) => m.month,
+      redraw: () => showDetail(habit.id),
+      render: (slice) => frequencyChart(slice, color, { width: chartWidth }),
+    });
     els.viewDetail.append(fc);
   }
 }
@@ -1066,6 +1169,194 @@ function cardInnerWidth(container) {
   probe.remove();
 
   return inner > 0 ? Math.floor(inner) : 720;
+}
+
+/**
+ * "Bouncing back": recovery rate, how long lapses last, and how far streaks
+ * usually get.
+ *
+ * These three answer the question streaks and the score curve do not — when
+ * this habit fails, what happens next? A long best-streak says you once had a
+ * good month; recovery rate says whether one bad day tends to become a bad
+ * week, which is what actually decides whether a habit survives.
+ *
+ * Returns null when there is nothing honest to say: a non-daily habit (where
+ * off-days are not failures) or a habit with no history yet.
+ */
+function buildResilienceCard(stats, color, chartWidth) {
+  const r = stats.resilience;
+  if (!r || !r.applicable) return null;
+
+  const hasLapses = r.recovery.lapses > 0 || r.recovery.openRun > 0;
+  const hasStreaks = r.survival.length > 0;
+  // A brand-new habit has neither, and three empty charts say nothing.
+  if (!hasLapses && !hasStreaks) return null;
+
+  const c = card('Bouncing back', null);
+
+  const lead = document.createElement('p');
+  lead.className = 'hint';
+  lead.textContent =
+    'Streaks show your best run. These show what happens after a miss.';
+  c.append(lead);
+
+  /* headline figures */
+  const tiles = document.createElement('div');
+  tiles.className = 'stat-row';
+
+  const tile = (value, label, tone) => {
+    const t = document.createElement('div');
+    t.className = 'stat-tile';
+    const v = document.createElement('div');
+    v.className = 'stat-value';
+    v.textContent = value;
+    v.style.color = tone ?? color;
+    const l = document.createElement('div');
+    l.className = 'stat-label';
+    l.textContent = label;
+    t.append(v, l);
+    return t;
+  };
+
+  // A null rate means nothing has ever been missed — which is not the same
+  // claim as "recovers 100% of the time", so it must not render as a number.
+  tiles.append(tile(
+    r.recovery.rate == null ? '—' : `${Math.round(r.recovery.rate * 100)}%`,
+    r.recovery.rate == null ? 'No misses yet' : 'Back next day'
+  ));
+  tiles.append(tile(
+    r.worstLapse ? `${r.worstLapse}d` : '—',
+    'Longest lapse'
+  ));
+  if (r.recovery.openRun > 0) {
+    tiles.append(tile(`${r.recovery.openRun}d`, 'Currently missed',
+      'var(--danger, #ef4444)'));
+  }
+  c.append(tiles);
+
+  if (r.recovery.rate != null) {
+    const summary = document.createElement('p');
+    summary.className = 'hint';
+    summary.textContent =
+      `After a miss you were back the next day ${r.recovery.recovered} of ` +
+      `${r.recovery.lapses} time${r.recovery.lapses === 1 ? '' : 's'}.`;
+    c.append(summary);
+  }
+
+  if (hasLapses) {
+    c.append(subheading('How long lapses last'));
+    const scroll = document.createElement('div');
+    scroll.className = 'chart-scroll';
+    scroll.append(missDistributionChart(r.missDistribution, color, { width: chartWidth }));
+    c.append(scroll);
+  }
+
+  if (hasStreaks) {
+    c.append(subheading('How far streaks get'));
+    const scroll = document.createElement('div');
+    scroll.className = 'chart-scroll';
+    scroll.append(survivalChart(r.survival, color, { width: chartWidth }));
+    c.append(scroll);
+
+    const first = r.survival.find((p) => p.days >= 7) ?? r.survival[r.survival.length - 1];
+    if (first) {
+      const note = document.createElement('p');
+      note.className = 'hint';
+      note.textContent =
+        `${Math.round(first.share * 100)}% of your streaks reached ${first.days} days.`;
+      c.append(note);
+    }
+  }
+
+  return c;
+}
+
+/**
+ * Render a chart over a scrollable window of its data, with ‹ Earlier /
+ * Later › controls when the data does not fit.
+ *
+ * Every chart with an unbounded time axis needs this: `slot = width / count`
+ * shrinks bars to hairlines once there is a year of daily data. Capacity comes
+ * from a minimum per-column width rather than a fixed number, so a wide
+ * monitor shows more and a phone shows fewer.
+ *
+ * The paging offset lives in `state.chartOffsets`, keyed per chart, so the
+ * position survives the re-render each button press causes.
+ *
+ * @param {object} opts
+ * @param {HTMLElement} opts.card    the card to add controls and chart to
+ * @param {string} opts.key          identity for the stored offset
+ * @param {Array} opts.items         full series, oldest first
+ * @param {'bar'|'circle'|'point'|number} opts.density  a MIN_SLOT key, or pixels
+ * @param {number} opts.width
+ * @param {(slice: Array) => Node} opts.render
+ * @param {(item: any) => string} [opts.labelOf]  for the range readout
+ * @param {() => void} opts.redraw
+ */
+function windowedChart(opts) {
+  const { card: host, key, items, density, width, render, labelOf, redraw } = opts;
+
+  const capacity = columnsForWidth(width, density);
+  const win = windowSlice(items, capacity, state.chartOffsets[key] ?? 0);
+  // Write the clamped value back, so paging past an end does not leave a
+  // stale offset that shifts the window on the next render.
+  state.chartOffsets[key] = win.offset;
+
+  if (win.canGoEarlier || win.canGoLater) {
+    const head = host.querySelector('.card-head');
+    const nav = document.createElement('div');
+    nav.className = 'cal-nav';
+
+    const mkNav = (text, label, disabled, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn btn-sm';
+      b.textContent = text;
+      b.setAttribute('aria-label', label);
+      b.disabled = disabled;
+      b.addEventListener('click', fn);
+      return b;
+    };
+
+    const page = (by) => {
+      // Page by most of a screen, keeping a column of overlap for context.
+      const stride = Math.max(1, win.slice.length - 1);
+      state.chartOffsets[key] = win.offset + by * stride;
+      redraw();
+    };
+
+    const range = document.createElement('span');
+    range.className = 'cal-range';
+    if (labelOf && win.slice.length) {
+      range.textContent = win.slice.length === 1
+        ? labelOf(win.slice[0])
+        : `${labelOf(win.slice[0])} → ${labelOf(win.slice[win.slice.length - 1])}`;
+    }
+
+    nav.append(
+      mkNav('‹ Earlier', 'Show earlier', !win.canGoEarlier, () => page(1)),
+      range,
+      mkNav('Later ›', 'Show later', !win.canGoLater, () => page(-1)),
+      mkNav('Now', 'Jump to the most recent', !win.canGoLater, () => {
+        state.chartOffsets[key] = 0;
+        redraw();
+      }),
+    );
+    head.append(nav);
+  }
+
+  const scroll = document.createElement('div');
+  scroll.className = 'chart-scroll';
+  scroll.append(render(win.slice));
+  host.append(scroll);
+  return host;
+}
+
+function subheading(text) {
+  const h = document.createElement('div');
+  h.className = 'card-subhead';
+  h.textContent = text;
+  return h;
 }
 
 function card(titleText, content) {
@@ -1374,6 +1665,12 @@ async function runImport() {
 /* ---------- wire up ---------- */
 
 $('#btn-new').addEventListener('click', () => openDialog());
+// The app title doubles as "home". Reloads rather than just switching views,
+// so returning from a detail page shows current data.
+$('#btn-home').addEventListener('click', () => {
+  loadDashboard().catch((e) => toast(e.message));
+});
+
 $('#btn-settings').addEventListener('click', openSettings);
 $('#settings-close').addEventListener('click', () => els.settingsDialog.close());
 $('#settings-reset').addEventListener('click', async () => {
@@ -1455,16 +1752,39 @@ if ('serviceWorker' in navigator) {
     .catch((e) => console.warn('service worker registration failed', e));
 }
 
-// Reconnecting is the moment to drain the outbox.
+// Reconnecting is the moment to drain the outbox and refresh.
+//
+// `watchConnectivity` only calls back on a real transition, so this runs once
+// per outage rather than on every poll. It also re-probes when the tab becomes
+// visible and polls while offline, which is what recovers the app when the
+// *server* comes back but the network never dropped — a restarted server used
+// to leave the page stuck offline until a manual reload.
+let wasOffline = false;
 watchConnectivity(async (online) => {
   setOffline(!online);
   await refreshOfflineBadge();
-  if (online) await syncNow().catch(() => {});
+  if (!online) { wasOffline = true; return; }
+
+  await syncNow().catch(() => {});
+
+  // Whatever was on screen was rendered from cache, and the server may have
+  // changed under it — from another device, or from this one before the
+  // outage. syncNow only reloads when it actually sent something.
+  if (wasOffline) {
+    wasOffline = false;
+    await loadDashboard().catch(() => {});
+    if (state.openHabitId != null) await showDetail(state.openHabitId).catch(() => {});
+  }
 });
 
-// Returning to the app after it was backgrounded is also a good moment.
+// Coming back to a backgrounded tab, independently of any connectivity
+// transition: the watcher's callback only fires when online/offline actually
+// flips, so a tab that never went offline but has a queue left over from a
+// flush that failed part-way still needs a nudge.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') syncNow().catch(() => {});
+  if (document.visibilityState === 'visible' && !state.offline) {
+    syncNow().catch(() => {});
+  }
 });
 
 /**

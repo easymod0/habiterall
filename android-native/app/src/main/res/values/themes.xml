@@ -3,9 +3,14 @@
     <!--
       The Compose UI supplies its own colours, so the platform theme only has
       to provide a sane window background and follow the system's day/night
-      setting. DeviceDefault.DayNight does both without pulling in AppCompat.
+      setting.
+
+      DeviceDefault.DayNight would do both, but it only exists from API 29 and
+      minSdk here is 26 — on Android 8 and 9 that resolves to nothing and the
+      activity fails to inflate. The plain DeviceDefault base works everywhere;
+      values-v29/ overrides it with the DayNight variant where it exists.
     -->
-    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault.DayNight" />
+    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault" />
 
     <!--
       Used by CountEntryActivity, which is only ever a dialog over whatever is

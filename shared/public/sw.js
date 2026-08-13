@@ -22,7 +22,9 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
-const CACHE_VERSION = 'v4';
+// v5: new logo (the bar-checkmark). The icons are shell assets, so without a
+// bump an already-installed PWA would keep serving the old ones from cache.
+const CACHE_VERSION = 'v5';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

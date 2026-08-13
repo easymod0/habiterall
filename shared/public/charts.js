@@ -120,6 +120,8 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     endDate = null,     // last date shown; defaults to today
     skips = null,       // Set of skipped dates, kept out of the value space
     onPick = null,      // callback(date) -> makes cells clickable
+    streaks = null,     // [{start, end, length}] to underline as runs
+    minStreak = 3,      // shorter runs are noise, not an achievement
   } = opts;
 
   const level = zoomLevel(zoom);
@@ -135,6 +137,8 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   // gap, and that one extra pixel-gap was enough to trip `max-width: 100%`
   // into scaling the whole grid down.
   const width = calendarWidth(weeks, zoom);
+  // The extra 4px at the foot leaves room for the wrap tab hanging below
+  // Saturday; the one above Sunday sits inside padTop's existing space.
   const height = padTop + 7 * step + 4;
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Completion calendar');
@@ -161,6 +165,67 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     svg.appendChild(el('text', {
       x: 0, y: padTop + (i * step) + CELL - 2, 'font-size': 9, fill: dim,
     }, WEEKDAY_LABELS[i]));
+  }
+
+  // Dates belonging to a streak worth showing, so each cell can decide
+  // whether to merge with its neighbours. A Set rather than a per-cell scan
+  // of the streak list: at wide zoom that would be ~740 cells x every streak.
+  const inStreak = streakDates(streaks, minStreak);
+
+  // Connectors are drawn in their own pass BEFORE the cells, because SVG
+  // paints in document order and they must sit underneath. A separate sweep
+  // rather than insertBefore: the offline render tests use a fake DOM with
+  // only appendChild, and this needs nothing more.
+  if (inStreak.size) {
+    const link = shade(color, 1);
+    const thick = Math.max(2, CELL * 0.34);
+    const probe = new Date(start);
+
+    for (let wk = 0; wk < weeks; wk++) {
+      for (let dow = 0; dow < 7; dow++) {
+        const date = iso(probe);
+        probe.setDate(probe.getDate() + 1);
+        if (!inStreak.has(date) || !inStreak.has(shiftISO(date, 1))) continue;
+
+        const x = padLeft + wk * step;
+        const y = padTop + dow * step;
+
+        if (dow < 6) {
+          // Within a column: a short bar bridging the gap to the day below.
+          svg.appendChild(el('rect', {
+            // Inset from the cell's sides so it reads as a link between
+            // squares rather than widening them into a solid block.
+            x: x + (CELL - thick) / 2,
+            y: y + CELL - 0.5,
+            width: thick,
+            height: GAP + 1,
+            fill: link,
+          }));
+        } else if (wk < weeks - 1) {
+          // Saturday to Sunday: the run wraps to the top of the NEXT column,
+          // a jump from bottom-right to top-left that no straight connector
+          // can span. Routing an elbow around the grid was tried and looked
+          // like a smudge — it crossed unrelated cells and got clipped.
+          //
+          // Instead, two small tabs: one off the bottom of Saturday and one
+          // off the top of the following Sunday. They are the same mark as
+          // the within-column connector, so a half-connector reads as
+          // "continues" — the way a hyphen at the end of a line does.
+          const tab = (cx, cy) => el('rect', {
+            x: cx + (CELL - thick) / 2,
+            y: cy,
+            width: thick,
+            height: Math.max(2, GAP * 0.8),
+            rx: thick / 2,
+            fill: link,
+            'fill-opacity': 0.65,
+          });
+
+          svg.appendChild(tab(x, y + CELL - 0.5));
+          svg.appendChild(tab(x + step, padTop - Math.max(2, GAP * 0.8) + 0.5));
+        }
+      }
+    }
   }
 
   let lastMonth = -1;
@@ -269,6 +334,29 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   attachCellPopover(svg);
 
   return svg;
+}
+
+/**
+ * Every date inside a streak of at least `minStreak` days.
+ *
+ * Built once per render so each cell can ask "am I in a run?" in O(1) — a
+ * per-cell scan of the streak list would be ~740 cells times every streak in
+ * the habit's history at the widest zoom.
+ */
+function streakDates(streaks, minStreak) {
+  const dates = new Set();
+  if (!streaks) return dates;
+
+  for (const streak of streaks) {
+    if (!streak || streak.length < minStreak) continue;
+    let cursor = streak.start;
+    // Bounded by the streak's own length, so a malformed entry cannot spin.
+    for (let i = 0; i < streak.length && cursor <= streak.end; i++) {
+      dates.add(cursor);
+      cursor = shiftISO(cursor, 1);
+    }
+  }
+  return dates;
 }
 
 /**
@@ -465,6 +553,210 @@ function handleGridKey(e, svg, cell, onPick) {
   }
 }
 
+/**
+ * Weekday consistency month by month: columns are months, rows are weekdays,
+ * circle size and opacity are the completion rate.
+ *
+ * The same idiom as `frequencyChart`, applied to a different question. Where
+ * "By day of week" collapses all history into seven bars, this keeps the time
+ * axis — so a weekday that used to be reliable and has quietly rotted shows up
+ * as a row that fades to the right, which the collapsed view cannot show.
+ *
+ * Rate, not count: months hold four or five of each weekday, and a raw count
+ * would make February look worse than March for no reason.
+ */
+export function weekdayMonthChart(months, color, { width = 720 } = {}) {
+  const rowH = 26;
+  // Two lines of header: the month on every column, the year where it changes.
+  const pad = { top: 30, right: 12, bottom: 8, left: 42 };
+  const height = pad.top + 7 * rowH + pad.bottom;
+
+  const svg = svgRoot(width, height);
+  svg.setAttribute('aria-label', 'Weekday consistency by month');
+
+  const dim = cssVar('--text-dim');
+  if (!months.length) {
+    svg.appendChild(el('text', {
+      x: pad.left, y: pad.top + 16, 'font-size': 12, fill: dim,
+    }, 'Not enough history yet.'));
+    return svg;
+  }
+
+  const w = width - pad.left - pad.right;
+  const shown = months;
+  // Capped: with three months of history, dividing the full card width by
+  // three strands the columns in acres of empty space and makes them look
+  // unrelated. The grid stays left-aligned at a sensible column width and
+  // simply does not fill the card.
+  const colW = Math.min(72, w / shown.length);
+  const maxR = Math.min(11, colW / 2 - 2, rowH / 2 - 2);
+
+  // Weekday rows, Sunday first to match the calendar heatmap above it.
+  // Two letters, not one: S/S and T/T are ambiguous, and this axis is the
+  // whole point of the chart.
+  const FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const SHORT = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+  for (let d = 0; d < 7; d++) {
+    svg.appendChild(el('text', {
+      x: pad.left - 8, y: pad.top + d * rowH + rowH / 2 + 4,
+      'text-anchor': 'end', 'font-size': 10.5, fill: dim,
+    }, SHORT[d]));
+  }
+
+  shown.forEach((m, c) => {
+    const cx = pad.left + (c + 0.5) * colW;
+
+    // Every column gets its month. The columns are now paged rather than
+    // squeezed, so there is always room — and a chart whose axis labels only
+    // some columns makes you count to work out which one you are looking at.
+    const [yy, mm] = m.month.split('-').map(Number);
+    svg.appendChild(el('text', {
+      x: cx, y: 12, 'text-anchor': 'middle', 'font-size': 9.5, fill: dim,
+    }, MONTH_LABELS[mm - 1]));
+
+    // The year, once, wherever it changes — so a window spanning December
+    // into January is not two ambiguous "Jan"s.
+    if (c === 0 || yy !== Number(shown[c - 1].month.split('-')[0])) {
+      svg.appendChild(el('text', {
+        x: cx, y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
+        fill: dim, 'fill-opacity': 0.75,
+      }, String(yy)));
+    }
+
+    m.days.forEach((d, r) => {
+      if (!d.total) return;
+      const cy = pad.top + r * rowH + rowH / 2;
+
+      // An empty ring for a weekday that occurred but was never completed:
+      // drawing nothing would be indistinguishable from a month where that
+      // weekday did not exist in range.
+      if (d.rate === 0) {
+        svg.appendChild(title(el('circle', {
+          cx, cy, r: 3, fill: 'none', stroke: dim, 'stroke-width': 1,
+          'stroke-opacity': 0.5,
+        }), `${m.month} ${FULL[r]}: 0 of ${d.total}`));
+        return;
+      }
+
+      svg.appendChild(title(el('circle', {
+        cx, cy, r: 3 + d.rate * (maxR - 3),
+        fill: color, 'fill-opacity': 0.3 + 0.7 * d.rate,
+      }), `${m.month} ${FULL[r]}: ${d.completed} of ${d.total} (${Math.round(d.rate * 100)}%)`));
+    });
+  });
+
+  return svg;
+}
+
+/* ---------- resilience ---------- */
+
+/**
+ * Miss-run distribution: how long your lapses tend to last.
+ *
+ * Horizontal bars, because the labels ("1–2 weeks") do not fit under vertical
+ * ones and the ordering is a scale rather than a set of categories.
+ */
+export function missDistributionChart(buckets, color, { width = 720 } = {}) {
+  const rows = buckets.filter((b) => b.count > 0);
+  const rowH = 26;
+  const pad = { top: 8, right: 44, bottom: 8, left: 78 };
+  const height = pad.top + pad.bottom + Math.max(rows.length, 1) * rowH;
+
+  const svg = svgRoot(width, height);
+  svg.setAttribute('aria-label', 'How long lapses last');
+
+  const dim = cssVar('--text-dim');
+  if (!rows.length) {
+    svg.appendChild(el('text', {
+      x: pad.left, y: pad.top + 16, 'font-size': 12, fill: dim,
+    }, 'No lapses yet.'));
+    return svg;
+  }
+
+  const w = width - pad.left - pad.right;
+  const max = Math.max(...rows.map((b) => b.count));
+
+  rows.forEach((b, i) => {
+    const y = pad.top + i * rowH;
+    const barW = max ? (b.count / max) * w : 0;
+
+    svg.appendChild(el('text', {
+      x: pad.left - 8, y: y + 16, 'text-anchor': 'end', 'font-size': 11, fill: dim,
+    }, b.label));
+
+    // Shorter lapses are the good outcome, so they get the full colour and
+    // longer ones fade — the eye should be drawn to the bottom of the list.
+    const strength = Math.max(0.3, 1 - i / rows.length);
+    svg.appendChild(title(el('rect', {
+      x: pad.left, y: y + 4, width: Math.max(barW, 2), height: rowH - 12,
+      rx: 4, fill: shade(color, strength),
+    }), `${b.count} lapse${b.count === 1 ? '' : 's'} of ${b.label} (${Math.round(b.share * 100)}%)`));
+
+    svg.appendChild(el('text', {
+      x: pad.left + Math.max(barW, 2) + 6, y: y + 16,
+      'font-size': 11, fill: cssVar('--text'),
+    }, String(b.count)));
+  });
+
+  return svg;
+}
+
+/**
+ * Survival curve: the share of streaks that reached each length.
+ *
+ * A descending step curve. The cliff in it is the point worth reading — it
+ * locates where this habit reliably breaks, which "best streak: 23" cannot.
+ */
+export function survivalChart(points, color, { width = 720, height = 190 } = {}) {
+  const pad = { top: 14, right: 14, bottom: 30, left: 38 };
+  const svg = svgRoot(width, height);
+  svg.setAttribute('aria-label', 'Share of streaks reaching each length');
+
+  const dim = cssVar('--text-dim');
+  if (points.length < 1) {
+    svg.appendChild(el('text', {
+      x: pad.left, y: pad.top + 16, 'font-size': 12, fill: dim,
+    }, 'Not enough history yet.'));
+    return svg;
+  }
+
+  const w = width - pad.left - pad.right;
+  const h = height - pad.top - pad.bottom;
+  const border = cssVar('--border');
+
+  for (const frac of [0, 0.5, 1]) {
+    const y = pad.top + h - frac * h;
+    svg.appendChild(el('line', {
+      x1: pad.left, x2: width - pad.right, y1: y, y2: y, stroke: border, 'stroke-width': 1,
+    }));
+    svg.appendChild(el('text', {
+      x: pad.left - 6, y: y + 4, 'text-anchor': 'end', 'font-size': 10, fill: dim,
+    }, `${Math.round(frac * 100)}%`));
+  }
+
+  const slot = points.length > 1 ? w / (points.length - 1) : 0;
+  const xAt = (i) => pad.left + (points.length > 1 ? i * slot : w / 2);
+  const yAt = (share) => pad.top + h - share * h;
+
+  const line = points.map((p, i) => `${i ? 'L' : 'M'}${xAt(i)},${yAt(p.share)}`).join(' ');
+  svg.appendChild(el('path', {
+    d: line, fill: 'none', stroke: color, 'stroke-width': 2,
+    'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+  }));
+
+  points.forEach((p, i) => {
+    svg.appendChild(title(el('circle', {
+      cx: xAt(i), cy: yAt(p.share), r: 3.5, fill: color,
+    }), `${p.reached} of ${p.total} streaks reached ${p.days} days (${Math.round(p.share * 100)}%)`));
+
+    svg.appendChild(el('text', {
+      x: xAt(i), y: height - 10, 'text-anchor': 'middle', 'font-size': 11, fill: dim,
+    }, `${p.days}d`));
+  });
+
+  return svg;
+}
+
 function shiftISO(isoDate, days) {
   const [y, m, d] = isoDate.split('-').map(Number);
   const date = new Date(y, m - 1, d);
@@ -602,7 +894,15 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   const LABEL_W = 168;   // room for "12 Mar – 24 Mar"
   const COUNT_W = 42;
 
-  const top = [...streaks].sort((a, b) => b.length - a.length).slice(0, limit);
+  // Select by length, then present by date, newest first. Two different
+  // questions: "which were my best runs" picks the rows, "when were they"
+  // orders them — and a list ordered by length reads as a leaderboard, which
+  // makes it hard to see whether the good runs were recent or years ago.
+  const top = [...streaks]
+    .sort((a, b) => b.length - a.length)
+    .slice(0, limit)
+    .sort((a, b) => b.end.localeCompare(a.end));
+
   const height = pad.top + Math.max(top.length, 1) * rowH + pad.bottom;
 
   const svg = svgRoot(width, height);
@@ -618,7 +918,10 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
     return svg;
   }
 
-  const max = top[0].length;
+  // The longest of the rows shown, not top[0]: the list is ordered by date
+  // now, so the first row is the most recent streak rather than the biggest,
+  // and scaling the bars to it would push longer ones off the chart.
+  const max = Math.max(...top.map((s) => s.length));
   const barX = pad.left + LABEL_W;
   const barMax = width - pad.right - COUNT_W - barX;
 

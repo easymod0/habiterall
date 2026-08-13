@@ -141,6 +141,15 @@ export const SETTING_VALUES = {
   // the level keeps the rendering free to retune the sizes later without
   // stranding a saved number that no longer means anything.
   calendarZoom: ['closest', 'close', 'default', 'wide'],
+  // Which bucket the history chart opens on. Must stay in step with
+  // BUCKETERS in stats.js — a value the aggregator does not know silently
+  // falls back to 'day', so the setting would appear to do nothing.
+  historyGranularity: ['day', 'week', 'month', 'quarter', 'year'],
+  historyMode: ['percent', 'count'],
+  // Resolution of the strength chart. Display only — the score is always
+  // computed daily, since it is an EWMA and skipping days would change the
+  // value rather than the resolution.
+  scoreGranularity: ['day', 'week', 'month', 'quarter', 'year'],
 };
 
 /**
