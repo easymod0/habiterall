@@ -67,6 +67,11 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
       TRUST_PROXY: 1
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      # The fallback clock: a container has no timezone, so it is UTC. Users can
+      # override it for their own reminders in ⚙ → Notifications, but this is
+      # what "the server's own timezone" means, and it is also the clock that
+      # decides which day a check-off with no explicit date belongs to.
+      TZ: ${TZ:-Etc/UTC}
     restart: unless-stopped
 
 volumes:

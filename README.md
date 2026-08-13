@@ -83,6 +83,10 @@ services:
       - habiterall-data:/data
     environment:
       HABITERALL_DB: /data/habiterall.db
+      # SET THIS. A container has no timezone, so it is UTC — and this decides
+      # both when an 08:00 reminder fires and which day a check-off lands on.
+      # Unset, an evening check-in west of UTC is filed under tomorrow.
+      TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
       # Optional, and only for reminders the SERVER sends (a Discord channel).
       # The Android app needs neither of these — it arms its own alarms.
       HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
@@ -203,6 +207,11 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
       TRUST_PROXY: 1
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      # The fallback clock: a container has no timezone, so it is UTC. Users can
+      # override it for their own reminders in ⚙ → Notifications, but this is
+      # what "the server's own timezone" means, and it is also the clock that
+      # decides which day a check-off with no explicit date belongs to.
+      TZ: ${TZ:-Etc/UTC}
     restart: unless-stopped
 
 volumes:
@@ -720,6 +729,7 @@ fork can cut a release having configured nothing. Details in
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HABITERALL_DB` | `./data/habiterall.db` | SQLite file path |
+| `TZ` | the host's, **`UTC` in a container** | The clock reminders fire on, and which day a check-off belongs to |
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 
@@ -750,6 +760,15 @@ see [`.github/workflows/README.md`](.github/workflows/README.md).
 | `HABITERALL_NOTIFY` | `on` | `off` disables server-sent reminders entirely |
 | `HABITERALL_NOTIFY_INTERVAL_MS` | `60000` | How often to check for due reminders |
 | `DISCORD_BOT_TOKEN` | — | Turns on buttons. One bot per instance; each user points it at their own channel |
+| `TZ` | the host's, **`UTC` in a container** | The clock behind "the server's own timezone" |
+
+> **Set `TZ` if you deploy with Docker.** A container has no timezone, so it is
+> UTC whatever the host is set to. Two things follow it: when an `08:00` reminder
+> fires, and — for a request that names no date — which day a check-off lands on.
+> Left at UTC, someone three hours west gets their morning reminder before dawn,
+> and an evening check-in after 21:00 is filed under tomorrow. In the cloud
+> edition a user can override the first of those in ⚙ → Notifications; there is
+> no per-user override for the second.
 
 The scheduler costs nothing until someone configures a destination for it: with
 none, it queries and stops. On-device reminders do not involve it at all.

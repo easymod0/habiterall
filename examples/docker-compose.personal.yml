@@ -19,6 +19,10 @@ services:
       - habiterall-data:/data
     environment:
       HABITERALL_DB: /data/habiterall.db
+      # SET THIS. A container has no timezone, so it is UTC — and this decides
+      # both when an 08:00 reminder fires and which day a check-off lands on.
+      # Unset, an evening check-in west of UTC is filed under tomorrow.
+      TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
       # Optional, and only for reminders the SERVER sends (a Discord channel).
       # The Android app needs neither of these — it arms its own alarms.
       HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
