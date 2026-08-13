@@ -175,21 +175,9 @@ jobs:
             echo >> notes.md
           fi
 
-          {
-            echo '### Install'
-            echo
-            echo '| | |'
-            echo '|---|---|'
-            echo "| Android (native, notification actions) | \`habiterall-native-${{ steps.v.outputs.version }}.apk\` below |"
-            echo "| Android (TWA wrapper) | \`habiterall-twa-${{ steps.v.outputs.version }}.apk\` below |"
-            OWNER=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-            echo "| Docker (personal) | \`docker pull ghcr.io/$OWNER/habiterall-personal:${{ steps.v.outputs.version }}\` |"
-            echo "| Docker (cloud) | \`docker pull ghcr.io/$OWNER/habiterall-cloud:${{ steps.v.outputs.version }}\` |"
-            echo
-            echo 'Unsigned APKs install with *Install unknown apps* enabled. A signed'
-            echo 'release needs the keystore secrets — see `.github/workflows/README.md`.'
-          } >> notes.md
-
+          # The "Install" half is appended by the release job, not here: this
+          # job runs before anything is built, so all it could do is promise
+          # assets and hope. It promised a TWA APK whether or not one existed.
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -305,6 +293,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # docker/build-push-action uploads a `<owner>~<repo>~<id>.dockerbuild`
+      # build record as a workflow artifact for each build. Nothing here reads
+      # them, they are ~100KB each, and they broke the release once by being
+      # picked up by a download-everything step. Off at the source.
+      DOCKER_BUILD_RECORD_UPLOAD: false
     steps:
       - uses: actions/checkout@v4
 
@@ -467,17 +461,72 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
-      - uses: actions/download-artifact@v4
+      # Named, not "everything". Downloading every artifact in the run also
+      # picked up the two `<owner>~<repo>~<id>.dockerbuild` build records that
+      # docker/build-push-action uploads on its own, and one of them failed to
+      # extract — which failed the release over a file it has no use for.
+      #
+      # `pattern` rather than two named steps, because apk-twa only exists when
+      # TWA_HOST is set, and a named download of a missing artifact is an error.
+      - name: The APKs
+        uses: actions/download-artifact@v4
         with:
-          path: incoming
+          pattern: apk-*
+          merge-multiple: true
+          path: dist
 
-      - name: Collect the assets
+      - name: The changelog
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+
+      # Now that the assets are in hand, say what is actually here — rather than
+      # what the version job hoped would be.
+      - name: Describe what is being released
+        env:
+          V: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          find incoming -name '*.apk' -exec cp {} dist/ \;
-          cp incoming/release-notes/notes.md .
           ls -la dist
+
+          OWNER=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+
+          {
+            echo
+            echo '### Install'
+            echo
+            echo '**Docker** — `linux/amd64` and `linux/arm64`:'
+            echo
+            echo '```bash'
+            echo "# single user, SQLite, no login"
+            echo "docker pull ghcr.io/$OWNER/habiterall-personal:$V"
+            echo
+            echo "# multi user, Postgres, OIDC"
+            echo "docker pull ghcr.io/$OWNER/habiterall-cloud:$V"
+            echo '```'
+            echo
+            echo "Also tagged \`$(echo "$V" | cut -d. -f1-2)\` and \`latest\`."
+            echo
+
+            if ls dist/*.apk >/dev/null 2>&1; then
+              echo '**Android** — attached below:'
+              echo
+              for apk in dist/*.apk; do
+                name=$(basename "$apk")
+                size=$(( $(stat -c%s "$apk") / 1024 / 1024 ))
+                case "$name" in
+                  *native*) what='the native client — notification actions, reminders' ;;
+                  *twa*)    what='the TWA wrapper — the PWA as an installable app' ;;
+                  *)        what='' ;;
+                esac
+                echo "- \`$name\` (${size} MB) — $what"
+              done
+              echo
+              echo 'Unsigned APKs install with *Install unknown apps* enabled. A signed'
+              echo 'release needs the keystore secrets — see `.github/workflows/README.md`.'
+            fi
+          } >> notes.md
+
           echo "--- notes ---"
           cat notes.md
 
