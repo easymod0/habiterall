@@ -68,15 +68,24 @@ class MainActivity : ComponentActivity() {
                     checked = true
                 }
 
+                // The web UI is a screen of this app, not a trip to a
+                // browser. See WebScreen for why that matters.
+                var web by remember { mutableStateOf<String?>(null) }
+
                 when {
                     !checked -> Loading()
                     url == null -> SetupScreen(onSaved = {
                         url = it
                         Reminders.rescheduleAll(this@MainActivity)
                     })
+                    web != null -> WebScreen(
+                        url = web!!,
+                        title = "Statistics",
+                        onClose = { web = null },
+                    )
                     else -> HabitListScreen(
                         serverUrl = url!!,
-                        onOpenStats = { openWeb(url!!) },
+                        onOpenStats = { web = url },
                         onChangeServer = { url = null },
                     )
                 }
@@ -85,11 +94,13 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Stats, charts and history editing are the server's own web UI, opened in
-     * a Custom Tab. One implementation of the charts rather than two, and it
-     * inherits whatever the web app gains without an app update.
+     * Open the web UI in a real browser.
+     *
+     * No longer how Stats works — that is `WebScreen`, in-app. This is kept for
+     * the cases a WebView is the wrong container for: a user who wants the site
+     * in their own browser, with their own extensions and password manager.
      */
-    private fun openWeb(serverUrl: String) {
+    fun openInBrowser(serverUrl: String) {
         runCatching {
             CustomTabsIntent.Builder()
                 .setShowTitle(true)
