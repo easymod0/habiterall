@@ -51,8 +51,8 @@ skipped.
 
 | A pull request touching | runs |
 |---|---|
-| documentation or workflow config only | unit tests + type check (~20s each) |
-| any code | the whole of `ci.yml` |
+| documentation or workflow config only | nothing but the change detector (~5s) |
+| any code, anywhere | the whole of `ci.yml` |
 | `android-native/**`, or a shared file the Kotlin client mirrors | the Android workflow as well |
 | `android/**` or the PWA assets | the TWA workflow as well |
 | a push to `master` | everything, always — that run is what says master is releasable |
@@ -65,6 +65,14 @@ so a *required* check on it waits forever for a run that will never arrive, and
 the pull request can never merge. A job skipped by `if:` reports "skipped", which
 branch protection accepts. If you add branch protection later, this is the
 difference between it working and it wedging every docs PR.
+
+**All or nothing, not a middle.** Even the unit tests and the type check are
+gated. They only take twenty seconds, so leaving them on was tempting — but a
+change to `release.yml` cannot make `npm test` fail, and running it anyway is
+theatre. What makes this safe is that the detector is not asked to be clever: a
+pull request that touches *one line* of code anywhere runs the entire suite, so
+the only way to skip anything is to have changed nothing but prose and workflow
+config.
 
 **No per-directory matrix.** It looks tempting — only test the edition that
 changed — and it would be false precision here: the browser suites drive a real
