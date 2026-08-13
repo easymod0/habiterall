@@ -1,0 +1,126 @@
+package com.habiterall.app.data
+
+import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+
+private val Context.dataStore by preferencesDataStore(name = "habiterall")
+
+/**
+ * Device-local preferences.
+ *
+ * The server remains the source of truth for everything about the habits —
+ * a new phone needs nothing but the address typed in again. But reminder
+ * times are ALSO mirrored here, and that is not a duplication of state so
+ * much as a cache with a hard requirement behind it: an alarm must be armable
+ * with no network at all.
+ *
+ * This class previously stored only the server URL, on the reasoning that
+ * habit data belongs to the server. The consequence was that every path which
+ * armed an alarm ran inside a worker constrained to `NetworkType.CONNECTED`,
+ * so a phone rebooted in airplane mode never scheduled a single reminder —
+ * the app's one reason to exist, silently dead until connectivity returned.
+ */
+class Settings(private val context: Context) {
+
+    private val serverUrlKey = stringPreferencesKey("server_url")
+
+    /**
+     * Cached reminder schedule, as `id|HH:MM|name|type|target|unit|prompt`
+     * lines.
+     *
+     * A flat string rather than a JSON blob or a database: it is written on
+     * every successful sync and read on a cold boot with no network, so the
+     * priority is that parsing it can never fail in a way that costs the user
+     * their reminders. A malformed line is skipped, not fatal — and a line
+     * written by an older version, before the prompt existed, still parses.
+     */
+    private val reminderCacheKey = stringPreferencesKey("reminder_cache")
+
+    /**
+     * Whether this phone is one of the account's reminder destinations.
+     *
+     * Mirrored here for the same reason the reminder times are: the decision
+     * has to be available on a cold boot with no network, and the alternative
+     * — assuming "enabled" until the server can be asked — would arm alarms
+     * the user switched off, every reboot, for as long as they were offline.
+     *
+     * Absent means never synced, which reads as enabled: that is the server's
+     * default too, and a fresh install that armed nothing would look broken.
+     */
+    private val androidRemindersKey = booleanPreferencesKey("android_reminders")
+
+    val serverUrl: Flow<String?> =
+        context.dataStore.data.map { it[serverUrlKey]?.ifBlank { null } }
+
+    suspend fun serverUrlOnce(): String? = serverUrl.first()
+
+    suspend fun setServerUrl(url: String) {
+        context.dataStore.edit { it[serverUrlKey] = url }
+    }
+
+    /** An [Api] bound to the configured server, or null if unconfigured. */
+    suspend fun api(): Api? = serverUrlOnce()?.let { Api(it) }
+
+    /**
+     * Mirror the habits that carry a reminder. Called after every successful
+     * fetch, so the cache tracks the server within one sync.
+     */
+    suspend fun cacheReminders(habits: List<Habit>) {
+        val line = habits
+            .filter { !it.archived && it.reminderTime.isNotBlank() }
+            .joinToString("\n") {
+                // Fields the notification needs, with separators stripped from
+                // free text so a habit named "a|b" cannot corrupt the record.
+                listOf(
+                    it.id.toString(),
+                    it.reminderTime,
+                    it.name.replace('|', ' ').replace('\n', ' '),
+                    it.type,
+                    it.targetValue.toString(),
+                    it.unit.replace('|', ' ').replace('\n', ' '),
+                    it.reminderMessage.replace('|', ' ').replace('\n', ' '),
+                ).joinToString("|")
+            }
+        context.dataStore.edit { it[reminderCacheKey] = line }
+    }
+
+    /** Remember whether the account wants reminders on this device. */
+    suspend fun cacheAndroidReminders(enabled: Boolean) {
+        context.dataStore.edit { it[androidRemindersKey] = enabled }
+    }
+
+    /** The cached answer; true until the server has said otherwise. */
+    suspend fun androidRemindersEnabled(): Boolean =
+        context.dataStore.data.first()[androidRemindersKey] ?: true
+
+    /**
+     * The cached schedule. Enough to arm an alarm and post a usable
+     * notification with no network.
+     */
+    suspend fun cachedReminders(): List<Habit> {
+        val raw = context.dataStore.data.first()[reminderCacheKey] ?: return emptyList()
+        return raw.lineSequence().mapNotNull { line ->
+            val f = line.split('|')
+            if (f.size < 6) return@mapNotNull null
+            val id = f[0].toLongOrNull() ?: return@mapNotNull null
+            Habit(
+                id = id,
+                name = f[2],
+                type = f[3],
+                targetValue = f[4].toDoubleOrNull() ?: 0.0,
+                unit = f[5],
+                reminderTime = f[1],
+                // getOrNull, not f[6]: a cache written before prompts existed
+                // has six fields, and losing every reminder on upgrade would be
+                // a far worse bug than a missing prompt for one sync.
+                reminderMessage = f.getOrNull(6) ?: "",
+            )
+        }.toList()
+    }
+}
