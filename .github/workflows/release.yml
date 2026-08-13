@@ -182,8 +182,9 @@ jobs:
             echo '|---|---|'
             echo "| Android (native, notification actions) | \`habiterall-native-${{ steps.v.outputs.version }}.apk\` below |"
             echo "| Android (TWA wrapper) | \`habiterall-twa-${{ steps.v.outputs.version }}.apk\` below |"
-            echo "| Docker (personal) | \`docker pull <ns>/habiterall-personal:${{ steps.v.outputs.version }}\` |"
-            echo "| Docker (cloud) | \`docker pull <ns>/habiterall-cloud:${{ steps.v.outputs.version }}\` |"
+            OWNER=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+            echo "| Docker (personal) | \`docker pull ghcr.io/$OWNER/habiterall-personal:${{ steps.v.outputs.version }}\` |"
+            echo "| Docker (cloud) | \`docker pull ghcr.io/$OWNER/habiterall-cloud:${{ steps.v.outputs.version }}\` |"
             echo
             echo 'Unsigned APKs install with *Install unknown apps* enabled. A signed'
             echo 'release needs the keystore secrets — see `.github/workflows/README.md`.'
@@ -297,58 +298,125 @@ jobs:
     name: Docker images
     runs-on: ubuntu-latest
     needs: [version, verify]
+    # `packages: write` is what lets the automatic GITHUB_TOKEN push to GHCR.
+    # That is the whole reason GHCR is the default here: it needs no secret at
+    # all, so a fresh clone of this repository can publish images without its
+    # owner configuring anything.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check for registry credentials
-        id: creds
-        env:
-          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          if [ -n "$USERNAME" ] && [ -n "$TOKEN" ] && [ "${{ needs.version.outputs.publish }}" = "true" ]; then
-            echo "push=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "push=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::not pushing (missing DOCKERHUB_* secrets, or a dry run) — images are still built."
-          fi
 
       - name: Resolve image names
         id: names
         env:
-          NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
-          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          OWNER: ${{ github.repository_owner }}
+          DOCKERHUB_NS: ${{ vars.DOCKERHUB_NAMESPACE }}
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          NS="${NAMESPACE:-${USERNAME:-habiterall}}"
-          echo "personal=docker.io/$NS/habiterall-personal" >> "$GITHUB_OUTPUT"
-          echo "cloud=docker.io/$NS/habiterall-cloud" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          # A registry path must be lowercase; a GitHub owner need not be.
+          GH_OWNER=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "ghcr_personal=ghcr.io/$GH_OWNER/habiterall-personal" >> "$GITHUB_OUTPUT"
+          echo "ghcr_cloud=ghcr.io/$GH_OWNER/habiterall-cloud" >> "$GITHUB_OUTPUT"
+
+          # Docker Hub is optional and additional. Only named when its
+          # credentials exist, so the tag list below stays empty otherwise.
+          if [ -n "$DOCKERHUB_USER" ]; then
+            NS="${DOCKERHUB_NS:-$DOCKERHUB_USER}"
+            echo "hub_personal=docker.io/$NS/habiterall-personal" >> "$GITHUB_OUTPUT"
+            echo "hub_cloud=docker.io/$NS/habiterall-cloud" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether to push
+        id: mode
+        env:
+          HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          PUBLISH: ${{ needs.version.outputs.publish }}
+        run: |
+          set -euo pipefail
+
+          # A dry run builds everything and pushes nowhere, so the workflow can
+          # be tried out without leaving anything behind.
+          if [ "$PUBLISH" = "true" ]; then
+            echo "ghcr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ghcr=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::dry run — images are built but pushed nowhere."
+          fi
+
+          if [ "$PUBLISH" = "true" ] && [ -n "$HUB_USER" ] && [ -n "$HUB_TOKEN" ]; then
+            echo "hub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hub=false" >> "$GITHUB_OUTPUT"
+            if [ -z "$HUB_USER" ]; then
+              echo "::notice::no DOCKERHUB_* secrets; publishing to GHCR only."
+            fi
+          fi
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        if: steps.mode.outputs.ghcr == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
       - name: Log in to Docker Hub
-        if: steps.creds.outputs.push == 'true'
+        if: steps.mode.outputs.hub == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # X.Y.Z, X.Y and latest, so a deployment can pin as tightly as it likes.
+      # X.Y.Z, X.Y and latest, on every registry in play, so a deployment can
+      # pin as tightly as it likes.
       - name: Tags
         id: tags
         env:
           V: ${{ needs.version.outputs.version }}
+          GHCR_PERSONAL: ${{ steps.names.outputs.ghcr_personal }}
+          GHCR_CLOUD: ${{ steps.names.outputs.ghcr_cloud }}
+          HUB_PERSONAL: ${{ steps.names.outputs.hub_personal }}
+          HUB_CLOUD: ${{ steps.names.outputs.hub_cloud }}
+          WITH_HUB: ${{ steps.mode.outputs.hub }}
         run: |
+          set -euo pipefail
           MINOR="${V%.*}"
-          echo "personal=${{ steps.names.outputs.personal }}:$V,${{ steps.names.outputs.personal }}:$MINOR,${{ steps.names.outputs.personal }}:latest" >> "$GITHUB_OUTPUT"
-          echo "cloud=${{ steps.names.outputs.cloud }}:$V,${{ steps.names.outputs.cloud }}:$MINOR,${{ steps.names.outputs.cloud }}:latest" >> "$GITHUB_OUTPUT"
+
+          # `if` rather than `[ … ] && …`: under `set -e` a test that fails as
+          # the last command of a function or a block takes the whole step with
+          # it, which is a memorable way to lose an afternoon.
+          tags_for() {
+            local repo="$1"
+            if [ -n "$repo" ]; then
+              printf '%s:%s\n%s:%s\n%s:latest\n' "$repo" "$V" "$repo" "$MINOR" "$repo"
+            fi
+          }
+
+          {
+            echo 'personal<<EOF'
+            tags_for "$GHCR_PERSONAL"
+            if [ "$WITH_HUB" = "true" ]; then tags_for "$HUB_PERSONAL"; fi
+            echo EOF
+            echo 'cloud<<EOF'
+            tags_for "$GHCR_CLOUD"
+            if [ "$WITH_HUB" = "true" ]; then tags_for "$HUB_CLOUD"; fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: personal
         uses: docker/build-push-action@v6
         with:
           context: .
           file: habiterall-personal/Dockerfile
-          push: ${{ steps.creds.outputs.push == 'true' }}
+          push: ${{ steps.mode.outputs.ghcr == 'true' }}
           tags: ${{ steps.tags.outputs.personal }}
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
@@ -359,7 +427,7 @@ jobs:
         with:
           context: .
           file: habiterall-cloud/Dockerfile
-          push: ${{ steps.creds.outputs.push == 'true' }}
+          push: ${{ steps.mode.outputs.ghcr == 'true' }}
           tags: ${{ steps.tags.outputs.cloud }}
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
@@ -369,15 +437,22 @@ jobs:
         if: always()
         run: |
           {
-            if [ "${{ steps.creds.outputs.push }}" = "true" ]; then
+            if [ "${{ steps.mode.outputs.ghcr }}" = "true" ]; then
               echo "### Images pushed"
             else
               echo "### Images built, not pushed"
             fi
             echo '```'
-            echo "${{ steps.tags.outputs.personal }}" | tr ',' '\n'
-            echo "${{ steps.tags.outputs.cloud }}" | tr ',' '\n'
+            echo "${{ steps.tags.outputs.personal }}"
+            echo "${{ steps.tags.outputs.cloud }}"
             echo '```'
+            if [ "${{ steps.mode.outputs.hub }}" != "true" ]; then
+              echo "Docker Hub was skipped (no DOCKERHUB_USERNAME / DOCKERHUB_TOKEN)."
+            fi
+            echo
+            echo "A package is PRIVATE the first time it is pushed, even from a public"
+            echo "repository. Make it public once under Packages → habiterall-personal →"
+            echo "Package settings → Change visibility, and it stays that way."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ----------------------------------------------------------------- release
