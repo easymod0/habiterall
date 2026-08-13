@@ -27,8 +27,8 @@ test('the stylesheet forces [hidden] to win over display rules', () => {
 });
 
 test('every element JS hides is actually hideable', () => {
-  // Elements toggled via `.hidden` in app.js that also match a CSS selector
-  // setting `display` would break without the guard above.
+  // Elements toggled via `.hidden` from the ui modules that also match a CSS
+  // selector setting `display` would break without the guard above.
   const jsHidden = [
     'day-boolean', 'day-numeric', 'day-save', 'day-clear',
     'import-result', 'empty', 'view-list', 'view-detail', 'toast',
@@ -54,11 +54,11 @@ test('the day editor has exactly one control per habit type', () => {
   assert.equal(choices.length, 2, 'expected exactly Done and Not done');
 });
 
-test('app.js toggles both day-editor blocks off the same flag', () => {
-  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+test('the day editor toggles both blocks off the same flag', () => {
+  const src = readFileSync(join(root, 'public', 'ui', 'day-dialog.js'), 'utf8');
 
-  assert.ok(/els\.dayBoolean\.hidden\s*=\s*numeric/.test(app),
+  assert.ok(/booleanBlock\.hidden\s*=\s*numeric/.test(src),
     'the boolean block must be hidden when the habit is numerical');
-  assert.ok(/els\.dayNumeric\.hidden\s*=\s*!numeric/.test(app),
+  assert.ok(/numericBlock\.hidden\s*=\s*!numeric/.test(src),
     'the numeric block must be hidden when the habit is boolean');
 });

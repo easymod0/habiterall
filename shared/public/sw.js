@@ -22,6 +22,10 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v7: app.js was split into one module per view and dialog, so an installed
+// PWA holding the old single file alongside the new index.html would boot a
+// shell whose scripts no longer exist.
+//
 // v6: the habit dialog gained the reminder time picker and the "what the
 // reminder asks" field. index.html is a shell asset, so without a bump an
 // already-installed PWA would keep serving the old markup — and app.js, which
@@ -29,19 +33,53 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
+/**
+ * Everything a cold install needs before it can run offline.
+ *
+ * `shellFirst` also caches whatever it fetches, so a file missing from here
+ * still works — right up until someone installs the app and loses connectivity
+ * before that module has ever been requested. `test/ui-modules.test.js` walks
+ * the imports from the entry point and fails if this list has fallen behind.
+ */
 const SHELL = [
   '/',
   '/index.html',
   '/app-entry.js',      // per-edition: picks the auth adapter
-  '/shared/app.js',     // the UI itself, identical across editions
   '/style.css',
+  '/shared/manifest.json',
+
+  // The UI, identical across editions. Both auth adapters are listed because
+  // one service worker serves both editions and each imports a different one.
+  '/shared/app.js',
+  '/shared/auth-none.js',
+  '/shared/auth-oidc.js',
   '/shared/charts.js',
   '/shared/offline.js',
-  '/shared/manifest.json',
+  '/shared/ui/api.js',
+  '/shared/ui/calendar.js',
+  '/shared/ui/components.js',
+  '/shared/ui/connectivity.js',
+  '/shared/ui/dashboard.js',
+  '/shared/ui/data-dialog.js',
+  '/shared/ui/dates.js',
+  '/shared/ui/day-dialog.js',
+  '/shared/ui/detail.js',
+  '/shared/ui/habit-dialog.js',
+  '/shared/ui/reminder-field.js',
+  '/shared/ui/resample.js',
+  '/shared/ui/settings-dialog.js',
+  '/shared/ui/settings.js',
+  '/shared/ui/store.js',
+  '/shared/ui/theme.js',
+  '/shared/ui/time.js',
+  '/shared/ui/toast.js',
+  '/shared/ui/values.js',
+  '/shared/ui/views.js',
+  '/shared/ui/window.js',
 ];
 
 /** GET endpoints worth keeping a copy of for offline rendering. */
