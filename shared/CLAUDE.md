@@ -123,14 +123,33 @@ counts as done, `NO(0)`/`UNKNOWN(-1)` are dropped. `test/import.test.js` and
 `test/export-loop.test.js` pin all of it — if you change a conversion and
 those fail, the tests are right.
 
-**Resilience only applies to daily habits.** `computeResilience` returns
-`{applicable: false}` when `freq_numerator < freq_denominator`. For a 3×/week
-habit the four off-days are not failures, so day-level miss runs would report a
-perfectly-kept habit as lapsing every single week. Two related rules in the
-same code: an *ongoing* lapse is excluded from recovery rate (being mid-slip is
-not the same as having failed to recover) and reported as `openRun` instead;
-and a rate of `null` means "nothing has ever been missed", which is a different
-claim from 100% and must not render as a number.
+**A streak and a lapse are made of "on pace", not "done today".** `onPaceSeries`
+asks whether the trailing `denominator`-day window holds enough completions,
+pro-rated by any skips inside it — the same window and the same pro-rating
+`computeScores` uses, so strength and streaks cannot disagree about whether a
+habit is being kept. For `num >= den` the window is one day and the
+requirement clamps to it, so this reduces exactly to `isCompleted` and daily
+habits behave as they always have; that degeneration is what makes the change
+safe, and `test/resilience.test.js` pins it.
+
+Consequences worth knowing. A streak counts CALENDAR days, so a 3×/week habit
+kept for a month is a 30-day streak rather than a 12-day one — that is what
+"I have kept this up for a month" means, and it keeps the number comparable
+with a daily habit's. The window is rolling, not calendar-aligned: three
+sessions crammed into Mon–Wed satisfy every day that week and then fall short
+the following Monday, because by then the trailing seven days hold only two.
+And this is a computation change only — nothing about storage, the schema or
+the Loop export moved.
+
+**Resilience applies at any frequency.** It used to return
+`{applicable: false}` for non-daily habits, because a miss meant "a day it was
+not done" and a 3×/week habit has four of those every week. `onPaceSeries`
+fixed the premise instead: a miss is a day the habit fell below its RATE.
+`applicable` is kept in the response shape but nothing sets it false. Two
+related rules in the same code: an *ongoing* lapse is excluded from recovery
+rate (being mid-slip is not the same as having failed to recover) and reported
+as `openRun` instead; and a rate of `null` means "nothing has ever been
+missed", which is a different claim from 100% and must not render as a number.
 
 **The calendar is anchored on its END, not its start.** Going back
 `weeks*7` days and *then* snapping to a Sunday shifts the whole grid earlier,

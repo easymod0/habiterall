@@ -221,18 +221,85 @@ test('no streaks means no curve', () => {
 
 /* ---------- non-daily habits ---------- */
 
-test('resilience is marked inapplicable for a non-daily habit', () => {
-  // For a 3x/week habit the four off-days are not failures. Day-level miss
-  // runs would report a perfectly-kept habit as lapsing every single week,
-  // which is worse than showing nothing at all.
-  const gym = { ...DAILY, freq_numerator: 3, freq_denominator: 7 };
-  const map = pattern('x.x.x..x.x.x..');
-  const streaks = computeStreaks(gym, map, '2026-01-01', endOf('x.x.x..x.x.x..'));
-  const r = computeResilience(gym, map, streaks, '2026-01-01', endOf('x.x.x..x.x.x..'));
+const GYM = { ...DAILY, freq_numerator: 3, freq_denominator: 7 };
 
-  assert.equal(r.applicable, false);
-  assert.equal(r.recovery, null);
-  assert.deepEqual(r.survival, []);
+const run = (habit, str) => {
+  const map = pattern(str);
+  const streaks = computeStreaks(habit, map, '2026-01-01', endOf(str));
+  return {
+    streaks,
+    missRuns: computeMissRuns(habit, map, '2026-01-01', endOf(str)),
+    resilience: computeResilience(habit, map, streaks, '2026-01-01', endOf(str)),
+  };
+};
+
+test('a 3x/week habit kept on pace is one unbroken streak', () => {
+  // Mon/Wed/Fri, twice over. The four off-days a week are not failures — the
+  // question is whether the RATE held, and it did. Judging each day on its own
+  // reported this exact pattern as a streak of one and a lapse every other
+  // day, which is why resilience used to refuse to run for these at all.
+  const { streaks, missRuns } = run(GYM, 'x.x.x..x.x.x..');
+
+  assert.equal(streaks.length, 1);
+  assert.equal(streaks[0].length, 14, 'the whole span, off-days included');
+  assert.deepEqual(missRuns, []);
+});
+
+test('the streak counts calendar days, so it compares with a daily habit', () => {
+  const { streaks } = run(GYM, 'x.x.x..');
+  assert.equal(streaks[0].length, 7, 'a kept week is 7 days, not 3');
+});
+
+test('falling below the rate is what breaks a non-daily streak', () => {
+  // Two good weeks, then a week with a single session: the trailing window
+  // drops under three and the run ends.
+  const { streaks, missRuns } = run(GYM, 'x.x.x..x.x.x..x......');
+
+  assert.ok(streaks[0].length >= 14, `kept the good stretch: ${streaks[0].length}`);
+  assert.ok(missRuns.length > 0, 'the bad week registers as a lapse');
+  assert.ok(missRuns.at(-1).open, 'and it is still open at the end');
+});
+
+test('resilience now applies to a non-daily habit', () => {
+  // Fell off the pace, then came back to it.
+  const { resilience } = run(GYM, 'x.x.x..x.......x.x.x..x.x.x..');
+
+  assert.equal(resilience.applicable, true);
+  assert.ok(resilience.recovery, 'a recovery figure is computed');
+  assert.ok(resilience.worstLapse > 0, 'and the lapse is measured');
+  assert.ok(resilience.survival.length > 0, 'streaks reach the survival curve');
+});
+
+test('a short history is judged against what there is, not a full week', () => {
+  // Three days in, a 3x/week habit cannot have done three sessions yet. The
+  // requirement is pro-rated by the window actually available, so a habit is
+  // not born already failing.
+  const { missRuns } = run(GYM, 'x.x');
+  assert.deepEqual(missRuns, [], 'no lapse in the first three days');
+});
+
+test('a skipped day pro-rates the requirement rather than counting against it', () => {
+  // Two sessions in a full week is under a 3x/week pace, and reads as a lapse.
+  assert.ok(run(GYM, 'x.x....').missRuns.length > 0,
+    'two sessions in seven days is short of the rate');
+
+  // The same two sessions, but three of those days did not happen at all. The
+  // week only asks for its share — two over four active days clears it — so a
+  // skip neither counts against you nor silently lowers the bar to nothing.
+  assert.deepEqual(run(GYM, 'x.xsss.').missRuns, [],
+    'two sessions over four active days is on pace');
+});
+
+test('asking for something every day still means every day', () => {
+  // The rule has to collapse back to `isCompleted` at 1/1, or this change
+  // would quietly rewrite every ordinary habit's history.
+  const daily = run(DAILY, 'xx.xx');
+  assert.deepEqual(daily.streaks.map((s) => s.length), [2, 2]);
+  assert.deepEqual(daily.missRuns.map((m) => m.length), [1]);
+
+  // More than once a day cannot be recorded, so it must not become impossible.
+  const twice = run({ ...DAILY, freq_numerator: 2, freq_denominator: 1 }, 'xx.xx');
+  assert.deepEqual(twice.streaks.map((s) => s.length), [2, 2]);
 });
 
 test('a daily habit is applicable', () => {

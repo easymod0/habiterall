@@ -204,28 +204,98 @@ export function computeScores(habit, entryMap, start, end) {
   return out;
 }
 
+/* ---------- on pace ---------- */
+
+/**
+ * Whether each day leaves the habit ON PACE, which is what a streak and a
+ * lapse are both made of.
+ *
+ * A day used to count only if the habit was completed on it. That is right for
+ * a daily habit and wrong for every other kind: a 3×/week habit kept perfectly
+ * has four off-days a week, and asking "was it done today?" reports the best
+ * possible behaviour as a streak of one and a lapse every other day. The score
+ * has always known better — it measures adherence over a trailing window the
+ * length of the frequency period — so this asks the same question the same way
+ * and the two numbers stop contradicting each other.
+ *
+ * The window is `denominator` days ending on the day being judged, and the
+ * requirement is pro-rated by any skips inside it, exactly as `computeScores`
+ * does: a week with two skipped days only demands its share of the target.
+ * Near `start` the window is short and the requirement shrinks with it, so a
+ * habit is not judged against a week of history it does not have yet.
+ *
+ * For a habit asking for something every day (`num >= den`) the window is one
+ * day and the requirement clamps to it, so this reduces exactly to
+ * `isCompleted` and daily habits behave precisely as they always have.
+ *
+ * @returns {{date: string, ok: boolean|null}[]} `null` on a skipped day, which
+ *   is transparent: it neither starts, extends nor breaks a run.
+ */
+function onPaceSeries(habit, entryMap, start, end) {
+  const num = Math.max(1, Number(habit.freq_numerator) || 1);
+  const den = Math.max(1, Number(habit.freq_denominator) || 1);
+
+  // Clamp here rather than at each call site. dateRange allocates one element
+  // per day, so a single entry dated in the distant past — trivially planted
+  // through an import — would otherwise spin for hundreds of thousands of
+  // iterations and block the event loop for every user of the process.
+  const dates = boundedRange(start, end);
+  const done = dates.map((date) => isCompleted(habit, entryMap.get(date) ?? UNSET));
+
+  const out = [];
+  let windowDone = 0;
+  let windowSkips = 0;
+
+  for (let i = 0; i < dates.length; i++) {
+    if (done[i] === null) windowSkips++;
+    else if (done[i]) windowDone++;
+
+    // Drop the day that just fell out of the trailing `den`-day window.
+    const outgoing = i - den;
+    if (outgoing >= 0) {
+      if (done[outgoing] === null) windowSkips--;
+      else if (done[outgoing]) windowDone--;
+    }
+
+    if (done[i] === null) { out.push({ date: dates[i], ok: null }); continue; }
+
+    const windowDays = Math.min(i + 1, den);
+    const activeDays = windowDays - windowSkips;
+    // `num * activeDays` before the division, so a whole-number requirement
+    // stays whole: 3 × 7 / 7 is exactly 3, where 3 × (7/7) can float.
+    // Capped at the days available, which is what keeps a "twice a day" habit
+    // — more than the one row a day can hold — from being impossible to meet.
+    const required = Math.min(activeDays, (num * activeDays) / den);
+
+    out.push({
+      date: dates[i],
+      // A hair of tolerance: the requirement is a ratio and the count is not.
+      ok: activeDays <= 0 || windowDone + 1e-9 >= required,
+    });
+  }
+  return out;
+}
+
 /* ---------- streaks ---------- */
 
 /**
- * Contiguous runs of success. Skipped days bridge a streak rather than
+ * Contiguous runs of being on pace. Skipped days bridge a streak rather than
  * breaking it (Loop treats a skip as "this day didn't happen").
+ *
+ * Note this counts CALENDAR days, including the off-days of a non-daily
+ * habit: a 3×/week habit kept for a month is a 30-day streak, not a 12-day
+ * one. That is what people mean by "I have kept this up for a month", and it
+ * keeps the number comparable with a daily habit's.
  */
 export function computeStreaks(habit, entryMap, start, end) {
   const streaks = [];
   let runStart = null;
   let runEnd = null;
 
-  // Clamp here rather than at each call site. dateRange allocates one element
-  // per day, so a single entry dated in the distant past — trivially planted
-  // through an import — would otherwise spin for hundreds of thousands of
-  // iterations and block the event loop for every user of the process.
-  for (const date of boundedRange(start, end)) {
-    const value = entryMap.get(date) ?? UNSET;
-    const done = isCompleted(habit, value);
+  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end)) {
+    if (ok === null) continue; // skip: neither extends nor breaks
 
-    if (done === null) continue; // skip: neither extends nor breaks
-
-    if (done) {
+    if (ok) {
       if (runStart === null) runStart = date;
       runEnd = date;
     } else if (runStart !== null) {
@@ -266,13 +336,10 @@ export function computeMissRuns(habit, entryMap, start, end) {
   let runStart = null;
   let runEnd = null;
 
-  for (const date of boundedRange(start, end)) {
-    const value = entryMap.get(date) ?? UNSET;
-    const done = isCompleted(habit, value);
+  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end)) {
+    if (ok === null) continue;
 
-    if (done === null) continue;
-
-    if (!done) {
+    if (!ok) {
       if (runStart === null) runStart = date;
       runEnd = date;
     } else if (runStart !== null) {
@@ -423,18 +490,16 @@ export function computeSurvival(streaks, end, thresholds = SURVIVAL_THRESHOLDS) 
  * when this habit fails, what happens next?
  */
 export function computeResilience(habit, entryMap, streaks, start, end) {
-  // Only meaningful for habits meant to happen every day. For a 3×/week habit
-  // the four off-days are not failures, so day-level miss runs would report a
-  // perfectly-kept habit as lapsing every week — worse than showing nothing.
-  // Period-level resilience for non-daily habits is worth doing, but it is a
-  // different measure and does not belong behind the same label.
-  const isDaily = Number(habit.freq_numerator) >= Number(habit.freq_denominator);
-  if (!isDaily) {
-    return { applicable: false, recovery: null, missDistribution: [], survival: [], worstLapse: 0 };
-  }
-
+  // This used to refuse to run for anything but a daily habit, because a miss
+  // run meant "a day it was not done" and a 3×/week habit has four of those
+  // every week — a perfectly-kept habit reported as lapsing continuously.
+  // `onPaceSeries` fixed the premise rather than the symptom: a miss is now a
+  // day the habit fell BELOW ITS RATE, which is a real failure for any
+  // frequency, so there is nothing left to suppress.
   const missRuns = computeMissRuns(habit, entryMap, start, end);
   return {
+    // Retained: the response shape is public, and the detail view still guards
+    // on it. Nothing sets it false any more.
     applicable: true,
     recovery: computeRecovery(missRuns, end),
     missDistribution: computeMissDistribution(missRuns),

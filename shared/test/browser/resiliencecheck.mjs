@@ -164,9 +164,11 @@ try {
 
   console.log('\n--- non-daily habits ---');
 
-  // For a 3x/week habit the four off-days are not failures, so day-level
-  // recovery would report a perfectly-kept habit as lapsing every week.
-  // Showing nothing is correct; showing a wrong number is not.
+  // This card used to be withheld from non-daily habits, because a miss meant
+  // "a day it was not done" and a 3x/week habit has four of those every week —
+  // a perfectly-kept habit would have read as lapsing continuously. A miss is
+  // now a day the habit fell below its RATE, which is a real failure at any
+  // frequency, so the card belongs here too.
   let checkedNonDaily = false;
   for (let i = 0; i < habits.length; i++) {
     await back();
@@ -177,8 +179,14 @@ try {
     if (isDaily) continue;
 
     const r = await readCard();
-    ck(`"${r.habit}" (non-daily) has no resilience card`, r.card === false,
+    ck(`"${r.habit}" (non-daily) shows the resilience card`, r.card === true,
       r.order.join(' > '));
+    ck('and it sits in the same place as on a daily habit',
+      r.order.indexOf('Bouncing back') === r.order.indexOf('Best streaks') + 1,
+      r.order.join(' > '));
+    ck('with real figures, not placeholders',
+      !r.hints.some((h) => /NaN|undefined|null|Infinity/.test(h)),
+      r.hints.join(' | '));
     checkedNonDaily = true;
     break;
   }
