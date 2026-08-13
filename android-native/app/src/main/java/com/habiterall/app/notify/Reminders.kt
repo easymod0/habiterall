@@ -78,9 +78,22 @@ object Reminders {
     private fun parseTime(value: String): LocalTime? =
         runCatching { LocalTime.parse(value) }.getOrNull()
 
-    fun schedule(context: Context, habit: Habit) {
+    /**
+     * Whether this habit should hold an alarm on this phone.
+     *
+     * [androidEnabled] is the account's `notifyChannels` setting: reminders can
+     * be sent to a Discord channel by the server instead of, or as well as,
+     * here. Switching this destination off has to stop the alarms — nothing
+     * else can, since the server never sends push and does not know about them.
+     */
+    fun wantsAlarm(habit: Habit, androidEnabled: Boolean): Boolean =
+        androidEnabled && !habit.archived && parseTime(habit.reminderTime) != null
+
+    fun schedule(context: Context, habit: Habit, androidEnabled: Boolean) {
+        // The null check is stated again here rather than left to `wantsAlarm`
+        // so `time` smart-casts below; the two cannot disagree.
         val time = parseTime(habit.reminderTime)
-        if (habit.archived || time == null) {
+        if (time == null || !wantsAlarm(habit, androidEnabled)) {
             cancel(context, habit.id)
             return
         }
@@ -143,10 +156,19 @@ object Reminders {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 runCatching {
-                    val cached = Settings(app).cachedReminders()
+                    val settings = Settings(app)
+                    // The cached answer, not an assumption: a phone the account
+                    // has switched off as a destination must not re-arm every
+                    // alarm on each reboot while it waits for connectivity.
+                    val enabled = settings.androidRemindersEnabled()
+                    val cached = settings.cachedReminders()
                     Notifications.ensureChannel(app)
                     cached.filter { habitId == null || it.id == habitId }
-                        .forEach { schedule(app, it) }
+                        // `schedule` cancels when it is not wanted, so a
+                        // destination that has just been switched off clears the
+                        // alarms it already holds rather than merely stopping
+                        // new ones.
+                        .forEach { schedule(app, it, enabled) }
                 }
             } finally {
                 onDone?.invoke()
@@ -206,6 +228,18 @@ object Reminders {
             // network — the whole point of the cache.
             runCatching { settings.cacheReminders(habits) }
 
+            // Whether this device is still a destination for reminders. A
+            // failed settings fetch falls back to the cached answer rather than
+            // to "enabled": one flaky request must not resurrect alarms the
+            // user turned off.
+            val enabled = try {
+                api.settings().androidRemindersEnabled().also {
+                    runCatching { settings.cacheAndroidReminders(it) }
+                }
+            } catch (e: Exception) {
+                settings.androidRemindersEnabled()
+            }
+
             Notifications.ensureChannel(applicationContext)
 
             if (only != null) {
@@ -215,9 +249,9 @@ object Reminders {
                 // reminder-less habits.
                 val habit = habits.firstOrNull { it.id == only }
                 if (habit == null) cancel(applicationContext, only)
-                else schedule(applicationContext, habit)
+                else schedule(applicationContext, habit, enabled)
             } else {
-                habits.forEach { schedule(applicationContext, it) }
+                habits.forEach { schedule(applicationContext, it, enabled) }
             }
             return Result.success()
         }

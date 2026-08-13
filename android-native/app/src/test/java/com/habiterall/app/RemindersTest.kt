@@ -1,7 +1,10 @@
 package com.habiterall.app
 
+import com.habiterall.app.data.AppSettings
+import com.habiterall.app.data.Habit
 import com.habiterall.app.notify.Reminders
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalTime
@@ -124,5 +127,41 @@ class RemindersTest {
         val now = at(2026, 3, 10, 23, 50)
         val next = Reminders.nextOccurrence(LocalTime.of(0, 0), now)
         assertEquals(at(2026, 3, 11, 0, 0).toInstant().toEpochMilli(), next)
+    }
+
+    /* ---------- this device as a notification destination ---------- */
+
+    private fun habit(time: String = "08:30", archived: Boolean = false) =
+        Habit(id = 1, name = "Meditate", reminderTime = time, archived = archived)
+
+    @Test
+    fun `an alarm is wanted only when this device is a destination`() {
+        assertTrue(Reminders.wantsAlarm(habit(), androidEnabled = true))
+        // Reminders may be going to a Discord channel instead. Nothing else can
+        // stop the alarms: the server sends no push and knows nothing of them.
+        assertFalse(Reminders.wantsAlarm(habit(), androidEnabled = false))
+    }
+
+    @Test
+    fun `a habit with no reminder time or an archived one never holds an alarm`() {
+        assertFalse(Reminders.wantsAlarm(habit(time = ""), androidEnabled = true))
+        assertFalse(Reminders.wantsAlarm(habit(time = "nonsense"), androidEnabled = true))
+        assertFalse(Reminders.wantsAlarm(habit(archived = true), androidEnabled = true))
+    }
+
+    @Test
+    fun `an account that has never chosen destinations still gets its alarms`() {
+        // Absent is not the same as empty: the server's default is on-device
+        // only, so a fresh install must arm alarms rather than wait to be told.
+        assertTrue(AppSettings(notifyChannels = null).androidRemindersEnabled)
+        assertTrue(AppSettings().androidRemindersEnabled)
+    }
+
+    @Test
+    fun `an explicit choice is honoured, including choosing nothing`() {
+        assertTrue(AppSettings(listOf("android")).androidRemindersEnabled)
+        assertTrue(AppSettings(listOf("discord", "android")).androidRemindersEnabled)
+        assertFalse(AppSettings(listOf("discord")).androidRemindersEnabled)
+        assertFalse(AppSettings(emptyList()).androidRemindersEnabled)
     }
 }

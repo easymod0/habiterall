@@ -57,6 +57,16 @@ class ReminderReceiver : BroadcastReceiver() {
             val settings = Settings(applicationContext)
             val api = settings.api()
 
+            // An alarm already armed when the account stopped wanting reminders
+            // here still fires once — `Reminders` cannot reach into a pending
+            // alarm from the moment the setting changes. Check again at the
+            // point of posting, or switching this destination off would appear
+            // not to work until the next sync.
+            if (!settings.androidRemindersEnabled()) {
+                Reminders.cancel(applicationContext, habitId)
+                return Result.success()
+            }
+
             // Prefer the live habit — its name and target may have changed —
             // but fall back to the cache rather than dropping the reminder.
             // `null` here means "we could not ask", which is NOT the same as
