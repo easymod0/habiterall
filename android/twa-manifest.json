@@ -1,4 +1,11 @@
 {
+  "_comment": [
+    "packageId is the permanent Android application id. Change it BEFORE the",
+    "first build — afterwards a different id installs as a separate app, and",
+    "the old one must be uninstalled by hand. Reverse-DNS of a domain you",
+    "control is the convention (e.g. com.yourname.habiterall).",
+    "host is overwritten by the release workflow from the TWA_HOST variable."
+  ],
   "packageId": "com.example.habiterall",
   "host": "habits.example.com",
   "name": "habiterall",

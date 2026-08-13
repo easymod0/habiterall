@@ -168,6 +168,15 @@ app.use(express.static(join(__dirname, '..', 'public')));
 app.use(express.static(SHARED_PUBLIC));
 app.use('/shared', express.static(SHARED_PUBLIC));
 
+// Digital Asset Links, verifying the Android TWA against this origin. Express
+// skips dotfiles by default, so `.well-known` needs an explicit mount or the
+// app shows a URL bar with no obvious cause. This must sit outside the auth
+// gate: Google fetches it unauthenticated.
+app.use('/.well-known', express.static(join(SHARED_PUBLIC, '.well-known'), {
+  dotfiles: 'allow',
+  setHeaders: (res) => res.type('application/json'),
+}));
+
 // A service worker may only control pages at or below its own path, so it has
 // to be served from the origin root even though it lives in shared/.
 app.get('/sw.js', (req, res) => {

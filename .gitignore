@@ -20,6 +20,11 @@ data/
 *.db-wal
 *.db-shm
 
+# ---- android ----
+# Generated per-deployment from YOUR signing key; committing a placeholder
+# would silently break TWA verification (the app shows a URL bar).
+shared/public/.well-known/assetlinks.json
+
 # ---- android signing ----
 # A leaked keystore lets anyone publish an update to your app.
 *.keystore
