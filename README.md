@@ -403,6 +403,20 @@ See [`.env.example`](habiterall-cloud/.env.example). Beyond the database and
 OIDC credentials: `MAX_HABITS_PER_USER`, `MAX_ENTRIES_PER_IMPORT`,
 `MAX_UPLOAD_MB`, and `PORT`.
 
+### Published images
+
+Every release publishes both editions to GitHub Container Registry, for
+`linux/amd64` and `linux/arm64`:
+
+```bash
+docker pull ghcr.io/easymod0/habiterall-personal:latest
+docker pull ghcr.io/easymod0/habiterall-cloud:latest
+```
+
+Tags are `X.Y.Z`, `X.Y` and `latest`, so a deployment can pin as tightly as it
+likes. Docker Hub is published to as well when its credentials are configured —
+see [`.github/workflows/README.md`](.github/workflows/README.md).
+
 ### Both editions: the reminder scheduler
 
 | Variable | Default | Purpose |

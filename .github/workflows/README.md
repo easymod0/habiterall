@@ -41,10 +41,11 @@ To try it without publishing, use **Actions → Release → Run workflow** and l
 *dry_run* ticked: everything builds, nothing is pushed, and the summary lists
 what would have been attached.
 
-Each part degrades on its own. No `DOCKERHUB_*` secrets means images are built
-but not pushed. No keystore means the APKs are unsigned (still sideloadable). No
-`TWA_HOST` means no TWA asset. The release still succeeds and says which parts
-were skipped.
+Each part degrades on its own. No keystore means the APKs are unsigned (still
+sideloadable). No `TWA_HOST` means no TWA asset. No `DOCKERHUB_*` secrets means
+the images go to GHCR only — which needs no secrets at all, so images are
+published either way. The release still succeeds and says which parts were
+skipped.
 
 ### `ci.yml` — the main suite
 
@@ -64,47 +65,47 @@ workflow itself.
 
 No secrets. No variables. Nothing to enable beyond Actions itself.
 
-### Publishing Docker images (optional)
+### Publishing images — nothing to configure
 
-`release.yml` pushes both editions to Docker Hub, and only for a release. It is
-**skipped entirely** when credentials are absent — the images are still built,
-which is what proves the Dockerfiles work, and the summary explains what to set.
-So you can ignore this section until you actually want published images.
+`release.yml` publishes both editions to **GitHub Container Registry**, and only
+for a release:
 
-This used to live in `ci.yml` and fire on every merge, which made every merge a
-release of `latest`.
+```
+ghcr.io/<your-github-owner>/habiterall-personal:1.4.0   (and :1.4, :latest)
+ghcr.io/<your-github-owner>/habiterall-cloud:1.4.0
+```
 
-It only runs on a push to `main` or a `v*` tag, never on a pull request.
+**No secrets.** The workflow's automatic `GITHUB_TOKEN` can push to GHCR given
+`packages: write`, which the job asks for. That is why GHCR is the default: a
+fresh clone of this repository can publish images without its owner configuring
+anything, which was never true of Docker Hub.
 
-| Kind | Name | Required |
+Built for **linux/amd64 and linux/arm64**, so the personal edition runs on a
+Raspberry Pi as well as a normal server.
+
+> **One manual step, once.** A package is **private** the first time it is
+> pushed, even from a public repository. Open **Packages → habiterall-personal →
+> Package settings → Change visibility → Public**, and it stays public for every
+> later release. Do the same for `habiterall-cloud`. Until then `docker pull`
+> asks for credentials.
+
+#### Docker Hub as well (optional)
+
+Set both secrets and every image is pushed to Docker Hub *in addition* to GHCR.
+Leave them unset and it is skipped, with a note in the run summary.
+
+| Kind | Name | Purpose |
 |---|---|---|
-| Secret | `DOCKERHUB_USERNAME` | to publish |
-| Secret | `DOCKERHUB_TOKEN` | to publish — an *access token*, not your password |
+| Secret | `DOCKERHUB_USERNAME` | enables the Docker Hub push |
+| Secret | `DOCKERHUB_TOKEN` | an *access token*, not your password |
 | Variable | `DOCKERHUB_NAMESPACE` | optional; defaults to the username |
 
-Create the token at **Docker Hub → Account Settings → Personal access
-tokens**, scoped *Read & Write*. Set `DOCKERHUB_NAMESPACE` only if you publish
-under an organisation rather than your own account.
+Create the token at **Docker Hub → Account Settings → Personal access tokens**,
+scoped *Read & Write*. Set the namespace only if you publish under an
+organisation rather than your own account.
 
-Images are built for **linux/amd64 and linux/arm64**, so the personal edition
-runs on a Raspberry Pi as well as a normal server:
-
-```
-<namespace>/habiterall-personal:latest
-<namespace>/habiterall-cloud:latest
-```
-
-Tagging follows the ref: `main` publishes `latest`, and a tag like `v1.2.3`
-publishes `1.2.3`, `1.2`, and a short-SHA tag, so a deployment can pin as
-tightly as it likes.
-
-```bash
-git tag v1.0.0 && git push origin v1.0.0
-```
-
-> Docker Hub's free tier allows unlimited public repositories and one private
-> one. Both images are pushed as whatever visibility the repository has on
-> Docker Hub — create them there first if you want them private.
+This publishing used to live in `ci.yml` and fire on every merge, which made
+every merge a release of `latest`.
 
 ### `android-native.yml` — the native client
 
