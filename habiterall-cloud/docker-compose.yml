@@ -124,6 +124,14 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
       TRUST_PROXY: ${TRUST_PROXY:-1}
+      # Server-sent reminders (a Discord webhook). Costs nothing until a user
+      # configures one; on-device reminders never involve this process.
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}
+      # Set to enable Discord buttons. Opens one outbound WebSocket; needs no
+      # inbound port.
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       # Local HTTP testing only; never set this in a real deployment.
       ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}
     ports:

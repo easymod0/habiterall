@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.habiterall.app.data.*
 import com.habiterall.app.notify.Reminders
+import com.habiterall.app.notify.ReminderTime
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 
@@ -273,10 +274,10 @@ class MainActivity : ComponentActivity() {
             ReminderDialog(
                 habit = habit,
                 onDismiss = { reminderFor = null },
-                onSave = { time ->
+                onSave = { time, message ->
                     reminderFor = null
                     lifecycleScope.launch {
-                        runCatching { api.setReminder(habit, time) }
+                        runCatching { api.setReminder(habit, time, message) }
                             .onSuccess {
                                 // Re-arm immediately: the schedule lives on the
                                 // server, but the alarm is local.
@@ -399,58 +400,168 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Set or clear a habit's reminder time.
+     * A dropdown for the hour, one for the minute, and a box to type into.
      *
-     * A plain HH:MM field rather than the platform picker: the value goes
-     * straight to the server as a `reminder_time` string, and a text field
-     * keeps that mapping obvious and testable. Clearing it removes the
-     * reminder, which is why "Remove" is a first-class button rather than a
-     * hidden gesture.
+     * All three edit one value, which is submitted verbatim as `reminder_time`.
+     * The dropdowns exist because picking 08:30 should not require typing a
+     * colon, and the text box stays because typing "830" or "8:30 pm" is
+     * faster than two menus — [ReminderTime.parse] is what makes those equal.
+     *
+     * This was a bare text field validated against `^HH:MM$`, which rejected
+     * every form anyone naturally types.
+     *
+     * "Remove" is a first-class button rather than a hidden gesture: clearing
+     * the field is how a reminder is deleted, and that should not be a guess.
      */
     @Composable
     private fun ReminderDialog(
         habit: Habit,
         onDismiss: () -> Unit,
-        onSave: (String) -> Unit,
+        onSave: (String, String) -> Unit,
     ) {
-        var text by remember { mutableStateOf(habit.reminderTime) }
-        val valid = text.isBlank() || Regex("^([01]\\d|2[0-3]):[0-5]\\d$").matches(text)
+        // The typed box is the source of truth, exactly as in the web dialog;
+        // the menus write into it.
+        var typed by remember { mutableStateOf(habit.reminderTime) }
+        var message by remember { mutableStateOf(habit.reminderMessage) }
+        val parsed = ReminderTime.parse(typed)
+        val valid = parsed != null
 
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(habit.name) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         "A notification with " +
                             (if (habit.isNumerical) "a count field" else "Yes / No buttons") +
                             " appears at this time, so you can answer without opening the app.",
                         style = MaterialTheme.typography.bodySmall,
                     )
+
+                    val current = ReminderTime.split(parsed ?: "")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        TimeMenu(
+                            label = current?.first ?: "--",
+                            options = ReminderTime.hours(),
+                            onPick = { hour ->
+                                typed = "$hour:${current?.second ?: "00"}"
+                            },
+                        )
+                        Text(":")
+                        TimeMenu(
+                            // The typed minute is included in the list, so an
+                            // odd 08:37 is not silently rounded to 08:35.
+                            label = current?.second ?: "--",
+                            options = ReminderTime.minutes(current?.second?.toIntOrNull())
+                                .map { it to it },
+                            onPick = { minute ->
+                                typed = "${current?.first ?: "08"}:$minute"
+                            },
+                        )
+                        OutlinedTextField(
+                            value = typed,
+                            onValueChange = { typed = it },
+                            label = { Text("or type") },
+                            placeholder = { Text("08:30") },
+                            singleLine = true,
+                            isError = !valid,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+
+                    Text(
+                        if (!valid) {
+                            "\"$typed\" is not a time — try 08:30, 8:30 pm or 2030."
+                        } else if (parsed.isNullOrEmpty()) {
+                            "No reminder — nothing will be sent for this habit."
+                        } else {
+                            ReminderTime.describe(parsed)
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (valid) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (common in ReminderTime.COMMON) {
+                            TextButton(onClick = { typed = common }) { Text(common) }
+                        }
+                    }
+
                     OutlinedTextField(
-                        value = text,
-                        onValueChange = { text = it.trim() },
-                        label = { Text("Time (24h, e.g. 08:30)") },
+                        value = message,
+                        onValueChange = {
+                            // One line, capped, matching LIMITS.reminderMessage:
+                            // the reminder cache is line-delimited, so a newline
+                            // here would corrupt the record it sits in.
+                            message = it.replace("\n", " ").take(200)
+                        },
+                        label = { Text("What the reminder asks") },
+                        placeholder = {
+                            Text(
+                                if (habit.isNumerical) "How many cups of water today?"
+                                else "Did you exercise today?"
+                            )
+                        },
                         singleLine = true,
-                        isError = !valid,
                         supportingText = {
-                            if (!valid) Text("Use HH:MM, for example 07:15")
+                            Text("Optional — blank uses the habit's name and goal.")
                         },
                     )
                 }
             },
             confirmButton = {
-                TextButton(enabled = valid, onClick = { onSave(text) }) { Text("Save") }
+                TextButton(
+                    enabled = valid,
+                    onClick = { onSave(parsed ?: "", message.trim()) },
+                ) { Text("Save") }
             },
             dismissButton = {
                 Row {
                     if (habit.reminderTime.isNotBlank()) {
-                        TextButton(onClick = { onSave("") }) { Text("Remove") }
+                        TextButton(onClick = { onSave("", message.trim()) }) { Text("Remove") }
                     }
                     TextButton(onClick = onDismiss) { Text("Cancel") }
                 }
             },
         )
+    }
+
+    /**
+     * One dropdown of `value to label` pairs.
+     *
+     * A button that opens a `DropdownMenu`, rather than an
+     * `ExposedDropdownMenuBox`: the hour list is 24 items and the minute list
+     * grows by one when an odd minute is typed, so the menu has to be
+     * rebuildable without the text-field plumbing the exposed variant brings.
+     */
+    @Composable
+    private fun TimeMenu(
+        label: String,
+        options: List<Pair<String, String>>,
+        onPick: (String) -> Unit,
+    ) {
+        var open by remember { mutableStateOf(false) }
+        Box {
+            OutlinedButton(onClick = { open = true }) { Text(label) }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                for ((value, text) in options) {
+                    DropdownMenuItem(
+                        text = { Text(text) },
+                        onClick = {
+                            open = false
+                            onPick(value)
+                        },
+                    )
+                }
+            }
+        }
     }
 
     private fun trim(n: Double): String =

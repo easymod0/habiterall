@@ -1,9 +1,10 @@
 # Builds a signed Android APK (a Trusted Web Activity wrapping the PWA) and
 # attaches it to a GitHub Release.
 #
-# A pull request validates that the wrapper still builds; merging to main
-# signs it and attaches it to a release. Nothing needs installing locally —
-# the JDK and Android SDK live on the runner.
+# A pull request — and a push to master — validate that the wrapper still
+# builds. Neither publishes: release.yml calls this workflow when a release is
+# tagged, and that is the only path that produces an asset. Nothing needs
+# installing locally; the JDK and Android SDK live on the runner.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #
@@ -31,7 +32,7 @@ on:
   # the TWA config itself, or the PWA assets it points at (icons, manifest,
   # service worker) — the wrapper embeds no logic of its own beyond those.
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'android/**'
       - '.github/workflows/android-release.yml'
@@ -53,6 +54,16 @@ on:
         description: 'Host to wrap (overrides the TWA_HOST variable)'
         required: false
         type: string
+  # Called by release.yml, which passes the version to stamp into the APK's
+  # name so the release asset says what it is.
+  workflow_call:
+    inputs:
+      host:
+        required: false
+        type: string
+      version:
+        required: false
+        type: string
 
 # Read-only by default. Only the build job publishes, and only on main, so
 # it asks for write itself rather than granting it to every PR run.
@@ -62,8 +73,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Read-only: this workflow builds and uploads an artifact, and release.yml
+    # is what publishes. Nothing here needs write access any more.
     permissions:
-      contents: write        # to create the release and upload the APK
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -169,8 +182,11 @@ jobs:
             m.maskableIconUrl  = 'https://' + host + '/shared/icons/icon-maskable-512.png';
             m.signingKey = { path: process.env.RUNNER_TEMP + '/android.keystore',
                              alias: process.env.KEY_ALIAS || m.signingKey.alias };
-            // Derive a version from the tag so each release installs over the last.
-            const tag = (process.env.GITHUB_REF_NAME || '').replace(/^android-v/, '');
+            // The version release.yml is cutting, or the tag if this ran on its
+            // own. Both APKs in a release must carry the same one, or the two
+            // Android builds of one release claim to be different versions.
+            const tag = (process.env.RELEASE_VERSION
+                      || process.env.GITHUB_REF_NAME || '').replace(/^(android-)?v/, '');
             if (/^\d+\.\d+\.\d+$/.test(tag)) {
               m.appVersionName = tag;
               const [maj, min, pat] = tag.split('.').map(Number);
@@ -211,23 +227,21 @@ jobs:
           echo "Put this in /.well-known/assetlinks.json on https://${{ steps.cfg.outputs.host }}" \
             >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Name the APK after the version
+        if: steps.cfg.outputs.skip != 'true'
+        working-directory: android
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          V="${RELEASE_VERSION:-dev}"
+          cp app-release-signed.apk "habiterall-twa-$V.apk"
+
       - uses: actions/upload-artifact@v4
         if: steps.cfg.outputs.skip != 'true'
         with:
-          name: habiterall-apk
-          path: android/app-release-signed.apk
+          name: apk-twa
+          path: android/habiterall-twa-*.apk
 
-      # A pull request validates that the wrapper still builds; it must not
-      # publish. Merging to main is what ships.
-      - name: Attach to the release
-        if: >-
-          steps.cfg.outputs.skip != 'true' &&
-          steps.keystore.outputs.real == 'true' &&
-          (github.event_name == 'push' && github.ref == 'refs/heads/main'
-           || github.event_name == 'workflow_dispatch')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: android/app-release-signed.apk
-          tag_name: twa-${{ github.sha }}
-          name: TWA wrapper (${{ github.sha }})
-          generate_release_notes: true
+      # Nothing is attached to a release from here. release.yml collects this
+      # artifact and publishes it with everything else, so one release carries
+      # one set of assets rather than a trickle of per-workflow tags.

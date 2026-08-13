@@ -14,6 +14,10 @@ Only what is coupled to storage:
 - `src/apply-import.js` — the SQLite *writer*; parsing is shared
 - a `settings` key/value table — preferences live server-side, so they survive
   a browser reset and are captured by the same backup as the habits
+- `src/notifier.js` — the storage half of server-sent reminders: read this
+  user's settings and habits, and record what has been sent (`notify_log`).
+  The scheduling and the delivery are in `@habiterall/shared/notify.js` and
+  `notify-send.js`
 - `public/app-entry.js` — three lines: pick the no-auth adapter, `start()`
 
 The entire UI is in `shared/public/` and served by the static mounts in
@@ -39,7 +43,9 @@ alone as real amounts, because only the former is unambiguous.
 so tests can mount the real server on an ephemeral port; importing the module
 must stay side-effect-free on that front, or every such test fights over port
 3000. `HABITERALL_DB` is read by `db.js` at module load, so a test has to set
-it *before* the first import.
+it *before* the first import. **The notifier starts in the same block, for a
+sharper version of the same reason**: a test that imported the server would
+otherwise start posting to whatever webhook the developer's own database holds.
 
 **`/overview` is bounded.** It reads lifetime entries for the streak figures,
 so the clamp inside `computeStreaks` is what keeps a distant-past entry from
@@ -51,6 +57,7 @@ blocking the process. Don't reintroduce an unbounded range here.
 npm start                 # http://localhost:3000  (no login)
 npm run seed              # sample data (refuses if habits already exist)
 npm test                  # the CSS-guard test
+npm run test:notify       # reminder delivery, and that a send is not repeated
 npm run test:roundtrip    # export every format, re-import, assert no drift
 docker compose up -d      # containerised
 ```

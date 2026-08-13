@@ -11,6 +11,10 @@ Postgres one.
 |---|---|
 | `src/stats.js` | scoring, streaks, resilience, history/weekday/frequency aggregation |
 | `src/validate.js` | every input rule for habits, entries, and dates |
+| `src/notify.js` | notification destinations, which reminders are due, what they say, and what a button means |
+| `src/notify-send.js` | delivering them, and the tick loop — network only through an injected `fetch` |
+| `src/discord.js` | posting as a bot (the only way to get buttons) and handling a press |
+| `src/discord-gateway.js` | the WebSocket that receives presses, so no inbound port is needed |
 | `src/import.js` | parsers: habiterall JSON, Loop `.db`, Loop CSV |
 | `src/export-loop.js` | writes a Loop-compatible `.db` |
 | `src/export-csv.js` | builds the `Habits.csv` + `Checkmarks.csv` archive |
@@ -23,6 +27,7 @@ Postgres one.
 | `public/ui/window.js` | how many columns a chart fits, and which slice to show |
 | `public/ui/resample.js` | thins the daily score series for the strength chart |
 | `public/ui/dates.js` | browser-side date helpers |
+| `public/ui/time.js` | parsing and formatting a reminder time, DOM-free so it is testable |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
 | `public/auth-none.js`, `auth-oidc.js` | the two auth adapters |
 | `public/charts.js` | hand-rolled SVG charts |
@@ -133,6 +138,15 @@ sentinel while `8` and `10` are dropped as unknown ones. That is why
 `/api/export.csv` returns a zip. `test/export-csv.test.js` pins the failure
 mode deliberately, so if the ambiguity ever goes away the test says so.
 
+**A setting the server normalises must be written with `save`, not `set`.**
+`set` applies locally and writes through, which is right for a value the client
+can judge and keeps it working offline. It is wrong for a webhook URL: whether
+it is acceptable depends on a host allowlist that lives with the fetch, so the
+control has to wait for the answer and then show what was *stored*. Both paths
+now `adopt` the server's reply, and `onChange` fires when it differed — that is
+what makes a pasted URL lose its query string in the field rather than only in
+the database.
+
 **A setting with an in-place toggle needs a session override.** `calendarZoom`,
 `historyGranularity` and `historyMode` all have controls in the detail view as
 well as entries in the dialog. The pattern: `state.X = null` means "use the
@@ -140,6 +154,30 @@ saved value", the toggle sets it for the session, and `applySetting` clears it
 when the dialog changes that key — otherwise the dialog appears to do nothing
 once a toggle has been touched. Read through the accessor, never
 `state.X` directly.
+
+**The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
+`android-native/.../ReminderTime.kt` accept the same inputs and produce the same
+`HH:MM`, because both clients write the same `reminder_time` on the same habit.
+`test/time.test.js` and `ReminderTimeTest` pin the same examples on purpose — if
+you add a form to one, add it to both. The two that catch people out: `12 am` is
+00:00 while `12 pm` is 12:00, and an empty box means "no reminder" while
+unparseable text is an error to report — the caller does different things with
+them, so they are `''` and `null` rather than both falsy.
+
+**The notifier reads its clock through `zonedClock`, never `new Date()`
+locally.** The zone decides two things, and the second is easy to miss: what
+time it is, *and* which calendar day the send is filed under. A server in UTC
+reminding someone in Auckland files it under the wrong date and re-sends hours
+later. Note `hourCycle: 'h23'` rather than `hour12: false` — en-US resolves the
+latter to h24 and formats midnight as `'24'`, so a 00:00 reminder is compared
+against 1440 minutes and never fires, with a correct-looking date beside it.
+`runTick` also *hands* the instant to `collect`, so the adapter cannot read a
+second clock a millisecond the other side of local midnight.
+
+**`shared/src` is not served to the browser.** Only `shared/public` is mounted,
+so `ui/settings.js` cannot import `notify.js` — the channel list is declared in
+both and pinned by `test/notify.test.js`, exactly as `SETTING_VALUES` is. Do not
+"fix" this by mounting `src/`.
 
 **Adding a setting means two files.** `public/ui/settings.js` declares what
 the dialog renders; `src/validate.js` declares what the server accepts. Both,

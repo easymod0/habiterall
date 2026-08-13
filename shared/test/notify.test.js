@@ -1,0 +1,680 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const {
+  CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
+  channelConfigured, completedIds, discordPayload, dueReminders, enabledChannels,
+  minutesOfDay, needsServerDelivery, parseChannelList, parseDiscordWebhook,
+  parseTimeZone, reminderMessage, serverChannels, zonedClock,
+} = await import('../src/notify.js');
+
+const { deliverAccount, postWebhook, runTick, sendToChannel } =
+  await import('../src/notify-send.js');
+
+const { parseSettings } = await import('../src/validate.js');
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/** A habit with a reminder, overridable per test. */
+const habit = (over = {}) => ({
+  id: 1, name: 'Meditate', description: '', type: 'boolean', unit: '',
+  target_value: 0, target_type: 'at_least', freq_numerator: 1,
+  freq_denominator: 1, color: '#3b82f6', reminder_time: '08:00',
+  archived: false, ...over,
+});
+
+/** An instant, given as UTC parts. */
+const utc = (y, mo, d, h, mi) => new Date(Date.UTC(y, mo - 1, d, h, mi));
+
+/* ---------- the registry and the UI must agree ---------- */
+
+test('every channel offered in the UI is one the server knows', () => {
+  // ui/settings.js declares what the dialog renders and notify.js declares
+  // what the server delivers. A channel in one and not the other is either a
+  // dead control or a destination nobody can switch on.
+  const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
+  const block = /const CHANNEL_OPTIONS = \[([\s\S]*?)\n\];/.exec(ui);
+  assert.ok(block, 'failed to find CHANNEL_OPTIONS in ui/settings.js');
+
+  const offered = [...block[1].matchAll(/\{ value: '([^']+)'/g)].map((m) => m[1]);
+  assert.deepEqual(offered, [...CHANNEL_IDS],
+    'the UI channel list must match CHANNELS in shared/src/notify.js, in order');
+});
+
+test('every channel declares how it is delivered', () => {
+  for (const [id, channel] of Object.entries(CHANNELS)) {
+    assert.ok(['device', 'server'].includes(channel.delivery),
+      `${id} has no usable delivery`);
+    assert.ok(Array.isArray(channel.configKeys), `${id} has no configKeys`);
+  }
+});
+
+/* ---------- webhook URLs ---------- */
+
+test('a real Discord webhook URL is accepted and canonicalised', () => {
+  const url = 'https://discord.com/api/webhooks/123456789012345678/aB3-_xYz';
+  assert.equal(parseDiscordWebhook(url), url);
+  assert.equal(parseDiscordWebhook(`  ${url}  `), url);
+  assert.equal(parseDiscordWebhook(`${url}?wait=true`), url,
+    'the query string must be dropped, not stored for the server to fetch');
+  assert.equal(parseDiscordWebhook(`${url}#frag`), url);
+  assert.equal(
+    parseDiscordWebhook('https://DISCORD.COM/api/webhooks/1/abc'),
+    'https://discord.com/api/webhooks/1/abc'
+  );
+  assert.equal(
+    parseDiscordWebhook('https://discord.com/api/v10/webhooks/1/abc'),
+    'https://discord.com/api/v10/webhooks/1/abc'
+  );
+  assert.equal(parseDiscordWebhook('https://ptb.discord.com/api/webhooks/1/abc'),
+    'https://ptb.discord.com/api/webhooks/1/abc');
+  assert.equal(parseDiscordWebhook('https://discordapp.com/api/webhooks/1/abc'),
+    'https://discordapp.com/api/webhooks/1/abc');
+});
+
+test('an empty webhook means "not configured", not an error', () => {
+  for (const blank of ['', '   ', null, undefined]) {
+    assert.equal(parseDiscordWebhook(blank), '');
+  }
+});
+
+test('the webhook host allowlist closes off request forgery', () => {
+  // The SERVER fetches this URL, so anything that is not Discord is a way to
+  // aim it at the private network and read the result back as a status code.
+  const hostile = [
+    'http://discord.com/api/webhooks/1/abc',            // plaintext
+    'https://169.254.169.254/api/webhooks/1/abc',       // cloud metadata
+    'https://localhost/api/webhooks/1/abc',
+    'https://127.0.0.1:5432/api/webhooks/1/abc',
+    'https://10.0.0.5/api/webhooks/1/abc',
+    'https://discord.com.evil.test/api/webhooks/1/abc', // suffix trick
+    'https://evil.test/api/webhooks/1/abc',
+    'https://notdiscord.com/api/webhooks/1/abc',
+    'https://user:pass@discord.com/api/webhooks/1/abc', // credentials
+    'file:///etc/passwd',
+    'gopher://discord.com/api/webhooks/1/abc',
+    'https://discord.com/api/webhooks/1/abc/../../admin', // path escape
+    'https://discord.com/login',                         // right host, wrong path
+    'javascript:alert(1)',
+    'not a url at all',
+    `https://discord.com/api/webhooks/1/${'a'.repeat(300)}`, // over the length cap
+  ];
+  for (const url of hostile) {
+    assert.equal(parseDiscordWebhook(url), undefined, `accepted ${url}`);
+  }
+});
+
+test('an embedded-credential URL cannot smuggle a host past the allowlist', () => {
+  // The classic: everything before the last @ is userinfo, so the real host is
+  // evil.test. Rejected for the host, not merely for the credentials.
+  assert.equal(
+    parseDiscordWebhook('https://discord.com@evil.test/api/webhooks/1/abc'),
+    undefined
+  );
+});
+
+/* ---------- channel lists and time zones ---------- */
+
+test('a channel list is normalised, not trusted', () => {
+  assert.deepEqual(parseChannelList(['discord', 'android']), ['android', 'discord'],
+    'stored in registry order so the value is canonical');
+  assert.deepEqual(parseChannelList(['android', 'android']), ['android']);
+  assert.deepEqual(parseChannelList([]), []);
+  assert.deepEqual(parseChannelList(['android', 'telegram']), ['android'],
+    'an unknown id is dropped so an older server tolerates a newer client');
+  for (const bad of ['android', null, 42, { android: true }]) {
+    assert.equal(parseChannelList(bad), undefined, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test('an account that has never touched the setting gets the defaults', () => {
+  assert.deepEqual(enabledChannels({}), [...DEFAULT_CHANNELS]);
+  assert.deepEqual(enabledChannels(), [...DEFAULT_CHANNELS]);
+  // An explicit empty list is a choice, not an absence: it must not be
+  // overwritten by the defaults, or "no notifications at all" is unreachable.
+  assert.deepEqual(enabledChannels({ notifyChannels: [] }), []);
+});
+
+test('a channel is only ready when its configuration is filled in', () => {
+  assert.equal(channelConfigured('android', {}), true, 'needs nothing');
+  assert.equal(channelConfigured('discord', {}), false);
+  assert.equal(channelConfigured('discord', { discordWebhook: '' }), false);
+  assert.equal(channelConfigured('discord', { discordWebhook: 'x' }), true);
+  assert.equal(channelConfigured('__proto__', {}), false,
+    'a key from a request body must not resolve to Object.prototype');
+});
+
+test('the server only delivers for channels that are on, its own, and ready', () => {
+  const url = 'https://discord.com/api/webhooks/1/abc';
+
+  assert.deepEqual(serverChannels({ notifyChannels: ['android'], discordWebhook: url }), [],
+    'the phone delivers its own alarms');
+  assert.deepEqual(serverChannels({ notifyChannels: ['discord'] }), [],
+    'enabled but unconfigured is not deliverable');
+  assert.deepEqual(
+    serverChannels({ notifyChannels: ['android', 'discord'], discordWebhook: url }),
+    ['discord']
+  );
+  assert.equal(needsServerDelivery({ notifyChannels: ['android'] }), false);
+  assert.equal(
+    needsServerDelivery({ notifyChannels: ['discord'], discordWebhook: url }), true);
+});
+
+test('a time zone is validated by asking Intl, not by pattern', () => {
+  assert.equal(parseTimeZone('Europe/Berlin'), 'Europe/Berlin');
+  assert.equal(parseTimeZone('UTC'), 'UTC');
+  assert.equal(parseTimeZone(''), '');
+  // Shaped like a zone, and not one. Storing it would throw inside the
+  // notifier tick — on a schedule, for one user, where nobody sees it.
+  assert.equal(parseTimeZone('Europe/Atlantis'), undefined);
+  assert.equal(parseTimeZone('Not/A/Zone'), undefined);
+  assert.equal(parseTimeZone('a'.repeat(200)), undefined);
+});
+
+/* ---------- the settings surface ---------- */
+
+test('the notification settings go through the same validator as the rest', () => {
+  const url = 'https://discord.com/api/webhooks/123/abc';
+  const { accepted, rejected } = parseSettings({
+    notifyChannels: ['discord', 'android'],
+    discordWebhook: `${url}?wait=true`,
+    notifyTimezone: 'America/Toronto',
+  });
+
+  assert.deepEqual(accepted, {
+    notifyChannels: ['android', 'discord'],
+    discordWebhook: url,
+    notifyTimezone: 'America/Toronto',
+  }, 'a normaliser stores what it returns, not what arrived');
+  assert.deepEqual(rejected, []);
+});
+
+test('a rejected notification setting is dropped like any other bad value', () => {
+  const { accepted, rejected } = parseSettings({
+    discordWebhook: 'https://evil.test/api/webhooks/1/abc',
+    notifyTimezone: 'Mars/Olympus',
+    notifyChannels: 'android',
+    dayOrder: 'newest-left',
+  });
+  assert.deepEqual(accepted, { dayOrder: 'newest-left' });
+  assert.deepEqual(rejected.sort(),
+    ['discordWebhook', 'notifyChannels', 'notifyTimezone']);
+});
+
+/* ---------- the clock ---------- */
+
+test('the local clock is read in the account\'s own zone', () => {
+  // 2026-08-13 23:30 UTC is already the 14th in Tokyo and still the 13th in
+  // Toronto. Both the date and the minute-of-day have to follow the zone: the
+  // date keys the "already sent" watermark.
+  const instant = utc(2026, 8, 13, 23, 30);
+
+  assert.deepEqual(zonedClock(instant, 'UTC'),
+    { date: '2026-08-13', time: '23:30', minutes: 23 * 60 + 30 });
+  assert.deepEqual(zonedClock(instant, 'Asia/Tokyo'),
+    { date: '2026-08-14', time: '08:30', minutes: 8 * 60 + 30 });
+  assert.deepEqual(zonedClock(instant, 'America/Toronto'),
+    { date: '2026-08-13', time: '19:30', minutes: 19 * 60 + 30 });
+});
+
+test('midnight is hour 00, not hour 24', () => {
+  // With `hour12: false` en-US resolves to the h24 cycle and formats midnight
+  // as '24' — so a 00:00 reminder would be compared against 1440 minutes and
+  // could never fire, while the date beside it stayed correct.
+  const clock = zonedClock(utc(2026, 8, 13, 0, 0), 'UTC');
+  assert.equal(clock.time, '00:00');
+  assert.equal(clock.minutes, 0);
+  assert.equal(clock.date, '2026-08-13');
+});
+
+test('a reminder keeps its wall time across a DST change', () => {
+  // Toronto springs forward on 2026-03-08. 08:00 local is 13:00 UTC before and
+  // 12:00 UTC after; computing in UTC offsets would drift the reminder by an
+  // hour for half the year.
+  const before = zonedClock(utc(2026, 3, 7, 13, 0), 'America/Toronto');
+  const after = zonedClock(utc(2026, 3, 9, 12, 0), 'America/Toronto');
+  assert.equal(before.time, '08:00');
+  assert.equal(after.time, '08:00');
+});
+
+test('minutesOfDay only accepts a real HH:MM', () => {
+  assert.equal(minutesOfDay('00:00'), 0);
+  assert.equal(minutesOfDay('08:30'), 510);
+  assert.equal(minutesOfDay('23:59'), 1439);
+  for (const bad of ['', '8:30', '24:00', '23:60', 'ab:cd', null, undefined, '08:30:00']) {
+    assert.equal(minutesOfDay(bad), null, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+/* ---------- what is due ---------- */
+
+const dueAt = (isoUtc, over = {}, args = {}) => dueReminders({
+  habits: [habit(over)],
+  instant: new Date(isoUtc),
+  timeZone: 'UTC',
+  ...args,
+});
+
+test('a reminder fires in its own minute', () => {
+  const due = dueAt('2026-08-13T08:00:00Z');
+  assert.equal(due.length, 1);
+  assert.deepEqual(
+    { date: due[0].date, time: due[0].time },
+    { date: '2026-08-13', time: '08:00' }
+  );
+});
+
+test('a reminder does not fire before its time', () => {
+  assert.deepEqual(dueAt('2026-08-13T07:59:00Z'), []);
+});
+
+test('a missed reminder is caught up, but only briefly', () => {
+  // The server may have been restarting. Half an hour late is still useful;
+  // six hours late is a lie, and waking up after a day of downtime must not
+  // fire a day of reminders at once.
+  assert.equal(dueAt(`2026-08-13T08:${String(CATCH_UP_MINUTES).padStart(2, '0')}:00Z`).length, 1);
+  assert.equal(dueAt('2026-08-13T08:31:00Z').length, 0);
+  assert.equal(dueAt('2026-08-13T14:00:00Z').length, 0);
+});
+
+test('a reminder whose window straddles midnight is dropped, not re-dated', () => {
+  // 23:50 with the next tick at 00:05 the following day. Sending it then would
+  // file it under tomorrow's date — misreporting the day AND consuming
+  // tomorrow's slot, so tomorrow's real reminder would never go.
+  const late = habit({ reminder_time: '23:50' });
+  assert.equal(dueReminders({
+    habits: [late], instant: new Date('2026-08-14T00:05:00Z'), timeZone: 'UTC',
+  }).length, 0);
+  assert.equal(dueReminders({
+    habits: [late], instant: new Date('2026-08-13T23:55:00Z'), timeZone: 'UTC',
+  }).length, 1);
+});
+
+test('habits without a reminder, or archived, are never due', () => {
+  assert.deepEqual(dueAt('2026-08-13T08:00:00Z', { reminder_time: '' }), []);
+  assert.deepEqual(dueAt('2026-08-13T08:00:00Z', { archived: true }), []);
+});
+
+test('a habit already done today is not nagged', () => {
+  const done = dueAt('2026-08-13T08:00:00Z', {}, { doneToday: new Set([1]) });
+  assert.deepEqual(done, []);
+});
+
+test('a reminder already sent today is not sent again', () => {
+  const args = { alreadySent: (id, date) => id === 1 && date === '2026-08-13' };
+  assert.deepEqual(dueAt('2026-08-13T08:00:00Z', {}, args), []);
+  // The next day is a different key, so it fires again.
+  assert.equal(dueAt('2026-08-14T08:00:00Z', {}, args).length, 1);
+});
+
+test('the due date follows the user\'s zone, not the server\'s', () => {
+  // 08:00 in Tokyo on the 14th is 23:00 UTC on the 13th. A watermark written
+  // under the UTC date would be the wrong day for this user.
+  const due = dueReminders({
+    habits: [habit()],
+    instant: utc(2026, 8, 13, 23, 0),
+    timeZone: 'Asia/Tokyo',
+  });
+  assert.equal(due.length, 1);
+  assert.equal(due[0].date, '2026-08-14');
+});
+
+test('completedIds asks isCompleted, so a numerical 3 is an amount', () => {
+  const habits = [
+    habit({ id: 1, type: 'boolean' }),
+    habit({ id: 2, type: 'numerical', target_value: 3, target_type: 'at_least' }),
+    habit({ id: 3, type: 'numerical', target_value: 3, target_type: 'at_least' }),
+  ];
+  const done = completedIds(habits, [
+    { habit_id: 1, value: 2, status: '' },     // a checkmark
+    { habit_id: 2, value: 3, status: '' },     // three of something: done
+    { habit_id: 3, value: 3, status: 'skip' }, // a skip that happens to hold 3
+  ]);
+  assert.deepEqual([...done].sort(), [1, 2]);
+});
+
+/* ---------- what it says ---------- */
+
+test('the reminder text describes the goal it is reminding about', () => {
+  assert.match(reminderMessage(habit()).body, /have you done this today/i);
+  assert.match(
+    reminderMessage(habit({ type: 'numerical', target_value: 8, unit: 'glasses' })).body,
+    /at least 8 glasses/
+  );
+  assert.match(
+    reminderMessage(habit({
+      type: 'numerical', target_value: 2, target_type: 'at_most', unit: 'cigarettes',
+    })).body,
+    /at most 2 cigarettes/
+  );
+  assert.match(reminderMessage(habit(), { test: true }).body, /test notification/i);
+});
+
+test('a target is not scaled by 1000 — only entry values are', () => {
+  // Scaling the target once turned "at most 2 times" into "at most 0.002".
+  const body = reminderMessage(habit({
+    type: 'numerical', target_value: 2, target_type: 'at_most', unit: '',
+  })).body;
+  assert.match(body, /at most 2\b/);
+  assert.doesNotMatch(body, /0\.002/);
+});
+
+test('a Discord payload carries the habit, its colour, and no mentions', () => {
+  const payload = discordPayload({
+    habit: habit({ description: 'ten minutes' }),
+    message: reminderMessage(habit()),
+    date: '2026-08-13',
+    appUrl: 'https://habits.example/',
+  });
+
+  const [embed] = payload.embeds;
+  assert.equal(embed.title, 'Meditate');
+  assert.equal(embed.color, 0x3b82f6);
+  assert.equal(embed.footer.text, '2026-08-13');
+  assert.equal(embed.url, 'https://habits.example/');
+  assert.deepEqual(embed.fields, [{ name: 'Notes', value: 'ten minutes' }]);
+  // A habit may be named '@everyone'. Embeds do not resolve mentions today,
+  // but this is the guarantee rather than an accident of where the text sits.
+  assert.deepEqual(payload.allowed_mentions, { parse: [] });
+});
+
+test('a Discord payload omits what it does not know', () => {
+  const payload = discordPayload({ habit: habit(), message: reminderMessage(habit()) });
+  const [embed] = payload.embeds;
+  assert.equal(embed.url, undefined, 'no invented link when no public URL is set');
+  assert.equal(embed.fields, undefined);
+  assert.equal(embed.footer, undefined);
+});
+
+test('an over-long name or note is truncated to Discord\'s limits', () => {
+  const payload = discordPayload({
+    habit: habit({ name: 'n'.repeat(400), description: 'd'.repeat(2000) }),
+    message: reminderMessage(habit({ name: 'n'.repeat(400) })),
+  });
+  const [embed] = payload.embeds;
+  assert.equal(embed.title.length, 256);
+  assert.equal(embed.fields[0].value.length, 1024);
+});
+
+/* ---------- delivery ---------- */
+
+/** A fetch stand-in that records what it was asked to do. */
+function fakeFetch(responses) {
+  const calls = [];
+  const queue = [...responses];
+  const doFetch = async (url, init) => {
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    if (next instanceof Error) throw next;
+    return {
+      status: next.status,
+      headers: { get: (h) => next.headers?.[h.toLowerCase()] ?? null },
+    };
+  };
+  doFetch.calls = calls;
+  return doFetch;
+}
+
+test('a successful post reports ok', async () => {
+  const fetch = fakeFetch([{ status: 204 }]);
+  const result = await postWebhook('https://discord.com/api/webhooks/1/a', { x: 1 },
+    { fetch });
+
+  assert.deepEqual(result, { ok: true, status: 204 });
+  assert.equal(fetch.calls[0].init.method, 'POST');
+  assert.equal(fetch.calls[0].init.redirect, 'manual',
+    'following a redirect would walk straight around the host allowlist');
+  assert.deepEqual(fetch.calls[0].body, { x: 1 });
+});
+
+test('a deleted webhook is a permanent failure, not something to retry', async () => {
+  for (const status of [401, 403, 404]) {
+    const result = await postWebhook('https://discord.com/api/webhooks/1/a', {},
+      { fetch: fakeFetch([{ status }]) });
+    assert.equal(result.ok, false);
+    assert.equal(result.permanent, true, `${status} should be permanent`);
+  }
+});
+
+test('a 500 or a timeout is a retryable failure', async () => {
+  const server = await postWebhook('https://discord.com/api/webhooks/1/a', {},
+    { fetch: fakeFetch([{ status: 500 }]) });
+  assert.equal(server.ok, false);
+  assert.ok(!server.permanent);
+
+  const aborted = Object.assign(new Error('aborted'), { name: 'AbortError' });
+  const timeout = await postWebhook('https://discord.com/api/webhooks/1/a', {},
+    { fetch: fakeFetch([aborted]) });
+  assert.equal(timeout.ok, false);
+  assert.ok(!timeout.permanent);
+  assert.match(timeout.error, /no response within/);
+});
+
+test('a 429 reports how long Discord asked us to wait', async () => {
+  const result = await postWebhook('https://discord.com/api/webhooks/1/a', {},
+    { fetch: fakeFetch([{ status: 429, headers: { 'retry-after': '2.5' } }]) });
+  assert.equal(result.ok, false);
+  assert.equal(result.retryAfterMs, 2500);
+});
+
+test('a 429 with no advice still asks for a wait, not zero', async () => {
+  // Zero would read as "no wait requested" and therefore as "do not retry",
+  // turning a transient limit into a dropped reminder.
+  for (const headers of [undefined, { 'retry-after': 'soon' }, { 'retry-after': '0' }]) {
+    const result = await postWebhook('https://discord.com/api/webhooks/1/a', {},
+      { fetch: fakeFetch([{ status: 429, headers }]) });
+    assert.ok(result.retryAfterMs > 0, `${JSON.stringify(headers)} gave ${result.retryAfterMs}`);
+  }
+  // And an absurd one is capped rather than parking the tick for an hour.
+  const capped = await postWebhook('https://discord.com/api/webhooks/1/a', {},
+    { fetch: fakeFetch([{ status: 429, headers: { 'retry-after': '99999' } }]) });
+  assert.equal(capped.retryAfterMs, 60_000);
+});
+
+test('a device channel is never posted anywhere', async () => {
+  const fetch = fakeFetch([{ status: 204 }]);
+  const result = await sendToChannel('android', { habit: habit(), settings: {} }, { fetch });
+  assert.equal(result.ok, false);
+  assert.equal(fetch.calls.length, 0);
+});
+
+/* ---------- a whole tick ---------- */
+
+const account = (over = {}) => ({
+  id: 7,
+  settings: {
+    notifyChannels: ['android', 'discord'],
+    discordWebhook: 'https://discord.com/api/webhooks/1/abc',
+    notifyTimezone: 'UTC',
+  },
+  habits: [habit()],
+  doneToday: new Set(),
+  alreadySent: () => false,
+  ...over,
+});
+
+test('a tick delivers what is due and records it', async () => {
+  const marked = [];
+  const fetch = fakeFetch([{ status: 204 }]);
+
+  const result = await runTick({
+    collect: () => [account()],
+    mark: (acc, habitId, channel, date) => marked.push([acc.id, habitId, channel, date]),
+    instant: utc(2026, 8, 13, 8, 0),
+    fetch,
+  });
+
+  assert.deepEqual(result, { accounts: 1, sent: 1, failed: 0 });
+  assert.deepEqual(marked, [[7, 1, 'discord', '2026-08-13']]);
+  assert.equal(fetch.calls.length, 1);
+  assert.match(fetch.calls[0].url, /^https:\/\/discord\.com\/api\/webhooks\//);
+});
+
+test('collect is handed the tick\'s own instant', async () => {
+  // Not left to read its own clock: it has to resolve the user's local date to
+  // answer "already sent today", and two clock reads either side of local
+  // midnight would check yesterday's watermark against today's date.
+  let seen;
+  await runTick({
+    collect: (instant) => { seen = instant; return []; },
+    mark: () => {},
+    instant: utc(2026, 8, 13, 8, 0),
+  });
+  assert.equal(Number(seen), Number(utc(2026, 8, 13, 8, 0)));
+});
+
+test('a failed send is not recorded, so the next tick retries it', async () => {
+  const marked = [];
+  const result = await deliverAccount(account(), {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: (...args) => marked.push(args),
+    fetch: fakeFetch([{ status: 500 }]),
+    log: { warn: () => {} },
+  });
+
+  assert.deepEqual(result, { sent: 0, failed: 1 });
+  assert.deepEqual(marked, [], 'a retryable failure must leave the slot open');
+});
+
+test('a permanently failed send IS recorded, so it is not retried all day', async () => {
+  const marked = [];
+  await deliverAccount(account(), {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: (...args) => marked.push(args),
+    fetch: fakeFetch([{ status: 404 }]),
+    log: { warn: () => {} },
+  });
+  assert.equal(marked.length, 1, 'a deleted webhook will not start working before midnight');
+});
+
+test('an account with no server destination costs no requests', async () => {
+  const fetch = fakeFetch([{ status: 204 }]);
+  const result = await deliverAccount(
+    account({ settings: { notifyChannels: ['android'] } }),
+    { instant: utc(2026, 8, 13, 8, 0), mark: () => {}, fetch }
+  );
+  assert.deepEqual(result, { sent: 0, failed: 0 });
+  assert.equal(fetch.calls.length, 0);
+});
+
+test('one account\'s storage failure does not stop the others', async () => {
+  const errors = [];
+  const result = await runTick({
+    collect: () => [
+      account({ id: 1, alreadySent: () => { throw new Error('database gone'); } }),
+      account({ id: 2 }),
+    ],
+    mark: () => {},
+    instant: utc(2026, 8, 13, 8, 0),
+    fetch: fakeFetch([{ status: 204 }]),
+    log: { warn: () => {}, error: (...a) => errors.push(a) },
+  });
+
+  assert.equal(result.sent, 1, 'the second account still got its reminder');
+  assert.equal(errors.length, 1);
+});
+
+test('the watermark is per channel, so a new destination is not silenced', async () => {
+  // The phone handled this habit this morning, and Discord was switched on
+  // afterwards. A watermark keyed on the habit alone would swallow the first
+  // Discord reminder.
+  const sent = new Set(['1:android']);
+  const marked = [];
+  await deliverAccount(
+    account({ alreadySent: (id, channel) => sent.has(`${id}:${channel}`) }),
+    {
+      instant: utc(2026, 8, 13, 8, 0),
+      mark: (...args) => marked.push(args),
+      fetch: fakeFetch([{ status: 204 }]),
+    }
+  );
+  assert.equal(marked.length, 1);
+  assert.equal(marked[0][2], 'discord');
+});
+
+test('a rate-limited send waits the requested time and retries once', async () => {
+  // Five habits due at 08:00 on one webhook is enough to trip Discord's limit.
+  // Leaving it to the next tick would trip it again a minute later, so the wait
+  // it asks for is honoured — once.
+  const fetch = fakeFetch([
+    { status: 429, headers: { 'retry-after': '0.01' } },
+    { status: 204 },
+  ]);
+  const marked = [];
+  const result = await deliverAccount(account(), {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: (...args) => marked.push(args),
+    fetch,
+  });
+
+  assert.deepEqual(result, { sent: 1, failed: 0 });
+  assert.equal(fetch.calls.length, 2, 'the retry must actually be sent');
+  assert.equal(marked.length, 1, 'and recorded once, not twice');
+});
+
+test('a second rate limit gives up rather than looping', async () => {
+  const fetch = fakeFetch([{ status: 429, headers: { 'retry-after': '0.01' } }]);
+  const result = await deliverAccount(account(), {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => {},
+    fetch,
+    log: { warn: () => {} },
+  });
+
+  assert.deepEqual(result, { sent: 0, failed: 1 });
+  assert.equal(fetch.calls.length, 2);
+});
+
+/* ---------- a custom prompt per habit ---------- */
+
+test('a custom prompt leads, and the habit name becomes the subtitle', () => {
+  const message = reminderMessage(habit({ reminder_message: 'Did you exercise today?' }));
+  assert.equal(message.title, 'Did you exercise today?');
+  assert.equal(message.subtitle, 'Meditate',
+    'a channel carrying several habits still has to say which one is asking');
+  // The generated sentence is dropped: "have you done this today?" under
+  // "Did you exercise today?" is the same question twice.
+  assert.doesNotMatch(message.body, /have you done this today/i);
+});
+
+test('a measurable habit keeps its goal alongside a custom prompt', () => {
+  const message = reminderMessage(habit({
+    type: 'numerical', target_value: 8, unit: 'glasses',
+    reminder_message: 'How many glasses of water so far?',
+  }));
+  assert.equal(message.title, 'How many glasses of water so far?');
+  assert.match(message.body, /at least 8 glasses/);
+});
+
+test('no prompt behaves exactly as before', () => {
+  const message = reminderMessage(habit({ reminder_message: '' }));
+  assert.equal(message.title, 'Meditate');
+  assert.equal(message.subtitle, '');
+  assert.match(message.body, /have you done this today/i);
+});
+
+test('a blank-but-present prompt is not treated as one', () => {
+  const message = reminderMessage(habit({ reminder_message: '   ' }));
+  assert.equal(message.title, 'Meditate');
+});
+
+test('the Discord embed carries the prompt as its title', () => {
+  const h = habit({ reminder_message: 'Did you exercise today?', description: '' });
+  const payload = discordPayload({ habit: h, message: reminderMessage(h), date: '2026-08-13' });
+  const [embed] = payload.embeds;
+  assert.equal(embed.title, 'Did you exercise today?');
+  assert.equal(embed.author.name, 'Meditate');
+  assert.equal(embed.description, undefined, 'nothing to add for a yes/no habit');
+});
+
+test('a prompt at the limit is not truncated on the way out', () => {
+  // LIMITS.reminderMessage is 200 and Discord's embed title cap is 256, so a
+  // prompt the server accepted must always survive the send intact.
+  const prompt = 'q'.repeat(200);
+  const h = habit({ reminder_message: prompt });
+  const payload = discordPayload({ habit: h, message: reminderMessage(h) });
+  assert.equal(payload.embeds[0].title, prompt);
+});

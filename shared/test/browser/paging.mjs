@@ -5,17 +5,15 @@
  * arrows re-rendered an empty grid — every past day looked unrecorded even
  * though the stats view showed the data.
  */
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME } from './chrome.mjs';
+import { closeChrome, launchChrome } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = 9306;
 const profile = mkdtempSync(join(tmpdir(), 'habpage-'));
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${PORT}`,
-  `--user-data-dir=${profile}`, '--no-first-run', '--disable-gpu', 'about:blank'], { stdio: 'ignore' });
+const chrome = launchChrome(PORT, profile);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let fails = 0;
@@ -109,7 +107,6 @@ try {
 } catch (e) {
   console.error('ERR', e.message); fails++;
 } finally {
-  chrome.kill();
-  try { rmSync(profile, { recursive: true, force: true }); } catch {}
+  await closeChrome({ chrome, port: PORT, profile });
   process.exit(fails ? 1 : 0);
 }

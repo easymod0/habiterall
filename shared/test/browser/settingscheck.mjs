@@ -1,13 +1,11 @@
 /** Settings dialog: persistence, and that dayOrder actually flips the grid. */
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME } from './chrome.mjs';
+import { closeChrome, launchChrome } from './chrome.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT=9291;
 const profile=mkdtempSync(join(tmpdir(),'habset-'));
-const chrome=spawn(CHROME,['--headless=new',`--remote-debugging-port=${PORT}`,
- `--user-data-dir=${profile}`,'--no-first-run','--disable-gpu','about:blank'],{stdio:'ignore'});
+const chrome=launchChrome(PORT, profile);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let fails=0;const ck=(l,c,e='')=>{console.log((c?'PASS':'FAIL')+'  '+l+(e?' :: '+e:''));if(!c)fails++;};
 let ws,nid=1;const pend=new Map();
@@ -160,4 +158,4 @@ try{
 
   console.log(fails===0?'\nALL SETTINGS CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}
-finally{chrome.kill();try{rmSync(profile,{recursive:true,force:true});}catch{};process.exit(fails?1:0);}
+finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}

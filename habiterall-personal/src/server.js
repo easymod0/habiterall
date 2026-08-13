@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { api } from './api.js';
 import { db } from './db.js';
+import { start as startNotifier } from './notifier.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -63,8 +64,14 @@ if (isEntryPoint) {
     console.log(`habiterall listening on http://localhost:${PORT}`);
   });
 
+  // Only from the entry point, exactly like `listen`: a test that imports this
+  // module for its routes must not start posting real reminders to whatever
+  // webhook the developer's own database happens to hold.
+  const notifier = startNotifier();
+
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.on(signal, () => {
+      notifier?.stop();
       server.close(() => {
         db.close();
         process.exit(0);

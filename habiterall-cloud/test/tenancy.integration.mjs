@@ -196,6 +196,90 @@ try {
 } catch { victimOk = false; }
 check('bob can still write and clear that day', victimOk);
 
+/* ---------- the reminder scheduler's scope ---------- */
+//
+// Migration 008 adds the only policy in the schema that lets a query see more
+// than one user's rows. It is gated on a transaction-local `app.scope` flag
+// that the request path never sets, and it is FOR SELECT on `users` alone —
+// these checks are what says so.
+
+console.log('--- notify_log is isolated like everything else ---');
+// Fresh habits: the replace-mode import attack above deleted alice's original.
+const aliceReminder = await mk(alice.id, 'Alice Reminder Habit');
+
+await withUser(alice.id, (db) => db.query(
+  `INSERT INTO notify_log (user_id, habit_id, channel, date)
+   VALUES ($1, $2, 'discord', '2026-01-01')`, [alice.id, aliceReminder]));
+
+const bobSeesLog = await withUser(bob.id, (db) =>
+  db.query('SELECT * FROM notify_log').then(r => r.rows.length));
+check('bob cannot read alice\'s send history', bobSeesLog === 0, `rows=${bobSeesLog}`);
+
+// The same attack as migration 007's, on the new table: the primary key is
+// (habit_id, channel, date) with no user_id, so a row carrying the attacker's
+// user_id and the victim's habit_id would occupy a slot the victim cannot see
+// — and the victim's own INSERT would then fail on a conflict with an
+// invisible row, costing them that reminder permanently.
+let logSquatBlocked = false;
+try {
+  await withUser(bob.id, (db) => db.query(
+    `INSERT INTO notify_log (user_id, habit_id, channel, date)
+     VALUES ($1, $2, 'discord', '2026-02-02')`, [bob.id, aliceReminder]));
+} catch { logSquatBlocked = true; }
+check("bob cannot log a send against alice's habit", logSquatBlocked);
+
+let aliceCanStillLog = false;
+try {
+  await withUser(alice.id, (db) => db.query(
+    `INSERT INTO notify_log (user_id, habit_id, channel, date)
+     VALUES ($1, $2, 'discord', '2026-02-02')`, [alice.id, aliceReminder]));
+  aliceCanStillLog = true;
+} catch { aliceCanStillLog = false; }
+check('and alice can still use that slot herself', aliceCanStillLog);
+
+console.log('--- attack: claim the notifier scope from a user session ---');
+const scoped = async (claimScope) => withUser(alice.id, async (db) => {
+  if (claimScope) await db.query(`SELECT set_config('app.scope', 'notifier', true)`);
+  return {
+    users: (await db.query('SELECT COUNT(*)::int c FROM users')).rows[0].c,
+    habits: (await db.query('SELECT COUNT(*)::int c FROM habits')).rows[0].c,
+  };
+});
+// Compared against the same request without the flag, rather than against a
+// hardcoded count: what matters is that claiming the scope changes nothing.
+const honest = await scoped(false);
+const forged = await scoped(true);
+check('the scope flag cannot widen a request that has a user',
+  forged.users === 1 && JSON.stringify(forged) === JSON.stringify(honest),
+  `${JSON.stringify(honest)} -> ${JSON.stringify(forged)}`);
+
+console.log('--- the scan itself sees users, and nothing else ---');
+const { withNotifierScope } = await import('../src/db/pool.js');
+const scan = await withNotifierScope(async (db) => ({
+  users: (await db.query('SELECT COUNT(*)::int c FROM users')).rows[0].c,
+  habits: (await db.query('SELECT COUNT(*)::int c FROM habits')).rows[0].c,
+  entries: (await db.query('SELECT COUNT(*)::int c FROM entries')).rows[0].c,
+  log: (await db.query('SELECT COUNT(*)::int c FROM notify_log')).rows[0].c,
+}));
+check('the scan can enumerate accounts (it has to)', scan.users === 2, JSON.stringify(scan));
+check('but reaches no habit, entry, or send history',
+  scan.habits === 0 && scan.entries === 0 && scan.log === 0, JSON.stringify(scan));
+
+let scanWriteBlocked = false;
+try {
+  await withNotifierScope((db) =>
+    db.query(`UPDATE users SET display_name = 'pwned' WHERE id = $1`, [alice.id]));
+} catch { scanWriteBlocked = true; }
+check('the scan cannot write anything', scanWriteBlocked);
+
+console.log('--- and the flag does nothing without the scope helper ---');
+let plainNoCtx = 0;
+try {
+  plainNoCtx = await withoutUser((db) =>
+    db.query('SELECT COUNT(*)::int c FROM users').then(r => r.rows[0].c));
+} catch { plainNoCtx = -1; }
+check('no user and no scope still sees zero users', plainNoCtx === 0, `rows=${plainNoCtx}`);
+
 await admin.end();
 await pool.end();
 console.log(fails === 0 ? '\nALL TENANCY CHECKS PASSED' : `\n${fails} TENANCY CHECK(S) FAILED`);

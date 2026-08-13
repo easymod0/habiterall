@@ -144,11 +144,31 @@
         <input name="color" type="color" value="#3b82f6">
       </label>
 
-      <label>Reminder
-        <input name="reminder_time" type="time" autocomplete="off">
+      <fieldset class="timefield" id="reminder-field">
+        <legend>Reminder</legend>
+        <div class="timefield-row">
+          <select id="reminder-hour" aria-label="Reminder hour"></select>
+          <span class="timefield-sep" aria-hidden="true">:</span>
+          <select id="reminder-minute" aria-label="Reminder minute"></select>
+          <!-- The canonical value, and the only field that is submitted. The
+               two selects above write into it; typing into it writes back. -->
+          <input name="reminder_time" id="reminder-typed" type="text"
+                 inputmode="numeric" autocomplete="off" placeholder="08:30"
+                 aria-label="Reminder time, typed">
+          <button type="button" id="reminder-clear" class="btn btn-sm"
+                  title="Remove the reminder">Clear</button>
+        </div>
+        <div class="timefield-presets" id="reminder-presets"></div>
+        <span class="field-hint" id="reminder-hint">
+          Optional. Type any time (8:30, 8:30 pm, 2030) or pick one.
+        </span>
+      </fieldset>
+
+      <label id="reminder-message-wrap">What the reminder asks
+        <input name="reminder_message" type="text" maxlength="200"
+               autocomplete="off" placeholder="Did you exercise today?">
         <span class="field-hint">
-          Optional. The Android app rings at this time; the web app does not
-          send notifications.
+          Optional. Left blank, the notification uses the habit's name and goal.
         </span>
       </label>
 
@@ -197,7 +217,7 @@
 
   <dialog id="settings-dialog">
     <h2>Settings</h2>
-    <p class="hint">Stored on this device.</p>
+    <p class="hint">Stored on the server, so they follow your account.</p>
     <div id="settings-body"></div>
     <div class="dialog-actions">
       <button type="button" id="settings-reset" class="btn">Reset to defaults</button>
