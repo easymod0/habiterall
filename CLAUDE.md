@@ -10,7 +10,7 @@ non-obvious decisions below were each paid for with a real bug.
 shared/               EVERYTHING both editions have in common
   src/                pure logic — no database, no HTTP, no DOM
   public/             the entire UI, plus the PWA (manifest, sw, offline queue)
-  public/ui/          settings registry, date helpers, theme, auth adapters
+  public/ui/          one module per view and dialog, over a shared store
   test/               unit tests + browser suites (test/browser/)
 habiterall-personal/  single user, SQLite, no auth   (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)

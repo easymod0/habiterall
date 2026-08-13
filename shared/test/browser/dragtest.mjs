@@ -54,6 +54,34 @@ try{
   check('drag order persisted',JSON.stringify(persisted)===JSON.stringify(after),JSON.stringify(persisted));
   check('no drag artifacts left behind',
     await ev(`document.querySelectorAll('.dragging,.drop-above,.drop-below').length`)===0);
+
+  // --- keyboard reorder keeps its handle ---
+  //
+  // HTML5 drag events are unreachable by keyboard, so the arrows are the only
+  // way to reorder without a pointer — and they are useless if focus does not
+  // follow the habit to its new row. persistOrder used to re-focus the handle
+  // by hand; paint() now restores it by data-focus-key, which names the habit
+  // rather than the position, so this is the check that the general mechanism
+  // really replaced the special case.
+  console.log('\n--- keyboard reorder ---');
+  const firstName = (await names())[0];
+  const handleKey = await ev(`(()=>{
+    const h=document.querySelector('.habit-row:first-child .drag-handle');
+    h.focus(); return h.dataset.focusKey;
+  })()`);
+  await ev(`document.activeElement.dispatchEvent(
+    new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}))`);
+  await sleep(900);
+  const nudged=await names();
+  check('arrow down moves the habit one slot',
+    nudged.indexOf(firstName)===1, `${firstName}: ${JSON.stringify(nudged)}`);
+  check('focus follows the handle to its new row',
+    await ev(`document.activeElement?.dataset?.focusKey ?? null`)===handleKey,
+    `${handleKey} -> ${await ev(`document.activeElement?.dataset?.focusKey ?? document.activeElement?.tagName`)}`);
+  check('and it is the moved habit\'s own handle',
+    await ev(`document.activeElement?.closest('.habit-row')
+      ?.querySelector('.habit-name')?.textContent?.trim()`)===firstName);
+
   console.log(fails===0?'\nALL DRAG CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERROR:',e.message);fails++;}
 finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}

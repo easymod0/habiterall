@@ -1,0 +1,166 @@
+/**
+ * Create, edit, delete and undelete a habit.
+ *
+ * Owns `#habit-dialog` and its form, plus the "New habit" button that opens
+ * it. Announces `'reload'` when it changes something, so it never has to know
+ * which view is showing.
+ */
+
+import { api } from '/shared/ui/api.js';
+import { reminderField } from '/shared/ui/reminder-field.js';
+import * as settings from '/shared/ui/settings.js';
+import { emit, state } from '/shared/ui/store.js';
+import { toast } from '/shared/ui/toast.js';
+
+const $ = (sel) => document.querySelector(sel);
+
+const dialog = $('#habit-dialog');
+const form = $('#habit-form');
+const title = $('#dialog-title');
+const del = $('#dialog-delete');
+const archivedWrap = $('#archived-wrap');
+
+/** @param habit  null opens the create form */
+export function openDialog(habit = null) {
+  state.editingId = habit?.id ?? null;
+  title.textContent = habit ? 'Edit habit' : 'New habit';
+  del.hidden = !habit;
+
+  const f = form;
+  f.name.value = habit?.name ?? '';
+  f.description.value = habit?.description ?? '';
+  f.type.value = habit?.type ?? 'boolean';
+  f.unit.value = habit?.unit ?? '';
+  f.target_value.value = habit?.target_value ?? 1;
+  f.target_type.value = habit?.target_type ?? 'at_least';
+  f.freq_numerator.value = habit?.freq_numerator ?? 1;
+  f.freq_denominator.value = habit?.freq_denominator ?? 1;
+  f.color.value = habit?.color ?? '#3b82f6';
+  reminderField.set(habit?.reminder_time ?? '');
+  f.reminder_message.value = habit?.reminder_message ?? '';
+  f.archived.checked = !!habit?.archived;
+  archivedWrap.hidden = !habit; // only meaningful for an existing habit
+
+  syncTypeFields();
+  dialog.showModal();
+  f.name.focus();
+}
+
+function syncTypeFields() {
+  const numerical = form.type.value === 'numerical';
+  form.querySelector('.numerical-only').hidden = !numerical;
+}
+
+async function saveHabit(e) {
+  e.preventDefault();
+  const f = form;
+
+  // The reminder box accepts free text, so it is the one field that can hold
+  // something unsaveable. Refuse here rather than sending '' and silently
+  // dropping the reminder the user thought they had just set.
+  const reminderTime = reminderField.value();
+  if (reminderTime === null) {
+    reminderField.hint(
+      `"${f.reminder_time.value}" is not a time — try 08:30, 8:30 pm or 2030.`, true);
+    reminderField.focus();
+    return;
+  }
+
+  const payload = {
+    name: f.name.value,
+    description: f.description.value,
+    type: f.type.value,
+    unit: f.unit.value,
+    target_value: Number(f.target_value.value) || 0,
+    target_type: f.target_type.value,
+    freq_numerator: Number(f.freq_numerator.value) || 1,
+    freq_denominator: Number(f.freq_denominator.value) || 1,
+    color: f.color.value,
+    // Normalised by the picker, so '8:30 pm' reaches the server as '20:30' and
+    // an empty field as '' — which the validator reads as "no reminder".
+    reminder_time: reminderTime,
+    reminder_message: f.reminder_message.value,
+    archived: f.archived.checked,
+  };
+
+  try {
+    if (state.editingId) {
+      await api(`/habits/${state.editingId}`, { method: 'PUT', body: JSON.stringify(payload) });
+      toast('Habit updated');
+    } else {
+      await api('/habits', { method: 'POST', body: JSON.stringify(payload) });
+      toast('Habit created');
+    }
+    dialog.close();
+    emit('reload');
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function deleteHabit() {
+  if (!state.editingId) return;
+  const id = state.editingId;
+
+  try {
+    // Snapshot the habit and its history first, so the delete can be undone
+    // without a soft-delete column or a server-side trash.
+    const habit = await api(`/habits/${id}`);
+    const entries = await api(`/habits/${id}/entries`);
+
+    // The delete is undoable from the toast that follows, so the confirm is
+    // a preference rather than a safety requirement.
+    if (settings.get('confirmDelete') && !confirm(
+      `Delete "${habit.name}" and its ${entries.length} recorded ` +
+      `${entries.length === 1 ? 'day' : 'days'}?`
+    )) return;
+
+    await api(`/habits/${id}`, { method: 'DELETE' });
+    dialog.close();
+    emit('reload');
+
+    toast(`Deleted "${habit.name}"`, {
+      actionLabel: 'Undo',
+      onAction: () => restoreHabit(habit, entries),
+    });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+/** Recreate a deleted habit and replay its entries. */
+async function restoreHabit(habit, entries) {
+  try {
+    const created = await api('/habits', {
+      method: 'POST',
+      body: JSON.stringify(habit),
+    });
+
+    // Restore history in one import rather than a request per day.
+    if (entries.length) {
+      const payload = { habits: [{ ...created, entries }] };
+      const res = await fetch('/api/import?mode=merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? 'could not restore history');
+      }
+    }
+
+    emit('reload');
+    toast(`Restored "${habit.name}"`);
+  } catch (e) {
+    toast(`Could not undo: ${e.message}`);
+  }
+}
+
+export function init() {
+  $('#btn-new').addEventListener('click', () => openDialog());
+  $('#dialog-cancel').addEventListener('click', () => dialog.close());
+  del.addEventListener('click', deleteHabit);
+  form.addEventListener('submit', saveHabit);
+  form.type.addEventListener('change', syncTypeFields);
+}

@@ -117,6 +117,50 @@ try{
   ck('cannot navigate past today',
      await ev(`[...document.querySelectorAll('.grid-nav button')].find(b=>b.getAttribute('aria-label')?.startsWith('Next')).disabled`)===true);
 
+  // --- keyboard focus survives a repaint ---
+  //
+  // Every one of these rebuilds the grid with replaceChildren(), which
+  // destroys the focused element. Before paint() restored focus by
+  // data-focus-key, tabbing to a checkbox and pressing Enter dropped focus to
+  // <body> and the next Tab started from the top of the document.
+  console.log('\n--- keyboard focus ---');
+
+  await ev(`[...document.querySelectorAll('.grid-nav button')]
+    .find(b=>b.getAttribute('aria-label')?.startsWith('Previous')).focus()`);
+  await ev(`document.activeElement.click()`);
+  await sleep(700);
+  ck('focus stays on the paging arrow',
+     await ev(`document.activeElement?.dataset?.focusKey`)==='nav:older',
+     await ev(`document.activeElement?.dataset?.focusKey ?? document.activeElement?.tagName`));
+
+  // Today disables itself once it has nowhere to jump to, and .focus() on a
+  // disabled button is a no-op — so this is the case that needs the fallback
+  // to a working neighbour rather than a plain restore.
+  await ev(`[...document.querySelectorAll('.grid-nav button')]
+    .find(b=>b.textContent.trim()==='Today').focus()`);
+  await ev(`document.activeElement.click()`);
+  await sleep(700);
+  const afterToday = await ev(`({key:document.activeElement?.dataset?.focusKey??null,
+                                 tag:document.activeElement?.tagName})`);
+  ck('Today hands focus to a working neighbour rather than dropping it',
+     afterToday.key!==null && afterToday.tag!=='BODY', JSON.stringify(afterToday));
+
+  // A check-off repaints twice — optimistically, then again after the refetch
+  // that brings the new score and streak. Both have to keep focus.
+  // `prompt` is stubbed so this works whichever habit type sits in row one; a
+  // measurable habit would otherwise block headless Chrome on the dialog.
+  await ev(`window.prompt = () => '1'; true`);
+  const checkKey = await ev(`(()=>{
+    const c=document.querySelector('.habit-row:first-child .check');
+    c.focus(); return c.dataset.focusKey;
+  })()`);
+  ck('checkboxes carry a focus key', !!checkKey, String(checkKey));
+  await ev(`document.activeElement.click()`);
+  await sleep(1200);
+  const afterCheck = await ev(`document.activeElement?.dataset?.focusKey ?? null`);
+  ck('focus stays on the checkbox across a check-off',
+     afterCheck===checkKey, `${checkKey} -> ${afterCheck}`);
+
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}
 finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}
