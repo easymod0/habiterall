@@ -767,12 +767,82 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   color: var(--accent);
 }
 
+/* ---------- reminder time picker ---------- */
+
+.timefield {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 11px 9px;
+  margin: 0 0 11px;
+  /* A fieldset defaults to `min-width: min-content`, which ignores its
+     container — without this the row below pushes the dialog past a 360px
+     screen instead of wrapping. */
+  min-width: 0;
+}
+.timefield legend { padding: 0 5px; font-size: 13px; color: var(--text-dim); }
+
+.timefield-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* The selects size to their content and the typed box takes what is left, so a
+   narrow screen wraps the Clear button rather than crushing the hour list. */
+.timefield-row select {
+  width: auto;
+  margin-top: 0;
+  flex: 0 0 auto;
+}
+.timefield-row input[type='text'] {
+  width: auto;
+  margin-top: 0;
+  flex: 1 1 5.5em;
+  min-width: 5.5em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.timefield-sep { color: var(--text-dim); }
+
+.timefield-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.timefield .field-hint { display: block; margin-top: 7px; }
+.timefield .field-hint.error { color: var(--danger); }
+
 /* ---------- settings dialog ---------- */
 
 #settings-dialog { width: min(460px, 92vw); }
 #settings-dialog .data-section:first-of-type { margin-top: 8px; }
 .setting-help { margin: -6px 0 12px; font-size: 12px; }
 #settings-dialog label:not(.checkbox) { margin-bottom: 4px; }
+
+/* A group of checkboxes that together are one setting (notification
+   destinations). The fieldset carries the group's name, so the rows inside it
+   need no label of their own. */
+.setting-multi {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 11px 0;
+  margin: 0 0 4px;
+  /* A fieldset's default `min-width: min-content` ignores its container, so a
+     long destination label would push the dialog past a 360px screen. Every
+     other block here shrinks; this one has to be told to. */
+  min-width: 0;
+}
+.setting-multi legend {
+  padding: 0 5px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+/* The rows are the only labels in the dialog that must not stretch, or each
+   checkbox row becomes a full-width click target over empty space. */
+.setting-multi label.checkbox { margin-bottom: 9px; }
+/* A long webhook URL must not widen the dialog on a phone. */
+#settings-dialog input[type='text'] { text-overflow: ellipsis; }
 
 /* ---------- backup / restore dialog ---------- */
 

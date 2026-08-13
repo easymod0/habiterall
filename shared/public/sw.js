@@ -22,9 +22,14 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v6: the habit dialog gained the reminder time picker and the "what the
+// reminder asks" field. index.html is a shell asset, so without a bump an
+// already-installed PWA would keep serving the old markup — and app.js, which
+// builds the picker from those elements at load, would find nothing there.
+//
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

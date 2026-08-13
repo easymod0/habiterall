@@ -32,6 +32,7 @@ export const FIXTURE = [
     freq_denominator: 1,
     color: '#3b82f6',
     reminder_time: '07:30',
+    reminder_message: 'Did you sit for ten minutes?',
     archived: false,
     entries: [
       { date: '2026-01-05', value: 2, status: '', notes: '' },
@@ -53,7 +54,8 @@ export const FIXTURE = [
     freq_numerator: 1,
     freq_denominator: 1,
     color: '#22c55e',
-    reminder_time: '',
+    reminder_time: '09:00',
+    reminder_message: 'How many glasses of water so far?',
     archived: false,
     entries: [
       { date: '2026-01-05', value: 8, status: '', notes: '' },
@@ -97,6 +99,7 @@ export const FIXTURE = [
     freq_denominator: 7,
     color: '#f59e0b',
     reminder_time: '18:00',
+    reminder_message: '',
     archived: false,
     entries: [
       { date: '2026-01-05', value: 2, status: '', notes: '' },
@@ -154,7 +157,8 @@ export const LOOP_HABIT_FIELDS = [
 
 /** Fields the lossless JSON backup must preserve exactly. */
 export const JSON_HABIT_FIELDS = [
-  ...LOOP_HABIT_FIELDS, 'description', 'color', 'reminder_time', 'archived',
+  ...LOOP_HABIT_FIELDS, 'description', 'color', 'reminder_time',
+  'reminder_message', 'archived',
 ];
 
 export function pick(obj, fields) {
