@@ -1,0 +1,642 @@
+/**
+ * The habit list: the day grid, its column header and paging, the empty
+ * state, drag reordering, and what a checkbox tap does.
+ *
+ * Owns `#grid`, `#grid-head`, `#list-head`, `#toggle-archived`, `#empty` and
+ * the starter panel inside it.
+ */
+
+import { api } from '/shared/ui/api.js';
+import { openDataDialog } from '/shared/ui/data-dialog.js';
+import {
+  addDaysISO, datesEndingOn, freqLabel, iso, targetLabel, todayISO,
+} from '/shared/ui/dates.js';
+import { openDialog } from '/shared/ui/habit-dialog.js';
+import * as settings from '/shared/ui/settings.js';
+import { on, state } from '/shared/ui/store.js';
+import { toast } from '/shared/ui/toast.js';
+import { SKIP, UNSET, YES } from '/shared/ui/values.js';
+import * as views from '/shared/ui/views.js';
+import { open as openHabit } from '/shared/ui/detail.js';
+
+const $ = (sel) => document.querySelector(sel);
+
+const grid = $('#grid');
+const gridHead = $('#grid-head');
+const listHead = $('#list-head');
+const toggleArchived = $('#toggle-archived');
+const empty = $('#empty');
+const emptyArchived = $('#empty-archived');
+const starters = $('#starters');
+// querySelectorAll yields Element, which has no `hidden`; these are all
+// HTMLElements in practice.
+const emptyOnboarding = /** @type {HTMLElement[]} */ ([...document.querySelectorAll(
+  '.empty-title, .empty-sub:not(#empty-archived), #starters, .empty-actions, .empty-note'
+)]);
+
+const GRID_DAYS = 14;         // most columns we will ever show
+const GRID_DAYS_NARROW = 7;   // phone layout: fewer, wider columns
+const GRID_DAYS_MEDIUM = 10;  // tablets, where 14 would crush the habit name
+
+const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * How many day columns fit without squeezing the habit name out of existence.
+ *
+ * Chosen from the actual viewport width rather than a single breakpoint: at
+ * 768px the 14-column desktop layout needed 668px of a 698px row, leaving
+ * nothing for the name. Under 640px the CSS switches to flexible columns, so
+ * the narrow count applies there.
+ */
+function gridDays() {
+  const w = window.innerWidth;
+  if (w <= 640) return GRID_DAYS_NARROW;
+  if (w <= 900) return GRID_DAYS_MEDIUM;
+  return GRID_DAYS;
+}
+
+export async function load() {
+  // Always request the widest column count so a rotation to landscape needs
+  // no refetch, and the window the user is actually looking at — paging back
+  // must bring its entries with it.
+  const params = new URLSearchParams({ days: String(GRID_DAYS) });
+  if (state.gridEnd) params.set('end', state.gridEnd);
+  if (state.showArchived) params.set('archived', 'true');
+  const data = await api(`/overview?${params}`);
+  state.habits = data.habits;
+
+  // The archive toggle is pointless until something has been archived.
+  const archived = await api('/habits?archived=true');
+  state.hasArchived = archived.length > 0;
+
+  paint();
+}
+
+export function paint() {
+  state.openHabitId = null;
+  const root = views.showList();
+
+  // Everything below is rebuilt from scratch, which destroys whatever had
+  // keyboard focus. A check-off repaints twice — optimistically, then again
+  // after the refetch — so without this, tabbing to a checkbox and pressing
+  // Enter dropped focus to <body> and the next Tab started from the top of
+  // the page. Same for the paging arrows, which `shiftGrid` rebuilds.
+  const focused = focusKeyOf(document.activeElement);
+
+  grid.replaceChildren();
+
+  listHead.hidden = !state.hasArchived;
+  toggleArchived.textContent = state.showArchived ? 'Show active' : 'Show archived';
+  toggleArchived.setAttribute('aria-pressed', String(state.showArchived));
+
+  // The onboarding panel is only for a genuinely empty tracker; an empty
+  // archive view just needs a line of text.
+  const isEmpty = state.habits.length === 0;
+  empty.hidden = !isEmpty;
+  emptyArchived.hidden = !(isEmpty && state.showArchived);
+  for (const el of emptyOnboarding) el.hidden = !(isEmpty && !state.showArchived);
+
+  if (isEmpty && !state.showArchived) renderStarters();
+
+  const todayIso = todayISO();
+  // datesEndingOn always returns oldest-first; flip it when the user wants
+  // today on the left. Everything downstream just walks the array.
+  const dates = datesEndingOn(gridDays(), state.gridEnd ?? todayIso);
+  if (settings.get('dayOrder') === 'newest-left') dates.reverse();
+  renderGridHeader(dates, todayIso);
+
+  for (const habit of state.habits) {
+    const row = document.createElement('div');
+    row.className = 'habit-row' + (habit.archived ? ' archived' : '');
+    row.dataset.habitId = String(habit.id);
+
+    // Drag handle. Reordering only makes sense in the active list, and only
+    // when there is more than one habit to move.
+    const reorderable = !state.showArchived && state.habits.length > 1;
+    if (reorderable) {
+      const handle = document.createElement('button');
+      handle.className = 'drag-handle';
+      handle.type = 'button';
+      handle.draggable = true;
+      handle.textContent = '⠿';
+      handle.title = 'Drag to reorder — or focus and use ↑ / ↓';
+      handle.setAttribute('aria-label', `Reorder ${habit.name}. Use arrow up or arrow down.`);
+      handle.dataset.focusKey = `handle:${habit.id}`;
+      attachDragHandlers(handle, row, habit);
+      row.append(handle);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'habit-meta';
+    meta.setAttribute('role', 'button');
+    meta.tabIndex = 0;
+
+    const name = document.createElement('div');
+    name.className = 'habit-name';
+    const dot = document.createElement('span');
+    dot.className = 'habit-dot';
+    dot.style.background = habit.color;
+    name.append(dot, document.createTextNode(habit.name));
+
+    const sub = document.createElement('div');
+    sub.className = 'habit-sub';
+    const bits = [
+      freqLabel(habit),
+      targetLabel(habit),
+      `${Math.round(habit.score * 100)}%`,
+      habit.currentStreak > 0 ? `🔥 ${habit.currentStreak}` : '',
+    ].filter(Boolean);
+    sub.textContent = bits.join(' · ');
+
+    meta.append(name, sub);
+    meta.addEventListener('click', () => openHabit(habit.id));
+    meta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHabit(habit.id); }
+    });
+
+    const checks = document.createElement('div');
+    checks.className = 'checks';
+
+    for (const d of dates) {
+      const date = iso(d);
+      const value = habit.entries[date];
+      const btn = document.createElement('button');
+      btn.className = 'check' + (date === todayIso ? ' today' : '');
+      btn.title = `${habit.name} — ${date}`;
+      btn.dataset.focusKey = `check:${habit.id}:${date}`;
+
+      const box = document.createElement('span');
+      box.className = 'check-box';
+      paintCheckbox(box, habit, value);
+
+      const day = document.createElement('span');
+      day.className = 'check-day';
+      day.textContent = DAY_LETTERS[d.getDay()];
+
+      btn.append(box, day);
+      btn.addEventListener('click', () => onCheckClick(habit, date));
+      checks.append(btn);
+    }
+
+    row.append(meta, checks);
+    grid.append(row);
+  }
+
+  restoreFocus(root, focused);
+}
+
+/* ---------- keeping focus across a repaint ---------- */
+
+/**
+ * The identity of a control that survives being rebuilt.
+ *
+ * Every focusable thing `paint()` recreates carries a `data-focus-key` that
+ * names *what it is* rather than where it sat, so the restore still lands
+ * after a reorder moves the row or a refetch rebuilds the grid. A key that no
+ * longer exists — the column you were on after paging away — simply does not
+ * match, which is the right answer rather than a special case.
+ */
+function focusKeyOf(el) {
+  return el instanceof HTMLElement ? el.dataset.focusKey ?? null : null;
+}
+
+function restoreFocus(root, key) {
+  if (!key) return;
+
+  // Compared rather than selected: a key carries a habit name or a date, and
+  // building a selector out of either needs escaping that is easy to get
+  // wrong and pointless here.
+  const match = [...root.querySelectorAll('[data-focus-key]')]
+    .find((el) => el.dataset.focusKey === key);
+  if (!match) return;
+
+  // The control can survive but stop being operable — pressing Today disables
+  // it, since there is nowhere left to jump to. `.focus()` on a disabled
+  // button is a no-op, so fall back to its nearest working neighbour rather
+  // than leaving the keyboard at the top of the document.
+  if (!/** @type {HTMLButtonElement} */ (match).disabled) {
+    match.focus();
+    return;
+  }
+  const sibling = [...(match.parentElement?.querySelectorAll('[data-focus-key]') ?? [])]
+    .find((el) => !(/** @type {HTMLButtonElement} */ (el).disabled));
+  /** @type {HTMLElement} */ (sibling)?.focus();
+}
+
+/**
+ * Column header: the month/day above each column, plus navigation.
+ *
+ * Without this the grid showed only weekday letters, so there was no way to
+ * tell which column was which date — or to look at any day but the most
+ * recent fortnight.
+ */
+function renderGridHeader(dates, todayIso) {
+  gridHead.replaceChildren();
+  if (!state.habits.length) { gridHead.hidden = true; return; }
+  gridHead.hidden = false;
+
+  const label = document.createElement('span');
+  label.className = 'grid-range';
+  label.textContent = rangeLabel(dates);
+
+  const nav = document.createElement('div');
+  nav.className = 'grid-nav';
+
+  const step = gridDays();
+
+  // The arrows follow the layout, not the calendar: when today sits on the
+  // left, "back in time" is to the RIGHT, so the glyphs swap. An arrow that
+  // points away from the direction the days actually move is worse than no
+  // arrow at all.
+  const newestLeft = settings.get('dayOrder') === 'newest-left';
+  const olderGlyph = newestLeft ? '›' : '‹';
+  const newerGlyph = newestLeft ? '‹' : '›';
+
+  const mk = (key, text, aria, delta, disabled = false) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-sm';
+    b.textContent = text;
+    b.setAttribute('aria-label', aria);
+    b.disabled = disabled;
+    b.dataset.focusKey = key;
+    b.addEventListener('click', () => shiftGrid(delta));
+    return b;
+  };
+
+  // Never scroll past today: there is nothing to record in the future.
+  const atToday = (state.gridEnd ?? todayIso) >= todayIso;
+
+  // "Today" is rendered FIRST and always present — merely made invisible when
+  // it has nothing to do. Appending it conditionally after the arrows shifted
+  // them sideways the moment you paged back, so the pointer was no longer over
+  // the button it had just clicked.
+  const today = document.createElement('button');
+  today.type = 'button';
+  today.className = 'btn btn-sm';
+  today.textContent = 'Today';
+  today.dataset.focusKey = 'nav:today';
+  today.addEventListener('click', () => {
+    state.gridEnd = null;
+    load().catch((e) => toast(e.message));
+  });
+  if (atToday) {
+    // visibility, not `hidden`: the slot must keep its width.
+    today.style.visibility = 'hidden';
+    today.disabled = true;
+    today.tabIndex = -1;
+    today.setAttribute('aria-hidden', 'true');
+  }
+  nav.append(today);
+
+  // Order the arrows so they read left-to-right in the direction they move.
+  const older = mk('nav:older', olderGlyph, `Previous ${step} days`, -step);
+  const newer = mk('nav:newer', newerGlyph, `Next ${step} days`, step, atToday);
+  nav.append(...(newestLeft ? [newer, older] : [older, newer]));
+
+  // Date row, aligned to the checkbox columns below.
+  const cols = document.createElement('div');
+  cols.className = 'grid-dates';
+  for (const d of dates) {
+    const cell = document.createElement('div');
+    const dIso = iso(d);
+    cell.className = 'grid-date' + (dIso === todayIso ? ' is-today' : '');
+    // Only show the month on the first column and when it changes, so the
+    // row stays readable at seven columns on a phone.
+    const dayNum = document.createElement('span');
+    dayNum.className = 'grid-date-num';
+    dayNum.textContent = String(d.getDate());
+    const mon = document.createElement('span');
+    mon.className = 'grid-date-mon';
+    mon.textContent = d.getDate() === 1 || d === dates[0] ? MONTHS[d.getMonth()] : '';
+    cell.append(mon, dayNum);
+    cols.append(cell);
+  }
+
+  gridHead.append(label, nav, cols);
+}
+
+/** "3 – 16 Aug 2026", collapsing the repeated month and year. */
+function rangeLabel(dates) {
+  // The label always reads oldest to newest, whichever way the row is drawn.
+  const [a, b] = dates[0] <= dates[dates.length - 1]
+    ? [dates[0], dates[dates.length - 1]]
+    : [dates[dates.length - 1], dates[0]];
+  const sameMonth = a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear();
+  const left = sameMonth ? String(a.getDate()) : `${a.getDate()} ${MONTHS[a.getMonth()]}`;
+  return `${left} – ${b.getDate()} ${MONTHS[b.getMonth()]} ${b.getFullYear()}`;
+}
+
+/** Move the visible window, clamped so it never runs past today. */
+function shiftGrid(deltaDays) {
+  const today = todayISO();
+  let next = addDaysISO(state.gridEnd ?? today, deltaDays);
+  if (next > today) next = today;
+  state.gridEnd = next === today ? null : next;
+  // Refetch, not just re-render: the entries for the new window have not been
+  // loaded, and re-rendering alone would draw an empty grid.
+  load().catch((e) => toast(e.message));
+}
+
+/* ---------- empty state ---------- */
+
+/**
+ * A few one-click starters covering both habit types and a non-daily
+ * frequency, so a new tracker isn't a blank page. Everything stays editable.
+ */
+const STARTERS = [
+  { name: 'Meditate', description: '10 minutes after waking', type: 'boolean',
+    color: '#8b5cf6', freq_numerator: 1, freq_denominator: 1 },
+  { name: 'Exercise', description: '', type: 'boolean',
+    color: '#f59e0b', freq_numerator: 3, freq_denominator: 7 },
+  { name: 'Read', description: 'Pages before bed', type: 'numerical',
+    unit: 'pages', target_value: 20, target_type: 'at_least', color: '#0ea5e9' },
+  { name: 'Drink water', description: '', type: 'numerical',
+    unit: 'glasses', target_value: 8, target_type: 'at_least', color: '#3b82f6' },
+];
+
+function renderStarters() {
+  starters.replaceChildren();
+
+  for (const preset of STARTERS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'starter';
+    btn.dataset.focusKey = `starter:${preset.name}`;
+
+    const dot = document.createElement('span');
+    dot.className = 'habit-dot';
+    dot.style.background = preset.color;
+
+    const label = document.createElement('span');
+    label.className = 'starter-name';
+    label.textContent = preset.name;
+
+    const sub = document.createElement('span');
+    sub.className = 'starter-sub';
+    sub.textContent = [freqLabel(preset), targetLabel(preset)].filter(Boolean).join(' · ');
+
+    btn.append(dot, label, sub);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await api('/habits', { method: 'POST', body: JSON.stringify(preset) });
+        await load();
+        toast(`Added "${preset.name}"`);
+      } catch (e) {
+        btn.disabled = false;
+        toast(e.message);
+      }
+    });
+    starters.append(btn);
+  }
+}
+
+/* ---------- reordering ---------- */
+
+/**
+ * Wire a drag handle for both pointer drag-and-drop and keyboard arrows.
+ * Keyboard support matters here: HTML5 drag events are unreachable by
+ * keyboard and unreliable on touch.
+ */
+function attachDragHandlers(handle, row, habit) {
+  handle.addEventListener('dragstart', (e) => {
+    state.dragId = habit.id;
+    row.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox refuses to start a drag without payload.
+    e.dataTransfer.setData('text/plain', String(habit.id));
+  });
+
+  handle.addEventListener('dragend', () => {
+    state.dragId = null;
+    row.classList.remove('dragging');
+    for (const r of grid.children) r.classList.remove('drop-above', 'drop-below');
+  });
+
+  row.addEventListener('dragover', (e) => {
+    if (state.dragId == null || state.dragId === habit.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const box = row.getBoundingClientRect();
+    const after = e.clientY > box.top + box.height / 2;
+    row.classList.toggle('drop-below', after);
+    row.classList.toggle('drop-above', !after);
+  });
+
+  row.addEventListener('dragleave', () => {
+    row.classList.remove('drop-above', 'drop-below');
+  });
+
+  row.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (state.dragId == null || state.dragId === habit.id) return;
+    const after = row.classList.contains('drop-below');
+    row.classList.remove('drop-above', 'drop-below');
+    moveHabit(state.dragId, habit.id, after);
+  });
+
+  handle.addEventListener('keydown', (e) => {
+    const delta = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
+    if (!delta) return;
+    e.preventDefault();
+    nudgeHabit(habit.id, delta);
+  });
+}
+
+/** Move `dragId` to sit before or after `targetId`, then persist. */
+function moveHabit(dragId, targetId, after) {
+  const order = state.habits.map((h) => h.id);
+  const from = order.indexOf(dragId);
+  if (from === -1) return;
+
+  order.splice(from, 1);
+  let to = order.indexOf(targetId);
+  if (to === -1) return;
+  if (after) to += 1;
+  order.splice(to, 0, dragId);
+
+  persistOrder(order);
+}
+
+/**
+ * Shift a habit one slot up or down. Keyboard focus follows the handle to its
+ * new position because `paint()` restores it by `data-focus-key`, which names
+ * the habit rather than the row it sat in.
+ */
+function nudgeHabit(habitId, delta) {
+  const order = state.habits.map((h) => h.id);
+  const from = order.indexOf(habitId);
+  const to = from + delta;
+  if (from === -1 || to < 0 || to >= order.length) return;
+
+  order.splice(to, 0, ...order.splice(from, 1));
+  persistOrder(order);
+}
+
+/** Reorder optimistically so the list never appears to lag, then save. */
+async function persistOrder(order) {
+  const byId = new Map(state.habits.map((h) => [h.id, h]));
+  const previous = state.habits;
+  state.habits = order.map((id) => byId.get(id)).filter(Boolean);
+  paint();
+
+  try {
+    await api('/habits/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ order }),
+    });
+  } catch (e) {
+    state.habits = previous; // put it back rather than lie about the order
+    paint();
+    toast(e.message);
+  }
+}
+
+/* ---------- the checkboxes ---------- */
+
+function paintCheckbox(box, habit, value) {
+  box.textContent = '';
+  box.style.background = 'var(--grid-empty)';
+  box.style.color = '#fff';
+
+  if (value == null) return;
+
+  if (value === SKIP) {
+    box.style.background = 'var(--surface-2)';
+    box.style.color = 'var(--text-dim)';
+    box.textContent = '–';
+    return;
+  }
+
+  if (habit.type === 'boolean') {
+    if (value === YES) {
+      box.style.background = habit.color;
+      box.textContent = '✓';
+    }
+    return;
+  }
+
+  // numerical: shade by progress toward target, show the raw number.
+  // For an "at most" habit a low number is the good outcome, so 0 is a full
+  // success and must be painted, not left blank.
+  if (habit.target_type === 'at_most') {
+    const target = habit.target_value;
+    // Fade gradually past the target; scale by 3 when the target is 0 so
+    // small overages remain distinguishable.
+    const scale = Math.max(target, 3);
+    const ratio = value <= target
+      ? 1
+      : Math.max(0.2, 1 - (value - target) / scale);
+    box.style.background = habit.color;
+    box.style.opacity = String(ratio);
+  } else {
+    const target = habit.target_value || 1;
+    const ratio = Math.min(1, value / target);
+    if (value > 0) {
+      box.style.background = habit.color;
+      box.style.opacity = String(Math.max(0.28, ratio));
+    }
+  }
+  box.textContent = value % 1 === 0 ? String(value) : value.toFixed(1);
+  box.style.fontSize = '9.5px';
+}
+
+async function onCheckClick(habit, date) {
+  try {
+    let next;
+    if (habit.type === 'boolean') {
+      // cycle: unset -> yes -> skip -> unset
+      const cur = habit.entries[date] ?? UNSET;
+      next = cur === UNSET ? YES : cur === YES ? SKIP : UNSET;
+    } else {
+      // A skipped day has no numeric value to prefill. For numerical habits
+      // the SKIP wire value is only meaningful when the day is actually
+      // flagged as a skip — 3 is otherwise a legitimate amount.
+      const cur = habit.entries[date];
+      const skipped = habit.skips?.includes(date);
+      const raw = prompt(
+        `${habit.name} — ${date}\nEnter value${habit.unit ? ` (${habit.unit})` : ''}:`,
+        cur != null && !skipped ? String(cur) : ''
+      );
+      if (raw === null) return;
+      if (raw.trim() === '') {
+        // Optimistic first, for the same reason as below: offline, `api()`
+        // queues the delete and throws, and the cell would otherwise keep
+        // showing a value the user has just cleared.
+        const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
+        delete habit.entries[date];
+        paint();
+        try {
+          await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
+        } catch (e) {
+          if (!e.queued) {
+            if (had !== undefined) habit.entries[date] = had;
+            paint();
+          }
+          throw e;
+        }
+        return;
+      }
+      next = Number(raw);
+      if (!Number.isFinite(next) || next < 0) return toast('Enter a non-negative number');
+    }
+
+    // Apply optimistically BEFORE awaiting the request. Offline, `api()`
+    // enqueues the write and then throws, so anything after the await is
+    // skipped — which used to leave `habit.entries` stale. The next tap then
+    // recomputed the cycle from the same starting value and queued another
+    // identical write: three offline taps meaning "clear this day" all queued
+    // `value: 2`, and the day synced as DONE. The cell stayed blank the whole
+    // time, so there was no hint anything was wrong.
+    const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
+    if (next === UNSET) delete habit.entries[date];
+    else habit.entries[date] = next;
+    paint();
+
+    try {
+      await api(`/habits/${habit.id}/entries/${date}`, {
+        method: 'PUT',
+        body: JSON.stringify({ value: next }),
+      });
+    } catch (e) {
+      // A queued write will still land, so the optimistic state is correct and
+      // must stand. Any other failure did not reach the server, so roll back
+      // rather than leave the UI asserting something untrue.
+      if (!e.queued) {
+        if (previous === undefined) delete habit.entries[date];
+        else habit.entries[date] = previous;
+        paint();
+      }
+      throw e;
+    }
+
+    // Re-fetch so score and streak reflect the change.
+    await load();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+export function init() {
+  toggleArchived.addEventListener('click', () => {
+    state.showArchived = !state.showArchived;
+    load().catch((e) => toast(e.message));
+  });
+
+  $('#empty-new').addEventListener('click', () => openDialog());
+  $('#empty-import').addEventListener('click', openDataDialog);
+
+  // Reflow the day grid when crossing the narrow/wide breakpoint (rotation,
+  // window resize) so the column count always matches the available width.
+  window.matchMedia('(max-width: 640px)').addEventListener('change', () => {
+    if (state.openHabitId == null && state.habits.length) paint();
+  });
+
+  // The dashboard repaints from what it already has; only a 'reload' goes back
+  // to the server. Both are ignored while the detail view is the one showing.
+  on('change', () => { if (state.openHabitId == null) paint(); });
+  on('reload', () => { load().catch((e) => toast(e.message)); });
+}

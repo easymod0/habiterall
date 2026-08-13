@@ -5,6 +5,8 @@
  * signed in?" is answered by asking the server, never by inspecting storage.
  */
 
+import { hideAll } from '/shared/ui/views.js';
+
 const $ = (sel) => document.querySelector(sel);
 
 /** Buttons that mean nothing to a signed-out visitor. */
@@ -30,8 +32,7 @@ export const auth = {
 
     if (!user) {
       if (signin) signin.hidden = false;
-      $('#view-list').hidden = true;
-      $('#view-detail').hidden = true;
+      hideAll();
       if (chip) chip.hidden = true;
       for (const id of SIGNED_IN_ONLY) { const el = $(`#${id}`); if (el) el.hidden = true; }
       return;

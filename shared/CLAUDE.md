@@ -21,7 +21,20 @@ Postgres one.
 | `src/unzip.js` | minimal ZIP reader (Loop's CSV export) |
 | `src/zip.js` | minimal ZIP writer, for the CSV archive |
 | `src/constants.js` | `UNSET` / `YES` / `SKIP` wire values |
-| `public/app.js` | the whole UI; `start(authAdapter)` is the entry |
+| `public/app.js` | boot, the top bar, the PWA; `start(authAdapter)` is the entry |
+| `public/ui/store.js` | view state, and the `'change'` / `'reload'` channel views listen on |
+| `public/ui/dashboard.js` | the habit list: day grid, paging, empty state, reordering, checkbox taps |
+| `public/ui/detail.js` | the single-habit view and every chart on it |
+| `public/ui/habit-dialog.js` | create / edit / delete / undelete a habit |
+| `public/ui/day-dialog.js` | edit one day from the calendar |
+| `public/ui/data-dialog.js` | backup and restore |
+| `public/ui/settings-dialog.js` | the settings dialog, built from the registry |
+| `public/ui/components.js` | card, subheading, segmented control, `windowedChart`, `cardInnerWidth` |
+| `public/ui/views.js` | which of the two main views is showing |
+| `public/ui/api.js` | every request, and what to do when one cannot be made |
+| `public/ui/connectivity.js` | the offline banner, the outbox badge, reconnect handling |
+| `public/ui/toast.js` | the transient message strip |
+| `public/ui/reminder-field.js` | the reminder time picker inside the habit dialog |
 | `public/ui/settings.js` | the preference registry and its server sync |
 | `public/ui/calendar.js` | calendar window/zoom maths, DOM-free so it is testable |
 | `public/ui/window.js` | how many columns a chart fits, and which slice to show |
@@ -29,6 +42,7 @@ Postgres one.
 | `public/ui/dates.js` | browser-side date helpers |
 | `public/ui/time.js` | parsing and formatting a reminder time, DOM-free so it is testable |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
+| `public/ui/values.js` | `UNSET` / `YES` / `SKIP` for the browser, mirroring `src/constants.js` |
 | `public/auth-none.js`, `auth-oidc.js` | the two auth adapters |
 | `public/charts.js` | hand-rolled SVG charts |
 | `public/sw.js`, `offline.js` | PWA shell cache and the write outbox |
@@ -36,6 +50,28 @@ Postgres one.
 Parsers return plain data; the *writing* is per edition (`apply-import.js`),
 because one talks to SQLite and the other to Postgres under row-level
 security.
+
+### How the frontend fits together
+
+**Mutators announce; views listen.** Nothing calls another view's render
+function. `ui/store.js` carries the state and exactly two events: `'change'`
+means "the visible view's data moved, update it", and `'reload'` means "go to
+the dashboard and fetch it". Each view decides whether it is the one showing —
+the dashboard repaints from `state`, the detail view refetches, because none of
+what it shows can be recomputed locally.
+
+That is not decoration. The day editor has to refresh the detail view, the
+settings dialog has to refresh both, and the detail view has to open the day
+editor. Written as direct calls those are circular imports; written as one
+2,100-line file — which is what this was — they are eleven scattered
+`renderDashboard()` calls and no way to split it.
+
+**A module owns its subtree, and `test/ui-modules.test.js` enforces it.** No
+element id may be reached for by two modules; `ui/views.js` exists because
+`#view-list` and `#view-detail` genuinely have three claimants. The same test
+walks the imports from the entry point and fails when `SHELL` in `sw.js` has
+fallen behind — with fourteen modules where there was one, a hand-maintained
+precache list drifts silently.
 
 ## Traps
 
@@ -64,7 +100,8 @@ the longest row the moment the ordering changed.
 **Charts with a time axis page rather than shrink.** `slot = width / count`
 silently squeezes bars to hairlines once a habit has a year of daily data.
 `ui/window.js` decides how many columns fit from a minimum per-column width,
-and `windowedChart` in app.js adds the ‹ Earlier / Later › controls. Paging
+and `windowedChart` in `ui/components.js` adds the ‹ Earlier / Later ›
+controls. Paging
 strides by one less than the window so a column of context is shared between
 screens — `test/window.test.js` asserts no column is ever strandable.
 
@@ -126,7 +163,22 @@ box to anchor an HTML tooltip to. `<title>` stays in the markup for screen
 readers but is hidden with `display: none`, or the native bubble covers the
 popover.
 
-**`showDetail` preserves scroll position.** Every control in the detail view
+**A rebuilt control keeps focus via `data-focus-key`, not its position.**
+`dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single
+check-off does it twice — optimistically, then again after the refetch. That
+destroys the focused element, so tabbing to a checkbox and pressing Enter used
+to drop focus to `<body>` and send the next Tab to the top of the page. The key
+names *what a control is* (`check:<habit>:<date>`, `handle:<habit>`,
+`nav:older`), never where it sat, so the restore still lands after a reorder
+moves the row. Two consequences worth knowing: a key that no longer exists
+simply does not match, which is the right answer for a column you paged away
+from; and a control that survives but is *disabled* — Today, once there is
+nowhere to jump to — hands focus to its nearest working neighbour, because
+`.focus()` on a disabled button is a silent no-op. `persistOrder` used to
+re-focus the drag handle by hand; that special case is gone. Pinned by
+`test/browser/gridcheck.mjs` and `dragtest.mjs`.
+
+**`detail.open()` preserves scroll position.** Every control in the detail view
 re-renders through it, and `replaceChildren()` collapses the page height,
 which sends the window to the top. Preserve it on redraw of the *same* habit
 only — opening a different one should start at the top.
@@ -185,9 +237,11 @@ or the control is either unenforced or dead — `test/settings.test.js` fails if
 they drift. Do not add a control before the behaviour it names actually works:
 `weekStart` sat commented out until the aggregation honoured it.
 
-**The UI is auth-agnostic.** `app.js` never mentions sign-in; it calls the
-injected adapter (`load` / `render` / `signOut` / `onUnauthorized`). Adding an
-`if (cloud)` branch here is how the frontends drifted apart the first time.
+**The UI is auth-agnostic.** No view mentions sign-in; `app.js` calls the
+injected adapter (`load` / `render` / `signOut` / `onUnauthorized`) and hands it
+to `ui/api.js`, which needs it only to tell an expired session from a bug.
+Adding an `if (cloud)` branch anywhere here is how the frontends drifted apart
+the first time.
 
 ## Tests
 
