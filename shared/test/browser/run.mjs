@@ -26,7 +26,7 @@ const OFFLINE_SUITES = new Set(['rendercheck', 'daydialog']);
 const requested = process.argv.slice(2);
 const all = readdirSync(here)
   // fixtures.mjs is a helper, not a suite.
-  .filter((f) => f.endsWith('.mjs') && !['run.mjs', 'fixtures.mjs'].includes(f))
+  .filter((f) => f.endsWith('.mjs') && !['run.mjs', 'fixtures.mjs', 'chrome.mjs'].includes(f))
   .map((f) => f.replace(/\.mjs$/, ''));
 
 const suites = requested.length

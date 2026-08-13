@@ -16,5 +16,5 @@
     "express": "^4.21.2",
     "@habiterall/shared": "*"
   },
-  "license": "MIT"
+  "license": "GPL-3.0-or-later"
 }

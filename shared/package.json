@@ -20,5 +20,5 @@
   "engines": {
     "node": ">=22.5.0"
   },
-  "license": "MIT"
+  "license": "GPL-3.0-or-later"
 }

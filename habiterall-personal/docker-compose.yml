@@ -1,6 +1,14 @@
+# Single-user edition. Run from this directory:
+#   docker compose up -d --build
+#
+# The build context is the repo root because the app depends on the `shared`
+# workspace, which lives outside this folder.
+
 services:
   habiterall:
-    build: .
+    build:
+      context: ..
+      dockerfile: habiterall-personal/Dockerfile
     image: habiterall:latest
     container_name: habiterall
     ports:

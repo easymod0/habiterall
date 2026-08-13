@@ -123,4 +123,8 @@ Admin dashboard, per-user usage metrics, automated backups, and billing. The fou
 
 ## License
 
-MIT
+[GNU General Public License v3.0 or later](LICENSE).
+
+In short: you may use, modify, and redistribute this, including running it as a
+service — but derivative works must also be GPLv3. All dependencies are
+permissive (MIT/ISC/BSD-3-Clause) and compatible with that.

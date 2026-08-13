@@ -1,0 +1,32 @@
+# Both editions build from the REPO ROOT (they depend on the shared
+# workspace), so the ignore rules must live here — a .dockerignore inside a
+# package directory is not consulted.
+
+# Dependencies are installed inside the image; sending the host copy would
+# bloat the context and can leak platform-specific binaries.
+node_modules
+
+# Local data and secrets must never enter an image.
+data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+
+# Signing material.
+*.keystore
+*.jks
+
+# Not needed at runtime.
+.git
+.gitignore
+.gitattributes
+.github
+android
+**/test
+**/CLAUDE.md
+**/*.md
+npm-debug.log*
+*.log

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-const CHROME=String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
+import { CHROME } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT=9224;
 const profile=mkdtempSync(join(tmpdir(),'habsnack-'));
 const chrome=spawn(CHROME,['--headless=new',`--remote-debugging-port=${PORT}`,
