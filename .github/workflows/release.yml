@@ -444,9 +444,9 @@ jobs:
               echo "Docker Hub was skipped (no DOCKERHUB_USERNAME / DOCKERHUB_TOKEN)."
             fi
             echo
-            echo "A package is PRIVATE the first time it is pushed, even from a public"
-            echo "repository. Make it public once under Packages → habiterall-personal →"
-            echo "Package settings → Change visibility, and it stays that way."
+            echo "If \`docker pull\` asks for credentials, the package is private:"
+            echo "Packages → habiterall-personal → Package settings → Change"
+            echo "visibility → Public. Once, and it stays that way."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ----------------------------------------------------------------- release

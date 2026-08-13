@@ -1,0 +1,29 @@
+# habiterall, personal edition — single user, SQLite, no login.
+#
+# The copy in README.md is generated from this file, and a unit test fails if the
+# two drift, so edit this one.
+#
+#   docker compose -f docker-compose.personal.yml up -d
+#   open http://localhost:3000
+#
+# To update: docker compose pull && docker compose up -d
+
+services:
+  habiterall:
+    image: ghcr.io/easymod0/habiterall-personal:latest
+    container_name: habiterall
+    ports:
+      - '3000:3000'
+    volumes:
+      # Your entire database is one file in here. Back it up by copying it.
+      - habiterall-data:/data
+    environment:
+      HABITERALL_DB: /data/habiterall.db
+      # Optional, and only for reminders the SERVER sends (a Discord channel).
+      # The Android app needs neither of these — it arms its own alarms.
+      HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
+      DISCORD_BOT_TOKEN: ''          # enables Yes / No / Skip buttons
+    restart: unless-stopped
+
+volumes:
+  habiterall-data:

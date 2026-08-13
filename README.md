@@ -62,24 +62,58 @@ Requires **Node 22.5+**. There is no build step — what runs is what is on disk
 
 ### personal edition
 
+The published image needs no clone and no build. Save this as
+`docker-compose.yml` anywhere:
+
+```yaml
+services:
+  habiterall:
+    image: ghcr.io/easymod0/habiterall-personal:latest
+    container_name: habiterall
+    ports:
+      - '3000:3000'
+    volumes:
+      # Your entire database is one file in here. Back it up by copying it.
+      - habiterall-data:/data
+    environment:
+      HABITERALL_DB: /data/habiterall.db
+      # Optional, and only for reminders the SERVER sends (a Discord channel).
+      # The Android app needs neither of these — it arms its own alarms.
+      HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
+      DISCORD_BOT_TOKEN: ''          # enables Yes / No / Skip buttons
+    restart: unless-stopped
+
+volumes:
+  habiterall-data:
+```
+
 ```bash
-npm run start:personal
+docker compose up -d
 ```
 
 Open **<http://localhost:3000>**. That is the whole setup — no login, no
-configuration. Optionally seed sample data first with
-`npm run seed -w habiterall-personal`.
+configuration.
 
-<details>
-<summary><b>Or with Docker</b></summary>
+That file is also in the repository as
+[`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
+(and the cloud one beside it), with a test that fails if it drifts from what is
+printed here. To update:
 
 ```bash
-cd habiterall-personal
-docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
 
-Also **<http://localhost:3000>**. Your database lives in the `habiterall-data`
-volume and survives rebuilds.
+<details>
+<summary><b>Or from a clone, with no Docker at all</b></summary>
+
+```bash
+npm install
+npm run start:personal
+```
+
+Also **<http://localhost:3000>**, with the database at
+`habiterall-personal/data/habiterall.db`. Optionally seed sample data first with
+`npm run seed -w habiterall-personal`.
 </details>
 
 ### cloud edition
@@ -104,6 +138,75 @@ docker compose up -d app
 
 Create users in Authentik under *Directory → Users*; a habiterall account is
 provisioned the first time each one signs in.
+
+<details>
+<summary><b>Or with the published image and your own identity provider</b></summary>
+
+The compose file above brings its own Authentik, which is the quickest way to
+have *an* OIDC provider. If you already run one — Keycloak, Authelia, Entra,
+Auth0 — this is the whole stack:
+
+```yaml
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: habiterall
+      POSTGRES_USER: habiterall_owner
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?set it in .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U habiterall_owner -d habiterall']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Runs once per deploy, as a SEPARATE credential the app never holds — it is
+  # the only thing allowed to change the schema. `up -d` waits for it to finish.
+  migrate:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL_ADMIN: postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set it in .env}
+    command: ['node', 'src/db/migrate.js']
+    restart: 'no'
+
+  app:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports:
+      - '3100:3000'
+    environment:
+      NODE_ENV: production
+      # The RESTRICTED role — not the owner. This is what makes a forgotten
+      # WHERE clause return nothing instead of another user's rows.
+      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
+      SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      OIDC_ISSUER: ${OIDC_ISSUER:?from your provider}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
+      TRUST_PROXY: 1
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+    restart: unless-stopped
+
+volumes:
+  db-data:
+```
+
+Register `${PUBLIC_URL}/auth/callback` as the redirect URI with your provider.
+Users are provisioned the first time each one signs in.
+
+> **Pin the tag here.** `latest` is fine for the personal edition, where an
+> update is a new binary against the same file. The cloud edition runs
+> migrations on deploy, so pulling `latest` means taking a schema change at a
+> moment you did not choose. Use `:0.0.1` and bump it deliberately.
+</details>
 
 Full walkthrough, including HTTPS and the production checklist:
 **[habiterall-cloud/SETUP.md](habiterall-cloud/SETUP.md)**.
@@ -292,8 +395,13 @@ Three options, in increasing order of effort:
 | | What you get | Needs |
 |---|---|---|
 | **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
-| **[TWA wrapper](android/SETUP.md)** | The same, as an installable APK | A GitHub Action run |
-| **[Native app](android-native/README.md)** | **Notification actions** — answer from the shade | A GitHub Action run |
+| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade | Download the APK from [Releases](../../releases) |
+| **[TWA wrapper](android/SETUP.md)** | The same PWA, as an installable APK | A public HTTPS host, then a workflow run |
+
+The native APK is attached to every [release](../../releases). It is unsigned
+unless the repository has signing secrets configured, so Android will ask you to
+allow *Install unknown apps* for whatever you download it with — that is
+expected, not a warning about the app.
 
 ### Add to Home Screen
 
