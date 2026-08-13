@@ -39,6 +39,12 @@ const MILLIS_PER_DAY = 86_400_000;
  * UTC getters so a local timezone west of UTC doesn't shift every date back
  * by one day.
  */
+import { unzip } from './unzip.js';
+// The same limits the API enforces, so an import cannot store what a typed-in
+// habit could not.
+import { LIMITS } from './validate.js';
+import { TIME_RE } from './constants.js';
+
 export function loopTimestampToISO(millis) {
   const n = Number(millis);
   if (!Number.isFinite(n)) return null;
@@ -420,4 +426,151 @@ export function parseLoopHabitsCSV(text) {
     });
   }
   return out;
+}
+
+/* ---------- what arrived in the request body ---------- */
+
+/**
+ * Work out what an uploaded file is, and parse it.
+ *
+ * Sniffed from the bytes rather than trusted from the client:
+ *
+ *   PK\x03\x04           -> zip (a Loop CSV export)
+ *   "SQLite format 3\0"  -> a Loop .db backup
+ *   otherwise            -> text: a habiterall JSON backup, or a bare CSV
+ *
+ * This lived in both editions' api.js, and the two copies had already drifted in
+ * a way worth recording. The staged temp file was named
+ * `habiterall-import-${pid}-${Date.now()}.db` with default permissions in the
+ * personal edition, and `randomUUID()` with mode 0600 in cloud: a predictable
+ * name and a world-readable file, holding somebody's entire habit history, fixed
+ * once and never carried back. The safer pair is what survives here.
+ *
+ * Errors carry `status: 400` — an unreadable upload is the client's problem, and
+ * both editions' error middleware reads that field.
+ *
+ * @param {Buffer} buf the raw request body
+ * @returns {Promise<object[]>} normalised habits, ready for applyImport
+ */
+export async function parseUpload(buf) {
+  const fail = (message) => Object.assign(new Error(message), { status: 400 });
+
+  if (buf.length >= 4 && buf.toString('latin1', 0, 4) === 'PK\x03\x04') {
+    return parseZipExport(buf, fail);
+  }
+
+  if (buf.length >= 16 && buf.toString('latin1', 0, 15) === 'SQLite format 3') {
+    // node:sqlite can only open a path, so the upload has to be staged on disk.
+    // A random name because a predictable one in a shared /tmp is a file another
+    // local user can wait for, and 0600 because the contents are private.
+    const { writeFileSync, unlinkSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { randomUUID } = await import('node:crypto');
+
+    const path = join(tmpdir(), `habiterall-import-${randomUUID()}.db`);
+    writeFileSync(path, buf, { mode: 0o600 });
+    try {
+      return await parseLoopDatabase(path);
+    } finally {
+      try { unlinkSync(path); } catch { /* best effort */ }
+    }
+  }
+
+  // A BOM survives a round trip through Windows editors and would otherwise
+  // make `JSON.parse` fail on a file that is perfectly valid.
+  const text = buf.toString('utf8').replace(/^﻿/, '');
+  const head = text.trimStart();
+
+  if (head.startsWith('{') || head.startsWith('[')) {
+    return parseHabiterallJSON(head.startsWith('[') ? { habits: JSON.parse(head) } : text);
+  }
+
+  if (/^"?date"?\s*,/i.test(head)) return parseLoopCheckmarksCSV(text);
+
+  throw fail(
+    'unrecognized file: expected a habiterall JSON backup, a Loop .db backup, ' +
+    'or a Loop CSV export'
+  );
+}
+
+/**
+ * Pull Habits.csv and Checkmarks.csv out of a Loop CSV export.
+ *
+ * Both are needed. Checkmarks.csv has one column per habit and nothing saying
+ * what a habit IS, so parsed alone every column defaults to boolean — and a
+ * measurable habit's 3 is then read as Loop's SKIP sentinel.
+ */
+function parseZipExport(buf, fail) {
+  const files = unzip(buf);
+
+  const find = (suffix) => {
+    for (const [name, contents] of files) {
+      if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
+    }
+    return null;
+  };
+
+  const checkmarksCsv = find('checkmarks.csv');
+  if (!checkmarksCsv) throw fail('zip does not contain a Checkmarks.csv');
+
+  const habitsCsv = find('habits.csv');
+  const meta = habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map();
+  return parseLoopCheckmarksCSV(checkmarksCsv, meta);
+}
+
+/**
+ * Repair one imported habit into something both editions will store.
+ *
+ * `parseHabit` in validate.js is the sibling of this function and the difference
+ * is deliberate: that one REJECTS bad input, because a person is typing it and
+ * can be told. This one REPAIRS it, because the input is a file — often written
+ * by another application — and refusing the whole import over one over-long
+ * description would be the wrong trade.
+ *
+ * It exists because the two writers had drifted apart on exactly the rules a
+ * validator is for:
+ *
+ *   personal   no length clamps at all, and no cap on the frequency denominator
+ *   cloud      description 500, unit 20, denominator 365
+ *
+ * So the personal edition would accept, through an import, a habit its own API
+ * would have refused — and `shared/CLAUDE.md` already says why that is the worst
+ * kind of divergence: data one edition accepts and the other silently truncates
+ * on the way back in. The limits come from LIMITS rather than being restated, so
+ * they cannot drift from the ones the API enforces either.
+ *
+ * Loop permits shapes our own validation does not (a numerator above the
+ * denominator), so those are squared up rather than dropped.
+ *
+ * @param {Record<string, any>} h a habit from any parser
+ * @returns {import('./types.js').Habit & {archived: boolean}}
+ */
+export function normaliseImportedHabit(h) {
+  const num = Math.max(1, Number(h.freq_numerator) || 1);
+  let den = Math.max(1, Number(h.freq_denominator) || 1);
+  if (num > den) den = num;
+  den = Math.min(den, LIMITS.freqDenominator);
+
+  const target = Number(h.target_value);
+
+  return {
+    name: String(h.name ?? '').trim().slice(0, LIMITS.name),
+    description: String(h.description ?? '').slice(0, LIMITS.description),
+    type: h.type === 'numerical' ? 'numerical' : 'boolean',
+    unit: String(h.unit ?? '').slice(0, LIMITS.unit),
+    target_value: Number.isFinite(target) && target > 0 ? target : 0,
+    target_type: h.target_type === 'at_most' ? 'at_most' : 'at_least',
+    freq_numerator: num,
+    freq_denominator: den,
+    color: normalizeColor(h.color),
+    reminder_time: TIME_RE.test(h.reminder_time ?? '') ? h.reminder_time : '',
+    // One line and capped, the same rule parseHabit applies: an imported prompt
+    // ends up in the Android client's line-delimited reminder cache exactly like
+    // one typed into the dialog, and a newline there corrupts the record it
+    // sits in.
+    reminder_message: String(h.reminder_message ?? '')
+      .replace(/[\r\n]+/g, ' ').trim().slice(0, LIMITS.reminderMessage),
+    archived: !!h.archived,
+  };
 }
