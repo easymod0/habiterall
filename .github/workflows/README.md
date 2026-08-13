@@ -115,11 +115,12 @@ anything, which was never true of Docker Hub.
 Built for **linux/amd64 and linux/arm64**, so the personal edition runs on a
 Raspberry Pi as well as a normal server.
 
-> **One manual step, once.** A package is **private** the first time it is
-> pushed, even from a public repository. Open **Packages → habiterall-personal →
-> Package settings → Change visibility → Public**, and it stays public for every
-> later release. Do the same for `habiterall-cloud`. Until then `docker pull`
-> asks for credentials.
+> **If a pull asks for credentials**, the package is private — GitHub does that
+> for a package published into some accounts. Open **Packages →
+> habiterall-personal → Package settings → Change visibility → Public**, once,
+> and it stays public for every later release. Verified for this repository:
+> an anonymous `docker pull ghcr.io/easymod0/habiterall-personal:latest` works,
+> so nothing needed doing here.
 
 #### Docker Hub as well (optional)
 

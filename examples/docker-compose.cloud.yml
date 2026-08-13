@@ -1,0 +1,73 @@
+# habiterall, cloud edition — multi user, Postgres, your own OIDC provider.
+#
+# The copy in README.md is generated from this file, and a unit test fails if the
+# two drift, so edit this one.
+#
+# Needs a .env beside it:
+#
+#   DB_OWNER_PASSWORD=...      openssl rand -base64 36
+#   APP_DB_PASSWORD=...        openssl rand -base64 36
+#   SESSION_SECRET=...         openssl rand -base64 36
+#   PUBLIC_URL=https://habits.example.com
+#   OIDC_ISSUER=...            from your provider; must end in a slash
+#   OIDC_CLIENT_ID=...
+#   OIDC_CLIENT_SECRET=...
+#
+# Register ${PUBLIC_URL}/auth/callback as the redirect URI with your provider.
+#
+# Pin the image tag here rather than tracking `latest`: this edition runs
+# migrations on deploy, so `latest` means taking a schema change at a moment you
+# did not choose.
+#
+#   docker compose -f docker-compose.cloud.yml up -d
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: habiterall
+      POSTGRES_USER: habiterall_owner
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?set it in .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U habiterall_owner -d habiterall']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Runs once per deploy, as a SEPARATE credential the app never holds — it is
+  # the only thing allowed to change the schema. `up -d` waits for it to finish.
+  migrate:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL_ADMIN: postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set it in .env}
+    command: ['node', 'src/db/migrate.js']
+    restart: 'no'
+
+  app:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports:
+      - '3100:3000'
+    environment:
+      NODE_ENV: production
+      # The RESTRICTED role — not the owner. This is what makes a forgotten
+      # WHERE clause return nothing instead of another user's rows.
+      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
+      SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      OIDC_ISSUER: ${OIDC_ISSUER:?from your provider}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
+      TRUST_PROXY: 1
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+    restart: unless-stopped
+
+volumes:
+  db-data:
