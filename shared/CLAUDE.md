@@ -16,6 +16,9 @@ Postgres one.
 | `src/unzip.js` | minimal ZIP reader (Loop's CSV export) |
 | `src/constants.js` | `UNSET` / `YES` / `SKIP` wire values |
 | `public/app.js` | the whole UI; `start(authAdapter)` is the entry |
+| `public/ui/settings.js` | the preference registry and its server sync |
+| `public/ui/dates.js` | browser-side date helpers |
+| `public/ui/theme.js` | light/dark, with a redraw callback |
 | `public/auth-none.js`, `auth-oidc.js` | the two auth adapters |
 | `public/charts.js` | hand-rolled SVG charts |
 | `public/sw.js`, `offline.js` | PWA shell cache and the write outbox |
@@ -45,6 +48,12 @@ epoch-millis UTC-midnight timestamps, ×1000 numerical scaling, `YES_AUTO(1)`
 counts as done, `NO(0)`/`UNKNOWN(-1)` are dropped. `test/import.test.js` and
 `test/export-loop.test.js` pin all of it — if you change a conversion and
 those fail, the tests are right.
+
+**Adding a setting means two files.** `public/ui/settings.js` declares what
+the dialog renders; `src/validate.js` declares what the server accepts. Both,
+or the control is either unenforced or dead — `test/settings.test.js` fails if
+they drift. Do not add a control before the behaviour it names actually works:
+`weekStart` sat commented out until the aggregation honoured it.
 
 **The UI is auth-agnostic.** `app.js` never mentions sign-in; it calls the
 injected adapter (`load` / `render` / `signOut` / `onUnauthorized`). Adding an

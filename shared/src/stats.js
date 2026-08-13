@@ -242,15 +242,24 @@ export function bestStreak(streaks) {
 
 /* ---------- history aggregation ---------- */
 
+/**
+ * Start of the week containing `iso`.
+ *
+ * @param {string} iso
+ * @param {'monday'|'sunday'} [weekStart] ISO weeks start Monday; much of the
+ *   Americas starts Sunday, and a habit tracker's week should match the
+ *   user's calendar or the counts look wrong at the boundary.
+ */
+export function startOfWeek(iso, weekStart = 'monday') {
+  const d = fromISO(iso);
+  const dow = weekStart === 'sunday' ? d.getDay() : (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - dow);
+  return toISO(d);
+}
+
 const BUCKETERS = {
   day: (iso) => iso,
-  week: (iso) => {
-    const d = fromISO(iso);
-    // ISO week starts Monday.
-    const dow = (d.getDay() + 6) % 7;
-    d.setDate(d.getDate() - dow);
-    return toISO(d);
-  },
+  week: (iso, weekStart) => startOfWeek(iso, weekStart),
   month: (iso) => iso.slice(0, 7),
   quarter: (iso) => {
     const [y, m] = iso.split('-').map(Number);
@@ -263,12 +272,21 @@ const BUCKETERS = {
  * Group entries into buckets, returning completions and opportunities per
  * bucket so the UI can show either a raw count or a percentage.
  */
-export function computeHistory(habit, entryMap, start, end, granularity = 'day') {
+/**
+ * @param {import('./types.js').Habit} habit
+ * @param {Map<string, any>} entryMap
+ * @param {string} start
+ * @param {string} end
+ * @param {string} [granularity]
+ * @param {'monday'|'sunday'} [weekStart]
+ */
+export function computeHistory(habit, entryMap, start, end, granularity = 'day',
+                               weekStart = 'monday') {
   const bucketOf = BUCKETERS[granularity] ?? BUCKETERS.day;
   const buckets = new Map();
 
   for (const date of boundedRange(start, end)) {
-    const key = bucketOf(date);
+    const key = bucketOf(date, weekStart);
     if (!buckets.has(key)) {
       buckets.set(key, { bucket: key, completed: 0, total: 0, value: 0, skipped: 0 });
     }
@@ -320,13 +338,20 @@ export function computeWeekdays(habit, entryMap, start, end) {
  * Loop's frequency chart: for each month, how many weeks had 1, 2, 3 ...
  * completions. Reveals whether a "3x/week" habit is actually held at 3x.
  */
-export function computeFrequency(habit, entryMap, start, end) {
+/**
+ * @param {import('./types.js').Habit} habit
+ * @param {Map<string, any>} entryMap
+ * @param {string} start
+ * @param {string} end
+ * @param {'monday'|'sunday'} [weekStart]
+ */
+export function computeFrequency(habit, entryMap, start, end, weekStart = 'monday') {
   const weekTotals = new Map();
 
   for (const date of boundedRange(start, end)) {
     const value = entryMap.get(date) ?? UNSET;
     if (isCompleted(habit, value) !== true) continue;
-    const week = BUCKETERS.week(date);
+    const week = startOfWeek(date, weekStart);
     weekTotals.set(week, (weekTotals.get(week) ?? 0) + 1);
   }
 
@@ -345,10 +370,13 @@ export function computeFrequency(habit, entryMap, start, end) {
 /**
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
- * @param {{start?: string, end?: string, granularity?: string}} [opts]
+ * @param {{start?: string, end?: string, granularity?: string,
+ *           weekStart?: 'monday'|'sunday'}} [opts]
  * @returns {import('./types.js').Stats}
  */
-export function computeStats(habit, entries, { start, end, granularity = 'day' } = {}) {
+export function computeStats(habit, entries,
+                             { start, end, granularity = 'day',
+                               weekStart = 'monday' } = {}) {
   // Preserve `status` alongside the value so skips stay distinguishable from
   // a numerical habit legitimately recording the value 3.
   const entryMap = new Map(
@@ -380,8 +408,8 @@ export function computeStats(habit, entries, { start, end, granularity = 'day' }
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),
     totalCompleted,
-    history: computeHistory(habit, entryMap, from, end, granularity),
+    history: computeHistory(habit, entryMap, from, end, granularity, weekStart),
     weekdays: computeWeekdays(habit, entryMap, from, end),
-    frequency: computeFrequency(habit, entryMap, from, end),
+    frequency: computeFrequency(habit, entryMap, from, end, weekStart),
   };
 }

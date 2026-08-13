@@ -37,11 +37,19 @@ error). Regenerated on login against fixation; logout deletes the row.
 ignored entirely; habits match by *name*, and every written row carries the
 session's `user_id`. See the header comment in `src/apply-import.js`.
 
+**Settings are a JSONB column on `users`**, covered by the existing
+`users_select_self` / `users_update_self` policies — no new RLS needed. The
+app role was granted `UPDATE (settings)` explicitly; it still cannot touch
+`idp_subject` or `blocked`.
+
 ## Verify it, don't trust it
 
 ```bash
-npm run test:tenancy    # from the repo root
+npm run test:tenancy    # isolation attacks — from the repo root
+npm run test:cloud      # API, settings, and the Loop round trip
 ```
+
+Both need Postgres and run on every pull request.
 
 That suite *attacks* the isolation: cross-user reads, forged `user_id`
 inserts, malicious backups, `replace`-mode wipes, and privilege checks. Run it
@@ -60,7 +68,8 @@ to date".
 ## Local stack
 
 `docker compose up -d` brings up Postgres, Redis, Authentik (server +
-worker), and the app. First run needs `scripts/bootstrap-authentik.mjs` to
+worker), and the app. The app listens on **:3100**; Authentik's admin UI is on
+**:9000**. First run needs `scripts/bootstrap-authentik.mjs` to
 create the OIDC client — see `SETUP.md`.
 
 Two guards deliberately refuse to run insecurely and must be overridden for a
