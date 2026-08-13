@@ -27,9 +27,17 @@ android {
 
     signingConfigs {
         create("release") {
-            // Supplied by CI (or a local keystore.properties). Left unset for
-            // a debug-only build, which Gradle handles by falling back below.
-            val storePath = System.getenv("ANDROID_KEYSTORE_PATH")
+            // Supplied by CI (or a local keystore.properties). Absent for an
+            // unsigned build, which is a supported outcome — a release with no
+            // keystore configured still produces a sideloadable APK.
+            //
+            // `takeIf { isNotBlank() }`, not just a null check: a workflow that
+            // computes this value with a ternary passes an EMPTY STRING when
+            // there is no keystore, and `System.getenv` hands back "" rather
+            // than null. That read as "signing is configured", so the build set
+            // `storeFile = file("")` — the project directory — and then failed
+            // trying to sign with it. Blank and absent mean the same thing here.
+            val storePath = System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
             if (storePath != null) {
                 storeFile = file(storePath)
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
@@ -49,10 +57,12 @@ android {
             )
             // Only sign when a keystore was actually provided; otherwise the
             // build still succeeds and produces an unsigned APK.
-            signingConfig = if (System.getenv("ANDROID_KEYSTORE_PATH") != null) {
-                signingConfigs.getByName("release")
-            } else {
+            // Same rule as above: blank is absent, and an unsigned APK is a
+            // supported outcome rather than a failure.
+            signingConfig = if (System.getenv("ANDROID_KEYSTORE_PATH").isNullOrBlank()) {
                 null
+            } else {
+                signingConfigs.getByName("release")
             }
         }
     }
