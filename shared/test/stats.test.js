@@ -161,6 +161,63 @@ test('score rises with consistency and stays within 0..1', () => {
   }
 });
 
+test('the score uses Loop\'s decay constant, not a slower one', () => {
+  // 0.5^(sqrt(frequency)/13) from uhabits' Score.kt — a 13-day half-life for
+  // a daily habit. This was 0.5^(1/30) here for a while, which is faithful in
+  // shape but far too sluggish: a perfect habit took four months to look
+  // strong instead of one, and the number stopped feeling responsive.
+  const entries = new Map();
+  const d = new Date(2026, 0, 1);
+  for (let i = 0; i < 90; i++) {
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    entries.set(iso, { value: 2, status: '' });
+    d.setDate(d.getDate() + 1);
+  }
+
+  const scores = computeScores(boolHabit, entries, '2026-01-01', '2026-03-31');
+  const at = (n) => scores[n - 1].score;
+
+  // Half-life 13 days: a perfect habit is at 50% on day 13.
+  assert.ok(Math.abs(at(13) - 0.5) < 0.01,
+    `day 13 should be ~50%, got ${(at(13) * 100).toFixed(1)}%`);
+  assert.ok(at(30) > 0.75,
+    `a perfect month should exceed 75%, got ${(at(30) * 100).toFixed(1)}%`);
+  assert.ok(at(60) > 0.94,
+    `two perfect months should exceed 94%, got ${(at(60) * 100).toFixed(1)}%`);
+});
+
+test('a less frequent habit decays more slowly', () => {
+  // Loop scales the exponent by sqrt(frequency), so a 3x/week habit has a
+  // ~20-day half-life against a daily habit's 13. Missing one of three weekly
+  // sessions should not sting as much as missing a day of a daily habit.
+  const build = (freqNum, freqDen, doneOn) => {
+    const entries = new Map();
+    const d = new Date(2026, 0, 1);
+    for (let i = 0; i < 60; i++) {
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (doneOn(d)) entries.set(iso, { value: 2, status: '' });
+      d.setDate(d.getDate() + 1);
+    }
+    return computeScores(
+      { ...boolHabit, freq_numerator: freqNum, freq_denominator: freqDen },
+      entries, '2026-01-01', '2026-03-01'
+    );
+  };
+
+  const daily = build(1, 1, () => true);
+  const weekly3 = build(3, 7, (d) => [1, 3, 5].includes(d.getDay()));
+
+  // Both are perfectly kept, so both climb — but the daily one climbs faster.
+  const dayN = 30;
+  assert.ok(daily[dayN].score > weekly3[dayN].score,
+    `daily ${daily[dayN].score.toFixed(3)} should outpace 3x/week ${weekly3[dayN].score.toFixed(3)}`);
+
+  // And both still converge: a habit held exactly at its target reaches full
+  // strength whatever its frequency.
+  assert.ok(weekly3[weekly3.length - 1].score > 0.85,
+    `a perfectly-kept 3x/week habit should approach full strength, got ${weekly3[weekly3.length - 1].score}`);
+});
+
 test('score decays once the habit is abandoned', () => {
   const entries = map(
     Object.fromEntries(dateRange('2026-01-01', '2026-01-31').map((d) => [d, YES]))

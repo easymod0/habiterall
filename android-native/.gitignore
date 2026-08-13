@@ -1,11 +1,9 @@
-.gradle/
-build/
-local.properties
-*.jks
-*.keystore
+# Deliberately thin: the repo keeps its ignore rules at the root (see the note
+# there), and android-native/ is covered by that file. This exists only for the
+# things a stray Android tool can drop *inside* this directory tree, where a
+# root-level pattern would be easy to miss when the project is opened on its
+# own in Android Studio.
 
-# Generated in CI by `gradle wrapper` rather than committed — a binary jar
-# nobody can review in a diff.
-gradle/wrapper/gradle-wrapper.jar
-gradlew
-gradlew.bat
+.cxx/
+*.iml
+.idea/

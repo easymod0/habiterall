@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API 29+ only. DayNight follows the system dark-mode setting, which is what
+  the Compose UI already does for its own colours — this keeps the window
+  background and system bars in step with it.
+
+  The base values/themes.xml uses plain DeviceDefault, because DayNight does
+  not exist below API 29 and referencing it there fails to inflate at runtime.
+-->
+<resources>
+    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault.DayNight" />
+
+    <style name="Theme.Habiterall.Transparent" parent="@android:style/Theme.DeviceDefault.Dialog">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">true</item>
+    </style>
+</resources>

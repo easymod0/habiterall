@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Maskable variant of logo.svg.
+
+  Android and some launchers crop an adaptive icon to their own shape — a
+  circle, a squircle, a rounded square — and only the middle ~80% is
+  guaranteed to survive. So the background is a full bleed square (the crop
+  supplies the corners) and the mark is scaled to 0.72 about the centre to sit
+  well inside the safe zone.
+
+  Do not reuse logo.svg here: its rounded corners would be cropped away and
+  its bars would lose their ends under an aggressive mask.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#3B82F6"/>
+  <g fill="#FFFFFF">
+    <rect x="132.9" y="207.8" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="161.7" y="236.6" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="189.8" y="264.6" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="218.6" y="283.4" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="246.6" y="251.7" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="275.4" y="220.7" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="303.5" y="189.8" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="332.3" y="158.1" width="21.6" height="61.9" rx="10.8"/>
+    <rect x="360.4" y="127.1" width="21.6" height="61.9" rx="10.8"/>
+  </g>
+</svg>

@@ -16,11 +16,25 @@
   <link rel="apple-touch-icon" href="/shared/icons/icon-192.png">
 
   <link rel="stylesheet" href="/style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>✓</text></svg>">
+  <!--
+    The bar-checkmark, reduced to 5 bars. A favicon renders at 16px, where the
+    full 9-bar mark closes its gaps and turns to mush; five wider bars keep the
+    tick legible. Inline so the tab icon needs no extra request.
+  -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%233B82F6'/><g fill='%23fff'><rect x='4' y='12' width='4' height='9' rx='2'/><rect x='9.5' y='17' width='4' height='9' rx='2'/><rect x='15' y='13' width='4' height='9' rx='2'/><rect x='20.5' y='9' width='4' height='9' rx='2'/><rect x='26' y='5' width='4' height='9' rx='2'/></g></svg>">
+  <link rel="mask-icon" href="/shared/icons/logo.svg" color="#3B82F6">
 </head>
 <body>
   <header class="topbar">
-    <h1 class="brand">habiterall</h1>
+    <!--
+      A real <button> inside the heading, not a click handler on the <h1>:
+      the title is a navigation control, so it needs to be focusable and
+      operable from the keyboard like any other.
+    -->
+    <h1 class="brand">
+      <button type="button" id="btn-home" class="brand-link"
+              title="Back to your habits">habiterall</button>
+    </h1>
     <div class="topbar-actions">
       <button id="btn-new" class="btn btn-primary">New habit</button>
       <button id="btn-data" class="btn">Backup</button>

@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 
 const { parseSettings, SETTING_VALUES, ValidationError } =
   await import('../src/validate.js');
+const { computeHistory } = await import('../src/stats.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -93,6 +94,35 @@ test('non-objects are rejected outright', () => {
 
 test('an empty patch is valid and changes nothing', () => {
   assert.deepEqual(parseSettings({}), { accepted: {}, rejected: [] });
+});
+
+test('every historyGranularity value is one the aggregator understands', () => {
+  // computeHistory falls back to 'day' for an unknown bucket rather than
+  // throwing, so a typo here would produce a setting that saves fine, passes
+  // validation, and then silently does nothing.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const entries = new Map([
+    ['2026-01-15', { value: 2, status: '' }],
+    ['2026-04-20', { value: 2, status: '' }],
+  ]);
+
+  const dayBuckets = computeHistory(habit, entries, '2026-01-01', '2026-06-30', 'day');
+
+  for (const g of SETTING_VALUES.historyGranularity) {
+    const buckets = computeHistory(habit, entries, '2026-01-01', '2026-06-30', g);
+    if (g === 'day') continue;
+    // Any real bucketing groups days together, so it must produce strictly
+    // fewer buckets than one-per-day. An unrecognised value would fall back
+    // to 'day' and match it exactly.
+    assert.ok(
+      buckets.length < dayBuckets.length,
+      `"${g}" produced ${buckets.length} buckets, the same as day-level — ` +
+      'it is not a bucket computeHistory knows, so the setting would do nothing'
+    );
+  }
 });
 
 test('prototype pollution attempts are dropped', () => {

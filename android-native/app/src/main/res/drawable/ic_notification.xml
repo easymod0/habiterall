@@ -1,20 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Notification icons are masked to a silhouette: only the alpha channel is
-  used, and any colour is discarded. So this is the checkmark alone, drawn in
-  white on transparent, with no background square — a filled square would show
-  up in the status bar as a solid block.
+  Notification icon: the bar-checkmark as a bare silhouette.
+
+  Android masks a notification icon to its alpha channel and throws the colour
+  away, so there is no background square here — a filled one would appear in
+  the status bar as a solid block. White on transparent, bars only.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
-    android:viewportHeight="24"
-    android:tint="#FFFFFFFF">
+    android:viewportHeight="24">
     <path
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="2.6"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M5,12.5 L9.8,17.3 L19,8" />
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M5.11,9.9a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6.72,11.52a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M8.29,13.09a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M9.9,14.14a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11.48,12.36a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13.09,10.63a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M14.66,8.9a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M16.27,7.12a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M17.85,5.39a0.6,0.6 0 0 1 1.21,0v2.26a0.6,0.6 0 0 1 -1.21,0z" />
 </vector>

@@ -24,7 +24,7 @@ reconnect.
 
 - [Which edition do I want?](#which-edition-do-i-want)
 - [Quick start](#quick-start) · [personal](#personal-edition) · [cloud](#cloud-edition)
-- [Features](#features) · [Statistics](#statistics)
+- [Features](#features) · [Statistics](#statistics) · [Bouncing back](#bouncing-back)
 - [Install on a phone](#install-on-a-phone)
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
 - [Backup and restore](#backup-and-restore)
@@ -139,7 +139,10 @@ travel.
 and note intact.
 
 **Works offline** — check off habits with no signal; they queue on the device
-and sync, in order, when you reconnect.
+and sync, in order, when you reconnect. Reconnection is automatic, and does not
+rely on the browser noticing: the app re-checks when you come back to the tab
+and keeps probing while it is down, so restarting the server does not leave a
+page stranded.
 
 **Light and dark**, following your system preference.
 
@@ -147,29 +150,92 @@ and sync, in order, when you reconnect.
 
 | View | What it shows |
 |---|---|
-| **Strength** | An exponential-decay score (30-day half-life) over your whole history |
-| **Calendar** | A clickable year heatmap, shaded by completion or progress toward the target |
+| **Strength** | Loop's exponential-decay score, plotted by day / week / month / quarter / year |
+| **Calendar** | A clickable heatmap with streaks joined up, zoomable and pageable |
 | **History** | Completions by day / week / month / quarter / year, as a percentage or a count |
-| **Best streaks** | Your five longest runs, with the dates you achieved them |
+| **Best streaks** | Your ten longest runs, listed newest first with the dates |
+| **Bouncing back** | What happens *after* a miss — see below |
 | **By day of week** | Which days you reliably miss |
+| **Weekday consistency** | The same, month by month, so you can see a weekday slipping |
 | **Times per week** | How many weeks each month hit 1×, 2×, 3× … |
 
+Every chart with a time axis pages through history rather than cramming years
+into one screen, and the number of columns follows the width you have.
+
 Plus current streak, best streak, and total completions at a glance.
+
+### Bouncing back
+
+Streaks reward perfection and punish one bad day. **Bouncing back** measures
+the thing that actually decides whether a habit survives — what happens after
+you miss:
+
+- **Recovery rate** — of every lapse that ended, how often were you back the
+  very next day?
+- **How long lapses last** — misses clustered at one day mean a habit that
+  self-corrects; a fat tail means one that, once dropped, stays dropped.
+- **How far streaks get** — of all the streaks you started, what share reached
+  3 days? 7? 30? The cliff in that curve locates where this habit reliably
+  breaks, which "best streak: 23" cannot tell you.
+
+Two habits can both recover 100% of the time and still be nothing alike: one
+clears a week 86% of the time, the other 40%. Only the survival curve
+separates them.
+
+> Shown for daily habits only. For a 3×/week habit an off-day is not a
+> failure, so these figures would be measuring the wrong thing.
 
 ---
 
 ## Install on a phone
 
+Three options, in increasing order of effort:
+
+| | What you get | Needs |
+|---|---|---|
+| **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
+| **[TWA wrapper](android/SETUP.md)** | The same, as an installable APK | A GitHub Action run |
+| **[Native app](android-native/README.md)** | **Notification actions** — answer from the shade | A GitHub Action run |
+
+### Add to Home Screen
+
 Open your instance in a mobile browser and choose **Add to Home Screen**. You
 get an app icon, a full-screen launch with no browser chrome, offline access
 to your dashboard, and check-offs that queue until you reconnect.
 
-For a Play-Store-installable APK, see **[android/SETUP.md](android/SETUP.md)** —
-it builds a Trusted Web Activity wrapping this same app, in GitHub Actions, with
-no Android toolchain on your machine.
-
 > Requires HTTPS. Browsers disable service workers (and therefore offline
 > support) on plaintext origins other than `localhost`.
+
+### The two Android apps
+
+They are different things, and which you want depends on one question: do you
+want to record a habit **without opening anything**?
+
+**[`android/`](android/SETUP.md) — Trusted Web Activity.** A thin native shell
+around the PWA. Same UI, same code, installable as an APK, and it verifies
+against your domain so no URL bar appears. Built by bubblewrap in GitHub
+Actions, so nothing needs installing locally. Choose this if you just want an
+app icon and a Play-Store-shaped package.
+
+**[`android-native/`](android-native/README.md) — native Kotlin client.**
+Exists for one reason the web cannot do: a reminder notification with **Yes /
+No / count buttons in it**. Tap one and the entry is recorded without the app
+ever coming to the foreground; if you are offline the write queues and retries.
+Reminders are local alarms, so they fire whether or not the server is
+reachable, and the reminder *times* live on the server so they follow your
+account to a new phone.
+
+Everything a web page does well — charts, the calendar, history editing —
+opens the server's own UI inside the app, so there is one implementation of the
+statistics rather than two. The habit list, quick check-offs and server
+settings are native.
+
+> The native app talks to the **personal** edition. The cloud edition needs an
+> OIDC sign-in flow it does not implement yet.
+>
+> Plain `http://` is accepted only for private addresses (`10.x`,
+> `192.168.x`, `172.16–31.x`) so a LAN server works without a certificate;
+> anything public must be `https://`.
 
 ---
 
@@ -315,7 +381,8 @@ shared/               everything both editions have in common
   public/             the entire UI, plus the PWA
 habiterall-personal/  single user, SQLite, no auth
 habiterall-cloud/     multi user, Postgres, OIDC
-android/              Trusted Web Activity wrapper
+android/              Trusted Web Activity wrapper for the PWA
+android-native/       native Kotlin client, for notification actions
 ```
 
 One npm workspace, **no build step**, and one runtime dependency for the
@@ -335,10 +402,17 @@ npm test              # unit tests, all workspaces
 npm run typecheck     # JSDoc types via tsc --noEmit (no build step)
 npm run test:browser  # real-browser UI suites — needs Chrome + a running server
 npm run test:cloud    # cloud API + Loop round trip — needs Postgres
+npm run test:roundtrip -w habiterall-personal   # backup fidelity, all formats
 npm run test:tenancy  # multi-tenant isolation attacks — needs Postgres
 ```
 
-Every one of these runs on each pull request, alongside both Docker builds.
+Every one of these runs on each pull request, alongside both Docker builds and
+a backup round-trip check that exports every format, re-imports it, and asserts
+nothing changed.
+
+**The main suite needs no configuration** — fork it, push, and everything runs.
+Only the two Android release workflows need secrets, and only to *sign* an APK;
+see **[.github/workflows/README.md](.github/workflows/README.md)**.
 
 The browser suites drive real Chrome and check things unit tests structurally
 cannot — a CSS rule silently defeating the `hidden` attribute, offline

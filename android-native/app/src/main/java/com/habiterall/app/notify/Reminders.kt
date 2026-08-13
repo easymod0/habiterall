@@ -123,7 +123,8 @@ object Reminders {
 
         override suspend fun doWork(): Result {
             val api = Settings(applicationContext).api() ?: return Result.success()
-            val only = if (inputData.hasKeyWithValueOfType<Long>(Notifications.EXTRA_HABIT_ID)) {
+            // See Outbox.SyncWorker: `hasKeyWithValueOfType` is not reified.
+            val only = if (inputData.keyValueMap.containsKey(Notifications.EXTRA_HABIT_ID)) {
                 inputData.getLong(Notifications.EXTRA_HABIT_ID, -1)
             } else {
                 null

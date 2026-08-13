@@ -71,6 +71,47 @@ export const SETTINGS = {
       { value: 'wide', label: 'Wide — smallest squares, most history' },
     ],
   },
+  scoreGranularity: {
+    section: 'Statistics',
+    label: 'Strength chart resolution',
+    help: 'How finely the strength curve is plotted. The score itself is always daily.',
+    type: 'select',
+    default: 'day',
+    options: [
+      { value: 'day', label: 'Day' },
+      { value: 'week', label: 'Week' },
+      { value: 'month', label: 'Month' },
+      { value: 'quarter', label: 'Quarter' },
+      { value: 'year', label: 'Year' },
+    ],
+  },
+  historyGranularity: {
+    section: 'Statistics',
+    label: 'History starts on',
+    help: 'Which bucket the history chart opens on. You can still switch it per habit.',
+    type: 'select',
+    // Weeks rather than days: a day-level history of a year is ~365 bars,
+    // which reads as noise. Weekly is where the shape of a habit shows.
+    default: 'week',
+    options: [
+      { value: 'day', label: 'Day' },
+      { value: 'week', label: 'Week' },
+      { value: 'month', label: 'Month' },
+      { value: 'quarter', label: 'Quarter' },
+      { value: 'year', label: 'Year' },
+    ],
+  },
+  historyMode: {
+    section: 'Statistics',
+    label: 'History shows',
+    help: 'A percentage of days met, or a raw count of completions.',
+    type: 'select',
+    default: 'percent',
+    options: [
+      { value: 'percent', label: 'Percentage' },
+      { value: 'count', label: 'Count' },
+    ],
+  },
   confirmDelete: {
     section: 'Safety',
     label: 'Confirm before deleting a habit',

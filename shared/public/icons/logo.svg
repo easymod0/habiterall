@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The habiterall mark: a checkmark built from bars.
+
+  Two ideas in one shape — the checkmark (a day done) and the bar chart (the
+  history behind it).
+
+  The bars are SEGMENTS OF THE STROKE, not columns on a baseline. Bars anchored
+  to a baseline have thickness that grows with height, so the tick never
+  emerges and the mark just reads as a chart. Each bar here spans only the
+  stroke's thickness at its own x.
+
+  Three numbers carry the whole design, and it is a narrow window:
+
+    gap 9.5px   bars stay visibly separate — that is what says "bars".
+                Close it and they merge into a solid staircase.
+    overlap 47px  each bar overlaps its neighbour vertically by more than half
+                its height, so the eye joins them into one stroke. Lose it and
+                the mark falls apart into scattered dashes.
+    height 86px  tall enough to look like bars rather than square blocks.
+
+  Geometry is derived, not hand-placed: 9 bars evenly spaced along two lines,
+  (100,232) down to the corner at (212,344), then up to (416,120). The long arm
+  climbs well above where the short arm starts, which is what distinguishes a
+  tick from a V.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="112" fill="#3B82F6"/>
+  <g fill="#FFFFFF">
+    <rect x="85"  y="189" width="30" height="86" rx="15"/>
+    <rect x="125" y="229" width="30" height="86" rx="15"/>
+    <rect x="164" y="268" width="30" height="86" rx="15"/>
+    <rect x="204" y="294" width="30" height="86" rx="15"/>
+    <rect x="243" y="250" width="30" height="86" rx="15"/>
+    <rect x="283" y="207" width="30" height="86" rx="15"/>
+    <rect x="322" y="164" width="30" height="86" rx="15"/>
+    <rect x="362" y="120" width="30" height="86" rx="15"/>
+    <rect x="401" y="77"  width="30" height="86" rx="15"/>
+  </g>
+</svg>

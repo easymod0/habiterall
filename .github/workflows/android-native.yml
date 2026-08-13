@@ -42,17 +42,23 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       # The repo does not commit gradle-wrapper.jar — a binary nobody can
       # review in a diff. This generates the wrapper from the version pinned
       # in gradle/wrapper/gradle-wrapper.properties instead.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          # Pin it. Without this the action installs the newest Gradle — 9.x —
+          # and `gradle wrapper` below runs under that, configuring the project
+          # before the wrapper it generates is ever used. AGP 8.x does not
+          # support Gradle 9, so the build failed during that very step.
+          gradle-version: '8.14.3'
 
       - name: Generate the wrapper
         working-directory: android-native
-        run: gradle wrapper --gradle-version 8.9
+        run: gradle wrapper --gradle-version 8.14.3
 
       - name: Unit tests
         working-directory: android-native
@@ -95,14 +101,20 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          # Pin it. Without this the action installs the newest Gradle — 9.x —
+          # and `gradle wrapper` below runs under that, configuring the project
+          # before the wrapper it generates is ever used. AGP 8.x does not
+          # support Gradle 9, so the build failed during that very step.
+          gradle-version: '8.14.3'
 
       - name: Generate the wrapper
         working-directory: android-native
-        run: gradle wrapper --gradle-version 8.9
+        run: gradle wrapper --gradle-version 8.14.3
 
       # Optional: without ANDROID_KEYSTORE_BASE64 the build produces an
       # unsigned APK rather than failing, so a fork can still build one.

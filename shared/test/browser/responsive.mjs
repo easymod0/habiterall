@@ -159,7 +159,10 @@ try {
           const wrap = s.closest('.chart-scroll');
           return !wrap && b.right > de.clientWidth + 1;
         }).length,
-        tiles: document.querySelectorAll('.stat-tile').length,
+        // Scoped to the header row, not every .stat-tile on the page: the
+        // "Bouncing back" card contributes its own tiles, and a global count
+        // would have to be revised every time a card gains one.
+        tiles: document.querySelectorAll('#view-detail > .stat-row .stat-tile').length,
       };
     })()`);
     ck(`${vp.label}: all five charts render`, charts.count >= 5, String(charts.count));
