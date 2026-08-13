@@ -62,6 +62,41 @@ export async function withUser(userId, fn) {
 }
 
 /**
+ * Run a read-only scan across users, for the reminder scheduler only.
+ *
+ * The notifier is the one job with no user to scope to: it must ask "who has a
+ * server-delivered destination configured?" before it knows whose day to look
+ * at. `withoutUser` cannot answer that — with no `app.user_id` set, the
+ * `users_self` policy matches nothing and the scan returns zero rows, which is
+ * RLS working correctly.
+ *
+ * So this sets a transaction-local `app.scope`, which migration 008's
+ * `users_notifier_scan` policy requires. That policy is FOR SELECT and demands
+ * `app_current_user_id() IS NULL`, so this can never widen a request already
+ * scoped to a user, and it reaches no table but `users`. Once the scan has the
+ * ids, per-user work goes back through `withUser` like everything else.
+ *
+ * @param {(client: pg.PoolClient) => Promise<T>} fn
+ * @returns {Promise<T>}
+ * @template T
+ */
+export async function withNotifierScope(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN READ ONLY');
+    await client.query('SELECT set_config($1, $2, true)', ['app.scope', 'notifier']);
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Run a query with NO user context, for operations that legitimately span
  * users: migrations, session storage, and looking a user up by their IdP
  * subject before we know their id.

@@ -16,10 +16,23 @@ APP_DB_PASSWORD='apptestpw' node src/db/migrate.js
 node test/tenancy.integration.mjs
 node test/api.integration.mjs
 node test/roundtrip.integration.mjs
+node test/notify.integration.mjs
 ```
 
 Run them after ANY change to the schema, the RLS policies, `db/pool.js`, or
 `apply-import.js`.
+
+## `notify.integration.mjs`
+
+The reminder scheduler's storage adapter: which accounts the cross-user scan
+finds, that the per-user reads go through `withUser` like everything else, and
+that the watermark is keyed on each account's *own* local date — a server in
+UTC and a user in Tokyo must not file a send under the wrong day and repeat it
+hours later. Every send goes to a fake `fetch`; nothing here reaches Discord.
+
+The policy that lets the scan span users at all is attacked in
+`tenancy.integration.mjs` — see the "notifier scope" checks there and the
+header of `migrations/008_notify_log.sql`.
 
 ## `roundtrip.integration.mjs`
 

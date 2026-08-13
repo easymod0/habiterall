@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { pool, closePool } from './db/pool.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api } from './api.js';
+import { start as startNotifier } from './notifier.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -117,6 +118,18 @@ const apiLimiter = rateLimit({
   message: { error: 'rate limit exceeded' },
 });
 
+/**
+ * The test-notification endpoint makes the server perform an OUTBOUND request,
+ * which the general 300-per-minute API limit is far too loose for: it would
+ * let one account push 300 posts a minute at its Discord channel and get the
+ * server rate-limited (or the webhook deleted) on their behalf.
+ */
+const notifyTestLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, limit: 10,
+  keyGenerator: (req) => (req.session?.user?.id ? `u:${req.session.user.id}` : req.ip),
+  message: { error: 'too many test notifications, try again in a few minutes' },
+});
+
 const importLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, limit: 20,
   keyGenerator: (req) => (req.session?.user?.id ? `u:${req.session.user.id}` : req.ip),
@@ -169,6 +182,8 @@ app.use('/api/import', requireAuth, importLimiter,
     ? `${process.env.MAX_UPLOAD_MB}mb` : '16mb' }));
 
 app.use(express.json({ limit: '1mb' }));
+// Mounted before the router so the tighter limit applies first.
+app.use('/api/notify/test', requireAuth, notifyTestLimiter);
 app.use('/api', requireAuth, apiLimiter, api);
 
 /* ---------- static ---------- */
@@ -221,6 +236,11 @@ app.use((err, req, res, next) => {
 
 const server = await start();
 
+// Reminders the server delivers itself (Discord today). Started here rather
+// than at import time so the test suites, which import `api.js`, never post to
+// a real webhook. Nothing schedules the Android channel: the phone does that.
+const notifier = startNotifier();
+
 async function start() {
   await initAuth();
   const s = app.listen(PORT, '0.0.0.0', () => {
@@ -231,6 +251,7 @@ async function start() {
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
+    notifier?.stop();
     server.close(async () => {
       await closePool();
       process.exit(0);
