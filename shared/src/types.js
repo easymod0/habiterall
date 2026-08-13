@@ -149,8 +149,9 @@
  */
 
 /**
- * What happens after a miss. `applicable` is false for non-daily habits,
- * where an off-day is not a failure and these figures would mislead.
+ * What happens after a miss. A "miss" is a day the habit fell below its rate,
+ * so this applies at any frequency; `applicable` is retained because the
+ * response shape is public, and nothing sets it false any more.
  * @typedef {object} Resilience
  * @property {boolean} applicable
  * @property {Recovery|null} recovery
