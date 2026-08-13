@@ -18,20 +18,35 @@ release builds — unsigned APKs and all the tests work with no setup at all.
 ### Releasing
 
 **Merging does not release.** Every merge to `master` runs the tests and stops
-there. A release is a decision, and tagging is how it is taken:
+there. A release is a decision, taken either from the Actions tab — **Release →
+Run workflow** — or by tagging:
 
 ```bash
 git tag v1.4.0 && git push origin v1.4.0
 ```
 
-That runs `release.yml`, which:
+From the Actions tab the *version* box is optional:
+
+| version | releases |
+|---|---|
+| *(blank)* | the next **patch**, derived from the highest `vX.Y.Z` tag — `1.4.0` → `1.4.1` |
+| `1.5.0` | exactly that |
+
+Patch is automatic because it is the common case, and typing it is the one place
+a release can silently go backwards. Major and minor are judgement calls, so
+they stay manual. Pre-releases (`v1.5.0-rc1`) are never used as the base for a
+bump and never produced by one — pass a version for those.
+
+Either route runs `release.yml`, which:
 
 1. derives the version from the tag, and an Android `versionCode` from it
    (`1.4.0` → `10400`, monotonic by construction);
 2. runs the whole test suite again — tagging a commit whose tests never ran is
    the failure a release pipeline exists to prevent;
 3. builds the native APK and the TWA APK, both stamped with that version;
-4. builds both Docker images and pushes `1.4.0`, `1.4` and `latest`;
+4. builds both Docker images and pushes `1.4.0`, `1.4` and `latest` — the
+   moving `X.Y` tag only from `1.0.0` up, since under semver a `0.x` series
+   promises no compatibility for it to stand for;
 5. writes release notes listing every commit since the previous `v*` tag,
    grouped by subject prefix, with anything unprefixed under *Other* rather
    than dropped;
@@ -41,11 +56,15 @@ To try it without publishing, use **Actions → Release → Run workflow** and l
 *dry_run* ticked: everything builds, nothing is pushed, and the summary lists
 what would have been attached.
 
-Each part degrades on its own. No keystore means the APKs are unsigned (still
-sideloadable). No `TWA_HOST` means no TWA asset. No `DOCKERHUB_*` secrets means
-the images go to GHCR only — which needs no secrets at all, so images are
-published either way. The release still succeeds and says which parts were
-skipped.
+Most parts degrade on their own. No `TWA_HOST` means no TWA asset. No
+`DOCKERHUB_*` secrets means the images go to GHCR only — which needs no secrets
+at all, so images are published either way. The release still succeeds and says
+which parts were skipped.
+
+Signing is the exception: **a publishing run with no keystore fails.** An
+unsigned APK cannot be installed on any device, so degrading there would mean
+attaching a file nobody can use. A dry run still builds one, which is enough to
+validate the build.
 
 ### What runs when
 
@@ -153,9 +172,16 @@ every merge a release of `latest`.
 On a PR touching `android-native/` it runs the unit tests, lints, and uploads a
 **debug APK** as a build artifact. That path needs no configuration.
 
-Signing is optional: with no `ANDROID_KEYSTORE_BASE64` secret the release build
-still succeeds and produces an **unsigned** APK, which installs fine via
-`adb install`. Set the four secrets below only when you want a signed one.
+**Signing is required for a usable APK.** With no `ANDROID_KEYSTORE_BASE64`
+secret the build still succeeds, but it produces an **unsigned** APK — and
+Android will not install one under any circumstances. It is rejected by the
+package manager itself (`INSTALL_PARSE_FAILED_NO_CERTIFICATES`), so neither
+*Install unknown apps* nor `adb install` gets around it; the user just sees
+"App not installed".
+
+A publishing release therefore **fails** if the secrets are absent, rather than
+attaching a file nobody can install. A dry run still builds an unsigned APK, so
+the build itself can be validated without a keystore.
 
 ### `android-release.yml` — the TWA wrapper
 
