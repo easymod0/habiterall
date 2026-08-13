@@ -51,6 +51,59 @@ export function findChrome() {
 
 export const CHROME = findChrome();
 
+
+/**
+ * Wait for the browser to expose a DevTools endpoint, and say so plainly if it
+ * never does.
+ *
+ * Every suite had its own copy of this poll, and every copy failed the same
+ * unhelpful way: the loop gave up, left `url` undefined, and the next line —
+ * `new WebSocket(undefined)` — threw **TypeError: Invalid URL**. A release run
+ * failed with exactly that, and the message says nothing about the actual
+ * problem, which is that Chrome had not finished starting.
+ *
+ * Fifteen seconds was also thin. A cold browser here takes ~300ms and the loop
+ * exits as soon as it answers, so a longer ceiling costs nothing on a healthy
+ * machine and removes a whole class of flake on a loaded CI runner.
+ *
+ * @param {number} port  the --remote-debugging-port the browser was given
+ * @param {import('node:child_process').ChildProcess} [chrome] to report an early exit
+ * @param {number} [timeoutMs]
+ * @returns {Promise<string>} the browser's WebSocket debugger URL
+ */
+export async function devtoolsUrl(port, chrome, timeoutMs = 45_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'no response yet';
+
+  while (Date.now() < deadline) {
+    // A browser that died is never going to answer, so stop waiting for it.
+    if (chrome?.exitCode !== null && chrome?.exitCode !== undefined) {
+      throw new Error(
+        `the browser exited with code ${chrome.exitCode} before opening a ` +
+        `DevTools port. Check CHROME_PATH (${CHROME}).`
+      );
+    }
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      const { webSocketDebuggerUrl } = await res.json();
+      if (webSocketDebuggerUrl) return webSocketDebuggerUrl;
+      lastError = 'answered, but with no webSocketDebuggerUrl';
+    } catch (err) {
+      lastError = err?.message ?? String(err);
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  throw new Error(
+    `the browser did not expose a DevTools endpoint on port ${port} within ` +
+    `${timeoutMs / 1000}s (last attempt: ${lastError}). ` +
+    `CHROME_PATH is ${CHROME}.`
+  );
+}
+
 /**
  * Shut a suite's browser down for real.
  *

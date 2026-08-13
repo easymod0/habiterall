@@ -12,7 +12,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT=9297;
 const profile=mkdtempSync(join(tmpdir(),'habnotify-'));
 const chrome=launchChrome(PORT, profile);
@@ -25,7 +25,7 @@ const send=(m,p={},s)=>new Promise((res,rej)=>{const id=nid++;pend.set(id,{res,r
 const WEBHOOK='https://discord.com/api/webhooks/123456789012345678/browser-test-token';
 
 try{
-  let url;for(let i=0;i<60;i++){try{url=(await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json()).webSocketDebuggerUrl;if(url)break;}catch{}await sleep(250);}
+  const url = await devtoolsUrl(PORT, chrome);
   ws=new globalThis.WebSocket(url);await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j;});
   ws.onmessage=ev=>{const m=JSON.parse(ev.data);
     if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(new Error(JSON.stringify(m.error))):res(m.result);}};
