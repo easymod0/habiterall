@@ -53,6 +53,30 @@ test('numerical entries are scaled by 1000', () => {
   assert.equal(toLoopEntry(h, { value: 0, status: '' }), 0);
 });
 
+test('a tiny amount never exports into the sentinel band', () => {
+  // 0.003 x 1000 = 3, which IS Loop's SKIP. Re-importing turned the recorded
+  // amount into a skipped day: the value destroyed, and a failure silently
+  // converted into a skip that bridges streaks and inflates the score.
+  //
+  // Loop resolves the ambiguity in favour of the sentinel, so it can only be
+  // avoided on the way out. Nudging to 4 costs 0.001 of a unit — a rounding
+  // error at a precision nothing tracks — and keeps the day a real entry.
+  const h = { type: 'numerical' };
+
+  for (const tiny of [0.001, 0.002, 0.003]) {
+    const wire = toLoopEntry(h, { value: tiny, status: '' });
+    assert.ok(wire > 3,
+      `${tiny} exported as ${wire}, inside the sentinel band`);
+  }
+
+  // Zero must stay zero: it is a legitimate amount, especially for an
+  // "at most" habit where 0 is the ideal outcome, and 0 is NO not SKIP.
+  assert.equal(toLoopEntry(h, { value: 0, status: '' }), 0);
+
+  // And a genuine skip is still the sentinel.
+  assert.equal(toLoopEntry(h, { value: 0, status: 'skip' }), 3);
+});
+
 test('a numerical 3 exports as 3000, never as the SKIP sentinel', () => {
   const h = { type: 'numerical' };
   const three = toLoopEntry(h, { value: 3, status: '' });

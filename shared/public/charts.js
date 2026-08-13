@@ -293,7 +293,12 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       if (onPick && !isFuture) {
         rect.setAttribute('cursor', 'pointer');
         rect.setAttribute('role', 'gridcell');
-        rect.dataset.date = date;
+        // setAttribute, not .dataset — the offline render suites drive this
+        // module against a fake DOM that implements attributes only, so
+        // `.dataset.date` threw and made the clickable calendar untestable
+        // there. Reading it back still works via `rect.dataset.date` in a
+        // real browser, which is where the keyboard handler runs.
+        rect.setAttribute('data-date', date);
         // Roving tabindex: only one cell is a tab stop, so tabbing past the
         // calendar takes one press rather than ~180. Arrows move within it.
         rect.setAttribute('tabindex', '-1');
@@ -389,12 +394,12 @@ function attachCellPopover(svg) {
     for (const c of svg.querySelectorAll('.cal-cell.is-active')) {
       c.classList.remove('is-active');
     }
-    if (!pop) return;
-    pop.classList.remove('is-open');
-    const node = pop;
+    // The node is shared page-wide and stays in the DOM — only its visibility
+    // is toggled. Removing it would race every other calendar's reference to
+    // it, and an invisible empty div costs nothing.
+    const node = pop ?? document.querySelector('.cal-pop');
     pop = null;
-    // Let the fade finish before removing, or it vanishes abruptly.
-    setTimeout(() => node.remove(), 160);
+    if (node) node.classList.remove('is-open');
   };
 
   const show = (cell) => {
@@ -406,6 +411,16 @@ function attachCellPopover(svg) {
     }
     cell.classList.add('is-active');
 
+    // ONE popover element for the whole page, reused.
+    //
+    // Each calendar used to create its own. If a re-render happened while the
+    // pointer sat still over a cell, the replacement SVG appeared under the
+    // motionless pointer, fired `pointerover`, and opened a second popover —
+    // which then never closed, because a pointer that does not move generates
+    // no further events. It floated over unrelated cards indefinitely.
+    // Sharing one node makes that impossible: opening it anywhere moves the
+    // same element.
+    pop = document.querySelector('.cal-pop');
     if (!pop) {
       pop = document.createElement('div');
       pop.className = 'cal-pop';
@@ -983,8 +998,13 @@ export function frequencyChart(months, color, { width = 720 } = {}) {
     1,
     ...months.flatMap((m) => Object.keys(m.counts).map(Number))
   );
-  const rows = Math.min(months.length, 12);
-  const shown = months.slice(-rows);
+  // Draw everything handed over. This used to re-clamp to 12 rows and slice
+  // the oldest away — but the caller (windowedChart) has already decided how
+  // many months fit and labels the range accordingly, so the two clamps
+  // fought: the header claimed "2025-05 → 2026-08" while four of those months
+  // were drawn on no page at all, reachable by no amount of paging.
+  const shown = months;
+  const rows = Math.max(shown.length, 1);
   const height = pad.top + rows * rowH + pad.bottom;
 
   const svg = svgRoot(width, height);

@@ -36,9 +36,32 @@ for (const required of ['DATABASE_URL', 'SESSION_SECRET', 'PUBLIC_URL']) {
 
 const app = express();
 
-// Behind a TLS-terminating reverse proxy, trust exactly one hop so that
-// secure cookies and per-IP rate limiting see the real client address.
-app.set('trust proxy', 1);
+/**
+ * How many reverse proxies sit in front of the app.
+ *
+ * This was hardcoded to 1 while `.env.example` and docker-compose both
+ * advertised a `TRUST_PROXY` variable — so an operator running the app
+ * directly exposed, and setting `TRUST_PROXY=0` exactly as documented, still
+ * got proxy trust. That matters: with it on, a client-supplied
+ * `X-Forwarded-For` becomes `req.ip`, and `req.ip` is the rate limiter's key
+ * for unauthenticated requests. The login limiter (20 per 15 minutes) is then
+ * bypassable by rotating a header.
+ *
+ * Trusting one hop remains the default, because the documented deployment
+ * puts TLS termination in front.
+ */
+const trustProxy = process.env.TRUST_PROXY === undefined
+  ? 1
+  : Number(process.env.TRUST_PROXY);
+
+if (!Number.isInteger(trustProxy) || trustProxy < 0) {
+  throw new Error(
+    `TRUST_PROXY must be a non-negative integer (got ${process.env.TRUST_PROXY})`
+  );
+}
+// `false` rather than 0: Express treats the number 0 as "trust nothing" too,
+// but false is the documented form and reads unambiguously.
+app.set('trust proxy', trustProxy === 0 ? false : trustProxy);
 
 app.use(helmet({
   contentSecurityPolicy: {

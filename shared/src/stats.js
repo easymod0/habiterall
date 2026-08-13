@@ -276,7 +276,11 @@ export function computeMissRuns(habit, entryMap, start, end) {
       if (runStart === null) runStart = date;
       runEnd = date;
     } else if (runStart !== null) {
-      runs.push({ start: runStart, end: runEnd, length: daysBetween(runStart, runEnd) + 1 });
+      // Closed by a success, so it is decided: the user did come back.
+      runs.push({
+        start: runStart, end: runEnd,
+        length: daysBetween(runStart, runEnd) + 1, open: false,
+      });
       runStart = null;
       runEnd = null;
     }
@@ -284,8 +288,16 @@ export function computeMissRuns(habit, entryMap, start, end) {
   // A run still open at `end` is deliberately included: an ongoing lapse is
   // the most important one to see, and excluding it would flatter the stats
   // exactly when the habit is in trouble.
+  //
+  // `open: true` is set HERE rather than inferred later by comparing `end`.
+  // Skips are transparent to this loop, so a lapse whose final days were
+  // skipped stops short of `end` and any such comparison misreads it as
+  // closed — see computeRecovery.
   if (runStart !== null) {
-    runs.push({ start: runStart, end: runEnd, length: daysBetween(runStart, runEnd) + 1 });
+    runs.push({
+      start: runStart, end: runEnd,
+      length: daysBetween(runStart, runEnd) + 1, open: true,
+    });
   }
   return runs;
 }
@@ -302,14 +314,24 @@ export function computeMissRuns(habit, entryMap, start, end) {
  * recovery yet, and counting it as a failure to recover would penalise a habit
  * simply for being mid-slip. `openRun` reports it separately.
  *
+ * "Open" cannot be decided by comparing against `end`. Skips are transparent
+ * to `computeMissRuns` — they neither start nor break a run — so an ongoing
+ * lapse whose last days were skipped *ends before* `end` and used to be
+ * misread as closed and unrecovered. A single trailing skip flipped a habit
+ * from "never missed" (rate null) to "0% recovery", the precise misreport this
+ * function exists to avoid. `computeMissRuns` therefore marks the run itself.
+ *
  * @returns {{rate: number|null, recovered: number, lapses: number, openRun: number}}
  *   `rate` is null when nothing has ever been missed — undefined, not 100%.
  */
 export function computeRecovery(missRuns, end) {
-  const closed = missRuns.filter((r) => r.end !== end);
-  const openRun = missRuns.length && missRuns[missRuns.length - 1].end === end
-    ? missRuns[missRuns.length - 1].length
-    : 0;
+  const last = missRuns.length ? missRuns[missRuns.length - 1] : null;
+  // `open` is set by computeMissRuns; the `end` comparison is a fallback for
+  // callers that build runs themselves (the chart tests do).
+  const isOpen = last ? (last.open ?? last.end === end) : false;
+
+  const closed = isOpen ? missRuns.slice(0, -1) : missRuns;
+  const openRun = isOpen ? last.length : 0;
 
   if (!closed.length) {
     return { rate: null, recovered: 0, lapses: 0, openRun };
@@ -627,8 +649,13 @@ export function computeStats(habit, entries,
   const scores = computeScores(habit, entryMap, from, end);
   const streaks = computeStreaks(habit, entryMap, from, end);
 
+  // Bounded to the same [from, end] window every other figure in this payload
+  // uses. Filtering the whole map counted entries outside the range — a
+  // future-dated row, or one beyond MAX_RANGE_DAYS — so `totalCompleted`
+  // disagreed with `streaks`, `history` and `scores` computed from the very
+  // same call.
   const totalCompleted = [...entryMap.entries()].filter(
-    ([, v]) => isCompleted(habit, v) === true
+    ([date, v]) => date >= from && date <= end && isCompleted(habit, v) === true
   ).length;
 
   return {

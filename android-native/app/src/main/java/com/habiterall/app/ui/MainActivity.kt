@@ -129,11 +129,17 @@ class MainActivity : ComponentActivity() {
                                 lifecycleScope.launch {
                                     // Verify before saving, so a typo surfaces
                                     // here rather than as an empty habit list.
-                                    if (Api(parsed.url).health()) {
+                                    // `probe` reports WHY: "could not reach"
+                                    // alone left the user with nothing to act
+                                    // on, since it covered DNS failure, a
+                                    // closed port, a firewall and a bad
+                                    // response identically.
+                                    val why = Api(parsed.url).probe()
+                                    if (why == null) {
                                         settings.setServerUrl(parsed.url)
                                         onSaved(parsed.url)
                                     } else {
-                                        error = "Could not reach ${parsed.url}"
+                                        error = why
                                     }
                                     busy = false
                                 }

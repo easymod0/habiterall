@@ -28,11 +28,13 @@ class ReminderReceiver : BroadcastReceiver() {
         val habitId = intent.getLongExtra(Notifications.EXTRA_HABIT_ID, -1)
         if (habitId < 0) return
 
+        // NO network constraint. The notification is the entire point of the
+        // app, and it must appear whether or not the server is reachable —
+        // requiring connectivity meant an offline morning silently produced no
+        // reminder at all. The worker falls back to the cached habit and, if
+        // it cannot check today's entries, errs toward notifying.
         val request = OneTimeWorkRequestBuilder<NotifyWorker>()
             .setInputData(Data.Builder().putLong(Notifications.EXTRA_HABIT_ID, habitId).build())
-            .setConstraints(
-                Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
-            )
             .build()
 
         WorkManager.getInstance(context)
@@ -52,18 +54,31 @@ class ReminderReceiver : BroadcastReceiver() {
             val habitId = inputData.getLong(Notifications.EXTRA_HABIT_ID, -1)
             if (habitId < 0) return Result.failure()
 
-            val api = Settings(applicationContext).api() ?: return Result.failure()
-            val habit = try {
+            val settings = Settings(applicationContext)
+            val api = settings.api()
+
+            // Prefer the live habit — its name and target may have changed —
+            // but fall back to the cache rather than dropping the reminder.
+            // `null` here means "we could not ask", which is NOT the same as
+            // "the habit was deleted", and only the latter should stay silent.
+            val fresh = if (api == null) null else try {
                 api.habits().firstOrNull { it.id == habitId }
+                    ?: return Result.success()   // genuinely gone server-side
             } catch (e: Exception) {
-                return Result.retry()
-            } ?: return Result.success() // deleted server-side; nothing to remind about
+                null                              // unreachable; use the cache
+            }
+
+            val habit = fresh
+                ?: settings.cachedReminders().firstOrNull { it.id == habitId }
+                ?: return Result.success()
 
             if (habit.archived || habit.reminderTime.isBlank()) return Result.success()
 
             val today = LocalDate.now().toString()
-            // Already answered today — a reminder would be noise.
-            val alreadyDone = try {
+            // Already answered today — a reminder would be noise. If the check
+            // itself fails we notify anyway: a redundant reminder is a far
+            // smaller harm than a missed one.
+            val alreadyDone = if (api == null) false else try {
                 api.entries(habitId).any { it.date == today }
             } catch (e: Exception) {
                 false

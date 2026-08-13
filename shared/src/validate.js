@@ -188,6 +188,26 @@ export function assertDate(date) {
   if (!DATE_RE.test(date ?? '')) {
     throw new ValidationError('date must be YYYY-MM-DD');
   }
+
+  // The shape being right does not make the date real. `2026-02-30` and
+  // `2026-13-45` both match the pattern, and the two editions then failed
+  // differently: Postgres rejected them with a 22008 that surfaced as an
+  // unhandled 500, while SQLite stored the string verbatim — an entry filed
+  // under a day that does not exist, invisible to every range query.
+  //
+  // Round-tripping through Date is what catches it: JS rolls invalid
+  // components over (13-45 becomes the following February), so a mismatch
+  // means the input was not a real calendar date.
+  const [y, m, d] = date.split('-').map(Number);
+  const probe = new Date(y, m - 1, d);
+  if (
+    probe.getFullYear() !== y ||
+    probe.getMonth() !== m - 1 ||
+    probe.getDate() !== d
+  ) {
+    throw new ValidationError(`${date} is not a real calendar date`);
+  }
+
   return date;
 }
 

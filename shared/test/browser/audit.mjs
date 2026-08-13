@@ -1,3 +1,15 @@
+/**
+ * Accessibility and layout guard rails.
+ *
+ * This file spent a long time as a pure diagnostic: every line was a
+ * console.log, there was no assertion, no failure counter and no
+ * `process.exit`, so the runner reported PASS unconditionally — including
+ * with no server running at all. Everything it appeared to verify (the 44px
+ * touch-target minimum above all) was in fact unguarded.
+ *
+ * It now asserts. Keep it that way: a suite that cannot fail is worse than
+ * no suite, because it reads as coverage.
+ */
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,6 +20,11 @@ const profile=mkdtempSync(join(tmpdir(),'habaudit-'));
 const chrome=spawn(CHROME,['--headless=new',`--remote-debugging-port=${PORT}`,
  `--user-data-dir=${profile}`,'--no-first-run','--disable-gpu','about:blank'],{stdio:'ignore'});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let fails=0;
+const check=(label,cond,extra='')=>{
+  console.log(`${cond?'PASS':'FAIL'}  ${label}${extra?' :: '+extra:''}`);
+  if(!cond)fails++;
+};
 let ws,nid=1;const pend=new Map();
 const send=(m,p={},s)=>new Promise((res,rej)=>{const id=nid++;pend.set(id,{res,rej});
  ws.send(JSON.stringify({id,method:m,params:p,sessionId:s}));});
@@ -41,11 +58,16 @@ try{
         visibleChecks: checks.filter(c=>{const b=c.getBoundingClientRect();return b.left>=0&&b.right<=de.clientWidth;}).length,
       };})()`);
     console.log(`\n--- ${label} ---`);
-    console.log('  horizontal page scroll :', r.hScroll, `(${r.scrollW} vs ${r.clientW})`);
-    console.log('  check cell size        :', JSON.stringify(r.checkSize), '<- 44px is the a11y min');
-    console.log('  cells below 44px       :', r.belowTouchMin, 'of', r.checkCount);
-    console.log('  day cells visible      :', r.visibleChecks, 'of 14 per habit row');
-    console.log('  checks strip overflows :', r.checksOverflow);
+    check(`${label}: the page does not scroll horizontally`,
+      r.hScroll === false, `${r.scrollW} vs ${r.clientW}`);
+    check(`${label}: habit rows rendered`, r.checkCount > 0, String(r.checkCount));
+    // 44px is the WCAG 2.5.5 / platform minimum for a touch target, and the
+    // day cells are the app's primary control on a phone.
+    check(`${label}: every day cell meets the 44px touch minimum`,
+      r.belowTouchMin === 0,
+      `${r.belowTouchMin} of ${r.checkCount} too small, first=${JSON.stringify(r.checkSize)}`);
+    check(`${label}: the checks strip does not overflow its row`,
+      r.checksOverflow === false, String(r.checksOverflow));
   }
 
   // a11y + empty state
@@ -63,6 +85,14 @@ try{
   }))()`);
   console.log('\n--- a11y ---');
   for(const [k,v] of Object.entries(a)) console.log(`  ${k.padEnd(16)}: ${v}`);
+  // Toasts announce undo and sync results; without aria-live a screen-reader
+  // user never hears them.
+  check('the toast region is announced',
+    a.toastLive === 'polite' || a.toastLive === 'assertive', String(a.toastLive));
+  check('every image has alt text', a.imgsNoAlt === 0, String(a.imgsNoAlt));
+  check('exactly one h1', a.h1 === 1, String(a.h1));
+  check('the document has a title',
+    typeof a.docTitle === 'string' && a.docTitle.length > 0, String(a.docTitle));
 
   // --- new features ---
   await send('Page.navigate',{url:BASE},sessionId);
@@ -76,5 +106,17 @@ try{
   }))()`);
   console.log('--- new features ---');
   for(const [k,v] of Object.entries(f)) console.log('  '+k.padEnd(18)+': '+v);
-}catch(e){console.error('ERROR:',e.message);}
+  check('the day dialog has a notes field', f.notesField === true);
+  check('the habit dialog has an archive control', f.archivedCheckbox === true);
+  check('the dashboard has an archive toggle', f.archiveToggle === true);
+}catch(e){
+  // A thrown harness error is a FAILURE, not a log line. This catch used to
+  // swallow everything, which is how the suite passed against a dead server.
+  console.error('FAIL  harness error ::', e.message);
+  fails++;
+}
 finally{chrome.kill();try{rmSync(profile,{recursive:true,force:true});}catch{}}
+
+console.log(`
+${fails===0?'ALL AUDIT CHECKS PASSED':`${fails} AUDIT CHECK(S) FAILED`}`);
+process.exit(fails===0?0:1);

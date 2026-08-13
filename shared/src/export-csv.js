@@ -24,6 +24,30 @@ export function esc(value) {
  * The metadata file. Column names match what `parseLoopHabitsCSV` looks for,
  * so our own export can be read back by our own importer.
  */
+/**
+ * Make every habit name unique for the duration of an export.
+ *
+ * Both CSV files identify a habit by NAME — `Checkmarks.csv` has one column
+ * per name, and `Habits.csv` is looked up by name on the way back in. Two
+ * habits called "Run" therefore collapse to one metadata entry on import,
+ * last-wins: both inherit the survivor's type, target and unit, and a
+ * measurable habit re-read as boolean has its recorded amounts DROPPED
+ * entirely, not merely mistyped.
+ *
+ * Nothing stops duplicate names existing — the validator does not require
+ * uniqueness — so the export has to disambiguate. A suffix is visible and
+ * reversible by hand; silently losing a habit's history is not.
+ */
+function uniqueNames(habits) {
+  const seen = new Map();
+  return habits.map((h) => {
+    const name = String(h.name ?? '');
+    const n = (seen.get(name) ?? 0) + 1;
+    seen.set(name, n);
+    return n === 1 ? h : { ...h, name: `${name} (${n})` };
+  });
+}
+
 export function buildHabitsCsv(habits) {
   const header = [
     'Position', 'Name', 'Question', 'Description', 'NumRepetitions',
@@ -93,8 +117,12 @@ export function buildCheckmarksCsv(habits, entriesFor) {
  * @returns {Buffer}
  */
 export function buildCsvArchive(habits, entriesFor, modified = new Date()) {
+  // Disambiguate ONCE, here, so both files agree on the same names. Doing it
+  // inside each builder separately would be enough for Habits.csv and
+  // Checkmarks.csv to disagree about which "Run" is which.
+  const named = uniqueNames(habits);
   return zip([
-    { name: 'Habits.csv', data: buildHabitsCsv(habits) },
-    { name: 'Checkmarks.csv', data: buildCheckmarksCsv(habits, entriesFor) },
+    { name: 'Habits.csv', data: buildHabitsCsv(named) },
+    { name: 'Checkmarks.csv', data: buildCheckmarksCsv(named, entriesFor) },
   ], modified);
 }

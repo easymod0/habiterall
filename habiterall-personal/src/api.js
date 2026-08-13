@@ -10,6 +10,13 @@ import {
 
 /** Lookback used for the dashboard's score/current-streak summary. */
 const SUMMARY_WINDOW_DAYS = 400;
+
+/**
+ * How far back the dashboard's streak scan reads. Five years — far beyond
+ * any streak a person will run, and it keeps the dashboard O(window) per
+ * habit instead of O(lifetime). Matches the cloud edition.
+ */
+const STREAK_HISTORY_DAYS = 1830;
 import {
   parseHabiterallJSON, parseLoopDatabase,
   parseLoopCheckmarksCSV, parseLoopHabitsCSV,
@@ -52,6 +59,21 @@ const q = {
     SELECT date, value, status, notes
     FROM entries WHERE habit_id = ? ORDER BY date
   `),
+  /**
+   * Lifetime completion count, done in SQLite instead of by walking every
+   * row in JS. The CASE mirrors `isCompleted` exactly — a skip is never a
+   * completion, whatever its value.
+   */
+  countCompleted: db.prepare(`
+    SELECT COUNT(*) AS n FROM entries
+     WHERE habit_id = ?
+       AND COALESCE(status, '') <> 'skip'
+       AND CASE
+             WHEN ? = 'boolean'  THEN value = 2
+             WHEN ? = 'at_most'  THEN value <= ?
+             ELSE value >= ?
+           END
+  `),
   entriesInRange: db.prepare(`
     SELECT habit_id, date, value, status
     FROM entries WHERE date >= ? AND date <= ? ORDER BY date
@@ -88,6 +110,25 @@ function habitRow(body) {
 }
 
 /**
+ * A habit row on its way OUT to a client.
+ *
+ * SQLite has no boolean type, so `archived` comes back as 0 or 1 while the
+ * cloud edition's Postgres BOOLEAN returns true/false — the same endpoint
+ * describing the same habit with two different JSON types. The web UI happens
+ * to survive it (0 and false are both falsy), but the native Android client
+ * declares `archived: Boolean` and refuses to deserialise:
+ *
+ *   Expected valid boolean literal prefix, but had '0'
+ *
+ * The API contract is a boolean. Convert here, at the single boundary, rather
+ * than teaching every client to accept both.
+ */
+function toApiHabit(row) {
+  if (!row) return row;
+  return { ...row, archived: Boolean(row.archived) };
+}
+
+/**
  * An Error carrying the HTTP status the API should return.
  * @param {number} status
  * @param {string} message
@@ -111,7 +152,7 @@ const asHabit = (row) => /** @type {any} */ (row);
 
 api.get('/habits', (req, res) => {
   const archived = req.query.archived === 'true' ? 1 : 0;
-  res.json(q.allHabits.all(archived));
+  res.json(q.allHabits.all(archived).map(toApiHabit));
 });
 
 api.post('/habits', (req, res) => {
@@ -120,13 +161,13 @@ api.post('/habits', (req, res) => {
     h.name, h.description, h.type, h.unit, h.target_value,
     h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time
   );
-  res.status(201).json(q.habitById.get(info.lastInsertRowid));
+  res.status(201).json(toApiHabit(q.habitById.get(info.lastInsertRowid)));
 });
 
 api.get('/habits/:id', (req, res) => {
   const habit = asHabit(q.habitById.get(Number(req.params.id)));
   if (!habit) throw httpError(404, 'habit not found');
-  res.json(habit);
+  res.json(toApiHabit(habit));
 });
 
 api.put('/habits/:id', (req, res) => {
@@ -138,7 +179,7 @@ api.put('/habits/:id', (req, res) => {
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
     h.freq_numerator, h.freq_denominator, h.color, h.reminder_time, h.archived, id
   );
-  res.json(q.habitById.get(id));
+  res.json(toApiHabit(q.habitById.get(id)));
 });
 
 api.delete('/habits/:id', (req, res) => {
@@ -148,9 +189,26 @@ api.delete('/habits/:id', (req, res) => {
   res.status(204).end();
 });
 
+/**
+ * Ceiling on a reorder request.
+ *
+ * The array length was unvalidated and drove one UPDATE per element inside a
+ * transaction, so a 1MB body — roughly 500,000 ids — could hold the database
+ * for minutes. Duplicates pass validation too, so no habits even had to
+ * exist. This edition has no rate limiter, which makes the bound matter more
+ * here than in cloud, not less.
+ */
+const MAX_REORDER_IDS = 1000;
+
 api.post('/habits/reorder', (req, res) => {
   const order = req.body.order;
   if (!Array.isArray(order)) throw httpError(400, 'order must be an array of habit ids');
+  if (order.length > MAX_REORDER_IDS) {
+    throw httpError(400, `order may not exceed ${MAX_REORDER_IDS} ids`);
+  }
+  if (order.some((n) => !Number.isFinite(Number(n)))) {
+    throw httpError(400, 'order must contain only habit ids');
+  }
   const tx = db.prepare('BEGIN');
   tx.run();
   try {
@@ -160,7 +218,7 @@ api.post('/habits/reorder', (req, res) => {
     db.prepare('ROLLBACK').run();
     throw e;
   }
-  res.json(q.allHabits.all(0));
+  res.json(q.allHabits.all(0).map(toApiHabit));
 });
 
 /* ---------- entries ---------- */
@@ -289,16 +347,27 @@ api.get('/overview', (req, res) => {
       // half-life the score has long since converged, and streaks that matter
       // here are recent. This keeps the dashboard O(window) rather than
       // O(lifetime) per habit.
-      const entries = /** @type {any} */ (q.entriesFor.all(h.id));
+      // Bounded, not lifetime. Reading every entry per habit made the
+      // dashboard O(lifetime x habits) and, worse, fed an unbounded array
+      // into computeStreaks — hundreds of thousands of iterations of
+      // synchronous work on a single-threaded server.
+      const entries = /** @type {any} */ (
+        q.entriesForSince.all(h.id, addDays(end, -STREAK_HISTORY_DAYS))
+      );
       const windowed = /** @type {any} */ (q.entriesForSince.all(h.id, addDays(end, -SUMMARY_WINDOW_DAYS)));
       const stats = computeStats(h, windowed, { end });
 
-      // Lifetime figures still need every entry, but a single pass is cheap
-      // next to the five aggregation passes computeStats would run.
-      let totalCompleted = 0;
-      for (const e of entries) {
-        if (isCompleted(h, e.value) === true) totalCompleted++;
-      }
+      // Counted in SQLite rather than by walking every row in JS. The
+      // expression mirrors isCompleted exactly, including that a skip is
+      // "not applicable" and never a completion — passing `e.value` instead
+      // of the whole row is what made this edition count skips as done on
+      // at_most habits while cloud did not.
+      const totalCompleted = /** @type {any} */ (
+        q.countCompleted.get(
+          h.id, h.type, h.target_type, h.target_value, h.target_value
+        )
+      ).n;
+
       const allStreaks = computeStreaks(
         h,
         new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
@@ -307,7 +376,7 @@ api.get('/overview', (req, res) => {
       );
 
       return {
-        ...h,
+        ...toApiHabit(h),
         entries: byHabit.get(h.id) ?? {},
         skips: skipsByHabit.get(h.id) ?? [],
         score: stats.score,
@@ -369,7 +438,7 @@ api.get('/export', (req, res) => {
     version: 1,
     app: 'habiterall',
     exported_at: new Date().toISOString(),
-    habits: habits.map((h) => ({ ...h, entries: q.entriesFor.all(h.id) })),
+    habits: habits.map((h) => ({ ...toApiHabit(h), entries: q.entriesFor.all(h.id) })),
   };
 
   if (req.query.download === 'true') {

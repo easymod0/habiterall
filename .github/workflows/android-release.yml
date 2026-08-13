@@ -1,9 +1,9 @@
 # Builds a signed Android APK (a Trusted Web Activity wrapping the PWA) and
 # attaches it to a GitHub Release.
 #
-# Triggered by pushing a tag like `android-v1.0.0`, or manually from the
-# Actions tab. Nothing needs installing locally — the JDK and Android SDK live
-# on the runner.
+# A pull request validates that the wrapper still builds; merging to main
+# signs it and attaches it to a release. Nothing needs installing locally —
+# the JDK and Android SDK live on the runner.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #
@@ -26,8 +26,27 @@
 name: Android APK
 
 on:
+  # Merging to main ships the wrapper, matching the native client and the
+  # Docker images. Only when something that can change the wrapped app moves:
+  # the TWA config itself, or the PWA assets it points at (icons, manifest,
+  # service worker) — the wrapper embeds no logic of its own beyond those.
   push:
-    tags: ['android-v*']
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-release.yml'
+      - 'shared/public/manifest.json'
+      - 'shared/public/icons/**'
+      - 'shared/public/sw.js'
+  # Validation only on a PR — no signing, no release. See the `release` gate
+  # on the publishing steps below.
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-release.yml'
+      - 'shared/public/manifest.json'
+      - 'shared/public/icons/**'
+      - 'shared/public/sw.js'
   workflow_dispatch:
     inputs:
       host:
@@ -35,12 +54,16 @@ on:
         required: false
         type: string
 
+# Read-only by default. Only the build job publishes, and only on main, so
+# it asks for write itself rather than granting it to every PR run.
 permissions:
-  contents: write        # needed to create the release and upload the APK
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to create the release and upload the APK
 
     steps:
       - uses: actions/checkout@v4
@@ -50,9 +73,15 @@ jobs:
         run: |
           HOST="${{ inputs.host || vars.TWA_HOST }}"
           if [ -z "$HOST" ]; then
-            echo "::error::Set the TWA_HOST repository variable (e.g. habits.example.com)"
-            exit 1
+            # A TWA is bound to a domain, so with no host configured there is
+            # nothing meaningful to build. Skip rather than fail: the wrapper
+            # is optional, and a red X on every PR of a fresh clone would be a
+            # false alarm about a feature the owner has not set up.
+            echo "::notice::TWA_HOST is not set; skipping the TWA build. See .github/workflows/README.md"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
           # A scheme or trailing slash here silently produces a broken manifest.
           case "$HOST" in
             *://*) echo "::error::TWA_HOST must not include a scheme: $HOST"; exit 1 ;;
@@ -62,6 +91,7 @@ jobs:
           echo "Building a TWA for https://$HOST"
 
       - name: Verify the PWA manifest is reachable
+        if: steps.cfg.outputs.skip != 'true'
         run: |
           # Fail here with a clear message rather than deep inside bubblewrap.
           URL="https://${{ steps.cfg.outputs.host }}/shared/manifest.json"
@@ -92,20 +122,35 @@ jobs:
       - uses: android-actions/setup-android@v3
 
       - name: Install bubblewrap
+        if: steps.cfg.outputs.skip != 'true'
         run: npm install -g @bubblewrap/cli
 
       - name: Restore the signing keystore
+        if: steps.cfg.outputs.skip != 'true'
+        id: keystore
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
+          # A fork PR cannot read secrets, and a fresh clone has none set.
+          # Generating a throwaway key lets the build still prove it compiles,
+          # which is the whole point of running on a PR. The resulting APK is
+          # never published — see the release gate below.
           if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set"
-            exit 1
+            echo "::notice::No signing keystore configured; using a throwaway key for validation only."
+            keytool -genkeypair -v -keystore "$RUNNER_TEMP/android.keystore"               -alias habiterall -keyalg RSA -keysize 2048 -validity 1               -storepass throwaway -keypass throwaway               -dname "CN=habiterall-ci, O=validation, C=US" >/dev/null 2>&1
+            echo "real=false" >> "$GITHUB_OUTPUT"
+            echo "alias=habiterall" >> "$GITHUB_OUTPUT"
+            echo "pass=throwaway" >> "$GITHUB_OUTPUT"
+          else
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/android.keystore"
+            echo "real=true" >> "$GITHUB_OUTPUT"
+            echo "alias=${{ secrets.ANDROID_KEY_ALIAS }}" >> "$GITHUB_OUTPUT"
+            echo "pass=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_OUTPUT"
+            echo "keystore restored ($(stat -c%s "$RUNNER_TEMP/android.keystore") bytes)"
           fi
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/android.keystore"
-          echo "keystore restored ($(stat -c%s "$RUNNER_TEMP/android.keystore") bytes)"
 
       - name: Generate the TWA project
+        if: steps.cfg.outputs.skip != 'true'
         working-directory: android
         env:
           HOST: ${{ steps.cfg.outputs.host }}
@@ -137,11 +182,12 @@ jobs:
           "
 
       - name: Build and sign the APK
+        if: steps.cfg.outputs.skip != 'true'
         working-directory: android
         env:
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
+          KEYSTORE_PASSWORD: ${{ steps.keystore.outputs.pass }}
+          KEY_PASSWORD: ${{ steps.keystore.outputs.pass }}
         run: |
           bubblewrap build --skipPwaValidation \
             --signingKeyPath "$RUNNER_TEMP/android.keystore" \
@@ -152,6 +198,7 @@ jobs:
           ls -la app-release-signed.apk
 
       - name: Report the signing fingerprint
+        if: steps.cfg.outputs.skip != 'true'
         working-directory: android
         run: |
           # This is what must appear in assetlinks.json, or the app shows a
@@ -165,13 +212,22 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
+        if: steps.cfg.outputs.skip != 'true'
         with:
           name: habiterall-apk
           path: android/app-release-signed.apk
 
+      # A pull request validates that the wrapper still builds; it must not
+      # publish. Merging to main is what ships.
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: >-
+          steps.cfg.outputs.skip != 'true' &&
+          steps.keystore.outputs.real == 'true' &&
+          (github.event_name == 'push' && github.ref == 'refs/heads/main'
+           || github.event_name == 'workflow_dispatch')
         uses: softprops/action-gh-release@v2
         with:
           files: android/app-release-signed.apk
+          tag_name: twa-${{ github.sha }}
+          name: TWA wrapper (${{ github.sha }})
           generate_release_notes: true

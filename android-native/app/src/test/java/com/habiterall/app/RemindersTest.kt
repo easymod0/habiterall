@@ -53,13 +53,59 @@ class RemindersTest {
     }
 
     @Test
-    fun `a time inside the spring-forward gap still resolves`() {
+    fun `a time inside the spring-forward gap does not shift the following day`() {
         // 02:30 does not exist on 2026-03-08 in Toronto. java.time shifts it
-        // forward rather than throwing; the point is that scheduling must not
-        // crash for a user who picked that minute.
-        val now = at(2026, 3, 7, 9, 0)
-        val next = Reminders.nextOccurrence(LocalTime.of(2, 30), now)
-        assertTrue(next > now.toInstant().toEpochMilli())
+        // to 03:30 that day, which is unavoidable — but the day AFTER must be
+        // 02:30 again.
+        //
+        // The old implementation computed `now.with(time).plusDays(1)`, which
+        // carried the shifted 03:30 forward, so the reminder fired an hour
+        // late on the transition day AND the next one. The test that was
+        // supposed to guard this asserted only `next > now`, which is true of
+        // any future instant whatsoever — it could not fail for the bug it
+        // was named after.
+        val gapDay = at(2026, 3, 8, 0, 30)
+        val onGapDay = ZonedDateTime.ofInstant(
+            java.time.Instant.ofEpochMilli(Reminders.nextOccurrence(LocalTime.of(2, 30), gapDay)),
+            toronto,
+        )
+        assertEquals(8, onGapDay.dayOfMonth)
+        assertEquals(3, onGapDay.hour)   // pushed out of the missing hour
+
+        // The day after the transition: back to the time the user asked for.
+        val dayAfterGap = at(2026, 3, 8, 12, 0)
+        val nextDay = ZonedDateTime.ofInstant(
+            java.time.Instant.ofEpochMilli(
+                Reminders.nextOccurrence(LocalTime.of(2, 30), dayAfterGap)
+            ),
+            toronto,
+        )
+        assertEquals(9, nextDay.dayOfMonth)
+        assertEquals("the day after the gap must be 02:30, not 03:30", 2, nextDay.hour)
+        assertEquals(30, nextDay.minute)
+    }
+
+    @Test
+    fun `a reminder keeps its local time across a whole DST transition week`() {
+        // The property that matters, stated directly: whatever the clocks do,
+        // 08:30 means 08:30. Walk each day across both transitions.
+        for ((start, days) in listOf(
+            at(2026, 3, 5, 12, 0) to 6,    // spring forward on the 8th
+            at(2026, 10, 30, 12, 0) to 6,  // fall back on Nov 1st
+        )) {
+            var cursor = start
+            repeat(days) {
+                val fired = ZonedDateTime.ofInstant(
+                    java.time.Instant.ofEpochMilli(
+                        Reminders.nextOccurrence(LocalTime.of(8, 30), cursor)
+                    ),
+                    toronto,
+                )
+                assertEquals("drifted on ${fired.toLocalDate()}", 8, fired.hour)
+                assertEquals("drifted on ${fired.toLocalDate()}", 30, fired.minute)
+                cursor = cursor.plusDays(1)
+            }
+        }
     }
 
     @Test

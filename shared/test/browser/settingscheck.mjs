@@ -91,12 +91,72 @@ try{
   console.log('--- invalid values are ignored ---');
   await ev(`localStorage.setItem('habiterall-settings', JSON.stringify({dayOrder:'sideways'}))`);
   await load();
-  ck('a bogus stored value falls back to the default',
-     await ev(`document.querySelectorAll('.grid-date').length`) > 0);
+  // Assert the fallback actually HAPPENED, not merely that the grid drew
+  // something. This used to check `.grid-date.length > 0`, which would pass
+  // just as happily if the bogus value had been honoured — as long as any
+  // columns appeared at all.
+  ck('a bogus stored value falls back to the default (today on the left)',
+     await ev(`document.querySelector('.grid-date')?.classList.contains('is-today')`) === true,
+     await ev(`JSON.stringify([...document.querySelectorAll('.grid-date')].slice(0,3).map(d=>d.textContent.trim()))`));
   await ev(`localStorage.setItem('habiterall-settings','not json')`);
   await load();
   ck('corrupt storage does not break the app',
      await ev(`!!document.querySelector('#grid .habit-row')`) === true);
+
+  /* --- the dialog must override a session toggle --- */
+  //
+  // Settings with an in-place control keep a session override in `state`, so
+  // trying a value does not rewrite the saved default. The catch is that the
+  // override then SHADOWS the dialog: without `applySetting` clearing it,
+  // choosing a value in Settings appears to do nothing once you have touched
+  // the toggle. The trap is documented in shared/CLAUDE.md and was untested.
+  console.log('--- the dialog beats an in-place toggle ---');
+  await ev(`localStorage.removeItem('habiterall-settings')`);
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({calendarZoom:'default'})}).then(r=>r.ok)`);
+  await load();
+
+  // Open a habit and zoom in — this sets the session override.
+  await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);
+  for (let i = 0; i < 40; i++) {
+    if (await ev(`!!document.querySelector('[aria-label="Completion calendar"]')`).catch(()=>0)) break;
+    await sleep(200);
+  }
+  await sleep(400);
+  const cellOf = () => ev(`(()=>{const c=document.querySelector('rect.cal-cell[data-date]');
+    return c ? Math.round(c.getBoundingClientRect().width) : 0;})()`);
+
+  const atDefault = await cellOf();
+  await ev(`[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.trim()==='+')?.click()`);
+  await sleep(600);
+  const afterToggle = await cellOf();
+  ck('the in-place toggle changes the zoom', afterToggle > atDefault,
+     `${atDefault}px -> ${afterToggle}px`);
+
+  // Now choose the ORIGINAL value in the dialog. It must win.
+  await ev(`document.getElementById('btn-settings').click()`);
+  await sleep(400);
+  await ev(`(()=>{const s=[...document.querySelectorAll('#settings-body select')]
+    .find(x=>[...x.options].some(o=>o.value==='closest'));
+    if(!s) return false;
+    s.value='default'; s.dispatchEvent(new Event('change',{bubbles:true})); return true;})()`);
+  await sleep(700);
+  await ev(`document.getElementById('settings-close')?.click()`);
+  await sleep(500);
+
+  // Closing the dialog returns to the dashboard, so reopen the habit before
+  // measuring — otherwise this reads 0 and looks like a failure of the thing
+  // being tested rather than of the navigation.
+  await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);
+  for (let i = 0; i < 40; i++) {
+    if (await ev(`!!document.querySelector('rect.cal-cell[data-date]')`).catch(()=>0)) break;
+    await sleep(200);
+  }
+  await sleep(400);
+  const afterDialog = await cellOf();
+  ck('choosing in the dialog overrides the toggle', afterDialog === atDefault,
+     `expected ${atDefault}px, got ${afterDialog}px`);
 
   console.log(fails===0?'\nALL SETTINGS CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}

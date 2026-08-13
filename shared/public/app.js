@@ -780,22 +780,55 @@ async function onCheckClick(habit, date) {
       );
       if (raw === null) return;
       if (raw.trim() === '') {
-        await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
+        // Optimistic first, for the same reason as below: offline, `api()`
+        // queues the delete and throws, and the cell would otherwise keep
+        // showing a value the user has just cleared.
+        const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
         delete habit.entries[date];
         renderDashboard();
+        try {
+          await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
+        } catch (e) {
+          if (!e.queued) {
+            if (had !== undefined) habit.entries[date] = had;
+            renderDashboard();
+          }
+          throw e;
+        }
         return;
       }
       next = Number(raw);
       if (!Number.isFinite(next) || next < 0) return toast('Enter a non-negative number');
     }
 
-    await api(`/habits/${habit.id}/entries/${date}`, {
-      method: 'PUT',
-      body: JSON.stringify({ value: next }),
-    });
-
+    // Apply optimistically BEFORE awaiting the request. Offline, `api()`
+    // enqueues the write and then throws, so anything after the await is
+    // skipped — which used to leave `habit.entries` stale. The next tap then
+    // recomputed the cycle from the same starting value and queued another
+    // identical write: three offline taps meaning "clear this day" all queued
+    // `value: 2`, and the day synced as DONE. The cell stayed blank the whole
+    // time, so there was no hint anything was wrong.
+    const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
     if (next === UNSET) delete habit.entries[date];
     else habit.entries[date] = next;
+    renderDashboard();
+
+    try {
+      await api(`/habits/${habit.id}/entries/${date}`, {
+        method: 'PUT',
+        body: JSON.stringify({ value: next }),
+      });
+    } catch (e) {
+      // A queued write will still land, so the optimistic state is correct and
+      // must stand. Any other failure did not reach the server, so roll back
+      // rather than leave the UI asserting something untrue.
+      if (!e.queued) {
+        if (previous === undefined) delete habit.entries[date];
+        else habit.entries[date] = previous;
+        renderDashboard();
+      }
+      throw e;
+    }
 
     // Re-fetch so score and streak reflect the change.
     await loadDashboard();

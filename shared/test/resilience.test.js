@@ -294,3 +294,38 @@ test('resilience survives a habit with no entries at all', () => {
   assert.equal(stats.resilience.recovery.rate, null);
   assert.deepEqual(stats.resilience.survival, []);
 });
+
+/* ---------- trailing skips ---------- */
+
+test('a trailing skip does not close an ongoing lapse', () => {
+  // Skips are transparent to computeMissRuns, so an ongoing lapse whose last
+  // day is skipped ends BEFORE `end`. Deciding "open" by comparing against
+  // `end` therefore misread it as closed and unrecovered: one trailing skip
+  // flipped a habit from "never missed" to "0% recovery".
+  const pairs = [
+    ['xxx..', 'xxx..s'],
+    ['x.xx..', 'x.xx..s'],
+    ['xx...', 'xx...ss'],
+  ];
+
+  for (const [plain, withSkip] of pairs) {
+    const a = recoveryOf(plain);
+    const b = recoveryOf(withSkip);
+    assert.equal(b.rate, a.rate,
+      `"${withSkip}" reported rate ${b.rate}, but "${plain}" reports ${a.rate}`);
+    assert.equal(b.lapses, a.lapses, `lapses differ for "${withSkip}"`);
+    assert.equal(b.openRun, a.openRun, `openRun differs for "${withSkip}"`);
+  }
+});
+
+test('an open run is marked as such rather than inferred from the end date', () => {
+  const r = runs('xxx..s');
+  const last = r[r.length - 1];
+  assert.equal(last.open, true, 'the ongoing lapse must be flagged open');
+  assert.ok(last.end < endOf('xxx..s'),
+    'and its end is genuinely before the window end — which is why the flag is needed');
+});
+
+test('a lapse closed by a success is not open', () => {
+  assert.equal(runs('x.xx')[0].open, false);
+});

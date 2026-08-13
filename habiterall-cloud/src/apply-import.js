@@ -24,7 +24,22 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Ceilings so one upload cannot exhaust the database on a shared host. */
 const MAX_HABITS_PER_IMPORT = Number(process.env.MAX_HABITS_PER_IMPORT) || 200;
-const MAX_ENTRIES_PER_IMPORT = Number(process.env.MAX_ENTRIES_PER_IMPORT) || 200_000;
+/**
+ * 200,000 entries was legal and took over two minutes, holding a pool
+ * connection and an open transaction throughout — ten such uploads exhaust
+ * the default pool and every other tenant's request times out. 50,000 is
+ * still ~135 years of daily history for one habit.
+ */
+const MAX_ENTRIES_PER_IMPORT = Number(process.env.MAX_ENTRIES_PER_IMPORT) || 50_000;
+
+/**
+ * Cap on the account TOTAL, not just this upload.
+ *
+ * `POST /habits` enforces a per-user habit limit but import did not, so two
+ * successive 199-habit merges produced 398 habits — and every one of those
+ * multiplies the per-habit work in /overview. Must match api.js.
+ */
+const MAX_HABITS_PER_USER = Number(process.env.MAX_HABITS_PER_USER) || 200;
 
 /**
  * Write a parsed habit list into the importing user's own account.
@@ -61,6 +76,34 @@ export async function applyImport(userId, habits, mode = 'merge') {
       // mean "everything of mine".
       await db.query('DELETE FROM entries');
       await db.query('DELETE FROM habits');
+    }
+
+    // Bound the ACCOUNT, not just this upload. `POST /habits` enforces a
+    // per-user limit and import did not, so repeated merges accumulated
+    // without limit — and each habit multiplies the per-habit work every
+    // /overview request does. Counted inside the transaction so a `replace`
+    // that just cleared the table starts from zero.
+    const { rows: existingRows } = await db.query(`SELECT name FROM habits`);
+    const existingNames = new Set(existingRows.map((r) => r.name));
+
+    // Only names that do NOT already exist can add rows — merge matches by
+    // name. Counting every incoming name would refuse a re-import of the same
+    // backup, which has to stay idempotent: restoring twice is the normal way
+    // to check a backup is good.
+    const incoming = new Set(
+      habits.map((h) => String(h.name ?? '').trim()).filter(Boolean)
+    );
+    let willAdd = 0;
+    for (const name of incoming) if (!existingNames.has(name)) willAdd++;
+
+    if (existingNames.size + willAdd > MAX_HABITS_PER_USER) {
+      throw Object.assign(
+        new Error(
+          `import would exceed the habit limit (${MAX_HABITS_PER_USER}); ` +
+          `you have ${existingNames.size} and this adds ${willAdd}`
+        ),
+        { status: 413 }
+      );
     }
 
     const { rows: [{ next }] } = await db.query(

@@ -283,8 +283,17 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
     );
   }
 
-  const names = header.slice(1).filter((n) => n !== '');
-  const habits = names.map((name) => {
+  // Keep each habit's ORIGINAL column index. Filtering the names first
+  // compacted the array while the row was still read at `i + 1`, so every
+  // habit after a blank column silently received its neighbour's cell — a
+  // `Date,A,,B` header gave B the blank column's value and never read B's own.
+  // Wrong data, not a dropped row, which is the worse failure.
+  const columns = header
+    .map((name, index) => ({ name, index }))
+    .slice(1)
+    .filter((c) => c.name !== '');
+
+  const habits = columns.map(({ name }) => {
     const meta = habitMeta.get(name) ?? {};
     return {
       name,
@@ -306,7 +315,8 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
     if (!DATE_RE.test(date)) continue;
 
     habits.forEach((habit, i) => {
-      const cell = (row[i + 1] ?? '').trim();
+      // columns[i].index, not i + 1 — see the note where `columns` is built.
+      const cell = (row[columns[i].index] ?? '').trim();
       if (cell === '' || cell === '-') return;
 
       const isNumerical = habit.type === 'numerical';

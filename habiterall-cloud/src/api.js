@@ -32,6 +32,20 @@ export const api = express.Router();
 
 const SUMMARY_WINDOW_DAYS = 400;
 
+/**
+ * How far back the dashboard's streak scan reads.
+ *
+ * The scan used to be unbounded, so a long history meant hundreds of
+ * thousands of rows shipped to Node and ~850ms of synchronous CPU per
+ * request — on a single-threaded server that stalls every tenant, and one
+ * account could saturate the process within its rate limit.
+ *
+ * Five years bounds the work while being far beyond any streak a person will
+ * actually run. `bestStreak` is therefore "best in the last five years",
+ * which is the honest reading of a dashboard summary anyway.
+ */
+const STREAK_HISTORY_DAYS = 1830;
+
 /** Per-user ceilings. Cheap insurance against one account exhausting the box. */
 const MAX_HABITS_PER_USER = Number(process.env.MAX_HABITS_PER_USER) || 200;
 
@@ -100,7 +114,7 @@ api.get('/habits/:id', route(async (req, res) => {
 
 api.put('/habits/:id', route(async (req, res) => {
   const h = parseHabit(req.body);
-  const id = Number(req.params.id);
+  const id = habitId(req);
 
   const updated = await withUser(uid(req), async (db) => {
     const { rows } = await db.query(
@@ -120,7 +134,7 @@ api.put('/habits/:id', route(async (req, res) => {
 }));
 
 api.delete('/habits/:id', route(async (req, res) => {
-  const id = Number(req.params.id);
+  const id = habitId(req);
   const gone = await withUser(uid(req), (db) =>
     db.query(`DELETE FROM habits WHERE id = $1 RETURNING id`, [id])
       .then((r) => r.rowCount > 0)
@@ -134,12 +148,26 @@ api.post('/habits/reorder', route(async (req, res) => {
   if (!Array.isArray(order) || order.some((n) => !Number.isInteger(Number(n)))) {
     throw httpError(400, 'order must be an array of habit ids');
   }
+  // The array length was unvalidated and drove a serial UPDATE loop inside one
+  // transaction, so a single legal request could hold a pool connection for
+  // minutes — a 1MB body fits ~500,000 ids, and duplicates pass validation, so
+  // no habits even had to exist. One caller could stall every tenant.
+  if (order.length > MAX_HABITS_PER_USER) {
+    throw httpError(400, `order may not exceed ${MAX_HABITS_PER_USER} ids`);
+  }
 
   const rows = await withUser(uid(req), async (db) => {
-    // RLS confines these updates to the caller's own habits, so an id
-    // belonging to someone else simply matches nothing.
-    for (const [i, id] of order.entries()) {
-      await db.query(`UPDATE habits SET position = $1 WHERE id = $2`, [i, Number(id)]);
+    // One statement instead of a round trip per id. RLS still confines the
+    // update to the caller's own habits, so an id belonging to someone else
+    // simply matches nothing.
+    const ids = order.map((id) => Number(id));
+    if (ids.length) {
+      await db.query(
+        `UPDATE habits SET position = v.position
+           FROM (SELECT * FROM unnest($1::bigint[], $2::int[]) AS t(id, position)) AS v
+          WHERE habits.id = v.id`,
+        [ids, ids.map((_, i) => i)]
+      );
     }
     return db.query(
       `SELECT * FROM habits WHERE archived = false ORDER BY position, id`
@@ -157,7 +185,7 @@ api.get('/habits/:id/entries', route(async (req, res) => {
     db.query(
       `SELECT to_char(date, 'YYYY-MM-DD') AS date, value, status, notes
        FROM entries WHERE habit_id = $1 ORDER BY date`,
-      [Number(req.params.id)]
+      [habitId(req)]
     ).then((r) => r.rows)
   );
   res.json(rows);
@@ -202,7 +230,7 @@ api.delete('/habits/:id/entries/:date', route(async (req, res) => {
 
   await withUser(uid(req), (db) =>
     db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
-      [Number(req.params.id), req.params.date])
+      [habitId(req), req.params.date])
   );
   res.status(204).end();
 }));
@@ -288,11 +316,41 @@ api.get('/overview', route(async (req, res) => {
        ORDER BY date`,
       [ids, start, end]
     );
+    // Bounded, NOT lifetime. This query had no date predicate, so an account
+    // with years of history shipped every row to Node and then spent ~850ms
+    // of SYNCHRONOUS CPU per request in computeStreaks — blocking the event
+    // loop for every other tenant. `boundedRange` caps the date SPAN, not the
+    // row count, so it was no help here.
+    //
+    // STREAK_HISTORY_DAYS bounds what the streak scan reads. A streak longer
+    // than this reports as capped rather than reading the whole table; the
+    // count below is done in SQL instead of in JS.
+    const streakFrom = addDays(end, -STREAK_HISTORY_DAYS);
     const { rows: allRows } = await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
-       FROM entries WHERE habit_id = ANY($1) ORDER BY date`,
+       FROM entries WHERE habit_id = ANY($1) AND date >= $2 ORDER BY date`,
+      [ids, streakFrom]
+    );
+
+    // Lifetime totals in the database, where counting is what it is for.
+    // Postgres applies the same completion rule the shared code does; the
+    // status check keeps skips out, matching isCompleted returning null.
+    const { rows: totalRows } = await db.query(
+      `SELECT e.habit_id,
+              COUNT(*) FILTER (
+                WHERE COALESCE(e.status, '') <> 'skip'
+                  AND CASE
+                        WHEN h.type = 'boolean' THEN e.value = 2
+                        WHEN h.target_type = 'at_most' THEN e.value <= h.target_value
+                        ELSE e.value >= h.target_value
+                      END
+              )::int AS completed
+         FROM entries e JOIN habits h ON h.id = e.habit_id
+        WHERE e.habit_id = ANY($1)
+        GROUP BY e.habit_id`,
       [ids]
     );
+    const totals = new Map(totalRows.map((r) => [r.habit_id, r.completed]));
 
     const grid = new Map(ids.map((id) => [id, {}]));
     const skips = new Map(ids.map((id) => [id, []]));
@@ -318,8 +376,7 @@ api.get('/overview', route(async (req, res) => {
         const recent = all.filter((e) => e.date >= cutoff);
         const stats = computeStats(h, recent, { end });
 
-        let totalCompleted = 0;
-        for (const e of all) if (isCompleted(h, e) === true) totalCompleted++;
+        const totalCompleted = totals.get(h.id) ?? 0;
 
         const streaks = computeStreaks(
           h,
@@ -532,9 +589,22 @@ async function parseUpload(buf) {
 /* ---------- helpers ---------- */
 
 /** Fetch a habit, 404ing if it does not exist OR is not the caller's. */
-async function getHabit(req) {
+/**
+ * A habit id from the URL, validated.
+ *
+ * `Number(req.params.id)` alone let `/api/habits/abc` reach Postgres as NaN
+ * and `/api/habits/1e30` as a float, both of which came back as a 22P02
+ * "invalid input syntax for bigint" — an unhandled 500 and a logged stack
+ * trace for what is plainly a client error.
+ */
+function habitId(req) {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid habit id');
+  return id;
+}
+
+async function getHabit(req) {
+  const id = habitId(req);
 
   const habit = await withUser(uid(req), (db) =>
     db.query(`SELECT * FROM habits WHERE id = $1`, [id]).then((r) => r.rows[0])

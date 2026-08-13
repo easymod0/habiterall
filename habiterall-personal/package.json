@@ -11,7 +11,8 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "seed": "node scripts/seed.js",
-    "test:roundtrip": "node test/roundtrip.integration.mjs"
+    "test:roundtrip": "node test/roundtrip.integration.mjs",
+    "test:apishape": "node test/apishape.integration.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
