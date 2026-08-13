@@ -8,6 +8,7 @@
  */
 
 import pg from 'pg';
+import { log } from '@habiterall/shared/log.js';
 
 const { Pool } = pg;
 
@@ -27,8 +28,26 @@ export const pool = new Pool({
 
 pool.on('error', (err) => {
   // An idle client erroring must not take the process down.
-  console.error('unexpected postgres client error', err);
+  log.error('pg.client_error', err);
 });
+
+/**
+ * The pool, as numbers to graph.
+ *
+ * `waiting` is the one that matters and the one nothing else reveals: a request
+ * queued for a connection is indistinguishable from a slow query in a latency
+ * chart, and the fix is the opposite one. It goes non-zero when `max × replicas`
+ * has outgrown what Postgres will hand out, which is exactly the wall a
+ * scaled-out deployment hits first.
+ */
+export function poolGauge() {
+  return {
+    pg_total: pool.totalCount,
+    pg_idle: pool.idleCount,
+    pg_waiting: pool.waitingCount,
+    pg_max: pool.options?.max ?? null,
+  };
+}
 
 /**
  * Run `fn` inside a transaction scoped to one user.
