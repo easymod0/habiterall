@@ -52,6 +52,46 @@ if (suites.some((s) => !OFFLINE_SUITES.has(s))) {
   }
 }
 
+/**
+ * How long any one suite may take.
+ *
+ * On a healthy machine they run in two to ten seconds each, so a minute means
+ * something is stuck — a browser that never came up, or a wedged DevTools
+ * connection. Without this the whole run simply stops there, which is how a
+ * broken environment came to look like "the browser tests take forever".
+ */
+const SUITE_TIMEOUT_MS = Number(process.env.SUITE_TIMEOUT_MS) || 120_000;
+
+/**
+ * Run one suite, killing it — and the browser it launched — if it overruns.
+ *
+ * `detached: true` puts the suite in its own process group, so the kill below
+ * reaches the browser it spawned as well. A suite that times out has no chance
+ * to run its own teardown, and a leaked browser would slow every suite after it.
+ */
+function runSuite(suite) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(here, `${suite}.mjs`)], {
+      stdio: 'inherit',
+      env: { ...process.env, BASE },
+      detached: process.platform !== 'win32',
+    });
+
+    const timer = setTimeout(() => {
+      console.error(`  TIMEOUT after ${SUITE_TIMEOUT_MS / 1000}s — killing ${suite}`);
+      try {
+        if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
+        else child.kill();
+      } catch { /* already gone */ }
+    }, SUITE_TIMEOUT_MS);
+
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      resolve(code ?? 1);
+    });
+  });
+}
+
 const results = [];
 
 for (const suite of suites) {
@@ -71,19 +111,16 @@ for (const suite of suites) {
   }
 
   process.stdout.write(`\n=== ${suite} ===\n`);
-  const code = await new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(here, `${suite}.mjs`)], {
-      stdio: 'inherit',
-      env: { ...process.env, BASE },
-    });
-    child.on('exit', (c) => resolve(c ?? 1));
-  });
-  results.push({ suite, ok: code === 0 });
+  const started = Date.now();
+  const code = await runSuite(suite);
+  const seconds = ((Date.now() - started) / 1000).toFixed(1);
+  process.stdout.write(`    (${seconds}s)\n`);
+  results.push({ suite, ok: code === 0, seconds });
 }
 
 console.log('\n──────── summary ────────');
-for (const { suite, ok } of results) {
-  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${suite}`);
+for (const { suite, ok, seconds } of results) {
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${suite.padEnd(16)} ${seconds}s`);
 }
 
 const failed = results.filter((r) => !r.ok);
