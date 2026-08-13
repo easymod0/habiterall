@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
@@ -20,7 +21,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.habiterall.app.data.*
 import com.habiterall.app.notify.Reminders
 import com.habiterall.app.notify.ReminderTime
@@ -36,6 +40,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Say what we want of the window instead of inheriting it. From
+        // targetSdk 35 the system draws every app edge to edge whether it asked
+        // or not, and then the app owes the insets back — Scaffold and
+        // TopAppBar do that, but only once someone has declared the intent.
+        // Without this the window's insets were applied on the first layout and
+        // came back as zero after a resume, which slid the list up under the
+        // bar: the app looked right until you closed and reopened it.
+        enableEdgeToEdge()
+
         settings = Settings(this)
 
         // The whole point of the app is notifications, so ask up front rather
@@ -192,24 +206,41 @@ class MainActivity : ComponentActivity() {
             loading = false
         }
 
-        // Bring an out-of-range scroll position back into the list.
+        // Correct a restored scroll position that no longer fits the list.
         //
-        // A retained offset can outlive the list it belonged to — the app is
-        // resumed, the list is empty for a moment, and the restored offset
-        // then points past the end. Clamping only when the index no longer
-        // exists leaves a deliberate mid-list scroll alone.
+        // See ScrollRestore for what can go wrong and why; the rule is there,
+        // and unit-tested, because the version inlined here only covered a
+        // clipped FIRST row and left a clipped row at any other index — which
+        // is the case that kept being reported.
         LaunchedEffect(habits.size) {
-            if (habits.isEmpty()) return@LaunchedEffect
-
-            val index = listState.firstVisibleItemIndex
-            // Two bad states, both reachable by closing and reopening the app:
-            //   - the index points past the end of a list that shrank
-            //   - the index is 0 but a leftover pixel offset clips the first
-            //     habit, which is what "the top one was cut off" looks like
-            if (index >= habits.size ||
-                (index == 0 && listState.firstVisibleItemScrollOffset > 0)
+            if (ScrollRestore.needsSnapToTop(
+                    listState.firstVisibleItemIndex,
+                    listState.firstVisibleItemScrollOffset,
+                    habits.size,
+                )
             ) {
                 listState.scrollToItem(0)
+            }
+        }
+
+        // Coming back to the app shows today, from the top.
+        //
+        // The check above runs when the list SIZE changes, which is not the same
+        // as "the app was reopened": close and reopen with the same five habits
+        // and it never fires, so a stale position survives. This is the event
+        // that actually matters, and it is also the right moment to refetch —
+        // the app is most often reopened because the day moved on.
+        val lifecycle = LocalLifecycleOwner.current.lifecycle
+        LaunchedEffect(lifecycle) {
+            var first = true
+            lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                // The first RESUMED is the launch that is already loading.
+                if (first) {
+                    first = false
+                } else {
+                    reload++
+                    listState.scrollToItem(0)
+                }
             }
         }
 

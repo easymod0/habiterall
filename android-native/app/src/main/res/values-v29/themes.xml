@@ -8,7 +8,17 @@
   not exist below API 29 and referencing it there fails to inflate at runtime.
 -->
 <resources>
-    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault.DayNight" />
+    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <!--
+          The Compose UI draws its own TopAppBar, so the window must not also
+          have a platform one. Set as attributes rather than by inheriting a
+          .NoActionBar parent: the composite
+          `Theme.DeviceDefault.DayNight.NoActionBar` does not exist as a
+          platform style, and only aapt tells you so.
+        -->
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 
     <style name="Theme.Habiterall.Transparent" parent="@android:style/Theme.DeviceDefault.Dialog">
         <item name="android:windowBackground">@android:color/transparent</item>
