@@ -32,6 +32,14 @@
  */
 [hidden] { display: none !important; }
 
+html {
+  /* Reserve the scrollbar's space permanently. A modal <dialog> locks body
+     scrolling, which otherwise removes the scrollbar and shifts the whole
+     page sideways underneath it — visible as the date header sliding out of
+     line with the checkboxes it labels. */
+  scrollbar-gutter: stable;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -190,6 +198,77 @@ body {
 }
 .toast-action:hover { background: rgb(255 255 255 / 15%); }
 
+/* ---------- grid header (dates + navigation) ---------- */
+
+/* The header must sit in exactly the same box as a habit row, or the date
+   cells drift away from the checkboxes they label. Rather than hand-matching
+   padding (which was wrong by 8px, then 24px), give it the row's border and
+   padding with the border made invisible: identical geometry, by construction. */
+.grid-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 10px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+}
+.grid-range {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.grid-nav { display: flex; gap: 6px; justify-self: end; }
+.grid-nav .btn { padding: 3px 9px; line-height: 1.3; }
+.grid-nav .btn:disabled { opacity: 0.35; cursor: default; }
+
+/* The date row must line up with the checkbox columns in each habit row.
+   Both are right-aligned strips of 44px cells with a 4px gap, so matching
+   those three values keeps them registered regardless of the habit names'
+   width. */
+.grid-dates {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  /* The row reserves space for the drag handle to the left of the names;
+     the header has none, so nothing else needs compensating here. */
+}
+/* flex: none — the strip is stretched to the full grid width, and without
+   this the cells grow to fill it (44.8px instead of 44px), drifting out of
+   line with the fixed-width checkboxes below. */
+.grid-date {
+  flex: none;
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.1;
+  color: var(--text-dim);
+}
+.grid-date-mon {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  min-height: 11px;
+}
+.grid-date-num { font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* Today is called out in the header and in every row, so the column reads as
+   a single highlighted stripe rather than one subtly coloured letter. */
+.grid-date.is-today {
+  color: var(--accent);
+  font-weight: 700;
+}
+.grid-date.is-today .grid-date-num {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+  min-width: 20px;
+  text-align: center;
+}
+
 /* ---------- habit grid ---------- */
 
 .grid { display: flex; flex-direction: column; gap: 10px; }
@@ -264,7 +343,17 @@ body {
   line-height: 1;
 }
 .check-day { font-size: 9.5px; letter-spacing: 0.02em; }
+
+/* Today reads as a continuous tinted column down the whole list, which is
+   far easier to find than one coloured weekday letter was. */
+.check.today {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
 .check.today .check-day { color: var(--accent); font-weight: 700; }
+
+/* Days the habit did not yet exist for are not failures; dim them. */
+.check.before-start { opacity: 0.35; }
 
 /* ---------- detail view ---------- */
 
@@ -554,6 +643,13 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   color: var(--accent);
 }
 
+/* ---------- settings dialog ---------- */
+
+#settings-dialog { width: min(460px, 92vw); }
+#settings-dialog .data-section:first-of-type { margin-top: 8px; }
+.setting-help { margin: -6px 0 12px; font-size: 12px; }
+#settings-dialog label:not(.checkbox) { margin-bottom: 4px; }
+
 /* ---------- backup / restore dialog ---------- */
 
 #data-dialog { width: min(500px, 92vw); }
@@ -650,4 +746,15 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   .checks { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 3px; }
   .check { width: auto; min-width: 0; height: 46px; }
   .check-box { width: 26px; height: 26px; }
+
+  /* The header must use the same track sizing as .checks above, or the dates
+     stop lining up with the boxes they label. */
+  .grid-head { padding: 0 14px; }
+  .grid-dates {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    gap: 3px;
+  }
+  .grid-date { width: auto; min-width: 0; }
 }

@@ -20,7 +20,7 @@ import {
 } from '@habiterall/shared/import.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
-  parseHabit, parseEntry, assertDate, assertNotFuture, DATE_RE,
+  parseHabit, parseEntry, parseSettings, assertDate, assertNotFuture, DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
   computeStats, computeStreaks, bestStreak, isCompleted,
@@ -34,8 +34,14 @@ const SUMMARY_WINDOW_DAYS = 400;
 /** Per-user ceilings. Cheap insurance against one account exhausting the box. */
 const MAX_HABITS_PER_USER = Number(process.env.MAX_HABITS_PER_USER) || 200;
 
+/**
+ * An Error carrying the HTTP status the API should return.
+ * @param {number} status
+ * @param {string} message
+ * @returns {Error & {status: number}}
+ */
 function httpError(status, message) {
-  const err = new Error(message);
+  const err = /** @type {Error & {status: number}} */ (new Error(message));
   err.status = status;
   return err;
 }
@@ -319,6 +325,45 @@ api.get('/overview', route(async (req, res) => {
   });
 
   res.json(payload);
+}));
+
+/* ---------- settings ---------- */
+
+/**
+ * Preferences follow the account rather than the device, so a choice made on
+ * a laptop applies on a phone. Stored as JSONB on the user row; the existing
+ * users_select_self / users_update_self policies scope both queries.
+ */
+api.get('/settings', route(async (req, res) => {
+  const settings = await withUser(uid(req), (db) =>
+    db.query(`SELECT settings FROM users WHERE id = $1`, [uid(req)])
+      .then((r) => r.rows[0]?.settings ?? {})
+  );
+  res.json(settings);
+}));
+
+/** Merge a patch. Unknown or invalid keys are dropped, not rejected. */
+api.put('/settings', route(async (req, res) => {
+  const { accepted, rejected } = parseSettings(req.body);
+
+  const merged = await withUser(uid(req), (db) =>
+    // Merge server-side so two devices racing cannot clobber each other's
+    // unrelated keys.
+    db.query(
+      `UPDATE users SET settings = settings || $1::jsonb
+       WHERE id = $2 RETURNING settings`,
+      [JSON.stringify(accepted), uid(req)]
+    ).then((r) => r.rows[0]?.settings ?? {})
+  );
+
+  res.json({ settings: merged, ignored: rejected });
+}));
+
+api.delete('/settings', route(async (req, res) => {
+  await withUser(uid(req), (db) =>
+    db.query(`UPDATE users SET settings = '{}'::jsonb WHERE id = $1`, [uid(req)])
+  );
+  res.json({});
 }));
 
 /* ---------- export ---------- */

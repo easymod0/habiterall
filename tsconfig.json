@@ -1,0 +1,39 @@
+{
+  // Type-checking only — `noEmit` means nothing is compiled and there is still
+  // no build step. Types come from JSDoc in plain .js files, so what runs is
+  // what is on disk.
+  //
+  //   npm run typecheck
+  //
+  // Server code and browser code are checked separately (see
+  // tsconfig.browser.json) because they have different globals: `process` and
+  // `Buffer` on one side, `window` and `document` on the other.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    // Pragmatic to begin with: catch wrong shapes, typos and bad arguments
+    // without demanding annotations everywhere. Tighten as coverage grows.
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "shared/src/**/*.js",
+    "habiterall-personal/src/**/*.js",
+    "habiterall-cloud/src/**/*.js"
+  ],
+  "exclude": ["node_modules", "**/node_modules"]
+}

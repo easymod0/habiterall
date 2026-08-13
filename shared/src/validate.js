@@ -45,6 +45,9 @@ export class ValidationError extends Error {
  * Returns a plain object with every field present and coerced. Throws
  * ValidationError for input that cannot be repaired; silently clamps input
  * that can (over-long text, unknown enum values).
+ *
+ * @param {Record<string, any>} [body]
+ * @returns {import('./types.js').Habit}
  */
 export function parseHabit(body = {}) {
   const name = String(body.name ?? '').trim();
@@ -89,9 +92,10 @@ export function parseHabit(body = {}) {
  * Returns `{ value, status, notes }`; a skip always carries value 0, since
  * skips are stored out of band and must never alias a real amount.
  *
- * @param {object} habit
- * @param {object} body   the request body
- * @param {object} sentinels  { UNSET, YES, SKIP } from constants.js
+ * @param {import('./types.js').Habit} habit
+ * @param {{value?: unknown, status?: string, notes?: unknown}} body
+ * @param {{UNSET: number, YES: number, SKIP: number}} sentinels from constants.js
+ * @returns {{value: number, status: import('./types.js').EntryStatus, notes: string}}
  */
 export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
   const notes = String(body.notes ?? '').slice(0, LIMITS.notes);
@@ -112,6 +116,50 @@ export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
   }
 
   return { value, status: '', notes };
+}
+
+/**
+ * The settable preferences and their allowed values.
+ *
+ * Duplicated deliberately from the browser's ui/settings.js registry: the
+ * server must never trust the client's idea of what is valid, and this file
+ * cannot import browser code. The two lists are kept honest by
+ * test/settings.test.js, which fails if they drift.
+ */
+export const SETTING_VALUES = {
+  dayOrder: ['newest-right', 'newest-left'],
+  confirmDelete: [true, false],
+};
+
+/**
+ * Validate a settings patch, dropping anything unknown or out of range.
+ *
+ * Returns only the accepted keys, so a caller can merge the result without
+ * re-checking. Unknown keys are ignored rather than rejected, so an older
+ * server tolerates a newer client.
+ *
+ * @param {Record<string, any>} patch
+ * @returns {{accepted: Record<string, any>, rejected: string[]}}
+ */
+export function parseSettings(patch = {}) {
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new ValidationError('settings must be an object');
+  }
+
+  const accepted = {};
+  const rejected = [];
+
+  for (const [key, value] of Object.entries(patch)) {
+    // Own-property check, not a plain lookup: SETTING_VALUES['__proto__']
+    // resolves to Object.prototype, which is truthy and has no .includes —
+    // so a `__proto__` key in the payload would throw and 500 the request.
+    if (!Object.hasOwn(SETTING_VALUES, key)) { rejected.push(key); continue; }
+
+    const allowed = SETTING_VALUES[key];
+    if (!allowed.includes(value)) { rejected.push(key); continue; }
+    accepted[key] = value;
+  }
+  return { accepted, rejected };
 }
 
 /** Reject anything that is not a 'YYYY-MM-DD' calendar date. */

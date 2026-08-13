@@ -68,6 +68,11 @@ const daysAgo = (n) => {
  * @returns {Promise<object[]>} the created habits, in fixture order
  */
 export async function reset({ days = 60 } = {}) {
+  // Preferences are server-side now, so a suite that changed one would leak
+  // into every suite after it — the dashboard would render in the wrong day
+  // order and alignment assertions would fail for no visible reason.
+  await api('/settings', { method: 'DELETE' }).catch(() => {});
+
   for (const q of ['', '?archived=true']) {
     for (const h of await api(`/habits${q}`)) {
       await api(`/habits/${h.id}`, { method: 'DELETE' });
