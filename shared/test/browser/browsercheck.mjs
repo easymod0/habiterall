@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000';
 const PORT = 9223;
 
@@ -23,18 +23,6 @@ const check = (label, cond, extra = '') => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function getWsUrl() {
-  for (let i = 0; i < 60; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json/version`);
-      const j = await res.json();
-      if (j.webSocketDebuggerUrl) return j.webSocketDebuggerUrl;
-    } catch { /* not up yet */ }
-    await sleep(250);
-  }
-  throw new Error('Chrome DevTools did not become available');
-}
-
 let ws, nextId = 1;
 const pending = new Map();
 
@@ -47,7 +35,7 @@ function send(method, params = {}, sessionId) {
 }
 
 async function main() {
-  const wsUrl = await getWsUrl();
+  const wsUrl = await devtoolsUrl(PORT, chrome);
   const { WebSocket } = await import('node:worker_threads').then(() => import('ws')).catch(() => ({}));
 
   // Node 22 has a global WebSocket — no dependency needed.
