@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>habiterall</title>
+
+  <!-- Installable web app -->
+  <link rel="manifest" href="/shared/manifest.json">
+  <meta name="theme-color" content="#0f1216" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="habiterall">
+  <link rel="apple-touch-icon" href="/shared/icons/icon-192.png">
+
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>✓</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">habiterall</h1>
+    <div class="topbar-actions">
+      <button id="btn-new" class="btn btn-primary">New habit</button>
+      <button id="btn-data" class="btn">Backup</button>
+      <button id="btn-theme" class="btn btn-icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
+      <!-- Multi-user edition only; the no-auth adapter never reveals it. -->
+      <span id="user-chip" class="user-chip" hidden>
+        <span id="user-name"></span>
+        <button id="btn-logout" class="btn btn-sm">Sign out</button>
+      </span>
+    </div>
+  </header>
+
+  <div id="offline-bar" class="offline-bar" role="status" aria-live="polite" hidden>
+    <span class="offline-dot" aria-hidden="true"></span>
+    <span>Offline — changes are saved on this device</span>
+    <span id="pending-count" class="pending-count" hidden></span>
+    <button type="button" id="btn-sync" class="btn btn-sm">Retry</button>
+  </div>
+
+  <main id="view-signin" class="view" hidden>
+    <div class="signin">
+      <h2 class="signin-title">Sign in to habiterall</h2>
+      <p class="signin-sub">
+        Your habits are private to your account. Sign in with your
+        organisation account to continue.
+      </p>
+      <a href="/auth/login" class="btn btn-primary btn-signin">Sign in</a>
+    </div>
+  </main>
+
+  <main id="view-list" class="view">
+    <div id="list-head" hidden>
+      <button type="button" id="toggle-archived" class="btn btn-sm" aria-pressed="false">
+        Show archived
+      </button>
+    </div>
+    <div id="grid" class="grid"></div>
+    <div id="empty" class="empty" hidden>
+      <p id="empty-archived" class="empty-sub" hidden>No archived habits.</p>
+
+      <p class="empty-title">Nothing tracked yet</p>
+      <p class="empty-sub">
+        Start with one of these, or create your own. You can change the name,
+        target, and frequency at any time.
+      </p>
+
+      <div id="starters" class="starters"></div>
+
+      <div class="empty-actions">
+        <button type="button" id="empty-new" class="btn btn-primary">Create a habit</button>
+        <button type="button" id="empty-import" class="btn">Import a backup</button>
+      </div>
+      <p class="empty-note">
+        Already using Loop Habit Tracker? Import its <code>.db</code> backup
+        and keep your history.
+      </p>
+    </div>
+  </main>
+
+  <main id="view-detail" class="view" hidden></main>
+
+  <dialog id="habit-dialog">
+    <form id="habit-form" method="dialog">
+      <h2 id="dialog-title">New habit</h2>
+
+      <label>Name
+        <input name="name" required maxlength="100" autocomplete="off">
+      </label>
+
+      <label>Description
+        <input name="description" maxlength="500" autocomplete="off">
+      </label>
+
+      <label>Type
+        <select name="type">
+          <option value="boolean">Yes / No</option>
+          <option value="numerical">Measurable</option>
+        </select>
+      </label>
+
+      <div class="numerical-only" hidden>
+        <label>Target
+          <input name="target_value" type="number" min="0" step="any" value="1">
+        </label>
+        <label>Goal
+          <select name="target_type">
+            <option value="at_least">At least</option>
+            <option value="at_most">At most</option>
+          </select>
+        </label>
+        <label>Unit
+          <input name="unit" maxlength="20" placeholder="glasses, km, pages" autocomplete="off">
+        </label>
+      </div>
+
+      <fieldset class="freq">
+        <legend>Frequency</legend>
+        <input name="freq_numerator" type="number" min="1" value="1" aria-label="times">
+        <span>time(s) per</span>
+        <input name="freq_denominator" type="number" min="1" value="1" aria-label="days">
+        <span>day(s)</span>
+      </fieldset>
+
+      <label>Color
+        <input name="color" type="color" value="#3b82f6">
+      </label>
+
+      <label class="checkbox" id="archived-wrap" hidden>
+        <input type="checkbox" name="archived">
+        <span>Archived — hidden from the dashboard, history kept</span>
+      </label>
+
+      <div class="dialog-actions">
+        <button type="button" id="dialog-delete" class="btn btn-danger" hidden>Delete</button>
+        <span class="spacer"></span>
+        <button type="button" id="dialog-cancel" class="btn">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="day-dialog">
+    <h2 id="day-title">Edit day</h2>
+    <p id="day-sub" class="hint"></p>
+
+    <div id="day-boolean" class="day-choices" hidden>
+      <button type="button" class="btn day-choice" data-action="done">✓ Done</button>
+      <button type="button" class="btn day-choice" data-action="not-done">✕ Not done</button>
+    </div>
+
+    <label id="day-numeric" hidden>
+      <span id="day-numeric-label">Value</span>
+      <input id="day-value" type="number" min="0" step="any" inputmode="decimal">
+    </label>
+
+    <label id="day-notes-wrap">
+      <span>Note <span class="muted">(optional)</span></span>
+      <input id="day-notes" maxlength="500" autocomplete="off"
+             placeholder="Why did this day go the way it did?">
+    </label>
+
+    <div class="dialog-actions">
+      <button type="button" id="day-skip" class="btn">Skip day</button>
+      <button type="button" id="day-clear" class="btn btn-danger">Clear</button>
+      <span class="spacer"></span>
+      <button type="button" id="day-cancel" class="btn">Cancel</button>
+      <button type="button" id="day-save" class="btn btn-primary">Save</button>
+    </div>
+  </dialog>
+
+  <dialog id="data-dialog">
+    <h2>Backup &amp; restore</h2>
+
+    <section class="data-section">
+      <h3>Export</h3>
+      <p class="hint">Download everything as a file you can re-import later.</p>
+      <div class="data-actions">
+        <button type="button" id="export-json" class="btn">JSON backup</button>
+        <button type="button" id="export-csv" class="btn">Checkmarks CSV</button>
+        <button type="button" id="export-loop" class="btn">Loop .db</button>
+      </div>
+      <p class="hint">
+        The Loop <code>.db</code> file can be restored in Loop Habit Tracker
+        via Settings → Import data.
+      </p>
+    </section>
+
+    <section class="data-section">
+      <h3>Import</h3>
+      <p class="hint">
+        Accepts a habiterall JSON backup, a Loop Habit Tracker
+        <code>.db</code> backup, or a Loop CSV export (<code>.zip</code> or
+        <code>Checkmarks.csv</code>).
+      </p>
+
+      <fieldset class="import-mode">
+        <legend>If a habit already exists</legend>
+        <label class="radio">
+          <input type="radio" name="import-mode" value="merge" checked>
+          Merge — add new habits, fill in missing entries
+        </label>
+        <label class="radio">
+          <input type="radio" name="import-mode" value="replace">
+          Replace — delete everything first
+        </label>
+      </fieldset>
+
+      <input type="file" id="import-file" accept=".json,.db,.zip,.csv,application/json,application/zip,text/csv">
+      <div class="data-actions">
+        <button type="button" id="import-run" class="btn btn-primary" disabled>Import</button>
+      </div>
+      <div id="import-result" class="import-result" hidden></div>
+    </section>
+
+    <div class="dialog-actions">
+      <span class="spacer"></span>
+      <button type="button" id="data-close" class="btn">Close</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="/app-entry.js"></script>
+</body>
+</html>

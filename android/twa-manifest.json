@@ -1,0 +1,44 @@
+{
+  "packageId": "com.example.habiterall",
+  "host": "habits.example.com",
+  "name": "habiterall",
+  "launcherName": "habiterall",
+  "display": "standalone",
+  "themeColor": "#0f1216",
+  "themeColorDark": "#0f1216",
+  "navigationColor": "#0f1216",
+  "navigationColorDark": "#0f1216",
+  "navigationDividerColor": "#0f1216",
+  "navigationDividerColorDark": "#0f1216",
+  "backgroundColor": "#0f1216",
+  "enableNotifications": false,
+  "startUrl": "/",
+  "iconUrl": "https://habits.example.com/shared/icons/icon-512.png",
+  "maskableIconUrl": "https://habits.example.com/shared/icons/icon-maskable-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "habiterall"
+  },
+  "appVersionName": "1.0.0",
+  "appVersionCode": 1,
+  "shortcuts": [
+    {
+      "name": "New habit",
+      "shortName": "New",
+      "url": "/?action=new",
+      "chosenIconUrl": "https://habits.example.com/shared/icons/icon-192.png"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://habits.example.com/shared/manifest.json",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": { "enabled": false },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://habits.example.com/",
+  "minSdkVersion": 23,
+  "orientation": "portrait"
+}

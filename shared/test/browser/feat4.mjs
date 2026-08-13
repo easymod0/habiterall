@@ -1,0 +1,226 @@
+/** Browser checks for empty state, starters, reorder, undo, and calendar keys. */
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const CHROME = String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
+const BASE = process.env.BASE ?? 'http://localhost:3000';
+const PORT = 9229;
+
+const profile = mkdtempSync(join(tmpdir(), 'habfeat-'));
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${PORT}`,
+  `--user-data-dir=${profile}`, '--no-first-run', '--disable-gpu', 'about:blank'], { stdio: 'ignore' });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let fails = 0;
+const check = (l, c, e = '') => {
+  console.log(`${c ? 'PASS' : 'FAIL'}  ${l}${e ? ' :: ' + e : ''}`);
+  if (!c) fails++;
+};
+
+let ws, nid = 1;
+const pend = new Map();
+const send = (m, p = {}, s) => new Promise((res, rej) => {
+  const id = nid++; pend.set(id, { res, rej });
+  ws.send(JSON.stringify({ id, method: m, params: p, sessionId: s }));
+});
+
+try {
+  let url;
+  for (let i = 0; i < 60; i++) {
+    try { url = (await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json()).webSocketDebuggerUrl; if (url) break; } catch {}
+    await sleep(250);
+  }
+  ws = new globalThis.WebSocket(url);
+  await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.method === 'Runtime.exceptionThrown') console.log('  [PAGE ERROR]', m.params.exceptionDetails.exception?.description?.split('\n')[0]);
+    if (m.id && pend.has(m.id)) { const { res, rej } = pend.get(m.id); pend.delete(m.id); m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result); }
+  };
+  const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
+  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
+  const ev = async (e) => {
+    const r = await send('Runtime.evaluate', { expression: e, awaitPromise: true, returnByValue: true }, sessionId);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
+    return r.result.value;
+  };
+  await send('Runtime.enable', {}, sessionId);
+  await send('Page.enable', {}, sessionId);
+
+  const wipe = () => ev(`(async()=>{
+    for (const q of ['','?archived=true'])
+      for (const h of await (await fetch('/api/habits'+q)).json())
+        await fetch('/api/habits/'+h.id,{method:'DELETE'});
+  })()`);
+
+  const reload = async (waitForRows = true) => {
+    await send('Page.navigate', { url: BASE }, sessionId);
+    for (let i = 0; i < 80; i++) {
+      const ok = await ev(waitForRows
+        ? `!!document.querySelector('#grid .habit-row')`
+        : `!document.getElementById('empty').hidden || !!document.querySelector('#grid .habit-row')`
+      ).catch(() => 0);
+      if (ok) break;
+      await sleep(200);
+    }
+  };
+
+  /* ---------- 1. empty state ---------- */
+  console.log('--- empty state ---');
+  await send('Page.navigate', { url: BASE }, sessionId);
+  await sleep(1200);
+  await wipe();
+  await reload(false);
+
+  const empty = await ev(`(()=>{
+    const vis=id=>{const e=document.getElementById(id); return e && !e.hidden && getComputedStyle(e).display!=='none';};
+    return {
+      panel: vis('empty'),
+      starters: document.querySelectorAll('.starter').length,
+      newBtn: vis('empty-new'),
+      importBtn: vis('empty-import'),
+      archivedMsg: vis('empty-archived'),
+      title: document.querySelector('.empty-title')?.textContent?.trim(),
+    };})()`);
+  check('empty panel shown', empty.panel === true, JSON.stringify(empty));
+  check('starter presets offered', empty.starters === 4, String(empty.starters));
+  check('create + import buttons shown', empty.newBtn && empty.importBtn);
+  check('archived message hidden on the active view', empty.archivedMsg === false);
+  check('title reads as onboarding', empty.title === 'Nothing tracked yet', empty.title);
+
+  // click a starter
+  await ev(`[...document.querySelectorAll('.starter')].find(b=>b.textContent.includes('Meditate')).click()`);
+  await sleep(900);
+  const afterStarter = await ev(`(async()=>{
+    const hs=await (await fetch('/api/habits')).json();
+    return {count:hs.length, name:hs[0]?.name, emptyHidden: document.getElementById('empty').hidden};
+  })()`);
+  check('starter creates the habit', afterStarter.count === 1 && afterStarter.name === 'Meditate',
+    JSON.stringify(afterStarter));
+  check('empty panel disappears once a habit exists', afterStarter.emptyHidden === true);
+
+  /* ---------- 2. reorder ---------- */
+  console.log('--- reorder ---');
+  await ev(`(async()=>{
+    for (const b of [{name:'Bravo',type:'boolean'},{name:'Charlie',type:'boolean'}])
+      await fetch('/api/habits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  })()`);
+  await reload();
+
+  const names = () => ev(`[...document.querySelectorAll('#grid .habit-row .habit-name')].map(n=>n.textContent.trim())`);
+  const before = await names();
+  check('three habits listed', before.length === 3, JSON.stringify(before));
+  check('drag handles rendered', await ev(`document.querySelectorAll('.drag-handle').length`) === 3);
+
+  // keyboard: move the first habit down one
+  await ev(`(()=>{const h=document.querySelectorAll('.drag-handle')[0]; h.focus();
+    h.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));})()`);
+  await sleep(800);
+  const afterDown = await names();
+  check('ArrowDown moves a habit down',
+    afterDown[0] === before[1] && afterDown[1] === before[0],
+    `${JSON.stringify(before)} -> ${JSON.stringify(afterDown)}`);
+
+  const persisted = await ev(`(async()=>(await (await fetch('/api/habits')).json()).map(h=>h.name))()`);
+  check('new order persisted to the server',
+    JSON.stringify(persisted) === JSON.stringify(afterDown.map(n => n.trim())),
+    JSON.stringify(persisted));
+
+  check('focus stays on the moved handle',
+    await ev(`document.activeElement?.classList.contains('drag-handle')`) === true);
+
+  // move it back up
+  await ev(`(()=>{const h=document.activeElement; h.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));})()`);
+  await sleep(800);
+  check('ArrowUp restores the original order',
+    JSON.stringify(await names()) === JSON.stringify(before),
+    JSON.stringify(await names()));
+
+  /* ---------- 3. undo delete ---------- */
+  console.log('--- undo delete ---');
+  await ev(`(async()=>{
+    const hs=await (await fetch('/api/habits')).json();
+    const h=hs.find(x=>x.name==='Meditate');
+    for (const d of ['2026-06-01','2026-06-02'])
+      await fetch('/api/habits/'+h.id+'/entries/'+d,{method:'PUT',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({value:2,notes:'kept'})});
+  })()`);
+  await reload();
+
+  await ev(`window.confirm = () => true`);
+  await ev(`(()=>{
+    const rows=[...document.querySelectorAll('#grid .habit-row')];
+    const i=rows.findIndex(r=>r.querySelector('.habit-name').textContent.includes('Meditate'));
+    rows[i].querySelector('.habit-meta').click();})()`);
+  await sleep(700);
+  await ev(`[...document.querySelectorAll('#view-detail .btn')].find(b=>b.textContent==='Edit').click()`);
+  await sleep(300);
+  await ev(`document.getElementById('dialog-delete').click()`);
+  await sleep(1000);
+
+  const afterDelete = await ev(`(async()=>({
+    names: (await (await fetch('/api/habits')).json()).map(h=>h.name),
+    toast: document.getElementById('toast').textContent,
+    undoShown: !!document.querySelector('.toast-action'),
+  }))()`);
+  check('habit deleted', !afterDelete.names.includes('Meditate'), JSON.stringify(afterDelete.names));
+  check('undo action offered in the toast', afterDelete.undoShown === true, afterDelete.toast);
+
+  await ev(`document.querySelector('.toast-action').click()`);
+  await sleep(1500);
+  const afterUndo = await ev(`(async()=>{
+    const hs=await (await fetch('/api/habits')).json();
+    const h=hs.find(x=>x.name==='Meditate');
+    const es=h ? await (await fetch('/api/habits/'+h.id+'/entries')).json() : [];
+    return {restored: !!h, entries: es.length, notes: es[0]?.notes};
+  })()`);
+  check('undo restores the habit', afterUndo.restored === true, JSON.stringify(afterUndo));
+  check('undo restores its history', afterUndo.entries === 2, String(afterUndo.entries));
+  check('undo restores notes too', afterUndo.notes === 'kept', String(afterUndo.notes));
+
+  /* ---------- 4. calendar keyboard nav ---------- */
+  console.log('--- calendar keys ---');
+  await reload();
+  await ev(`(()=>{
+    const rows=[...document.querySelectorAll('#grid .habit-row')];
+    const i=rows.findIndex(r=>r.querySelector('.habit-name').textContent.includes('Meditate'));
+    rows[i].querySelector('.habit-meta').click();})()`);
+  for (let i = 0; i < 60; i++) {
+    if (await ev(`!!document.querySelector('rect[role="gridcell"]')`)) break;
+    await sleep(200);
+  }
+
+  const tabStops = await ev(`document.querySelectorAll('rect[role="gridcell"][tabindex="0"]').length`);
+  check('exactly one calendar tab stop (roving tabindex)', tabStops === 1, String(tabStops));
+
+  const nav = await ev(`(()=>{
+    const cells=[...document.querySelectorAll('rect[role="gridcell"]')];
+    const start=cells.find(c=>c.getAttribute('tabindex')==='0');
+    start.focus();
+    const from=document.activeElement.dataset.date;
+    const key=k=>document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:k,bubbles:true}));
+    key('ArrowUp');   const up=document.activeElement.dataset.date;
+    key('ArrowDown'); const back=document.activeElement.dataset.date;
+    key('ArrowLeft'); const left=document.activeElement.dataset.date;
+    return {from, up, back, left};
+  })()`);
+  const dayDiff = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+  check('ArrowUp moves back one day', dayDiff(nav.up, nav.from) === 1, JSON.stringify(nav));
+  check('ArrowDown returns to the start', nav.back === nav.from, JSON.stringify(nav));
+  check('ArrowLeft moves back one week', dayDiff(nav.left, nav.from) === 7, JSON.stringify(nav));
+
+  const opened = await ev(`(()=>{
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    return document.getElementById('day-dialog').open;})()`);
+  check('Enter opens the day editor', opened === true);
+
+  console.log(fails === 0 ? '\nALL FEATURE CHECKS PASSED' : `\n${fails} FEATURE CHECK(S) FAILED`);
+} catch (e) {
+  console.error('ERROR:', e.message); fails++;
+} finally {
+  chrome.kill();
+  try { rmSync(profile, { recursive: true, force: true }); } catch {}
+  process.exit(fails ? 1 : 0);
+}

@@ -1,0 +1,24 @@
+{
+  "name": "habiterall-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "habiterall — a self-hosted habit tracker, in personal (single-user, SQLite) and cloud (multi-user, Postgres) editions sharing one core",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "habiterall-personal",
+    "habiterall-cloud"
+  ],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "test:shared": "npm test -w @habiterall/shared",
+    "start:personal": "npm start -w habiterall-personal",
+    "start:cloud": "npm start -w habiterall-cloud",
+    "test:browser": "npm run test:browser -w @habiterall/shared",
+    "test:tenancy": "npm run test:tenancy -w habiterall-cloud"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}

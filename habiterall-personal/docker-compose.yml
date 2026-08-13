@@ -1,0 +1,16 @@
+services:
+  habiterall:
+    build: .
+    image: habiterall:latest
+    container_name: habiterall
+    ports:
+      - "3000:3000"
+    volumes:
+      - habiterall-data:/data
+    environment:
+      - HABITERALL_DB=/data/habiterall.db
+      - PORT=3000
+    restart: unless-stopped
+
+volumes:
+  habiterall-data:

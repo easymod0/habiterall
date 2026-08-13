@@ -1,0 +1,10 @@
+# Normalise line endings so cross-edition diffs stay readable and git never
+# reports phantom whole-file changes. Without this, one CRLF file makes every
+# comparison against its LF counterpart look 100% different.
+* text=auto eol=lf
+
+# Binary assets must never be munged.
+*.png binary
+*.db  binary
+*.jks binary
+*.keystore binary
