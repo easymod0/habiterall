@@ -14,8 +14,9 @@ import { normalizeColor } from '@habiterall/shared/import.js';
 
 const insertHabit = db.prepare(`
   INSERT INTO habits (name, description, type, unit, target_value, target_type,
-                      freq_numerator, freq_denominator, color, position, archived)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      freq_numerator, freq_denominator, color, reminder_time,
+                      position, archived)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const insertEntry = db.prepare(`
   INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)
@@ -83,6 +84,7 @@ export function applyImport(habits, mode = 'merge') {
           num,
           den,
           normalizeColor(h.color),
+          /^([01]\d|2[0-3]):[0-5]\d$/.test(h.reminder_time ?? '') ? h.reminder_time : '',
           position++,
           h.archived ? 1 : 0
         );

@@ -58,6 +58,29 @@ try{
     ck(`${label}: next disabled at today`, r.nextDisabled===true, String(r.nextDisabled));
   }
 
+  // --- arrows must not move when Today appears ---
+  console.log('--- arrow stability ---');
+  const arrowX = () => ev(`(()=>{
+    const b=[...document.querySelectorAll('.grid-nav button')]
+      .find(b=>b.getAttribute('aria-label')?.startsWith('Previous'));
+    return b ? Math.round(b.getBoundingClientRect().left) : null;})()`);
+  const beforeX = await arrowX();
+  await ev(`[...document.querySelectorAll('.grid-nav button')]
+    .find(b=>b.getAttribute('aria-label')?.startsWith('Previous')).click()`);
+  await sleep(900);
+  const afterX = await arrowX();
+  ck('the back arrow stays put when Today appears', beforeX === afterX,
+     `${beforeX}px -> ${afterX}px`);
+  ck('Today is now clickable',
+     await ev(`(()=>{const b=[...document.querySelectorAll('.grid-nav button')]
+       .find(b=>b.textContent.trim()==='Today');
+       return !!b && !b.disabled && getComputedStyle(b).visibility==='visible';})()`) === true);
+  await ev(`[...document.querySelectorAll('.grid-nav button')]
+    .find(b=>b.textContent.trim()==='Today').click()`);
+  await sleep(900);
+  ck('and the arrow is still in the same place after returning',
+     await arrowX() === beforeX, `${await arrowX()}px`);
+
   // --- alignment in the reversed order too ---
   console.log('--- reversed day order ---');
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',

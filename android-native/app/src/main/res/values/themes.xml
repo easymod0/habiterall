@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The Compose UI supplies its own colours, so the platform theme only has
+      to provide a sane window background and follow the system's day/night
+      setting. DeviceDefault.DayNight does both without pulling in AppCompat.
+    -->
+    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault.DayNight" />
+
+    <!--
+      Used by CountEntryActivity, which is only ever a dialog over whatever is
+      already on screen. A transparent, un-animated window keeps it feeling
+      like part of the notification shade rather than a launch into the app.
+    -->
+    <style name="Theme.Habiterall.Transparent" parent="@android:style/Theme.DeviceDefault.Dialog">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">true</item>
+    </style>
+</resources>

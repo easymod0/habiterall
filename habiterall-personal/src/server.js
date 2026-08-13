@@ -1,6 +1,6 @@
 import express from 'express';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { api } from './api.js';
 import { db } from './db.js';
 
@@ -50,15 +50,25 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: err.message ?? 'internal error' });
 });
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`habiterall listening on http://localhost:${PORT}`);
-});
+// Exported so tests can mount the real app on an ephemeral port. Importing
+// this module must not start listening, or every test that touches it would
+// fight over port 3000 — hence the entry-point check below.
+export { app };
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    server.close(() => {
-      db.close();
-      process.exit(0);
-    });
+const isEntryPoint = process.argv[1] != null &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+
+if (isEntryPoint) {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`habiterall listening on http://localhost:${PORT}`);
   });
+
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      server.close(() => {
+        db.close();
+        process.exit(0);
+      });
+    });
+  }
 }

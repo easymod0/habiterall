@@ -431,6 +431,78 @@ body {
 .chart-scroll { overflow-x: auto; }
 svg.chart { display: block; max-width: 100%; height: auto; }
 
+/*
+ * Inside a scroll container a chart keeps its natural size and the container
+ * scrolls. `max-width: 100%` there would shrink the SVG to fit instead — which
+ * is not "responsive" for a calendar: it scales every square down uniformly,
+ * so on a 320px screen the cells rendered at 7.6px and the grid became
+ * unreadable rather than scrollable.
+ */
+.chart-scroll > svg.chart { max-width: none; }
+
+/* ---------- calendar cell hover ---------- */
+
+/*
+ * `transform-box: fill-box` makes the transform origin relative to the rect's
+ * own geometry, so `center` is the square's middle. Without it the origin is
+ * the SVG's origin and a hovered cell flies across the grid.
+ */
+.cal-cell {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/*
+ * Suppress the browser's own tooltip. `<title>` stays in the markup for
+ * assistive tech, but the native bubble takes about a second to appear,
+ * cannot be styled, and would sit on top of the popover.
+ */
+.cal-cell > title { display: none; }
+
+/*
+ * `.is-active` is set by the script on focus. `:focus-visible` alone would
+ * miss it: focus moved programmatically (arrow keys call .focus()) does not
+ * always match, so the keyboard path grew nothing while the mouse path did.
+ */
+.cal-cell:hover,
+.cal-cell:focus,
+.cal-cell.is-active {
+  transform: scale(1.45);
+}
+.cal-cell:focus { outline: none; }
+
+.cal-pop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 60;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;   /* never steals the hover that summoned it */
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.28);
+
+  /* The JS sets `transform` for position, so the entrance animates opacity
+     and nothing else — mixing the two would fight over the same property. */
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.cal-pop.is-open { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cal-cell { transition: none; }
+  /* The popover still appears — it carries the information. Only the motion
+     goes, which is what the preference actually asks for. */
+  .cal-cell:hover, .cal-cell:focus, .cal-cell.is-active { transform: none; }
+  .cal-pop { transition: none; }
+}
+
 .legend {
   display: flex;
   align-items: center;

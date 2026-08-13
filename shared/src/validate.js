@@ -27,6 +27,9 @@ export const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const DEFAULT_COLOR = '#3b82f6';
 
+/** 24-hour local wall time, e.g. '08:30'. Empty means "no reminder". */
+export const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 /**
  * A validation failure carrying the HTTP status the API should return, so
  * callers can rethrow it directly without re-wrapping.
@@ -80,6 +83,10 @@ export function parseHabit(body = {}) {
     freq_numerator: num,
     freq_denominator: den,
     color: COLOR_RE.test(body.color ?? '') ? body.color : DEFAULT_COLOR,
+    // Local wall time the native app schedules a reminder for. Stored on the
+    // habit so it follows the account to a new device, and so the web UI can
+    // set it too. '' means no reminder.
+    reminder_time: TIME_RE.test(body.reminder_time ?? '') ? body.reminder_time : '',
     archived: !!body.archived,
   };
 }
@@ -130,6 +137,10 @@ export const SETTING_VALUES = {
   dayOrder: ['newest-right', 'newest-left'],
   weekStart: ['monday', 'sunday'],
   confirmDelete: [true, false],
+  // Calendar zoom: the *name* of a level, not a cell size in pixels. Storing
+  // the level keeps the rendering free to retune the sizes later without
+  // stranding a saved number that no longer means anything.
+  calendarZoom: ['closest', 'close', 'default', 'wide'],
 };
 
 /**

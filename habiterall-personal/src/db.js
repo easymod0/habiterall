@@ -38,6 +38,8 @@ db.exec(`
     freq_numerator   INTEGER NOT NULL DEFAULT 1,
     freq_denominator INTEGER NOT NULL DEFAULT 1,
     color         TEXT    NOT NULL DEFAULT '#3b82f6',
+    -- local 'HH:MM' the mobile app schedules a reminder for; '' = none
+    reminder_time TEXT    NOT NULL DEFAULT '',
     position      INTEGER NOT NULL DEFAULT 0,
     archived      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -76,6 +78,14 @@ db.exec(`
  * `status` and, for numerical habits, drop the ambiguous rows rather than
  * guess — a boolean 3 is unambiguously a skip, a numerical 3 is not.
  */
+const habitColumns = new Set(
+  db.prepare(`PRAGMA table_info(habits)`).all().map((c) => c.name)
+);
+if (!habitColumns.has('reminder_time')) {
+  db.exec(`ALTER TABLE habits ADD COLUMN reminder_time TEXT NOT NULL DEFAULT ''`);
+  console.log('migrated habits: added reminder_time');
+}
+
 const entryColumns = new Set(
   db.prepare(`PRAGMA table_info(entries)`).all().map((c) => c.name)
 );

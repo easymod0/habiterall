@@ -35,6 +35,12 @@ the call site (`habitRow()`); the shared validator returns a real boolean.
 databases automatically: boolean `3`s become skips, numerical `3`s are left
 alone as real amounts, because only the former is unambiguous.
 
+**`src/server.js` only listens when it is the entry point.** It exports `app`
+so tests can mount the real server on an ephemeral port; importing the module
+must stay side-effect-free on that front, or every such test fights over port
+3000. `HABITERALL_DB` is read by `db.js` at module load, so a test has to set
+it *before* the first import.
+
 **`/overview` is bounded.** It reads lifetime entries for the streak figures,
 so the clamp inside `computeStreaks` is what keeps a distant-past entry from
 blocking the process. Don't reintroduce an unbounded range here.
@@ -45,6 +51,7 @@ blocking the process. Don't reintroduce an unbounded range here.
 npm start                 # http://localhost:3000  (no login)
 npm run seed              # sample data (refuses if habits already exist)
 npm test                  # the CSS-guard test
+npm run test:roundtrip    # export every format, re-import, assert no drift
 docker compose up -d      # containerised
 ```
 

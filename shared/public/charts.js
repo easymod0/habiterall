@@ -3,6 +3,13 @@
  * the app ships with no frontend build step and no CDN dependency.
  */
 
+// Relative, not '/shared/...': two test suites import this module directly in
+// Node, where a root-absolute specifier resolves against the filesystem root.
+// A relative path works in both the browser and Node.
+import {
+  calendarWindow, zoomLevel, calendarWidth, CALENDAR_PAD_LEFT, DEFAULT_ZOOM,
+} from './ui/calendar.js';
+
 const NS = 'http://www.w3.org/2000/svg';
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -109,19 +116,25 @@ export function scoreChart(scores, color, { width = 720, height = 200 } = {}) {
 
 export function calendarChart(entriesByDate, color, habit, opts = {}) {
   const {
-    weeks = 53,
+    zoom = DEFAULT_ZOOM, // 'close' | 'default' | 'wide'
     endDate = null,     // last date shown; defaults to today
     skips = null,       // Set of skipped dates, kept out of the value space
     onPick = null,      // callback(date) -> makes cells clickable
   } = opts;
 
-  const CELL = 13;
-  const GAP = 3;
+  const level = zoomLevel(zoom);
+  // An explicit `weeks` still wins, so a caller can size the grid itself.
+  const weeks = opts.weeks ?? level.weeks;
+  const CELL = level.cell;
+  const GAP = level.gap;
   const step = CELL + GAP;
-  const padLeft = 22;
+  const padLeft = CALENDAR_PAD_LEFT;
   const padTop = 16;
 
-  const width = padLeft + weeks * step;
+  // calendarWidth, not padLeft + weeks*step: the last column needs no trailing
+  // gap, and that one extra pixel-gap was enough to trip `max-width: 100%`
+  // into scaling the whole grid down.
+  const width = calendarWidth(weeks, zoom);
   const height = padTop + 7 * step + 4;
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Completion calendar');
@@ -140,9 +153,9 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   const last = endDate ? fromISOLocal(endDate) : new Date(realToday);
   last.setHours(0, 0, 0, 0);
 
-  const start = new Date(last);
-  start.setDate(start.getDate() - (weeks * 7 - 1));
-  start.setDate(start.getDate() - start.getDay());
+  // The window is anchored on its end so `last` is always drawn — see
+  // calendarWindow, where the reasoning and the regression test live.
+  const start = fromISOLocal(calendarWindow(iso(last), weeks).start);
 
   for (let i = 0; i < 3; i += 2) {
     svg.appendChild(el('text', {
@@ -201,8 +214,11 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         }
       }
 
+      // `class` via setAttribute, like every other attribute here: the
+      // offline render tests drive this module against a minimal fake DOM
+      // whose nodes have no classList.
       const rect = el('rect', {
-        x, y, width: CELL, height: CELL, rx: 3, fill,
+        x, y, width: CELL, height: CELL, rx: 3, fill, class: 'cal-cell',
       });
       if (isFuture) {
         rect.setAttribute('stroke', empty);
@@ -222,6 +238,14 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         cells.push(rect);
       }
 
+      // The popover shows the bare label; the clickability is obvious from
+      // the cursor and does not need repeating in a bubble that follows the
+      // pointer. `<title>` keeps the longer form, where a screen-reader user
+      // has no cursor to infer it from.
+      //
+      // setAttribute, not .dataset: the offline render tests use a fake DOM
+      // that implements attributes but not the dataset proxy.
+      rect.setAttribute('data-label', label);
       svg.appendChild(title(rect, onPick && !isFuture ? `${label} — click to edit` : label));
 
       // month label above the first week containing a new month
@@ -242,7 +266,152 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     cells[cells.length - 1].setAttribute('tabindex', '0');
   }
 
+  attachCellPopover(svg);
+
   return svg;
+}
+
+/**
+ * Shows the day's label in a small popover on hover or focus, and lets the
+ * hovered square grow slightly.
+ *
+ * Delegated from the SVG rather than bound per cell: a year at wide zoom is
+ * ~740 squares, and that many listener pairs is a lot of needless work for an
+ * effect only one cell shows at a time.
+ *
+ * The growth itself is a CSS transform (see `.cal-cell` in style.css) so it
+ * runs on the compositor. The popover is positioned in JS because an SVG rect
+ * has no CSS box for an HTML tooltip to anchor to.
+ */
+function attachCellPopover(svg) {
+  // The offline render tests build charts against a minimal fake DOM with no
+  // event or document APIs. The popover is presentation only, so skipping it
+  // there costs nothing and keeps the fake from having to grow.
+  if (typeof svg.addEventListener !== 'function' ||
+      typeof document === 'undefined' ||
+      typeof requestAnimationFrame !== 'function') {
+    return;
+  }
+
+  let pop = null;
+  let raf = 0;
+
+  const hide = () => {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    for (const c of svg.querySelectorAll('.cal-cell.is-active')) {
+      c.classList.remove('is-active');
+    }
+    if (!pop) return;
+    pop.classList.remove('is-open');
+    const node = pop;
+    pop = null;
+    // Let the fade finish before removing, or it vanishes abruptly.
+    setTimeout(() => node.remove(), 160);
+  };
+
+  const show = (cell) => {
+    const label = cell?.dataset?.label;
+    if (!label) return hide();
+
+    for (const c of svg.querySelectorAll('.cal-cell.is-active')) {
+      if (c !== cell) c.classList.remove('is-active');
+    }
+    cell.classList.add('is-active');
+
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.className = 'cal-pop';
+      // Decorative: the text is already on the cell's <title> for screen
+      // readers, and announcing it twice is worse than not at all.
+      pop.setAttribute('aria-hidden', 'true');
+      document.body.append(pop);
+    }
+    pop.textContent = label;
+
+    // Measure after the text is set, or the first popover is mispositioned
+    // using the previous cell's width.
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      if (!pop) return;
+      const box = cell.getBoundingClientRect();
+      const own = pop.getBoundingClientRect();
+      const gap = 8;
+
+      let left = box.left + box.width / 2 - own.width / 2;
+      // Keep it on screen at the edges of the grid.
+      left = Math.max(6, Math.min(left, window.innerWidth - own.width - 6));
+
+      // Above the cell, unless that would clip the top of the viewport.
+      const above = box.top - own.height - gap;
+      const top = above < 6 ? box.bottom + gap : above;
+
+      pop.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+      pop.classList.add('is-open');
+      pop.classList.toggle('is-below', above < 6);
+    });
+  };
+
+  const cellFrom = (e) => e.target?.closest?.('.cal-cell') ?? null;
+
+  /*
+   * SVG has no z-index: elements paint in document order, so a cell that
+   * grows is clipped by every square drawn after it. Moving the hovered cell
+   * to the end of its parent is the standard fix. It is one DOM move per
+   * hover, and the cell keeps its x/y so nothing visually shifts.
+   */
+  const raise = (cell) => {
+    const parent = cell.parentNode;
+    if (!parent || parent.lastElementChild === cell) return;
+
+    // Re-appending a focused element blurs it, which silently broke arrow-key
+    // navigation: the handler reads document.activeElement, and after the
+    // move there was nothing focused to read. Restore focus if we took it.
+    const refocus = document.activeElement === cell;
+    parent.append(cell);
+    if (refocus) cell.focus({ preventScroll: true });
+  };
+
+  svg.addEventListener('pointerover', (e) => {
+    const cell = cellFrom(e);
+    if (cell) { watchDetach(); raise(cell); show(cell); }
+  });
+  svg.addEventListener('pointerout', (e) => {
+    // Moving between two cells fires out-then-over; only hide when the
+    // pointer has actually left the grid, or the popover flickers.
+    if (!svg.contains(e.relatedTarget)) hide();
+  });
+  svg.addEventListener('focusin', (e) => {
+    const cell = cellFrom(e);
+    watchDetach();
+    if (cell) raise(cell);
+    show(cell);
+  });
+  svg.addEventListener('focusout', hide);
+  // Scrolling moves the cells out from under a fixed popover.
+  svg.closest('.chart-scroll')?.addEventListener('scroll', hide, { passive: true });
+
+  svg.addEventListener('pointerleave', hide);
+
+  // The detail view re-renders on every button press, detaching this SVG. If
+  // that happens mid-hover, no pointer event ever fires again and the popover
+  // is stranded on the page.
+  //
+  // Watching the SVG's own parent is not enough: the re-render replaces the
+  // children of an ancestor, so the parent is removed *with* the SVG still
+  // inside it and never mutates. Polling `isConnected` on each frame while a
+  // popover is open is cheap — the loop only runs during a hover, and stops
+  // the moment the popover closes.
+  let watching = false;
+  const watchDetach = () => {
+    if (watching) return;
+    watching = true;
+    const tick = () => {
+      if (!pop) { watching = false; return; }   // closed normally
+      if (!svg.isConnected) { hide(); watching = false; return; }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
 }
 
 /** Make `cell` the single tab stop within this calendar. */

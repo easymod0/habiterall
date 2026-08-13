@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext HTTP is allowed only for addresses that cannot leave the local
+  network. A self-hosted server on a LAN rarely has a certificate, so
+  forbidding http:// outright would make the app unusable for its main
+  audience; allowing it everywhere would send habit data across the internet
+  in the clear. This is the line between the two.
+
+  Android's config matches literal hostnames and has no notion of CIDR, so a
+  whole private range like 192.168.0.0/16 cannot be expressed here. Cleartext
+  is therefore permitted at the base level and the private-range restriction is
+  enforced in code, in ServerUrl.parse — which rejects an http:// URL whose
+  host is not a private literal. Both layers are needed: this file cannot
+  express the rule, and code cannot relax what this file forbids.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <!-- Lets a user trust their own CA for a private HTTPS server. -->
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

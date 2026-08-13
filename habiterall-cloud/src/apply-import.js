@@ -97,8 +97,9 @@ export async function applyImport(userId, habits, mode = 'merge') {
         const { rows } = await db.query(
           `INSERT INTO habits (user_id, name, description, type, unit,
                                target_value, target_type, freq_numerator,
-                               freq_denominator, color, position, archived)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                               freq_denominator, color, reminder_time,
+                               position, archived)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
            RETURNING id`,
           [
             userId,                                   // from the session, always
@@ -111,6 +112,7 @@ export async function applyImport(userId, habits, mode = 'merge') {
             num,
             Math.min(den, 365),
             /^#[0-9a-fA-F]{6}$/.test(h.color ?? '') ? h.color : '#3b82f6',
+            /^([01]\d|2[0-3]):[0-5]\d$/.test(h.reminder_time ?? '') ? h.reminder_time : '',
             position++,
             !!h.archived,
           ]

@@ -9,6 +9,7 @@ import {
   iso, datesEndingOn, freqLabel, targetLabel, todayISO, addDaysISO,
 } from '/shared/ui/dates.js';
 import { initTheme, toggleTheme } from '/shared/ui/theme.js';
+import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
 import * as settings from '/shared/ui/settings.js';
 
 /**
@@ -94,6 +95,7 @@ let state = {
   granularity: 'day',
   historyMode: 'percent',
   calEnd: null,        // last date shown in the calendar; null = today
+  calZoom: null,       // overrides the saved zoom for this session; null = use the setting
   dayEdit: null,       // { habitId, date, type } while the day dialog is open
   showArchived: false, // dashboard is showing the archive rather than active
   hasArchived: false,  // any archived habits exist at all
@@ -391,22 +393,31 @@ function renderGridHeader(dates, todayIso) {
   // Never scroll past today: there is nothing to record in the future.
   const atToday = (state.gridEnd ?? todayIso) >= todayIso;
 
-  // Order the buttons so they read left-to-right in the direction they move.
+  // "Today" is rendered FIRST and always present — merely made invisible when
+  // it has nothing to do. Appending it conditionally after the arrows shifted
+  // them sideways the moment you paged back, so the pointer was no longer over
+  // the button it had just clicked.
+  const today = document.createElement('button');
+  today.type = 'button';
+  today.className = 'btn btn-sm';
+  today.textContent = 'Today';
+  today.addEventListener('click', () => {
+    state.gridEnd = null;
+    loadDashboard().catch((e) => toast(e.message));
+  });
+  if (atToday) {
+    // visibility, not `hidden`: the slot must keep its width.
+    today.style.visibility = 'hidden';
+    today.disabled = true;
+    today.tabIndex = -1;
+    today.setAttribute('aria-hidden', 'true');
+  }
+  nav.append(today);
+
+  // Order the arrows so they read left-to-right in the direction they move.
   const older = mk(olderGlyph, `Previous ${step} days`, -step);
   const newer = mk(newerGlyph, `Next ${step} days`, step, atToday);
   nav.append(...(newestLeft ? [newer, older] : [older, newer]));
-
-  if (!atToday) {
-    const today = document.createElement('button');
-    today.type = 'button';
-    today.className = 'btn btn-sm';
-    today.textContent = 'Today';
-    today.addEventListener('click', () => {
-      state.gridEnd = null;
-      loadDashboard().catch((e) => toast(e.message));
-    });
-    nav.append(today);
-  }
 
   // Date row, aligned to the checkbox columns below.
   const cols = document.createElement('div');
@@ -520,6 +531,10 @@ function openSettings() {
 /** Persist a setting and re-render whatever it affects. */
 function applySetting(key, value) {
   if (!settings.set(key, value)) return;
+  // The calendar's +/- buttons keep a session override. Choosing a zoom in
+  // the dialog is the more deliberate act, so it clears that override —
+  // otherwise the dialog would appear to do nothing.
+  if (key === 'calendarZoom') state.calZoom = null;
   renderDashboard();
   if (state.openHabitId != null) showDetail(state.openHabitId);
 }
@@ -775,10 +790,26 @@ async function onCheckClick(habit, date) {
 /* ---------- detail view ---------- */
 
 async function showDetail(id) {
+  // Every control in the detail view — zoom, calendar paging, granularity,
+  // history mode — re-renders through here, and replaceChildren() drops the
+  // page height to zero, which scrolls the window back to the top. Keeping
+  // the position means a button press leaves you looking at the thing you
+  // just pressed. Only when redrawing the *same* habit: opening a different
+  // one should start at the top, as any new page would.
+  const redraw = state.openHabitId === id;
+  const scroll = redraw ? window.scrollY : 0;
+
   try {
     const stats = await api(`/habits/${id}/stats?granularity=${state.granularity}`);
     const entries = await api(`/habits/${id}/entries`);
     renderDetail(stats, entries);
+
+    if (redraw && scroll) {
+      // After layout, or the page is still short and the scroll is clamped
+      // to 0. Not scrollTo({behavior:'smooth'}) — this is meant to look like
+      // nothing moved, not like a jump and a glide back.
+      requestAnimationFrame(() => window.scrollTo(0, scroll));
+    }
   } catch (e) {
     toast(e.message);
   }
@@ -845,14 +876,21 @@ function renderDetail(stats, entries) {
   );
   els.viewDetail.append(tiles);
 
+  // Every chart is drawn at the width of the card it sits in, rather than at
+  // a hardcoded 720px that left a third of a desktop card empty. The floor
+  // keeps a phone from producing an unreadably squashed axis — below it the
+  // card scrolls horizontally instead.
+  const chartWidth = Math.max(320, cardInnerWidth(els.viewDetail));
+
   /* score */
   els.viewDetail.append(
-    card('Habit strength', scoreChart(stats.scores, color))
+    card('Habit strength', scoreChart(stats.scores, color, { width: chartWidth }))
   );
 
   /* best streaks */
   els.viewDetail.append(
-    card('Best streaks', streakChart(stats.streaks, color, { limit: STREAK_LIMIT }))
+    card('Best streaks',
+      streakChart(stats.streaks, color, { limit: STREAK_LIMIT, width: chartWidth }))
   );
 
   /* calendar — clickable, with navigation back through history */
@@ -873,23 +911,51 @@ function renderDetail(stats, entries) {
     return b;
   };
 
-  const CAL_WEEKS = 27; // ~6 months per page, readable without scrolling far
+  // Zoom comes from the saved setting, but the buttons below change it for
+  // this session too, so trying a level does not mean a trip to Settings.
+  const ZOOM_ORDER = ['closest', 'close', 'default', 'wide'];
+  const zoom = state.calZoom ?? settings.get('calendarZoom');
+
+  // Fill the card rather than sitting at a fixed width with empty space to the
+  // right of it. `chartWidth` is measured from the container the card is about
+  // to be appended to, since calCard is not in the DOM yet.
+  const CAL_WEEKS = weeksForWidth(chartWidth, zoom);
+
   const shift = (weeks) => {
     state.calEnd = addDaysISO(state.calEnd ?? todayISO(), weeks * 7);
     if (state.calEnd > todayISO()) state.calEnd = todayISO();
     showDetail(habit.id);
   };
 
+  /** @param {number} dir -1 zooms in (bigger squares), +1 zooms out */
+  const changeZoom = (dir) => {
+    const i = ZOOM_ORDER.indexOf(zoom);
+    const next = ZOOM_ORDER[Math.min(ZOOM_ORDER.length - 1, Math.max(0, i + dir))];
+    if (next === zoom) return;
+    state.calZoom = next;
+    // `set` is synchronous and owns its own offline queuing, so the redraw
+    // never waits on the server.
+    settings.set('calendarZoom', next);
+    showDetail(habit.id);
+  };
+
+  const zoomIn = mkNav('+', 'Zoom in: bigger squares, less history', () => changeZoom(-1));
+  const zoomOut = mkNav('−', 'Zoom out: smaller squares, more history', () => changeZoom(1));
+  zoomIn.disabled = zoom === ZOOM_ORDER[0];
+  zoomOut.disabled = zoom === ZOOM_ORDER.at(-1);
+
   nav.append(
     mkNav('‹ Earlier', 'Show earlier months', () => shift(-CAL_WEEKS)),
     navLabel,
     mkNav('Later ›', 'Show later months', () => shift(CAL_WEEKS)),
     mkNav('Today', 'Jump to today', () => { state.calEnd = null; showDetail(habit.id); }),
+    zoomOut,
+    zoomIn,
   );
   calHead.append(nav);
 
   const calEnd = state.calEnd ?? todayISO();
-  const calStart = addDaysISO(calEnd, -(CAL_WEEKS * 7 - 1));
+  const calStart = calendarWindow(calEnd, CAL_WEEKS).start;
   navLabel.textContent = `${calStart} → ${calEnd}`;
 
   const skipSet = new Set(entries.filter((e) => e.status === 'skip').map((e) => e.date));
@@ -900,6 +966,7 @@ function renderDetail(stats, entries) {
   const calScroll = document.createElement('div');
   calScroll.className = 'chart-scroll';
   calScroll.append(calendarChart(entriesByDate, color, habit, {
+    zoom,
     weeks: CAL_WEEKS,
     endDate: calEnd,
     skips: skipSet,
@@ -948,22 +1015,57 @@ function renderDetail(stats, entries) {
   histScroll.className = 'chart-scroll';
   histScroll.append(historyChart(stats.history, color, {
     showPercent: state.historyMode === 'percent',
+    width: chartWidth,
   }));
   histCard.append(histScroll);
   els.viewDetail.append(histCard);
 
   /* weekday */
-  els.viewDetail.append(card('By day of week', weekdayChart(stats.weekdays, color)));
+  els.viewDetail.append(
+    card('By day of week', weekdayChart(stats.weekdays, color, { width: chartWidth }))
+  );
 
   /* frequency */
   if (stats.frequency.length) {
     const freqScroll = document.createElement('div');
     freqScroll.className = 'chart-scroll';
-    freqScroll.append(frequencyChart(stats.frequency, color));
+    freqScroll.append(frequencyChart(stats.frequency, color, { width: chartWidth }));
     const fc = card('Times per week', null);
     fc.append(freqScroll);
     els.viewDetail.append(fc);
   }
+}
+
+/**
+ * Usable width inside a `.card` placed in `container`, in CSS pixels.
+ *
+ * Measured from a real card rather than subtracting a hardcoded number:
+ * `.card` carries 16px of padding *and* a 1px border on each side, and an
+ * assumed 32 left the SVG 33px wider than its box — enough for
+ * `max-width: 100%` to scale the whole chart down, so 13px cells rendered at
+ * 12.6px. Measuring cannot drift from the stylesheet.
+ */
+function cardInnerWidth(container) {
+  const outer = container?.clientWidth ?? 0;
+  if (!outer) return 720; // detached or hidden; the old fixed width is a safe floor
+
+  const probe = document.createElement('div');
+  probe.className = 'card';
+  // `visibility`, not `position: absolute` — taking the probe out of flow
+  // collapses it to its (empty) content instead of stretching to the
+  // container, which is how this first returned 720 on a 1026px card. It
+  // still occupies a row for one frame, but nothing is painted and it is
+  // removed before the browser can render.
+  probe.style.visibility = 'hidden';
+  probe.style.margin = '0';
+  container.append(probe);
+
+  const cs = getComputedStyle(probe);
+  const inner = probe.clientWidth
+    - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  probe.remove();
+
+  return inner > 0 ? Math.floor(inner) : 720;
 }
 
 function card(titleText, content) {
@@ -1293,8 +1395,10 @@ $('#btn-theme').addEventListener('click', () => toggleTheme(() => {
 $('#data-close').addEventListener('click', () => els.dataDialog.close());
 $('#export-json').addEventListener('click',
   () => download('/api/export?download=true', 'habiterall-backup.json'));
+// A zip of Habits.csv + Checkmarks.csv, matching Loop's own export. The route
+// keeps its historical `.csv` name; the file does not.
 $('#export-csv').addEventListener('click',
-  () => download('/api/export.csv', 'habiterall-checkmarks.csv'));
+  () => download('/api/export.csv', 'habiterall-csv.zip'));
 $('#export-loop').addEventListener('click',
   () => download('/api/export-loop.db', 'Loop Habits Backup.db'));
 els.importFile.addEventListener('change',

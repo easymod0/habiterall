@@ -369,8 +369,11 @@ export function parseLoopHabitsCSV(text) {
 
   const cType = idx('type');
   const cDesc = idx('description', 'question');
-  const cNum = idx('frequencynumerator', 'frequency numerator');
-  const cDen = idx('frequencydenominator', 'frequency denominator');
+  // Loop's own Habits.csv labels these NumRepetitions/Interval; other exports
+  // (and older versions) spell them out. Accept both, or a 3-times-a-week
+  // habit silently comes back as daily.
+  const cNum = idx('frequencynumerator', 'frequency numerator', 'numrepetitions');
+  const cDen = idx('frequencydenominator', 'frequency denominator', 'interval');
   const cColor = idx('color');
   const cUnit = idx('unit');
   const cTType = idx('target type', 'targettype');

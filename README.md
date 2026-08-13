@@ -205,7 +205,7 @@ can restore on Android. You are not locked in.
 | What | Where |
 |---|---|
 | Full JSON backup (round-trippable) | `GET /api/export` |
-| Checkmarks as CSV | `GET /api/export.csv` |
+| CSV archive — `Habits.csv` + `Checkmarks.csv`, zipped | `GET /api/export.csv` |
 | Loop-compatible `.db` | `GET /api/export-loop.db` |
 
 Restore by importing the file back. `?mode=merge` (default) adds and merges by

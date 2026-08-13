@@ -162,6 +162,34 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/api.integration.mjs
 
+      # Exports every format and imports it back, asserting the data is
+      # unchanged. A silent encoding regression here loses real history and
+      # would otherwise only surface when someone restores a backup.
+      - name: Backup round-trip fidelity
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/roundtrip.integration.mjs
+
+  roundtrip:
+    name: Backup round-trip (personal)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # Runs against a throwaway SQLite file on an ephemeral port, so it needs
+      # no services and no fixtures beyond its own.
+      - name: Export and re-import every format
+        working-directory: habiterall-personal
+        run: node test/roundtrip.integration.mjs
+
   docker:
     name: Docker images
     runs-on: ubuntu-latest
