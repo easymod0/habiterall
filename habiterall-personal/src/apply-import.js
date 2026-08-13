@@ -15,8 +15,8 @@ import { normalizeColor } from '@habiterall/shared/import.js';
 const insertHabit = db.prepare(`
   INSERT INTO habits (name, description, type, unit, target_value, target_type,
                       freq_numerator, freq_denominator, color, reminder_time,
-                      position, archived)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      reminder_message, position, archived)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const insertEntry = db.prepare(`
   INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)
@@ -85,6 +85,10 @@ export function applyImport(habits, mode = 'merge') {
           den,
           normalizeColor(h.color),
           /^([01]\d|2[0-3]):[0-5]\d$/.test(h.reminder_time ?? '') ? h.reminder_time : '',
+          // One line, capped: the same rule parseHabit applies, because an
+          // imported prompt lands in the Android client's line-delimited cache
+          // exactly like one typed into the dialog.
+          String(h.reminder_message ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200),
           position++,
           h.archived ? 1 : 0
         );

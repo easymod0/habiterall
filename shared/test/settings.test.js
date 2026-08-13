@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const { parseSettings, SETTING_VALUES, ValidationError } =
+const { parseSettings, SETTING_VALUES, ValidationError, entryWrite } =
   await import('../src/validate.js');
 const { computeHistory } = await import('../src/stats.js');
 
@@ -39,15 +39,61 @@ test('every browser setting is enforced by the server', () => {
   }
 });
 
+/**
+ * Slice ui/settings.js into one text block per declared setting, so an option
+ * value can be checked against the key that actually offers it.
+ *
+ * The previous version of this test pooled every `{ value: '…' }` literal in
+ * the file and asked whether ANY setting accepted it, which passed happily for
+ * a value offered under the wrong key — and could not survive a setting whose
+ * legal values are not a list at all.
+ */
+function uiSettingBlocks(src) {
+  const marks = [...src.matchAll(/^ {2}(\w+): \{$/gm)];
+  return new Map(marks.map((mark, i) => [
+    mark[1],
+    src.slice(mark.index, i + 1 < marks.length ? marks[i + 1].index : src.length),
+  ]));
+}
+
 test('every UI option value is one the server accepts', () => {
   const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
+  const blocks = uiSettingBlocks(ui);
+  assert.ok(blocks.size > 0, 'failed to parse any settings from ui/settings.js');
 
-  // dayOrder is a select; check its declared option values individually.
-  const options = [...ui.matchAll(/\{ value: '([^']+)'/g)].map((m) => m[1]);
-  for (const value of options) {
-    const known = Object.values(SETTING_VALUES).some((vals) => vals.includes(value));
-    assert.ok(known, `the UI offers "${value}", which the server would reject`);
+  let checked = 0;
+  for (const [key, block] of blocks) {
+    const values = [...block.matchAll(/\{ value: '([^']*)'/g)].map((m) => m[1]);
+    // A `multi` setting's control offers one value at a time but stores a list,
+    // so each option is submitted the way the client would submit it.
+    const isMulti = /type: 'multi'/.test(block);
+
+    for (const value of values) {
+      const patch = { [key]: isMulti ? [value] : value };
+      assert.deepEqual(
+        parseSettings(patch).rejected, [],
+        `the UI offers ${JSON.stringify(value)} for "${key}", which the server rejects`
+      );
+      checked++;
+    }
   }
+  assert.ok(checked > 0, 'no option values were checked — has the format changed?');
+});
+
+test('a setting whose values are not a list is still enforced', () => {
+  // notifyTimezone and discordWebhook cannot be enumerated, so they carry a
+  // normaliser instead of an array. The point of this test is that the two
+  // rule forms live behind one door: parseSettings.
+  const shapes = Object.values(SETTING_VALUES).map((rule) => typeof rule);
+  assert.ok(shapes.includes('function'), 'expected at least one normaliser rule');
+  assert.ok(shapes.includes('object'), 'expected at least one enumerated rule');
+
+  // A normaliser may store something other than what arrived; an array rule
+  // never does. Both are decided here and nowhere else.
+  const { accepted } = parseSettings({
+    discordWebhook: 'https://discord.com/api/webhooks/1/abc?wait=true',
+  });
+  assert.equal(accepted.discordWebhook, 'https://discord.com/api/webhooks/1/abc');
 });
 
 /* ---------- server-side validation ---------- */
@@ -134,4 +180,40 @@ test('prototype pollution attempts are dropped', () => {
   assert.deepEqual(accepted, { dayOrder: 'newest-left' });
   assert.ok(rejected.includes('__proto__'));
   assert.equal(/** @type {any} */ ({}).polluted, undefined);
+});
+
+/* ---------- what a write actually does to storage ---------- */
+
+const SENTINELS = { UNSET: 0, YES: 2, SKIP: 3 };
+
+test('a skip is stored out of band and reported as the wire value', () => {
+  const write = entryWrite({ type: 'numerical' },
+    { value: 0, status: 'skip', notes: 'ill' }, SENTINELS);
+  assert.equal(write.op, 'upsert');
+  assert.equal(write.status, 'skip');
+  assert.equal(write.value, 0, 'never the SKIP value — a numerical habit may record 3');
+  assert.equal(write.reply.value, 3, 'but the API answers with the wire value');
+});
+
+test('clearing a checkmark deletes the row', () => {
+  const write = entryWrite({ type: 'boolean' },
+    { value: 0, status: '', notes: '' }, SENTINELS);
+  assert.equal(write.op, 'delete', '"not done" is the absence of a row');
+});
+
+test('unless a note needs somewhere to live', () => {
+  const write = entryWrite({ type: 'boolean' },
+    { value: 0, status: '', notes: 'travelling' }, SENTINELS);
+  assert.equal(write.op, 'upsert');
+  assert.equal(write.value, 0);
+  assert.equal(write.notes, 'travelling');
+});
+
+test('a numerical zero is a recorded amount, not an absence', () => {
+  // "at most 0 cigarettes" is met by recording 0, which must not be deleted as
+  // if it had never been answered.
+  const write = entryWrite({ type: 'numerical' },
+    { value: 0, status: '', notes: '' }, SENTINELS);
+  assert.equal(write.op, 'upsert');
+  assert.equal(write.value, 0);
 });

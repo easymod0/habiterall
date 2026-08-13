@@ -18,11 +18,75 @@ const CACHE_KEY = 'habiterall-settings';
  * @typedef {object} SettingDef
  * @property {string} label      shown in the settings dialog
  * @property {string} [help]     one-line explanation under the control
- * @property {'select'|'toggle'} type
+ * @property {'select'|'toggle'|'multi'|'text'} type
  * @property {any} default
- * @property {{value: string, label: string}[]} [options]  for `select`
+ * @property {{value: string, label: string}[]} [options]  for `select` and `multi`
+ * @property {string} [placeholder]  for `text`
  * @property {string} [section]  groups controls in the dialog
+ * @property {(values: Record<string, any>) => boolean} [requires]
+ *   when present, the control is only shown while this holds — a webhook URL
+ *   is noise until its channel is switched on
+ * @property {(value: any) => boolean} [validate]
+ *   overrides the type's own check, for a value whose legal set is not a list
  */
+
+/**
+ * Notification destinations.
+ *
+ * The ids and their meanings live in shared/src/notify.js, which is what the
+ * server enforces and what the notifier delivers with; this is the render
+ * side, exactly as SETTINGS is the render side of SETTING_VALUES.
+ * test/notify.test.js fails if the two lists drift.
+ */
+const CHANNEL_OPTIONS = [
+  { value: 'android', label: 'Android app (on-device alarm, works offline)' },
+  { value: 'discord', label: 'Discord channel (sent by the server)' },
+];
+
+/** The zone the browser is in, e.g. 'Europe/Berlin'. */
+function deviceTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** Whether Intl here understands a zone name — the same test the server makes. */
+function knownTimeZone(value) {
+  if (typeof value !== 'string') return false;
+  if (value === '') return true;                 // '' = use the server's zone
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every zone this browser knows, so the reminder time can mean what the user
+ * means by it. Long, but a list of ~400 names in a `<select>` is still far
+ * better than asking someone to type 'America/Argentina/Buenos_Aires'.
+ */
+function timeZoneOptions() {
+  const device = deviceTimeZone();
+  let zones = [];
+  try {
+    zones = Intl.supportedValuesOf?.('timeZone') ?? [];
+  } catch {
+    zones = [];
+  }
+  if (!zones.length && device) zones = [device];
+
+  return [
+    { value: '', label: "Server's own timezone" },
+    ...zones.map((zone) => ({
+      value: zone,
+      label: zone === device ? `${zone} (this device)` : zone,
+    })),
+  ];
+}
 
 /**
  * The available settings.
@@ -112,6 +176,63 @@ export const SETTINGS = {
       { value: 'count', label: 'Count' },
     ],
   },
+  notifyChannels: {
+    section: 'Notifications',
+    label: 'Send reminders to',
+    help: 'A habit only sends anything if it has a reminder time set, on its own edit screen.',
+    type: 'multi',
+    // The phone alarm only. It is the one destination that needs no setup, and
+    // the only one that still fires with no network.
+    default: ['android'],
+    options: CHANNEL_OPTIONS,
+  },
+  discordChannelId: {
+    section: 'Notifications',
+    label: 'Discord channel id',
+    help: 'For buttons you can answer in Discord. Needs a bot on this server — ' +
+      'turn on Developer Mode, then right-click the channel → Copy Channel ID.',
+    type: 'text',
+    default: '',
+    placeholder: '123456789012345678',
+    // Hidden until Discord is switched on: an empty field for a destination
+    // you are not using reads as something you forgot to fill in.
+    requires: (values) => (values.notifyChannels ?? []).includes('discord'),
+  },
+  discordUserId: {
+    section: 'Notifications',
+    label: 'Your Discord user id',
+    help: 'Optional. Set it and only your clicks count — otherwise anyone who ' +
+      'can see the channel can answer your reminders.',
+    type: 'text',
+    default: '',
+    placeholder: '123456789012345678',
+    requires: (values) => (values.notifyChannels ?? []).includes('discord') &&
+      !!values.discordChannelId,
+  },
+  discordWebhook: {
+    section: 'Notifications',
+    label: 'Discord webhook URL',
+    help: 'An alternative to the channel id, with no bot to set up — but the ' +
+      'message is text only, with nothing to click.',
+    type: 'text',
+    default: '',
+    placeholder: 'https://discord.com/api/webhooks/…',
+    requires: (values) => (values.notifyChannels ?? []).includes('discord'),
+  },
+  notifyTimezone: {
+    section: 'Notifications',
+    label: 'Reminder timezone',
+    help: 'Which clock "08:00" is on. Only affects reminders the server sends; the Android app uses the phone\'s own clock.',
+    type: 'select',
+    default: '',
+    options: timeZoneOptions(),
+    // Checked against Intl rather than the option list, so a zone this
+    // browser's data does not list — but the server's does — is still shown
+    // as the saved value instead of silently reading as the default.
+    validate: knownTimeZone,
+    requires: (values) => (values.notifyChannels ?? [])
+      .some((id) => id !== 'android'),
+  },
   confirmDelete: {
     section: 'Safety',
     label: 'Confirm before deleting a habit',
@@ -127,7 +248,11 @@ let cache = null;
 /** Defaults for every declared setting. */
 function defaults() {
   return Object.fromEntries(
-    Object.entries(SETTINGS).map(([k, def]) => [k, def.default])
+    // Arrays are copied: a `multi` default is a mutable value, and handing the
+    // registry's own array to the caller means one stray push would change
+    // what "default" means for the rest of the session.
+    Object.entries(SETTINGS).map(([k, def]) =>
+      [k, Array.isArray(def.default) ? [...def.default] : def.default])
   );
 }
 
@@ -143,10 +268,68 @@ function sanitise(raw) {
 
 function isValid(def, value) {
   if (value === undefined || value === null) return false;
+  if (def.validate) return def.validate(value);
   if (def.type === 'toggle') return typeof value === 'boolean';
   if (def.type === 'select') return def.options.some((o) => o.value === value);
+  if (def.type === 'multi') {
+    return Array.isArray(value) &&
+      value.every((v) => def.options.some((o) => o.value === v));
+  }
+  // Free text is checked by the server, which is the only check that counts —
+  // a webhook URL's real rule (an allowed host) belongs where the fetch is.
+  if (def.type === 'text') return typeof value === 'string';
   return false;
 }
+
+/**
+ * Whether a control applies given the other values, so a dependent field can
+ * stay out of the way until it is relevant. A hidden control keeps its stored
+ * value; this is about the dialog, not about the data.
+ */
+export function visible(key, values = load()) {
+  const def = SETTINGS[key];
+  return !def?.requires || def.requires(values);
+}
+
+/**
+ * Buttons a section needs that are not settings.
+ *
+ * Declared here rather than hardcoded in app.js for the same reason SETTINGS
+ * is: the dialog should be able to render a whole section without knowing what
+ * is in it. `run` resolves to the text to show the user.
+ *
+ * @type {Record<string, {label: string, run: () => Promise<string>}[]>}
+ */
+export const SECTION_ACTIONS = {
+  Notifications: [{
+    label: 'Send a test notification',
+    /**
+     * Ask the server to post to every destination it delivers for.
+     *
+     * This is the only way to find out that a webhook URL is wrong: a
+     * reminder that fails at 08:00 fails silently into a server log, which is
+     * exactly where nobody is looking.
+     */
+    async run() {
+      const res = await fetch('/api/notify/test', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error ?? `test failed (${res.status})`);
+
+      const results = body.results ?? [];
+      if (!results.length) {
+        return 'No server-delivered destination is switched on and configured.';
+      }
+      return results
+        .map((r) => (r.ok ? `${r.channel}: sent` : `${r.channel}: ${r.error}`))
+        .join(' · ');
+    },
+  }],
+};
 
 function readCache() {
   try {
@@ -193,6 +376,52 @@ export function get(key) {
   return load()[key];
 }
 
+/** @type {((values: Record<string, any>) => void)[]} */
+const listeners = [];
+
+/**
+ * Called when the cached values change because the SERVER said something
+ * different from what was sent. Used by the settings dialog to redraw.
+ */
+export function onChange(fn) {
+  listeners.push(fn);
+}
+
+/**
+ * Take the server's word for it.
+ *
+ * The reply to a write is authoritative, and it is not always what was sent:
+ * a webhook URL comes back without its query string, and a channel list comes
+ * back deduplicated and in registry order. Without adopting it, the cache
+ * disagrees with the server until the next reload — the dialog then shows a
+ * value the server does not hold, which is the failure this whole
+ * "server wins, localStorage caches" arrangement exists to avoid.
+ *
+ * The two editions answer slightly differently (one returns the accepted
+ * patch, the other the whole merged object); merging covers both.
+ */
+function adopt(serverValues) {
+  if (!serverValues || typeof serverValues !== 'object') return;
+  const merged = sanitise({ ...load(), ...serverValues });
+  if (JSON.stringify(merged) === JSON.stringify(load())) return;
+
+  cache = merged;
+  writeCache(cache);
+  for (const fn of listeners) {
+    try { fn(cache); } catch { /* a listener must not break a save */ }
+  }
+}
+
+/** Queue a write for later, so a choice made offline still reaches the server. */
+async function queueWrite(body) {
+  try {
+    const { enqueue } = await import('/shared/offline.js');
+    await enqueue({ url: '/api/settings', method: 'PUT', body });
+  } catch {
+    // No outbox available; the cached value still applies here.
+  }
+}
+
 /**
  * Persist one setting.
  *
@@ -200,7 +429,10 @@ export function get(key) {
  * to the server. A failed write leaves the value cached for this device and
  * is retried on the next `init()`.
  *
- * @returns {boolean} whether the value was accepted
+ * For a value only the server can judge — a webhook URL — use `save`, which
+ * waits for the answer.
+ *
+ * @returns {boolean} whether the value was accepted locally
  */
 export function set(key, value) {
   const def = SETTINGS[key];
@@ -215,19 +447,64 @@ export function set(key, value) {
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body,
+  }).then(async (res) => {
+    if (!res.ok) return;
+    const payload = await res.json().catch(() => null);
+    adopt(payload?.settings);
   }).catch(async () => {
     // Offline. Queue the write so the choice reaches the server rather than
     // living on this device only — otherwise a preference set on a train
     // silently fails to follow the account.
-    try {
-      const { enqueue } = await import('/shared/offline.js');
-      await enqueue({ url: '/api/settings', method: 'PUT', body });
-    } catch {
-      // No outbox available; the cached value still applies here.
-    }
+    await queueWrite(body);
   });
 
   return true;
+}
+
+/**
+ * Persist one setting and wait for the server's verdict.
+ *
+ * Some values cannot be judged here. A Discord webhook URL is only legal if it
+ * points at a host the server is willing to fetch, and that rule lives with
+ * the fetch — duplicating it in the browser is how the two would drift. So the
+ * control has to be able to say "that was refused" and show what is actually
+ * stored, which needs the round trip.
+ *
+ * @returns {Promise<{ok: boolean, value?: any, error?: string, offline?: boolean}>}
+ */
+export async function save(key, value) {
+  const def = SETTINGS[key];
+  if (!def) return { ok: false, error: 'unknown setting' };
+
+  const body = JSON.stringify({ [key]: value });
+  let res;
+  try {
+    res = await fetch('/api/settings', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+  } catch {
+    // Offline: keep it here and send it later. Accepting it locally is the
+    // lesser evil — the alternative is silently discarding what was typed.
+    if (!isValid(def, value)) return { ok: false, error: 'not a valid value' };
+    cache = { ...load(), [key]: value };
+    writeCache(cache);
+    await queueWrite(body);
+    return { ok: true, value, offline: true };
+  }
+
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { ok: false, error: payload.error ?? `could not save (${res.status})` };
+  }
+  if ((payload.ignored ?? []).includes(key)) {
+    return { ok: false, error: 'the server would not accept that value' };
+  }
+
+  adopt(payload.settings);
+  return { ok: true, value: get(key) };
 }
 
 /** Restore every setting to its default, on the server and locally. */

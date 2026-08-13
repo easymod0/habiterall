@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { withUser } from './db/pool.js';
 import { applyImport } from './apply-import.js';
+import { sendTest } from './notifier.js';
 import { unzip } from '@habiterall/shared/unzip.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
@@ -21,7 +22,8 @@ import {
 } from '@habiterall/shared/import.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
-  parseHabit, parseEntry, parseSettings, assertDate, assertNotFuture, DATE_RE,
+  parseHabit, parseEntry, parseSettings, entryWrite, assertDate, assertNotFuture,
+  DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
   computeStats, computeStreaks, bestStreak, isCompleted,
@@ -93,13 +95,13 @@ api.post('/habits', route(async (req, res) => {
     const { rows } = await db.query(
       `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                            target_type, freq_numerator, freq_denominator, color,
-                           reminder_time, archived, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+                           reminder_time, reminder_message, archived, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
                COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
        RETURNING *`,
       [uid(req), h.name, h.description, h.type, h.unit, h.target_value,
        h.target_type, h.freq_numerator, h.freq_denominator, h.color,
-       h.reminder_time, h.archived]
+       h.reminder_time, h.reminder_message, h.archived]
     );
     return rows[0];
   });
@@ -120,11 +122,12 @@ api.put('/habits/:id', route(async (req, res) => {
     const { rows } = await db.query(
       `UPDATE habits SET name=$1, description=$2, type=$3, unit=$4,
               target_value=$5, target_type=$6, freq_numerator=$7,
-              freq_denominator=$8, color=$9, reminder_time=$10, archived=$11
-       WHERE id = $12 RETURNING *`,
+              freq_denominator=$8, color=$9, reminder_time=$10,
+              reminder_message=$11, archived=$12
+       WHERE id = $13 RETURNING *`,
       [h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
        h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-       h.archived, id]
+       h.reminder_message, h.archived, id]
     );
     return rows[0];
   });
@@ -198,30 +201,23 @@ api.put('/habits/:id/entries/:date', route(async (req, res) => {
   assertDate(date);
   assertNotFuture(date, today());
 
-  const { value, status, notes } = parseEntry(habit, req.body, { UNSET, YES, SKIP });
+  const parsed = parseEntry(habit, req.body, { UNSET, YES, SKIP });
 
-  const result = await withUser(uid(req), async (db) => {
-    if (status === 'skip') {
-      await upsertEntry(db, uid(req), habit.id, date, 0, 'skip', notes);
-      return { habit_id: habit.id, date, value: SKIP, status: 'skip', notes };
-    }
+  // The rule — a skip is out of band, and "not done" is the absence of a row
+  // unless a note needs one — lives in shared/validate.js, because the personal
+  // edition and the Discord button handler have to apply exactly the same one.
+  const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
-    // "Not done" is the absence of a row — unless a note needs somewhere to live.
-    if (habit.type === 'boolean' && value === UNSET) {
-      if (notes) {
-        await upsertEntry(db, uid(req), habit.id, date, UNSET, '', notes);
-        return { habit_id: habit.id, date, value: UNSET, notes };
-      }
+  await withUser(uid(req), async (db) => {
+    if (write.op === 'delete') {
       await db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
         [habit.id, date]);
-      return { habit_id: habit.id, date, value: UNSET, notes: '' };
+      return;
     }
-
-    await upsertEntry(db, uid(req), habit.id, date, value, '', notes);
-    return { habit_id: habit.id, date, value, notes };
+    await upsertEntry(db, uid(req), habit.id, date, write.value, write.status, write.notes);
   });
 
-  res.json(result);
+  res.json({ habit_id: habit.id, date, ...write.reply });
 }));
 
 api.delete('/habits/:id/entries/:date', route(async (req, res) => {
@@ -438,6 +434,27 @@ api.delete('/settings', route(async (req, res) => {
     db.query(`UPDATE users SET settings = '{}'::jsonb WHERE id = $1`, [uid(req)])
   );
   res.json({});
+}));
+
+/* ---------- notifications ---------- */
+
+/**
+ * Post a test message to every configured server-delivered destination.
+ *
+ * Without it, a wrong webhook URL is only discoverable by waiting for a
+ * reminder that never comes and then reading a log the user has no access to.
+ * The reply carries each channel's own outcome.
+ *
+ * The settings are re-read here rather than taken from the request: the URL the
+ * server will fetch must be one it has already validated and stored, or this
+ * endpoint would be a way to make the server fetch an arbitrary body.
+ */
+api.post('/notify/test', route(async (req, res) => {
+  const settings = await withUser(uid(req), (db) =>
+    db.query(`SELECT settings FROM users WHERE id = $1`, [uid(req)])
+      .then((r) => r.rows[0]?.settings ?? {})
+  );
+  res.json({ results: await sendTest(uid(req), settings) });
 }));
 
 /* ---------- export ---------- */

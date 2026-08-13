@@ -1,0 +1,91 @@
+package com.habiterall.app.data
+
+import android.content.Context
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import java.util.concurrent.TimeUnit
+
+/**
+ * Retries a check-off that could not be sent immediately.
+ *
+ * Tapping "Yes" on a notification has to feel done the instant it is tapped,
+ * including on a train with no signal. The tap hands the write to WorkManager,
+ * which owns the retry across process death and reboots — the same guarantee
+ * the web app's IndexedDB outbox gives.
+ */
+object Outbox {
+
+    private const val KEY_HABIT = "habit"
+    private const val KEY_DATE = "date"
+    private const val KEY_VALUE = "value"
+    private const val KEY_SKIP = "skip"
+
+    /**
+     * Queue a write. Uniqueness is per habit+day and [ExistingWorkPolicy.REPLACE]:
+     * if you tap Yes then No before either reaches the server, the last tap is
+     * the one that lands, rather than the two racing.
+     */
+    fun enqueue(context: Context, habitId: Long, date: String, value: Double?, skip: Boolean) {
+        val data = Data.Builder()
+            .putLong(KEY_HABIT, habitId)
+            .putString(KEY_DATE, date)
+            .putBoolean(KEY_SKIP, skip)
+        if (value != null) data.putDouble(KEY_VALUE, value)
+
+        val request = OneTimeWorkRequestBuilder<SyncWorker>()
+            .setInputData(data.build())
+            .setConstraints(
+                Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+            )
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .build()
+
+        WorkManager.getInstance(context)
+            .enqueueUniqueWork("entry:$habitId:$date", ExistingWorkPolicy.REPLACE, request)
+    }
+
+    class SyncWorker(
+        appContext: Context,
+        params: WorkerParameters,
+    ) : CoroutineWorker(appContext, params) {
+
+        override suspend fun doWork(): Result {
+            val api = Settings(applicationContext).api() ?: return Result.failure()
+            val habitId = inputData.getLong(KEY_HABIT, -1)
+            val date = inputData.getString(KEY_DATE) ?: return Result.failure()
+            if (habitId < 0) return Result.failure()
+
+            val skip = inputData.getBoolean(KEY_SKIP, false)
+            // `hasKeyWithValueOfType` is a plain Java generic, not reified, so
+            // it needs the Class object — the angle-bracket form does not
+            // compile. `keyValueMap` avoids the question entirely.
+            val value = if (inputData.keyValueMap.containsKey(KEY_VALUE)) {
+                inputData.getDouble(KEY_VALUE, 0.0)
+            } else {
+                null
+            }
+
+            return try {
+                if (!skip && value == null) {
+                    api.clearEntry(habitId, date)
+                } else {
+                    api.setEntry(habitId, date, value = value, skip = skip)
+                }
+                Result.success()
+            } catch (e: ApiException) {
+                // A 4xx will fail identically forever — retrying only burns
+                // battery. 5xx and transport errors are worth another go.
+                if (e.status in 400..499) Result.failure() else Result.retry()
+            } catch (e: Exception) {
+                Result.retry()
+            }
+        }
+    }
+}

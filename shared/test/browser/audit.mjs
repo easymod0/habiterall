@@ -10,15 +10,13 @@
  * It now asserts. Keep it that way: a suite that cannot fail is worse than
  * no suite, because it reads as coverage.
  */
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME } from './chrome.mjs';
+import { closeChrome, launchChrome } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT=9226;
 const profile=mkdtempSync(join(tmpdir(),'habaudit-'));
-const chrome=spawn(CHROME,['--headless=new',`--remote-debugging-port=${PORT}`,
- `--user-data-dir=${profile}`,'--no-first-run','--disable-gpu','about:blank'],{stdio:'ignore'});
+const chrome=launchChrome(PORT, profile);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let fails=0;
 const check=(label,cond,extra='')=>{
@@ -115,7 +113,7 @@ try{
   console.error('FAIL  harness error ::', e.message);
   fails++;
 }
-finally{chrome.kill();try{rmSync(profile,{recursive:true,force:true});}catch{}}
+finally{await closeChrome({ chrome, port: PORT, profile });}
 
 console.log(`
 ${fails===0?'ALL AUDIT CHECKS PASSED':`${fails} AUDIT CHECK(S) FAILED`}`);

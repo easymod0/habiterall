@@ -40,12 +40,38 @@ internet in the clear.
 
 ## Reminders
 
-Set a time per habit. The app schedules a local alarm, so a reminder fires
-whether or not the phone has connectivity, and whether or not the server is
-reachable.
+Set a time per habit — hour and minute dropdowns, or type it, since `8:30`,
+`8:30 pm`, `830` and `8` are all things people type and all mean something. The
+parsing lives in `ReminderTime` and mirrors `shared/public/ui/time.js` exactly,
+because both clients write the same field on the same habit.
+
+The same dialog sets **what the reminder asks** — "Did you exercise today?" —
+which becomes the notification's title, with the habit's name beneath it.
+
+The app schedules a local alarm, so a reminder fires whether or not the phone has
+connectivity, and whether or not the server is reachable.
 
 Reminder times are stored **on the server** as a field on the habit, so they
 follow your account to a new phone and the web UI can set them too.
+
+### This device is one destination among several
+
+The account's Settings → Notifications lists where reminders go: this app, a
+Discord channel, or both. The server delivers the webhook channels itself; it
+never sends push, and it does not know about these alarms — so **unticking the
+Android destination has to be honoured here or it does nothing at all.**
+
+That is why the flag is mirrored into DataStore alongside the reminder times:
+the decision has to be available on a cold boot with no network, and defaulting
+to "enabled" while waiting for the server would re-arm alarms the user switched
+off on every reboot. A settings fetch that fails falls back to the cached
+answer, never to "on". An alarm already pending when the setting changes is
+checked again at the moment of posting, so switching the destination off takes
+effect immediately rather than at the next sync.
+
+An account that has never touched the setting counts as enabled — the server's
+default is on-device only, and a fresh install that armed nothing would look
+broken.
 
 Checking off from a notification while offline queues the write and retries
 when connectivity returns — the same guarantee the web app's outbox gives.
@@ -97,7 +123,7 @@ with *Install unknown apps* enabled — no keystore needed to try it.
 
 ## Tests
 
-`./gradlew test` covers the two pieces with logic worth pinning:
+`./gradlew test` covers the pieces with logic worth pinning:
 
 - **`ServerUrlTest`** — the private-range rule. Android's network security
   config cannot express CIDR ranges, so the "plain http only for a LAN
@@ -106,6 +132,12 @@ with *Install unknown apps* enabled — no keystore needed to try it.
 - **`RemindersTest`** — next-occurrence scheduling, including both DST
   transitions. A reminder is a wall-clock promise: 08:30 must stay 08:30
   across a clock change, which computing in UTC millis would silently break.
+  It also pins the destination rule above, including that an *absent*
+  `notifyChannels` means enabled while an *empty* one means off.
+- **`ReminderTimeTest`** — the time parser, case for case with
+  `shared/test/time.test.js`. Two parsers with one contract only stay honest if
+  both are held to the same examples; `12 am` versus `12 pm` is the one that
+  catches every hand-rolled converter.
 
 ## Roadmap
 

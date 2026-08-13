@@ -40,6 +40,9 @@ db.exec(`
     color         TEXT    NOT NULL DEFAULT '#3b82f6',
     -- local 'HH:MM' the mobile app schedules a reminder for; '' = none
     reminder_time TEXT    NOT NULL DEFAULT '',
+    -- what the reminder asks ('Did you exercise today?'); '' = a sentence
+    -- built from the habit's own name and goal
+    reminder_message TEXT NOT NULL DEFAULT '',
     position      INTEGER NOT NULL DEFAULT 0,
     archived      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -68,6 +71,24 @@ db.exec(`
     value TEXT NOT NULL
   );
 
+  -- What the server has already sent, so a reminder goes out once.
+  --
+  -- Keyed on the LOCAL date the reminder was for, not on a timestamp: the
+  -- question being asked is "has today's 08:00 nudge gone yet", and a
+  -- timestamp would need re-deriving the day boundary in the user's zone
+  -- every time it was read. The channel is part of the key so switching on a
+  -- new destination is not silenced for its first day by a send to another.
+  --
+  -- On-device channels (the Android alarm) never appear here; the phone owns
+  -- its own schedule and works with the server unreachable.
+  CREATE TABLE IF NOT EXISTS notify_log (
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    channel  TEXT    NOT NULL,
+    date     TEXT    NOT NULL,
+    sent_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (habit_id, channel, date)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
   CREATE INDEX IF NOT EXISTS idx_habits_pos  ON habits(position, id);
 `);
@@ -84,6 +105,10 @@ const habitColumns = new Set(
 if (!habitColumns.has('reminder_time')) {
   db.exec(`ALTER TABLE habits ADD COLUMN reminder_time TEXT NOT NULL DEFAULT ''`);
   console.log('migrated habits: added reminder_time');
+}
+if (!habitColumns.has('reminder_message')) {
+  db.exec(`ALTER TABLE habits ADD COLUMN reminder_message TEXT NOT NULL DEFAULT ''`);
+  console.log('migrated habits: added reminder_message');
 }
 
 const entryColumns = new Set(

@@ -4,21 +4,16 @@
  *
  * Verifies the day editor shows exactly one control set per habit type.
  */
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CHROME } from './chrome.mjs';
+import { closeChrome, launchChrome } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000';
 const PORT = 9223;
 
 const profile = mkdtempSync(join(tmpdir(), 'habchrome-'));
-const chrome = spawn(CHROME, [
-  '--headless=new', `--remote-debugging-port=${PORT}`,
-  `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
-  '--disable-gpu', 'about:blank',
-], { stdio: 'ignore' });
+const chrome = launchChrome(PORT, profile);
 
 let fails = 0;
 const check = (label, cond, extra = '') => {
@@ -194,7 +189,6 @@ try {
   console.error('ERROR:', e.message);
   fails++;
 } finally {
-  chrome.kill();
-  try { rmSync(profile, { recursive: true, force: true }); } catch {}
+  await closeChrome({ chrome, port: PORT, profile });
   process.exit(fails === 0 ? 0 : 1);
 }

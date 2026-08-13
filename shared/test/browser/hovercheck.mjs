@@ -5,16 +5,14 @@
  * `transform-box: fill-box`, and getting that wrong sends the cell flying
  * across the grid rather than scaling in place — a fake DOM cannot see it.
  */
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME } from './chrome.mjs';
+import { closeChrome, launchChrome } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = 9302;
 const profile = mkdtempSync(join(tmpdir(), 'habhover-'));
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${PORT}`,
-  `--user-data-dir=${profile}`, '--no-first-run', '--disable-gpu', 'about:blank'], { stdio: 'ignore' });
+const chrome = launchChrome(PORT, profile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let fails = 0;
 const ck = (l, c, e = '') => { console.log((c ? 'PASS' : 'FAIL') + '  ' + l + (e ? ' :: ' + e : '')); if (!c) fails++; };
@@ -270,8 +268,7 @@ try {
   fails++;
 } finally {
   try { ws?.close(); } catch {}
-  chrome.kill();
-  try { rmSync(profile, { recursive: true, force: true }); } catch {}
+  await closeChrome({ chrome, port: PORT, profile });
 }
 
 console.log(`\n${fails === 0 ? 'all hover checks passed' : `${fails} FAILED`}`);

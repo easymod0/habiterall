@@ -13,6 +13,10 @@ import {
 import { initTheme, toggleTheme } from '/shared/ui/theme.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
 import * as settings from '/shared/ui/settings.js';
+import {
+  COMMON_TIMES, describe as describeTime, hourOptions, minuteOptions,
+  parseTimeInput, split as splitTime,
+} from '/shared/ui/time.js';
 
 /**
  * Auth adapter, injected by the edition's entry point (app-personal.js or
@@ -479,13 +483,141 @@ function shiftGrid(deltaDays) {
   loadDashboard().catch((e) => toast(e.message));
 }
 
+/* ---------- reminder time ---------- */
+
+/**
+ * The reminder picker: two dropdowns and a text box, over one value.
+ *
+ * All three edit the same string, and the text box is the one that is actually
+ * submitted (it carries `name="reminder_time"`), so there is a single source of
+ * truth and no hidden field to forget. The dropdowns are for picking, the text
+ * box for typing — `parseTimeInput` is what makes '8:30 pm' and '2030' as valid
+ * as '20:30'.
+ *
+ * Why not `<input type="time">`: in its text-box form (Firefox, and Safari
+ * depending on version) it silently refuses anything that is not already
+ * 'HH:MM' — including '8:30' — and there is no way to tell the user why.
+ */
+function createTimeField(els) {
+  /** Rebuild the minute list, keeping an odd typed minute selectable. */
+  function fillMinutes(extra) {
+    const wanted = els.minute.value;
+    els.minute.replaceChildren();
+    for (const opt of minuteOptions(extra)) {
+      const o = document.createElement('option');
+      o.value = opt.value;
+      o.textContent = opt.label;
+      els.minute.append(o);
+    }
+    if (wanted) els.minute.value = wanted;
+  }
+
+  for (const opt of hourOptions()) {
+    const o = document.createElement('option');
+    o.value = opt.value;
+    o.textContent = opt.label;
+    els.hour.append(o);
+  }
+  fillMinutes(null);
+
+  for (const value of COMMON_TIMES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm';
+    button.textContent = value;
+    button.addEventListener('click', () => set(value, { announce: true }));
+    els.presets.append(button);
+  }
+
+  /** Reflect a canonical value (or '') into all three controls. */
+  function set(value, { announce = false } = {}) {
+    const parts = splitTime(value);
+    els.typed.value = value;
+
+    if (parts) {
+      fillMinutes(parts.minute);
+      els.hour.value = String(parts.hour).padStart(2, '0');
+      els.minute.value = String(parts.minute).padStart(2, '0');
+    }
+    // With no reminder the dropdowns keep whatever they showed: they are a
+    // starting point for picking one, and resetting them to 00:00 would make
+    // "no reminder" look like "midnight".
+    els.hour.disabled = false;
+    els.minute.disabled = false;
+
+    hint(announce ? describeTime(value) : '', false);
+  }
+
+  function hint(message, isError) {
+    els.hint.textContent = message ||
+      'Optional. Type any time (8:30, 8:30 pm, 2030) or pick one.';
+    els.hint.classList.toggle('error', !!isError);
+  }
+
+  function fromDropdowns() {
+    set(`${els.hour.value}:${els.minute.value}`, { announce: true });
+  }
+
+  els.hour.addEventListener('change', fromDropdowns);
+  els.minute.addEventListener('change', fromDropdowns);
+
+  // While typing: follow along if it parses, and say nothing if it does not —
+  // half-typed input is not a mistake yet.
+  els.typed.addEventListener('input', () => {
+    const parsed = parseTimeInput(els.typed.value);
+    if (parsed === null) return;
+    const parts = splitTime(parsed);
+    if (!parts) return;
+    fillMinutes(parts.minute);
+    els.hour.value = String(parts.hour).padStart(2, '0');
+    els.minute.value = String(parts.minute).padStart(2, '0');
+    hint(describeTime(parsed), false);
+  });
+
+  // On leaving the field, commit: normalise what parsed, complain about what
+  // did not. Doing this on `input` instead would rewrite '8' to '08:00' under
+  // the cursor before the minutes were typed.
+  els.typed.addEventListener('change', () => {
+    const parsed = parseTimeInput(els.typed.value);
+    if (parsed === null) {
+      hint(`"${els.typed.value}" is not a time — try 08:30, 8:30 pm or 2030.`, true);
+      return;
+    }
+    set(parsed, { announce: !!parsed });
+  });
+
+  els.clear.addEventListener('click', () => {
+    set('');
+    hint('No reminder — nothing will be sent for this habit.', false);
+    els.typed.focus();
+  });
+
+  return {
+    set: (value) => set(value ?? ''),
+    /** The canonical value, or null if what is in the box is not a time. */
+    value: () => parseTimeInput(els.typed.value),
+    /** Put the cursor where the problem is. */
+    focus: () => els.typed.focus(),
+    hint,
+  };
+}
+
+const reminderField = createTimeField({
+  hour: $('#reminder-hour'),
+  minute: $('#reminder-minute'),
+  typed: $('#reminder-typed'),
+  clear: $('#reminder-clear'),
+  presets: $('#reminder-presets'),
+  hint: $('#reminder-hint'),
+});
+
 /* ---------- settings ---------- */
 
 /**
  * Build the settings dialog from the registry, so adding an option needs no
  * changes here — only a new entry in SETTINGS.
  */
-function openSettings() {
+function renderSettingsBody() {
   els.settingsBody.replaceChildren();
   const current = settings.load();
 
@@ -499,15 +631,30 @@ function openSettings() {
 
     for (const [key, def] of Object.entries(settings.SETTINGS)) {
       if ((def.section ?? 'General') !== section) continue;
+      // A control whose prerequisite is off is left out entirely rather than
+      // disabled: the value is still stored, so nothing is lost by hiding it.
+      if (!settings.visible(key, current)) continue;
 
       const label = document.createElement('label');
       label.className = def.type === 'toggle' ? 'checkbox' : '';
+      // A stable id per setting. The dialog needs none of it — the control is
+      // inside its own <label> — but it means a test can name the field it
+      // means rather than counting inputs, which silently retargets the moment
+      // a setting is added above it.
+      const controlId = `setting-${key}`;
 
       if (def.type === 'select') {
         const text = document.createElement('span');
         text.textContent = def.label;
         const select = document.createElement('select');
-        for (const opt of def.options) {
+        select.id = controlId;
+        // A stored value the option list does not carry still has to be
+        // selectable, or the dialog would show the default and saving anything
+        // else would quietly discard what the server had.
+        const options = def.options.some((o) => o.value === current[key])
+          ? def.options
+          : [{ value: current[key], label: String(current[key]) }, ...def.options];
+        for (const opt of options) {
           const o = document.createElement('option');
           o.value = opt.value;
           o.textContent = opt.label;
@@ -516,8 +663,63 @@ function openSettings() {
         }
         select.addEventListener('change', () => applySetting(key, select.value));
         label.append(text, select);
+      } else if (def.type === 'multi') {
+        // A fieldset rather than nested labels: each destination is its own
+        // checkbox, and the group needs one accessible name of its own.
+        const fieldset = document.createElement('fieldset');
+        fieldset.className = 'setting-multi';
+        const legend = document.createElement('legend');
+        legend.textContent = def.label;
+        fieldset.append(legend);
+
+        const chosen = Array.isArray(current[key]) ? current[key] : [];
+        for (const opt of def.options) {
+          const row = document.createElement('label');
+          row.className = 'checkbox';
+          const box = document.createElement('input');
+          box.id = `${controlId}-${opt.value}`;
+          box.type = 'checkbox';
+          box.checked = chosen.includes(opt.value);
+          box.addEventListener('change', () => {
+            const next = def.options
+              .map((o) => o.value)
+              .filter((v) => (v === opt.value ? box.checked : chosen.includes(v)));
+            applySetting(key, next);
+          });
+          const text = document.createElement('span');
+          text.textContent = opt.label;
+          row.append(box, text);
+          fieldset.append(row);
+        }
+        group.append(fieldset);
+        if (def.help) group.append(settingHelp(def.help));
+        continue;                       // no outer <label> for a group
+      } else if (def.type === 'text') {
+        const text = document.createElement('span');
+        text.textContent = def.label;
+        const input = document.createElement('input');
+        input.id = controlId;
+        input.type = 'text';
+        input.value = current[key] ?? '';
+        if (def.placeholder) input.placeholder = def.placeholder;
+        // `change`, not `input`: a URL is pasted a character at a time as far
+        // as `input` is concerned, and each one would be a rejected PUT.
+        //
+        // `save`, not `set`: whether a webhook URL is acceptable is the
+        // server's call, so the field has to wait for the answer and then show
+        // what was actually stored — a URL that snaps back to blank is how the
+        // user learns it was refused, instead of finding out at 08:00 tomorrow.
+        input.addEventListener('change', async () => {
+          input.disabled = true;
+          const result = await settings.save(key, input.value.trim());
+          input.disabled = false;
+          if (!result.ok) toast(`${def.label}: ${result.error}`);
+          input.value = settings.get(key) ?? '';
+        });
+        label.append(text, input);
       } else {
         const box = document.createElement('input');
+        box.id = controlId;
         box.type = 'checkbox';
         box.checked = !!current[key];
         box.addEventListener('change', () => applySetting(key, box.checked));
@@ -528,22 +730,58 @@ function openSettings() {
 
       group.append(label);
 
-      if (def.help) {
-        const help = document.createElement('p');
-        help.className = 'hint setting-help';
-        help.textContent = def.help;
-        group.append(help);
-      }
+      if (def.help) group.append(settingHelp(def.help));
     }
+
+    for (const action of settings.SECTION_ACTIONS[section] ?? []) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn';
+      button.textContent = action.label;
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          toast(await action.run());
+        } catch (e) {
+          toast(e.message);
+        } finally {
+          button.disabled = false;
+        }
+      });
+      group.append(button);
+    }
+
     els.settingsBody.append(group);
   }
+}
 
+function settingHelp(textContent) {
+  const help = document.createElement('p');
+  help.className = 'hint setting-help';
+  help.textContent = textContent;
+  return help;
+}
+
+function openSettings() {
+  renderSettingsBody();
   els.settingsDialog.showModal();
 }
+
+// The server may store something other than what was sent — a webhook URL
+// keeps its host and loses its query string. Redraw when that happens, so the
+// dialog never shows a value the server does not hold.
+settings.onChange(() => {
+  if (els.settingsDialog.open) renderSettingsBody();
+});
 
 /** Persist a setting and re-render whatever it affects. */
 function applySetting(key, value) {
   if (!settings.set(key, value)) return;
+
+  // Some settings decide whether others are shown at all (enabling Discord
+  // reveals its webhook field), so the body is rebuilt from the new values.
+  // The body, not the dialog: showModal on an open dialog throws.
+  if (els.settingsDialog.open) renderSettingsBody();
   // The in-place toggles (calendar +/-, the history segmented controls) keep a
   // session override. Choosing a value in the dialog is the more deliberate
   // act, so it clears that override — otherwise the dialog would appear to do
@@ -1436,7 +1674,8 @@ function openDialog(habit = null) {
   f.freq_numerator.value = habit?.freq_numerator ?? 1;
   f.freq_denominator.value = habit?.freq_denominator ?? 1;
   f.color.value = habit?.color ?? '#3b82f6';
-  f.reminder_time.value = habit?.reminder_time ?? '';
+  reminderField.set(habit?.reminder_time ?? '');
+  f.reminder_message.value = habit?.reminder_message ?? '';
   f.archived.checked = !!habit?.archived;
   els.archivedWrap.hidden = !habit; // only meaningful for an existing habit
 
@@ -1454,6 +1693,17 @@ async function saveHabit(e) {
   e.preventDefault();
   const f = els.form;
 
+  // The reminder box accepts free text, so it is the one field that can hold
+  // something unsaveable. Refuse here rather than sending '' and silently
+  // dropping the reminder the user thought they had just set.
+  const reminderTime = reminderField.value();
+  if (reminderTime === null) {
+    reminderField.hint(
+      `"${f.reminder_time.value}" is not a time — try 08:30, 8:30 pm or 2030.`, true);
+    reminderField.focus();
+    return;
+  }
+
   const payload = {
     name: f.name.value,
     description: f.description.value,
@@ -1464,9 +1714,10 @@ async function saveHabit(e) {
     freq_numerator: Number(f.freq_numerator.value) || 1,
     freq_denominator: Number(f.freq_denominator.value) || 1,
     color: f.color.value,
-    // An empty <input type="time"> yields '', which the validator maps to
-    // "no reminder" — so clearing the field genuinely removes it.
-    reminder_time: f.reminder_time.value,
+    // Normalised by the picker, so '8:30 pm' reaches the server as '20:30' and
+    // an empty field as '' — which the validator reads as "no reminder".
+    reminder_time: reminderTime,
+    reminder_message: f.reminder_message.value,
     archived: f.archived.checked,
   };
 
@@ -1712,7 +1963,7 @@ $('#btn-settings').addEventListener('click', openSettings);
 $('#settings-close').addEventListener('click', () => els.settingsDialog.close());
 $('#settings-reset').addEventListener('click', async () => {
   await settings.reset();
-  openSettings();          // redraw the controls at their defaults
+  renderSettingsBody();    // redraw the controls at their defaults
   renderDashboard();
 });
 $('#empty-new').addEventListener('click', () => openDialog());

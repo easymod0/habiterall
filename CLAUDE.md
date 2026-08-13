@@ -28,7 +28,8 @@ what runs is what's on disk.
   lives here; each edition ships only `public/app-entry.js`, which picks an
   auth adapter and calls `start()`.
 - **Per edition** — storage (`db.js` / `db/pool.js`), auth, the import
-  *writer* (`apply-import.js`), and the API routes.
+  *writer* (`apply-import.js`), the notifier's storage adapter
+  (`notifier.js`), and the API routes.
 
 If you find yourself copying a file between editions, stop: it belongs in
 `shared/` behind an adapter. That duplication has already bitten this project
@@ -44,6 +45,7 @@ npm run test:tenancy        # cloud isolation attacks — needs Postgres
 
 npm run typecheck           # JSDoc types via tsc --noEmit
 npm run test:cloud          # cloud API + Loop round trip — needs Postgres
+npm run test:notify         # reminder delivery + its watermark, against SQLite
 npm run test:roundtrip -w habiterall-personal   # backup fidelity, all formats
 
 npm run start:personal      # http://localhost:3000
@@ -98,6 +100,19 @@ while the stats view showed them fine.
 14-column layout needed 668px of a 698px row and squeezed the habit name to
 zero width. 7 / 10 / 14 columns by width.
 
+**One rule decides what writing an entry does to storage**, and it lives in
+`entryWrite` (shared/validate.js) because three callers need it: both editions'
+PUT routes and the Discord button handler. It had been inline in the two routes,
+and a third copy in the interaction handler is how "not done" would start meaning
+something different depending on where you answered from.
+
+**A time is parsed, not pattern-matched.** `08:30` is what gets stored, but
+`8:30`, `8:30 pm`, `830` and `8` are what people type, and an `^HH:MM$` check
+rejects all four with nothing useful to say. `shared/public/ui/time.js` and the
+Kotlin `ReminderTime` are deliberate mirrors — same inputs, same outputs, tests
+pinned to the same examples — because both clients write the same field. Note
+12am/12pm is the pair every hand-rolled converter gets wrong.
+
 **Settings live on the server** — a `settings` table (personal) or a JSONB
 column on `users` (cloud, covered by the existing RLS policies). The browser
 caches them in localStorage for a fast first paint, but the server wins.
@@ -107,6 +122,66 @@ caches them in localStorage for a fast first paint, but the server wins.
 **`Object.hasOwn` when looking up a key from user input.** `SETTING_VALUES['__proto__']`
 resolves to `Object.prototype` — truthy, and with no `.includes` — so a plain
 lookup let a crafted payload 500 the endpoint.
+
+**A notification destination is either on-device or server-sent, and the
+difference is the whole design.** `CHANNELS` in `shared/src/notify.js` says
+which. The Android channel is a local alarm armed from `habits.reminder_time`;
+the server neither schedules nor pushes it, which is what keeps it working
+offline — so switching that destination *off* only has an effect if the phone
+honours the setting, and it reads `notifyChannels` for exactly that reason.
+Discord is the opposite: nothing on the phone knows the webhook, and the
+browser could not post to it anyway (`connect-src 'self'`), so the server keeps
+time. Adding a destination means an entry in `CHANNELS`, a branch in
+`sendToChannel`, and an option in `ui/settings.js` — nothing per edition.
+
+**Buttons in Discord need a bot; a webhook cannot carry them.** Discord accepts
+`components` on an *application-owned* webhook only, so the plain channel
+webhook anyone can create is text-only, permanently. Bot mode therefore exists
+alongside it rather than replacing it: with `DISCORD_BOT_TOKEN` and a channel id
+the reminder gets Yes / No / Skip and a number modal; with only a URL it gets
+the same text as before. `sendToChannel` picks, and `CHANNELS.discord.ready` is
+why "configured" is a predicate rather than a list of required keys.
+
+**Interactions arrive over a WebSocket, not an HTTP endpoint.** Discord will
+call an endpoint if you have one, but a self-hosted instance behind a router has
+no inbound port and no hostname — requiring one would mean the interactive
+reminders only worked for people who had already solved a harder problem. The
+outbound socket in `shared/src/discord-gateway.js` needs nothing. It is also why
+no request-signature verification appears anywhere here: a socket is
+authenticated once, by the token.
+
+**The bot token is an environment variable, never a setting.** It can post to
+every channel the bot is in, and `GET /api/settings` hands settings to the
+browser — so a stolen session would exfiltrate the operator's token. The channel
+id *is* a setting, because it is per user and worth nothing on its own.
+
+**A button press is authorised by the CHANNEL it came from, not by its
+`custom_id`.** The id carries a habit and a date because that is all Discord
+gives back, and it is trusted for neither: `resolveChannel` decides whose data
+is written, and the habit is then looked up inside that account, so a forged id
+finds nothing. `discordUserId` narrows it further to one Discord user — without
+it, anyone who can see the channel can answer.
+
+**A server-sent reminder is written down after it is sent** (`notify_log`,
+keyed on habit + channel + the user's *local* date). Without that watermark a
+minute-by-minute tick re-sends for as long as the catch-up window lasts. Keyed
+per channel, or enabling a second destination is silenced for its first day by
+the send to the first; keyed on the local date, or a user east of the server
+gets it filed under the wrong day and again a few hours later.
+
+**`SETTING_VALUES` rules are an array *or* a normaliser.** A URL and a timezone
+name cannot be enumerated, so those entries are functions returning the value
+to store (or `undefined` to reject) — which is also why an accepted setting may
+differ from what was sent, and why `ui/settings.js` has a `save()` that waits
+for the server's answer rather than assuming it. Do not widen the array form to
+"any string" instead: `parseSettings` being the only thing that needs trusting
+is the point.
+
+**A user-supplied URL that the server fetches is a request-forgery
+primitive.** `parseDiscordWebhook` allowlists Discord's hosts, requires HTTPS,
+rebuilds the URL from the parts it checked, and the sender refuses redirects.
+Without the host check, `discordWebhook` aims the server at cloud metadata or a
+port on its own network and reports the result as a status code.
 
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
@@ -122,6 +197,8 @@ Several layers, and they catch different things:
 | Unit | `npm test` | nothing |
 | Types | `npm run typecheck` | nothing |
 | Browser | `npm run test:browser` | Chrome + a running server |
+| Reminders | `npm run test:notify` | nothing |
+| Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |

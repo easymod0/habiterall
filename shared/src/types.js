@@ -41,6 +41,8 @@
  * @property {number} freq_denominator m, in "n times per m days"
  * @property {string} color            #rrggbb
  * @property {string} [reminder_time]  local 'HH:MM', or '' for no reminder
+ * @property {string} [reminder_message] what the reminder asks, e.g. 'Did you
+ *   exercise today?'; '' falls back to a sentence built from the habit
  * @property {number} [position]       display order
  * @property {boolean|0|1} archived    boolean in Postgres, 0/1 in SQLite
  */

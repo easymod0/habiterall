@@ -95,16 +95,29 @@ object Notifications {
     }
 
     fun buildReminder(context: Context, habit: Habit, date: String): Notification {
+        // A custom prompt leads, because "Did you exercise today?" is a question
+        // where the habit's name is a label. The name then becomes the second
+        // line, so a shade holding several reminders still says which is which.
+        val prompt = habit.reminderMessage.trim()
+
         val builder = NotificationCompat.Builder(context, CHANNEL_REMINDERS)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(habit.name)
+            .setContentTitle(if (prompt.isEmpty()) habit.name else prompt)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
 
         if (habit.isNumerical) {
             val target = formatTarget(habit)
-            builder.setContentText(context.getString(R.string.reminder_measurable, target))
+            builder.setContentText(
+                if (prompt.isEmpty()) {
+                    context.getString(R.string.reminder_measurable, target)
+                } else {
+                    // The prompt has taken the title, so this line carries the
+                    // two things it does not say: which habit, and the goal.
+                    "${habit.name} · ${context.getString(R.string.reminder_measurable, target)}"
+                }
+            )
             builder.setContentIntent(countIntent(context, habit, date))
             builder.addAction(
                 0,
@@ -112,7 +125,10 @@ object Notifications {
                 countIntent(context, habit, date),
             )
         } else {
-            builder.setContentText(context.getString(R.string.reminder_boolean))
+            builder.setContentText(
+                if (prompt.isEmpty()) context.getString(R.string.reminder_boolean)
+                else habit.name
+            )
             builder.addAction(
                 0,
                 context.getString(R.string.action_yes),

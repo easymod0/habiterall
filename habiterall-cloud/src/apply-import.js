@@ -141,8 +141,8 @@ export async function applyImport(userId, habits, mode = 'merge') {
           `INSERT INTO habits (user_id, name, description, type, unit,
                                target_value, target_type, freq_numerator,
                                freq_denominator, color, reminder_time,
-                               position, archived)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                               reminder_message, position, archived)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
            RETURNING id`,
           [
             userId,                                   // from the session, always
@@ -156,6 +156,10 @@ export async function applyImport(userId, habits, mode = 'merge') {
             Math.min(den, 365),
             /^#[0-9a-fA-F]{6}$/.test(h.color ?? '') ? h.color : '#3b82f6',
             /^([01]\d|2[0-3]):[0-5]\d$/.test(h.reminder_time ?? '') ? h.reminder_time : '',
+            // One line, capped: the same rule parseHabit applies, and the
+            // column's own CHECK constraints would reject anything else with a
+            // 500 rather than a skipped field.
+            String(h.reminder_message ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200),
             position++,
             !!h.archived,
           ]

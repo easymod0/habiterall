@@ -42,6 +42,33 @@ session's `user_id`. See the header comment in `src/apply-import.js`.
 app role was granted `UPDATE (settings)` explicitly; it still cannot touch
 `idp_subject` or `blocked`.
 
+**The reminder scheduler is the one job with no user to scope to**, and
+migration 008 is where that is paid for. It must ask "who has a webhook
+configured?" before it knows whose day to read, and `withoutUser` cannot answer
+— no `app.user_id` means `users_self` matches nothing and the scan returns zero
+rows, which is RLS working. So there is a `users_notifier_scan` policy, `FOR
+SELECT` only, requiring `app_current_user_id() IS NULL` *and* a
+transaction-local `app.scope = 'notifier'` that only `withNotifierScope` sets.
+The two conditions are mutually exclusive by construction, so it cannot widen a
+request already scoped to a user, and it reaches no table but `users`. Once it
+has the ids, `src/notifier.js` goes back through `withUser` for the habits, the
+entries, and `notify_log` — so a mistake there still fails closed. Read the
+header of `008_notify_log.sql` before touching any of it.
+
+**A button press is authorised by its channel.** `interactionAdapter` in
+`src/notifier.js` resolves the account from `interaction.channel_id` — through
+the notifier scope, since it spans users — and everything after that runs in
+`withUser`. The habit id on the button is looked up *inside* that account, so a
+forged one finds nothing rather than someone else's habit; the tenancy suite
+attacks exactly that. Two accounts naming the same channel resolves to neither,
+because guessing would write to the wrong person's history.
+
+**A webhook URL is a user-supplied URL that the server fetches.** It is
+validated in `shared/src/notify.js` against Discord's own hosts and stored
+canonicalised; `/api/notify/test` re-reads it from the database rather than
+taking one from the request body, and carries its own tight rate limit because
+it causes outbound traffic.
+
 ## Verify it, don't trust it
 
 ```bash

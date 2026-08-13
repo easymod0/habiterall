@@ -11,6 +11,11 @@
  * the personal edition maps `archived` to 0/1 itself.
  */
 
+import { TIME_RE } from './constants.js';
+import {
+  parseChannelList, parseDiscordWebhook, parseSnowflake, parseTimeZone,
+} from './notify.js';
+
 export const HABIT_TYPES = new Set(['boolean', 'numerical']);
 export const TARGET_TYPES = new Set(['at_least', 'at_most']);
 
@@ -19,6 +24,12 @@ export const LIMITS = {
   description: 500,
   unit: 20,
   notes: 500,
+  /**
+   * The prompt a reminder asks. Capped below Discord's 256-character embed
+   * title so it is never truncated on the way out, and short enough to fit an
+   * Android notification's one line.
+   */
+  reminderMessage: 200,
   /** A frequency period longer than a year is not a habit. */
   freqDenominator: 365,
 };
@@ -27,8 +38,13 @@ export const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const DEFAULT_COLOR = '#3b82f6';
 
-/** 24-hour local wall time, e.g. '08:30'. Empty means "no reminder". */
-export const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+/**
+ * 24-hour local wall time, e.g. '08:30'. Empty means "no reminder".
+ * Defined in constants.js so notify.js can share it without importing this
+ * file, which imports notify.js — re-exported here because this is where
+ * every caller expects to find it.
+ */
+export { TIME_RE };
 
 /**
  * A validation failure carrying the HTTP status the API should return, so
@@ -87,6 +103,12 @@ export function parseHabit(body = {}) {
     // habit so it follows the account to a new device, and so the web UI can
     // set it too. '' means no reminder.
     reminder_time: TIME_RE.test(body.reminder_time ?? '') ? body.reminder_time : '',
+    // What the reminder asks — 'Did you exercise today?' rather than the habit
+    // name. Newlines are flattened: this is a one-line prompt in a
+    // notification, and the Android reminder cache is line-delimited, so a
+    // newline here would corrupt the record it is stored in.
+    reminder_message: String(body.reminder_message ?? '')
+      .replace(/[\r\n]+/g, ' ').trim().slice(0, LIMITS.reminderMessage),
     archived: !!body.archived,
   };
 }
@@ -126,12 +148,73 @@ export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
 }
 
 /**
- * The settable preferences and their allowed values.
+ * What writing an entry actually does to storage.
+ *
+ * Both editions' PUT routes had this rule inline, and now a Discord button can
+ * record an entry too — three copies of a rule with two exceptions in it is
+ * how "not done" quietly starts meaning different things in different places.
+ *
+ * The rule:
+ *   - a skip is stored as a row with `status = 'skip'` and value 0, never as a
+ *     magic value, because a numerical habit may legitimately record 3;
+ *   - "not done" on a yes/no habit is the ABSENCE of a row, so clearing a
+ *     checkmark deletes it — unless a note is attached, which needs a row to
+ *     live on.
+ *
+ * @param {import('./types.js').Habit} habit
+ * @param {{value: number, status: string, notes: string}} parsed from parseEntry
+ * @param {{UNSET: number, SKIP: number}} sentinels
+ * @returns {{op: 'upsert'|'delete', value: number, status: string, notes: string,
+ *            reply: {value: number, status?: string, notes: string}}}
+ *   `reply` is what the API echoes back: it reports a skip with the SKIP wire
+ *   value even though 0 is what gets stored.
+ */
+export function entryWrite(habit, parsed, { UNSET, SKIP }) {
+  const { value, status, notes } = parsed;
+
+  if (status === 'skip') {
+    return {
+      op: 'upsert', value: 0, status: 'skip', notes,
+      reply: { value: SKIP, status: 'skip', notes },
+    };
+  }
+
+  if (habit.type === 'boolean' && value === UNSET) {
+    if (notes) {
+      return {
+        op: 'upsert', value: UNSET, status: '', notes,
+        reply: { value: UNSET, notes },
+      };
+    }
+    return {
+      op: 'delete', value: UNSET, status: '', notes: '',
+      reply: { value: UNSET, notes: '' },
+    };
+  }
+
+  return { op: 'upsert', value, status: '', notes, reply: { value, notes } };
+}
+
+/**
+ * The settable preferences and what each accepts.
  *
  * Duplicated deliberately from the browser's ui/settings.js registry: the
  * server must never trust the client's idea of what is valid, and this file
  * cannot import browser code. The two lists are kept honest by
  * test/settings.test.js, which fails if they drift.
+ *
+ * A rule is either:
+ *
+ *   - an ARRAY of the permitted values, for anything enumerable; or
+ *   - a NORMALISER `(value) => stored | undefined`, for anything that is not
+ *     — a URL, a time zone name, a list of channels. It returns the value to
+ *     store (which need not be the value sent: a webhook URL is canonicalised
+ *     and a channel list is deduped and ordered) or `undefined` to reject.
+ *
+ * The second form exists because notification settings are not a menu. Do not
+ * be tempted to widen the array form to "any string" instead — the whole
+ * value of this table is that `parseSettings` is the only thing that has to be
+ * trusted, and a normaliser keeps it that way.
  */
 export const SETTING_VALUES = {
   dayOrder: ['newest-right', 'newest-left'],
@@ -150,6 +233,25 @@ export const SETTING_VALUES = {
   // computed daily, since it is an EWMA and skipping days would change the
   // value rather than the resolution.
   scoreGranularity: ['day', 'week', 'month', 'quarter', 'year'],
+
+  /* --- notifications: see notify.js for what each of these means --- */
+
+  // Which destinations reminders go to. A list, because they are not
+  // mutually exclusive: the phone alarm and a Discord ping are useful at once.
+  notifyChannels: parseChannelList,
+  // Host-restricted on purpose — the SERVER fetches this URL.
+  discordWebhook: parseDiscordWebhook,
+  // Bot mode: the channel to post in. Only useful when the instance has a
+  // DISCORD_BOT_TOKEN — which is an operator credential and deliberately NOT a
+  // setting, since these are handed to the browser by GET /api/settings.
+  discordChannelId: parseSnowflake,
+  // Optional: lock the buttons to one Discord account. Without it, anyone who
+  // can see the channel can answer the reminders in it.
+  discordUserId: parseSnowflake,
+  // Which zone a habit's 'HH:MM' reminder means. '' = the server's own zone,
+  // which is right for a self-hosted single user and wrong for anyone whose
+  // cloud account lives on a box in another country.
+  notifyTimezone: parseTimeZone,
 };
 
 /**
@@ -176,8 +278,19 @@ export function parseSettings(patch = {}) {
     // so a `__proto__` key in the payload would throw and 500 the request.
     if (!Object.hasOwn(SETTING_VALUES, key)) { rejected.push(key); continue; }
 
-    const allowed = SETTING_VALUES[key];
-    if (!allowed.includes(value)) { rejected.push(key); continue; }
+    const rule = SETTING_VALUES[key];
+
+    if (typeof rule === 'function') {
+      // A normaliser returns what to store, so the accepted value may differ
+      // from what arrived — deliberately, since this is where a webhook URL
+      // loses its query string and a channel list is put in order.
+      const normalised = rule(value);
+      if (normalised === undefined) { rejected.push(key); continue; }
+      accepted[key] = normalised;
+      continue;
+    }
+
+    if (!rule.includes(value)) { rejected.push(key); continue; }
     accepted[key] = value;
   }
   return { accepted, rejected };

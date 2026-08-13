@@ -22,8 +22,10 @@ import {
   parseLoopCheckmarksCSV, parseLoopHabitsCSV,
 } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
+import { sendTest } from './notifier.js';
 import {
-  parseHabit, parseEntry, parseSettings, assertDate, assertNotFuture, DATE_RE,
+  parseHabit, parseEntry, parseSettings, entryWrite, assertDate, assertNotFuture,
+  DATE_RE,
 } from '@habiterall/shared/validate.js';
 import { unzip } from '@habiterall/shared/unzip.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
@@ -40,14 +42,16 @@ const q = {
   habitById: db.prepare(`SELECT * FROM habits WHERE id = ?`),
   insertHabit: db.prepare(`
     INSERT INTO habits (name, description, type, unit, target_value, target_type,
-                        freq_numerator, freq_denominator, color, reminder_time, position)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        freq_numerator, freq_denominator, color, reminder_time,
+                        reminder_message, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
   `),
   updateHabit: db.prepare(`
     UPDATE habits SET name = ?, description = ?, type = ?, unit = ?,
       target_value = ?, target_type = ?, freq_numerator = ?,
-      freq_denominator = ?, color = ?, reminder_time = ?, archived = ?
+      freq_denominator = ?, color = ?, reminder_time = ?, reminder_message = ?,
+      archived = ?
     WHERE id = ?
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
@@ -159,7 +163,8 @@ api.post('/habits', (req, res) => {
   const h = habitRow(req.body);
   const info = q.insertHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value,
-    h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time
+    h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
+    h.reminder_message
   );
   res.status(201).json(toApiHabit(q.habitById.get(info.lastInsertRowid)));
 });
@@ -177,7 +182,8 @@ api.put('/habits/:id', (req, res) => {
   const h = habitRow(req.body);
   q.updateHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
-    h.freq_numerator, h.freq_denominator, h.color, h.reminder_time, h.archived, id
+    h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
+    h.reminder_message, h.archived, id
   );
   res.json(toApiHabit(q.habitById.get(id)));
 });
@@ -238,28 +244,17 @@ api.put('/habits/:id/entries/:date', (req, res) => {
   assertDate(date);
   assertNotFuture(date, today());
 
-  const { value, status, notes } = parseEntry(habit, req.body, { UNSET, YES, SKIP });
+  const parsed = parseEntry(habit, req.body, { UNSET, YES, SKIP });
 
-  if (status === 'skip') {
-    q.upsertEntry.run(id, date, 0, 'skip', notes);
-    return res.json({ habit_id: id, date, value: SKIP, status: 'skip', notes });
-  }
+  // The rule — a skip is out of band, and "not done" is the absence of a row
+  // unless a note needs one — lives in shared/validate.js, because the cloud
+  // edition and the Discord button handler have to apply exactly the same one.
+  const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
-  // Clearing a checkmark removes the row rather than storing a zero, keeping
-  // "never recorded" and "recorded as zero" distinct for numerical habits.
-  // A note is the exception: it needs a row to live on, so an explicit
-  // "not done, and here's why" is preserved.
-  if (habit.type === 'boolean' && value === UNSET) {
-    if (notes) {
-      q.upsertEntry.run(id, date, UNSET, '', notes);
-      return res.json({ habit_id: id, date, value: UNSET, notes });
-    }
-    q.deleteEntry.run(id, date);
-    return res.json({ habit_id: id, date, value: UNSET, notes: '' });
-  }
+  if (write.op === 'delete') q.deleteEntry.run(id, date);
+  else q.upsertEntry.run(id, date, write.value, write.status, write.notes);
 
-  q.upsertEntry.run(id, date, value, '', notes);
-  res.json({ habit_id: id, date, value, notes });
+  res.json({ habit_id: id, date, ...write.reply });
 });
 
 api.delete('/habits/:id/entries/:date', (req, res) => {
@@ -428,6 +423,22 @@ api.put('/settings', (req, res) => {
 api.delete('/settings', (req, res) => {
   q.clearSettings.run();
   res.json({});
+});
+
+/* ---------- notifications ---------- */
+
+/**
+ * Post a test message to every configured server-delivered destination.
+ *
+ * Without this a wrong webhook URL is only discoverable by waiting for a
+ * reminder that never arrives and then reading the server log. The reply
+ * carries each channel's own outcome, because "it failed" is not useful when
+ * two destinations are configured.
+ */
+api.post('/notify/test', (req, res, next) => {
+  sendTest()
+    .then((results) => res.json({ results }))
+    .catch(next);
 });
 
 /* ---------- export / import ---------- */

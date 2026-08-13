@@ -13,8 +13,12 @@ node_modules/
 !.env.example
 
 # ---- local data ----
-# SQLite databases (personal edition) and anything under a data/ directory.
-data/
+# The personal edition's SQLite directory. ANCHORED with a leading slash on
+# purpose: a bare `data/` matches at any depth, and it silently excluded
+# android-native/app/src/main/java/com/habiterall/app/data/ — four Kotlin source
+# files, so the app could not compile from a fresh clone and CI had never built
+# it. Keep new entries anchored unless they really are meant to match anywhere.
+/habiterall-personal/data/
 *.db
 *.db-journal
 *.db-wal
