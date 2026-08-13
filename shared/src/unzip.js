@@ -19,6 +19,25 @@ const LFH_SIG = 0x04034b50;
 const MAX_ENTRY_BYTES = 32 * 1024 * 1024;
 
 /**
+ * Cap on the TOTAL decompressed output of one archive.
+ *
+ * The per-entry cap alone is not a defence. Central-directory entries carry
+ * their own offset, and nothing stops hundreds of them pointing at the SAME
+ * local header — so an attacker declares every entry honestly, each one
+ * comfortably under MAX_ENTRY_BYTES, and still multiplies the payload
+ * arbitrarily. A 41KB archive of 200 entries sharing one 31MB member expanded
+ * to 6.05GB in four seconds here, a 153,000x amplification, reachable from
+ * an unauthenticated POST /api/import.
+ */
+const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Cap on how many members we will even attempt. Loop's export contains two.
+ * Bounds the work before any decompression happens.
+ */
+const MAX_ENTRIES = 512;
+
+/**
  * @param {Buffer} buf
  * @returns {Map<string, Buffer>} file path within the archive -> contents
  */
@@ -41,8 +60,13 @@ export function unzip(buf) {
   }
 
   const files = new Map();
+  let totalBytes = 0;
 
-  for (let i = 0; i < entryCount; i++) {
+  const tooBig = () => Object.assign(
+    new Error('archive expands to too much data'), { status: 400 }
+  );
+
+  for (let i = 0; i < Math.min(entryCount, MAX_ENTRIES); i++) {
     if (offset + 46 > buf.length || buf.readUInt32LE(offset) !== CD_SIG) break;
 
     const flags = buf.readUInt16LE(offset + 8);
@@ -87,12 +111,34 @@ export function unzip(buf) {
     const end = Math.min(dataStart + compressedSize, buf.length);
     const raw = buf.subarray(dataStart, end);
 
+    // Budget the REMAINING allowance, not the per-entry cap. Without this a
+    // member may be individually legal and still blow the total, which is the
+    // whole amplification trick — inflate stops at the ceiling rather than
+    // materialising gigabytes we would only throw away.
+    const remaining = MAX_TOTAL_BYTES - totalBytes;
+    if (remaining <= 0) throw tooBig();
+
     try {
       const out = method === 0
-        ? Buffer.from(raw)
-        : inflateRawSync(raw, { maxOutputLength: MAX_ENTRY_BYTES });
+        // Stored entries were previously copied wholesale from
+        // `compressedSize`, ignoring the declared size the cap above checks.
+        // Truncating here is not enough on its own — the length check below
+        // is what actually rejects the archive.
+        ? Buffer.from(raw.subarray(0, Math.min(raw.length, remaining + 1)))
+        : inflateRawSync(raw, {
+            maxOutputLength: Math.min(MAX_ENTRY_BYTES, remaining + 1),
+          });
+
+      totalBytes += out.length;
+      if (totalBytes > MAX_TOTAL_BYTES) throw tooBig();
       files.set(name, out);
-    } catch {
+    } catch (err) {
+      // An over-budget archive must fail loudly, not be mistaken for a corrupt
+      // member. zlib reports the ceiling as ERR_BUFFER_TOO_LARGE, which is
+      // indistinguishable from real corruption unless checked by name.
+      if (err?.status === 400 || err?.code === 'ERR_BUFFER_TOO_LARGE') {
+        throw err?.status === 400 ? err : tooBig();
+      }
       // A single corrupt member shouldn't abort the whole import.
       continue;
     }

@@ -1,9 +1,13 @@
 # Builds the native Android client.
 #
-# Two modes:
-#   - on a pull request or a push touching android-native/, build a debug APK
-#     and run the unit tests, so a broken client is caught before merge
-#   - on a tag or a manual run, build a release APK and attach it to a release
+#   - PULL REQUEST — unit tests, lint and a debug APK. Never publishes.
+#   - PUSH TO MAIN — the same, then a release APK attached to a GitHub
+#     release, so merging is what ships.
+#   - MANUAL — build a release on demand.
+#
+# Only runs when something that can actually affect the client changes: its
+# own sources, this workflow, or the two shared files whose contract it
+# hard-codes.
 #
 # Signing is optional. Without the secrets the release build still succeeds and
 # produces an unsigned APK, which is enough for sideloading via `adb install`.
@@ -11,25 +15,33 @@
 name: Android (native)
 
 on:
+  # A `paths` filter applies to TAG pushes too, and a tag changes no files —
+  # so a block pairing `tags:` with `paths:` matches nothing at all. Releases
+  # are therefore driven by a push to main rather than by tagging, which also
+  # matches how the rest of this repo publishes.
   push:
     branches: [main]
     paths:
       - 'android-native/**'
       - '.github/workflows/android-native.yml'
-    tags: ['android-v*']
+      # The Kotlin client hard-codes the REST contract — field names, the
+      # x1000 entry scaling, the sentinel values — so a change to either of
+      # these can break it even though no Kotlin file moved.
+      - 'shared/src/types.js'
+      - 'shared/src/constants.js'
   pull_request:
     paths:
       - 'android-native/**'
       - '.github/workflows/android-native.yml'
+      - 'shared/src/types.js'
+      - 'shared/src/constants.js'
   workflow_dispatch:
-    inputs:
-      release:
-        description: 'Build a release APK and attach it to a release'
-        type: boolean
-        default: false
 
+# Read-only by default; only the release job needs to publish, and it asks
+# for write itself. The build job runs on every fork PR and must not carry
+# write scope it never uses.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -93,7 +105,18 @@ jobs:
     name: Release APK
     runs-on: ubuntu-latest
     needs: build
-    if: startsWith(github.ref, 'refs/tags/android-v') || inputs.release
+    # A push to main, or a deliberate manual run. Never a pull request: a PR
+    # validates, it does not publish — and a fork PR cannot read the signing
+    # secrets anyway, so it would only ever produce a confusing unsigned
+    # release.
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      || github.event_name == 'workflow_dispatch'
+
+    # Only this job publishes, so only this job gets write. The build job
+    # above runs on every fork PR with read-only scope.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -147,10 +170,14 @@ jobs:
           if-no-files-found: error
 
       - name: Attach the APK to the release
-        if: startsWith(github.ref, 'refs/tags/android-v')
         uses: softprops/action-gh-release@v2
         with:
           files: android-native/app/build/outputs/apk/release/*.apk
+          # Releases are cut by merging, not tagging, so the tag is derived
+          # from the commit. `android-latest` is moved each time; the
+          # commit-specific tag gives every build a stable permalink.
+          tag_name: android-${{ github.sha }}
+          name: Android client (${{ github.sha }})
           body: |
             Native Android client for habiterall.
 

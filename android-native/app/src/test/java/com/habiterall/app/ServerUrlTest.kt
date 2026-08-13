@@ -41,8 +41,23 @@ class ServerUrlTest {
         // likely place for an off-by-one in the range check.
         rejected("http://172.15.0.1")
         rejected("http://172.32.0.1")
-        // A name that merely looks internal still resolves through DNS.
-        rejected("http://myserver.local")
+        // A dotted public name still needs https.
+        rejected("http://habits.example.com")
+        rejected("http://myserver.example.org")
+    }
+
+    @Test
+    fun `LAN hostnames are accepted over plain http`() {
+        // The setup this app exists for. A single-label name cannot be a
+        // public host — public names are fully qualified — and .local/.lan/
+        // .home/.internal are reserved for private networks. Refusing these
+        // told someone who reaches http://raspberrypi:3000 in a browser to
+        // use https for a server that cannot have a certificate.
+        assertEquals("http://raspberrypi:3000", ok("http://raspberrypi:3000"))
+        assertEquals("http://habiterall:3000", ok("habiterall:3000"))
+        assertEquals("http://nas.local:3000", ok("http://nas.local:3000"))
+        assertEquals("http://server.lan:3000", ok("http://server.lan:3000"))
+        assertEquals("http://box.home:3000", ok("http://box.home:3000"))
     }
 
     @Test

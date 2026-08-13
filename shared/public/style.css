@@ -68,6 +68,10 @@ body {
   font-size: 19px;
   font-weight: 650;
   letter-spacing: -0.02em;
+  /* Give way before the action buttons do, and truncate rather than pushing
+     them off a narrow screen. */
+  min-width: 0;
+  overflow: hidden;
 }
 /*
  * The title is a button (it navigates home) but must not look like one —
@@ -85,6 +89,11 @@ body {
   letter-spacing: inherit;
   cursor: pointer;
   border-radius: 4px;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .brand-link:hover { color: var(--accent); }
 .brand-link:focus-visible {
@@ -92,7 +101,28 @@ body {
   outline-offset: 3px;
 }
 
-.topbar-actions { display: flex; gap: 8px; align-items: center; }
+/*
+ * The action row must be allowed to shrink, and the brand to give way before
+ * it. Neither was true: both were rigid, so on a 360px screen the topbar
+ * overflowed and took the whole page's horizontal scroll with it. It passed
+ * on Windows and failed on CI's Linux runner purely because the font renders
+ * wider there — a layout that depends on font metrics for a 30px margin is
+ * broken whether or not the local machine happens to show it.
+ */
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+@media (max-width: 420px) {
+  .topbar { padding: 12px 14px; gap: 8px; }
+  .topbar-actions { gap: 6px; }
+  /* "New habit" is the one label that can afford to lose its wording on a
+     narrow screen; the icon buttons are already minimal. */
+  .topbar .btn { padding: 7px 10px; }
+}
 
 /* ---------- buttons ---------- */
 

@@ -14,11 +14,29 @@
   express the rule, and code cannot relax what this file forbids.
 -->
 <network-security-config>
+    <!--
+      System CAs only. `<certificates src="user"/>` used to sit here, which
+      meant RELEASE builds trusted anything in the user certificate store —
+      an MDM profile, or anyone with brief physical access, could then read
+      the https traffic this whole configuration exists to protect.
+
+      Trusting a self-signed CA for a private server is a legitimate wish, but
+      it belongs in a debug override, not applied to every host globally.
+    -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
-            <!-- Lets a user trust their own CA for a private HTTPS server. -->
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
+
+    <!--
+      Debug builds only: lets a developer point the app at a test server with
+      a self-signed certificate. Never present in a release APK.
+    -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
 </network-security-config>

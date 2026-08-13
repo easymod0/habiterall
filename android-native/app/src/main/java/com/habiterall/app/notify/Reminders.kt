@@ -15,6 +15,9 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Settings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -50,8 +53,25 @@ object Reminders {
      * wherever you are, and must survive a flight and a DST boundary.
      */
     fun nextOccurrence(time: LocalTime, now: java.time.ZonedDateTime): Long {
-        var next = now.with(time).withSecond(0).withNano(0)
-        if (!next.isAfter(now)) next = next.plusDays(1)
+        // Pick the DATE on the local calendar, then resolve to the zone once.
+        //
+        // `now.with(time).plusDays(1)` looks equivalent and is not: `with`
+        // resolves against the zone straight away, so on a spring-forward day
+        // a time inside the missing hour is pushed to 03:30 — and `plusDays`
+        // then preserves that shifted local time, firing the NEXT day at 03:30
+        // too. The reminder only righted itself on day three.
+        val wanted = time.withSecond(0).withNano(0)
+        var date = now.toLocalDate()
+
+        // Resolve on the local date first; the zone decides what that instant
+        // is. On a gap day java.time shifts forward (unavoidable and correct);
+        // the point is that tomorrow is computed from the DATE, not from the
+        // shifted result.
+        var next = java.time.ZonedDateTime.of(date, wanted, now.zone)
+        if (!next.isAfter(now)) {
+            date = date.plusDays(1)
+            next = java.time.ZonedDateTime.of(date, wanted, now.zone)
+        }
         return next.toInstant().toEpochMilli()
     }
 
@@ -86,12 +106,52 @@ object Reminders {
 
     /** Re-arms one habit's alarm after it fired. */
     fun rescheduleOne(context: Context, habitId: Long) {
+        armFromCache(context, habitId)
         enqueueSync(context, habitId)
     }
 
-    /** Re-arms every habit's alarm — after a reboot, or a habit list change. */
-    fun rescheduleAll(context: Context) {
+    /**
+     * Re-arms every habit's alarm — after a reboot, or a habit list change.
+     *
+     * `onDone` lets a BroadcastReceiver hold its process open via `goAsync`
+     * until the cache has actually been read; without it the reschedule races
+     * process death on exactly the occasion that matters most, a boot that
+     * has just wiped every pending alarm.
+     */
+    fun rescheduleAll(context: Context, onDone: (() -> Unit)? = null) {
+        armFromCache(context, null, onDone)
         enqueueSync(context, null)
+    }
+
+    /**
+     * Arm alarms from the local cache, immediately and without any network.
+     *
+     * This is the path that actually keeps reminders working. `enqueueSync`
+     * below only *refreshes* the cache; if it were the only path — as it was
+     * — then a phone rebooted in airplane mode would arm nothing at all,
+     * because its worker is constrained to `NetworkType.CONNECTED` and simply
+     * waits. Reminders would stay silently dead until connectivity returned,
+     * which is the one failure this app cannot have.
+     *
+     * Runs on the IO dispatcher against DataStore; callers are receivers with
+     * a short window, so it must not block them.
+     */
+    private fun armFromCache(context: Context, habitId: Long?, onDone: (() -> Unit)? = null) {
+        val app = context.applicationContext
+        // A standalone scope, not the caller's: a BroadcastReceiver's lifetime
+        // ends the moment onReceive returns.
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                runCatching {
+                    val cached = Settings(app).cachedReminders()
+                    Notifications.ensureChannel(app)
+                    cached.filter { habitId == null || it.id == habitId }
+                        .forEach { schedule(app, it) }
+                }
+            } finally {
+                onDone?.invoke()
+            }
+        }
     }
 
     private fun enqueueSync(context: Context, habitId: Long?) {
@@ -113,8 +173,12 @@ object Reminders {
     }
 
     /**
-     * Fetches habits and arms their alarms. Needs the network, hence a worker:
-     * the reminder times are the server's, so there is nothing local to read.
+     * Refreshes the local cache from the server and re-arms from it.
+     *
+     * Network-constrained, and that is now acceptable: `armFromCache` has
+     * already scheduled from whatever was last known, so this only corrects
+     * the schedule after a change made elsewhere. Losing it costs accuracy,
+     * not the reminder itself.
      */
     class ScheduleWorker(
         appContext: Context,
@@ -122,7 +186,8 @@ object Reminders {
     ) : CoroutineWorker(appContext, params) {
 
         override suspend fun doWork(): Result {
-            val api = Settings(applicationContext).api() ?: return Result.success()
+            val settings = Settings(applicationContext)
+            val api = settings.api() ?: return Result.success()
             // See Outbox.SyncWorker: `hasKeyWithValueOfType` is not reified.
             val only = if (inputData.keyValueMap.containsKey(Notifications.EXTRA_HABIT_ID)) {
                 inputData.getLong(Notifications.EXTRA_HABIT_ID, -1)
@@ -135,6 +200,11 @@ object Reminders {
             } catch (e: Exception) {
                 return Result.retry()
             }
+
+            // Refresh the offline cache on every successful fetch. This is
+            // what makes the next cold boot able to arm alarms with no
+            // network — the whole point of the cache.
+            runCatching { settings.cacheReminders(habits) }
 
             Notifications.ensureChannel(applicationContext)
 

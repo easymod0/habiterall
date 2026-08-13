@@ -198,6 +198,14 @@ jobs:
         working-directory: habiterall-personal
         run: node test/roundtrip.integration.mjs
 
+      # The native Android client is strongly typed and refuses anything that
+      # does not match. SQLite returning `archived: 0` where the contract says
+      # boolean broke it on a real phone, and nothing in the web-facing suite
+      # noticed because 0 and false are both falsy.
+      - name: API shape for typed clients
+        working-directory: habiterall-personal
+        run: node test/apishape.integration.mjs
+
   docker:
     name: Docker images
     runs-on: ubuntu-latest

@@ -64,6 +64,16 @@ export function isoToLoopTimestamp(iso) {
 }
 
 /**
+ * Loop's sentinel band: NO(0), YES_AUTO(1), YES_MANUAL(2), SKIP(3).
+ *
+ * On a numerical habit these are ALSO valid scaled amounts — 3 means both
+ * "skipped" and "0.003 units" — and Loop itself resolves the ambiguity in
+ * favour of the sentinel. The collision is inherent to the format, so the
+ * only place it can be avoided is here, on the way out.
+ */
+const LOOP_SENTINEL_MAX = 3;
+
+/**
  * Translate one habiterall entry into Loop's encoding.
  * Returns null for rows Loop has no representation for.
  */
@@ -73,7 +83,17 @@ export function toLoopEntry(habit, entry) {
   if (habit.type === 'numerical') {
     const n = Number(entry.value);
     if (!Number.isFinite(n)) return null;
-    return Math.round(n * LOOP_NUMERIC_SCALE);
+
+    const scaled = Math.round(n * LOOP_NUMERIC_SCALE);
+
+    // A tiny non-zero amount scales into the sentinel band and would be read
+    // back as a SKIP — destroying the recorded amount AND turning a failure
+    // into a skipped day, which bridges streaks and inflates scores. Rounding
+    // up to 4 (0.004 units) is a rounding error at a scale nothing tracks;
+    // silently converting the day to a skip is data loss.
+    if (scaled > 0 && scaled <= LOOP_SENTINEL_MAX) return LOOP_SENTINEL_MAX + 1;
+
+    return scaled;
   }
 
   // Boolean: only "done" is stored; absence means not done.

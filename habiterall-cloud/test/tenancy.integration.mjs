@@ -154,6 +154,48 @@ try { await withoutUser((db) => db.query('ALTER TABLE habits DISABLE ROW LEVEL S
 catch (e) { policyBlocked = true; }
 check('app role cannot disable RLS', policyBlocked);
 
+/* ---------- attack: squat on another user's habit/date slot ---------- */
+
+console.log("--- attack: plant a row on someone else's habit id ---");
+
+// The blind spot this suite had. The forged INSERT earlier uses the VICTIM's
+// user_id, which RLS has always rejected. The dangerous variant uses the
+// ATTACKER's own user_id with the victim's habit_id — every predicate on
+// `user_id` is then satisfied, and nothing tied habit_id to the same owner.
+//
+// It is a denial of service rather than a leak: `entries` is keyed on
+// (habit_id, date), so the planted row occupies that slot permanently. The
+// victim's upsert hits ON CONFLICT against a row they cannot see and errors,
+// and their DELETE matches nothing — with no way to self-remedy.
+// bobHabit already exists above; reuse it rather than creating another.
+const victimHabit = bobHabit;
+
+let squatBlocked = false;
+try {
+  await withUser(alice.id, (db) => db.query(
+    `INSERT INTO entries (user_id, habit_id, date, value, status)
+     VALUES ($1, $2, '2026-05-01', 2, '')`,
+    [alice.id, victimHabit]
+  ));
+} catch (e) { squatBlocked = true; }
+check("alice cannot attach an entry to bob's habit", squatBlocked);
+
+// And the victim must still be able to use that slot afterwards.
+let victimOk = false;
+try {
+  await withUser(bob.id, (db) => db.query(
+    `INSERT INTO entries (user_id, habit_id, date, value, status)
+     VALUES ($1, $2, '2026-05-01', 2, '')`,
+    [bob.id, victimHabit]
+  ));
+  const cleared = await withUser(bob.id, async (db) => (await db.query(
+    `DELETE FROM entries WHERE habit_id = $1 AND date = '2026-05-01'`,
+    [victimHabit]
+  )).rowCount);
+  victimOk = cleared === 1;
+} catch { victimOk = false; }
+check('bob can still write and clear that day', victimOk);
+
 await admin.end();
 await pool.end();
 console.log(fails === 0 ? '\nALL TENANCY CHECKS PASSED' : `\n${fails} TENANCY CHECK(S) FAILED`);

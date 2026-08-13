@@ -13,7 +13,7 @@
  */
 
 import * as client from 'openid-client';
-import { withoutUser } from './db/pool.js';
+import { withUser, withoutUser } from './db/pool.js';
 
 const {
   OIDC_ISSUER,
@@ -157,6 +157,56 @@ export function logoutUrl(idTokenHint) {
 
 /* ---------- middleware ---------- */
 
+/**
+ * How long a `blocked` lookup is trusted before being re-read, in ms.
+ *
+ * Suspension has to actually take effect, but re-reading `users` on every
+ * request would add a query to the hot path for a column that changes almost
+ * never. A minute bounds the window an abusive account keeps working while
+ * keeping the cost negligible.
+ */
+const BLOCK_CHECK_MS = 60_000;
+
+/** userId -> {blocked, at}. Small and bounded by the number of live users. */
+const blockCache = new Map();
+
+/**
+ * Is this account suspended, according to the database?
+ *
+ * `req.session.user.blocked` is a snapshot taken at login, and sessions here
+ * are `rolling` with a 14-day lifetime — so a session that renews on every
+ * request would keep a suspended user working indefinitely. Setting
+ * `blocked = true` did nothing until they chose to log out, which is the one
+ * thing that flag exists to prevent.
+ */
+async function isBlocked(userId) {
+  const hit = blockCache.get(userId);
+  if (hit && Date.now() - hit.at < BLOCK_CHECK_MS) return hit.blocked;
+
+  try {
+    // withUser, NOT withoutUser: the policy on `users` is self-scoped, so
+    // clearing `app.user_id` makes the row invisible and the query returns
+    // nothing. Reading that as "user vanished" would have locked out every
+    // legitimate session — a far worse bug than the one this fixes.
+    const { rows } = await withUser(userId, (db) =>
+      db.query('SELECT blocked FROM users WHERE id = $1', [userId])
+    );
+    // A vanished user is not a valid session.
+    const blocked = rows.length === 0 ? true : rows[0].blocked === true;
+    blockCache.set(userId, { blocked, at: Date.now() });
+    return blocked;
+  } catch {
+    // Database trouble must not lock everyone out; fall back to the session
+    // snapshot, which is the behaviour we had before this check existed.
+    return hit?.blocked ?? false;
+  }
+}
+
+/** Drop a cached decision so a suspension takes effect immediately. */
+export function forgetBlockState(userId) {
+  blockCache.delete(userId);
+}
+
 /** Reject anything that is not an authenticated, non-blocked session. */
 export function requireAuth(req, res, next) {
   const user = req.session?.user;
@@ -169,8 +219,20 @@ export function requireAuth(req, res, next) {
     }
     return res.redirect('/auth/login');
   }
+  // The login-time snapshot still short-circuits, so a user blocked at login
+  // never reaches the database at all.
   if (user.blocked) {
     return res.status(403).json({ error: 'account suspended' });
   }
-  next();
+
+  isBlocked(user.id)
+    .then((blocked) => {
+      if (!blocked) return next();
+      // Destroy the session too, so the suspension survives the cache window
+      // and the user is not left in a half-authenticated state.
+      req.session.destroy(() => {
+        res.status(403).json({ error: 'account suspended' });
+      });
+    })
+    .catch(next);
 }

@@ -320,3 +320,33 @@ test('a Loop db missing later-version columns still imports', async () => {
 
   unlinkSync(path);
 });
+
+test('a blank header column does not shift later habits\' data', () => {
+  // `names` was filtered before use while the row was still read at `i + 1`,
+  // so every habit after a blank column silently received its neighbour's
+  // cell. Wrong data rather than a dropped row, which is the worse failure.
+  const csv = 'Date,A,,B\n2024-01-01,YES_MANUAL,SKIP,NO\n';
+  const habits = parseLoopCheckmarksCSV(csv);
+
+  const a = habits.find((h) => h.name === 'A');
+  const b = habits.find((h) => h.name === 'B');
+
+  assert.equal(a.entries.length, 1, 'A keeps its own YES');
+  assert.equal(a.entries[0].value, 2);
+
+  // B's own cell is NO, which is stored as absence — it must NOT inherit the
+  // blank column's SKIP.
+  assert.deepEqual(b.entries, [],
+    `B took the blank column's value: ${JSON.stringify(b.entries)}`);
+});
+
+test('several blank columns keep every habit aligned', () => {
+  const csv = 'Date,,A,,,B,C\n2024-01-01,x,YES_MANUAL,y,z,SKIP,3\n';
+  const habits = parseLoopCheckmarksCSV(csv);
+
+  assert.deepEqual(habits.map((h) => h.name), ['A', 'B', 'C']);
+  assert.equal(habits[0].entries[0].value, 2, 'A = YES');
+  assert.equal(habits[1].entries[0].status, 'skip', 'B = SKIP');
+  // C is boolean by default and 3 is Loop's SKIP sentinel there.
+  assert.equal(habits[2].entries[0].status, 'skip', 'C = 3 -> skip on a boolean');
+});

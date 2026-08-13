@@ -5,9 +5,17 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- API 33+: notifications are opt-in, requested at runtime. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- A reminder that drifts by an hour is not a reminder. -->
+    <!--
+      A reminder that drifts by an hour is not a reminder.
+
+      SCHEDULE_EXACT_ALARM only — deliberately NOT USE_EXACT_ALARM. That one
+      is restricted by Google Play to alarm clocks and calendars, which a
+      habit tracker is not, so declaring it risks rejection. It also makes
+      `canScheduleExactAlarms()` return true unconditionally, which would turn
+      the inexact fallback in Reminders.schedule into dead code — the
+      permission and that fallback contradicted each other.
+    -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <!-- Alarms do not survive a reboot; the receiver re-arms them. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 

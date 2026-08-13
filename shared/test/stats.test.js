@@ -482,3 +482,27 @@ test('frequency counts completions per week grouped by month', () => {
   assert.equal(freq[0].month, '2026-01');
   assert.deepEqual(freq[0].counts, { 3: 1 }, 'one week with three completions');
 });
+
+test('isCompleted needs the whole row, not just the value', () => {
+  // A skip is stored as `value 0, status 'skip'`. Passing the bare number
+  // throws the skip signal away, and 0 then gets judged against the target:
+  // on an at_most habit — or any at_least habit with a target of 0 — every
+  // skipped day was counted as a COMPLETION.
+  //
+  // This shipped in the personal edition's totalCompleted while the cloud
+  // edition passed the row correctly, so the two reported different lifetime
+  // totals for identical data.
+  const skip = { date: '2026-01-01', value: 0, status: 'skip' };
+
+  const cases = [
+    ['numerical at_most 2', { type: 'numerical', target_value: 2, target_type: 'at_most' }],
+    ['numerical at_least 0', { type: 'numerical', target_value: 0, target_type: 'at_least' }],
+    ['numerical at_least 8', { type: 'numerical', target_value: 8, target_type: 'at_least' }],
+    ['boolean', { type: 'boolean', target_value: 0, target_type: 'at_least' }],
+  ];
+
+  for (const [label, habit] of cases) {
+    assert.equal(isCompleted(habit, skip), null,
+      `${label}: a skipped day is "not applicable", never a completion`);
+  }
+});
