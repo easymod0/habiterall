@@ -2,16 +2,24 @@
 # changed since the last one.
 #
 # This is the ONLY workflow that publishes anything. Merging to master runs the
-# tests and stops there — a release is a decision, taken by tagging:
+# tests and stops there — a release is a decision, taken either by tagging:
 #
 #   git tag v1.4.0 && git push origin v1.4.0
 #
-# or from the Actions tab (Release → Run workflow) with a version, which is the
-# safer route for a first try: it can be told not to publish.
+# or from the Actions tab (Release → Run workflow), which is the safer route:
+# it defaults to publishing nothing, so it can be tried first.
 #
-# Nothing here needs configuring to go green. Signing and image pushing are each
-# skipped, loudly, when their secrets are absent — so a fresh clone produces a
-# release with unsigned APKs and no images, and says so in the summary. See
+#   version blank  ->  the next PATCH, derived from the highest vX.Y.Z tag
+#   version 1.4.0  ->  exactly that
+#
+# Patch is automatic because it is the common case, and typing it is the one
+# place a release can silently go backwards. Major and minor are judgement
+# calls and stay manual.
+#
+# Image pushing skips itself, loudly, when its credentials are absent, so a
+# fresh clone still produces a release. Signing does NOT skip: an unsigned APK
+# cannot be installed on any device, so a publishing run without the keystore
+# secrets fails rather than attaching a file nobody can use. See
 # .github/workflows/README.md.
 
 name: Release
@@ -24,8 +32,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. 1.4.0 (no leading v)'
-        required: true
+        description: 'Version, e.g. 1.4.0 (no leading v). Leave blank to bump the patch.'
+        required: false
         type: string
       dry_run:
         description: 'Build everything but publish nothing'
@@ -72,12 +80,46 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
             VERSION="${TAG#v}"
             PUBLISH=true
-          else
+          elif [ -n "${INPUT_VERSION}" ]; then
             VERSION="${INPUT_VERSION#v}"
             TAG="v${VERSION}"
             # A manual run defaults to publishing nothing, so trying the
             # workflow out cannot create a release by accident.
             if [ "${DRY_RUN}" = "false" ]; then PUBLISH=true; else PUBLISH=false; fi
+          else
+            # No version given: ship the next patch. A patch release is the
+            # common case and typing the number is both a chore and the only
+            # place a release can silently go backwards, so it is derived.
+            # Major and minor are judgement calls and stay manual — pass a
+            # version for those.
+            #
+            # Only exact vX.Y.Z tags count as a base. A pre-release such as
+            # v1.2.3-rc1 would make `$((PATCH + 1))` fail on "3-rc1", and
+            # bumping from one would skip the final release it precedes;
+            # anyone cutting pre-releases is passing a version anyway.
+            LATEST=$(git tag --list 'v[0-9]*' --sort=-v:refname \
+                      | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+            if [ -z "$LATEST" ]; then
+              echo "::error title=Nothing to bump from::No vX.Y.Z tag exists yet, so there is no patch to increment. Pass an explicit version for the first release."
+              exit 1
+            fi
+            IFS=. read -r M N P <<< "${LATEST#v}"
+            VERSION="$M.$N.$(( P + 1 ))"
+            TAG="v${VERSION}"
+            if [ "${DRY_RUN}" = "false" ]; then PUBLISH=true; else PUBLISH=false; fi
+            echo "::notice title=Auto-bumped::No version given; $LATEST -> $TAG"
+          fi
+
+          # Refuse to reuse a tag when actually publishing. Two dispatches in
+          # flight together would otherwise compute the same next patch, and the
+          # second would rediscover the collision only after building
+          # everything — or worse, quietly attach its assets to the first one's
+          # release. A dry run is left alone: re-running one against an existing
+          # version is a normal thing to do.
+          if [ "$PUBLISH" = "true" ] && [ "${GITHUB_REF_TYPE}" != "tag" ] \
+             && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error title=Tag already exists::$TAG is already tagged. Pass a different version, or delete the tag if the release was abandoned."
+            exit 1
           fi
 
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
