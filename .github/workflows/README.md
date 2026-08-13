@@ -47,6 +47,38 @@ the images go to GHCR only — which needs no secrets at all, so images are
 published either way. The release still succeeds and says which parts were
 skipped.
 
+### What runs when
+
+| A pull request touching | runs |
+|---|---|
+| documentation or workflow config only | unit tests + type check (~20s each) |
+| any code | the whole of `ci.yml` |
+| `android-native/**`, or a shared file the Kotlin client mirrors | the Android workflow as well |
+| `android/**` or the PWA assets | the TWA workflow as well |
+| a push to `master` | everything, always — that run is what says master is releasable |
+
+Two deliberate choices in there.
+
+**The expensive `ci.yml` jobs are filtered by a job-level `if:`, not by a
+workflow-level `paths:`.** A workflow skipped by `paths` never reports a status,
+so a *required* check on it waits forever for a run that will never arrive, and
+the pull request can never merge. A job skipped by `if:` reports "skipped", which
+branch protection accepts. If you add branch protection later, this is the
+difference between it working and it wedging every docs PR.
+
+**No per-directory matrix.** It looks tempting — only test the edition that
+changed — and it would be false precision here: the browser suites drive a real
+personal-edition server, and the Postgres jobs exercise `shared/src` through the
+cloud edition. The honest split is "docs and workflow config" against "code", and
+that is what is implemented. A change to `ci.yml` itself always runs everything,
+or a broken pipeline merges green.
+
+The Android workflow's path list names the shared files the Kotlin client mirrors
+**by hand** (`ui/time.js` against `ReminderTime.kt`, `notify.js` against
+`AppSettings`). That list and those mirrors have to be kept in step: a shared file
+the app copies and that is not listed is a change that can break the client with
+nothing to catch it.
+
 ### `ci.yml` — the main suite
 
 Seven jobs, all self-contained. Postgres comes from a service container, Chrome
