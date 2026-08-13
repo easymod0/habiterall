@@ -18,11 +18,15 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
     # Version tags publish semver-tagged images; without this the tag patterns
     # in the publish job could never match.
     tags: ['v*']
   workflow_dispatch:
+  # Called by release.yml, so a release runs the same suite a pull request does.
+  # Tagging a commit whose tests were never run is the failure a release
+  # pipeline exists to prevent.
+  workflow_call:
 
 # Read-only. Images go to Docker Hub with its own credentials, so nothing here
 # needs write access to the repository.
@@ -252,134 +256,7 @@ jobs:
           done
           docker rm -f hab
 
-  # Publishing is a separate job so the build-and-smoke-test above stays a
-  # required check that never depends on registry credentials existing.
-  publish:
-    name: Publish images
-    runs-on: ubuntu-latest
-    needs: [docker, test, types]
-    # Only from the canonical branch or a version tag: a pull request from a
-    # fork cannot read secrets anyway, and publishing every PR would fill the
-    # registry with throwaway tags.
-    if: >-
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # Everything below is skipped when the credentials are absent, so this
-      # job is green on a fresh clone with nothing configured. Secrets cannot
-      # be referenced in a job-level `if:`, hence the explicit gate here that
-      # every later step reads.
-      - name: Check for registry credentials
-        id: creds
-        env:
-          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          if [ -n "$USERNAME" ] && [ -n "$TOKEN" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-            echo "Docker Hub credentials found — images will be pushed."
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN are not set; skipping publish."
-          fi
-
-      # The namespace to push under. Defaults to the Docker Hub username, so
-      # only the two secrets are strictly required; set DOCKERHUB_NAMESPACE as
-      # a repository variable to push to an organisation instead.
-      - name: Resolve image names
-        if: steps.creds.outputs.configured == 'true'
-        id: names
-        env:
-          NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
-          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          NS="${NAMESPACE:-$USERNAME}"
-          echo "personal=docker.io/$NS/habiterall-personal" >> "$GITHUB_OUTPUT"
-          echo "cloud=docker.io/$NS/habiterall-cloud" >> "$GITHUB_OUTPUT"
-          echo "Publishing to $NS/habiterall-personal and $NS/habiterall-cloud"
-
-      - name: Set up Buildx
-        if: steps.creds.outputs.configured == 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        if: steps.creds.outputs.configured == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # `latest` only from main; a vX.Y.Z tag also publishes X.Y.Z and X.Y, so
-      # a deployment can pin however tightly it wants.
-      - name: Tags for the personal image
-        if: steps.creds.outputs.configured == 'true'
-        id: meta-personal
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.names.outputs.personal }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=short
-
-      - name: Build and push the personal image
-        if: steps.creds.outputs.configured == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: habiterall-personal/Dockerfile
-          push: true
-          tags: ${{ steps.meta-personal.outputs.tags }}
-          labels: ${{ steps.meta-personal.outputs.labels }}
-          # linux/arm64 covers a Raspberry Pi, which is exactly the kind of
-          # machine the personal edition is meant to run on.
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Tags for the cloud image
-        if: steps.creds.outputs.configured == 'true'
-        id: meta-cloud
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.names.outputs.cloud }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=short
-
-      - name: Build and push the cloud image
-        if: steps.creds.outputs.configured == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: habiterall-cloud/Dockerfile
-          push: true
-          tags: ${{ steps.meta-cloud.outputs.tags }}
-          labels: ${{ steps.meta-cloud.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.creds.outputs.configured }}" = "true" ]; then
-            echo "### Published" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            echo "${{ steps.meta-personal.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
-            echo "${{ steps.meta-cloud.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "### Publish skipped"
-              echo
-              echo "Set \`DOCKERHUB_USERNAME\` and \`DOCKERHUB_TOKEN\` as repository"
-              echo "secrets to publish images. See \`.github/workflows/README.md\`."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+  # Publishing lives in release.yml, not here. This workflow proves the images
+  # BUILD (see the docker job above) and stops there: pushing `latest` on every
+  # merge to master made every merge a release, which is the opposite of a
+  # decision. `git tag v1.4.0 && git push origin v1.4.0` is the decision.

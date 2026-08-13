@@ -8,11 +8,43 @@ release builds — unsigned APKs and all the tests work with no setup at all.
 
 ## The workflows
 
-| Workflow | Runs on | Needs setup |
-|---|---|---|
-| `ci.yml` | every push and PR | **nothing** (publishing is optional) |
-| `android-native.yml` | PRs touching `android-native/`, tags `android-v*` | only to sign |
-| `android-release.yml` | tags `android-v*`, manual | `TWA_HOST` + signing |
+| Workflow | Runs on | Publishes | Needs setup |
+|---|---|---|---|
+| `ci.yml` | every push and PR | nothing | **nothing** |
+| `android-native.yml` | PRs and pushes touching `android-native/` | nothing | only to sign |
+| `android-release.yml` | PRs and pushes touching `android/` | nothing | `TWA_HOST` + signing |
+| `release.yml` | **a `vX.Y.Z` tag**, or manual | APKs, images, a GitHub release | nothing (each part skips itself) |
+
+### Releasing
+
+**Merging does not release.** Every merge to `master` runs the tests and stops
+there. A release is a decision, and tagging is how it is taken:
+
+```bash
+git tag v1.4.0 && git push origin v1.4.0
+```
+
+That runs `release.yml`, which:
+
+1. derives the version from the tag, and an Android `versionCode` from it
+   (`1.4.0` → `10400`, monotonic by construction);
+2. runs the whole test suite again — tagging a commit whose tests never ran is
+   the failure a release pipeline exists to prevent;
+3. builds the native APK and the TWA APK, both stamped with that version;
+4. builds both Docker images and pushes `1.4.0`, `1.4` and `latest`;
+5. writes release notes listing every commit since the previous `v*` tag,
+   grouped by subject prefix, with anything unprefixed under *Other* rather
+   than dropped;
+6. creates the release with the APKs attached.
+
+To try it without publishing, use **Actions → Release → Run workflow** and leave
+*dry_run* ticked: everything builds, nothing is pushed, and the summary lists
+what would have been attached.
+
+Each part degrades on its own. No `DOCKERHUB_*` secrets means images are built
+but not pushed. No keystore means the APKs are unsigned (still sideloadable). No
+`TWA_HOST` means no TWA asset. The release still succeeds and says which parts
+were skipped.
 
 ### `ci.yml` — the main suite
 
@@ -34,10 +66,13 @@ No secrets. No variables. Nothing to enable beyond Actions itself.
 
 ### Publishing Docker images (optional)
 
-`ci.yml` has an eighth job that pushes both editions to Docker Hub. It is
-**skipped entirely** when credentials are absent — the job still runs and goes
-green, printing a note in the run summary explaining what to set. So you can
-ignore this section until you actually want published images.
+`release.yml` pushes both editions to Docker Hub, and only for a release. It is
+**skipped entirely** when credentials are absent — the images are still built,
+which is what proves the Dockerfiles work, and the summary explains what to set.
+So you can ignore this section until you actually want published images.
+
+This used to live in `ci.yml` and fire on every merge, which made every merge a
+release of `latest`.
 
 It only runs on a push to `main` or a `v*` tag, never on a pull request.
 
