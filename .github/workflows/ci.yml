@@ -1,0 +1,135 @@
+# Build and test on every pull request and push to main.
+#
+# Four jobs, deliberately separate so a failure names the thing that broke
+# rather than "CI failed":
+#
+#   test     unit tests (fast, no services)
+#   browser  the real-browser UI suites against a running personal instance
+#   tenancy  the adversarial multi-tenant isolation attacks, against Postgres
+#   docker   both images actually build
+#
+# The browser and tenancy jobs exist because they catch classes of bug the
+# unit tests structurally cannot: a CSS rule silently defeating the `hidden`
+# attribute, and a cross-user data leak.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight run for the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  browser:
+    name: Browser suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Start the personal edition
+        run: |
+          mkdir -p habiterall-personal/data
+          (cd habiterall-personal && \
+            PORT=3000 HABITERALL_DB=./data/ci.db node src/server.js &)
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000/healthz >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:3000/healthz
+
+      - name: Run the browser suites
+        # The runner ships Chrome; the harnesses drive it over the DevTools
+        # protocol and reset to known fixtures before each suite.
+        env:
+          BASE: http://localhost:3000
+          CHROME_PATH: /usr/bin/google-chrome
+        run: npm run test:browser
+
+  tenancy:
+    name: Multi-tenant isolation
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: habiterall
+          POSTGRES_USER: owner
+          POSTGRES_PASSWORD: testpw
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U owner -d habiterall"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Apply migrations
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL_ADMIN: postgres://owner:testpw@localhost:5432/habiterall
+          APP_DB_PASSWORD: apptestpw
+        run: node src/db/migrate.js
+
+      - name: Attack the isolation
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/tenancy.integration.mjs
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the personal image
+        run: docker build -f habiterall-personal/Dockerfile -t habiterall:ci .
+
+      - name: Build the cloud image
+        run: docker build -f habiterall-cloud/Dockerfile -t habiterall-cloud:ci .
+
+      - name: Smoke-test the personal image
+        run: |
+          docker run -d --name hab -p 3000:3000 habiterall:ci
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000/healthz >/dev/null && break
+            sleep 1
+          done
+          # The UI is served from the shared workspace; a broken COPY in the
+          # Dockerfile shows up here rather than at runtime for a user.
+          for path in / /app-entry.js /shared/app.js /style.css /sw.js; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3000$path")
+            echo "  $path -> $code"
+            [ "$code" = "200" ] || { docker logs hab; exit 1; }
+          done
+          docker rm -f hab

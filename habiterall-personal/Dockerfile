@@ -1,16 +1,34 @@
+# Built from the REPO ROOT so the shared workspace is available:
+#   docker build -f habiterall-personal/Dockerfile .
+#
 # Node 22 ships node:sqlite, so there is no native module to compile and no
-# build stage needed — the frontend is plain ES modules served statically.
+# build stage — the frontend is plain ES modules served statically.
 FROM node:22-alpine
 
 ENV NODE_ENV=production
 WORKDIR /app
 
-# Install dependencies first so this layer caches across source edits.
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+# Workspace manifests first, so the dependency layer caches across source
+# edits. The shared workspace's own sources are copied before `npm ci` so npm
+# can link it into node_modules as a real workspace package.
+COPY package.json package-lock.json ./
+COPY shared/package.json ./shared/
+COPY habiterall-personal/package.json ./habiterall-personal/
+COPY shared/src ./shared/src
+COPY shared/public ./shared/public
 
-COPY src ./src
-COPY public ./public
+# Both workspaces must be named: installing only habiterall-personal pulls its
+# external deps but does NOT link the local @habiterall/shared package.
+RUN npm ci --omit=dev \
+      --workspace habiterall-personal \
+      --workspace @habiterall/shared \
+      --include-workspace-root
+
+COPY habiterall-personal/src ./habiterall-personal/src
+COPY habiterall-personal/public ./habiterall-personal/public
+COPY habiterall-personal/scripts ./habiterall-personal/scripts
+
+WORKDIR /app/habiterall-personal
 
 # The database lives on a volume so it survives container rebuilds.
 ENV HABITERALL_DB=/data/habiterall.db

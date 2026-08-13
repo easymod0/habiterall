@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const CHROME = String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
+import { CHROME } from '../../../shared/test/browser/chrome.mjs';
 const APP = 'http://localhost:3100';
 const PORT = 9240;
 

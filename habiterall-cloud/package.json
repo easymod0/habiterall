@@ -22,5 +22,5 @@
     "helmet": "^8.0.0",
     "express-rate-limit": "^7.4.1"
   },
-  "license": "MIT"
+  "license": "GPL-3.0-or-later"
 }

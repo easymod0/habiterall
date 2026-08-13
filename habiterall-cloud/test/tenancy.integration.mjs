@@ -4,7 +4,13 @@
  * These try to BREAK isolation, not confirm it: forged ids, missing WHERE
  * clauses, cross-user imports, and a direct attempt to bypass RLS.
  */
-process.env.DATABASE_URL = 'postgres://habiterall_app:apptestpw@localhost:55432/habiterall';
+// Connection strings come from the environment so the same script serves CI
+// (Postgres on 5432) and a local run against the compose stack (via a proxy
+// on 55432). See test/README.md.
+process.env.DATABASE_URL ??=
+  'postgres://habiterall_app:apptestpw@localhost:55432/habiterall';
+const ADMIN_URL = process.env.ADMIN_URL ??
+  'postgres://owner:testpw@localhost:55432/habiterall';
 
 const { withUser, withoutUser, pool } = await import('../src/db/pool.js');
 const { applyImport } = await import('../src/apply-import.js');
@@ -17,7 +23,7 @@ const check = (l, c, e = '') => {
 
 // --- seed two users via the admin connection ---
 const pg = (await import('pg')).default;
-const admin = new pg.Client({ connectionString: 'postgres://owner:testpw@localhost:55432/habiterall' });
+const admin = new pg.Client({ connectionString: ADMIN_URL });
 await admin.connect();
 await admin.query('DELETE FROM entries');
 await admin.query('DELETE FROM habits');

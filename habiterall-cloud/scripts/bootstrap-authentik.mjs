@@ -56,8 +56,18 @@ console.log('Authentik is up');
 
 /* ---- flows: one to authorise, one to invalidate (log out) ---- */
 const flows = await api('/flows/instances/?designation=authorization');
-const authFlow = flows.results.find((f) => f.slug.includes('implicit')) ?? flows.results[0];
+
+// Prefer implicit consent: this is a first-party application, so making the
+// user approve it on every sign-in adds a click and no security.
+//
+// Match on 'implicit-consent', NOT `includes('implicit')` — the *explicit*
+// flow is named "...authorization-explicit-consent", which contains
+// "implicit" as a substring of "explicit" and silently matched first.
+const authFlow =
+  flows.results.find((f) => f.slug.includes('implicit-consent')) ??
+  flows.results[0];
 if (!authFlow) throw new Error('no authorization flow found in Authentik');
+console.log(`using authorization flow: ${authFlow.slug}`);
 
 const invFlows = await api('/flows/instances/?designation=invalidation');
 const invalidationFlow =

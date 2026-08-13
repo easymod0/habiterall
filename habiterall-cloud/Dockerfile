@@ -8,7 +8,10 @@ WORKDIR /app
 # Workspace manifests first, so the dependency layer caches across source
 # edits. The shared workspace's own sources are copied before `npm ci` so npm
 # can link it into node_modules as a real workspace package.
-COPY package.json package-lock.json* ./
+# No trailing `*` on the lockfile: the glob makes it optional, so a missing
+# lockfile silently produces an image where `npm ci` fails at build time with
+# a confusing "can only install with an existing package-lock.json".
+COPY package.json package-lock.json ./
 COPY shared/package.json ./shared/
 COPY habiterall-cloud/package.json ./habiterall-cloud/
 COPY shared/src ./shared/src
