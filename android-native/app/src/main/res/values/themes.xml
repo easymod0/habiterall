@@ -10,7 +10,24 @@
       activity fails to inflate. The plain DeviceDefault base works everywhere;
       values-v29/ overrides it with the DayNight variant where it exists.
     -->
-    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault" />
+    <!--
+      NoActionBar, because the Compose UI draws its own TopAppBar. With the
+      ActionBar variant the window has two title bars, and the platform one
+      overlaid the content: the first habit's name sat behind it, so the list
+      looked sliced off at the top. It survived a "scroll position" fix because
+      it was never the scroll position.
+    -->
+    <style name="Theme.Habiterall" parent="@android:style/Theme.DeviceDefault">
+        <!--
+          The Compose UI draws its own TopAppBar, so the window must not also
+          have a platform one. Set as attributes rather than by inheriting a
+          .NoActionBar parent: the composite
+          `Theme.DeviceDefault.DayNight.NoActionBar` does not exist as a
+          platform style, and only aapt tells you so.
+        -->
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 
     <!--
       Used by CountEntryActivity, which is only ever a dialog over whatever is
