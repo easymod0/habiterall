@@ -16,7 +16,8 @@
     "start:cloud": "npm start -w habiterall-cloud",
     "test:browser": "npm run test:browser -w @habiterall/shared",
     "test:tenancy": "npm run test:tenancy -w habiterall-cloud",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json",
+    "test:cloud": "npm run test:api -w habiterall-cloud"
   },
   "engines": {
     "node": ">=22.5.0"

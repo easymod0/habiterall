@@ -52,17 +52,18 @@ try{
   console.log('--- dayOrder flips the grid ---');
   const before = await ev(`[...document.querySelectorAll('.grid-date .grid-date-num')].map(e=>e.textContent).join(',')`);
   await ev(`(()=>{const s=[...document.querySelectorAll('#settings-body select')]
-      .find(s=>[...s.options].some(o=>o.value==='newest-left'));
-    s.value='newest-left'; s.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+      .find(s=>[...s.options].some(o=>o.value==='newest-right'));
+    s.value='newest-right'; s.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   await sleep(600);
   const after = await ev(`[...document.querySelectorAll('.grid-date .grid-date-num')].map(e=>e.textContent).join(',')`);
   ck('grid order reverses', before.split(',').reverse().join(',')===after, `${before} -> ${after}`);
-  ck('today is now the FIRST column',
-     await ev(`document.querySelector('.grid-date').classList.contains('is-today')`) === true);
-  ck('arrows follow the layout (back = right when today is left)',
+  ck('today moves to the LAST column',
+     await ev(`(()=>{const d=[...document.querySelectorAll('.grid-date')];
+       return d[d.length-1].classList.contains('is-today');})()`) === true);
+  ck('arrows follow the layout (back = left when today is right)',
      await ev(`(()=>{const b=[...document.querySelectorAll('.grid-nav button')]
        .find(b=>b.getAttribute('aria-label')?.startsWith('Previous'));
-       return b?.textContent.trim();})()`) === '›');
+       return b?.textContent.trim();})()`) === '‹');
   await sleep(300);
   // NOTE: column alignment is covered by gridcheck.mjs, which measures it on
   // a freshly loaded page. Measuring it here proved unreliable — this suite
@@ -74,17 +75,18 @@ try{
   console.log('--- persistence ---');
   await load();
   ck('preference survives a reload',
-     await ev(`document.querySelector('.grid-date').classList.contains('is-today')`) === true);
+     await ev(`(()=>{const d=[...document.querySelectorAll('.grid-date')];
+       return d[d.length-1].classList.contains('is-today');})()`) === true);
   ck('cached in localStorage for a fast first paint',
-     JSON.parse(await ev(`localStorage.getItem('habiterall-settings')`)).dayOrder === 'newest-left');
+     JSON.parse(await ev(`localStorage.getItem('habiterall-settings')`)).dayOrder === 'newest-right');
   ck('persisted on the SERVER, not just the device',
-     (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder === 'newest-left');
+     (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder === 'newest-right');
 
   console.log('--- reset ---');
   await ev(`document.getElementById('btn-settings').click()`); await sleep(300);
   await ev(`document.getElementById('settings-reset').click()`); await sleep(600);
-  ck('reset restores today to the right',
-     await ev(`document.querySelector('.grid-date').classList.contains('is-today')`) === false);
+  ck('reset restores the default (today on the left)',
+     await ev(`document.querySelector('.grid-date').classList.contains('is-today')`) === true);
 
   console.log('--- invalid values are ignored ---');
   await ev(`localStorage.setItem('habiterall-settings', JSON.stringify({dayOrder:'sideways'}))`);

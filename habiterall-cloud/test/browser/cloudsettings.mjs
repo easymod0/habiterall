@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME } from '../../../shared/test/browser/chrome.mjs';
+import { CHROME } from '@habiterall/shared/test/chrome.mjs';
 const APP='http://localhost:3100', PORT=9305;
 const profile=mkdtempSync(join(tmpdir(),'habcs-'));
 const chrome=spawn(CHROME,['--headless=new',`--remote-debugging-port=${PORT}`,
@@ -39,6 +39,9 @@ try{
   const me=await ev(`(async()=>(await (await fetch('/api/me',{credentials:'same-origin'})).json()))()`);
   ck('signed in', !!me?.id, JSON.stringify(me));
 
+  // Start from a known state: a previous run leaves a preference set.
+  await ev(`fetch('/api/settings',{method:'DELETE',credentials:'same-origin'})`);
+  await sleep(300);
   ck('settings start empty',
      JSON.stringify(await ev(`(async()=>(await (await fetch('/api/settings',{credentials:'same-origin'})).json()))()`))==='{}');
 

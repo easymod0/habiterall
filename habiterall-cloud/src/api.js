@@ -232,25 +232,39 @@ api.get('/habits/:id/stats', route(async (req, res) => {
     }
   }
 
-  const entries = await withUser(uid(req), (db) =>
-    db.query(
+  const { entries, weekStart } = await withUser(uid(req), async (db) => {
+    const { rows } = await db.query(
       `SELECT to_char(date, 'YYYY-MM-DD') AS date, value, status, notes
        FROM entries WHERE habit_id = $1 ORDER BY date`,
       [habit.id]
-    ).then((r) => r.rows)
-  );
+    );
+    // The week boundary is a user preference, so history and the
+    // times-per-week chart must be bucketed the way they read their calendar.
+    const { rows: [u] } = await db.query(
+      `SELECT settings ->> 'weekStart' AS week_start FROM users WHERE id = $1`,
+      [uid(req)]
+    );
+    const weekStart = /** @type {'monday'|'sunday'} */ (
+      u?.week_start === 'sunday' ? 'sunday' : 'monday');
+    return { entries: rows, weekStart };
+  });
 
   res.json({
     habit,
     ...computeStats(habit, entries, {
-      start, end, granularity: req.query.granularity ?? 'day',
+      start, end, granularity: req.query.granularity ?? 'day', weekStart,
     }),
   });
 }));
 
 api.get('/overview', route(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
-  const end = today();
+
+  // The dashboard can page back through history, so it asks for the window it
+  // is actually showing. Without this the grid rendered empty cells for any
+  // day outside the most recent fortnight — the entries were never fetched.
+  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : today();
+  const end = requestedEnd > today() ? today() : requestedEnd;
   const start = addDays(end, -(days - 1));
   const archived = req.query.archived === 'true';
 

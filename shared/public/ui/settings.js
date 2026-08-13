@@ -39,16 +39,25 @@ export const SETTINGS = {
     label: 'Day order',
     help: 'Which end of the row holds today.',
     type: 'select',
-    default: 'newest-right',
+    // Today first by default: it is the day you act on, so it belongs where
+    // the eye lands rather than at the far end of the row.
+    default: 'newest-left',
     options: [
-      { value: 'newest-right', label: 'Oldest first (today on the right)' },
       { value: 'newest-left', label: 'Newest first (today on the left)' },
+      { value: 'newest-right', label: 'Oldest first (today on the right)' },
     ],
   },
-  // NOTE: a `weekStart` option belongs here too, but the week boundary is
-  // currently baked into the server-side aggregation (shared/src/stats.js
-  // buckets by ISO week). Adding the control before the maths honours it
-  // would be a setting that silently does nothing, so it waits.
+  weekStart: {
+    section: 'Dashboard',
+    label: 'Week starts on',
+    help: 'Used by the history and times-per-week charts.',
+    type: 'select',
+    default: 'monday',
+    options: [
+      { value: 'monday', label: 'Monday' },
+      { value: 'sunday', label: 'Sunday' },
+    ],
+  },
   confirmDelete: {
     section: 'Safety',
     label: 'Confirm before deleting a habit',

@@ -121,6 +121,47 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/tenancy.integration.mjs
 
+  cloud:
+    name: Cloud API (Postgres)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: habiterall
+          POSTGRES_USER: owner
+          POSTGRES_PASSWORD: testpw
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U owner -d habiterall"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Apply migrations
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL_ADMIN: postgres://owner:testpw@localhost:5432/habiterall
+          APP_DB_PASSWORD: apptestpw
+        run: node src/db/migrate.js
+
+      # The cloud API was previously only ever exercised by hand. These are
+      # the paths where a regression is most expensive: per-user isolation,
+      # settings, and the import writer.
+      - name: Exercise the cloud API
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/api.integration.mjs
+
   docker:
     name: Docker images
     runs-on: ubuntu-latest

@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CHROME } from '../../../shared/test/browser/chrome.mjs';
+import { CHROME } from '@habiterall/shared/test/chrome.mjs';
 const APP = 'http://localhost:3100';
 const PORT = 9240;
 

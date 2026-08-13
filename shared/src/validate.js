@@ -128,6 +128,7 @@ export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
  */
 export const SETTING_VALUES = {
   dayOrder: ['newest-right', 'newest-left'],
+  weekStart: ['monday', 'sunday'],
   confirmDelete: [true, false],
 };
 

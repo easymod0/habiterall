@@ -12,7 +12,9 @@
     "./unzip.js": "./src/unzip.js",
     "./constants.js": "./src/constants.js",
     "./charts.js": "./public/charts.js",
-    "./types.js": "./src/types.js"
+    "./types.js": "./src/types.js",
+    "./test/chrome.mjs": "./test/browser/chrome.mjs",
+    "./test/fixtures.mjs": "./test/browser/fixtures.mjs"
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",

@@ -230,10 +230,13 @@ function toast(message, { actionLabel = null, onAction = null } = {}) {
 /* ---------- dashboard ---------- */
 
 async function loadDashboard() {
-  // Always fetch the wide window so a rotation to landscape needs no refetch.
-  const data = await api(
-    `/overview?days=${GRID_DAYS}${state.showArchived ? '&archived=true' : ''}`
-  );
+  // Always request the widest column count so a rotation to landscape needs
+  // no refetch, and the window the user is actually looking at — paging back
+  // must bring its entries with it.
+  const params = new URLSearchParams({ days: String(GRID_DAYS) });
+  if (state.gridEnd) params.set('end', state.gridEnd);
+  if (state.showArchived) params.set('archived', 'true');
+  const data = await api(`/overview?${params}`);
   state.habits = data.habits;
 
   // The archive toggle is pointless until something has been archived.
@@ -398,7 +401,10 @@ function renderGridHeader(dates, todayIso) {
     today.type = 'button';
     today.className = 'btn btn-sm';
     today.textContent = 'Today';
-    today.addEventListener('click', () => { state.gridEnd = null; renderDashboard(); });
+    today.addEventListener('click', () => {
+      state.gridEnd = null;
+      loadDashboard().catch((e) => toast(e.message));
+    });
     nav.append(today);
   }
 
@@ -444,7 +450,9 @@ function shiftGrid(deltaDays) {
   let next = addDaysISO(state.gridEnd ?? today, deltaDays);
   if (next > today) next = today;
   state.gridEnd = next === today ? null : next;
-  renderDashboard();
+  // Refetch, not just re-render: the entries for the new window have not been
+  // loaded, and re-rendering alone would draw an empty grid.
+  loadDashboard().catch((e) => toast(e.message));
 }
 
 /* ---------- settings ---------- */

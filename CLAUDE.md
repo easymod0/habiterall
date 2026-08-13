@@ -10,7 +10,8 @@ non-obvious decisions below were each paid for with a real bug.
 shared/               EVERYTHING both editions have in common
   src/                pure logic — no database, no HTTP, no DOM
   public/             the entire UI, plus the PWA (manifest, sw, offline queue)
-  test/               unit tests + browser suites
+  public/ui/          settings registry, date helpers, theme, auth adapters
+  test/               unit tests + browser suites (test/browser/)
 habiterall-personal/  single user, SQLite, no auth   (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)
 android/              Trusted Web Activity wrapper for the PWA
@@ -40,8 +41,11 @@ npm test                    # unit tests, all workspaces
 npm run test:browser        # UI suites — needs Chrome + a running server
 npm run test:tenancy        # cloud isolation attacks — needs Postgres
 
+npm run typecheck           # JSDoc types via tsc --noEmit
+npm run test:cloud          # cloud API + Loop round trip — needs Postgres
+
 npm run start:personal      # http://localhost:3000
-cd habiterall-cloud && docker compose up -d   # full stack, see SETUP.md
+cd habiterall-cloud && docker compose up -d   # app :3100, Authentik :9000
 ```
 
 ## Non-obvious decisions
@@ -74,6 +78,25 @@ turned "brush teeth at most 2 times" into "at most 0.002", which no entry could
 ever satisfy. Reading their source was not enough to catch this; it took a real
 export.
 
+**The dashboard fetches the window it is showing.** `/overview` takes an
+`end` date. Paging back without it re-rendered an empty grid, because the
+entries for that window had never been loaded — the days looked unrecorded
+while the stats view showed them fine.
+
+**Column count scales with viewport width**, not one breakpoint. At 768px the
+14-column layout needed 668px of a 698px row and squeezed the habit name to
+zero width. 7 / 10 / 14 columns by width.
+
+**Settings live on the server** — a `settings` table (personal) or a JSONB
+column on `users` (cloud, covered by the existing RLS policies). The browser
+caches them in localStorage for a fast first paint, but the server wins.
+`SETTING_VALUES` in `shared/src/validate.js` is what is enforced;
+`test/settings.test.js` fails if the UI registry drifts from it.
+
+**`Object.hasOwn` when looking up a key from user input.** `SETTING_VALUES['__proto__']`
+resolves to `Object.prototype` — truthy, and with no `.includes` — so a plain
+lookup let a crafted payload 500 the endpoint.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —
@@ -86,8 +109,16 @@ Three layers, and they catch different things:
 | | command | needs |
 |---|---|---|
 | Unit | `npm test` | nothing |
+| Types | `npm run typecheck` | nothing |
 | Browser | `npm run test:browser` | Chrome + a running server |
+| Cloud API | `npm run test:cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
+
+CI runs all of these on every pull request, plus both Docker builds.
+
+`responsive.mjs` checks every major view at 360 / 390 / 768 / 1440px. It found
+the tablet bug above on its first run; most other suites only ever ran at
+1440px.
 
 The browser suites reset to known fixtures before each run
 (`shared/test/browser/fixtures.mjs`). If one fails, check the fixtures before

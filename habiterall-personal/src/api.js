@@ -236,7 +236,11 @@ api.get('/habits/:id/stats', (req, res) => {
   const granularity = req.query.granularity ?? 'day';
 
   const entries = /** @type {any} */ (q.entriesFor.all(id));
-  res.json({ habit, ...computeStats(habit, entries, { start, end, granularity }) });
+  res.json({
+    habit,
+    ...computeStats(habit, entries,
+      { start, end, granularity, weekStart: storedWeekStart() }),
+  });
 });
 
 /**
@@ -245,7 +249,12 @@ api.get('/habits/:id/stats', (req, res) => {
  */
 api.get('/overview', (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
-  const end = today();
+
+  // The dashboard can page back through history, so it asks for the window it
+  // is actually showing. Without this the grid rendered empty cells for any
+  // day outside the most recent fortnight — the entries were never fetched.
+  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : today();
+  const end = requestedEnd > today() ? today() : requestedEnd;
   const start = addDays(end, -(days - 1));
 
   // Archived habits are hidden by default but can be requested explicitly.
@@ -308,6 +317,17 @@ api.get('/overview', (req, res) => {
     }),
   });
 });
+
+/** The user's week-start preference, defaulting to ISO (Monday). */
+function storedWeekStart() {
+  const row = q.allSettings.all().find((r) => r.key === 'weekStart');
+  try {
+    const value = row ? JSON.parse(String(row.value)) : null;
+    return value === 'sunday' ? 'sunday' : 'monday';
+  } catch {
+    return 'monday';
+  }
+}
 
 /* ---------- settings ---------- */
 
