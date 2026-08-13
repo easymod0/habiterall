@@ -1,0 +1,4 @@
+habits.example.com {
+	# Caddy gets and renews the certificate itself. Nothing else to configure.
+	reverse_proxy localhost:3000
+}

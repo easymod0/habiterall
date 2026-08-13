@@ -20,6 +20,12 @@ here either.
 Installs to a phone home screen as an app, works offline, and syncs when you
 reconnect.
 
+<div align="center">
+<img src="docs/screenshots/dashboard.png" width="900"
+     alt="The habiterall dashboard: four habits, each with its frequency, strength and current streak, beside two weeks of tappable squares — checkmarks for yes/no habits, numbers for measurable ones.">
+<br><sub>Every screenshot in this README is the real app, with sample data.</sub>
+</div>
+
 ## Contents
 
 - [Which edition do I want?](#which-edition-do-i-want)
@@ -139,12 +145,16 @@ docker compose up -d app
 Create users in Authentik under *Directory → Users*; a habiterall account is
 provisioned the first time each one signs in.
 
-<details>
-<summary><b>Or with the published image and your own identity provider</b></summary>
+**Already run an identity provider?** The stack above brings its own Authentik,
+which is the quickest way to have *one*. If you already have Keycloak, Authelia,
+Entra or Auth0, use
+[`examples/docker-compose.cloud.yml`](examples/docker-compose.cloud.yml) instead
+— the published image, Postgres, and nothing else.
 
-The compose file above brings its own Authentik, which is the quickest way to
-have *an* OIDC provider. If you already run one — Keycloak, Authelia, Entra,
-Auth0 — this is the whole stack:
+<details>
+<summary><b>Show that file</b></summary>
+
+
 
 ```yaml
 services:
@@ -211,10 +221,107 @@ Users are provisioned the first time each one signs in.
 Full walkthrough, including HTTPS and the production checklist:
 **[habiterall-cloud/SETUP.md](habiterall-cloud/SETUP.md)**.
 
-> **Note**
-> Put a TLS-terminating reverse proxy in front before exposing either edition.
-> The cloud edition's session cookies are only marked `Secure` over HTTPS, and
-> the offline features need a secure context.
+### Put HTTPS in front
+
+Not optional, and not only for the usual reasons — two features here are
+load-bearing on it:
+
+- **Offline and installability.** Service workers are disabled on plaintext
+  origins other than `localhost`, so without HTTPS there is no offline mode, no
+  outbox, and no *Add to Home Screen*.
+- **Signing in (cloud).** The session cookie is marked `Secure` whenever
+  `PUBLIC_URL` is https, and a browser discards a `Secure` cookie sent over
+  plain HTTP. Login then fails with no error message at all — it simply loops
+  back to the sign-in page.
+
+[`examples/Caddyfile`](examples/Caddyfile) is the whole thing, certificate
+included:
+
+```caddyfile
+habits.example.com {
+	# Caddy gets and renews the certificate itself. Nothing else to configure.
+	reverse_proxy localhost:3000
+}
+```
+
+```bash
+docker compose up -d      # habiterall on :3000
+caddy run                 # or: sudo caddy start
+```
+
+<details>
+<summary><b>nginx, if you already run it</b></summary>
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name habits.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/habits.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/habits.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        # The cloud edition's rate limiter keys on the client address, so
+        # without this every request appears to come from the proxy and one
+        # user's traffic throttles everybody.
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        # And this is what tells the app the browser is on https, which is what
+        # makes the session cookie Secure.
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+</details>
+
+<details>
+<summary><b>Nginx Proxy Manager</b></summary>
+
+Nothing to write — it is all in the web UI, and its default proxy config
+already sends the headers above. **Hosts → Proxy Hosts → Add Proxy Host:**
+
+| Field | Value |
+|---|---|
+| Domain Names | `habits.example.com` |
+| Scheme | `http` — this is the hop *behind* the proxy, not what your browser uses |
+| Forward Hostname / IP | the container name (`habiterall`) if it shares a Docker network with NPM, otherwise the host's LAN IP |
+| Forward Port | `3000` (personal) or `3100` (cloud) |
+| Cache Assets | off — the app's service worker already does this, and a stale `index.html` served from the proxy pins clients to an old build |
+| Block Common Exploits | on |
+| Websockets Support | not needed; harmless if on |
+| **SSL** tab | request a Let's Encrypt certificate, then **Force SSL** on |
+
+The one that catches everybody: **`localhost` in *Forward Hostname* means NPM's
+own container**, not your server. It resolves, connects to nothing, and shows a
+502 — which reads like the app is down. Put both on one network instead:
+
+```yaml
+services:
+  habiterall:
+    image: ghcr.io/easymod0/habiterall-personal:latest
+    expose: ['3000']        # not `ports:` — only NPM needs to reach it
+    volumes: ['habiterall-data:/data']
+    environment:
+      HABITERALL_DB: /data/habiterall.db
+    networks: [proxy]
+    restart: unless-stopped
+
+networks:
+  proxy:
+    external: true          # the network Nginx Proxy Manager is already on
+volumes:
+  habiterall-data:
+```
+
+Then *Forward Hostname* is `habiterall` and *Forward Port* is `3000`.
+</details>
+
+Whichever you use: with one proxy in front, leave `TRUST_PROXY=1` (the default).
+Set it to the number of proxies if there are more, or `0` if the app is exposed
+directly — getting this wrong either breaks the rate limiter's keying or lets a
+client spoof its own address with a header.
 
 ---
 
@@ -254,7 +361,13 @@ rely on the browser noticing: the app re-checks when you come back to the tab
 and keeps probing while it is down, so restarting the server does not leave a
 page stranded.
 
-**Light and dark**, following your system preference.
+**Light and dark**, following your system preference — and a toggle for when it
+disagrees with you.
+
+<div align="center">
+<img src="docs/screenshots/dashboard-dark.png" width="820"
+     alt="The same dashboard in dark theme: the surrounding chrome goes near-black while each habit keeps its own colour, so the filled squares still read at a glance.">
+</div>
 
 ### Statistics
 
@@ -274,6 +387,11 @@ into one screen, and the number of columns follows the width you have.
 
 Plus current streak, best streak, and total completions at a glance.
 
+<div align="center">
+<img src="docs/screenshots/statistics.png" width="820"
+     alt="A habit's detail view: strength 86%, current and best streak 8, 106 total; the strength curve rising over four months; a year-long calendar heatmap; and the ten best streaks listed by date.">
+</div>
+
 ### Bouncing back
 
 Streaks reward perfection and punish one bad day. **Bouncing back** measures
@@ -292,6 +410,11 @@ Two habits can both recover 100% of the time and still be nothing alike: one
 clears a week 86% of the time, the other 40%. Only the survival curve
 separates them.
 
+<div align="center">
+<img src="docs/screenshots/bouncing-back.png" width="820"
+     alt="The Bouncing back card: back next day 100%, longest lapse 1 day, currently missed 1 day; a histogram showing all 14 lapses lasted a single day; and a survival curve ending at 93% of streaks reaching 7 days.">
+</div>
+
 > Shown for daily habits only. For a 3×/week habit an off-day is not a
 > failure, so these figures would be measuring the wrong thing.
 
@@ -307,6 +430,15 @@ A reminder has two halves, set in two places:
    08:00 means eight in the morning, and stays there across a DST change.
 2. **Where** — under ⚙ → **Notifications**, as a list of destinations. They are
    not exclusive; pick as many as you like.
+
+<div align="center">
+<img src="docs/screenshots/reminder-time.png" width="420"
+     alt="The habit dialog's reminder field: an hour dropdown reading 07 (7 am), a minute dropdown reading 30, a box you can type into showing 07:30, a Clear button, one-tap presets for 07:00, 08:00, 12:00, 18:00 and 21:00, and below it the What the reminder asks field.">
+&nbsp;&nbsp;
+<img src="docs/screenshots/notifications.png" width="420"
+     alt="Settings, Notifications section: checkboxes for the Android app and a Discord channel, fields for a Discord channel id and a webhook URL, a reminder timezone, and a Send a test notification button.">
+<br><sub><b>When</b>, on the habit · <b>Where</b>, in settings</sub>
+</div>
 
 | Destination | Delivered by | Answer from it | Works offline | Needs |
 |---|---|---|---|---|
@@ -328,6 +460,12 @@ For a measurable habit this is where it pays off — "How many cups of water did
 you drink today?" is a question, where "Meditate / time to log this one" is a
 form. The same text is used by the Android notification and the Discord message,
 and it labels the amount box you type into.
+
+<div align="center">
+<img src="docs/screenshots/android-reminder.png" width="480"
+     alt="An Android notification from habiterall reading 'Did you sit for ten minutes?' with 'Meditate' underneath and three actions: Yes, No, Skip.">
+<br><sub>The same question, in the Android shade — answered without opening anything.</sub>
+</div>
 
 ### Discord with buttons (recommended)
 
@@ -402,6 +540,15 @@ The native APK is attached to every [release](../../releases). It is unsigned
 unless the repository has signing secrets configured, so Android will ask you to
 allow *Install unknown apps* for whatever you download it with — that is
 expected, not a warning about the app.
+
+<div align="center">
+<img src="docs/screenshots/dashboard-mobile.png" width="300"
+     alt="The web app at phone width: each habit is a card with its name, frequency, strength and streak, above a row of seven day squares.">
+&nbsp;&nbsp;
+<img src="docs/screenshots/android-list.png" width="300"
+     alt="The native Android app: a Today list of four habits, each with its current state, a reminder time or an Add reminder link, and Yes / No buttons or an amount button.">
+<br><sub>The web app added to the home screen · the native app, which can answer from the shade</sub>
+</div>
 
 ### Add to Home Screen
 
@@ -491,6 +638,77 @@ docker compose exec -T db pg_dump -U habiterall_owner habiterall | gzip > backup
 ```
 
 Back up Authentik's database too, or you lose your user directory.
+
+---
+
+## Upgrading, and getting your data out
+
+### Upgrading
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+For the **personal** edition that is the whole story: a new binary against the
+same file, and the schema migrates itself on start.
+
+For the **cloud** edition, pin the image tag and bump it deliberately. It runs
+migrations on deploy, so tracking `latest` means taking a schema change at a
+moment you did not choose — and a migration is the one thing here that is not
+trivially reversible. Take a dump first:
+
+```bash
+docker compose exec db pg_dump -U habiterall_owner habiterall > before-upgrade.sql
+docker compose pull && docker compose up -d   # runs migrate, then the app
+```
+
+Migrations are numbered and recorded, so re-running is safe and applying twice
+does nothing.
+
+### Backups
+
+Two kinds, and they are for different things.
+
+**The whole database** — for disaster recovery, and the one to automate:
+
+| | |
+|---|---|
+| personal | `cp /var/lib/docker/volumes/…/habiterall.db` — or, safely while running: `sqlite3 habiterall.db ".backup /tmp/backup.db"` |
+| cloud | `pg_dump -U habiterall_owner habiterall` |
+
+> For the personal edition, copy **all three** files (`.db`, `.db-wal`,
+> `.db-shm`) or use `.backup`. The database runs in WAL mode, so a plain copy of
+> the `.db` alone can be missing recent writes — they are still in the
+> write-ahead log.
+
+**A portable export** — for moving between editions, or leaving:
+`GET /api/export` (or ⚙ → Backup) writes a JSON file that imports into either
+edition, and into a fresh install of anything you replace this with. See
+[Backup and restore](#backup-and-restore).
+
+---
+
+## Releases
+
+Versions are tagged, and a tag is what publishes:
+
+```bash
+git tag v1.4.0 && git push origin v1.4.0
+```
+
+Every [release](../../releases) carries:
+
+- **Docker images** for both editions on GHCR, tagged `1.4.0`, `1.4` and
+  `latest`, for `linux/amd64` and `linux/arm64`;
+- **the native Android APK**, attached to the release;
+- **notes** listing every commit since the previous tag, grouped by kind.
+
+Merging to `master` publishes nothing — it runs the tests and stops. A release is
+a decision, taken by tagging. The Android `versionCode` is derived from the
+version (`1.4.0` → `10400`), so it always increases; and signing, image pushing
+and the TWA build each skip themselves when their credentials are absent, so a
+fork can cut a release having configured nothing. Details in
+[`.github/workflows/README.md`](.github/workflows/README.md).
 
 ---
 
