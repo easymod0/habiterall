@@ -138,7 +138,7 @@ services:
       migrate: { condition: service_completed_successfully }
       authentik-server: { condition: service_started }
     ports:
-      - '3100:3000'
+      - '${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten

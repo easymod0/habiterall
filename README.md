@@ -74,7 +74,7 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
-      - '3000:3000'
+      - '${APP_PORT:-3000}:3000'
     volumes:
       # Your entire database is one file in here. Back it up by copying it.
       - habiterall-data:/data
@@ -230,7 +230,7 @@ services:
       migrate: { condition: service_completed_successfully }
       authentik-server: { condition: service_started }
     ports:
-      - '3100:3000'
+      - '${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -275,6 +275,8 @@ PUBLIC_URL=https://habits.example.com
 OIDC_ISSUER=https://habits.example.com/application/o/habiterall/
 OIDC_CLIENT_ID=                     # filled in below
 OIDC_CLIENT_SECRET=                 # filled in below
+APP_PORT=3100                       # optional — the host port the app answers on
+AUTHENTIK_PORT=9000                 # optional — the host port Authentik answers on
 ```
 
 Then start it in two goes, because the OIDC client cannot exist before the
@@ -285,10 +287,23 @@ docker compose up -d authentik-db authentik-redis authentik-server authentik-wor
 ```
 
 Sign in to Authentik at **<http://localhost:9000>** as `akadmin`, and create an
-**OAuth2/OIDC provider** named `habiterall` with the redirect URI
-`${PUBLIC_URL}/auth/callback` and scopes `openid profile email`, then an
-application pointing at it. Put its client id and secret in `.env` and bring up
-the rest:
+**OAuth2/OIDC provider** named `habiterall`, then an application pointing at it:
+
+| Field | Value |
+|---|---|
+| Authorization flow | `default-provider-authorization-**implicit**-consent` — habiterall is a first-party app, so approving it on every sign-in is a click and no security |
+| Invalidation flow | `default-provider-invalidation-flow` — what makes signing out here end the Authentik session too |
+| Client type | Confidential |
+| Redirect URI | `${PUBLIC_URL}/auth/callback`, exactly |
+| Scopes | `openid`, `profile`, `email` |
+| Signing key | any certificate in the list; Authentik ships one |
+
+Watch the flow name: the *explicit* one is `...authorization-explicit-consent`,
+and "explicit" contains "implicit" as a substring — matching on the shorter word
+picks the wrong flow, which is a mistake this repo has already made once in
+code.
+
+Put the client id and secret in `.env` and bring up the rest:
 
 ```bash
 docker compose up -d
@@ -371,7 +386,7 @@ services:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     ports:
-      - '3100:3000'
+      - '${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
