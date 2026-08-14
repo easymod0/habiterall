@@ -11,7 +11,7 @@ const {
   parseTimeZone, reminderMessage, serverChannels, zonedClock,
 } = await import('../src/notify.js');
 
-const { deliverAccount, postWebhook, runTick, sendToChannel } =
+const { deliverAccount, postWebhook, resetSaid, runTick, sendToChannel, warnUnreachable } =
   await import('../src/notify-send.js');
 
 const { parseSettings } = await import('../src/validate.js');
@@ -605,6 +605,74 @@ test('a permanently failed send IS recorded, so it is not retried all day', asyn
     log: { warn: () => {} },
   });
   assert.equal(marked.length, 1, 'a deleted webhook will not start working before midnight');
+});
+
+test('a reminder lost to the catch-up window is a warning, once', async () => {
+  // Every other skip is a normal outcome. This one means the reminder is GONE:
+  // its minute passed while nothing was running, and it will not be retried
+  // today. At debug it was indistinguishable from "not yet".
+  const warned = [];
+  const log = { debug: () => {}, warn: (msg, fields) => warned.push({ msg, ...fields }) };
+  resetSaid();
+
+  const ctx = {
+    instant: utc(2026, 8, 13, 20, 23),   // 12 hours past an 08:00 reminder
+    mark: () => {},
+    fetch: fakeFetch([{ status: 204 }]),
+    log,
+  };
+
+  const result = await deliverAccount(account(), ctx);
+  assert.deepEqual(result.skipped, { too_late: 1 });
+  assert.equal(warned.length, 1);
+  assert.deepEqual(
+    { msg: warned[0].msg, habit: warned[0].habit, date: warned[0].date, late: warned[0].late_minutes },
+    { msg: 'notify.too_late', habit: 1, date: '2026-08-13', late: 743 }
+  );
+
+  // The condition holds for the rest of the day, and a tick a minute would make
+  // it 1,400 lines about one loss.
+  await deliverAccount(account(), ctx);
+  assert.equal(warned.length, 1, 'the same loss was reported twice');
+
+  // Tomorrow is a different loss.
+  await deliverAccount(account(), { ...ctx, instant: utc(2026, 8, 14, 20, 23) });
+  assert.equal(warned.length, 2);
+});
+
+test('a destination that can never deliver says so, rather than nothing', () => {
+  // The silent state: enabled, so the user believes it is on; unconfigured, so
+  // `needsServerDelivery` is false and the account is skipped before anything is
+  // logged above debug. Every visible surface looks right.
+  resetSaid();
+  const warned = [];
+  const log = { warn: (msg, fields) => warned.push({ msg, ...fields }) };
+
+  const botOnly = { notifyChannels: ['discord'], discordChannelId: '123456789012345678' };
+
+  // A channel id with no bot token on this instance — the recommended setup,
+  // missing the one credential the user cannot supply themselves.
+  assert.deepEqual(warnUnreachable({ id: 7, settings: botOnly }, { log }), ['discord']);
+  assert.equal(warned.length, 1);
+  assert.equal(warned[0].msg, 'notify.unreachable');
+  assert.match(warned[0].reason, /DISCORD_BOT_TOKEN/);
+
+  assert.equal(warnUnreachable({ id: 7, settings: botOnly }, { log }).length, 1);
+  assert.equal(warned.length, 1, 'a configuration does not change every minute');
+
+  // The same settings on an instance that HAS a bot are reachable.
+  resetSaid();
+  assert.deepEqual(warnUnreachable({ id: 7, settings: botOnly }, { log, botToken: 't' }), []);
+  assert.equal(warned.length, 1, 'nothing further to say');
+
+  // Enabled with nothing filled in at all gets the general message.
+  resetSaid();
+  warnUnreachable({ id: 8, settings: { notifyChannels: ['discord'] } }, { log });
+  assert.match(warned[1].reason, /nothing is configured/);
+
+  // The device channel is never this server's business, however it is set up.
+  resetSaid();
+  assert.deepEqual(warnUnreachable({ id: 9, settings: { notifyChannels: ['android'] } }, { log }), []);
 });
 
 test('an account with no server destination costs no requests', async () => {
