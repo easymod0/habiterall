@@ -22,7 +22,7 @@
 #
 # Two starts, because the OIDC client cannot exist before the provider does:
 #
-#   docker compose -f docker-compose.cloud-authentik.yml up -d authentik-db authentik-redis authentik-server authentik-worker
+#   docker compose -f docker-compose.cloud-authentik.yml up -d authentik-db authentik-server authentik-worker
 #   # sign in at :9000 as akadmin, create an OAuth2/OIDC provider named
 #   # habiterall with redirect URI ${PUBLIC_URL}/auth/callback and scopes
 #   # openid profile email, then an application pointing at it. Copy the client
@@ -47,6 +47,14 @@
 # Pin the image tag rather than tracking `latest`: this edition runs migrations
 # on deploy, so `latest` means taking a schema change at a moment you did not
 # choose.
+#
+# Authentik needs nothing but its Postgres. 2025.10 removed Redis from it
+# outright — caching, the embedded outpost and its WebSockets all moved into
+# Postgres, tasks having gone there in 2025.8 — so a redis service here would
+# start, pass its healthcheck and serve nobody. Its tag is an exact patch and
+# it is worth keeping that way: Authentik's upgrades may not skip a major
+# family (2026.5 → 2026.8 → 2026.11, never straight to the newest), and a
+# family tag that silently moves is how you find that out mid-migration.
 
 services:
   db:
@@ -77,26 +85,13 @@ services:
       retries: 20
     restart: unless-stopped
 
-  authentik-redis:
-    image: redis:7-alpine
-    command: ['redis-server', '--save', '60', '1']
-    volumes:
-      - authentik-redis-data:/data
-    healthcheck:
-      test: ['CMD-SHELL', 'redis-cli ping | grep PONG']
-      interval: 5s
-      retries: 20
-    restart: unless-stopped
-
   authentik-server:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.5.6
     command: server
     depends_on:
       authentik-db: { condition: service_healthy }
-      authentik-redis: { condition: service_healthy }
     environment:
       AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?openssl rand -base64 60}
-      AUTHENTIK_REDIS__HOST: authentik-redis
       AUTHENTIK_POSTGRESQL__HOST: authentik-db
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
@@ -109,14 +104,12 @@ services:
     restart: unless-stopped
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.5.6
     command: worker
     depends_on:
       authentik-db: { condition: service_healthy }
-      authentik-redis: { condition: service_healthy }
     environment:
       AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
-      AUTHENTIK_REDIS__HOST: authentik-redis
       AUTHENTIK_POSTGRESQL__HOST: authentik-db
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
@@ -173,4 +166,3 @@ services:
 volumes:
   db-data:
   authentik-db-data:
-  authentik-redis-data:

@@ -1,5 +1,5 @@
 # Full self-hosted stack: habiterall-cloud, its Postgres, and an Authentik
-# identity provider (server + worker + Redis).
+# identity provider (server + worker).
 #
 #   cp .env.example .env    # then fill in the secrets
 #   docker compose up -d
@@ -29,30 +29,21 @@ services:
       retries: 20
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    container_name: habiterall-redis
-    command: --save 60 1 --loglevel warning
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ['CMD-SHELL', 'redis-cli ping | grep PONG']
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-
   # ------------------------------------------------------------- authentik
+  # Postgres is the only dependency: 2025.10 removed Redis from Authentik
+  # outright, having moved caching, the embedded outpost and its WebSockets
+  # into Postgres (tasks went there in 2025.8). Pinned to an exact patch, not
+  # the `2026.5` family tag, so what starts here is what Dependabot last
+  # proposed — and note upgrades may not skip a major family, so the step to
+  # 2026.8 is a step, not a jump.
   authentik-server:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.5.6
     container_name: authentik-server
     command: server
     depends_on:
       db: { condition: service_healthy }
-      redis: { condition: service_healthy }
     environment:
       AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY}
-      AUTHENTIK_REDIS__HOST: redis
       AUTHENTIK_POSTGRESQL__HOST: db
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
@@ -61,23 +52,26 @@ services:
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
       AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+    # `/data`, not `/media`: 2025.12 reworked file storage and serves uploads
+    # from `/files`, with the local backend expecting one mount at `/data`. A
+    # `/media` mount is not an error — it is simply somewhere nothing writes,
+    # so branding and icons go into the container's writable layer instead and
+    # leave on the next `up`.
     volumes:
-      - authentik-media:/media
+      - authentik-data:/data
       - authentik-templates:/templates
     ports:
       - '${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.5.6
     container_name: authentik-worker
     command: worker
     depends_on:
       db: { condition: service_healthy }
-      redis: { condition: service_healthy }
     environment:
       AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
-      AUTHENTIK_REDIS__HOST: redis
       AUTHENTIK_POSTGRESQL__HOST: db
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
@@ -86,7 +80,7 @@ services:
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
       AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
     volumes:
-      - authentik-media:/media
+      - authentik-data:/data
       - authentik-templates:/templates
       - authentik-certs:/certs
     restart: unless-stopped
@@ -146,7 +140,6 @@ services:
 
 volumes:
   db-data:
-  redis-data:
-  authentik-media:
+  authentik-data:
   authentik-templates:
   authentik-certs:

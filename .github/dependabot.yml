@@ -63,9 +63,11 @@ updates:
     schedule:
       interval: monthly
 
-  # compose is local testing only (Postgres, Redis, Authentik) — it ships to
-  # nobody, but it is what the cloud suites run against, so a broken image
-  # here reads as a broken test run.
+  # compose is local testing only (Postgres, Authentik) — it ships to nobody,
+  # and CI does not run it either (the cloud jobs declare their own `services:
+  # postgres`), so nothing here is proved by a green run. Read the release
+  # notes: Authentik will not skip a major family, and its floating `YYYY.M`
+  # tag can point at a release candidate before that family has shipped one.
   - package-ecosystem: docker-compose
     directory: /habiterall-cloud
     schedule:
