@@ -13,6 +13,7 @@ uploads, work with no setup at all.
 |---|---|---|---|
 | `ci.yml` | every PR, and nightly at 05:17 UTC | nothing | **nothing** |
 | `android-native.yml` | every PR (it builds only if the client can be affected), and nightly at 06:17 UTC | nothing | **nothing** |
+| `codeql.yml` | every PR, every push to `master`, and weekly at 06:47 UTC Monday | code scanning alerts | **default setup must stay off** |
 | `release.yml` | **a `vX.Y.Z` tag**, or manual | the APK, images, a GitHub release | signing, and only for a publishing run |
 
 ### Releasing
@@ -74,7 +75,8 @@ validate the build.
 | documentation or workflow config only | nothing but the two change detectors (~5s) |
 | any code, anywhere | the whole of `ci.yml` |
 | `android-native/**`, or a shared file the Kotlin client mirrors | the Android workflow as well |
-| — a merge to `master` | nothing at all |
+| — anything at all | `codeql.yml`, ungated, all three languages |
+| — a merge to `master` | `codeql.yml` only |
 | — the nightly schedule | everything in both workflows, unconditionally |
 
 Four deliberate choices in there.
@@ -299,6 +301,59 @@ certutil -encode habiterall.keystore tmp.b64 && findstr /v CERTIFICATE tmp.b64  
 > than this repository, and never commit it (`*.jks` and `*.keystore` are
 > gitignored).
 
+### `codeql.yml` — static analysis
+
+Scans `javascript-typescript`, `actions` and `java-kotlin`, and needs no
+configuration — but it is the one workflow here with a setting outside the
+repository that has to stay a particular way.
+
+**Default setup must remain disabled** (Settings → Code security → CodeQL
+analysis). This workflow is an *advanced* configuration, and the two cannot
+share a repository: with default setup enabled the analysis runs, succeeds, and
+has its results **rejected** at the upload with `CodeQL analyses from advanced
+configurations cannot be processed when the default setup is enabled`. Nothing
+about the failure points at a setting rather than at the code, which is the
+reason it is written here. Splitting languages between the two is only possible
+through an organisation-level code security configuration.
+
+It exists as a file at all because default setup could not build the native
+client. Default setup analyses Kotlin with `autobuild`, which selects the JDK
+the Android plugin *recommends* — 17 — while `app/build.gradle.kts` compiles at
+source level 21, so every run died on `error: invalid source release: 21` with
+nowhere to add a `setup-java`. Moving to a file fixed that and forced javascript
+and actions to move too, per above.
+
+Three things about the `java-kotlin` job are load bearing.
+
+**Kotlin has to be compiled for real.** `build-mode: none` is how the other two
+languages are analysed without a build, and it does not support Kotlin — it
+reports the language unsupported and extracts nothing.
+
+**A cached build teaches it nothing**, and this fails in a way that reads like a
+configuration error. `gradle.properties` sets `org.gradle.caching=true`, so
+`compileDebugKotlin` and `compileDebugJavaWithJavac` come back FROM-CACHE and
+their outputs are unpacked without a compiler ever running — and tracing that
+compiler is precisely how CodeQL learns what the code is. The symptom is
+`BUILD SUCCESSFUL in 16s` followed by *"could not process any code written in
+Java/Kotlin"*. Hence `--no-build-cache`, on this invocation only: dependency
+caching is untouched, and `android-native.yml` keeps its cache hits because a
+cached build still proves the client builds.
+
+**Its toolchain is `android-native.yml`'s**, deliberately — same JDK 21, same
+pinned Gradle 8.14.3, same generate-the-wrapper step, for the same reasons
+documented there. Move one and the other has to move with it, or the client
+quietly stops being scanned while every check stays green.
+
+Unlike `ci.yml` and `android-native.yml`, this one **does** run on a push to
+`master`, and not for symmetry with anything. Code scanning treats the default
+branch as the source of truth: a pull request run annotates that pull request,
+but only a default-branch run updates the Security tab. Drop the trigger and the
+alert list silently freezes at whatever master last said.
+
+The `Analyze` jobs are **not** required checks. A finding is a judgement call —
+several of the open alerts are false positives that no fix would clear — so a
+red one should not block a merge the way a failing test does.
+
 ## Triggering a release
 
 ```bash
@@ -323,6 +378,14 @@ the images.
   Compose compiler is a separate plugin whose version must match Kotlin's
   exactly. `composeOptions.kotlinCompilerExtensionVersion` is the pre-2.0
   mechanism and is now a configuration error.
+- **Every `Analyze` job fails at the upload** — "CodeQL analyses from advanced
+  configurations cannot be processed when the default setup is enabled".
+  Nothing is wrong with the code or the workflow: default setup has been turned
+  back on. Disable it under Settings → Code security.
+- **`Analyze (java-kotlin)` says "could not process any code"** after a green
+  build — the compile tasks were a cache hit, so no compiler ran for CodeQL to
+  trace. Check for `--no-build-cache` on the Gradle invocation, and for
+  `from cache` in the build step's task list.
 - **Browser suites fail but pass locally** — check
   `shared/test/browser/fixtures.mjs` first. Several "failures" have been stale
   test data, and a cached service worker can serve old CSS.
