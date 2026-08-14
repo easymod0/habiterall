@@ -5,6 +5,23 @@
  * wire/API value only — it is never stored in `entries.value`, because a
  * numerical habit may legitimately record the amount 3. Skips live in the
  * `status` column instead.
+ *
+ * FOUR states, and the fourth is the one that is easy to miss:
+ *
+ *   done     a row, value YES (or an amount that meets the target)
+ *   skip     a row, `status = 'skip'` — "not applicable", see above
+ *   no       a row, value UNSET. A lapse the user stated.
+ *   unknown  NO ROW AT ALL. Nothing is known about the day.
+ *
+ * `no` and `unknown` are both "not done" for every figure computed here —
+ * `isCompleted` says `false` for the first and every caller treats a missing
+ * row as a miss — so nothing about scores, streaks or resilience turns on the
+ * difference. What turns on it is what the app can SAY: Loop's
+ * `pref_unknown_enabled` ("Show question marks for missing data") exists to
+ * differentiate a day you marked as missed from a day you never answered, and
+ * that distinction has to be storable before it can be shown. Which is why
+ * UNSET now writes a row rather than deleting one: `DELETE` is how a day goes
+ * back to unknown. See `entryWrite` in validate.js, the one rule that decides.
  */
 export const UNSET = 0;
 export const YES = 2;

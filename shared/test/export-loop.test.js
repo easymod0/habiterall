@@ -39,11 +39,16 @@ test('colors map to a palette index and back to something close', () => {
   assert.ok(colorToLoopIndex('#3c83f7') === 10, 'near miss snaps to nearest');
 });
 
-test('boolean entries encode done as YES_MANUAL and drop not-done', () => {
+test('boolean entries encode done as YES_MANUAL and a lapse as Loop NO', () => {
   const h = { type: 'boolean' };
   assert.equal(toLoopEntry(h, { value: YES, status: '' }), 2);
-  assert.equal(toLoopEntry(h, { value: 0, status: '' }), null, 'not-done is absence');
   assert.equal(toLoopEntry(h, { value: 0, status: 'skip' }), 3, 'skip');
+  // A row is an answer, so it exports as one. Returning null here dropped every
+  // stated lapse into "never answered" on the way out — the same information
+  // Loop's own question-mark setting exists to keep.
+  assert.equal(toLoopEntry(h, { value: 0, status: '' }), 0, 'a stated no is Loop NO');
+  // Days with no row are simply not written, and Loop reads a missing day as
+  // UNKNOWN. `writeLoopDatabase` never asks about those.
 });
 
 test('numerical entries are scaled by 1000', () => {

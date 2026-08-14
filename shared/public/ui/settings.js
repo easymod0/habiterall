@@ -135,6 +135,25 @@ export const SETTINGS = {
       { value: 'wide', label: 'Wide — smallest squares, most history' },
     ],
   },
+  // Loop's two tracking preferences, with Loop's keys' own defaults. Both off:
+  // the three-state cycle and a plain empty square are what the app has always
+  // done, and each of these adds a state to think about.
+  skipDays: {
+    section: 'Tracking',
+    label: 'Enable skip days',
+    help: 'Adds "skip" to the tap cycle, for a day the habit does not apply. ' +
+      'A skip leaves your score and streak untouched rather than breaking them.',
+    type: 'toggle',
+    default: false,
+  },
+  questionMarks: {
+    section: 'Tracking',
+    label: 'Show question marks for missing data',
+    help: 'Tells a day you marked as missed apart from a day you never answered, ' +
+      'which is drawn as “?”. With it on, the tap cycle ends on a cleared day.',
+    type: 'toggle',
+    default: false,
+  },
   scoreGranularity: {
     section: 'Statistics',
     label: 'Strength chart resolution',

@@ -41,7 +41,11 @@ const BINDINGS = [
   'valueInput', 'notes', 'skip', 'clear', 'save', 'dialog',
 ];
 
-function run(habit, date, value, isSkip) {
+/**
+ * @param prefs the settings the dialog reads. Both default off, as the server
+ *   does — this is the fake `ui/settings.js` for the sliced-out function.
+ */
+function run(habit, date, value, isSkip, prefs = {}) {
   const els = Object.fromEntries(BINDINGS.map((k) => [k, mkEl()]));
   els.dialog = { showModal() { this.open = true; } };
 
@@ -53,10 +57,11 @@ function run(habit, date, value, isSkip) {
 
   const state = {};
   const YES = 2, UNSET = 0;
-  const fn = new Function(...BINDINGS, 'state', 'YES', 'UNSET',
+  const settings = { get: (key) => prefs[key] ?? false };
+  const fn = new Function(...BINDINGS, 'state', 'YES', 'UNSET', 'settings',
     'habit', 'date', 'value', 'isSkip',
     `${body}; openDayDialog(habit, date, value, isSkip); return state;`);
-  const out = fn(...BINDINGS.map((k) => els[k]), state, YES, UNSET,
+  const out = fn(...BINDINGS.map((k) => els[k]), state, YES, UNSET, settings,
     habit, date, value, isSkip);
   return { els, state: out, doneBtn, notBtn };
 }
@@ -80,6 +85,33 @@ console.log('--- boolean habit, no entry ---');
 r = run(boolHabit, '2026-03-16', undefined, false);
 check('boolean: "Not done" active when empty', r.notBtn.getAttribute('aria-pressed') === 'true');
 check('boolean: Clear hidden when nothing to clear', r.els.clear.hidden === true);
+
+console.log('--- question marks: an unanswered day is neither answer ---');
+// With the setting on, a day with no row is its own state. "Not done" claiming
+// it would undo the only distinction the setting draws.
+r = run(boolHabit, '2026-03-16', undefined, false, { questionMarks: true });
+check('marks on: "Not done" not active for an unanswered day',
+  r.notBtn.getAttribute('aria-pressed') === 'false');
+check('marks on: "Done" not active either',
+  r.doneBtn.getAttribute('aria-pressed') === 'false');
+// A stored 0 IS an answer, and stays one whatever the setting says.
+r = run(boolHabit, '2026-03-16', 0, false, { questionMarks: true });
+check('marks on: a stated lapse still marks "Not done"',
+  r.notBtn.getAttribute('aria-pressed') === 'true');
+check('marks on: and offers Clear, the only way back to unanswered',
+  r.els.clear.hidden === false);
+
+console.log('--- skip days: the control follows the setting ---');
+r = run(boolHabit, '2026-03-15', 2, false);
+check('skips off: the Skip control is hidden', r.els.skip.hidden === true);
+r = run(boolHabit, '2026-03-15', 2, false, { skipDays: true });
+check('skips on: the Skip control is shown', r.els.skip.hidden === false);
+// An imported Loop history has skips in it whether or not this account creates
+// new ones, and "Unskip" is the only way to undo one.
+r = run(boolHabit, '2026-03-15', 0, true);
+check('skips off: Unskip stays reachable on a day that already is one',
+  r.els.skip.hidden === false && r.els.skip.textContent === 'Unskip',
+  `${r.els.skip.hidden} ${r.els.skip.textContent}`);
 
 console.log('--- numerical habit with a value ---');
 r = run(numHabit, '2026-03-15', 6, false);

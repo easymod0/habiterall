@@ -832,8 +832,13 @@ curl -X POST --data-binary @"Loop Habits Backup.db" localhost:3000/api/import
 The conversion is verified against a real Loop export, not just their source:
 timestamps are epoch-millisecond UTC midnights, entry values are scaled by
 1000 while habit targets are not, `YES_AUTO` counts as done, and skips are
-preserved. Backups predating Loop's `unit`, `target_type` or `notes` columns
-import fine.
+preserved. All four of Loop's day states survive — including `NO`, a day you told
+Loop you had missed, which is kept apart from a day you never answered. Backups
+predating Loop's `unit`, `target_type` or `notes` columns import fine.
+
+Loop keeps its *preferences* in Android, not in the backup, so nothing in the
+file can set yours — "Enable skip days" and "Show question marks" start off, as
+they do in Loop, and are yours to switch on under ⚙.
 
 **And back out again** — ⚙ → *Backup & Restore* → *Loop .db* writes a real Loop
 database you can restore on Android. You are not locked in.
@@ -850,6 +855,12 @@ database you can restore on Android. You are not locked in.
 
 Restore by importing the file back. `?mode=merge` (default) adds and merges by
 habit name; `?mode=replace` clears first.
+
+The JSON backup carries your **settings** as well as your habits, and only a
+`replace` applies them — that mode means "make this account look like the file",
+while a merge is "add these habits to what I have" and leaves your preferences
+alone. It matters more than it sounds: *Show question marks* decides how the very
+rows in the same file are read.
 
 The personal edition's database is a single file — copying `data/habiterall.db`
 is a complete backup. For cloud:
@@ -1042,7 +1053,17 @@ clock it compared against. `too_late` with a `zone` you did not expect is the
 Under the ⚙ button: day order (today on the left or right), which day the week
 starts on, chart resolutions, whether deleting asks first, and where reminders
 are sent. Preferences are stored server-side, so in the cloud edition they
-follow your account between devices.
+follow your account between devices — and they travel in the JSON backup.
+
+Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
+
+| Setting | What it does |
+|---|---|
+| **Enable skip days** | Adds *skip* to the tap cycle, for a day the habit does not apply — a rest day, or being ill. A skip leaves your score and streak untouched rather than breaking them. Off, a tap goes done → not done → done |
+| **Show question marks for missing data** | Tells a day you marked as missed apart from a day you never answered, drawing the second as **?**. It also adds a fourth step to the tap cycle, so a tap can clear a day back to no data |
+
+Switching skips off never touches skips you have already recorded — including
+those imported from Loop — and "Unskip" stays available on those days.
 
 ---
 
@@ -1070,9 +1091,16 @@ follow your account between devices.
 | `GET` | `/export`, `/export.csv`, `/export-loop.db` | Backups |
 | `POST` | `/import` | Restore — body is the raw file (`?mode=merge\|replace`) |
 
-Yes/no habits use Loop's encoding: `0` unset, `2` yes, `3` skip. Measurable
+Yes/no habits use Loop's encoding: `0` not done, `2` yes, `3` skip. Measurable
 habits store the amount. Skips are held in a separate `status` field, because a
 measurable habit may legitimately record the number 3.
+
+**A row is an answer, and `DELETE` is how a day goes back to having none.**
+`PUT {"value": 0}` records "not done" — a real answer, which is what makes
+question marks meaningful — so clearing a day is the `DELETE` above, not a `PUT`
+of zero. Four states in all: a row with `2` (done), a row with `status: "skip"`,
+a row with `0` (not done), and no row (nothing known). Only the display tells the
+last two apart; every statistic counts both as a miss.
 
 ```bash
 curl -X POST localhost:3000/api/habits -H 'Content-Type: application/json' \

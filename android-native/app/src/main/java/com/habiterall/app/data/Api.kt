@@ -127,6 +127,15 @@ data class AppSettings(
      * shared/public/ui/settings.js, and the two must not drift.
      */
     @SerialName("dayOrder") val dayOrder: String? = null,
+    /**
+     * Loop's two tracking preferences, read for the same reason `dayOrder` is:
+     * they are the account's, they are already in the web dialog, and a tap has
+     * to mean the same thing on both clients. Null means untouched, which reads
+     * as off — `SETTINGS.skipDays.default` and `questionMarks.default` in
+     * shared/public/ui/settings.js, and Loop's own defaults before that.
+     */
+    @SerialName("skipDays") val skipDays: Boolean? = null,
+    @SerialName("questionMarks") val questionMarks: Boolean? = null,
 ) {
     val androidRemindersEnabled: Boolean
         get() = notifyChannels?.contains(CHANNEL_ANDROID) ?: true
@@ -134,6 +143,10 @@ data class AppSettings(
     /** True when today belongs at the left-hand end of the grid. */
     val newestLeft: Boolean
         get() = (dayOrder ?: DEFAULT_DAY_ORDER) == DEFAULT_DAY_ORDER
+
+    val skipDaysEnabled: Boolean get() = skipDays ?: false
+
+    val questionMarksEnabled: Boolean get() = questionMarks ?: false
 
     companion object {
         const val CHANNEL_ANDROID = "android"

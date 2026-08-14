@@ -123,7 +123,18 @@ object Notifications {
         )
     }
 
-    fun buildReminder(context: Context, habit: Habit, date: String): Notification {
+    /**
+     * @param skipEnabled whether the account offers skip days. Read from the
+     *   local mirror by the caller, because an alarm can fire on a phone that has
+     *   not reached the server in a week and the shade must still agree with the
+     *   grid about which answers exist.
+     */
+    fun buildReminder(
+        context: Context,
+        habit: Habit,
+        date: String,
+        skipEnabled: Boolean = false,
+    ): Notification {
         // A custom prompt leads, because "Did you exercise today?" is a question
         // where the habit's name is a label. The name then becomes the second
         // line, so a shade holding several reminders still says which is which.
@@ -174,11 +185,13 @@ object Notifications {
             )
         }
 
-        builder.addAction(
-            0,
-            context.getString(R.string.action_skip),
-            actionIntent(context, ACTION_SKIP, habit, date),
-        )
+        if (skipEnabled) {
+            builder.addAction(
+                0,
+                context.getString(R.string.action_skip),
+                actionIntent(context, ACTION_SKIP, habit, date),
+            )
+        }
         return builder.build()
     }
 

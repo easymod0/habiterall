@@ -55,6 +55,16 @@ class Settings(private val context: Context) {
      */
     private val androidRemindersKey = booleanPreferencesKey("android_reminders")
 
+    /**
+     * Whether the account offers skip days, mirrored for the notification.
+     *
+     * The shade's actions are built by a receiver that may run days after the
+     * last successful fetch — an alarm fires whether or not there is a network —
+     * so "does this account use skips?" has to be answerable offline. Absent
+     * reads as off, which is both the server's default and Loop's.
+     */
+    private val skipDaysKey = booleanPreferencesKey("skip_days")
+
     val serverUrl: Flow<String?> =
         context.dataStore.data.map { it[serverUrlKey]?.ifBlank { null } }
 
@@ -98,6 +108,15 @@ class Settings(private val context: Context) {
     /** The cached answer; true until the server has said otherwise. */
     suspend fun cachedAndroidReminders(): Boolean =
         context.dataStore.data.first()[androidRemindersKey] ?: true
+
+    /** Remember whether the account offers skip days. */
+    suspend fun cacheSkipDays(enabled: Boolean) {
+        context.dataStore.edit { it[skipDaysKey] = enabled }
+    }
+
+    /** The cached answer; off until the server has said otherwise. */
+    suspend fun cachedSkipDays(): Boolean =
+        context.dataStore.data.first()[skipDaysKey] ?: false
 
     /**
      * The cached schedule. Enough to arm an alarm and post a usable

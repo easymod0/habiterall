@@ -158,16 +158,20 @@ ck('a second JSON restore is idempotent',
   diff(baselineFull, afterTwice) ?? '');
 
 /**
- * True for a day whose only content is a note: a boolean habit, not done, but
- * with text attached. Derived from the fixture rather than hardcoded, so
- * adding such a day to the fixture does not silently weaken the assertion.
+ * Days that exist only because the user answered "no": a boolean habit, not
+ * done, with or without a note. Derived from the fixture rather than hardcoded,
+ * so adding one does not silently weaken the assertion below.
+ *
+ * These used to be the documented gap in the Loop and CSV round trips — a
+ * boolean 0 was dropped on the way out unless a note came with it, and the
+ * bare ones did not exist at all because nothing could create one. Both
+ * formats have a place for them (`NO`, which is what Loop calls the same day),
+ * so the gap is closed and this counts what would reopen it.
  */
-function noteOnly(habitName, entryKeyStr) {
-  const h = FIXTURE.find((f) => f.name === habitName);
-  if (!h || h.type !== 'boolean') return false;
-  const date = entryKeyStr.split('|')[0];
-  const e = h.entries.find((x) => x.date === date);
-  return Boolean(e && e.status !== 'skip' && e.value === 0 && e.notes);
+function statedLapses() {
+  return FIXTURE
+    .filter((h) => h.type === 'boolean')
+    .flatMap((h) => h.entries.filter((e) => e.status !== 'skip' && e.value === 0));
 }
 
 /* ---------- Loop .db ---------- */
@@ -182,21 +186,18 @@ ck('the Loop export is a SQLite file',
 const loopResult = await restore(loopDb);
 const afterLoop = await current({ fields: LOOP_HABIT_FIELDS, notes: false });
 
-// Loop's schema has no way to store a day that carries only a note, so those
-// rows are legitimately lost. Everything else must match exactly — the
-// expectation is narrowed to that one documented gap rather than loosened.
-const baselineLoopLossy = baselineLoop.map((h) => ({
-  ...h,
-  entries: h.entries.filter((e) => !noteOnly(h.name, e)),
-}));
-
+// Every entry, with no exception left: Loop's NO is a day habiterall can now
+// both hold and write, so a stated lapse survives whether or not a note came
+// with it. Notes themselves are still outside this comparison (`notes: false`),
+// which is what the CSV cannot carry.
 ck('Loop round-trip preserves habits and entries',
-  diff(baselineLoopLossy, afterLoop) === null,
-  diff(baselineLoopLossy, afterLoop) ?? '');
-ck('Loop drops exactly the note-only days and nothing else',
-  baselineLoop.flatMap((h) => h.entries).length -
-    baselineLoopLossy.flatMap((h) => h.entries).length === 1,
-  'expected exactly 1 note-only day in the fixture');
+  diff(baselineLoop, afterLoop) === null,
+  diff(baselineLoop, afterLoop) ?? '');
+
+const loopMeditate = afterLoop.find((h) => h.name === 'Meditate');
+ck('Loop: a stated lapse survives, with or without a note',
+  statedLapses().every((e) => loopMeditate.entries.includes(`${e.date}|0|`)),
+  `${statedLapses().length} lapses in the fixture; got ${loopMeditate.entries.join(' ')}`);
 ck('Loop restore skipped nothing',
   (loopResult.skipped ?? []).length === 0,
   (loopResult.skipped ?? []).join('; '));
@@ -247,11 +248,16 @@ ck('CSV restore skipped nothing',
   (csvResult.skipped ?? []).length === 0,
   (csvResult.skipped ?? []).join('; '));
 
-// The CSV pair carries the same information the Loop .db does, so it is held
-// to the same standard: identical but for the note-only day.
+// The CSV pair carries the same information the Loop .db does, so it is held to
+// the same standard: every entry, notes aside.
 ck('CSV round-trip preserves habits and entries',
-  diff(baselineLoopLossy, afterCsv) === null,
-  diff(baselineLoopLossy, afterCsv) ?? '');
+  diff(baselineLoop, afterCsv) === null,
+  diff(baselineLoop, afterCsv) ?? '');
+
+const csvMeditate = afterCsv.find((h) => h.name === 'Meditate');
+ck('CSV: a stated lapse survives as a NO cell',
+  statedLapses().every((e) => csvMeditate.entries.includes(`${e.date}|0|`)),
+  csvMeditate.entries.join(' '));
 
 const csvWater = afterCsv.find((h) => h.name === 'Water');
 ck('CSV: a numerical 3 stays 3, not a skip',
@@ -273,6 +279,50 @@ const csvGym = afterCsv.find((h) => h.name === 'Gym');
 ck('CSV: a 3-per-7 frequency survives',
   csvGym.freq_numerator === 3 && csvGym.freq_denominator === 7,
   `${csvGym.freq_numerator}/${csvGym.freq_denominator}`);
+
+/* ---------- settings travel with the data ---------- */
+
+console.log('\n--- settings ---');
+
+const putSettings = (patch) => api('/api/settings', {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(patch),
+});
+const getSettings = async () => (await (await api('/api/settings')).json());
+
+// Two of these decide what the rows in the same backup MEAN, so a backup that
+// did not carry them restored a history the app then read differently. The JSON
+// export carried no settings at all until this was fixed.
+await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right' });
+const withSettings = Buffer.from(await (await api('/api/export')).arrayBuffer());
+const exported = JSON.parse(withSettings.toString('utf8')).settings ?? {};
+
+ck('the JSON backup carries the settings',
+  exported.skipDays === true && exported.questionMarks === true &&
+  exported.dayOrder === 'newest-right',
+  JSON.stringify(exported));
+
+await putSettings({ skipDays: false, questionMarks: false, dayOrder: 'newest-left' });
+const restored = await restore(withSettings, 'replace');
+const back = await getSettings();
+
+ck('a replace-mode restore puts them back',
+  back.skipDays === true && back.questionMarks === true &&
+  back.dayOrder === 'newest-right',
+  JSON.stringify(back));
+ck('and says how many it applied', restored.settings >= 3, String(restored.settings));
+
+// A merge is "add these habits to what I have", not "make my account look like
+// this file" — it must leave the rest of the account alone.
+await putSettings({ skipDays: false, questionMarks: false });
+const merged = await restore(withSettings, 'merge');
+const afterMergeSettings = await getSettings();
+
+ck('a merge leaves them alone',
+  afterMergeSettings.skipDays === false && afterMergeSettings.questionMarks === false,
+  JSON.stringify(afterMergeSettings));
+ck('and reports applying none', merged.settings === 0, String(merged.settings));
 
 /* ---------- merge mode must not duplicate ---------- */
 

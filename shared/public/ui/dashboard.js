@@ -15,6 +15,7 @@ import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
 import { on, state } from '/shared/ui/store.js';
+import { DAY, dayStateOf, nextDayState } from '/shared/ui/toggle.js';
 import { toast } from '/shared/ui/toast.js';
 import { SKIP, UNSET, YES } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
@@ -174,7 +175,8 @@ export function paint() {
 
       const box = document.createElement('span');
       box.className = 'check-box';
-      paintCheckbox(box, habit, value, habit.skips?.includes(date) ?? false);
+      paintCheckbox(box, habit, value, habit.skips?.includes(date) ?? false,
+        settings.get('questionMarks'));
 
       const day = document.createElement('span');
       day.className = 'check-day';
@@ -503,19 +505,20 @@ async function persistOrder(order) {
 /* ---------- the checkboxes ---------- */
 
 /**
- * @param isSkip  whether `/overview` listed this date in the habit's `skips`
+ * @param isSkip       whether `/overview` listed this date in the habit's `skips`
+ * @param showUnknown  the `questionMarks` setting: draw `?` where there is no row
  *
- * The flag is why this takes four arguments. `/overview` flattens a skip onto
- * the SKIP wire value so the grid has something paintable, *and* lists the date
- * in `skips` — and the second is the only one that can be trusted, because 3 is
- * a legitimate amount for a measurable habit. Reading the sentinel alone
- * painted "3 pages" and "3 cigarettes" as skipped days, while the score behind
- * them counted the 3: the cell disagreed with every figure computed from it.
- * The bare sentinel still counts for a *boolean* habit, where it cannot mean
+ * The skip flag is why this takes more than three arguments. `/overview` flattens
+ * a skip onto the SKIP wire value so the grid has something paintable, *and*
+ * lists the date in `skips` — and the second is the only one that can be trusted,
+ * because 3 is a legitimate amount for a measurable habit. Reading the sentinel
+ * alone painted "3 pages" and "3 cigarettes" as skipped days, while the score
+ * behind them counted the 3: the cell disagreed with every figure computed from
+ * it. The bare sentinel still counts for a *boolean* habit, where it cannot mean
  * anything else and is what an imported Loop history carries — the same rule as
  * `normalizeEntry` in shared/src/stats.js.
  */
-function paintCheckbox(box, habit, value, isSkip = false) {
+function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
   box.textContent = '';
   box.style.background = 'var(--grid-empty)';
   box.style.color = '#fff';
@@ -527,7 +530,16 @@ function paintCheckbox(box, habit, value, isSkip = false) {
     return;
   }
 
-  if (value == null) return;
+  // No row at all. Identical to a stated "no" unless question marks are on,
+  // which is the entire visible difference the setting makes: `value` is
+  // `undefined` here and `0` there, and both are a miss to every figure.
+  if (value == null) {
+    if (showUnknown) {
+      box.style.color = 'var(--text-dim)';
+      box.textContent = '?';
+    }
+    return;
+  }
 
   if (habit.type === 'boolean') {
     if (value === YES) {
@@ -583,13 +595,55 @@ function setSkip(habit, date, on) {
   return was;
 }
 
+/**
+ * Take a day back to "unknown": no row at all.
+ *
+ * The one write that is a DELETE rather than a PUT, since `PUT {value: 0}` now
+ * records a stated "no" — see `entryWrite`. Optimistic before the await for the
+ * same reason as the writes below: offline, `api()` queues the request and
+ * throws, so the cell would otherwise keep asserting a value just cleared.
+ */
+async function clearDay(habit, date) {
+  const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
+  delete habit.entries[date];
+  const wasSkip = setSkip(habit, date, false);
+  paint();
+  try {
+    await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
+  } catch (e) {
+    if (!e.queued) {
+      if (had !== undefined) habit.entries[date] = had;
+      setSkip(habit, date, wasSkip);
+      paint();
+    }
+    throw e;
+  }
+  await load();
+}
+
 async function onCheckClick(habit, date) {
   try {
     let next;
     if (habit.type === 'boolean') {
-      // cycle: unset -> yes -> skip -> unset
-      const cur = habit.entries[date] ?? UNSET;
-      next = cur === UNSET ? YES : cur === YES ? SKIP : UNSET;
+      // Loop's cycle, and both of its switches — `ui/toggle.js` owns it and the
+      // native client mirrors it. Note what is read here: whether the map HOLDS
+      // the date, not what it holds. `habit.entries[date] ?? UNSET` was fine
+      // while a lapse and an unanswered day were one state; now it would report
+      // every untouched day as an answered "no" and start the cycle in the wrong
+      // place.
+      const cur = habit.entries[date];
+      const current = dayStateOf({
+        value: Object.hasOwn(habit.entries, date) ? cur : undefined,
+        isSkip: (habit.skips?.includes(date) ?? false) || cur === SKIP,
+        done: cur === YES,
+      });
+      const to = nextDayState(current, {
+        skipDays: settings.get('skipDays'),
+        questionMarks: settings.get('questionMarks'),
+      });
+
+      if (to === DAY.UNKNOWN) return await clearDay(habit, date);
+      next = to === DAY.DONE ? YES : to === DAY.SKIP ? SKIP : UNSET;
     } else {
       // A skipped day has no numeric value to prefill. For numerical habits
       // the SKIP wire value is only meaningful when the day is actually
@@ -601,26 +655,9 @@ async function onCheckClick(habit, date) {
         cur != null && !skipped ? String(cur) : ''
       );
       if (raw === null) return;
-      if (raw.trim() === '') {
-        // Optimistic first, for the same reason as below: offline, `api()`
-        // queues the delete and throws, and the cell would otherwise keep
-        // showing a value the user has just cleared.
-        const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
-        delete habit.entries[date];
-        const wasSkip = setSkip(habit, date, false);
-        paint();
-        try {
-          await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
-        } catch (e) {
-          if (!e.queued) {
-            if (had !== undefined) habit.entries[date] = had;
-            setSkip(habit, date, wasSkip);
-            paint();
-          }
-          throw e;
-        }
-        return;
-      }
+      // An empty box means "nothing is known about this day", which is a
+      // deletion. Typing 0 is a different answer and writes a row.
+      if (raw.trim() === '') return await clearDay(habit, date);
       next = Number(raw);
       if (!Number.isFinite(next) || next < 0) return toast('Enter a non-negative number');
     }
@@ -633,8 +670,10 @@ async function onCheckClick(habit, date) {
     // `value: 2`, and the day synced as DONE. The cell stayed blank the whole
     // time, so there was no hint anything was wrong.
     const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
-    if (next === UNSET) delete habit.entries[date];
-    else habit.entries[date] = next;
+    // Set, never delete: UNSET is a row now — a stated "no" — and deleting the
+    // key here would paint the cell as unknown while the server holds an
+    // answer, which with question marks on is a visible lie until the refetch.
+    habit.entries[date] = next;
     // `skips` is what the cell is painted from, so it moves with the value.
     // Only a boolean habit can reach SKIP from here; a measurable one is
     // recording an amount, which by definition ends any skip on that day.

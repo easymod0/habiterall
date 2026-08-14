@@ -78,6 +78,7 @@ const SHELL = [
   '/shared/ui/theme.js',
   '/shared/ui/time.js',
   '/shared/ui/toast.js',
+  '/shared/ui/toggle.js',
   '/shared/ui/values.js',
   '/shared/ui/views.js',
   '/shared/ui/window.js',

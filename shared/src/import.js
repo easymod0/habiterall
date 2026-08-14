@@ -83,8 +83,14 @@ export function convertLoopValue(raw, isNumerical) {
     case LOOP_SKIP:
       return { value: 0, status: 'skip' };
     case LOOP_NO:
+      // A day the user told Loop they had missed. Kept as a row, which is what
+      // habiterall now means by "no" — these used to be dropped, and with them
+      // went the only thing that distinguished a lapse from a day never
+      // answered. On a backup from someone who does not use Loop's question
+      // marks that is most of their history.
+      return { value: 0, status: '' };
     case LOOP_UNKNOWN:
-      return null;        // "not done" is stored as absence in habiterall
+      return null;        // nothing is known about the day: no row
     default:
       return null;
   }
@@ -131,6 +137,41 @@ export function parseHabiterallJSON(payload) {
       ...h,
       entries: Array.isArray(h.entries) ? h.entries : [],
     }));
+}
+
+/**
+ * The preferences a habiterall JSON backup carries, if it is one.
+ *
+ * Separate from `parseUpload` rather than part of its result, because these do
+ * not go where the habits go: they are written through `parseSettings` and each
+ * edition's settings storage, not through `applyImport`. Nothing here is
+ * trusted — this only says "the file had an object under `settings`" and the
+ * validator decides what any of it means.
+ *
+ * Returns `null` for every other format. Loop cannot answer this at all: its
+ * preferences live in Android's SharedPreferences, not in the backup database,
+ * so a Loop import leaves the account's own settings alone — which is also the
+ * right answer, since Loop's keys are not these keys.
+ *
+ * @param {Buffer} buf the raw request body
+ * @returns {Record<string, any>|null}
+ */
+export function backupSettings(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
+
+  const head = buf.toString('utf8').replace(/^﻿/, '').trimStart();
+  if (!head.startsWith('{')) return null;      // a bare habits array, or not JSON
+
+  let data;
+  try {
+    data = JSON.parse(head);
+  } catch {
+    return null;                               // parseUpload reports the error
+  }
+
+  const settings = data?.settings;
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return null;
+  return settings;
 }
 
 /* ---------- Loop .db backup ---------- */
@@ -338,8 +379,11 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
         case 'SKIP':
           value = 0; status = 'skip'; break;
         case 'NO':
+          // A stated lapse, kept as a row — the same change as `LOOP_NO` in
+          // convertLoopValue, and for the same reason.
+          value = 0; break;
         case 'UNKNOWN':
-          return;
+          return;                      // no row: nothing is known about the day
         default: {
           const n = Number(cell);
           if (!Number.isFinite(n) || n < 0) return;

@@ -195,18 +195,41 @@ test('a skip is stored out of band and reported as the wire value', () => {
   assert.equal(write.reply.value, 3, 'but the API answers with the wire value');
 });
 
-test('clearing a checkmark deletes the row', () => {
+test('a stated "not done" is a row, so it can be told from an unanswered day', () => {
+  // This used to delete. A row is an answer: keeping one is what lets `?` mean
+  // "nobody has said" rather than "not done", and it is what an imported Loop NO
+  // becomes. DELETE is the verb that means "nothing is known" now.
   const write = entryWrite({ type: 'boolean' },
     { value: 0, status: '', notes: '' }, SENTINELS);
-  assert.equal(write.op, 'delete', '"not done" is the absence of a row');
+  assert.equal(write.op, 'upsert');
+  assert.equal(write.value, 0);
+  assert.equal(write.status, '');
+  assert.equal(write.reply.value, 0);
 });
 
-test('unless a note needs somewhere to live', () => {
+test('a note rides along with it, as it always did', () => {
   const write = entryWrite({ type: 'boolean' },
     { value: 0, status: '', notes: 'travelling' }, SENTINELS);
   assert.equal(write.op, 'upsert');
   assert.equal(write.value, 0);
   assert.equal(write.notes, 'travelling');
+});
+
+test('nothing entryWrite can return is a delete', () => {
+  // Three callers switch on `op` — both editions' PUT routes and the Discord
+  // button handler — and every one of them now only ever upserts. If a future
+  // change reintroduces a delete here, the DELETE route is where it belongs.
+  const cases = [
+    [{ type: 'boolean' }, { value: 0, status: '', notes: '' }],
+    [{ type: 'boolean' }, { value: 2, status: '', notes: '' }],
+    [{ type: 'boolean' }, { value: 0, status: 'skip', notes: '' }],
+    [{ type: 'numerical' }, { value: 0, status: '', notes: '' }],
+    [{ type: 'numerical' }, { value: 7.5, status: '', notes: 'x' }],
+  ];
+  for (const [habit, parsed] of cases) {
+    assert.equal(entryWrite(habit, parsed, SENTINELS).op, 'upsert',
+      `${habit.type} ${JSON.stringify(parsed)}`);
+  }
 });
 
 test('a numerical zero is a recorded amount, not an absence', () => {

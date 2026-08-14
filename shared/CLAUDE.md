@@ -42,6 +42,7 @@ Postgres one.
 | `public/ui/resample.js` | thins the daily score series for the strength chart |
 | `public/ui/dates.js` | browser-side date helpers |
 | `public/ui/time.js` | parsing and formatting a reminder time, DOM-free so it is testable |
+| `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, DOM-free, mirrored in Kotlin |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
 | `public/ui/values.js` | `UNSET` / `YES` / `SKIP` for the browser, mirroring `src/constants.js` |
 | `public/auth-none.js`, `auth-oidc.js` | the two auth adapters |
@@ -84,6 +85,16 @@ aggregation in `stats.js` already uses the bounded form; keep it that way.
 **`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
 still works for boolean habits (where `3` is unambiguously a skip) but is
 wrong for numerical ones, where `3` is a real amount.
+
+**A missing day and a day holding 0 are different states, and only the display
+knows.** `unknown` is the absence of a row, `no` is a row with value 0, and
+`isCompleted` answers `false` for both — deliberately, so `questionMarks` costs
+nothing in the arithmetic. What must never happen is a *reader* collapsing them:
+`habit.entries[date] ?? UNSET` reports every unanswered day as an answered "no",
+which starts the tap cycle in the wrong place and paints away the one difference
+the setting draws. Ask whether the map HOLDS the date (`Object.hasOwn`, or a null
+check in Kotlin), never what it holds. `ui/toggle.js`'s `dayStateOf` exists so
+that decision is written once.
 
 **The score constant is Loop's, read from its source.** It is
 `0.5^(sqrt(frequency)/13)` — a 13-day half-life for a daily habit, and slower
@@ -272,6 +283,15 @@ you add a form to one, add it to both. The two that catch people out: `12 am` is
 00:00 while `12 pm` is 12:00, and an empty box means "no reminder" while
 unparseable text is an error to report — the caller does different things with
 them, so they are `''` and `null` rather than both falsy.
+
+**The tap cycle is mirrored in Kotlin too.** `public/ui/toggle.js` and
+`Grid.nextState` are Loop's `Entry.nextToggleValue`, and `test/toggle.test.js` and
+`GridTest` are pinned to the same examples for the same reason `ReminderTime`
+mirrors `ui/time.js`. Both read `skipDays` and `questionMarks`, so the phone and
+the browser cannot disagree about how many states a tap walks through. Note the
+one asymmetry Loop has and this keeps: `SKIP` always moves on to `no`, even with
+skips since switched off, because the setting does not erase the skips already
+recorded and a tap on one has to go somewhere.
 
 **A day that needs no reminder is one that has been ANSWERED, not one that has
 been completed.** `answeredIds` tests `isCompleted(...) !== false` because

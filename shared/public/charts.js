@@ -139,6 +139,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     onPick = null,      // callback(date) -> makes cells clickable
     streaks = null,     // [{start, end, length}] to underline as runs
     minStreak = 3,      // shorter runs are noise, not an achievement
+    unknownMark = false, // draw '?' on days with no entry (`questionMarks`)
   } = opts;
 
   const level = zoomLevel(zoom);
@@ -344,6 +345,24 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // that implements attributes but not the dataset proxy.
       rect.setAttribute('data-label', label);
       svg.appendChild(title(rect, onPick && !isFuture ? `${label} — click to edit` : label));
+
+      // A day with no row at all, marked as such when the setting asks for it.
+      // Drawn AFTER the cell, since SVG paints in document order — and sized
+      // from the cell rather than fixed, because the same glyph has to sit in a
+      // 24px square at the closest zoom and an 8px one at the widest. It is
+      // deliberately not drawn on a future day: nothing is missing there yet.
+      if (unknownMark && !isFuture && value == null && !isSkip) {
+        svg.appendChild(el('text', {
+          x: x + CELL / 2,
+          y: y + CELL / 2,
+          'text-anchor': 'middle',
+          'dominant-baseline': 'central',
+          'font-size': Math.max(6, Math.round(CELL * 0.72)),
+          fill: dim,
+          // Or the glyph swallows the click that the cell underneath it wants.
+          'pointer-events': 'none',
+        }, '?'));
+      }
 
       // month label above the first week containing a new month
       if (dow === 0 && cursor.getMonth() !== lastMonth) {

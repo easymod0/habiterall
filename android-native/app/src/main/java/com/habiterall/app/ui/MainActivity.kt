@@ -390,6 +390,11 @@ class MainActivity : ComponentActivity() {
          */
         var loadedDays by remember { mutableStateOf(Grid.INITIAL_DAYS) }
         var newestLeft by remember { mutableStateOf(true) }
+        // Both default off until the settings fetch says otherwise, matching the
+        // server's defaults: a phone that has not asked yet must not offer a
+        // state the account has switched off.
+        var skipDays by remember { mutableStateOf(false) }
+        var questionMarks by remember { mutableStateOf(false) }
 
         /** One scroll position, shared by the header and every habit row. */
         val dayScroll = rememberScrollState()
@@ -457,11 +462,18 @@ class MainActivity : ComponentActivity() {
                 // matters.
                 val fetched = api.settings()
                 newestLeft = fetched.newestLeft
+                skipDays = fetched.skipDaysEnabled
+                questionMarks = fetched.questionMarksEnabled
                 // The same fetch answers whether this phone is still a
                 // destination, and the alarms read that from the local mirror —
                 // so this is where a choice made in a browser reaches them.
                 // Free: the request was already being made for the day order.
                 settings.cacheAndroidReminders(fetched.androidRemindersEnabled)
+                // Mirrored for the notification, which is built by a receiver
+                // with no chance to ask the server: an alarm can fire on a phone
+                // that has been offline for a week, and a Skip action the account
+                // has switched off must not appear in the shade.
+                settings.cacheSkipDays(fetched.skipDaysEnabled)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -706,15 +718,21 @@ class MainActivity : ComponentActivity() {
                 editing = habit to date
                 return
             }
-            val current = when {
-                habit.isSkipped(date) -> Grid.DayState.SKIPPED
-                habit.isMet(habit.valueOn(date), false) == true -> Grid.DayState.DONE
-                else -> Grid.DayState.UNSET
-            }
-            when (Grid.nextState(current)) {
+            // `entries[date]`, not `valueOn`: the map holding nothing for a day is
+            // what makes it UNKNOWN rather than an answered "no", and valueOn
+            // also returns null for a skip.
+            val current = Grid.dayStateOf(
+                value = habit.entries[date],
+                isSkip = habit.isSkipped(date),
+                done = habit.isMet(habit.valueOn(date), false) == true,
+            )
+            when (Grid.nextState(current, skipDays, questionMarks)) {
                 Grid.DayState.DONE -> record(habit, date, Sentinels.YES, false)
                 Grid.DayState.SKIPPED -> record(habit, date, null, true)
-                Grid.DayState.UNSET -> record(habit, date, null, false)
+                // A stated lapse is a row holding 0; only UNKNOWN clears the day,
+                // which the outbox turns into a DELETE.
+                Grid.DayState.NO -> record(habit, date, Sentinels.UNSET, false)
+                Grid.DayState.UNKNOWN -> record(habit, date, null, false)
             }
         }
 
@@ -777,6 +795,7 @@ class MainActivity : ComponentActivity() {
                                     onSetReminder = { reminderFor = habit },
                                     onTapDay = { date -> tapDay(habit, date) },
                                     onHoldDay = { date -> holding = habit to date },
+                                    questionMarks = questionMarks,
                                 )
                                 HorizontalDivider()
                             }
@@ -828,6 +847,7 @@ class MainActivity : ComponentActivity() {
             DayDialog(
                 habit = habit,
                 date = date,
+                skipDays = skipDays,
                 onDismiss = { holding = null },
                 onPick = { value, skip ->
                     holding = null
@@ -908,12 +928,16 @@ class MainActivity : ComponentActivity() {
     private fun DayDialog(
         habit: Habit,
         date: String,
+        skipDays: Boolean,
         onDismiss: () -> Unit,
         onPick: (Double?, Boolean) -> Unit,
         onEnterAmount: () -> Unit,
     ) {
         val skipped = habit.isSkipped(date)
         val value = habit.valueOn(date)
+        // A row exists for this day, whatever it says. Not `value != null`, which
+        // is null for a skip too.
+        val answered = skipped || habit.entries[date] != null
 
         AlertDialog(
             onDismissRequest = onDismiss,
@@ -930,6 +954,7 @@ class MainActivity : ComponentActivity() {
                     Text(
                         when {
                             skipped -> "Skipped"
+                            !answered -> "No entry"
                             habit.isNumerical && value != null ->
                                 "${trim(value)} / ${trim(habit.targetValue)} ${habit.unit}".trim()
                             habit.isMet(value, false) == true -> "Done"
@@ -951,11 +976,30 @@ class MainActivity : ComponentActivity() {
                             modifier = option,
                         ) { Text("Done", Modifier.fillMaxWidth()) }
                     }
-                    TextButton(onClick = { onPick(null, false) }, modifier = option) {
-                        Text("Not done", Modifier.fillMaxWidth())
+                    // A stated lapse: a row holding 0, not the absence of one. It
+                    // used to pass `null`, which cleared the day — the same
+                    // conflation the web dialog had, and the reason "Clear" is
+                    // now its own row rather than this one wearing two hats.
+                    TextButton(
+                        onClick = { onPick(Sentinels.UNSET, false) },
+                        modifier = option,
+                    ) { Text("Not done", Modifier.fillMaxWidth()) }
+                    // Hidden when the account does not use skips — but never on a
+                    // day that already is one, or an imported Loop skip could not
+                    // be undone from here at all.
+                    if (skipDays || skipped) {
+                        TextButton(onClick = { onPick(null, !skipped) }, modifier = option) {
+                            Text(if (skipped) "Unskip" else "Skip", Modifier.fillMaxWidth())
+                        }
                     }
-                    TextButton(onClick = { onPick(null, !skipped) }, modifier = option) {
-                        Text(if (skipped) "Unskip" else "Skip", Modifier.fillMaxWidth())
+                    // Back to "nothing is known about this day", which with
+                    // question marks off is the only way there: the tap cycle
+                    // deliberately does not return to it. Offered only when there
+                    // is something to remove.
+                    if (answered) {
+                        TextButton(onClick = { onPick(null, false) }, modifier = option) {
+                            Text("Clear", Modifier.fillMaxWidth())
+                        }
                     }
                 }
             },

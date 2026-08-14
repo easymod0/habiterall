@@ -17,7 +17,11 @@
  * The fixture deliberately includes the cases that have actually broken:
  * a 3 on a numerical habit (must not become a skip), an at_most target
  * (0 is a success), a non-integer amount, a skip, a note on an otherwise
- * empty day, and an archived habit.
+ * empty day, an archived habit — and a stated lapse with no note on it, which
+ * is the one that has to survive as a ROW. Every format has somewhere to put it
+ * (Loop's own NO, a `NO` cell in the CSV), and a format that dropped it would
+ * turn "I missed this day" into "nobody has answered this day" on the way
+ * through, which is precisely the difference `questionMarks` shows.
  */
 
 export const FIXTURE = [
@@ -42,6 +46,9 @@ export const FIXTURE = [
       // A note on a not-done day: the row exists only to carry the note.
       { date: '2026-01-08', value: 0, status: '', notes: 'overslept' },
       { date: '2026-01-09', value: 2, status: '', notes: '' },
+      // A stated lapse with nothing else on it. Bare, so nothing but the row
+      // itself can carry the fact that the day was answered at all.
+      { date: '2026-01-10', value: 0, status: '', notes: '' },
     ],
   },
   {

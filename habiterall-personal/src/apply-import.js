@@ -118,17 +118,14 @@ export function applyImport(habits, mode = 'merge') {
         }
         const notes = String(e.notes ?? '');
 
-        // Absence encodes "not done" for boolean habits, so a zero row is
-        // normally dropped — unless it carries a note, which needs a row to
-        // live on ("didn't run today, was ill").
-        if (type === 'boolean' && value !== YES) {
-          if (!notes) continue;
-          insertEntry.run(habitId, e.date, UNSET, '', notes);
-          result.entriesImported++;
-          continue;
-        }
-
-        insertEntry.run(habitId, e.date, value, '', notes);
+        // A row is an answer, whatever it says. This used to drop a boolean row
+        // that was not YES unless it carried a note — which quietly turned every
+        // stated lapse in the file into a day nobody had answered, and made an
+        // import lossy in exactly the way `questionMarks` exists to expose. A
+        // day with no answer has no row in the file either, so there is nothing
+        // here to decide about it.
+        const stored = type === 'boolean' && value !== YES ? UNSET : value;
+        insertEntry.run(habitId, e.date, stored, '', notes);
         result.entriesImported++;
       }
     }

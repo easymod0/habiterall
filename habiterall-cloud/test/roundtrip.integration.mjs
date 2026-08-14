@@ -128,13 +128,11 @@ const toJsonBackup = (habits) => ({
   version: 1, app: 'habiterall', habits,
 });
 
-/** Same note-only rule as the personal suite. */
-function noteOnly(habitName, entryKeyStr) {
-  const h = FIXTURE.find((f) => f.name === habitName);
-  if (!h || h.type !== 'boolean') return false;
-  const date = entryKeyStr.split('|')[0];
-  const e = h.entries.find((x) => x.date === date);
-  return Boolean(e && e.status !== 'skip' && e.value === 0 && e.notes);
+/** Same stated-lapse rule as the personal suite. */
+function statedLapses() {
+  return FIXTURE
+    .filter((h) => h.type === 'boolean')
+    .flatMap((h) => h.entries.filter((e) => e.status !== 'skip' && e.value === 0));
 }
 
 /* ---------- baseline ---------- */
@@ -145,10 +143,6 @@ await seed(alice);
 const seeded = await read(alice);
 const baselineFull = snapshot(seeded, { fields: JSON_HABIT_FIELDS });
 const baselineLoop = snapshot(seeded, { fields: LOOP_HABIT_FIELDS, notes: false });
-const baselineLoopLossy = baselineLoop.map((h) => ({
-  ...h,
-  entries: h.entries.filter((e) => !noteOnly(h.name, e)),
-}));
 
 ck('fixture seeded', baselineFull.length === FIXTURE.length,
   `${baselineFull.length} habits`);
@@ -197,11 +191,19 @@ const loopResult = await applyImport(alice, loopHabits, 'replace');
 const afterLoop = snapshot(await read(alice), { fields: LOOP_HABIT_FIELDS, notes: false });
 try { unlinkSync(loopPath); } catch { /* best effort */ }
 
+// Every entry, with no exception left: Loop's NO is a day habiterall can both
+// hold and write now, so a stated lapse survives whether or not a note came with
+// it. Notes are still outside this comparison (`notes: false`).
 ck('Loop round-trip preserves habits and entries',
-  diff(baselineLoopLossy, afterLoop) === null,
-  diff(baselineLoopLossy, afterLoop) ?? '');
+  diff(baselineLoop, afterLoop) === null,
+  diff(baselineLoop, afterLoop) ?? '');
 ck('Loop restore skipped nothing',
   loopResult.skipped.length === 0, loopResult.skipped.join('; '));
+
+const loopMeditate = afterLoop.find((h) => h.name === 'Meditate');
+ck('Loop: a stated lapse survives, with or without a note',
+  statedLapses().every((e) => loopMeditate.entries.includes(`${e.date}|0|`)),
+  loopMeditate.entries.join(' '));
 
 const loopWater = afterLoop.find((h) => h.name === 'Water');
 ck('Loop: numerical 3 stays 3, not a skip',
@@ -228,10 +230,15 @@ const csvResult = await applyImport(alice, csvHabits, 'replace');
 const afterCsv = snapshot(await read(alice), { fields: LOOP_HABIT_FIELDS, notes: false });
 
 ck('CSV round-trip preserves habits and entries',
-  diff(baselineLoopLossy, afterCsv) === null,
-  diff(baselineLoopLossy, afterCsv) ?? '');
+  diff(baselineLoop, afterCsv) === null,
+  diff(baselineLoop, afterCsv) ?? '');
 ck('CSV restore skipped nothing',
   csvResult.skipped.length === 0, csvResult.skipped.join('; '));
+
+const csvMeditate = afterCsv.find((h) => h.name === 'Meditate');
+ck('CSV: a stated lapse survives as a NO cell',
+  statedLapses().every((e) => csvMeditate.entries.includes(`${e.date}|0|`)),
+  csvMeditate.entries.join(' '));
 
 const csvWater = afterCsv.find((h) => h.name === 'Water');
 ck('CSV: a numerical 3 stays 3, not a skip',

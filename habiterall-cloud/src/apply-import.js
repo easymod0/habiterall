@@ -190,16 +190,12 @@ export async function applyImport(userId, habits, mode = 'merge') {
 
         const notes = String(e.notes ?? '').slice(0, 500);
 
-        // Boolean "not done" is the absence of a row, unless a note needs
-        // somewhere to live.
-        if (type === 'boolean' && value !== YES) {
-          if (!notes) continue;
-          await upsert(db, userId, habitId, e.date, UNSET, '', notes);
-          result.entriesImported++;
-          continue;
-        }
-
-        await upsert(db, userId, habitId, e.date, value, '', notes);
+        // A row is an answer, whatever it says — the same rule as the personal
+        // edition's writer, and the reason it changed is written there. Dropping
+        // a boolean 0 without a note turned every stated lapse in the file into a
+        // day nobody had answered.
+        const stored = type === 'boolean' && value !== YES ? UNSET : value;
+        await upsert(db, userId, habitId, e.date, stored, '', notes);
         result.entriesImported++;
       }
     }

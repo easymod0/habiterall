@@ -11,7 +11,8 @@
  *   Repetitions (id, habit, timestamp, value, notes)
  *
  *   - timestamp: epoch MILLISECONDS at UTC midnight
- *   - boolean entries: YES_MANUAL = 2, SKIP = 3 (absent = not done)
+ *   - boolean entries: NO = 0, YES_MANUAL = 2, SKIP = 3 (absent = UNKNOWN,
+ *     which is a day nobody has answered rather than a day answered "no")
  *   - numerical entries and targets: scaled by 1000
  *   - type: 0 = YES_NO, 1 = NUMERICAL;  target_type: 0 = AT_LEAST, 1 = AT_MOST
  */
@@ -21,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 const MILLIS_PER_DAY = 86_400_000;
 const LOOP_NUMERIC_SCALE = 1000;
 
+const LOOP_NO = 0;
 const LOOP_YES_MANUAL = 2;
 const LOOP_SKIP = 3;
 
@@ -96,8 +98,12 @@ export function toLoopEntry(habit, entry) {
     return scaled;
   }
 
-  // Boolean: only "done" is stored; absence means not done.
-  return Number(entry.value) === 2 ? LOOP_YES_MANUAL : null;
+  // Boolean. A row exists, so the day was answered: YES_MANUAL or Loop's own
+  // explicit NO. Only the days habiterall has no row for are left out, and Loop
+  // reads a missing day as UNKNOWN — which is what they are. Writing `null`
+  // here for a stated "no" was lossless while the two were one state; now it
+  // would quietly turn every lapse into "never answered" on the way out.
+  return Number(entry.value) === 2 ? LOOP_YES_MANUAL : LOOP_NO;
 }
 
 /**

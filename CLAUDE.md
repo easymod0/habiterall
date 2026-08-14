@@ -65,8 +65,36 @@ with Loop's SKIP sentinel and silently turn a real failure into a skip —
 bridging streaks and inflating scores. `isCompleted()` takes `{value, status}`
 for this reason.
 
-**"Not done" is the absence of a row** — except when a note is attached, which
-needs a row to live on.
+**A day has four states, and the fourth is a missing row.** `done`, `skip`, `no`
+(a row holding 0) and `unknown` (no row at all). "Not done" used to be the
+absence of a row, which made the last two one thing — and the note exception
+("except when a note is attached, which needs a row to live on") is what gave
+that away: the row was already the difference between a day the user answered and
+a day nobody has, but only a note could bring one into being. So Loop's
+`pref_unknown_enabled` — *show question marks for missing data* — had nothing to
+show, and a Loop backup's explicit `NO` rows were discarded on import because
+there was nowhere to put them.
+
+`entryWrite` therefore never deletes: `PUT {value: 0}` records a stated lapse and
+`DELETE` is how a day goes back to unknown. Two consequences to know. Nothing
+about the arithmetic moves — `isCompleted` is `false` for a 0 row and every
+caller treats a missing row as a miss, so no score, streak or resilience figure
+changes — and `PUT {value: 0}` has changed meaning for every client that used it
+to clear, which is invisible while question marks are off (a lapse and an
+unknown day paint identically) and never wrong about what it claims.
+
+**Loop's two tracking settings are `skipDays` and `questionMarks`,** both
+defaulting off as Loop's own do, and both read from Loop's source rather than
+guessed (`pref_skip_enabled`, `pref_unknown_enabled`). The tap cycle is
+`Entry.nextToggleValue` verbatim, in `shared/public/ui/toggle.js` and mirrored by
+the Kotlin `Grid.nextState` with both test suites pinned to the same examples.
+The one surprise in it is deliberate: with question marks off there is no way
+back to `unknown` from the grid, because with the setting off the two states
+paint the same and a step between them would be a tap that appears to do nothing.
+The day editor's Clear is what gets there. Every surface that can record an
+answer reads `skipDays` — both grids, both day editors, the Discord buttons
+(`reminderComponents`) and the Android notification, which reads it from a local
+mirror because an alarm fires whether or not the phone has a network.
 
 **Every date range is clamped** (`boundedRange`, `MAX_RANGE_DAYS`). Ranges
 derived from *stored* data are attacker-controlled: one entry dated year 0100
@@ -81,8 +109,20 @@ source, not guessed. A fixed 30-day half-life sat here for a while and made a
 perfect habit take four months to look strong instead of one.
 
 **Loop compatibility is exact and verified against a real backup**: timestamps
-are epoch millis at UTC midnight, `YES_AUTO(1)` counts as done, and identity is
-`(issuer, subject)`.
+are epoch millis at UTC midnight, `YES_AUTO(1)` counts as done, `NO(0)` is a
+stated lapse and keeps its row while `UNKNOWN(-1)` has none, and identity is
+`(issuer, subject)`. Both round-trip suites now assert every entry with no
+documented gap left — Loop's `.db` and the CSV pair can each carry all four
+states, so a lapse survives whether or not a note came with it.
+
+**Loop's backup carries no preferences** — they live in Android's
+SharedPreferences, not the database — so nothing from a Loop file can set one,
+and `skipDays` / `questionMarks` arrive only in habiterall's own JSON backup.
+That backup does carry settings now (it silently did not, while
+`habiterall-personal/CLAUDE.md` claimed otherwise), because two of them decide
+what the rows in the same file MEAN. A **replace** applies them and a **merge**
+does not: "make this account look like the file" versus "add these habits to what
+I have".
 
 **Only entry values scale by ×1000 — habit targets do not.** `Repetitions.value`
 of `2000` means 2, but `Habits.target_value` of `2` means 2. Scaling the target
@@ -296,6 +336,12 @@ nothing changed. They found two real bugs on their first run, both in the CSV
 path. Two offline suites (`atmost.mjs`, `rendercheck.mjs`) drive `charts.js`
 against a ~15-line fake DOM, so anything reaching for a browser API there
 crashes them outright rather than failing a check.
+
+`unknowncheck.mjs` is where a tap is followed all the way to storage: it taps a
+day and then asks the API what the row says, because the whole `questionMarks`
+distinction is between a row holding 0 and no row, and with the setting off both
+cells are the same empty square. A unit test can pin the cycle; only this can
+catch the grid and the database disagreeing about which of the two happened.
 
 `responsive.mjs` checks every major view at 360 / 390 / 768 / 1440px. It found
 the tablet bug above on its first run; most other suites only ever ran at
