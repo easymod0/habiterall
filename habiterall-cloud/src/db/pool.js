@@ -9,6 +9,7 @@
 
 import pg from 'pg';
 import { log } from '@habiterall/shared/log.js';
+import { assertConnectionString } from './url.js';
 
 const { Pool } = pg;
 
@@ -17,6 +18,10 @@ const { Pool } = pg;
 pg.types.setTypeParser(1082, (v) => v);
 // BIGINT as a Number: ids here stay far below 2^53.
 pg.types.setTypeParser(20, (v) => Number(v));
+
+// Before the pool, not on its first query — see url.js for what that
+// difference cost.
+assertConnectionString(process.env.DATABASE_URL, 'DATABASE_URL');
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,

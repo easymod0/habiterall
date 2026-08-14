@@ -16,7 +16,12 @@ Generate a distinct value for every secret:
 ```bash
 for k in DB_OWNER_PASSWORD APP_DB_PASSWORD AUTHENTIK_DB_PASSWORD \
          SESSION_SECRET AUTHENTIK_SECRET_KEY AUTHENTIK_BOOTSTRAP_TOKEN; do
-  echo "$k=$(openssl rand -base64 36 | tr -d '\n')"
+  # hex for the DB passwords: they go into a connection URL, and base64
+  # emits '/', which ends the URL's authority. The rest may be base64.
+  case "$k" in
+    *DB_PASSWORD) echo "$k=$(openssl rand -hex 32)" ;;
+    *) echo "$k=$(openssl rand -base64 36 | tr -d '\n')" ;;
+  esac
 done
 ```
 

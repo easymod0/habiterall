@@ -275,8 +275,10 @@ that looks like a proxy fault rather than a configuration one.
 Alongside it, a `.env`:
 
 ```bash
-DB_OWNER_PASSWORD=$(openssl rand -base64 36)
-APP_DB_PASSWORD=$(openssl rand -base64 36)
+# hex, not base64: these two go into a connection URL, and base64's '/' ends
+# the URL's authority — about half of generated passwords contain one.
+DB_OWNER_PASSWORD=$(openssl rand -hex 32)
+APP_DB_PASSWORD=$(openssl rand -hex 32)
 AUTHENTIK_DB_PASSWORD=$(openssl rand -base64 36)
 AUTHENTIK_SECRET_KEY=$(openssl rand -base64 60)
 AUTHENTIK_BOOTSTRAP_PASSWORD=       # the first admin's password
