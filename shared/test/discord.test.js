@@ -613,7 +613,7 @@ test('a resume the socket actually opens is the canonical URL', () => {
   gateway.stop();
 });
 
-test('the heartbeat period HELLO asks for is clamped', () => {
+test('the heartbeat period HELLO asks for is gated, not clamped', () => {
   const periods = [];
   const run = (d) => {
     const gateway = connectGateway({
@@ -738,9 +738,9 @@ test('a silent socket is noticed rather than trusted', () => {
   // acknowledging, and nothing arrives. Without the ack check the bot looks
   // connected forever.
   //
-  // The beat is driven by hand rather than waited out: the period is clamped to
-  // a floor of a second now, so a test that slept through two of them would take
-  // two seconds to say the same thing.
+  // The beat is driven by hand rather than waited out: a period under a second
+  // is rejected in favour of the 41.25s default now, so a test that slept
+  // through two of them would take a minute and a half to say the same thing.
   let beat = () => {};
   const gateway = connectGateway({
     token: 't', onInteraction: () => {}, WebSocketImpl: FakeSocket, log: quiet,

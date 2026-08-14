@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { pool, closePool, poolGauge } from './db/pool.js';
+import { LOCAL_IPS, createHealthProbe, sendHealth } from './health.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api } from './api.js';
 import { start as startNotifier } from './notifier.js';
@@ -108,15 +109,13 @@ app.use(session({
   },
 }));
 
-/* ---------- rate limits ---------- */
+/* ---------- health ---------- */
 
-/**
- * Loopback and the private ranges a container orchestrator probes from —
- * docker's bridge, a kubelet on the node, an IPv6 unique-local address.
- * Anchored and alternation-free per branch, so it cannot backtrack.
- */
-const LOCAL_IPS =
-  /^(::1|::ffff:127\.|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|f[cd]|fe80:)/i;
+// Declared up here because `healthLimiter` answers from it; the route itself
+// is down with the static files.
+const healthProbe = createHealthProbe(() => pool.query('SELECT 1'));
+
+/* ---------- rate limits ---------- */
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 20,
@@ -145,20 +144,35 @@ const notifyTestLimiter = rateLimit({
 });
 
 /**
- * `/healthz` is the only unauthenticated route that touches Postgres, which
- * makes it the cheapest way to exhaust a pool sized for the app rather than for
- * a flood: `PG_POOL_MAX` is 10 by default, and every waiting `SELECT 1` is a
- * connection a real request cannot have.
+ * `/healthz` is the only unauthenticated route that touches Postgres, but the
+ * pool is not what this limit protects — the memo in health.js is, and a per-IP
+ * limit is the wrong shape for pool exhaustion anyway, since a distributed
+ * flood pays nothing for a fresh bucket. This is the cheaper outer bound on
+ * request handling.
  *
- * `skip` is load bearing. A healthchecker reads 429 as "down" and restarts the
- * container, so the probe that this limit exists to protect must never meet it
- * — and those arrive on the container's own interface, not through the proxy.
+ * It must never answer 429, and that is the part worth writing down. `/healthz`
+ * has four callers, not two: the container healthcheck, an attacker, the PWA's
+ * connectivity probe (`isReachable` in shared/public/offline.js, on every boot
+ * and every visibilitychange) and the Android setup screen's. Both clients read
+ * anything but a 200 as "the server is unreachable" — so a rate-limited browser
+ * banners itself offline and diverts writes to the outbox while the server is
+ * perfectly healthy, and it is self-feeding, because going offline starts a
+ * backoff poll against the same bucket. Real clients arrive through the proxy,
+ * which is exactly the side of `skip` the limit applies to. So over the limit
+ * we answer from the memo instead: the same truth as a fresh probe, at no cost
+ * at all — which is also what the limit is now for, since the memo already
+ * bounds the pool. `cached()` is null only before the first request of the
+ * process has landed, and being over a limit of 60 implies 60 that were not.
+ *
+ * `skip` still matters for the other direction. A healthchecker reads 429 as
+ * "down" and restarts the container, and those probes arrive on the container's
+ * own interface rather than through the proxy.
  */
 const healthLimiter = rateLimit({
   windowMs: 60 * 1000, limit: 60,
   standardHeaders: true, legacyHeaders: false,
   skip: (req) => LOCAL_IPS.test(req.ip ?? ''),
-  message: { ok: false, error: 'rate limit exceeded' },
+  handler: async (req, res) => sendHealth(res, healthProbe.cached() ?? await healthProbe()),
 });
 
 const importLimiter = rateLimit({
@@ -220,12 +234,7 @@ app.use('/api', requireAuth, apiLimiter, api);
 /* ---------- static ---------- */
 
 app.get('/healthz', healthLimiter, async (req, res) => {
-  try {
-    await pool.query('SELECT 1');
-    res.json({ ok: true });
-  } catch {
-    res.status(503).json({ ok: false, error: 'database unavailable' });
-  }
+  sendHealth(res, await healthProbe());
 });
 
 const SHARED_PUBLIC = join(__dirname, '..', '..', 'shared', 'public');
