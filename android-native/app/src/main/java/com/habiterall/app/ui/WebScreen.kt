@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
+import org.json.JSONObject
 
 /**
  * The one WebView this app has, for as long as the activity does.
@@ -73,6 +74,15 @@ import androidx.compose.ui.zIndex
  * flash of the wrong screen that `start()` was changed to stop doing, on this
  * client's most used path in. `about:blank` buys the renderer process without
  * buying a screen nobody asked for.
+ *
+ * The third thing that follows is a bill rather than a payoff, and it is Back.
+ * `about:blank` is a real back-forward entry, so it sits underneath the habit and
+ * makes `canGoBack()` true where a per-tap WebView had nothing beneath it at all
+ * — and the page then adds an entry of its own on top, from `app.js`, after the
+ * load has committed. Both together meant the first Back press walked the page
+ * instead of leaving the screen. [WebBackStack] owns the rule and
+ * [truncateOnLoad] is how a document load gets back to the list shape that was
+ * already right: the document at 0, the page's own push above it, nothing below.
  */
 class WebHost {
 
@@ -87,9 +97,26 @@ class WebHost {
      * from a LaunchedEffect, so composition orders them correctly today. That is
      * an ordering guarantee this class does not own, though, and the failure it
      * would produce is the worst kind: [show] returning quietly, and the screen
-     * opening on nothing at all.
+     * opening on nothing at all. [warm] is covered by [view] doing it on the way
+     * out rather than by a second flag — losing that race costs no correctness,
+     * only the entire point of this class, silently.
      */
     private var pendingTarget: String? = null
+
+    /**
+     * Whether the load in flight should take the back-forward list with it.
+     *
+     * Set for a cross-document open and answered in `doUpdateVisitedHistory`,
+     * because [WebBackStack] cannot count a floor for one: the page pushes an
+     * entry of its own AFTER the document commits, so the index measured before
+     * the load is short of where Back has to stop. Truncating on commit makes the
+     * loaded entry 0 and the page's push entry 1 — which is exactly the list a
+     * per-tap WebView had, and `canGoBack()` was already right about it.
+     *
+     * Only ever true for a load this class started, so a document the user
+     * reached themselves keeps the history behind it.
+     */
+    private var truncateOnLoad = false
 
     /** True while a document is loading. Fragment changes are not one. */
     var loading by mutableStateOf(false)
@@ -139,6 +166,38 @@ class WebHost {
                     loading = false
                 }
 
+                /**
+                 * The history has changed, and this is the only callback that
+                 * says so AFTER the entry is in the list.
+                 *
+                 * That is why the truncation lives here rather than in
+                 * `onPageFinished`, and the difference was measured rather than
+                 * reasoned about. On a load that succeeds, either would do. On a
+                 * load that FAILS, the error page commits after `onPageFinished`
+                 * has already run — at which point the list still holds only
+                 * `about:blank`, so there is nothing to truncate, and the entry
+                 * then arrives above a floor of 0 with `about:blank` reachable
+                 * underneath it. Back walked to a blank screen instead of closing,
+                 * which is the same bug in the same place for a second reason.
+                 *
+                 * A same-document push reaches here too — the page's own
+                 * `routes.go()` is one — so the flag is what keeps this to the
+                 * load it was armed for.
+                 */
+                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    if (!truncateOnLoad) return
+                    truncateOnLoad = false
+                    // Everything under this entry — the warm-up's about:blank, and
+                    // whatever an earlier visit left — is not somewhere Back
+                    // should be able to reach, and leaving it there is what made
+                    // the first Back press walk off the screen instead of closing
+                    // it. clearHistory keeps the entry showing and drops the rest,
+                    // so the floor is 0 and the entry `app.js` pushes for its own
+                    // route lands above it, still walkable.
+                    view?.clearHistory()
+                    floor = 0
+                }
+
                 override fun onReceivedError(
                     view: WebView?,
                     request: WebResourceRequest?,
@@ -148,16 +207,20 @@ class WebHost {
                     // full-screen error.
                     if (request?.isForMainFrame == true) {
                         loading = false
+                        // `truncateOnLoad` is deliberately NOT cleared: an error
+                        // page is still an entry, it still commits, and a screen
+                        // showing one still has to be closeable.
                         failure = "Could not load ${request.url}"
                     }
                 }
             }
         }
         webView = created
-        pendingTarget?.let { target ->
-            pendingTarget = null
-            show(target)
-        }
+        // Whichever of the two got here first. Warming is what happens when the
+        // WebView is built before anything wants it, which is the ordinary case.
+        val target = pendingTarget
+        pendingTarget = null
+        if (target != null) show(target) else warm()
         return created
     }
 
@@ -180,12 +243,50 @@ class WebHost {
         val view = webView ?: run { pendingTarget = target; return }
         warmed = true
 
-        val navigated = currentUrl != target
-        floor = WebBackStack.floorAfterShow(view.copyBackForwardList().currentIndex, navigated)
+        val current = currentUrl
+        // A failed load leaves the WebView sitting on the URL it could not reach,
+        // so "already showing this" would decline to retry it: reopening the
+        // habit showed the same error again with nothing having been attempted,
+        // and only Reload got out of it. A retry is also a document load whatever
+        // the URLs say — the fragment of an error page is not a route.
+        val retry = failure != null
+        val navigate = retry || current != target
+        val sameDocument = !retry && WebBackStack.isSameDocument(current, target)
+        val replaces = !retry && WebBackStack.replacesEntry(current, target)
+
+        truncateOnLoad = navigate && !sameDocument
+        floor = WebBackStack.floorAfterShow(
+            indexBeforeLoad = view.copyBackForwardList().currentIndex,
+            // A cross-document open gets its floor from doUpdateVisitedHistory
+            // instead; until then this leaves it where it is, so Back during the
+            // load closes the screen rather than walking somewhere behind it. A
+            // replacing open adds nothing to stop at either.
+            pushedOneEntry = navigate && sameDocument && !replaces,
+        )
         // Reopening the habit already loaded is the case this skips, and it is
         // not rare: open a habit, Back to the list, open it again. loadUrl would
         // re-run the route for a document that is already showing the answer.
-        if (navigated) view.loadUrl(target)
+        if (!navigate) return
+        failure = null
+
+        if (!replaces) {
+            view.loadUrl(target)
+            return
+        }
+        // Habit over habit, and the only place this class speaks JavaScript.
+        //
+        // `loadUrl` of a fragment PUSHES, and an entry per habit tapped is what
+        // left the page's own "← Back" walking to the habit viewed before this
+        // one instead of to the dashboard — see [WebBackStack.replacesEntry].
+        // There is no replacing form of loadUrl, so this is `location.replace`,
+        // which is a same-document fragment navigation like the one it stands in
+        // for: same hashchange, same cost, one fewer entry.
+        //
+        // Not a bridge, and the distinction is the one the class note draws: this
+        // hands the page a URL, it does not hand it anything of the app's. The
+        // target is quoted rather than interpolated because `habitRoute` says not
+        // every base it is given came from `ServerUrl.parse`.
+        view.evaluateJavascript("location.replace(${JSONObject.quote(target)})", null)
     }
 
     /** Back: walk the page while there is page to walk, then close the screen. */
@@ -201,6 +302,27 @@ class WebHost {
 
     fun reload() {
         webView?.reload()
+    }
+
+    /**
+     * Stop the page while the app is not on screen, and start it again after.
+     *
+     * A WebView that outlives the screen also outlives the app being looked at,
+     * and nothing else stops its JavaScript — destroying it on the way out used
+     * to. The page has a reason to keep running, too: `connectivity.js` re-probes
+     * with a backoff while it believes the server is unreachable, so a phone put
+     * in a pocket after a check-off in a dead spot would go on asking. `onPause`
+     * is the per-WebView half and `pauseTimers` the process-wide one, which is
+     * only safe to call because this is the single WebView the app has.
+     */
+    fun pause() {
+        webView?.onPause()
+        webView?.pauseTimers()
+    }
+
+    fun resume() {
+        webView?.resumeTimers()
+        webView?.onResume()
     }
 
     /**
@@ -239,6 +361,17 @@ class WebHost {
  * it, and `clearAndSetSemantics` so a screen reader does not walk a page nobody
  * can see. The WebView itself goes INVISIBLE, which is what stops it taking
  * touches while keeping the width its layout depends on.
+ *
+ * None of those four is hit testing, and the top bar looks like it should be a
+ * problem: `alpha` does not stop a tap arriving, and the bar's Back and Reload
+ * are Compose rather than View, so unlike the WebView they stay live while
+ * hidden. They are unreachable anyway, and the reason is worth writing down
+ * because the blocker Box in MainActivity exists for the same hazard in the
+ * other direction. Compose hit-tests through anything that does not consume, and
+ * the habit list's own `Text("Today")` does not — but the `TopAppBar` holding it
+ * is a Material `Surface`, which does. So the list's bar covers this one for the
+ * whole width of the screen. Measured on a device rather than assumed: three
+ * taps on the list's title, and the page behind had not moved.
  *
  * What it deliberately does NOT do:
  *   - no JavaScript bridge. The page talks to the same REST API over the same
