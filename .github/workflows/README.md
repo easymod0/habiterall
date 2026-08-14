@@ -13,7 +13,7 @@ uploads, work with no setup at all.
 |---|---|---|---|
 | `ci.yml` | every PR, and nightly at 05:17 UTC | nothing | **nothing** |
 | `android-native.yml` | every PR (it builds only if the client can be affected), and nightly at 06:17 UTC | nothing | **nothing** |
-| `codeql.yml` | every PR, every push to `master`, and weekly at 06:47 UTC Monday | code scanning alerts | **default setup must stay off** |
+| `codeql.yml` | every PR and every push to `master` (each language only if it can be affected), and weekly at 06:47 UTC Monday | code scanning alerts | **default setup must stay off** |
 | `release.yml` | **a `vX.Y.Z` tag**, or manual | the APK, images, a GitHub release | signing, and only for a publishing run |
 
 ### Releasing
@@ -72,12 +72,16 @@ validate the build.
 
 | A pull request touching | runs |
 |---|---|
-| documentation or workflow config only | nothing but the two change detectors (~5s) |
+| documentation only | nothing but the three change detectors (~5s) |
+| workflow configuration only | the detectors, and `Analyze (actions)` |
 | any code, anywhere | the whole of `ci.yml` |
 | `android-native/**`, or a shared file the Kotlin client mirrors | the Android workflow as well |
-| — anything at all | `codeql.yml`, ungated, all three languages |
-| — a merge to `master` | `codeql.yml` only |
+| a `.js` / `.ts` file, or `package.json` | `Analyze (javascript-typescript)` |
+| `android-native/**` | `Analyze (java-kotlin)` — a full client build |
+| `.github/workflows/*.yml` | `Analyze (actions)` |
+| — a merge to `master` | the same three, gated the same way |
 | — the nightly schedule | everything in both workflows, unconditionally |
+| — the weekly schedule | all three CodeQL languages, unconditionally |
 
 Four deliberate choices in there.
 
@@ -349,6 +353,48 @@ Unlike `ci.yml` and `android-native.yml`, this one **does** run on a push to
 branch as the source of truth: a pull request run annotates that pull request,
 but only a default-branch run updates the Security tab. Drop the trigger and the
 alert list silently freezes at whatever master last said.
+
+### What CodeQL analyses, and when it does not
+
+Each language is gated separately by a `CodeQL — what changed` detector, on the
+same job-level `if:` as everywhere else here — a workflow-level `paths:` filter
+reports no status at all, and these checks should stay requirable.
+
+| Changed | Analyses |
+|---|---|
+| a `.js` / `.mjs` / `.ts` file anywhere, or `package.json` | `javascript-typescript` |
+| anything under `android-native/` | `java-kotlin` |
+| `.github/workflows/*.yml`, or a composite action | `actions` |
+| `codeql.yml` itself | all three |
+| documentation only | none |
+
+Three of those lines are less obvious than they look.
+
+**The split is by extension, not by directory** — a fourth workspace would
+otherwise go unscanned until somebody remembered to add it to a path list, and
+nothing would say so.
+
+**The Actions rule is `.github/workflows/*.yml`, not `.github/`.** The README you
+are reading sits in that directory, and a change to it should analyse nothing. A
+`^\.github/` rule re-runs the job for its own documentation, which is the case
+that prompted the gating.
+
+**The Kotlin rule is the whole of `android-native/`, deliberately coarse.** The
+manifest decides which components are exported and the Gradle files decide what
+is on the classpath, so both change what the Android queries find. Being wrong in
+this direction costs one build; being wrong in the other loses a finding in
+silence. Note it is **not** the shared-JS list `android-native.yml` keeps: that
+workflow tests behavioural *mirroring*, so `ui/time.js` reaching `ReminderTime.kt`
+matters to it, while this one only reads Kotlin.
+
+**What makes gating safe is the weekly run.** A skipped language is not an
+unscanned one — alerts are only ever closed by an analysis that runs and does not
+find them, never by one that did not run, so the existing results simply stand
+until the next analysis. And the case gating cannot cover is the case no
+push-triggered run covers either: CodeQL's queries move without any commit here,
+so Monday's sweep is what finds tomorrow's rule in code that has not changed
+since. Same argument as `ci.yml`'s nightly, one rung slower because query packs
+change over weeks rather than days.
 
 The `Analyze` jobs are **not** required checks. A finding is a judgement call —
 several of the open alerts are false positives that no fix would clear — so a
