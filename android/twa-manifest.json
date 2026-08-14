@@ -6,8 +6,8 @@
     "control is the convention (e.g. com.yourname.habiterall).",
     "host is overwritten by the release workflow from the TWA_HOST variable."
   ],
-  "packageId": "com.example.habiterall",
-  "host": "habits.example.com",
+  "packageId": "ca.jesp.habiterall",
+  "host": "habits.jesp.ca",
   "name": "habiterall",
   "launcherName": "habiterall",
   "display": "standalone",
@@ -20,8 +20,8 @@
   "backgroundColor": "#0f1216",
   "enableNotifications": false,
   "startUrl": "/",
-  "iconUrl": "https://habits.example.com/shared/icons/icon-512.png",
-  "maskableIconUrl": "https://habits.example.com/shared/icons/icon-maskable-512.png",
+  "iconUrl": "https://habits.jesp.ca/shared/icons/icon-512.png",
+  "maskableIconUrl": "https://habits.jesp.ca/shared/icons/icon-maskable-512.png",
   "splashScreenFadeOutDuration": 300,
   "signingKey": {
     "path": "./android.keystore",
@@ -34,7 +34,7 @@
       "name": "New habit",
       "shortName": "New",
       "url": "/?action=new",
-      "chosenIconUrl": "https://habits.example.com/shared/icons/icon-192.png"
+      "chosenIconUrl": "https://habits.jesp.ca/shared/icons/icon-192.png"
     }
   ],
   "generatorApp": "bubblewrap-cli",

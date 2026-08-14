@@ -7,6 +7,27 @@ It ships the *same* code as the web app — there is no second implementation of
 the scoring maths or the charts to drift out of sync — and works against
 either edition, because their APIs are identical.
 
+## Which Android client to use
+
+There are two, and today the edition decides for you:
+
+| | use |
+|---|---|
+| **Cloud edition** | **this TWA.** It shares Chrome's cookie jar, so the existing OIDC sign-in works untouched. The native client has no OIDC flow and cannot sign in at all. |
+| **Personal edition** | **the [native client](../android-native/README.md).** Notification actions, reminders that fire offline, and a plain-http LAN address — none of which a TWA can do. |
+
+That split is about **authentication, not preference**, and it is expected to
+change: once the native client can sign in to cloud (OAuth2 + PKCE via
+AppAuth — see its roadmap), it becomes the better answer for both editions and
+this wrapper's remaining reason to exist is "the full web UI as a standalone
+app". The table above is the thing to revisit then.
+
+Worth knowing before you invest an evening in it: a TWA needs **real HTTPS**.
+Without a certificate the URL bar stays, and — more importantly — a service
+worker will not register outside a secure context, so over a plain-http LAN
+address there is no offline queue and the app is useless the moment the server
+is unreachable. The native client has neither constraint.
+
 ## Status
 
 Ready to build. Everything on the web side is done and verified:

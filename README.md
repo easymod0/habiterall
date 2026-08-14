@@ -542,8 +542,13 @@ Three options, in increasing order of effort:
 | | What you get | Needs |
 |---|---|---|
 | **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
-| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade | Download the APK from [Releases](../../releases) |
-| **[TWA wrapper](android/SETUP.md)** | The same PWA, as an installable APK | A public HTTPS host, then a workflow run |
+| **[Native app](android-native/README.md)** — *personal edition* | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline and a plain-http LAN address | Download the APK from [Releases](../../releases) |
+| **[TWA wrapper](android/SETUP.md)** — *cloud edition* | The same PWA, as an installable APK, signed in through the ordinary OIDC flow | A public HTTPS host, then a workflow run |
+
+The edition decides which of the two, and it is about **authentication rather
+than preference**: the TWA shares Chrome's cookie jar so cloud sign-in works
+untouched, while the native client has no OIDC flow yet. When it gains one it
+becomes the better answer for both, and that row is the one to revisit.
 
 The native APK is attached to every [release](../../releases). It is unsigned
 unless the repository has signing secrets configured, so Android will ask you to
