@@ -219,7 +219,7 @@ jobs:
 
           # The "Install" half is appended by the release job, not here: this
           # job runs before anything is built, so all it could do is promise
-          # assets and hope. It promised a TWA APK whether or not one existed.
+          # assets and hope.
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -234,18 +234,6 @@ jobs:
   verify:
     name: Tests
     uses: ./.github/workflows/ci.yml
-
-  # The TWA wrapper, built by the workflow that owns it. It needs a public
-  # HTTPS host serving the PWA (bubblewrap reads the live manifest), so it
-  # skips itself when TWA_HOST is unset — a repository without one simply gets
-  # no TWA asset rather than a failed release.
-  twa:
-    name: TWA APK
-    uses: ./.github/workflows/android-release.yml
-    with:
-      version: ${{ needs.version.outputs.version }}
-    needs: [version, verify]
-    secrets: inherit
 
   # -------------------------------------------------------------------- apks
   apks:
@@ -522,7 +510,7 @@ jobs:
   release:
     name: Publish the release
     runs-on: ubuntu-latest
-    needs: [version, apks, twa, images]
+    needs: [version, apks, images]
     # The one job that writes to the repository.
     permissions:
       contents: write
@@ -534,10 +522,7 @@ jobs:
       # picked up the two `<owner>~<repo>~<id>.dockerbuild` build records that
       # docker/build-push-action uploads on its own, and one of them failed to
       # extract — which failed the release over a file it has no use for.
-      #
-      # `pattern` rather than two named steps, because apk-twa only exists when
-      # TWA_HOST is set, and a named download of a missing artifact is an error.
-      - name: The APKs
+      - name: The APK
         uses: actions/download-artifact@v4
         with:
           pattern: apk-*
@@ -590,7 +575,6 @@ jobs:
                 size=$(( $(stat -c%s "$apk") / 1024 / 1024 ))
                 case "$name" in
                   *native*) what='the native client — notification actions, reminders' ;;
-                  *twa*)    what='the TWA wrapper — the PWA as an installable app' ;;
                   *)        what='' ;;
                 esac
                 echo "- \`$name\` (${size} MB) — $what"

@@ -14,7 +14,6 @@ shared/               EVERYTHING both editions have in common
   test/               unit tests + browser suites (test/browser/)
 habiterall-personal/  single user, SQLite, no auth   (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)
-android/              Trusted Web Activity wrapper for the PWA
 android-native/       native Kotlin client, for notification actions
 ```
 

@@ -757,13 +757,10 @@ Three options, in increasing order of effort:
 | | What you get | Needs |
 |---|---|---|
 | **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
-| **[Native app](android-native/README.md)** — *personal edition* | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline and a plain-http LAN address | Download the APK from [Releases](../../releases) |
-| **[TWA wrapper](android/SETUP.md)** — *cloud edition* | The same PWA, as an installable APK, signed in through the ordinary OIDC flow | A public HTTPS host, then a workflow run |
+| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline and a plain-http LAN address | Download the APK from [Releases](../../releases) |
 
-The edition decides which of the two, and it is about **authentication rather
-than preference**: the TWA shares Chrome's cookie jar so cloud sign-in works
-untouched, while the native client has no OIDC flow yet. When it gains one it
-becomes the better answer for both, and that row is the one to revisit.
+The native client talks to the **personal** edition today; signing in to cloud
+needs an OIDC flow it does not have yet.
 
 The native APK is attached to every [release](../../releases). It is unsigned
 unless the repository has signing secrets configured, so Android will ask you to
@@ -788,16 +785,7 @@ to your dashboard, and check-offs that queue until you reconnect.
 > Requires HTTPS. Browsers disable service workers (and therefore offline
 > support) on plaintext origins other than `localhost`.
 
-### The two Android apps
-
-They are different things, and which you want depends on one question: do you
-want to record a habit **without opening anything**?
-
-**[`android/`](android/SETUP.md) — Trusted Web Activity.** A thin native shell
-around the PWA. Same UI, same code, installable as an APK, and it verifies
-against your domain so no URL bar appears. Built by bubblewrap in GitHub
-Actions, so nothing needs installing locally. Choose this if you just want an
-app icon and a Play-Store-shaped package.
+### The Android app
 
 **[`android-native/`](android-native/README.md) — native Kotlin client.**
 Exists for one reason the web cannot do: a reminder notification with **Yes /
@@ -934,9 +922,9 @@ Every [release](../../releases) carries:
 
 Merging to `master` publishes nothing — it runs the tests and stops. A release is
 a decision, taken by tagging. The Android `versionCode` is derived from the
-version (`1.4.0` → `10400`), so it always increases; and signing, image pushing
-and the TWA build each skip themselves when their credentials are absent, so a
-fork can cut a release having configured nothing. Details in
+version (`1.4.0` → `10400`), so it always increases; and signing and image
+pushing each skip themselves when their credentials are absent, so a fork can
+cut a release having configured nothing. Details in
 [`.github/workflows/README.md`](.github/workflows/README.md).
 
 ---
@@ -1125,7 +1113,6 @@ shared/               everything both editions have in common
   public/             the entire UI, plus the PWA
 habiterall-personal/  single user, SQLite, no auth
 habiterall-cloud/     multi user, Postgres, OIDC
-android/              Trusted Web Activity wrapper for the PWA
 android-native/       native Kotlin client, for notification actions
 ```
 
