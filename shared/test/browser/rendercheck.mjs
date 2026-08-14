@@ -27,17 +27,14 @@ class FakeNode {
   walk(fn) { fn(this); for (const c of this.children) c.walk(fn); }
 }
 
+// Deliberately without `getComputedStyle` or a themed `documentElement`.
+// `charts.js` used to read the palette through both and write the answer into
+// the SVG, which is the staleness this fake now guards against: reintroduce
+// either and this suite crashes rather than quietly passing.
 globalThis.document = {
-  documentElement: { dataset: { theme: 'light' } },
   createElementNS: (ns, name) => new FakeNode(name),
   createElement: (name) => new FakeNode(name),
 };
-globalThis.getComputedStyle = () => ({
-  getPropertyValue: (n) => ({
-    '--text-dim': '#666e7d', '--border': '#dcdfe6',
-    '--grid-empty': '#e6e9ef', '--text': '#14181f', '--surface-2': '#eef0f4',
-  }[n] ?? '#000000'),
-});
 
 const { streakChart } = await import(sharedPublic('charts.js'));
 

@@ -2,10 +2,13 @@
  * Light/dark theme, persisted in localStorage and defaulting to the system
  * preference.
  *
- * The charts read their colours from CSS custom properties at draw time, so
- * whatever is on screen has to be redrawn after a switch. Rather than reach
- * back into the app's state, the caller supplies that as a callback — which
- * is what lets this be a standalone module.
+ * Switching it repaints everything by itself, and this module does not tell
+ * anybody it happened. That is new: the charts used to resolve their colours
+ * to literals at draw time, so a switch had to be followed by a redraw — and
+ * in the detail view a redraw is a REFETCH, which made the palette on screen
+ * depend on two network requests. They now emit `var(--…)` and `color-mix()`,
+ * which the cascade resolves live, so there is nothing left to tell anyone
+ * about. See `themed` in charts.js.
  */
 
 const STORAGE_KEY = 'habiterall-theme';
@@ -17,13 +20,9 @@ export function initTheme() {
   document.documentElement.dataset.theme = saved ?? (prefersDark ? 'dark' : 'light');
 }
 
-/**
- * Flip between light and dark and remember the choice.
- * @param {() => void} [onChange] called after the switch, to redraw charts
- */
-export function toggleTheme(onChange) {
+/** Flip between light and dark and remember the choice. */
+export function toggleTheme() {
   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   document.documentElement.dataset.theme = next;
   localStorage.setItem(STORAGE_KEY, next);
-  onChange?.();
 }

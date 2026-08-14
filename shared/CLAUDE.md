@@ -166,6 +166,22 @@ measures a real `.card` rather than hardcoding padding that can drift from the
 stylesheet. Inside a `.chart-scroll` the cap is lifted so narrow screens
 scroll instead of shrinking.
 
+**A chart names a theme colour; it never resolves one.** Every fill and stroke
+that comes from the palette is emitted as `var(--grid-empty)` and friends, and
+a partial strength as `color-mix(in srgb, <habit colour> N%, var(--grid-empty))`
+— never a value read with `getComputedStyle` at draw time. An SVG attribute
+does not follow the theme, so a resolved colour freezes the palette the chart
+was drawn under, and the only thing that can correct it is a re-render. In the
+detail view a re-render is a *refetch*: switching to dark left every unrecorded
+calendar square holding the light `#e6e9ef` — near-white against the dark card
+— for two requests, and permanently if either failed. That is also why
+`toggleTheme` no longer takes a redraw callback, and why the fake DOM in
+`test/browser/atmost.mjs` and `rendercheck.mjs` no longer stubs
+`getComputedStyle`: reach for it again and those suites crash rather than
+quietly pass. `themecheck.mjs` blocks every request the detail view could make
+*before* switching the theme, so it can only pass if the colours followed with
+no redraw at all.
+
 **`charts.js` must survive the fake DOM.** `test/browser/atmost.mjs` and
 `rendercheck.mjs` import it directly with a ~15-line stand-in for `document`
 that implements `setAttribute`/`appendChild` and nothing else. Use

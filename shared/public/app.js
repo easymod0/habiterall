@@ -30,12 +30,12 @@ function initTopBar() {
   // so returning from a detail page shows current data.
   $('#btn-home').addEventListener('click', () => emit('reload'));
 
-  $('#btn-theme').addEventListener('click', () => toggleTheme(() => {
-    // Charts read theme colours at draw time, so redraw whatever is on screen.
-    // Only the detail view draws any: the dashboard's colours come from each
-    // habit, not the theme.
-    if (state.openHabitId != null) emit('change');
-  }));
+  // Nothing follows the switch. It used to refetch and redraw the detail view,
+  // because the charts had resolved the old palette into their attributes —
+  // which made a colour change cost two requests and, when they did not land,
+  // leave the old theme's colours on screen. The charts now name the CSS
+  // variables instead, so the cascade does this.
+  $('#btn-theme').addEventListener('click', () => toggleTheme());
 }
 
 /**
