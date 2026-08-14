@@ -38,14 +38,19 @@ updates:
         patterns: ['*']
 
   # Monthly, because Android dependencies churn and the constraints here are
-  # tighter than the manifests say. AGP fixes both the Gradle version (9.3
-  # requires ≥ 9.5) and, from AGP 9, the KOTLIN one — Kotlin is built in, so
-  # the compiler plugins must name AGP's Kotlin rather than the newest
-  # published, and a runtime library compiled by a later Kotlin cannot be read
-  # at all. Dependabot knows none of that and will offer all three. Read a PR
-  # that moves AGP or Kotlin against android-native/README.md before merging
-  # it; the version numbers it proposes for the plugins are the ones to check
-  # first.
+  # tighter than the manifests say — though less tightly than this comment used
+  # to claim. AGP fixes the GRADLE version (9.3 requires ≥ 9.5) and nothing
+  # here may contradict that. It does not fix the Kotlin one: the compiler
+  # plugins select the compiler through the Build Tools API, so Dependabot
+  # bumping them is an ordinary upgrade as long as the two move together.
+  #
+  # The two that do need reading before a merge are the ones a manifest cannot
+  # express. An androidx library can raise its `minCompileSdk`, which AGP
+  # refuses as an AAR metadata mismatch naming the dependency — core-ktx 1.19.0
+  # is why `compileSdk` is 37. And a runtime library compiled by a LATER Kotlin
+  # than the plugins name cannot be read at all, which reads like a corrupt
+  # artifact rather than a version conflict. Check a gradle group PR against
+  # android-native/README.md for both.
   - package-ecosystem: gradle
     directory: /android-native
     schedule:
