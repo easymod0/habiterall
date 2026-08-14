@@ -237,6 +237,47 @@ try {
 } catch { aliceCanStillLog = false; }
 check('and alice can still use that slot herself', aliceCanStillLog);
 
+console.log('--- notify_status is isolated too ---');
+// The table that tells a user their reminders stopped arriving. It carries an
+// error string straight from Discord, so a leak here would hand one account a
+// running commentary on another's destinations.
+await withUser(alice.id, (db) => db.query(
+  `INSERT INTO notify_status (user_id, channel, ok, status, error)
+   VALUES ($1, 'discord', false, 404, 'alice private failure')`, [alice.id]));
+
+const bobSeesStatus = await withUser(bob.id, (db) =>
+  db.query('SELECT * FROM notify_status').then((r) => r.rows.length));
+check("bob cannot read alice's delivery failures", bobSeesStatus === 0,
+  `rows=${bobSeesStatus}`);
+
+// The key leads with user_id, so the squat that migration 007/008 guards
+// against cannot arise here — but a forged user_id on an INSERT must still be
+// refused by WITH CHECK, exactly as everywhere else.
+let statusForgeBlocked = false;
+try {
+  await withUser(bob.id, (db) => db.query(
+    `INSERT INTO notify_status (user_id, channel, ok) VALUES ($1, 'discord', true)`,
+    [alice.id]));
+} catch { statusForgeBlocked = true; }
+check("bob cannot write a delivery outcome into alice's account", statusForgeBlocked);
+
+// And bob keeps his own row, on the same channel, unaffected by alice's.
+let bobHasHisOwn = false;
+try {
+  await withUser(bob.id, (db) => db.query(
+    `INSERT INTO notify_status (user_id, channel, ok) VALUES ($1, 'discord', true)`,
+    [bob.id]));
+  bobHasHisOwn = true;
+} catch { bobHasHisOwn = false; }
+check('and bob has his own row for the same channel', bobHasHisOwn);
+
+// Nothing deletes one; the app role should not be able to either.
+let statusDeleteBlocked = false;
+try {
+  await withUser(alice.id, (db) => db.query(`DELETE FROM notify_status`));
+} catch { statusDeleteBlocked = true; }
+check('the app role cannot DELETE from notify_status', statusDeleteBlocked);
+
 console.log('--- attack: claim the notifier scope from a user session ---');
 const scoped = async (claimScope) => withUser(alice.id, async (db) => {
   if (claimScope) await db.query(`SELECT set_config('app.scope', 'notifier', true)`);
@@ -260,10 +301,15 @@ const scan = await withNotifierScope(async (db) => ({
   habits: (await db.query('SELECT COUNT(*)::int c FROM habits')).rows[0].c,
   entries: (await db.query('SELECT COUNT(*)::int c FROM entries')).rows[0].c,
   log: (await db.query('SELECT COUNT(*)::int c FROM notify_log')).rows[0].c,
+  // `users_notifier_scan` is FOR SELECT on `users` alone, so this must be 0 —
+  // and it is worth asking, because notify_status is the newest table the
+  // notifier writes and it carries an error string straight from Discord.
+  status: (await db.query('SELECT COUNT(*)::int c FROM notify_status')).rows[0].c,
 }));
 check('the scan can enumerate accounts (it has to)', scan.users === 2, JSON.stringify(scan));
-check('but reaches no habit, entry, or send history',
-  scan.habits === 0 && scan.entries === 0 && scan.log === 0, JSON.stringify(scan));
+check('but reaches no habit, entry, send history or delivery report',
+  scan.habits === 0 && scan.entries === 0 && scan.log === 0 && scan.status === 0,
+  JSON.stringify(scan));
 
 let scanWriteBlocked = false;
 try {

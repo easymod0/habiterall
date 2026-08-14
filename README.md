@@ -1062,7 +1062,7 @@ those imported from Loop — and "Unskip" stays available on those days.
 
 ## API
 
-19 endpoints, identical in both editions. Dates are local calendar dates
+20 endpoints, identical in both editions. Dates are local calendar dates
 (`YYYY-MM-DD`).
 
 <details>
@@ -1081,6 +1081,7 @@ those imported from Loop — and "Unskip" stays available on those days.
 | `GET` | `/overview` | Dashboard data in one call (`?days=N&end=YYYY-MM-DD`) |
 | `GET` `PUT` `DELETE` | `/settings` | User preferences |
 | `POST` | `/notify/test` | Send a test notification to each configured destination |
+| `GET` | `/notify/status` | How each destination's last reminder went |
 | `GET` | `/export`, `/export.csv`, `/export-loop.db` | Backups |
 | `POST` | `/import` | Restore — body is the raw file (`?mode=merge\|replace`) |
 

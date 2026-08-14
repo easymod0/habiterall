@@ -49,6 +49,23 @@ const q = {
     ON CONFLICT(habit_id, channel, date) DO NOTHING
   `),
   prune: db.prepare(`DELETE FROM notify_log WHERE date < ?`),
+  allStatus: db.prepare(`SELECT * FROM notify_status ORDER BY channel`),
+  upsertStatus: db.prepare(`
+    INSERT INTO notify_status (channel, ok, status, error, permanent, mode, date, at)
+    -- ISO 8601 with the Z, because the cloud edition's TIMESTAMPTZ serialises
+    -- that way and the two editions promise the same API. SQLite's bare
+    -- datetime('now') is "2026-08-14 22:45:20" — space-separated and silent
+    -- about its zone, which is the kind of drift this project has paid for
+    -- before: archived coming back as 0 here and false there.
+    VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    ON CONFLICT(channel) DO UPDATE SET ok = excluded.ok,
+                                       status = excluded.status,
+                                       error = excluded.error,
+                                       permanent = excluded.permanent,
+                                       mode = excluded.mode,
+                                       date = excluded.date,
+                                       at = excluded.at
+  `),
 };
 
 /** The stored preferences, as the plain object the shared code expects. */
@@ -103,12 +120,61 @@ export function collect(now = new Date()) {
     habits,
     doneToday,
     alreadySent: (habitId, channel) => sent.has(`${habitId}:${channel}`),
+    // Read here rather than at write time so `recordOutcome` is only called
+    // when the news is new — see `noteOutcome` in notify-send.js, which needs
+    // the stored REASON and not merely whether it worked.
+    delivered: Object.fromEntries(
+      q.allStatus.all().map((r) => [String(r.channel), {
+        ok: r.ok === 1,
+        status: r.status == null ? undefined : Number(r.status),
+        error: String(r.error ?? ''),
+        permanent: r.permanent === 1,
+      }])
+    ),
   }];
 }
 
 /** Record a delivery so it is not repeated after a restart. */
 export function mark(account, habitId, channel, date) {
   q.markSent.run(habitId, channel, date);
+}
+
+/**
+ * Remember how a destination last behaved, so the settings dialog can say so.
+ *
+ * Called only on a CHANGE of state, which is what keeps this from being a write
+ * per reminder per channel.
+ */
+export function recordOutcome(account, channel, outcome) {
+  q.upsertStatus.run(
+    channel,
+    outcome.ok ? 1 : 0,
+    outcome.status ?? null,
+    String(outcome.error ?? ''),
+    outcome.permanent ? 1 : 0,
+    String(outcome.mode ?? ''),
+    String(outcome.date ?? '')
+  );
+}
+
+/**
+ * The last outcome per destination, for `GET /api/notify/status`.
+ *
+ * Reports only on channels something has actually been attempted for. Whether a
+ * destination is *configured* is `channelConfigured`'s question and stays
+ * there — two sources of truth about one setting is how they come to disagree.
+ */
+export function deliveryStatus() {
+  return q.allStatus.all().map((r) => ({
+    channel: String(r.channel),
+    ok: r.ok === 1,
+    status: r.status ?? null,
+    error: String(r.error ?? ''),
+    permanent: r.permanent === 1,
+    mode: String(r.mode ?? ''),
+    date: String(r.date ?? ''),
+    at: String(r.at ?? ''),
+  }));
 }
 
 /* ---------- answering from a Discord button ---------- */
@@ -206,6 +272,16 @@ export async function sendTest(deps = {}) {
       deps
     );
     results.push({ channel, ok: result.ok, error: result.ok ? undefined : result.error });
+    // A test is a real delivery attempt on the same path, so it answers the
+    // same question `/notify/status` reports on. Recorded unconditionally
+    // rather than on a change of state: a press here is a deliberate act by one
+    // person, not a tick that runs every minute, and it is how a warning about
+    // a webhook the user has just replaced gets cleared without waiting for
+    // tomorrow's reminder.
+    recordOutcome({ id: null }, channel, {
+      ok: result.ok, status: result.status, error: result.error,
+      permanent: !!result.permanent, mode: result.mode, date: '',
+    });
   }
   return results;
 }
@@ -256,6 +332,7 @@ export function start(env = process.env) {
       return collect(instant);
     },
     mark,
+    recordOutcome,
   });
 
   return {

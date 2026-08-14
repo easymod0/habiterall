@@ -248,6 +248,58 @@ try {
       .every((b) => b.label !== 'Skip'),
     JSON.stringify(noSkipFetch.calls[0]?.body?.components));
 
+  /* ---------- a failure the user can see ---------- */
+  //
+  // A permanent failure is recorded as sent and logged at warn, which is right:
+  // a 404 answers 404 forever. What was wrong is that the log was the ONLY
+  // surface — and on a shared instance it is the one surface the person it
+  // concerns cannot read, while the operator has no reason to be reading one
+  // account's warnings. Per user, and scoped by RLS like everything else here.
+
+  console.log('--- a delivery failure is reported to the account it happened to ---');
+  await deliverAccount(botAccount, {
+    instant: new Date(Date.UTC(yy, mm - 1, dd, 8, 0)),
+    mark: async () => {},
+    recordOutcome: notifier.recordOutcome,
+    fetch: fakeFetch(404),
+    botToken: 'test-bot-token',
+    log: { warn: () => {}, debug: () => {} },
+  });
+
+  const reported = await notifier.deliveryStatus(wired);
+  check('a permanent failure is stored against the account',
+    reported[0]?.channel === 'discord' && reported[0]?.ok === false
+      && reported[0]?.permanent === true,
+    JSON.stringify(reported));
+  check('carrying the sender\'s own words rather than a status code',
+    /bot cannot post|invited/i.test(reported[0]?.error ?? ''), reported[0]?.error);
+
+  // The whole point of the RLS on this table: it is a report about ONE account.
+  // The traveller has a row of its own from the sends above, so the check is
+  // that it holds the traveller's own outcome and nothing of the failure that
+  // just happened to somebody else.
+  const otherSees = await notifier.deliveryStatus(traveller);
+  check('and another account is told about its own deliveries, not this one\'s',
+    otherSees.every((s) => s.ok === true && !/bot cannot post/i.test(s.error ?? '')),
+    JSON.stringify(otherSees));
+
+  // A success clears it, which is what makes the settings dialog's notice go
+  // away without the user having to do anything.
+  await deliverAccount(
+    { ...botAccount, delivered: { discord: false } },
+    {
+      instant: new Date(Date.UTC(yy, mm - 1, dd, 8, 0)),
+      mark: async () => {},
+      recordOutcome: notifier.recordOutcome,
+      fetch: fakeFetch(),
+      botToken: 'test-bot-token',
+      log: { warn: () => {}, debug: () => {} },
+    }
+  );
+  const afterFix = await notifier.deliveryStatus(wired);
+  check('a success clears the failure', afterFix[0]?.ok === true,
+    JSON.stringify(afterFix));
+
   /* ---------- answering from a button ---------- */
 
   console.log('--- a click writes to the right account ---');
@@ -277,8 +329,8 @@ try {
   // account is looked up inside the resolved account, so it simply is not there.
   const crossUser = await press(OTHER_CHANNEL, `hab|${wiredHabit}|${day}|yes`);
   check('a habit id from another account cannot be written through a channel',
-    /no longer exists/i.test(crossUser[0]?.data?.content ?? ''),
-    JSON.stringify(crossUser[0]));
+    /no longer exists/i.test(crossUser.at(-1)?.data?.content ?? ''),
+    JSON.stringify(crossUser.at(-1)));
   const stillOne = await withUser(traveller, (db) =>
     db.query(`SELECT COUNT(*)::int c FROM entries WHERE habit_id = $1`, [wiredHabit])
       .then((r) => r.rows[0].c));
@@ -286,7 +338,7 @@ try {
 
   const unknown = await press('999999999999999999', `hab|${wiredHabit}|${day}|yes`);
   check('a channel no account claims is refused',
-    unknown[0]?.data?.flags === 64, JSON.stringify(unknown[0]));
+    unknown.at(-1)?.data?.flags === 64, JSON.stringify(unknown.at(-1)));
 
   // A user id set on the account narrows who may answer.
   await admin.query(
@@ -295,7 +347,7 @@ try {
   );
   const impostor = await press(BOT_CHANNEL, `hab|${wiredHabit}|${day}|skip`);
   check('with a Discord user set, someone else\'s click is refused',
-    /not your habits/i.test(impostor[0]?.data?.content ?? ''), JSON.stringify(impostor[0]));
+    /not your habits/i.test(impostor.at(-1)?.data?.content ?? ''), JSON.stringify(impostor.at(-1)));
   const unchanged = await withUser(wired, (db) =>
     db.query(`SELECT status FROM entries WHERE habit_id = $1 AND date = $2`, [wiredHabit, day])
       .then((r) => r.rows[0]?.status));

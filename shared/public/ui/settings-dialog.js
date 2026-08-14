@@ -75,6 +75,17 @@ function renderSettingsBody() {
     heading.textContent = section;
     group.append(heading);
 
+    // Above the controls, not below them: this is the answer to "why am I not
+    // getting my reminders?", which is the question that brought the user here.
+    // Read from the DRAFT, so switching a destination off makes its warning go
+    // away immediately rather than after a save and a refetch.
+    for (const problem of settings.SECTION_NOTICES[section]?.(draft) ?? []) {
+      const notice = document.createElement('p');
+      notice.className = 'hint setting-help setting-problem';
+      notice.textContent = problem;
+      group.append(notice);
+    }
+
     for (const [key, def] of Object.entries(settings.SETTINGS)) {
       if ((def.section ?? 'General') !== section) continue;
       // A control whose prerequisite is off is left out entirely rather than
@@ -187,6 +198,10 @@ function renderSettingsBody() {
         } finally {
           button.disabled = false;
           refreshFooter();
+          // A test is a real delivery attempt, so it is also the answer to
+          // "is it fixed yet?" — this is what clears the notice above once a
+          // replacement webhook works, rather than waiting for tomorrow.
+          refreshDeliveryNotices();
         }
       });
       actionButtons.push(button);
@@ -270,6 +285,36 @@ export function openSettings() {
   pendingReset = false;
   renderSettingsBody();
   dialog.showModal();
+
+  refreshDeliveryNotices();
+}
+
+/**
+ * Ask how the last reminder went, and redraw if the answer has anything to say.
+ *
+ * Not awaited by `openSettings`: the dialog opens now and the notice appears a
+ * moment later. Waiting on a request first would make every open feel slow to
+ * spare the one that has something to report — and offline it would never open.
+ *
+ * The redraw is conditional for the reason `stage` rebuilds sparingly: rebuilding
+ * the body tears every control out and takes a text field's focus with it, so a
+ * late answer must not do that to someone already typing. A clean draft means
+ * nobody has started.
+ */
+function refreshDeliveryNotices() {
+  // Every section's notices, not just the one that has any today: the body is
+  // rendered from the whole registry, so reading a single key here would leave
+  // a second entry drawn on open and never redrawn when its answer landed.
+  const snapshot = () => JSON.stringify(
+    Object.values(settings.SECTION_NOTICES).map((notices) => notices(draft))
+  );
+
+  const before = snapshot();
+  settings.refreshDelivery().then(() => {
+    if (!dialog.open || isDirty()) return;
+    if (snapshot() === before) return;
+    renderSettingsBody();
+  });
 }
 
 /**

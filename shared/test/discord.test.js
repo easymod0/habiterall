@@ -7,7 +7,7 @@ const {
 
 const {
   CALLBACK, INTERACTION, MAX_ANSWER_AGE_DAYS, amountModal, answeredUpdate,
-  discordRequest, ephemeral, handleInteraction, postReminder,
+  discordRequest, ephemeral, handleInteraction, postReminder, respondInteraction,
 } = await import('../src/discord.js');
 
 const { FATAL_CLOSE_CODES, OP, connectGateway } =
@@ -222,6 +222,41 @@ test('a default label is offered when the habit has no prompt', () => {
   assert.match(modal.data.components[0].components[0].label, /how many km/i);
 });
 
+test('the first answer takes the callback, and the rest take the webhook', async () => {
+  const interaction = { id: 'i1', token: 'tok', application_id: 'app1' };
+
+  // Unacknowledged: the three-second callback, carrying the whole response.
+  const first = fakeFetch();
+  await respondInteraction(interaction, { type: CALLBACK.DEFER_UPDATE }, { fetch: first });
+  assert.equal(first.calls[0].url,
+    'https://discord.com/api/v10/interactions/i1/tok/callback');
+  assert.deepEqual(first.calls[0].body, { type: CALLBACK.DEFER_UPDATE });
+  assert.equal(first.calls[0].init.method, 'POST');
+  // The interaction token is its own credential; a bot token here would be a
+  // second one to leak.
+  assert.equal(first.calls[0].headers.Authorization, undefined);
+
+  // Acknowledged, editing: the callback is spent, so this PATCHes the message
+  // the button was on. `application_id` rides on the interaction, so finding
+  // out who we are costs no extra call.
+  const edit = fakeFetch();
+  const update = answeredUpdate({ embeds: [{ title: 't' }] }, 'Done');
+  await respondInteraction(interaction, update, { fetch: edit, acknowledged: true });
+  assert.equal(edit.calls[0].url,
+    'https://discord.com/api/v10/webhooks/app1/tok/messages/@original');
+  assert.equal(edit.calls[0].init.method, 'PATCH');
+  assert.deepEqual(edit.calls[0].body, update.data,
+    'the webhook takes the data, not the {type, data} envelope');
+
+  // Acknowledged, replying: a private note is a new follow-up message.
+  const note = fakeFetch();
+  await respondInteraction(interaction, ephemeral('nope'),
+    { fetch: note, acknowledged: true });
+  assert.equal(note.calls[0].url, 'https://discord.com/api/v10/webhooks/app1/tok');
+  assert.equal(note.calls[0].init.method, 'POST');
+  assert.equal(note.calls[0].body.flags, 64, 'still only the clicker sees it');
+});
+
 /* ---------- handling a click ---------- */
 
 const TODAY = '2026-08-13';
@@ -230,6 +265,10 @@ const TODAY = '2026-08-13';
 function adapter(over = {}) {
   const recorded = [];
   const sent = [];
+  // Whether each response was sent as a first answer or as a follow-up, which
+  // is the difference between the three-second callback and the fifteen-minute
+  // webhook.
+  const after = [];
   const base = {
     resolveChannel: async () => ({
       id: 42,
@@ -241,15 +280,27 @@ function adapter(over = {}) {
       recorded.push(args);
       return { ok: true, habit: habit(), text: answerText(habit(), args) };
     },
-    respond: async (interaction, response) => { sent.push(response); },
+    respond: async (interaction, response, opts = {}) => {
+      sent.push(response);
+      after.push(!!opts.acknowledged);
+    },
     log: { warn: () => {}, error: () => {} },
   };
-  return { ...base, ...over, recorded, sent };
+  return { ...base, ...over, recorded, sent, after };
 }
+
+/**
+ * The answers, as opposed to the acknowledgement that now precedes them.
+ *
+ * Every path that touches storage defers first, so `sent[0]` is the defer and
+ * the thing under test is what came after it.
+ */
+const answers = (a) => a.sent.filter((r) => r.type !== CALLBACK.DEFER_UPDATE);
 
 const click = (over = {}) => ({
   id: 'i1',
   token: 'tok',
+  application_id: 'app1',
   type: INTERACTION.COMPONENT,
   channel_id: '123456789012345678',
   member: { user: { id: '999999999999999999' } },
@@ -263,8 +314,59 @@ test('a click records the entry and updates the message', async () => {
   await handleInteraction(click(), a);
 
   assert.deepEqual(a.recorded, [{ habitId: 7, date: TODAY, action: 'yes', value: undefined }]);
-  assert.equal(a.sent[0].type, CALLBACK.UPDATE_MESSAGE);
-  assert.deepEqual(a.sent[0].data.embeds[0].fields, [{ name: 'Recorded', value: 'Done' }]);
+  assert.equal(answers(a)[0].type, CALLBACK.UPDATE_MESSAGE);
+  assert.deepEqual(answers(a)[0].data.embeds[0].fields, [{ name: 'Recorded', value: 'Done' }]);
+});
+
+test('a press is acknowledged BEFORE any storage is touched', async () => {
+  // Discord allows three seconds. The work is up to three round trips through
+  // the database, so on a cold pool the press was recorded and the user was
+  // told "This interaction failed" — the message saying the opposite of what
+  // happened. What stops it is answering first and editing afterwards, and the
+  // only way to see the order is from the adapter's side.
+  const order = [];
+  const a = adapter({
+    resolveChannel: async () => {
+      order.push('resolveChannel');
+      return { id: 42, settings: { notifyTimezone: 'UTC' } };
+    },
+    today: async () => { order.push('today'); return TODAY; },
+    record: async (_account, args) => {
+      order.push('record');
+      return { ok: true, habit: habit(), text: answerText(habit(), args) };
+    },
+    respond: async (_i, response, opts = {}) => {
+      order.push(response.type === CALLBACK.DEFER_UPDATE
+        ? 'defer' : `respond:${opts.acknowledged ? 'webhook' : 'callback'}`);
+    },
+  });
+
+  await handleInteraction(click(), a);
+
+  assert.deepEqual(order, [
+    'defer', 'resolveChannel', 'today', 'record', 'respond:webhook',
+  ], 'the acknowledgement must come first, and the answer must follow it');
+});
+
+test('a deferred answer edits the reminder; an undeferred one uses the callback', async () => {
+  const a = adapter();
+  await handleInteraction(click(), a);
+
+  assert.deepEqual(a.sent.map((r) => r.type),
+    [CALLBACK.DEFER_UPDATE, CALLBACK.UPDATE_MESSAGE]);
+  assert.deepEqual(a.after, [false, true],
+    'the defer spends the callback; everything after it goes to the webhook');
+
+  // The two paths that must NOT defer: a modal has to be opened inside the
+  // three seconds, and the test button touches no storage at all.
+  const modal = adapter();
+  await handleInteraction(click({ data: { custom_id: `hab|7|${TODAY}|amount` } }), modal);
+  assert.deepEqual(modal.sent.map((r) => r.type), [CALLBACK.MODAL]);
+  assert.deepEqual(modal.after, [false]);
+
+  const tested = adapter({ record: async () => { throw new Error('must not be called'); } });
+  await handleInteraction(click({ data: { custom_id: 'test|yes' } }), tested);
+  assert.deepEqual(tested.after, [false]);
 });
 
 test('another application\'s component is ignored entirely', async () => {
@@ -288,7 +390,7 @@ test('a test button records nothing and says so', async () => {
   const a = adapter({ record: async () => { throw new Error('must not be called'); } });
   await handleInteraction(click({ data: { custom_id: 'test|yes' } }), a);
 
-  assert.match(a.sent[0].data.embeds[0].fields[0].value, /test message/i);
+  assert.match(answers(a)[0].data.embeds[0].fields[0].value, /test message/i);
   assert.deepEqual(a.recorded, []);
 });
 
@@ -296,8 +398,8 @@ test('a channel nobody owns gets a private note, not a write', async () => {
   const a = adapter({ resolveChannel: async () => null });
   await handleInteraction(click(), a);
 
-  assert.equal(a.sent[0].type, CALLBACK.MESSAGE);
-  assert.match(a.sent[0].data.content, /not linked/i);
+  assert.equal(answers(a)[0].type, CALLBACK.MESSAGE);
+  assert.match(answers(a)[0].data.content, /not linked/i);
   assert.deepEqual(a.recorded, []);
 });
 
@@ -310,7 +412,7 @@ test('with a Discord user set, only that user\'s clicks count', async () => {
   });
 
   await handleInteraction(click(), locked);
-  assert.match(locked.sent[0].data.content, /not your habits/i);
+  assert.match(answers(locked)[0].data.content, /not your habits/i);
   assert.deepEqual(locked.recorded, []);
 
   // The owner's own click goes through.
@@ -342,7 +444,7 @@ test('a stale reminder cannot rewrite history', async () => {
     .toISOString().slice(0, 10);
 
   await handleInteraction(click({ data: { custom_id: `hab|7|${old}|yes` } }), a);
-  assert.match(a.sent[0].data.content, /days old/);
+  assert.match(answers(a)[0].data.content, /days old/);
   assert.deepEqual(a.recorded, []);
 });
 
@@ -357,7 +459,7 @@ test('yesterday\'s reminder can still be answered', async () => {
 test('a future date is refused', async () => {
   const a = adapter();
   await handleInteraction(click({ data: { custom_id: 'hab|7|2027-01-01|yes' } }), a);
-  assert.match(a.sent[0].data.content, /future/i);
+  assert.match(answers(a)[0].data.content, /future/i);
   assert.deepEqual(a.recorded, []);
 });
 
@@ -365,8 +467,8 @@ test('the amount button opens a box rather than recording', async () => {
   const a = adapter();
   await handleInteraction(click({ data: { custom_id: `hab|7|${TODAY}|amount` } }), a);
 
-  assert.equal(a.sent[0].type, CALLBACK.MODAL);
-  assert.equal(a.sent[0].data.custom_id, `hab|7|${TODAY}|amount`);
+  assert.equal(answers(a)[0].type, CALLBACK.MODAL);
+  assert.equal(answers(a)[0].data.custom_id, `hab|7|${TODAY}|amount`);
   assert.deepEqual(a.recorded, []);
 });
 
@@ -382,7 +484,7 @@ test('the box\'s value is recorded', async () => {
   }, a);
 
   assert.deepEqual(a.recorded, [{ habitId: 7, date: TODAY, action: 'amount', value: 6 }]);
-  assert.equal(a.sent[0].type, CALLBACK.UPDATE_MESSAGE);
+  assert.equal(answers(a)[0].type, CALLBACK.UPDATE_MESSAGE);
 });
 
 test('a decimal comma is accepted, and nonsense is not', async () => {
@@ -404,8 +506,8 @@ test('a decimal comma is accepted, and nonsense is not', async () => {
     await handleInteraction(submit(value), bad);
   }
   assert.deepEqual(bad.recorded, []);
-  assert.equal(bad.sent.length, 4);
-  for (const response of bad.sent) {
+  assert.equal(answers(bad).length, 4);
+  for (const response of answers(bad)) {
     assert.equal(response.type, CALLBACK.MESSAGE, 'a bad amount is a private note');
   }
 });
@@ -415,16 +517,18 @@ test('a habit that no longer exists is reported, not written', async () => {
     record: async () => ({ ok: false, error: 'That habit no longer exists.' }),
   });
   await handleInteraction(click(), a);
-  assert.match(a.sent[0].data.content, /no longer exists/);
+  assert.match(answers(a)[0].data.content, /no longer exists/);
 });
 
 test('a storage failure does not leave the click unanswered', async () => {
   // An interaction must be answered within three seconds or Discord shows
   // "This interaction failed" — so even a thrown error has to produce a reply.
+  // The defer is that answer now, and the note explaining the failure follows
+  // it on the same token.
   const a = adapter({ record: async () => { throw new Error('database gone'); } });
   await handleInteraction(click(), a);
-  assert.equal(a.sent.length, 1);
-  assert.match(a.sent[0].data.content, /went wrong/i);
+  assert.equal(answers(a).length, 1);
+  assert.match(answers(a)[0].data.content, /went wrong/i);
 });
 
 test('a private note is only visible to the person who clicked', () => {

@@ -108,6 +108,107 @@ ck('another user cannot read them',
   bobSettings.length === 1 && !JSON.stringify(bobSettings).includes('newest-left'),
   JSON.stringify(bobSettings));
 
+/* ---------- what /overview means by `end` ---------- */
+
+console.log('--- overview ---');
+// The one place this suite goes through the router rather than the data layer,
+// because the bug was in the route: `end` decided both the grid window and the
+// date the row summary was computed as of, so paging the dashboard back a month
+// restated "43%" and a streak of 0 as if they were today's. The grid must still
+// follow `end` — that is what the parameter is for — while strength and the
+// streaks stay anchored on today. Mirrors habiterall-personal's
+// test/overview.integration.mjs; the two editions promise the same API.
+const express = (await import('express')).default;
+const { api } = await import('../src/api.js');
+
+const overviewApp = express();
+// Enough of a session for `uid(req)`. The OIDC flow is browser-tested; what is
+// under test here is arithmetic behind the route.
+overviewApp.use((req, _res, next) => { req.session = { user: { id: alice } }; next(); });
+overviewApp.use('/api', api);
+const overviewServer = await new Promise((resolve) => {
+  const s = overviewApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const overviewBase = `http://127.0.0.1:${overviewServer.address().port}`;
+
+// `n` days ago on the LOCAL calendar, which is the calendar `today()` keeps.
+// `toISOString()` here yields tomorrow's date everywhere east of UTC, and CI
+// runs in UTC — so the obvious spelling only ever fails on somebody's laptop.
+const isoDaysAgo = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  const pad = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
+// A run of completions ending today, and nothing in the month before it.
+const RECENT_DAYS = 10;
+await withUser(alice, async (db) => {
+  for (let i = 0; i < RECENT_DAYS; i++) {
+    await db.query(
+      `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+       VALUES ($1,$2,$3,9,'','')
+       ON CONFLICT (habit_id, date) DO UPDATE SET value = excluded.value`,
+      [habitId, alice, isoDaysAgo(i)]
+    );
+  }
+});
+
+const getOverview = (params) =>
+  fetch(`${overviewBase}/api/overview?${new URLSearchParams(params)}`).then((r) => r.json());
+
+const nowView = await getOverview({ days: 7 });
+const pagedView = await getOverview({ days: 7, end: isoDaysAgo(40) });
+const rowNow = nowView.habits.find((h) => h.id === habitId);
+const rowPaged = pagedView.habits.find((h) => h.id === habitId);
+
+ck('paging back does not move the strength percentage',
+  rowPaged.score === rowNow.score, `${rowPaged.score} vs ${rowNow.score}`);
+ck('paging back does not move the current streak',
+  rowPaged.currentStreak === rowNow.currentStreak,
+  `${rowPaged.currentStreak} vs ${rowNow.currentStreak}`);
+ck('paging back does not drop a best streak set after that date',
+  rowPaged.bestStreak === rowNow.bestStreak,
+  `${rowPaged.bestStreak} vs ${rowNow.bestStreak}`);
+ck('the summary is describing the run, not an empty window',
+  rowNow.currentStreak === RECENT_DAYS, String(rowNow.currentStreak));
+ck('the grid window still follows end',
+  pagedView.end === isoDaysAgo(40) && Object.keys(rowPaged.entries).length === 0,
+  `${pagedView.end}, ${Object.keys(rowPaged.entries).length} entries`);
+ck("today's window still carries its entries",
+  Object.keys(rowNow.entries).length === 7,
+  String(Object.keys(rowNow.entries).length));
+
+// While the router is mounted, the other route added alongside it. The notify
+// suite exercises the storage behind this through `notifier.deliveryStatus`
+// directly, which would go on passing if the route itself were wired to the
+// wrong function or forgot to scope itself to the session's user.
+const { recordOutcome } = await import('../src/notifier.js');
+await recordOutcome({ id: alice }, 'discord', {
+  ok: false, status: 404, error: 'the webhook was deleted', permanent: true, date: '2026-08-15',
+});
+// Bob's own, on the same channel and with the opposite verdict, so "scoped to
+// the session" is a real question rather than one row being the only row.
+await recordOutcome({ id: bob }, 'discord', {
+  ok: true, status: 204, error: '', permanent: false, date: '2026-08-15',
+});
+
+const status = await fetch(`${overviewBase}/api/notify/status`).then((r) => r.json());
+ck('GET /notify/status reports the last delivery outcome',
+  status.channels?.[0]?.channel === 'discord' && status.channels[0].ok === false,
+  JSON.stringify(status));
+ck('and it is the session\'s own, not whoever failed last',
+  status.channels.length === 1 && status.channels[0].error === 'the webhook was deleted',
+  JSON.stringify(status));
+ck('the timestamp is ISO, as the personal edition also reports it',
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(status.channels[0].at ?? ''),
+  status.channels[0].at);
+
+overviewServer.close();
+// The rows above would otherwise be counted by the checks that follow.
+await withUser(alice, (db) =>
+  db.query(`DELETE FROM entries WHERE habit_id = $1 AND date <> '2026-01-01'`, [habitId]));
+
 /* ---------- import isolation ---------- */
 
 console.log('--- import ---');

@@ -337,6 +337,13 @@ jobs:
         working-directory: habiterall-personal
         run: node test/apishape.integration.mjs
 
+      # `/overview` answers two questions with one `end`, and they want
+      # different dates: the grid follows the window on screen, the row summary
+      # describes the habit today. Only the real route can show them apart.
+      - name: The dashboard summary is anchored on today
+        working-directory: habiterall-personal
+        run: node test/overview.integration.mjs
+
       # Server-sent reminders, against a real database. The scheduling rules
       # are unit-tested; what this covers is the watermark surviving a round
       # trip, which is the difference between one reminder and one a minute for

@@ -13,6 +13,7 @@
     "seed": "node scripts/seed.js",
     "test:roundtrip": "node test/roundtrip.integration.mjs",
     "test:apishape": "node test/apishape.integration.mjs",
+    "test:overview": "node test/overview.integration.mjs",
     "test:notify": "node test/notify.integration.mjs"
   },
   "dependencies": {

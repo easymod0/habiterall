@@ -126,6 +126,9 @@ export async function collect(instant) {
         `SELECT habit_id, channel FROM notify_log WHERE date = $1`,
         [clock.date]
       );
+      const { rows: status } = await db.query(
+        `SELECT channel, ok, status, error, permanent FROM notify_status`
+      );
 
       const already = new Set(sent.map((s) => `${s.habit_id}:${s.channel}`));
       return {
@@ -134,6 +137,15 @@ export async function collect(instant) {
         habits,
         doneToday: answeredIds(habits, entries),
         alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
+        // Read here rather than at write time so `recordOutcome` is only called
+        // when the news is new — see `noteOutcome` in notify-send.js, which
+        // needs the stored REASON and not merely whether it worked.
+        delivered: Object.fromEntries(status.map((s) => [s.channel, {
+          ok: s.ok === true,
+          status: s.status ?? undefined,
+          error: String(s.error ?? ''),
+          permanent: s.permanent === true,
+        }])),
       };
     });
 
@@ -158,6 +170,62 @@ export async function mark(account, habitId, channel, date) {
       [account.id, habitId, channel, date]
     )
   );
+}
+
+/**
+ * Remember how a destination last behaved, so the settings dialog can say so.
+ *
+ * Inside the owner's own transaction, like every other write here, so RLS
+ * applies. Called only on a CHANGE of state, which is what keeps this from
+ * being a write per reminder per channel.
+ */
+export async function recordOutcome(account, channel, outcome) {
+  await withUser(account.id, (db) =>
+    db.query(
+      `INSERT INTO notify_status
+              (user_id, channel, ok, status, error, permanent, mode, date, at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       ON CONFLICT (user_id, channel) DO UPDATE
+         SET ok = EXCLUDED.ok,
+             status = EXCLUDED.status,
+             error = EXCLUDED.error,
+             permanent = EXCLUDED.permanent,
+             mode = EXCLUDED.mode,
+             date = EXCLUDED.date,
+             at = EXCLUDED.at`,
+      [
+        account.id, channel, !!outcome.ok, outcome.status ?? null,
+        String(outcome.error ?? ''), !!outcome.permanent,
+        String(outcome.mode ?? ''), String(outcome.date ?? ''),
+      ]
+    )
+  );
+}
+
+/**
+ * The last outcome per destination, for `GET /api/notify/status`.
+ *
+ * Reports only on channels something has actually been attempted for. Whether a
+ * destination is *configured* is `channelConfigured`'s question and stays
+ * there — two sources of truth about one setting is how they come to disagree.
+ */
+export async function deliveryStatus(userId) {
+  const { rows } = await withUser(userId, (db) =>
+    db.query(
+      `SELECT channel, ok, status, error, permanent, mode, date, at
+         FROM notify_status ORDER BY channel`
+    )
+  );
+  return rows.map((r) => ({
+    channel: r.channel,
+    ok: r.ok === true,
+    status: r.status ?? null,
+    error: String(r.error ?? ''),
+    permanent: r.permanent === true,
+    mode: String(r.mode ?? ''),
+    date: String(r.date ?? ''),
+    at: r.at instanceof Date ? r.at.toISOString() : String(r.at ?? ''),
+  }));
 }
 
 /** Drop watermarks nobody will ask about again. */
@@ -304,6 +372,16 @@ export async function sendTest(userId, settings, deps = {}) {
       channel, { habit, settings, test: true, appUrl, botToken }, deps
     );
     results.push({ channel, ok: result.ok, error: result.ok ? undefined : result.error });
+    // A test is a real delivery attempt on the same path, so it answers the
+    // same question `/notify/status` reports on. Recorded unconditionally
+    // rather than on a change of state: a press here is a deliberate act by one
+    // person, not a tick that runs every minute, and it is how a warning about
+    // a webhook the user has just replaced gets cleared without waiting for
+    // tomorrow's reminder.
+    await recordOutcome({ id: userId }, channel, {
+      ok: result.ok, status: result.status, error: result.error,
+      permanent: !!result.permanent, mode: result.mode, date: '',
+    });
   }
   return results;
 }
@@ -363,6 +441,7 @@ export function start(env = process.env) {
       return accounts;
     },
     mark,
+    recordOutcome,
   });
 
   return {

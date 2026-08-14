@@ -162,6 +162,66 @@ try {
   ck('a habit already ticked off today is not nagged', fetch4.calls.length === 0,
     `posted ${fetch4.calls.length} times`);
 
+  /* ---------- a failure the user can see ---------- */
+  //
+  // The watermark above answers "has it gone yet". This answers the question
+  // the user actually asks — "why did it never arrive?" — which before had no
+  // surface at all: a deleted webhook was recorded as sent, logged at warn, and
+  // the habit, its time and the destination toggle all went on looking correct.
+
+  /** One day's delivery, collected fresh so the stored verdict is re-read. */
+  const deliverOn = async (day, status) => {
+    const instant = new Date(Date.UTC(2026, 7, day, 8, 0));
+    await deliverAccount(notifier.collect(instant)[0], {
+      instant,
+      mark: notifier.mark,
+      recordOutcome: notifier.recordOutcome,
+      fetch: fakeFetch(status),
+      log: { warn: () => {}, debug: () => {} },
+    });
+    return (await api('/api/notify/status')).body.channels
+      .find((c) => c.channel === 'discord');
+  };
+
+  // Day one: Discord is having a bad afternoon. Retryable, so the reminder is
+  // not written off — but the user is still owed an explanation.
+  const transient = await deliverOn(15, 500);
+  ck('a delivery failure is readable over the API',
+    transient?.ok === false, JSON.stringify(transient));
+  ck('a retryable one is not reported as permanent',
+    transient?.permanent === false && transient?.status === 500,
+    JSON.stringify(transient));
+  ck('dated from when it started going wrong',
+    transient?.date === '2026-08-15', transient?.date);
+
+  // REGRESSION. Day two: the webhook is deleted. Both days are `ok: false`, so
+  // a change test that looked only at THAT wrote nothing here — and the dialog
+  // went on saying "webhook returned 500" forever while the one actionable
+  // sentence Discord gave us, "create a new one", never reached the person who
+  // could act on it. Which is the same silence this feature exists to end.
+  const permanent = await deliverOn(16, 404);
+  ck('a failure that changes its REASON is written down',
+    /deleted|create a new one/i.test(permanent?.error ?? ''), permanent?.error);
+  ck('and updates whether it is worth retrying',
+    permanent?.permanent === true && permanent?.status === 404,
+    JSON.stringify(permanent));
+  ck('and re-dates itself to when the new state began',
+    permanent?.date === '2026-08-16', permanent?.date);
+
+  // Day three: the same failure again. Nothing new to say, so nothing is
+  // written — the date stays at when this state began, which is what the
+  // dialog's "not delivered since" reads from. The row must not vanish either.
+  const repeated = await deliverOn(17, 404);
+  ck('an unchanged failure is not rewritten every day',
+    repeated?.date === '2026-08-16' && repeated?.status === 404,
+    JSON.stringify(repeated));
+
+  // ...and a working send clears it, which is what makes the notice go away.
+  const cleared = await deliverOn(18, 204);
+  ck('a success clears the failure', cleared?.ok === true, JSON.stringify(cleared));
+  ck('and the timestamp is ISO, as the cloud edition also reports it',
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(cleared?.at ?? ''), cleared?.at);
+
   /* ---------- switching it off ---------- */
 
   await api('/api/settings', {
@@ -285,7 +345,7 @@ try {
     message: { embeds: [] },
   }, { ...adapter, respond: async (i, r) => { wrongChannel.push(r); } });
   ck('a click from another channel writes nothing',
-    wrongChannel[0]?.data?.flags === 64, JSON.stringify(wrongChannel[0]));
+    wrongChannel.at(-1)?.data?.flags === 64, JSON.stringify(wrongChannel.at(-1)));
 
   // A forged habit id: the account is resolved from the channel, and the habit
   // is looked up inside it, so this finds nothing rather than someone else's.
@@ -297,7 +357,7 @@ try {
     message: { embeds: [] },
   }, { ...adapter, respond: async (i, r) => { forged.push(r); } });
   ck('a habit id that is not ours is refused',
-    /no longer exists/i.test(forged[0]?.data?.content ?? ''), JSON.stringify(forged[0]));
+    /no longer exists/i.test(forged.at(-1)?.data?.content ?? ''), JSON.stringify(forged.at(-1)));
 
   console.log(`\n${fails ? `${fails} check(s) failed` : 'all checks passed'}`);
 } finally {

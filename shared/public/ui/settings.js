@@ -310,6 +310,82 @@ export function visible(key, values = load()) {
   return !def?.requires || def.requires(values);
 }
 
+/* ---------- how the last reminder actually went ---------- */
+
+/**
+ * The last delivery outcome per channel, as the server last reported it.
+ *
+ * @type {{channel: string, ok: boolean, error: string, date: string, at: string}[]}
+ */
+let deliveryStatus = [];
+
+/**
+ * Ask what happened to the last reminder on each destination.
+ *
+ * The counterpart to the test button below, and the reason it is not enough on
+ * its own: a test has to be PRESSED, and nothing suggests pressing it. A
+ * webhook deleted months ago stops the reminders while every visible surface —
+ * the habit, its time, the destination toggle — goes on looking correct.
+ *
+ * Never throws. This is a diagnostic bolted onto a dialog that has to open
+ * whether or not the request lands.
+ */
+export async function refreshDelivery() {
+  try {
+    const res = await fetch('/api/notify/status', { credentials: 'same-origin' });
+    if (!res.ok) return deliveryStatus;
+    const body = await res.json();
+    deliveryStatus = Array.isArray(body?.channels) ? body.channels : [];
+  } catch {
+    // Offline, or an older server that has no such endpoint. Say nothing
+    // rather than claiming a destination is broken because we could not ask.
+  }
+  return deliveryStatus;
+}
+
+/**
+ * What to tell the user about a destination that stopped working, or nothing.
+ *
+ * Reported only for channels currently switched ON: a failure on a destination
+ * you have since turned off is not news. The wording after the colon is the
+ * sender's own — `postWebhook` and `discordRequest` already say why a 404 is a
+ * 404, and a second phrasing here is how the two come to disagree.
+ *
+ * @param {Record<string, any>} [values] the draft, so turning a channel off
+ *   clears its warning without a round trip
+ * @returns {string[]}
+ */
+export function deliveryProblems(values = load()) {
+  const enabled = new Set(values.notifyChannels ?? []);
+  const label = (id) =>
+    CHANNEL_OPTIONS.find((o) => o.value === id)?.label.replace(/\s*\(.*\)$/, '') ?? id;
+
+  return deliveryStatus
+    .filter((s) => !s.ok && enabled.has(s.channel))
+    .map((s) => {
+      // "since", not "on". The stored date is when this state BEGAN, because
+      // the row is only rewritten when the reason changes — a failure that has
+      // persisted for a week still carries the date it started. Saying "the
+      // last reminder on <date>" would be a claim the data does not support.
+      const when = s.date ? ` since ${s.date}` : '';
+      return `${label(s.channel)} — reminders have not been delivered${when}: ` +
+        `${s.error || 'no reason was given'}.`;
+    });
+}
+
+/**
+ * Things a section has to SAY, as opposed to things it can do.
+ *
+ * Declared here for the same reason `SECTION_ACTIONS` is: the dialog renders a
+ * section without knowing what is in it. Each entry takes the draft and returns
+ * lines of prose, or nothing when there is nothing wrong.
+ *
+ * @type {Record<string, (values: Record<string, any>) => string[]>}
+ */
+export const SECTION_NOTICES = {
+  Notifications: deliveryProblems,
+};
+
 /**
  * Buttons a section needs that are not settings.
  *

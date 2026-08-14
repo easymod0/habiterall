@@ -84,6 +84,33 @@ db.exec(`
     PRIMARY KEY (habit_id, channel, date)
   );
 
+  -- How each destination last behaved, so a delivery failure has somewhere to
+  -- be SEEN. A deleted webhook or a bot kicked from its channel stops the
+  -- reminders while the habit, its time and the destination toggle all go on
+  -- looking correct; before this the only record was a line in the log.
+  --
+  -- One row per channel, holding the LAST outcome and nothing more — a history
+  -- would answer a question nobody is asking. Written only when the state
+  -- changes, so a working instance writes to this table roughly never.
+  --
+  -- Not in the settings table, deliberately. This is the server reporting on
+  -- itself, not a preference: it is never sent by the client and never included
+  -- in a backup, and channelConfigured stays the only authority on whether a
+  -- destination CAN deliver. This says only whether it DID.
+  CREATE TABLE IF NOT EXISTS notify_status (
+    channel   TEXT PRIMARY KEY,
+    ok        INTEGER NOT NULL,
+    status    INTEGER,
+    error     TEXT    NOT NULL DEFAULT '',
+    permanent INTEGER NOT NULL DEFAULT 0,
+    mode      TEXT    NOT NULL DEFAULT '',
+    date      TEXT    NOT NULL DEFAULT '',
+    -- ISO 8601 with the Z, matching the cloud edition's TIMESTAMPTZ over the
+    -- wire. The neighbouring columns above predate the endpoint that exposes
+    -- this one and are not shipped to a client, which is why they differ.
+    at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
   CREATE INDEX IF NOT EXISTS idx_habits_pos  ON habits(position, id);
 `);
