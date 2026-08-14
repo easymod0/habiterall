@@ -1,4 +1,4 @@
-# Build and test on every pull request and every push to master.
+# Build and test on every pull request, and once a night against master.
 #
 # Five jobs, deliberately separate so a failure names the thing that broke
 # rather than "CI failed":
@@ -17,16 +17,41 @@ name: CI
 
 on:
   pull_request:
-  push:
-    # Master as well as pull requests, deliberately. A PR proves "this branch
-    # against the base as it was when the run started"; it does not prove master
-    # after the merge. Two independently green PRs can merge into a broken
-    # master, a squash can produce a commit neither PR ever tested, and a direct
-    # push skips PR checks entirely. This run is what says master is releasable —
-    # which matters here because a release is cut from a tag on master.
-    branches: [master]
-    # No `tags:`. A tag already runs the whole suite through release.yml, which
-    # calls this workflow; triggering on the tag as well ran everything twice.
+
+  # No `push:` trigger, and that is a change from how this started. It ran on
+  # every push to master because a PR proves "this branch against the base as it
+  # was when the run started" and not "master after the merge" — two green PRs
+  # merging into a broken master, a squash producing a commit neither PR tested,
+  # a direct push skipping checks entirely.
+  #
+  # The ruleset on master closes all three: a pull request is REQUIRED (so there
+  # are no direct pushes), squash is the only merge method, every job below is a
+  # required check, and `strict_required_status_checks_policy` means the branch
+  # must be up to date with master before it can merge. So the tree the PR run
+  # tested IS the tree that becomes master. The post-merge run was re-testing a
+  # commit it had just tested under another name.
+  #
+  # Two backstops remain for what a PR run structurally cannot cover. Below is
+  # the first; the second is release.yml, which `uses:` this workflow, so the
+  # exact commit being released is tested again before anything is published.
+  #
+  # If the required-check list is ever emptied, or `strict` turned off, put the
+  # push trigger back — those settings are what makes its absence safe.
+
+  # The failures that arrive with no commit at all: the runner's preinstalled
+  # Chrome moving under the browser suites, base images the docker job pulls,
+  # `ubuntu-latest` itself migrating, an `actions/*` node runtime deprecating,
+  # the Postgres service container tag. Nothing above can catch those, because
+  # nothing about the repository changed. Found on a schedule they are one
+  # morning's known breakage; found during an unrelated pull request they get
+  # attributed to that pull request, which is the expensive way to learn it.
+  #
+  # Not on the hour: GitHub queues `0 * * * *` heavily and delays it.
+  schedule:
+    - cron: '17 5 * * *'
+
+  # No `tags:`. A tag already runs the whole suite through release.yml, which
+  # calls this workflow; triggering on the tag as well ran everything twice.
   workflow_dispatch:
   # Called by release.yml, so a release runs the same suite a pull request does.
   # Tagging a commit whose tests were never run is the failure a release
@@ -40,21 +65,34 @@ permissions:
 
 concurrency:
   # A new push supersedes an in-flight run for the same ref.
-  group: ci-${{ github.ref }}
+  #
+  # Keyed on the EVENT as well as the ref, because several triggers now share
+  # `refs/heads/master`: the nightly schedule and a manual dispatch. On the ref
+  # alone they land in one group with `cancel-in-progress`, so a dispatch would
+  # kill the nightly — and the nightly's whole job is to run unattended, where
+  # "cancelled" and "never ran" look the same in the Actions tab.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # Which of the expensive jobs this change can possibly affect.
   #
-  # Only for pull requests. A push to master runs everything on purpose — that
-  # run is what says master is releasable — and a `workflow_call` from
-  # release.yml has no base commit to compare against.
+  # Only for pull requests. Every other trigger runs the lot: the nightly is
+  # asking whether master still builds against today's runner, and a
+  # `workflow_call` from release.yml has no base commit to compare against.
   #
   # Filtered at the JOB level, not with a workflow-level `paths:`, and that
   # distinction matters: a workflow that is skipped by `paths` never reports a
   # status, so a required check on it waits for a run that will never arrive and
-  # the pull request can never merge. A job skipped by `if:` reports "skipped",
-  # which branch protection accepts.
+  # the pull request can never merge. A job skipped by `if:` reports "Success",
+  # which a required check accepts.
+  #
+  # THIS job is a required check in its own right, and that is load bearing. A
+  # job skipped because a job it `needs` FAILED also reports "Success" — so if
+  # this one ever dies (a checkout error, the script tripping `pipefail`), every
+  # job below it skips, each reports Success, and a completely untested pull
+  # request goes green. Requiring this job is what turns that into a red check.
+  # If you ever trim the required list, this is the entry that cannot go.
   changes:
     name: What changed
     runs-on: ubuntu-latest

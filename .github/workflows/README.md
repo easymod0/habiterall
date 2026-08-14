@@ -11,15 +11,17 @@ uploads, work with no setup at all.
 
 | Workflow | Runs on | Publishes | Needs setup |
 |---|---|---|---|
-| `ci.yml` | every push and PR | nothing | **nothing** |
-| `android-native.yml` | PRs and pushes touching `android-native/` | nothing | **nothing** |
+| `ci.yml` | every PR, and nightly at 05:17 UTC | nothing | **nothing** |
+| `android-native.yml` | every PR (it builds only if the client can be affected), and nightly at 06:17 UTC | nothing | **nothing** |
 | `release.yml` | **a `vX.Y.Z` tag**, or manual | the APK, images, a GitHub release | signing, and only for a publishing run |
 
 ### Releasing
 
-**Merging does not release.** Every merge to `master` runs the tests and stops
-there. A release is a decision, taken either from the Actions tab — **Release →
-Run workflow** — or by tagging:
+**Merging does not release.** It no longer runs `ci.yml` either: the tests ran
+on the pull request, where they are *required*, against a branch the ruleset
+forced up to date with master first — so the tree that merged is the tree that
+was tested. A release is a decision, taken either from the Actions tab —
+**Release → Run workflow** — or by tagging:
 
 ```bash
 git tag v1.4.0 && git push origin v1.4.0
@@ -69,12 +71,13 @@ validate the build.
 
 | A pull request touching | runs |
 |---|---|
-| documentation or workflow config only | nothing but the change detector (~5s) |
+| documentation or workflow config only | nothing but the two change detectors (~5s) |
 | any code, anywhere | the whole of `ci.yml` |
 | `android-native/**`, or a shared file the Kotlin client mirrors | the Android workflow as well |
-| a push to `master` | everything, always — that run is what says master is releasable |
+| — a merge to `master` | nothing at all |
+| — the nightly schedule | everything in both workflows, unconditionally |
 
-Two deliberate choices in there.
+Four deliberate choices in there.
 
 **The expensive `ci.yml` jobs are filtered by a job-level `if:`, not by a
 workflow-level `paths:`.** A workflow skipped by `paths` never reports a status,
@@ -90,6 +93,28 @@ theatre. What makes this safe is that the detector is not asked to be clever: a
 pull request that touches *one line* of code anywhere runs the entire suite, so
 the only way to skip anything is to have changed nothing but prose and workflow
 config.
+
+**`ci.yml` lost its push-to-master trigger, and gained a nightly.** These are not
+the same trade. The post-merge run existed because a pull request proves "this
+branch against the base as it was when the run started" and not "master after
+the merge" — but the ruleset now requires a pull request, allows only squash,
+requires every `ci.yml` job, and requires the branch to be up to date first, so
+the tested tree *is* the tree that lands. Re-running was testing the same commit
+under a second name.
+
+The nightly replaces none of that; it catches a different class entirely — the
+failures that arrive with **no commit at all**. The runner's preinstalled Chrome
+moves under the browser suites, the docker job's base images move, `ubuntu-latest`
+migrates, an `actions/*` node runtime deprecates, the Postgres service tag moves.
+No push-triggered run can catch those, because nothing in the repository changed.
+Found nightly they are one morning's known breakage; found during an unrelated
+pull request they get **attributed to that pull request**, which is the expensive
+way to learn it. Daily because those inputs drift over days, not hours; at `:17`
+because GitHub queues and delays `0 * * * *`.
+
+> Scheduled workflows are **disabled automatically after 60 days of repository
+> inactivity**, public repositories included. If the nightly quietly stops, that
+> is the first thing to check.
 
 **No per-directory matrix.** It looks tempting — only test the edition that
 changed — and it would be false precision here: the browser suites drive a real
@@ -121,6 +146,59 @@ workflow itself.
 | Docker images | both editions build and boot |
 
 No secrets. No variables. Nothing to enable beyond Actions itself.
+
+### Required checks on `master`
+
+A repository **ruleset** (Settings → Rules) guards the default branch. It is
+what makes the absent push-to-master trigger safe, so the two are one decision:
+
+| Rule | Setting |
+|---|---|
+| Pull request required | yes — so there are no direct pushes to `master` |
+| Approvals | 0, and no CODEOWNERS — a solo maintainer cannot approve their own PR |
+| Merge methods | squash only |
+| Branch up to date before merging | **yes** (`strict`) — this is the load-bearing one |
+| Bypass actors | **none**, admins included |
+| Force push / deletion | blocked |
+
+The required checks are every job in both workflows:
+
+```
+What changed              Multi-tenant isolation
+Unit tests                Cloud API (Postgres)
+Type check                Backup round-trip (personal)
+Browser suites            Docker images
+
+Android — what changed    Build APK
+```
+
+Three things about that list are easy to get wrong.
+
+**Requiring `Build APK` is what forced `android-native.yml`'s shape.** It used to
+filter `pull_request` at the *workflow* level with `paths:`, and a workflow
+filtered that way does not run at all when nothing matches — it reports no
+status, so a required check on it sits **Pending forever** and the pull request
+can never merge. The filter therefore had to move down into an
+always-running `Android — what changed` job before the check could be required.
+That order is the whole trick, and it is the same one `ci.yml` uses.
+
+**A skipped job passes, and that is the documented behaviour** — "a job that is
+skipped will report its status as `Success`. It will not prevent a pull request
+from merging, even if it is a required check." That is precisely why the
+expensive jobs are gated with a job-level `if:`: on a docs-only pull request they
+all report Success and it merges. Skipping a whole *workflow* is the opposite,
+per above.
+
+**Both detectors are required for a reason that is not obvious.** A job skipped
+because a job it `needs` *failed* also reports Success. So if a detector ever
+dies — a checkout error, the script tripping `set -euo pipefail` — every job
+behind it skips, each reports Success, and an untested pull request goes green.
+Requiring the detector itself is what turns that silent pass into a red check.
+If the list is ever trimmed, `What changed` and `Android — what changed` are the
+entries that cannot go.
+
+> Adding a job to `ci.yml` does **not** add it to this list. Add the new job
+> name to the ruleset too, or it runs and is allowed to fail.
 
 ### Publishing images — nothing to configure
 
@@ -167,10 +245,23 @@ every merge a release of `latest`.
 
 ### `android-native.yml` — the native client
 
-On a PR touching `android-native/`, and on a push to `master`, it runs the unit
-tests, lints, and uploads a **debug APK** as a build artifact. It never
-publishes and it needs no configuration: a debug APK carries the standard
-Android debug signature and installs anywhere.
+Its detector runs on every PR; the build itself runs when the change can affect
+the client — `android-native/**`, this workflow, or one of the shared files the
+Kotlin code mirrors by hand. It then runs the unit tests, lints, and uploads a
+**debug APK** as a build artifact. It never publishes and it needs no
+configuration: a debug APK carries the standard Android debug signature and
+installs anywhere. Nightly it builds regardless.
+
+**The mirrored-file list lives in the detector's `grep`, not in a `paths:`
+filter,** and that is the only place it lives now. Keep it in step with the
+Kotlin side: `types.js` / `constants.js` are the REST contract, `ui/time.js` is
+`ReminderTime.kt`'s twin, `notify.js` backs `AppSettings.androidRemindersEnabled`,
+`validate.js` holds the reminder-prompt cap. A shared file the app copies that is
+not matched there can break the client with nothing to catch it.
+
+**`Build APK` is a required check, so a red client blocks a merge.** That is new,
+and it is why this workflow no longer runs on a push to `master` — the gate moved
+to the pull request, where it can actually stop something.
 
 **The release APK is `release.yml`'s, and signing it is required.** With no
 `ANDROID_KEYSTORE_BASE64` secret the Gradle build still succeeds, but what it

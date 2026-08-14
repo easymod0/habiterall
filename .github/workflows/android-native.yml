@@ -1,13 +1,17 @@
 # Builds the native Android client.
 #
-#   - PULL REQUEST — unit tests, lint and a debug APK. Never publishes.
-#   - PUSH TO MASTER — the same. Merging does NOT ship: release.yml builds the
-#     signed APK and attaches it to a release, and only a tag starts that.
+#   - PULL REQUEST — unit tests, lint and a debug APK, when the change can
+#     actually affect the client. Never publishes.
 #   - MANUAL — the same, for a branch you want an APK from.
+#   - NIGHTLY — the same, unconditionally. See the schedule below.
 #
-# Only runs when something that can actually affect the client changes: its
-# own sources, this workflow, or the two shared files whose contract it
-# hard-codes.
+# Merging does NOT ship, and no longer runs this either: release.yml builds the
+# signed APK and attaches it to a release, and only a tag starts that.
+#
+# Shaped like ci.yml, for ci.yml's reason: a `changes` job that ALWAYS runs
+# decides whether the build does, instead of a workflow-level `paths:` filter.
+# That shape is the whole point — it is what allows `Build APK` to be a required
+# check on master, which is what makes a red client stop a merge.
 #
 # Nothing here needs a secret: the APK it builds is a DEBUG one, signed with the
 # standard Android debug key, which installs anywhere. Release signing belongs to
@@ -17,48 +21,33 @@
 name: Android (native)
 
 on:
-  # A `paths` filter applies to TAG pushes too, and a tag changes no files —
-  # so a block pairing `tags:` with `paths:` matches nothing at all. Releases
-  # are therefore driven by a push to main rather than by tagging, which also
-  # matches how the rest of this repo publishes.
-  push:
-    branches: [master]
-    paths:
-      - 'android-native/**'
-      - '.github/workflows/android-native.yml'
-      # The Kotlin client mirrors parts of the shared code BY HAND, so a change
-      # to any of these can break it even though no Kotlin file moved. Each has a
-      # counterpart in the app:
-      #
-      #   types.js / constants.js  the REST contract — field names, the x1000
-      #                            entry scaling, the sentinel values
-      #   ui/time.js               ReminderTime.kt is a deliberate mirror, pinned
-      #                            to the same examples, because both clients
-      #                            write the same reminder_time
-      #   notify.js                AppSettings.androidRemindersEnabled encodes the
-      #                            channel id and the "absent means enabled"
-      #                            default from DEFAULT_CHANNELS
-      #   validate.js              the reminder-prompt cap the dialog applies with
-      #                            .take(200)
-      #
-      # Keep this list and that set of mirrors in step. A shared file the app
-      # copies, and that is not listed here, is a change that can break the
-      # client with nothing to catch it.
-      - 'shared/src/types.js'
-      - 'shared/src/constants.js'
-      - 'shared/src/notify.js'
-      - 'shared/src/validate.js'
-      - 'shared/public/ui/time.js'
+  # No `paths:` filter here, and no `push:` trigger at all. Both went for the
+  # same reason, and the order matters: the filter had to move first.
+  #
+  # `Build APK` is a REQUIRED check on master now, and a required check has to
+  # report SOMETHING on every pull request. A workflow filtered by `paths:` does
+  # not run at all when nothing matches — it reports no status, the check sits
+  # Pending, and the pull request can never merge. So the filtering moved down
+  # into the `changes` job below, where a skipped job reports "Success", which a
+  # required check accepts.
+  #
+  # With that in place the pull request run is what enforces a working client,
+  # and the push-to-master run became ci.yml's: a re-test of a tree that had just
+  # been tested, on a branch nothing can reach except through a pull request that
+  # passed. If `Build APK` is ever dropped from the required list, this trigger
+  # has to come back — it would be the only automated thing left.
   pull_request:
-    paths:
-      - 'android-native/**'
-      - '.github/workflows/android-native.yml'
-      - 'shared/src/types.js'
-      - 'shared/src/constants.js'
-      - 'shared/src/notify.js'
-      - 'shared/src/validate.js'
-      - 'shared/public/ui/time.js'
   workflow_dispatch:
+
+  # Nightly, an hour after ci.yml's, so a red morning reads in order rather than
+  # as two unrelated failures. This client is the most exposed thing here to a
+  # runner moving under it: JDK 21, Android SDK 36 and Gradle 8.14.3 are pinned
+  # against whatever `ubuntu-latest` ships, and the AGP-8.x-does-not-support-
+  # Gradle-9 trap in the README is exactly that failure with a different version
+  # number. The schedule builds unconditionally — nothing in the repository
+  # changed, the ground did.
+  schedule:
+    - cron: '17 6 * * *'
 
 # Read-only, and there is nothing here that could want more: this workflow
 # builds and tests, and publishing lives entirely in release.yml. The job runs
@@ -67,9 +56,71 @@ permissions:
   contents: read
 
 jobs:
+  # Whether this change can affect the native client. A mirror of ci.yml's
+  # detector, and it exists for that one's reason: filtering at the JOB level
+  # means a pull request touching no Android file still REPORTS a status, so
+  # `Build APK` can be required without wedging every unrelated pull request.
+  #
+  # This job is a required check in its own right, and that is deliberate. A job
+  # skipped because a job it `needs` FAILED also reports "Success" — so if this
+  # one dies, `Build APK` skips, reports Success, and an untested client merges.
+  changes:
+    name: Android — what changed
+    runs-on: ubuntu-latest
+    outputs:
+      android: ${{ steps.what.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Compare against the base
+        id: what
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "android=true" >> "$GITHUB_OUTPUT"
+            echo "Not a pull request — building."
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "$CHANGED" | sed 's/^/  /'
+
+          # The client's own sources, this workflow, and the shared files the
+          # Kotlin code mirrors BY HAND — a change to one of those can break the
+          # app even though no Kotlin file moved. Each has a counterpart in it:
+          #
+          #   types.js / constants.js  the REST contract — field names, the x1000
+          #                            entry scaling, the sentinel values
+          #   ui/time.js               ReminderTime.kt is a deliberate mirror,
+          #                            pinned to the same examples, because both
+          #                            clients write the same reminder_time
+          #   notify.js                AppSettings.androidRemindersEnabled encodes
+          #                            the channel id and the "absent means
+          #                            enabled" default from DEFAULT_CHANNELS
+          #   validate.js              the reminder-prompt cap the dialog applies
+          #                            with .take(200)
+          #
+          # Keep this pattern and that set of mirrors in step. A shared file the
+          # app copies, and that is not matched here, is a change that can break
+          # the client with nothing to catch it.
+          if echo "$CHANGED" | grep -qE '^(android-native/|\.github/workflows/android-native\.yml$|shared/src/(types|constants|notify|validate)\.js$|shared/public/ui/time\.js$)'; then
+            echo "android=true" >> "$GITHUB_OUTPUT"
+            echo "The client, or a shared file it mirrors, changed — building."
+          else
+            echo "android=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing the native client depends on changed — skipping the"
+            echo "build, which reports Success so a required check is satisfied."
+          fi
+
   build:
     name: Build APK
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
 
     steps:
       - uses: actions/checkout@v4
