@@ -13,11 +13,54 @@ icon on your phone.
 
 | | |
 |---|---|
-| **Native** | notifications with Yes / No / count actions, per-habit reminders, the day grid and everything you can record in it, server settings |
+| **Native** | notifications with Yes / No / count actions, per-habit reminders, the day grid and everything you can record in it, creating and editing habits, archiving, deleting, reordering, and the account's settings |
 | **Embedded web** | stats, charts, the calendar, import/export |
+
+The line is drawn by what a second implementation would COST, not by what is
+easy: charts and the calendar are one implementation on purpose, while managing
+habits was native the moment it stopped being possible to do it here at all.
 
 Individual screens can be ported to native later if any of them feel wrong.
 Nothing about this design forces the split to stay where it is.
+
+## Managing habits
+
+Create with the **+** button, edit by **holding** a habit's name (tapping opens
+its stats), and archive, delete or reorder from there and the overflow menu. All
+of it writes to the server and takes the server's answer back, so a habit made on
+the phone is on the laptop by its next refresh and vice versa.
+
+Two rules are worth knowing before changing any of this:
+
+- **`PUT /habits/:id` replaces, it does not patch.** The route runs the whole
+  body through `parseHabit`, which defaults every absent field — so a partial
+  write silently RESETS the fields it leaves out. `HabitInput` exists for that
+  reason, and is serialised with `encodeDefaults = true`, because
+  kotlinx.serialization otherwise omits exactly the fields that equal their
+  Kotlin default and the write clears them.
+- **`PUT /settings` does the opposite: it merges.** So the settings screen sends
+  only the key that changed, which is also the only way two clients editing
+  different preferences between fetches do not clobber one another.
+
+**Nothing on this side validates.** `SETTING_VALUES` and `parseHabit` in
+`shared/src/validate.js` are what is enforced; they normalise as well as check,
+so an accepted value can differ from the one sent. The phone submits and renders
+whatever comes back, including the error. A second copy of those rules here would
+be one more thing to keep in step, and the mirrors this client does keep
+(`Grid.nextState`, `ReminderTime`, `Reminders.needsReminder`) all earn their
+place by having to work **offline** — which none of these do.
+
+**The DEFAULTS are the exception, and they are a real mirror.** `GET /settings`
+returns only the keys that have been stored — no gaps filled — so a setting
+nobody has touched arrives as nothing at all, and every client has to know what
+that means. They live in `AppSettings`, one constant and one `…OrDefault`
+accessor each, and `AppSettingsDefaultsTest` reads `shared/public/ui/settings.js`
+and fails if the two disagree. It is not a formality: `historyGranularity`
+defaults to `week`, the only default in the registry that is not the first option
+in its own list, and the first version of the settings screen read it as `day` —
+which showed a value the charts were not using and then refused to store the one
+it claimed was already selected, since a chip drawn as chosen does not fire. Never
+write `?: "day"` at a call site; add the constant, and let the test check it.
 
 Tapping a habit's name opens **that habit's** page in the embedded web UI
 rather than the dashboard, via the `#/habit/<id>` route the web app added for

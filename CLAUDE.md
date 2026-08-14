@@ -14,7 +14,7 @@ shared/               EVERYTHING both editions have in common
   test/               unit tests + browser suites (test/browser/)
 habiterall-personal/  single user, SQLite, no auth   (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)
-android-native/       native Kotlin client, for notification actions
+android-native/       native Kotlin client — notification actions, and habits
 ```
 
 One npm workspace. `shared` resolves as `@habiterall/shared/<file>.js`; the
@@ -168,6 +168,42 @@ zero width. 7 / 10 / 14 columns by width.
 PUT routes and the Discord button handler. It had been inline in the two routes,
 and a third copy in the interaction handler is how "not done" would start meaning
 something different depending on where you answered from.
+
+**A client mirrors a rule only if it must work OFFLINE.** The native app keeps
+five hand-written copies of shared logic — the tap cycle, reminder-time parsing,
+`needsReminder`, the entry encoding, the channel default — and every one of them
+runs when there may be no network, which is why they are worth the cost of
+keeping in step. Nothing else is copied. Creating a habit, reordering, and the
+settings screen are all server-authoritative: the phone submits and renders
+whatever comes back, including the error, because `parseHabit` and
+`SETTING_VALUES` normalise as well as validate and are the only opinion that
+decides what gets stored. That rule is what let the phone become a full client
+without doubling the mirror surface — and it is the question to ask of anything
+added next, because a sixth mirror is a real cost and a sixth server call is not.
+
+**A setting's DEFAULT is a mirror even though its rule is not.** `GET /settings`
+returns only the keys that have been stored — neither edition fills gaps — so a
+setting nobody has touched arrives as nothing, and every client has to supply the
+same answer for it or the two disagree about what the account is set to. The web
+has `SETTINGS` in `shared/public/ui/settings.js`; the phone has the constants in
+`AppSettings`, and `AppSettingsDefaultsTest` reads the registry and fails if they
+drift, which is the Kotlin half of what `shared/test/settings.test.js` already
+does. The one that will catch you is `historyGranularity`, whose default is
+`week` — the only default in the registry that is not the first option in its own
+list, and duly copied as `day` the first time the phone grew a settings screen.
+That combination is nastier than it sounds: the screen showed a value the charts
+were not using, and a chip already drawn as selected does not fire, so the value
+it claimed was set was the one value it would not store.
+
+**The two habit routes disagree about what a write means, on purpose.**
+`PUT /habits/:id` REPLACES — the body goes through `parseHabit`, which supplies a
+default for every absent field, so a partial write resets what it omits rather
+than leaving it alone. `PUT /settings` MERGES, which is why the phone sends one
+key at a time and two clients editing different preferences do not clobber each
+other. The Android side pays for the first with a dedicated `HabitInput` type
+serialised with `encodeDefaults = true`: kotlinx.serialization omits fields equal
+to their Kotlin default, which is precisely the set a replace would then clear,
+and it had been safe only because those defaults happened to match the server's.
 
 **A view is named by a fragment, never a path.** `#/habit/42` is what the
 native client opens to land on one habit's stats, and it is a fragment because

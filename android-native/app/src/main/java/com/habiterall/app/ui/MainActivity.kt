@@ -18,6 +18,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 // A subpackage, so the wildcard above does not reach it.
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -27,8 +30,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.zIndex
+import androidx.core.app.NotificationManagerCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -70,6 +76,118 @@ private const val REFRESH_FLOOR_MS = 350L
  * repeated the write instead of advancing.
  */
 private data class PendingWrite(val value: Double?, val skip: Boolean)
+
+/**
+ * A screen that MANAGES habits, as opposed to answering them.
+ *
+ * Creating, editing, reordering and the preferences are all things the phone
+ * could not do at all until now — `Api` had no POST anywhere in it, so the app
+ * was an excellent answering device that could not manage what it answered
+ * about. They are grouped rather than routed individually because they share one
+ * rule: each is a full-screen sheet over the list, and each reports on the way
+ * out whether it wrote anything, because that is what decides if the grid behind
+ * it has to be fetched again.
+ */
+private sealed interface Manage {
+    data object NewHabit : Manage
+    data class EditHabit(val habit: Habit) : Manage
+    data class Reorder(val habits: List<Habit>) : Manage
+    data object Settings : Manage
+    data object Archive : Manage
+}
+
+/**
+ * One management screen, chosen by [screen].
+ *
+ * The API calls live here rather than inside each screen so that the screens
+ * stay ignorant of transport — and, more usefully, so the rule the whole feature
+ * turns on is written once and in one place: **the server is the source of
+ * truth, and every write is followed by taking what the server then says.** A
+ * habit write returns the stored habit, a reorder returns the whole list in its
+ * new order, and a settings patch is followed by a re-read. Nothing here decides
+ * locally what the database now holds.
+ */
+@Composable
+private fun ManageScreen(
+    screen: Manage,
+    api: Api,
+    account: AppSettings,
+    onAccount: (AppSettings) -> Unit,
+    onEditArchived: (habit: Habit, changed: Boolean) -> Unit,
+    onDone: (changed: Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+
+    when (screen) {
+        Manage.NewHabit -> HabitFormScreen(
+            existing = null,
+            confirmDelete = account.confirmDeleteEnabled,
+            onSave = { input -> api.createHabit(input) },
+            onClose = onDone,
+        )
+
+        is Manage.EditHabit -> HabitFormScreen(
+            existing = screen.habit,
+            confirmDelete = account.confirmDeleteEnabled,
+            onSave = { input -> api.updateHabit(screen.habit.id, input) },
+            onDelete = { api.deleteHabit(screen.habit.id) },
+            onClose = onDone,
+        )
+
+        is Manage.Reorder -> ReorderScreen(
+            habits = screen.habits,
+            onReorder = { ids -> api.reorderHabits(ids) },
+            onClose = onDone,
+        )
+
+        Manage.Archive -> ArchiveScreen(
+            load = { api.habits(archived = true) },
+            // A whole habit with one field flipped, not a patch: the route
+            // replaces, so `{archived: false}` on its own would blank the name.
+            onUnarchive = { habit ->
+                api.updateHabit(habit.id, habit.toInput().copy(archived = false))
+            },
+            onEdit = onEditArchived,
+            onClose = onDone,
+        )
+
+        Manage.Settings -> SettingsScreen(
+            initial = account,
+            // Whether Android itself will let a notification through, which is a
+            // different question from whether the account wants one here. The
+            // switch stays usable either way — the setting is the account's and
+            // governs other devices too — but the subtitle has to say when the
+            // answer will be ignored by the system regardless.
+            androidRemindersSupported =
+                NotificationManagerCompat.from(context).areNotificationsEnabled(),
+            onPatch = { patch ->
+                // What it would not take, kept: a key this server does not know
+                // comes back in `ignored` with a 200 rather than as an error, so
+                // this is the only evidence that a control which sprang back did
+                // so because the write never happened.
+                val ignored = api.updateSettings(patch).ignored
+                // Re-read rather than trusting the patch. `PUT /settings`
+                // answers with what it ACCEPTED, not with the settings — and
+                // `SETTING_VALUES` normalises as well as validates, so the
+                // stored value can differ from the one sent. Asking again is
+                // also what makes a change the web made in the meantime show up
+                // here rather than being written over.
+                val fresh = api.settings()
+                onAccount(fresh)
+                // The two the alarms read offline. `Reminders.armFrom` is the
+                // other half of this and runs from the list's fetch; these are
+                // the mirrors a receiver reads when there is no network at all,
+                // and a setting changed here has to reach them now rather than
+                // at the next successful overview.
+                Settings(context).cacheAndroidReminders(fresh.androidRemindersEnabled)
+                Settings(context).cacheSkipDays(fresh.skipDaysEnabled)
+                Reminders.rescheduleAll(context)
+                PatchOutcome(fresh, ignored)
+            },
+            onClose = onDone,
+        )
+    }
+}
 
 /**
  * The habits as they should appear: what the server said, with anything still
@@ -213,10 +331,29 @@ class MainActivity : ComponentActivity() {
                     if (target == null) webHost.warm() else webHost.show(target)
                 }
 
+                /** Which management screen is over the list, if any. */
+                var manage by remember { mutableStateOf<Manage?>(null) }
+                /** Bumped when one of them writes something the list must refetch. */
+                var refreshKey by remember { mutableIntStateOf(0) }
+                /**
+                 * The account's settings, reported up by the list after each of
+                 * its fetches and updated in place by the settings screen.
+                 *
+                 * One copy for the whole activity, because the alternative is
+                 * each screen fetching its own and two of them disagreeing —
+                 * which for `confirmDelete` means a delete that does or does not
+                 * ask depending on which screen you reached it from.
+                 */
+                var account by remember { mutableStateOf(AppSettings()) }
+
                 // A reminder tap lands on the list, whatever was on screen when
                 // the app was last left. Coming back to a chart from three days
-                // ago is not an answer to "did you exercise today?".
-                LaunchedEffect(openHabit) { if (openHabit != null) webUrl = null }
+                // ago is not an answer to "did you exercise today?". A management
+                // screen goes with it: the notification asked about today, and
+                // answering it should not be behind a form.
+                LaunchedEffect(openHabit) {
+                    if (openHabit != null) { webUrl = null; manage = null }
+                }
 
                 when {
                     !checked -> Loading()
@@ -230,12 +367,26 @@ class MainActivity : ComponentActivity() {
                     // coming back put you at today with a spinner and a fresh
                     // 30-day window, every time. It is covered, not gone.
                     else -> Box(Modifier.fillMaxSize()) {
+                        // One client for every management screen, rather than one
+                        // per opening: `Api` builds an OkHttpClient, and a screen
+                        // that can be opened and closed all afternoon should not
+                        // leave a connection pool behind each time.
+                        val manageApi = remember(url) { Api(url!!) }
+
                         Box(
                             Modifier.fillMaxSize().then(
                                 // Out of the accessibility tree while covered,
                                 // or a screen reader walks a grid nobody can see.
-                                if (webUrl != null) Modifier.clearAndSetSemantics {}
-                                else Modifier
+                                // Both covers count: the management sheets stop
+                                // TOUCHES with the pointer-consuming Box below,
+                                // and a swipe-to-explore gesture is not a touch —
+                                // it would otherwise read out the grid behind an
+                                // open form.
+                                if (webUrl != null || manage != null) {
+                                    Modifier.clearAndSetSemantics {}
+                                } else {
+                                    Modifier
+                                }
                             )
                         ) {
                             HabitListScreen(
@@ -252,7 +403,63 @@ class MainActivity : ComponentActivity() {
                                     webTitle = habit.name
                                 },
                                 onChangeServer = { url = null },
+                                refreshKey = refreshKey,
+                                onNewHabit = { manage = Manage.NewHabit },
+                                onEditHabit = { manage = Manage.EditHabit(it) },
+                                onReorder = { manage = Manage.Reorder(it) },
+                                onOpenSettings = { manage = Manage.Settings },
+                                onOpenArchive = { manage = Manage.Archive },
+                                onAccount = { account = it },
                             )
+                        }
+
+                        // The management screens, over the list for the reason
+                        // the list itself is kept underneath the web screen:
+                        // covering costs nothing and swapping loses the grid's
+                        // scroll position, its window and its pending writes.
+                        manage?.let { screen ->
+                            Box(
+                                Modifier.fillMaxSize().zIndex(2f).pointerInput(Unit) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            awaitPointerEvent().changes.forEach { it.consume() }
+                                        }
+                                    }
+                                }
+                            )
+                            Box(Modifier.fillMaxSize().zIndex(3f)) {
+                                ManageScreen(
+                                    screen = screen,
+                                    api = manageApi,
+                                    account = account,
+                                    onAccount = { account = it },
+                                    // Straight from the archive into the form,
+                                    // replacing this screen rather than stacking
+                                    // on it: the form's own Archived switch is
+                                    // the other way to restore, and coming back
+                                    // to a list that no longer holds the habit
+                                    // is a screen showing a stale row.
+                                    onEditArchived = { habit, wrote ->
+                                        // The archive's own writes are banked
+                                        // here rather than at a close it never
+                                        // gets: this replaces that screen, so a
+                                        // habit restored a moment ago would
+                                        // otherwise be forgotten if the form is
+                                        // then backed out of unchanged.
+                                        if (wrote) refreshKey++
+                                        manage = Manage.EditHabit(habit)
+                                    },
+                                    onDone = { changed ->
+                                        manage = null
+                                        // Only when something was actually
+                                        // written. Backing out of the form
+                                        // should not cost a refetch, and a
+                                        // refetch is what puts the pull
+                                        // indicator up on a list nobody touched.
+                                        if (changed) refreshKey++
+                                    },
+                                )
+                            }
                         }
 
                         if (webUrl != null) {
@@ -387,6 +594,30 @@ class MainActivity : ComponentActivity() {
         onOpenStats: () -> Unit,
         onOpenHabit: (Habit) -> Unit,
         onChangeServer: () -> Unit,
+        /**
+         * Bumped by the caller when a screen it owns has changed the data.
+         *
+         * Creating, editing, deleting or reordering a habit all happen on other
+         * screens, and this one holds the fetched list — so without a key to
+         * change, coming back from the form showed the list as it was before the
+         * edit until something else happened to refetch.
+         */
+        refreshKey: Int,
+        onNewHabit: () -> Unit,
+        onEditHabit: (Habit) -> Unit,
+        onReorder: (List<Habit>) -> Unit,
+        onOpenSettings: () -> Unit,
+        onOpenArchive: () -> Unit,
+        /**
+         * Reports the account's settings upward after every fetch.
+         *
+         * This screen already asks for them on each reload, and two of the
+         * screens above it need the answer — the settings screen to open on it,
+         * and the habit form to know whether Delete confirms. A second fetch of
+         * the same endpoint would be free to disagree with the grid on screen,
+         * which is the kind of difference nobody tracks down.
+         */
+        onAccount: (AppSettings) -> Unit,
     ) {
         var habits by remember { mutableStateOf<List<Habit>>(emptyList()) }
         var error by remember { mutableStateOf<String?>(null) }
@@ -486,7 +717,7 @@ class MainActivity : ComponentActivity() {
         var today by remember { mutableStateOf(LocalDate.now().toString()) }
         val api = remember(serverUrl) { Api(serverUrl) }
 
-        LaunchedEffect(reload, serverUrl, windowDays) {
+        LaunchedEffect(reload, serverUrl, windowDays, refreshKey) {
             // Read and cleared in one go: `quiet` describes THIS fetch only,
             // and clearing it here rather than at the end means a fetch cut
             // short — by paging into more history, say — cannot leave the next
@@ -510,6 +741,11 @@ class MainActivity : ComponentActivity() {
                 // default order, and the overview below is the fetch that
                 // matters.
                 val fetched = api.settings()
+                // Reported upward, not kept: the three flags below are all this
+                // screen itself obeys, and the whole object belongs to the
+                // activity, which is where the screens above it read it from. A
+                // second copy here would be a second thing to keep current.
+                onAccount(fetched)
                 newestLeft = fetched.newestLeft
                 skipDays = fetched.skipDaysEnabled
                 questionMarks = fetched.questionMarksEnabled
@@ -785,14 +1021,58 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        var menuOpen by remember { mutableStateOf(false) }
+
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = { Text("Today") },
                     actions = {
                         TextButton(onClick = onOpenStats) { Text("Stats") }
+                        // An overflow rather than more buttons: the bar already
+                        // carries Stats, and a 360dp phone runs out of room at
+                        // three. Everything in here is a screen, not an action.
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Reorder habits") },
+                                // Two, not one: a single habit has nowhere to
+                                // go, and a screen whose every button is
+                                // disabled is worse than a menu item that is.
+                                enabled = shown.size > 1,
+                                onClick = { menuOpen = false; onReorder(shown) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Archived habits") },
+                                onClick = { menuOpen = false; onOpenArchive() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                onClick = { menuOpen = false; onOpenSettings() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Change server") },
+                                onClick = { menuOpen = false; onChangeServer() },
+                            )
+                        }
                     },
                 )
+            },
+            floatingActionButton = {
+                // Only once a fetch has landed. A phone that cannot reach the
+                // server should not offer to create a habit on it — the POST
+                // would fail, and the failure would be the first the user heard
+                // of a connection problem the error screen is already reporting.
+                if (loaded && error == null) {
+                    FloatingActionButton(onClick = onNewHabit) {
+                        Icon(Icons.Default.Add, contentDescription = "New habit")
+                    }
+                }
             },
             snackbarHost = { SnackbarHost(snackbar) },
         ) { pad ->
@@ -827,8 +1107,13 @@ class MainActivity : ComponentActivity() {
                             .verticalScroll(rememberScrollState())
                             .padding(24.dp),
                     ) {
-                        Text("No habits yet. Add one in the web app.")
-                        TextButton(onClick = onOpenStats) { Text("Open habiterall") }
+                        // "Add one in the web app" is what this said until the
+                        // phone could create one, which is the single change
+                        // that most decided whether this client was a companion
+                        // or a client in its own right.
+                        Text("No habits yet.")
+                        Button(onClick = onNewHabit) { Text("Add a habit") }
+                        TextButton(onClick = onOpenStats) { Text("Open the web app") }
                     }
                     else -> Column(Modifier.fillMaxSize()) {
                         DayHeader(dates = dates, today = today, scroll = dayScroll)
@@ -841,6 +1126,7 @@ class MainActivity : ComponentActivity() {
                                     today = today,
                                     scroll = dayScroll,
                                     onOpen = { onOpenHabit(habit) },
+                                    onEdit = { onEditHabit(habit) },
                                     onSetReminder = { reminderFor = habit },
                                     onTapDay = { date -> tapDay(habit, date) },
                                     onHoldDay = { date -> holding = habit to date },
