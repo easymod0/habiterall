@@ -403,7 +403,8 @@ the regions are not enumerable from here) and rebuilding the URL from the host
 alone. Falling back to the published gateway costs a fresh session and nothing
 else, which is why a rejected value is not an error. HELLO's
 `heartbeat_interval` is the same shape of problem with a different sink: it sets
-a timer in this process, so it is clamped to 1s–10min. Unclamped, a `1` is a busy
+a timer in this process, so anything outside 1s–10min takes Discord's published
+default instead of being clamped to the nearer bound. Ungated, a `1` is a busy
 loop starving the reminder tick that shares the event loop.
 
 **`/healthz` is the only unauthenticated route in cloud that touches Postgres**,

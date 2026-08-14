@@ -98,7 +98,8 @@ export function resumeTarget(raw) {
  * The HELLO frame decides how often a timer in this process fires, so a value
  * of `1` — malformed, or hostile — is a self-inflicted busy loop that starves
  * the reminder tick sharing the event loop. Discord's real value is ~41.25s;
- * the bounds are wide enough that a legitimate change never trips them.
+ * the bounds are wide enough that a legitimate change never trips them, and
+ * anything outside them takes the default instead.
  */
 const MIN_HEARTBEAT_MS = 1_000;
 const MAX_HEARTBEAT_MS = 600_000;
@@ -210,10 +211,14 @@ export function connectGateway(opts) {
   function startHeartbeat(intervalMs) {
     clearHeartbeat();
     acked = true;
+    // Out of range falls back to Discord's published default rather than being
+    // clamped to the nearer bound: a HELLO this wrong is not one to take a hint
+    // from, and the default is a period we know works.
     const ms = Number(intervalMs);
-    const period = Number.isFinite(ms)
-      ? Math.min(MAX_HEARTBEAT_MS, Math.max(MIN_HEARTBEAT_MS, Math.trunc(ms)))
-      : DEFAULT_HEARTBEAT_MS;
+    let period = DEFAULT_HEARTBEAT_MS;
+    if (Number.isFinite(ms) && ms >= MIN_HEARTBEAT_MS && ms <= MAX_HEARTBEAT_MS) {
+      period = Math.trunc(ms);
+    }
     heartbeat = setIntervalImpl(() => {
       if (!acked) {
         // Silent socket: Discord's own guidance is to close with a non-1000

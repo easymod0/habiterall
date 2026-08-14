@@ -625,15 +625,21 @@ test('the heartbeat period HELLO asks for is clamped', () => {
   };
 
   run({ heartbeat_interval: 45_000 });
+  run({ heartbeat_interval: 1_000 });        // the floor itself is in range
+  run({ heartbeat_interval: 600_000 });      // and so is the ceiling
   // A HELLO is remote input that sets a timer in this process. `1` is a busy
-  // loop that starves the reminder tick sharing the event loop; the absurd
-  // upper value is a socket Discord kills for going silent.
+  // loop that starves the reminder tick sharing the event loop; a day is a
+  // socket Discord kills for going silent. Neither is clamped to the nearer
+  // bound — a frame this wrong is not one to take a hint from.
   run({ heartbeat_interval: 1 });
   run({ heartbeat_interval: 86_400_000 });
   run({ heartbeat_interval: 'soon' });
   run({});
 
-  assert.deepEqual(periods, [45_000, 1_000, 600_000, 41_250, 41_250]);
+  assert.deepEqual(
+    periods,
+    [45_000, 1_000, 600_000, 41_250, 41_250, 41_250, 41_250],
+  );
 });
 
 test('an invalid session that cannot be resumed forgets it', () => {
