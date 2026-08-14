@@ -71,6 +71,7 @@ const SHELL = [
   '/shared/ui/habit-dialog.js',
   '/shared/ui/reminder-field.js',
   '/shared/ui/resample.js',
+  '/shared/ui/routes.js',
   '/shared/ui/settings-dialog.js',
   '/shared/ui/settings.js',
   '/shared/ui/store.js',

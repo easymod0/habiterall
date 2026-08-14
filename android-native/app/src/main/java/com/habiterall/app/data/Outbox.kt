@@ -8,8 +8,12 @@ import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import java.util.concurrent.TimeUnit
 
 /**
@@ -26,6 +30,36 @@ object Outbox {
     private const val KEY_DATE = "date"
     private const val KEY_VALUE = "value"
     private const val KEY_SKIP = "skip"
+
+    /** The name of the unique work for one habit-day, so callers can watch it. */
+    fun workName(habitId: Long, date: String) = "entry:$habitId:$date"
+
+    /**
+     * Wait for a queued write to finish, and say whether it landed.
+     *
+     * Nothing observed the result before, which cost two things. A write the
+     * server refuses for good — a 4xx, which `SyncWorker` correctly does not
+     * retry — used to vanish in silence, leaving the cell showing a value that
+     * was never stored; the reliable way to produce one is a phone whose local
+     * date is ahead of the server's, where today's column is a future date the
+     * server rejects every evening. And a refetch that arrives before the write
+     * does would paint the old value back, so the caller needs to know when it
+     * is safe to stop overriding.
+     *
+     * Returns the terminal state, which the caller must tell apart three ways.
+     * SUCCEEDED landed. FAILED did not and never will. CANCELLED means a later
+     * tap on the same day REPLACEd this work — not a failure, and reporting it
+     * as one would put "could not be saved" on screen every time somebody
+     * tapped a cell twice in quick succession.
+     */
+    suspend fun awaitWrite(context: Context, habitId: Long, date: String): WorkInfo.State {
+        val manager = WorkManager.getInstance(context)
+        return manager.getWorkInfosForUniqueWorkFlow(workName(habitId, date))
+            .map { infos -> infos.lastOrNull() }
+            .filter { it != null && it.state.isFinished }
+            .map { it!!.state }
+            .first()
+    }
 
     /**
      * Queue a write. Uniqueness is per habit+day and [ExistingWorkPolicy.REPLACE]:
@@ -48,7 +82,7 @@ object Outbox {
             .build()
 
         WorkManager.getInstance(context)
-            .enqueueUniqueWork("entry:$habitId:$date", ExistingWorkPolicy.REPLACE, request)
+            .enqueueUniqueWork(workName(habitId, date), ExistingWorkPolicy.REPLACE, request)
     }
 
     class SyncWorker(

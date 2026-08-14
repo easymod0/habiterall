@@ -106,6 +106,28 @@ PUT routes and the Discord button handler. It had been inline in the two routes,
 and a third copy in the interaction handler is how "not done" would start meaning
 something different depending on where you answered from.
 
+**A view is named by a fragment, never a path.** `#/habit/42` is what the
+native client opens to land on one habit's stats, and it is a fragment because
+that reaches the server in neither edition: no static-serving change, no
+service-worker navigation rule, nothing to teach a build step that does not
+exist. `shared/public/ui/routes.js` owns it, and two rules in `go()` are load
+bearing — writing nothing when the URL already says this (`detail.open()` is
+re-entered by every zoom and paging control, so the alternative is a dozen
+history entries per habit), and pushing a habit while the list replaces (Back
+already goes home). Note the Android WebView and a browser then disagree, on
+purpose: a cold deep link leaves an entry a browser's Back walks into, while
+WebView's own back skips an entry pushed without a user gesture and closes the
+screen — which is what returns you to the native list you tapped from.
+
+**The native day grid runs whichever way `dayOrder` says, and only one
+direction is free.** With today on the left, loading more history appends past
+the right edge and the scroll offset is still correct. With today on the right
+it *prepends*, so every column shifts by its own width and the offset must move
+with it or the grid jumps a month sideways at the moment it loads —
+`Grid.scrollAfterGrowth` is that correction and it is unit-tested. All rows and
+the date header share one `ScrollState`, because two lazy rows cannot share one
+state and rows that scroll apart stop lining up with the dates above them.
+
 **A time is parsed, not pattern-matched.** `08:30` is what gets stored, but
 `8:30`, `8:30 pm`, `830` and `8` are what people type, and an `^HH:MM$` check
 rejects all four with nothing useful to say. `shared/public/ui/time.js` and the

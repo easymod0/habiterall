@@ -1,0 +1,256 @@
+package com.habiterall.app.ui
+
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.habiterall.app.data.Habit
+import java.time.LocalDate
+
+/**
+ * The day grid: one row per habit, and one column per day.
+ *
+ * The habit's name is pinned and the days scroll, all of them together — a
+ * frozen first column over one shared [ScrollState], which is also why this is
+ * a plain scrolling Row rather than a lazy one. Two lazy rows cannot share a
+ * single state, and rows that scroll independently turn a grid into a set of
+ * unrelated sliders where nothing lines up with the date above it.
+ */
+
+/**
+ * Width of one day column.
+ *
+ * Chosen against the narrowest phone this app supports rather than by eye: at
+ * 360dp, the pinned name column and the row's padding leave about 208dp, which
+ * is five of these. Five days is the least that makes the grid worth having —
+ * fewer and it says nothing the old single-day row did not.
+ */
+val CELL_WIDTH = 40.dp
+
+/** Pinned habit-name column. Wide enough for "No late-night snacks" to wrap to two lines. */
+val NAME_WIDTH = 120.dp
+
+private val CELL_SIZE = 34.dp
+
+/**
+ * The date row above the grid, scrolling in lockstep with every habit row.
+ *
+ * The dates live here rather than in each row for the obvious reason — one
+ * label per column, not one per column per habit — and today is marked here
+ * for the same reason: a marker repeated down every row is wallpaper.
+ */
+@Composable
+fun DayHeader(dates: List<String>, today: String, scroll: ScrollState) {
+    Row(
+        Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(NAME_WIDTH))
+        Row(Modifier.horizontalScroll(scroll)) {
+            for (date in dates) {
+                val isToday = date == today
+                Column(
+                    Modifier.width(CELL_WIDTH),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        weekdayLetter(date),
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        dayOfMonth(date),
+                        fontSize = 12.sp,
+                        fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
+                        color = if (isToday) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One habit: its name, its reminder, and its days.
+ *
+ * The Yes/No buttons this replaced only ever spoke about today. They are gone
+ * rather than kept alongside, because two ways to record the same day — one of
+ * which silently means "today" — is the confusion the web UI already had to
+ * remove once.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun HabitGridRow(
+    habit: Habit,
+    dates: List<String>,
+    today: String,
+    scroll: ScrollState,
+    onOpen: () -> Unit,
+    onSetReminder: () -> Unit,
+    onTapDay: (String) -> Unit,
+    onHoldDay: (String) -> Unit,
+) {
+    val color = habitColor(habit.color)
+
+    Row(
+        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.width(NAME_WIDTH)) {
+            Text(
+                habit.name,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clickable(onClickLabel = "Open habit") { onOpen() },
+            )
+            TextButton(
+                onClick = onSetReminder,
+                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+            ) {
+                Text(
+                    if (habit.reminderTime.isBlank()) "Add reminder"
+                    else habit.reminderTime,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+
+        Row(Modifier.horizontalScroll(scroll)) {
+            for (date in dates) {
+                DayCell(
+                    habit = habit,
+                    date = date,
+                    isToday = date == today,
+                    color = color,
+                    onTap = { onTapDay(date) },
+                    onHold = { onHoldDay(date) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One day of one habit.
+ *
+ * A tap cycles, a long press opens the day's own dialog. The long press is not
+ * the only way to reach anything — everything it offers is reachable by
+ * tapping through the cycle — so nothing is hidden behind a gesture nobody
+ * discovers; it is the shortcut, not the door.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun DayCell(
+    habit: Habit,
+    date: String,
+    isToday: Boolean,
+    color: Color,
+    onTap: () -> Unit,
+    onHold: () -> Unit,
+) {
+    // Through the habit, not the raw map: a yes/no day carrying Loop's old
+    // SKIP sentinel is a skip, and reading `entries` directly paints it as a
+    // partly-done day instead.
+    val skipped = habit.isSkipped(date)
+    val value = habit.valueOn(date)
+    val met = habit.isMet(value, skipped)
+
+    // How full the square looks. A measurable habit that fell short shows a
+    // faint version of its own colour rather than nothing, because "8 of 20
+    // pages" is not the same day as one with no entry at all.
+    val fill = when {
+        skipped -> Color.Transparent
+        met == true -> color
+        value != null && value > 0 -> color.copy(alpha = 0.35f)
+        else -> Color.Transparent
+    }
+
+    val label = when {
+        skipped -> "–"
+        habit.isNumerical -> value?.let { trimNumber(it) } ?: ""
+        met == true -> "✓"
+        else -> ""
+    }
+
+    Box(Modifier.width(CELL_WIDTH), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(CELL_SIZE)
+                .clip(RoundedCornerShape(8.dp))
+                .background(
+                    if (fill == Color.Transparent) MaterialTheme.colorScheme.surfaceVariant
+                    else fill
+                )
+                .then(
+                    // Today is outlined rather than filled: the fill already
+                    // means "recorded", so borrowing it to also mean "today"
+                    // would make an untouched today look done.
+                    if (isToday) Modifier.border(
+                        2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp)
+                    ) else Modifier
+                )
+                .combinedClickable(
+                    onClickLabel = "Record $date",
+                    onLongClickLabel = "Edit $date",
+                    onClick = onTap,
+                    onLongClick = onHold,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (label.isNotEmpty()) {
+                Text(
+                    label,
+                    fontSize = if (habit.isNumerical) 11.sp else 14.sp,
+                    textAlign = TextAlign.Center,
+                    color = if (met == true && !skipped) Color.White
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** `#8b5cf6` as a Compose colour, falling back rather than throwing on junk. */
+@Composable
+fun habitColor(hex: String): Color =
+    runCatching { Color(android.graphics.Color.parseColor(hex)) }
+        .getOrElse { MaterialTheme.colorScheme.primary }
+
+/** `2026-08-13` → `13`. */
+private fun dayOfMonth(date: String): String = date.takeLast(2).trimStart('0')
+
+/** `2026-08-13` → `T`. Sunday-first initials, as the web header uses. */
+private fun weekdayLetter(date: String): String =
+    runCatching { "SMTWTFS"[LocalDate.parse(date).dayOfWeek.value % 7].toString() }
+        .getOrElse { "" }
+
+/** 2.0 → "2", 2.5 → "2.5". */
+fun trimNumber(n: Double): String =
+    if (n == n.toLong().toDouble()) n.toLong().toString() else n.toString()

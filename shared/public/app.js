@@ -16,6 +16,7 @@ import * as dataDialog from '/shared/ui/data-dialog.js';
 import * as detail from '/shared/ui/detail.js';
 import * as dayDialog from '/shared/ui/day-dialog.js';
 import * as habitDialog from '/shared/ui/habit-dialog.js';
+import * as routes from '/shared/ui/routes.js';
 import * as settingsDialog from '/shared/ui/settings-dialog.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
@@ -35,6 +36,25 @@ function initTopBar() {
     // habit, not the theme.
     if (state.openHabitId != null) emit('change');
   }));
+}
+
+/**
+ * Back and Forward, and a fragment typed or pasted into the address bar.
+ *
+ * The check against what is already showing is what keeps this from fighting
+ * the views: opening a habit writes the URL, and without the guard the event
+ * that follows would reopen — and refetch — the habit already on screen.
+ */
+function initRouting() {
+  routes.init((route) => {
+    if (route.view === 'habit') {
+      if (route.id !== state.openHabitId) detail.open(route.id);
+    } else if (state.openHabitId != null) {
+      // 'reload' rather than a repaint: the dashboard is coming back after a
+      // detour, and the entries behind it may have moved since.
+      emit('reload');
+    }
+  });
 }
 
 /**
@@ -76,7 +96,13 @@ export async function start(adapter) {
   settingsDialog.init();
   dashboard.init();
   detail.init();
+  initRouting();
   registerServiceWorker();
+
+  // Read before anything paints. `dashboard.load()` below puts the app at the
+  // list, which rewrites the fragment — so a link straight to a habit has to
+  // be taken now or it is gone by the time there is somewhere to use it.
+  const opening = routes.current();
 
   initTheme();
   connectivity.refreshOfflineBadge();
@@ -92,6 +118,10 @@ export async function start(adapter) {
     await settings.init();
 
     await dashboard.load();
+    // After the dashboard, not instead of it: the habit view's Back button
+    // expects a list to go back to, and a habit that no longer exists then
+    // leaves the app on the dashboard rather than on nothing at all.
+    if (opening.view === 'habit') await detail.open(opening.id);
     handleLaunchAction();
   } catch (e) {
     toast(e.message);

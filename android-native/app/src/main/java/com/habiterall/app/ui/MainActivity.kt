@@ -5,31 +5,112 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+// A subpackage, so the wildcard above does not reach it.
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.work.WorkInfo
 import com.habiterall.app.data.*
 import com.habiterall.app.notify.Reminders
 import com.habiterall.app.notify.ReminderTime
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
+
+/**
+ * The least time the refresh indicator stays up, once it is up at all.
+ *
+ * A refresh that resolves within a frame of starting — an instant failure with
+ * no network, or a LAN server answering in 20ms — flips `isRefreshing` true and
+ * back before the indicator's own animation has anywhere to go, and it is left
+ * stranded on screen until the next resume clears it. Found on an emulator with
+ * Wi-Fi switched off, where the fetch fails so fast the indicator never had a
+ * chance to retract; the same instant also reads as a glitch rather than as
+ * work, since something appeared and vanished with no result to show for it.
+ */
+private const val REFRESH_FLOOR_MS = 350L
+
+/**
+ * A page of the server's web UI, and what the top bar calls it.
+ *
+ * The two travel together because they are decided together: opening a habit
+ * means both a fragment and that habit's name, and a screen titled
+ * "Statistics" showing one habit's page is the kind of small lie that makes an
+ * embedded browser feel embedded.
+ */
+private data class WebTarget(val url: String, val title: String)
+
+/**
+ * A write that has been made but not yet acknowledged by the server.
+ *
+ * These are kept apart from the fetched habits and laid over them, because a
+ * refetch replaces the list wholesale and the outbox delivers on its own
+ * schedule. Scrolling far enough to load more history seconds after a tap used
+ * to return the state from *before* the write, so the cell emptied itself again
+ * — and the tap cycle then recomputed from the wrong value, so the next tap
+ * repeated the write instead of advancing.
+ */
+private data class PendingWrite(val value: Double?, val skip: Boolean)
+
+/**
+ * The habits as they should appear: what the server said, with anything still
+ * in flight laid on top.
+ */
+private fun List<Habit>.withPending(
+    pending: Map<Pair<Long, String>, PendingWrite>,
+): List<Habit> {
+    if (pending.isEmpty()) return this
+    return map { habit ->
+        val mine = pending.filterKeys { it.first == habit.id }
+        if (mine.isEmpty()) return@map habit
+
+        val entries = habit.entries.toMutableMap()
+        val skips = habit.skips.toMutableList()
+        for ((key, write) in mine) {
+            val date = key.second
+            if (write.value == null || write.skip) entries.remove(date)
+            else entries[date] = write.value
+            // A skip lives out of band, so it is removed here as well as added:
+            // the value alone cannot say a day stopped being skipped.
+            if (write.skip) { if (date !in skips) skips.add(date) } else skips.remove(date)
+        }
+        habit.copy(entries = entries, skips = skips)
+    }
+}
+
+/**
+ * The scroll offset at which today is on screen.
+ *
+ * Which end that is depends on the day order, and it is asked for in three
+ * places — first layout, a change of order, and coming back to the app — so it
+ * is named rather than repeated as a conditional nobody reads twice.
+ */
+private fun todayEdge(scroll: androidx.compose.foundation.ScrollState, newestLeft: Boolean) =
+    if (newestLeft) 0 else scroll.maxValue
 
 class MainActivity : ComponentActivity() {
 
@@ -70,7 +151,7 @@ class MainActivity : ComponentActivity() {
 
                 // The web UI is a screen of this app, not a trip to a
                 // browser. See WebScreen for why that matters.
-                var web by remember { mutableStateOf<String?>(null) }
+                var web by remember { mutableStateOf<WebTarget?>(null) }
 
                 when {
                     !checked -> Loading()
@@ -79,13 +160,19 @@ class MainActivity : ComponentActivity() {
                         Reminders.rescheduleAll(this@MainActivity)
                     })
                     web != null -> WebScreen(
-                        url = web!!,
-                        title = "Statistics",
+                        url = web!!.url,
+                        title = web!!.title,
                         onClose = { web = null },
                     )
                     else -> HabitListScreen(
                         serverUrl = url!!,
-                        onOpenStats = { web = url },
+                        onOpenStats = { web = WebTarget(url!!, "Statistics") },
+                        // Straight to that habit's own page, titled with its
+                        // name: landing on the dashboard and hunting for the
+                        // habit you just tapped is the seam this removes.
+                        onOpenHabit = { habit ->
+                            web = WebTarget(ServerUrl.habitRoute(url!!, habit.id), habit.name)
+                        },
                         onChangeServer = { url = null },
                     )
                 }
@@ -186,14 +273,60 @@ class MainActivity : ComponentActivity() {
     private fun HabitListScreen(
         serverUrl: String,
         onOpenStats: () -> Unit,
+        onOpenHabit: (Habit) -> Unit,
         onChangeServer: () -> Unit,
     ) {
         var habits by remember { mutableStateOf<List<Habit>>(emptyList()) }
         var error by remember { mutableStateOf<String?>(null) }
         var loading by remember { mutableStateOf(true) }
+        /** True once a fetch has finished, however it went. See the spinner rule below. */
+        var loaded by remember { mutableStateOf(false) }
         var reload by remember { mutableStateOf(0) }
-        var countFor by remember { mutableStateOf<Habit?>(null) }
         var reminderFor by remember { mutableStateOf<Habit?>(null) }
+        /** Writes made here that the server has not confirmed yet. */
+        var pending by remember { mutableStateOf(mapOf<Pair<Long, String>, PendingWrite>()) }
+        /** The day a dialog is editing, and which habit's. */
+        var editing by remember { mutableStateOf<Pair<Habit, String>?>(null) }
+        var holding by remember { mutableStateOf<Pair<Habit, String>?>(null) }
+
+        /**
+         * How much history is loaded, and which way the days run.
+         *
+         * The window is always "the last N days ending today", which is what
+         * `/api/overview` answers: a grid showing days it never fetched
+         * renders them all as unrecorded, which is the paging bug the web
+         * dashboard already paid for once.
+         */
+        var windowDays by remember { mutableStateOf(Grid.INITIAL_DAYS) }
+        /**
+         * Days actually received, which is what the grid draws.
+         *
+         * Kept apart from `windowDays` because raising the request drew the new
+         * columns immediately, against habits still holding the old window: a
+         * month of recorded days rendered as blank, and blank is not a neutral
+         * state here — the cells are tappable, so the cycle started from the
+         * wrong value and a tap on a day that was DONE on the server wrote a
+         * skip over it.
+         */
+        var loadedDays by remember { mutableStateOf(Grid.INITIAL_DAYS) }
+        var newestLeft by remember { mutableStateOf(true) }
+
+        /** One scroll position, shared by the header and every habit row. */
+        val dayScroll = rememberScrollState()
+
+        val snackbar = remember { SnackbarHostState() }
+        val scope = rememberCoroutineScope()
+
+        /**
+         * Say something that is worth saying once.
+         *
+         * `error` drives the full-screen failure state, which only ever shows
+         * when there is no list to show instead. Anything that fails while the
+         * list IS on screen has nowhere to appear, so it comes through here.
+         */
+        fun notify(message: String) {
+            scope.launch { snackbar.showSnackbar(message) }
+        }
 
         /**
          * Explicit scroll state, so it can be corrected after a reload.
@@ -206,15 +339,75 @@ class MainActivity : ComponentActivity() {
          */
         val listState = rememberLazyListState()
 
-        val today = remember { LocalDate.now().toString() }
+        /**
+         * Today, as the phone reckons it — re-read whenever the app is resumed.
+         *
+         * It used to be captured once for the life of the composition. A
+         * process that survives the night then draws a window ending
+         * yesterday: today has no column at all, the cell outlined as "today"
+         * writes to yesterday, and long-pressing that same cell opens a dialog
+         * headed "Yesterday", because `dayLabel` asks the clock afresh. The
+         * reminder that wakes you at 8am is exactly the path that gets there.
+         */
+        var today by remember { mutableStateOf(LocalDate.now().toString()) }
         val api = remember(serverUrl) { Api(serverUrl) }
 
-        LaunchedEffect(reload, serverUrl) {
+        LaunchedEffect(reload, serverUrl, windowDays) {
             loading = true
-            runCatching { api.overview(days = 1) }
-                .onSuccess { habits = it.habits.filter { h -> !h.archived }; error = null }
-                .onFailure { error = it.message ?: "Could not reach the server" }
+            val started = SystemClock.elapsedRealtime()
+
+            // Cancellation is rethrown rather than reported, here and below.
+            // `runCatching` catches CancellationException like any other, and
+            // this effect is restarted every time the window grows — so a fetch
+            // cut short by scrolling into more history was being shown to the
+            // user as a failed refresh, reading "The coroutine scope left the
+            // composition". A restart is not an error; it is this code's own
+            // doing.
+            try {
+                // The day order is the account's, not this device's, so it is
+                // read from the server with everything else. Its own failure is
+                // not worth a message: the grid renders perfectly well in the
+                // default order, and the overview below is the fetch that
+                // matters.
+                newestLeft = api.settings().newestLeft
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // keep whatever order is already showing
+            }
+
+            try {
+                val data = api.overview(days = windowDays)
+                habits = data.habits.filter { h -> !h.archived }
+                loadedDays = windowDays
+                error = null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = e.message ?: "Could not reach the server"
+                // A refresh that fails with a list already on screen used to
+                // say nothing at all, and pulling makes that worse than the
+                // button did: the indicator retracts, nothing moves, and
+                // there is no hint the server was even asked.
+                if (habits.isNotEmpty()) notify(error!!)
+                // Give back the days this attempt was for. `dates` is drawn
+                // from `loadedDays` below, but the *next* paging decision reads
+                // `windowDays`: leaving it raised after a failure means the
+                // grid believes it holds history it never received, and quietly
+                // stops asking for it again.
+                windowDays = loadedDays
+            }
+
+            // Hold the indicator up for a moment, but only once it is the
+            // thing on screen — the first load has the full-screen spinner
+            // instead, and delaying that would just make the app slower.
+            if (loaded) {
+                val left = REFRESH_FLOOR_MS - (SystemClock.elapsedRealtime() - started)
+                if (left > 0) delay(left)
+            }
+
             loading = false
+            loaded = true
         }
 
         // Correct a restored scroll position that no longer fits the list.
@@ -234,6 +427,75 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Everything below renders from this, never from `habits` directly.
+        val shown = remember(habits, pending) { habits.withPending(pending) }
+
+        val dates = remember(today, loadedDays, newestLeft) {
+            Grid.dates(LocalDate.parse(today), loadedDays, newestLeft)
+        }
+        val cellPx = with(LocalDensity.current) { CELL_WIDTH.roundToPx() }
+
+        // Put today on screen, and keep it there when history arrives.
+        //
+        // With the newest day on the left there is nothing to do: today is at
+        // offset zero and older days are appended off the right-hand edge. With
+        // it on the right, today is at the FAR end, so the grid has to be sent
+        // there once the width is known — and sent again by exactly the width
+        // of whatever was just prepended, or loading a month of history slides
+        // the day being looked at off the screen.
+        // Keyed on the order, so flipping it re-anchors. Without that, changing
+        // the setting reversed the columns but left the offset where it was,
+        // and the grid stayed parked in July with today off the far end — the
+        // one day you are most likely to want after changing anything.
+        var anchored by remember(newestLeft) { mutableStateOf(false) }
+        var drawnDays by remember(newestLeft) { mutableStateOf(dates.size) }
+
+        LaunchedEffect(newestLeft, dayScroll.maxValue, dates.size) {
+            if (!anchored) {
+                dayScroll.scrollTo(todayEdge(dayScroll, newestLeft))
+                // Newest-right cannot anchor until there is a width to anchor
+                // against; newest-left is at zero and needs none.
+                if (newestLeft || dayScroll.maxValue > 0) anchored = true
+                drawnDays = dates.size
+                return@LaunchedEffect
+            }
+
+            if (dates.size > drawnDays) {
+                dayScroll.scrollTo(
+                    Grid.scrollAfterGrowth(
+                        dayScroll.value, dates.size - drawnDays, cellPx, newestLeft
+                    )
+                )
+            }
+            drawnDays = dates.size
+        }
+
+        // Load more history as the far edge comes into view. Reading the scroll
+        // through snapshotFlow rather than on every recomposition keeps this to
+        // one decision per settled scroll position instead of one per frame.
+        //
+        // `armed` is what makes it ONE page per approach. The effect must not be
+        // keyed on `windowDays` — it writes it, so the collector tore itself
+        // down and restarted, and `snapshotFlow` re-emits on collection while
+        // `maxValue` still describes the old column count. The edge therefore
+        // still looked near and the window grew twice: measured through a proxy,
+        // one swipe to the edge went `days=30` straight to `days=90`, skipping
+        // 60 entirely and reaching the cap in half the scrolls. Growing the
+        // window moves the scroll away from the edge, which re-arms it.
+        LaunchedEffect(dayScroll, newestLeft) {
+            var armed = true
+            snapshotFlow { dayScroll.value to dayScroll.maxValue }
+                .collect { (value, max) ->
+                    val atEdge = Grid.needsMore(value, max, windowDays, newestLeft, cellPx * 3)
+                    if (atEdge && armed) {
+                        windowDays = minOf(windowDays + Grid.PAGE_DAYS, Grid.MAX_DAYS)
+                        armed = false
+                    } else if (!atEdge) {
+                        armed = true
+                    }
+                }
+        }
+
         // Coming back to the app shows today, from the top.
         //
         // The check above runs when the list SIZE changes, which is not the same
@@ -249,22 +511,78 @@ class MainActivity : ComponentActivity() {
                 if (first) {
                     first = false
                 } else {
+                    // Before the refetch, so the window asked for is the one
+                    // the phone believes in. Past midnight this is a different
+                    // day and every column moves.
+                    today = LocalDate.now().toString()
                     reload++
                     listState.scrollToItem(0)
+                    // Horizontally too: reopening the app to a grid still
+                    // scrolled to last March is the same staleness the vertical
+                    // snap above exists to fix.
+                    dayScroll.scrollTo(todayEdge(dayScroll, newestLeft))
                 }
             }
         }
 
-        fun record(habit: Habit, value: Double?, skip: Boolean) {
-            Outbox.enqueue(this@MainActivity, habit.id, today, value, skip)
-            // Optimistic: the outbox owns delivery, so the row is already
-            // committed as far as the user is concerned.
-            habits = habits.map {
-                if (it.id != habit.id) it
-                else it.copy(
-                    entries = it.entries + (today to (value ?: 0.0)),
-                    skips = if (skip) it.skips + today else it.skips - today,
-                )
+        /**
+         * Record one day, on any day the grid shows.
+         *
+         * A null [value] with no skip means "clear" — which `Outbox` sends as a
+         * DELETE. It has to REMOVE the entry rather than store a zero: zero is
+         * a real amount for a measurable habit, and "not done" is the absence
+         * of a row, so writing 0.0 for a cleared day left it looking recorded.
+         */
+        fun record(habit: Habit, date: String, value: Double?, skip: Boolean) {
+            val key = habit.id to date
+            val mine = PendingWrite(value, skip)
+            pending = pending + (key to mine)
+            Outbox.enqueue(this@MainActivity, habit.id, date, value, skip)
+
+            scope.launch {
+                val state = Outbox.awaitWrite(this@MainActivity, habit.id, date)
+                // Superseded by a later tap on the same day, which is already
+                // holding its own override and waiting on its own work.
+                if (state == WorkInfo.State.CANCELLED) return@launch
+                // Identity, not equality: only retire the override this call
+                // put there. A newer tap's override must outlive this one.
+                if (pending[key] === mine) {
+                    // Fold it in before dropping it. `habits` still holds the
+                    // fetch from *before* this write, so retiring the override
+                    // without this puts the old value back on screen the moment
+                    // the write succeeds — the cell filling in and then quietly
+                    // emptying itself a second later.
+                    if (state == WorkInfo.State.SUCCEEDED) {
+                        habits = habits.withPending(mapOf(key to mine))
+                    }
+                    pending = pending - key
+                }
+                if (state != WorkInfo.State.SUCCEEDED) {
+                    // A write the server refused for good. Saying nothing left
+                    // the cell showing a value that was never stored, and the
+                    // next tap then cycled on from a state the server does not
+                    // share.
+                    notify("${habit.name} — ${dayLabel(date)} could not be saved")
+                    reload++
+                }
+            }
+        }
+
+        /** What a tap does: the web grid's cycle, or the number dialog. */
+        fun tapDay(habit: Habit, date: String) {
+            if (habit.isNumerical) {
+                editing = habit to date
+                return
+            }
+            val current = when {
+                habit.isSkipped(date) -> Grid.DayState.SKIPPED
+                habit.isMet(habit.valueOn(date), false) == true -> Grid.DayState.DONE
+                else -> Grid.DayState.UNSET
+            }
+            when (Grid.nextState(current)) {
+                Grid.DayState.DONE -> record(habit, date, Sentinels.YES, false)
+                Grid.DayState.SKIPPED -> record(habit, date, null, true)
+                Grid.DayState.UNSET -> record(habit, date, null, false)
             }
         }
 
@@ -274,38 +592,62 @@ class MainActivity : ComponentActivity() {
                     title = { Text("Today") },
                     actions = {
                         TextButton(onClick = onOpenStats) { Text("Stats") }
-                        TextButton(onClick = { reload++ }) { Text("Refresh") }
                     },
                 )
-            }
+            },
+            snackbarHost = { SnackbarHost(snackbar) },
         ) { pad ->
-            Column(Modifier.padding(pad).fillMaxSize()) {
+            // Exactly one spinner per fetch: the full-screen one until the
+            // first result lands, the pull indicator for every fetch after it.
+            // Keyed on "has a fetch finished" rather than "is the list empty",
+            // or an account with no habits yet would flip between the two on
+            // every pull.
+            PullToRefreshBox(
+                isRefreshing = loading && loaded,
+                onRefresh = { reload++ },
+                modifier = Modifier.padding(pad).fillMaxSize(),
+            ) {
                 when {
-                    loading && habits.isEmpty() -> Loading()
-                    error != null && habits.isEmpty() -> Column(
-                        Modifier.padding(24.dp),
+                    loading && !loaded -> Loading()
+                    error != null && shown.isEmpty() -> Column(
+                        // Scrollable so the pull gesture reaches this screen at
+                        // all: PullToRefreshBox only hears about a drag that a
+                        // scrollable child hands up to it, and this is the one
+                        // screen where a retry is the entire point.
+                        Modifier.fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(24.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         Text(error!!, color = MaterialTheme.colorScheme.error)
                         Button(onClick = { reload++ }) { Text("Try again") }
                         TextButton(onClick = onChangeServer) { Text("Change server") }
                     }
-                    habits.isEmpty() -> Column(Modifier.padding(24.dp)) {
+                    shown.isEmpty() -> Column(
+                        Modifier.fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(24.dp),
+                    ) {
                         Text("No habits yet. Add one in the web app.")
                         TextButton(onClick = onOpenStats) { Text("Open habiterall") }
                     }
-                    else -> LazyColumn(Modifier.weight(1f), state = listState) {
-                        items(habits, key = { it.id }) { habit ->
-                            HabitRow(
-                                habit = habit,
-                                value = habit.entries[today],
-                                skipped = today in habit.skips,
-                                onYes = { record(habit, Sentinels.YES, false) },
-                                onNo = { record(habit, Sentinels.UNSET, false) },
-                                onCount = { countFor = habit },
-                                onSetReminder = { reminderFor = habit },
-                            )
-                            HorizontalDivider()
+                    else -> Column(Modifier.fillMaxSize()) {
+                        DayHeader(dates = dates, today = today, scroll = dayScroll)
+                        HorizontalDivider()
+                        LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                            items(shown, key = { it.id }) { habit ->
+                                HabitGridRow(
+                                    habit = habit,
+                                    dates = dates,
+                                    today = today,
+                                    scroll = dayScroll,
+                                    onOpen = { onOpenHabit(habit) },
+                                    onSetReminder = { reminderFor = habit },
+                                    onTapDay = { date -> tapDay(habit, date) },
+                                    onHoldDay = { date -> holding = habit to date },
+                                )
+                                HorizontalDivider()
+                            }
                         }
                     }
                 }
@@ -319,103 +661,71 @@ class MainActivity : ComponentActivity() {
                 onSave = { time, message ->
                     reminderFor = null
                     lifecycleScope.launch {
-                        runCatching { api.setReminder(habit, time, message) }
-                            .onSuccess {
-                                // Re-arm immediately: the schedule lives on the
-                                // server, but the alarm is local.
-                                Reminders.rescheduleAll(this@MainActivity)
-                                reload++
-                            }
-                            .onFailure { error = it.message ?: "Could not save the reminder" }
+                        try {
+                            api.setReminder(habit, time, message)
+                            // Re-arm immediately: the schedule lives on the
+                            // server, but the alarm is local.
+                            Reminders.rescheduleAll(this@MainActivity)
+                            reload++
+                        } catch (e: CancellationException) {
+                            throw e            // see the fetch above
+                        } catch (e: Exception) {
+                            // Not `error`: that drives the "could not load the
+                            // list" screen, which is not what happened, and
+                            // setting it here would have replaced a real
+                            // connection error with this one.
+                            notify(e.message ?: "Could not save the reminder")
+                        }
                     }
                 },
             )
         }
 
-        countFor?.let { habit ->
+        editing?.let { (habit, date) ->
             CountDialog(
                 habit = habit,
-                initial = habit.entries[today],
-                onDismiss = { countFor = null },
-                onConfirm = { value -> record(habit, value, false); countFor = null },
+                date = date,
+                initial = habit.valueOn(date),
+                onDismiss = { editing = null },
+                onConfirm = { value -> record(habit, date, value, false); editing = null },
+                onClear = { record(habit, date, null, false); editing = null },
+            )
+        }
+
+        holding?.let { (habit, date) ->
+            DayDialog(
+                habit = habit,
+                date = date,
+                onDismiss = { holding = null },
+                onPick = { value, skip ->
+                    holding = null
+                    record(habit, date, value, skip)
+                },
+                onEnterAmount = {
+                    holding = null
+                    editing = habit to date
+                },
             )
         }
     }
 
-    @Composable
-    private fun HabitRow(
-        habit: Habit,
-        value: Double?,
-        skipped: Boolean,
-        onYes: () -> Unit,
-        onNo: () -> Unit,
-        onSetReminder: () -> Unit,
-        onCount: () -> Unit,
-    ) {
-        val met = habit.isMet(value, skipped)
-
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(habit.name, fontWeight = FontWeight.Medium)
-                val subtitle = when {
-                    skipped -> "Skipped"
-                    habit.isNumerical -> {
-                        val v = value?.let { trim(it) } ?: "—"
-                        val target = trim(habit.targetValue)
-                        val unit = if (habit.unit.isBlank()) "" else " ${habit.unit}"
-                        "$v / $target$unit"
-                    }
-                    met == true -> "Done"
-                    else -> "Not done"
-                }
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (met == true) Color(0xFF16a34a)
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-
-                // The reminder is the app's entire reason to exist, so setting
-                // one has to be reachable from the habit itself — it was
-                // previously only editable through the web UI, which meant the
-                // notification feature had no way to be switched on from here.
-                TextButton(
-                    onClick = onSetReminder,
-                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        if (habit.reminderTime.isBlank()) "Add reminder"
-                        else "Reminder ${habit.reminderTime}",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
-
-            // Measurable habits get one button that asks for a number; yes/no
-            // habits get the two-state pair. Showing both sets for both kinds
-            // is the exact confusion the web UI had to fix.
-            if (habit.isNumerical) {
-                Button(onClick = onCount) { Text(value?.let { trim(it) } ?: "Enter") }
-            } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalButton(onClick = onNo) { Text("No") }
-                    Button(onClick = onYes) { Text("Yes") }
-                }
-            }
-        }
-    }
-
+    /**
+     * How much, on one day.
+     *
+     * Prefilled with the day's own amount, or the target when there is none —
+     * "20 pages" is nearly always what you are about to record, and a habit
+     * with no entry yet has nothing better to offer.
+     */
     @Composable
     private fun CountDialog(
         habit: Habit,
+        date: String,
         initial: Double?,
         onDismiss: () -> Unit,
         onConfirm: (Double) -> Unit,
+        onClear: () -> Unit,
     ) {
-        var text by remember {
+        var text by remember(date) {
             mutableStateOf(initial?.let { trim(it) } ?: trim(habit.targetValue))
         }
         val parsed = text.trim().toDoubleOrNull()
@@ -424,12 +734,15 @@ class MainActivity : ComponentActivity() {
             onDismissRequest = onDismiss,
             title = { Text(habit.name) },
             text = {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    singleLine = true,
-                    label = { Text(habit.unit.ifBlank { "Amount" }) },
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(dayLabel(date), style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        singleLine = true,
+                        label = { Text(habit.unit.ifBlank { "Amount" }) },
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
@@ -437,7 +750,84 @@ class MainActivity : ComponentActivity() {
                     onClick = { parsed?.let(onConfirm) },
                 ) { Text("Save") }
             },
-            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+            dismissButton = {
+                Row {
+                    // Only when there is something to remove: an empty day
+                    // offering to be emptied is a button that does nothing.
+                    if (initial != null || habit.isSkipped(date)) {
+                        TextButton(onClick = onClear) { Text("Clear") }
+                    }
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                }
+            },
+        )
+    }
+
+    /**
+     * Everything a day can be, named rather than cycled to.
+     *
+     * The tap cycle is quicker once you know it, and unreadable until you do —
+     * this is where "skip" is a word instead of a third tap. It mirrors the
+     * web's day dialog, minus its Clear button: with no notes in this client,
+     * clearing a day and marking it not done are the same write, and two
+     * buttons that do one thing is worse than one.
+     */
+    @Composable
+    private fun DayDialog(
+        habit: Habit,
+        date: String,
+        onDismiss: () -> Unit,
+        onPick: (Double?, Boolean) -> Unit,
+        onEnterAmount: () -> Unit,
+    ) {
+        val skipped = habit.isSkipped(date)
+        val value = habit.valueOn(date)
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(habit.name) },
+            // The choices are the dialog's body, not its buttons. An
+            // AlertDialog lays its buttons out in a row, so three of them plus
+            // Cancel wrapped into an L-shape where the first choice sat beside
+            // Cancel and the rest stacked under it — a menu that reads as a
+            // mistake. As full-width rows they read as what they are: a list of
+            // what this day could be.
+            text = {
+                Column {
+                    Text(dayLabel(date), style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        when {
+                            skipped -> "Skipped"
+                            habit.isNumerical && value != null ->
+                                "${trim(value)} / ${trim(habit.targetValue)} ${habit.unit}".trim()
+                            habit.isMet(value, false) == true -> "Done"
+                            else -> "Not done"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+                    val option = Modifier.fillMaxWidth()
+                    if (habit.isNumerical) {
+                        TextButton(onClick = onEnterAmount, modifier = option) {
+                            Text("Enter an amount", Modifier.fillMaxWidth())
+                        }
+                    } else {
+                        TextButton(
+                            onClick = { onPick(Sentinels.YES, false) },
+                            modifier = option,
+                        ) { Text("Done", Modifier.fillMaxWidth()) }
+                    }
+                    TextButton(onClick = { onPick(null, false) }, modifier = option) {
+                        Text("Not done", Modifier.fillMaxWidth())
+                    }
+                    TextButton(onClick = { onPick(null, !skipped) }, modifier = option) {
+                        Text(if (skipped) "Unskip" else "Skip", Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
         )
     }
 
@@ -605,6 +995,23 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * `2026-08-13` as "Today", "Yesterday", or "Thu 13 Aug".
+     *
+     * A dialog opened from a grid cell has to say which day it is editing, and
+     * the ISO date is the one form that reads as a serial number rather than a
+     * day — the whole risk of an editable history is fixing the wrong square.
+     */
+    private fun dayLabel(date: String): String = runCatching {
+        val day = LocalDate.parse(date)
+        val today = LocalDate.now()
+        when (day) {
+            today -> "Today"
+            today.minusDays(1) -> "Yesterday"
+            else -> day.format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM"))
+        }
+    }.getOrElse { date }
 
     private fun trim(n: Double): String =
         if (n == n.toLong().toDouble()) n.toLong().toString() else n.toString()

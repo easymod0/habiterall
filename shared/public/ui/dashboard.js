@@ -12,6 +12,7 @@ import {
   addDaysISO, datesEndingOn, freqLabel, iso, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
+import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
 import { on, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
@@ -76,6 +77,10 @@ export async function load() {
 
 export function paint() {
   state.openHabitId = null;
+  // The URL follows the view. Cheap to call on every repaint — and this is
+  // called on every check-off — because `go` does nothing when the address bar
+  // already says this.
+  routes.go(routes.LIST);
   const root = views.showList();
 
   // Everything below is rebuilt from scratch, which destroys whatever had
@@ -169,7 +174,7 @@ export function paint() {
 
       const box = document.createElement('span');
       box.className = 'check-box';
-      paintCheckbox(box, habit, value);
+      paintCheckbox(box, habit, value, habit.skips?.includes(date) ?? false);
 
       const day = document.createElement('span');
       day.className = 'check-day';
@@ -497,19 +502,32 @@ async function persistOrder(order) {
 
 /* ---------- the checkboxes ---------- */
 
-function paintCheckbox(box, habit, value) {
+/**
+ * @param isSkip  whether `/overview` listed this date in the habit's `skips`
+ *
+ * The flag is why this takes four arguments. `/overview` flattens a skip onto
+ * the SKIP wire value so the grid has something paintable, *and* lists the date
+ * in `skips` — and the second is the only one that can be trusted, because 3 is
+ * a legitimate amount for a measurable habit. Reading the sentinel alone
+ * painted "3 pages" and "3 cigarettes" as skipped days, while the score behind
+ * them counted the 3: the cell disagreed with every figure computed from it.
+ * The bare sentinel still counts for a *boolean* habit, where it cannot mean
+ * anything else and is what an imported Loop history carries — the same rule as
+ * `normalizeEntry` in shared/src/stats.js.
+ */
+function paintCheckbox(box, habit, value, isSkip = false) {
   box.textContent = '';
   box.style.background = 'var(--grid-empty)';
   box.style.color = '#fff';
 
-  if (value == null) return;
-
-  if (value === SKIP) {
+  if (isSkip || (habit.type === 'boolean' && value === SKIP)) {
     box.style.background = 'var(--surface-2)';
     box.style.color = 'var(--text-dim)';
     box.textContent = '–';
     return;
   }
+
+  if (value == null) return;
 
   if (habit.type === 'boolean') {
     if (value === YES) {
@@ -544,6 +562,27 @@ function paintCheckbox(box, habit, value) {
   box.style.fontSize = '9.5px';
 }
 
+/**
+ * Add or remove a date from a habit's `skips`, in place.
+ *
+ * The optimistic paths below edit `habit.entries` and then repaint, and since
+ * the grid started reading `skips` to tell a skip from an amount, editing one
+ * without the other leaves the cell asserting the old state. Offline that is
+ * not a flash before the refetch corrects it: `api()` queues the write and
+ * throws, so the refetch never runs and the cell stays wrong while taps
+ * accumulate — the failure the long comment below was written to prevent,
+ * arriving by a different door.
+ *
+ * @returns {boolean} whether the date was a skip before this call
+ */
+function setSkip(habit, date, on) {
+  habit.skips ??= [];
+  const was = habit.skips.includes(date);
+  if (on && !was) habit.skips.push(date);
+  if (!on && was) habit.skips = habit.skips.filter((d) => d !== date);
+  return was;
+}
+
 async function onCheckClick(habit, date) {
   try {
     let next;
@@ -568,12 +607,14 @@ async function onCheckClick(habit, date) {
         // showing a value the user has just cleared.
         const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
         delete habit.entries[date];
+        const wasSkip = setSkip(habit, date, false);
         paint();
         try {
           await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
         } catch (e) {
           if (!e.queued) {
             if (had !== undefined) habit.entries[date] = had;
+            setSkip(habit, date, wasSkip);
             paint();
           }
           throw e;
@@ -594,6 +635,10 @@ async function onCheckClick(habit, date) {
     const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
     if (next === UNSET) delete habit.entries[date];
     else habit.entries[date] = next;
+    // `skips` is what the cell is painted from, so it moves with the value.
+    // Only a boolean habit can reach SKIP from here; a measurable one is
+    // recording an amount, which by definition ends any skip on that day.
+    const wasSkip = setSkip(habit, date, next === SKIP && habit.type === 'boolean');
     paint();
 
     try {
@@ -608,6 +653,7 @@ async function onCheckClick(habit, date) {
       if (!e.queued) {
         if (previous === undefined) delete habit.entries[date];
         else habit.entries[date] = previous;
+        setSkip(habit, date, wasSkip);
         paint();
       }
       throw e;

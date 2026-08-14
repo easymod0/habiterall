@@ -161,6 +161,77 @@ try{
   ck('focus stays on the checkbox across a check-off',
      afterCheck===checkKey, `${checkKey} -> ${afterCheck}`);
 
+  // --- 3 is an amount for a measurable habit, and a skip only for a yes/no one
+  //
+  // /overview flattens a skip onto the SKIP wire value so the grid has
+  // something paintable, AND lists the date in `skips`. Painting from the
+  // value alone made "3 pages" and "3 cigarettes" render as skipped days while
+  // the score behind them counted the 3 — the cell disagreeing with every
+  // figure computed from it. Only a browser sees what was painted.
+  const seeded = await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    const read = habits.find(h => h.type === 'numerical');
+    const yesno = habits.find(h => h.type === 'boolean');
+    const d = (n) => {
+      const x = new Date(); x.setHours(12,0,0,0); x.setDate(x.getDate() - n);
+      return x.getFullYear() + '-' +
+             String(x.getMonth()+1).padStart(2,'0') + '-' +
+             String(x.getDate()).padStart(2,'0');
+    };
+    const put = (id, date, body) => fetch('/api/habits/' + id + '/entries/' + date, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    await put(read.id, d(1), { value: 3 });         // three pages, genuinely
+    await put(read.id, d(2), { status: 'skip' });   // an actual skipped day
+    await put(yesno.id, d(3), { status: 'skip' });  // one to clear, offline, below
+    return { read: read.id, yesno: yesno.id, amount: d(1), skip: d(2), clearMe: d(3) };
+  })()`);
+
+  await send('Page.navigate',{url:APP},sessionId);
+  for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+  await sleep(600);
+
+  const painted = await ev(`(() => {
+    const s = ${JSON.stringify(seeded)};
+    const box = (habit, date) => {
+      const el = document.querySelector('[data-focus-key="check:' + habit + ':' + date + '"] .check-box');
+      return el ? (el.textContent || '').trim() : null;
+    };
+    return { amount: box(s.read, s.amount), skip: box(s.read, s.skip),
+             toClear: box(s.yesno, s.clearMe) };
+  })()`);
+
+  ck('a measurable 3 paints as the amount, not as a skip',
+     painted.amount === '3', JSON.stringify(painted));
+  ck('a real skip still paints as one', painted.skip === '–', JSON.stringify(painted));
+  ck('a skipped yes/no day paints as one too', painted.toClear === '–',
+     JSON.stringify(painted));
+
+  // --- clearing a skip repaints the cell, with no server to ask
+  //
+  // The optimistic paths edit `habit.entries`; the cell is painted from
+  // `habit.skips`. Edit one without the other and the cell keeps asserting the
+  // old state until a refetch corrects it — which offline never happens, since
+  // `api()` queues the write and throws. Emulating offline is what makes this
+  // deterministic: online the refetch hides the bug behind a repaint.
+  await send('Network.emulateNetworkConditions',
+    { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
+
+  await ev(`document.querySelector(
+    '[data-focus-key="check:${seeded.yesno}:${seeded.clearMe}"]')?.click()`);
+  await sleep(1200);
+
+  const cleared = await ev(`(() => {
+    const el = document.querySelector('[data-focus-key="check:${seeded.yesno}:${seeded.clearMe}"] .check-box');
+    return el ? (el.textContent || '').trim() : null;
+  })()`);
+  ck('clearing a skip while offline repaints the cell', cleared === '',
+     `cell reads "${cleared}" after the tap`);
+
+  await send('Network.emulateNetworkConditions',
+    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}
 finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}

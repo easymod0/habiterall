@@ -19,6 +19,7 @@ import { addDaysISO, freqLabel, targetLabel, todayISO } from '/shared/ui/dates.j
 import { openDayDialog } from '/shared/ui/day-dialog.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import { resampleScores } from '/shared/ui/resample.js';
+import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, on, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
@@ -76,6 +77,11 @@ function render(stats, entries) {
   const habit = stats.habit;
   const color = habit.color;
   state.openHabitId = habit.id;
+  // Set here rather than in `open()`, so the URL only names a habit that
+  // actually rendered: `open()` is also the failure path, and a fragment
+  // pointing at a habit the server refused would survive a reload as a link
+  // that goes nowhere.
+  routes.go({ view: 'habit', id: habit.id });
   const host = views.showDetail();
   host.replaceChildren();
 

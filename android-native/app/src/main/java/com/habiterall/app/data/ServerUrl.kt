@@ -62,6 +62,25 @@ object ServerUrl {
         }
     }
 
+    /**
+     * Where the web UI shows one habit.
+     *
+     * Mirrors `hashFor` in shared/public/ui/routes.js, and deliberately: the
+     * route is a **fragment**, so it is never sent to the server and needs
+     * nothing added to either edition to answer it. That is also why this can
+     * be built by string concatenation rather than asked for — there is no
+     * endpoint here, only a URL the page reads once it has loaded.
+     *
+     * [base] is already normalised by [parse], but not every caller's value
+     * came from there — a URL restored from storage predates a normalisation
+     * rule that changed — so the trailing slash is trimmed again rather than
+     * assumed away. `//#/habit/3` loads the shell and then shows the
+     * dashboard, which is the confusing kind of wrong: it works, just not the
+     * way it was asked to.
+     */
+    fun habitRoute(base: String, habitId: Long): String =
+        "${base.trimEnd('/')}/#/habit/$habitId"
+
     fun parse(input: String): Result {
         val raw = input.trim()
         if (raw.isEmpty()) return Result.Invalid("Enter your server address")
