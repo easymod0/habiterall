@@ -26,7 +26,7 @@ import {
   zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
-  notifierConfig, sendToChannel, startNotifier,
+  notifierConfig, sendToChannel, startNotifier, warnUnreachable,
 } from '@habiterall/shared/notify-send.js';
 import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
@@ -92,13 +92,19 @@ async function candidates() {
  */
 export async function collect(instant) {
   const accounts = [];
+  const { botToken } = notifierConfig(process.env);
 
   for (const row of await candidates()) {
     const settings = row.settings ?? {};
     // The scan's SQL predicate is deliberately loose (it cannot tell whether a
     // webhook URL or a channel id is actually filled in); this is the real test,
     // and it needs to know whether this instance has a bot at all.
-    if (!needsServerDelivery(settings, { bot: !!notifierConfig(process.env).botToken })) {
+    //
+    // A user who fails it is skipped in silence, which is why the warning comes
+    // first — on a shared instance the operator is the only one who can see the
+    // log, and the only one who can add a bot token.
+    warnUnreachable({ id: row.id, settings }, { botToken, log });
+    if (!needsServerDelivery(settings, { bot: !!botToken })) {
       continue;
     }
 

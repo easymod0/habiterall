@@ -459,6 +459,24 @@ test('numerical history sums recorded values', () => {
   assert.equal(hist[0].completed, 1, 'only the day hitting 8 counts');
 });
 
+test('an inherited property is not a granularity', () => {
+  // `granularity` is `req.query.granularity` in both editions, and a lookup
+  // on a plain object reaches Object.prototype. Each of these is truthy, so
+  // `?? BUCKETERS.day` never ran: 'valueOf' and 'hasOwnProperty' were then
+  // called with `this` undefined (a 500 on the stats endpoint), '__proto__'
+  // is not a function at all, and 'toString' quietly bucketed every day
+  // under '[object Undefined]'.
+  //
+  // The same shape as SETTING_VALUES['__proto__'] in validate.js.
+  const entries = map({ '2026-01-01': YES, '2026-01-02': YES });
+
+  for (const key of ['valueOf', 'toString', 'hasOwnProperty', '__proto__', 'constructor']) {
+    const hist = computeHistory(boolHabit, entries, '2026-01-01', '2026-01-02', key);
+    assert.deepEqual(hist.map((b) => b.bucket), ['2026-01-01', '2026-01-02'],
+      `${key} should fall back to daily buckets`);
+  }
+});
+
 /* ---------- weekdays ---------- */
 
 test('weekday breakdown attributes days correctly', () => {

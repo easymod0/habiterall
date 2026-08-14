@@ -15,7 +15,7 @@ import {
   answeredIds, answerText, needsServerDelivery, serverChannels, zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
-  notifierConfig, sendToChannel, startNotifier,
+  notifierConfig, sendToChannel, startNotifier, warnUnreachable,
 } from '@habiterall/shared/notify-send.js';
 import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
@@ -80,6 +80,9 @@ export function collect(now = new Date()) {
   // flag, so the test button worked and only the real reminders never came.
   // The cloud edition has always passed it; this is why that must not drift.
   const { botToken } = notifierConfig(process.env);
+  // Before the early return, and that is the whole point: an account skipped for
+  // having nothing configured is the one case that produced no log line at all.
+  warnUnreachable({ id: null, settings }, { botToken, log });
   if (!needsServerDelivery(settings, { bot: !!botToken })) return [];
 
   const habits = /** @type {any[]} */ (q.habits.all());

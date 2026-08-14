@@ -436,10 +436,12 @@ test('a private note is only visible to the person who clicked', () => {
 /** A stand-in socket the test drives frame by frame. */
 class FakeSocket {
   static last = null;
+  static made = 0;
   constructor(url) {
     this.url = url;
     this.sent = [];
     this.closed = null;
+    FakeSocket.made++;
     FakeSocket.last = this;
   }
 
@@ -453,6 +455,27 @@ class FakeSocket {
 
 const hello = { op: OP.HELLO, d: { heartbeat_interval: 45_000 } };
 const quiet = { log: () => {}, warn: () => {}, error: () => {} };
+
+/**
+ * A gateway whose reconnect timers are collected rather than run, so a test can
+ * count how many one disconnect produced without waiting a second for the first
+ * backoff step.
+ */
+function withFakeTimers(overrides = {}) {
+  const timers = [];
+  const gateway = connectGateway({
+    token: 't',
+    onInteraction: () => {},
+    WebSocketImpl: FakeSocket,
+    log: quiet,
+    setTimeoutImpl: (fn, ms) => {
+      timers.push({ fn, ms });
+      return { unref() {} };
+    },
+    ...overrides,
+  });
+  return { gateway, timers };
+}
 
 test('HELLO is answered with IDENTIFY, and no intents are asked for', () => {
   const gateway = connectGateway({
@@ -566,6 +589,49 @@ test('a rejected token does not become a reconnect loop', () => {
 
   assert.equal(gateway.state(), 'failed');
   assert.ok(FATAL_CLOSE_CODES.has(4004));
+});
+
+test('one disconnect schedules exactly one reconnect', () => {
+  // The socket's own onclose fires when we close it, so a handler left attached
+  // reports a deliberate close as an unexpected one and schedules a second
+  // reconnect. Two sockets then race, only the newer is heartbeated, and
+  // Discord closing the older schedules a third — which is how a bot ends up
+  // churning connections and answering a click twice.
+  const { gateway, timers } = withFakeTimers();
+  const socket = FakeSocket.last;
+  socket.emit(hello);
+  socket.emit({ op: OP.DISPATCH, s: 1, t: 'READY', d: { session_id: 's1' } });
+
+  socket.emit({ op: OP.RECONNECT });
+
+  assert.equal(socket.closed, 4000);
+  assert.equal(timers.length, 1, `${timers.length} reconnects scheduled for one disconnect`);
+  assert.equal(gateway.state(), 'waiting');
+  gateway.stop();
+});
+
+test('a discarded socket is detached, and its replacement resumes', () => {
+  const { gateway, timers } = withFakeTimers();
+  const first = FakeSocket.last;
+  first.emit(hello);
+  first.emit({ op: OP.DISPATCH, s: 1, t: 'READY', d: { session_id: 's1' } });
+  first.emit({ op: OP.RECONNECT });
+
+  // A real close is asynchronous, so a socket we are done with can report itself
+  // long after it has been replaced. Detaching is what makes that harmless.
+  assert.equal(first.onclose, null);
+  assert.equal(first.onmessage, null);
+
+  const before = FakeSocket.made;
+  timers[0].fn();                            // the backoff elapses
+  const second = FakeSocket.last;
+  assert.equal(FakeSocket.made, before + 1, 'exactly one new socket');
+  assert.notEqual(second, first);
+
+  second.emit(hello);
+  assert.ok(second.sent.some((f) => f.op === OP.RESUME),
+    'a reconnect must RESUME, or every event since the disconnect is lost');
+  gateway.stop();
 });
 
 test('an ordinary close schedules a reconnect', () => {
