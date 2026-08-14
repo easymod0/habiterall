@@ -393,6 +393,26 @@ rebuilds the URL from the parts it checked, and the sender refuses redirects.
 Without the host check, `discordWebhook` aims the server at cloud metadata or a
 port on its own network and reports the result as a status code.
 
+**The gateway's own frames are remote input too, and two of them steer this
+process.** A settings URL is the obvious case; the socket is the one that reads
+as trusted because it was authenticated. It is not: `resume_gateway_url` in READY
+says where the NEXT socket opens, and the RESUME frame it then sends carries the
+bot token — so `resumeTarget` applies `parseDiscordWebhook`'s reasoning one step
+out, suffix-matching `*.discord.gg` / `*.discord.com` (the value is regional and
+the regions are not enumerable from here) and rebuilding the URL from the host
+alone. Falling back to the published gateway costs a fresh session and nothing
+else, which is why a rejected value is not an error. HELLO's
+`heartbeat_interval` is the same shape of problem with a different sink: it sets
+a timer in this process, so it is clamped to 1s–10min. Unclamped, a `1` is a busy
+loop starving the reminder tick that shares the event loop.
+
+**`/healthz` is the only unauthenticated route in cloud that touches Postgres**,
+so it is rate-limited (60/min) like everything else that costs something. The
+`skip` for loopback and the private ranges is the load-bearing half: a
+healthchecker reads 429 as "down" and restarts the container, so the probe this
+limit exists to protect must never meet it — and those arrive on the container's
+own interface, not through the proxy.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —

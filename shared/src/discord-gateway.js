@@ -45,6 +45,65 @@
 
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
 
+/**
+ * Where a resume is allowed to go.
+ *
+ * `resume_gateway_url` arrives in READY, over a socket, from a party we have
+ * authenticated only by having reached Discord's TLS — so it is remote input
+ * that decides where the process opens its NEXT socket, carrying the bot token
+ * in the RESUME frame. The same allowlist reasoning as `parseDiscordWebhook`
+ * applies, one step further out: without it a hostile or garbled READY aims the
+ * socket wherever it likes and the token goes with it.
+ *
+ * A suffix match rather than a fixed set, because the value is regional
+ * (`wss://gateway-us-east1-b.discord.gg`) and the regions are not enumerable
+ * from here.
+ */
+const GATEWAY_HOSTS = ['discord.gg', 'discord.com'];
+
+/**
+ * The URL to resume on, rebuilt from the parts we checked, or `null` to fall
+ * back to the published gateway — which is always safe, just a fresh session.
+ *
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function resumeTarget(raw) {
+  const value = String(raw ?? '').trim();
+  if (!value || value.length > 512) return null;
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== 'wss:') return null;
+  if (url.username || url.password) return null;
+
+  const host = url.hostname.toLowerCase();
+  const allowed = GATEWAY_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  if (!allowed) return null;
+
+  // Host only: the path, query and port Discord sends are not needed, and
+  // passing them through is how a crafted READY would reach a different
+  // service on the same domain.
+  return `wss://${host}/?v=10&encoding=json`;
+}
+
+/**
+ * Bounds on Discord's `heartbeat_interval`.
+ *
+ * The HELLO frame decides how often a timer in this process fires, so a value
+ * of `1` — malformed, or hostile — is a self-inflicted busy loop that starves
+ * the reminder tick sharing the event loop. Discord's real value is ~41.25s;
+ * the bounds are wide enough that a legitimate change never trips them.
+ */
+const MIN_HEARTBEAT_MS = 1_000;
+const MAX_HEARTBEAT_MS = 600_000;
+const DEFAULT_HEARTBEAT_MS = 41_250;
+
 export const OP = {
   DISPATCH: 0,
   HEARTBEAT: 1,
@@ -93,6 +152,8 @@ const INTENTS = 0;
  * @param {{log?: Function, warn?: Function, error?: Function}} [opts.log]
  * @param {(fn: () => void, ms: number) => any} [opts.setTimeoutImpl] injected for
  *   tests, so a reconnect can be observed without waiting for one
+ * @param {(fn: () => void, ms: number) => any} [opts.setIntervalImpl] injected for
+ *   tests, so the heartbeat period can be read without waiting one out
  * @returns {{stop: () => void, state: () => string}}
  */
 export function connectGateway(opts) {
@@ -102,6 +163,7 @@ export function connectGateway(opts) {
     WebSocketImpl = globalThis.WebSocket,
     log = console,
     setTimeoutImpl = setTimeout,
+    setIntervalImpl = setInterval,
   } = opts;
 
   if (!token) throw new Error('connectGateway needs a bot token');
@@ -148,7 +210,11 @@ export function connectGateway(opts) {
   function startHeartbeat(intervalMs) {
     clearHeartbeat();
     acked = true;
-    heartbeat = setInterval(() => {
+    const ms = Number(intervalMs);
+    const period = Number.isFinite(ms)
+      ? Math.min(MAX_HEARTBEAT_MS, Math.max(MIN_HEARTBEAT_MS, Math.trunc(ms)))
+      : DEFAULT_HEARTBEAT_MS;
+    heartbeat = setIntervalImpl(() => {
       if (!acked) {
         // Silent socket: Discord's own guidance is to close with a non-1000
         // code and resume, because a plain close would drop the session.
@@ -158,7 +224,7 @@ export function connectGateway(opts) {
       }
       acked = false;
       send({ op: OP.HEARTBEAT, d: sequence });
-    }, intervalMs);
+    }, period);
     heartbeat.unref?.();
   }
 
@@ -215,7 +281,7 @@ export function connectGateway(opts) {
 
     switch (frame.op) {
       case OP.HELLO:
-        startHeartbeat(frame.d?.heartbeat_interval ?? 41_250);
+        startHeartbeat(frame.d?.heartbeat_interval ?? DEFAULT_HEARTBEAT_MS);
         identify();
         break;
 
@@ -245,7 +311,9 @@ export function connectGateway(opts) {
       case OP.DISPATCH:
         if (frame.t === 'READY') {
           sessionId = frame.d?.session_id ?? null;
-          resumeUrl = frame.d?.resume_gateway_url ?? null;
+          // Validated HERE rather than at the socket, so the value held between
+          // connections is already one of ours.
+          resumeUrl = resumeTarget(frame.d?.resume_gateway_url);
           attempt = 0;                       // a good connection resets backoff
           state = 'ready';
           log.log?.(`discord gateway: connected as ${frame.d?.user?.username ?? 'bot'}`);
@@ -271,8 +339,9 @@ export function connectGateway(opts) {
     state = 'connecting';
 
     // Resuming must go to the URL READY gave us; a fresh session uses the
-    // published one.
-    const url = sessionId && resumeUrl ? `${resumeUrl}/?v=10&encoding=json` : GATEWAY_URL;
+    // published one. `resumeUrl` is already canonical (see `resumeTarget`), so
+    // a READY that named somewhere else simply resumes on the published host.
+    const url = sessionId && resumeUrl ? resumeUrl : GATEWAY_URL;
 
     let socket;
     try {

@@ -456,6 +456,25 @@ test('a Discord payload omits what it does not know', () => {
   assert.equal(embed.footer, undefined);
 });
 
+test('the app link ends in exactly one slash, however many were configured', () => {
+  const link = (appUrl) => discordPayload({
+    habit: habit(), message: reminderMessage(habit()), appUrl,
+  }).embeds[0].url;
+
+  assert.equal(link('https://habits.example'), 'https://habits.example/');
+  assert.equal(link('https://habits.example/'), 'https://habits.example/');
+  assert.equal(link('https://habits.example///'), 'https://habits.example/');
+  assert.equal(link('https://habits.example/app/'), 'https://habits.example/app/');
+  assert.equal(link('ftp://habits.example'), undefined);
+
+  // The regex this replaced was `/\/+$/`, unanchored at the start: on a run of
+  // slashes with no match at the end, the engine retries from every one of them.
+  const started = process.hrtime.bigint();
+  link(`https://habits.example/${'/'.repeat(200_000)}x`);
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(ms < 500, `trailing-slash normalisation took ${ms}ms`);
+});
+
 test('an over-long name or note is truncated to Discord\'s limits', () => {
   const payload = discordPayload({
     habit: habit({ name: 'n'.repeat(400), description: 'd'.repeat(2000) }),

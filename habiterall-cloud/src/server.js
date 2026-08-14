@@ -110,6 +110,14 @@ app.use(session({
 
 /* ---------- rate limits ---------- */
 
+/**
+ * Loopback and the private ranges a container orchestrator probes from —
+ * docker's bridge, a kubelet on the node, an IPv6 unique-local address.
+ * Anchored and alternation-free per branch, so it cannot backtrack.
+ */
+const LOCAL_IPS =
+  /^(::1|::ffff:127\.|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|f[cd]|fe80:)/i;
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 20,
   standardHeaders: true, legacyHeaders: false,
@@ -134,6 +142,23 @@ const notifyTestLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, limit: 10,
   keyGenerator: (req) => (req.session?.user?.id ? `u:${req.session.user.id}` : req.ip),
   message: { error: 'too many test notifications, try again in a few minutes' },
+});
+
+/**
+ * `/healthz` is the only unauthenticated route that touches Postgres, which
+ * makes it the cheapest way to exhaust a pool sized for the app rather than for
+ * a flood: `PG_POOL_MAX` is 10 by default, and every waiting `SELECT 1` is a
+ * connection a real request cannot have.
+ *
+ * `skip` is load bearing. A healthchecker reads 429 as "down" and restarts the
+ * container, so the probe that this limit exists to protect must never meet it
+ * — and those arrive on the container's own interface, not through the proxy.
+ */
+const healthLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 60,
+  standardHeaders: true, legacyHeaders: false,
+  skip: (req) => LOCAL_IPS.test(req.ip ?? ''),
+  message: { ok: false, error: 'rate limit exceeded' },
 });
 
 const importLimiter = rateLimit({
@@ -194,7 +219,7 @@ app.use('/api', requireAuth, apiLimiter, api);
 
 /* ---------- static ---------- */
 
-app.get('/healthz', async (req, res) => {
+app.get('/healthz', healthLimiter, async (req, res) => {
   try {
     await pool.query('SELECT 1');
     res.json({ ok: true });
