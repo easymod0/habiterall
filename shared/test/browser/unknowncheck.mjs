@@ -181,6 +181,41 @@ try {
     (await stored(seeded.tapDay))?.status === '',
     JSON.stringify(await stored(seeded.tapDay)));
 
+  /* ---------- a skip already recorded, once skips are switched off ---------- */
+
+  console.log('\n--- skipDays off, on a day that is already a skip ---');
+
+  // Switching the setting off does not erase the skips already recorded — an
+  // imported Loop history is full of them — so those days must not become
+  // read-only. The cycle has to walk one into an answer even though it can no
+  // longer produce one, which is the case the `SKIPPED -> NO` rule exists for.
+  await ev(`(async () => {
+    await fetch('/api/habits/${seeded.habit}/entries/${seeded.tapDay}', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'skip' }) });
+    await fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skipDays: false }) });
+  })()`);
+  await boot();
+
+  ck('it still paints as a skip', (await ev(cell(seeded.tapDay))) === '–',
+    String(await ev(cell(seeded.tapDay))));
+
+  await tap(seeded.tapDay);
+  const offSkip = await stored(seeded.tapDay);
+  ck('one tap takes it to "not done", clearing the skip',
+    offSkip?.value === 0 && offSkip?.status === '', JSON.stringify(offSkip));
+
+  await tap(seeded.tapDay);
+  ck('and the next reaches "done"',
+    (await stored(seeded.tapDay))?.value === 2, JSON.stringify(await stored(seeded.tapDay)));
+
+  await tap(seeded.tapDay);
+  const back = await stored(seeded.tapDay);
+  ck('after which it cycles between the two answers and never back into a skip',
+    back?.value === 0 && back?.status === '', JSON.stringify(back));
+
   // Leave the account as the fixtures left it, or the next suite inherits this.
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
