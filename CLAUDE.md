@@ -268,7 +268,14 @@ decides is at debug, and rightly — 1,440 lines a day of "nothing was due" is h
 a log stops being read. Two exceptions, both routed through the `once` dedupe in
 notify-send.js. `notify.too_late` means a reminder was *lost*: its minute passed
 while nothing was running and it will not be retried today, which is what an
-outage, an overrunning tick or an unset container timezone looks like. And
+outage, an overrunning tick or an unset container timezone looks like. That claim
+rests entirely on the ORDER of the gates in `dueReminders`: the catch-up window
+closes half an hour after the reminder, so from 08:31 a habit whose reminder went
+out at 08:00 is also past it, and asking about lateness before `done_today` and
+`already_sent` reported every delivered reminder as a lost one, once per habit
+per channel per healthy day — which is worse than not warning at all, because a
+real loss then arrives in a crowd. Answered and sent are asked first, so
+`too_late` is only ever said about a day still outstanding. And
 `notify.unreachable` covers the state that produced no output whatsoever — a
 destination switched on but not configured, where `needsServerDelivery` is false,
 the account is skipped, and every visible surface looks correct. The case that

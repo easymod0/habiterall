@@ -436,13 +436,19 @@ export function dueReminders({
 
     const late = clock.minutes - at;
     if (late < 0) { skip(habit, 'not_yet', { at: habit.reminder_time, in_minutes: -late }); continue; }
+
+    // Answered and sent are asked BEFORE lateness, and the order is the whole
+    // meaning of `too_late`: a reminder that went out at 08:00 is still past its
+    // window at 08:31, so testing lateness first reported a delivered reminder as
+    // a lost one on every tick for the rest of the day. Nothing was lost — the
+    // day was handled — and `too_late` is a warning precisely because it is not.
+    if (doneToday.has(habit.id)) { skip(habit, 'done_today'); continue; }
+    if (alreadySent(habit.id, clock.date)) { skip(habit, 'already_sent'); continue; }
+
     if (late > catchUpMinutes) {
       skip(habit, 'too_late', { at: habit.reminder_time, late_minutes: late, catch_up: catchUpMinutes });
       continue;
     }
-
-    if (doneToday.has(habit.id)) { skip(habit, 'done_today'); continue; }
-    if (alreadySent(habit.id, clock.date)) { skip(habit, 'already_sent'); continue; }
 
     due.push({ habit, date: clock.date, time: habit.reminder_time });
   }
