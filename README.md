@@ -239,8 +239,14 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
       PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
       OIDC_ISSUER: ${OIDC_ISSUER:?from Authentik, ends in a slash}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
+      # Not `:?` like the rest, and that is load bearing: compose interpolates
+      # the WHOLE file before it works out which services you asked for, so a
+      # required-and-empty value here fails `up authentik-server` too — the
+      # first half of a two-phase start, whose entire purpose is to create the
+      # client these will hold. The app checks them itself at boot and says
+      # exactly this if they are missing (habiterall-cloud/src/auth.js).
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       TRUST_PROXY: 1
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       # The fallback clock: a container has no timezone, so it is UTC. Users can
