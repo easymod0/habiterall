@@ -66,7 +66,7 @@ jobs:
       publish: ${{ steps.v.outputs.publish }}
     steps:
       # Full history and tags: the changelog is a diff between two of them.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
 
       - name: Resolve the version
@@ -224,7 +224,7 @@ jobs:
           # assets and hope.
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: notes.md
@@ -243,9 +243,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [version, verify]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -292,7 +292,7 @@ jobs:
       # AGP 8.x does not support Gradle 9, and `gradle wrapper` below runs
       # under whatever this puts on PATH — so the version is pinned here as
       # well as in gradle-wrapper.properties.
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.14.3'
 
@@ -323,7 +323,7 @@ jobs:
           cp "$APK" "dist/habiterall-native-${{ needs.version.outputs.version }}.apk"
           ls -la dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: apk-native
           path: dist/*.apk
@@ -348,7 +348,7 @@ jobs:
       # picked up by a download-everything step. Off at the source.
       DOCKER_BUILD_RECORD_UPLOAD: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve image names
         id: names
@@ -399,12 +399,12 @@ jobs:
             fi
           fi
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: steps.mode.outputs.ghcr == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -412,7 +412,7 @@ jobs:
 
       - name: Log in to Docker Hub
         if: steps.mode.outputs.hub == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -465,7 +465,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: personal
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: habiterall-personal/Dockerfile
@@ -476,7 +476,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: cloud
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: habiterall-cloud/Dockerfile
@@ -517,7 +517,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
 
       # Named, not "everything". Downloading every artifact in the run also
@@ -525,14 +525,14 @@ jobs:
       # docker/build-push-action uploads on its own, and one of them failed to
       # extract — which failed the release over a file it has no use for.
       - name: The APK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: apk-*
           merge-multiple: true
           path: dist
 
       - name: The changelog
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-notes
 

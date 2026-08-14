@@ -68,12 +68,12 @@ jobs:
             build-mode: manual
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ---- java-kotlin only: the toolchain autobuild could not guess ----
 
       - if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -85,7 +85,7 @@ jobs:
       # not support Gradle 9.
       - if: matrix.language == 'java-kotlin'
         name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.14.3'
 

@@ -70,7 +70,7 @@ jobs:
     outputs:
       android: ${{ steps.what.outputs.android }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
 
       - name: Compare against the base
@@ -123,9 +123,9 @@ jobs:
     if: needs.changes.outputs.android == 'true'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -134,7 +134,7 @@ jobs:
       # review in a diff. This generates the wrapper from the version pinned
       # in gradle/wrapper/gradle-wrapper.properties instead.
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           # Pin it. Without this the action installs the newest Gradle — 9.x —
           # and `gradle wrapper` below runs under that, configuring the project
@@ -156,7 +156,7 @@ jobs:
 
       - name: Upload test and lint reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-reports
           path: |
@@ -169,7 +169,7 @@ jobs:
         run: ./gradlew --no-daemon assembleDebug
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: habiterall-debug-apk
           path: android-native/app/build/outputs/apk/debug/*.apk
