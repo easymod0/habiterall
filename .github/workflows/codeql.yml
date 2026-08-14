@@ -15,11 +15,11 @@
 #   - Default setup and a workflow file cannot split a repository between them.
 #     Enabling default setup blocks the API upload an advanced run does, so the
 #     analysis succeeds and the results are rejected. That is why javascript
-#     and actions moved in here rather than being left where they were.
+#     and actions live here rather than being left where they were.
 #
 # The java-kotlin build steps are android-native.yml's, deliberately: same JDK,
 # same pinned Gradle, same generate-the-wrapper dance. If that workflow's
-# toolchain moves, move this one with it or the client stops being scanned.
+# toolchain moves, move this one with it.
 
 name: CodeQL
 
@@ -34,9 +34,11 @@ on:
   push:
     branches: [master]
 
-  # A weekly sweep, which default setup also did. Nothing in the repository
-  # needs to change for this to be worth running — the queries themselves are
-  # updated, so a rule written after the last commit still finds what it finds.
+  # The weekly sweep, and the thing that makes the gating below safe. Nothing
+  # in the repository needs to change for this to be worth running: the QUERIES
+  # move, so a rule written after the last commit still finds what it finds.
+  # Same argument as ci.yml's nightly, one rung slower because query packs
+  # change over weeks rather than days.
   schedule:
     - cron: '47 6 * * 1'
 
@@ -44,36 +46,171 @@ permissions:
   contents: read
 
 jobs:
-  analyze:
-    name: Analyze (${{ matrix.language }})
+  # Which languages this change can actually affect. A mirror of ci.yml's
+  # detector and it exists for that one's reason: filtering at the JOB level
+  # means a pull request touching none of them still REPORTS a status, so these
+  # checks could be required without wedging every unrelated pull request. A
+  # workflow-level `paths:` filter reports nothing at all and would.
+  #
+  # Note this is a finer split than ci.yml's, where a per-directory matrix
+  # would be false precision. Here it is not: the three analyses genuinely do
+  # not read each other's files, and the Kotlin one costs a full Android build.
+  changes:
+    name: CodeQL — what changed
     runs-on: ubuntu-latest
+    outputs:
+      js: ${{ steps.what.outputs.js }}
+      actions: ${{ steps.what.outputs.actions }}
+      kotlin: ${{ steps.what.outputs.kotlin }}
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
 
+      - name: Compare against the base
+        id: what
+        env:
+          BASE_PR: ${{ github.event.pull_request.base.sha }}
+          BASE_PUSH: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          run_all() {
+            {
+              echo "js=true"
+              echo "actions=true"
+              echo "kotlin=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "$1"
+            exit 0
+          }
+
+          if [ "$EVENT" = "schedule" ]; then
+            run_all "Scheduled sweep — analysing everything."
+          fi
+
+          if [ "$EVENT" = "pull_request" ]; then
+            BASE="$BASE_PR"
+          else
+            BASE="$BASE_PUSH"
+          fi
+
+          # A new branch, a force push, or the very first push has no usable
+          # predecessor to diff against. Analysing everything is the only
+          # honest answer, and it is also the safe one.
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            run_all "No comparable predecessor — analysing everything."
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "Changed:"
+          echo "$CHANGED" | sed 's/^/  /'
+
+          # This file decides what gets analysed, so a change to it re-analyses
+          # the lot. Same rule ci.yml applies to itself.
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/codeql\.yml$'; then
+            run_all "codeql.yml itself changed — analysing everything."
+          fi
+
+          emit() {
+            if echo "$CHANGED" | grep -qE "$2"; then
+              echo "$1=true" >> "$GITHUB_OUTPUT"
+              echo "$1: yes"
+            else
+              echo "$1=false" >> "$GITHUB_OUTPUT"
+              echo "$1: no"
+            fi
+          }
+
+          # By EXTENSION rather than by directory, so a fourth workspace does
+          # not silently go unscanned the way a hand-kept path list would let
+          # it. package.json is in there because a dependency is an input to
+          # the analysis even when no source file moved.
+          emit js '(\.(js|mjs|cjs|ts|jsx|tsx)$|(^|/)package(-lock)?\.json$)'
+
+          # Workflows and composite actions ONLY, not everything under
+          # .github/ — the README that sits beside these files is the exact
+          # change that should analyse nothing, and a `^\.github/` rule would
+          # have re-run this job for it. dependabot.yml is not an Actions file
+          # either.
+          emit actions '^\.github/(workflows|actions)/.*\.ya?ml$'
+
+          # Anything under android-native/, deliberately coarse. The manifest
+          # decides which components are exported and the Gradle files decide
+          # what is on the classpath, so both change what the Android queries
+          # find — and being wrong in this direction costs one build, while
+          # being wrong in the other loses a finding in silence.
+          #
+          # NOT the shared JS files android-native.yml watches. That workflow
+          # tests behavioural MIRRORING, so ui/time.js reaching ReminderTime.kt
+          # matters to it; this one only reads Kotlin, and no JavaScript change
+          # can alter what it finds.
+          emit kotlin '^android-native/'
+
+  javascript:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.js == 'true'
     permissions:
-      # The whole point: uploading the SARIF results.
-      security-events: write
-      # Lets CodeQL read the workflow runs it needs to attribute results.
+      security-events: write   # the whole point: uploading the SARIF results
       actions: read
       contents: read
-
-    strategy:
-      # One language failing should not hide what the others found.
-      fail-fast: false
-      matrix:
-        include:
-          - language: javascript-typescript
-            build-mode: none
-          - language: actions
-            build-mode: none
-          - language: java-kotlin
-            build-mode: manual
-
     steps:
       - uses: actions/checkout@v7
 
-      # ---- java-kotlin only: the toolchain autobuild could not guess ----
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
 
-      - if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@v5
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript
+
+  actions:
+    name: Analyze (actions)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.actions == 'true'
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: actions
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:actions
+
+  # The expensive one, and the reason the detector above is worth having: this
+  # job builds the client from scratch every time it runs.
+  kotlin:
+    name: Analyze (java-kotlin)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.kotlin == 'true'
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # The toolchain autobuild could not guess. AGP recommends 17; this
+      # compiles at 21.
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -83,26 +220,22 @@ jobs:
       # in gradle/wrapper/gradle-wrapper.properties. Pin the Gradle that does
       # the generating too: unpinned, the action installs 9.x, and AGP 8.x does
       # not support Gradle 9.
-      - if: matrix.language == 'java-kotlin'
-        name: Set up Gradle
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.14.3'
 
-      - if: matrix.language == 'java-kotlin'
-        name: Generate the wrapper
+      - name: Generate the wrapper
         working-directory: android-native
         run: gradle wrapper --gradle-version 8.14.3
-
-      # ---- analysis ----
 
       # Init comes after the toolchain is in place but before any app code is
       # compiled: with `build-mode: manual` this is what traces the build below.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
+          languages: java-kotlin
+          build-mode: manual
 
       # assembleDebug rather than the unit tests or lint: this run exists to
       # produce a database, and android-native.yml already owns proving the
@@ -117,12 +250,11 @@ jobs:
       # empty database and says "could not process any code written in
       # Java/Kotlin". BUILD SUCCESSFUL in 16s, nothing analysed. Dependency
       # caching is untouched; only the task-output cache is bypassed.
-      - if: matrix.language == 'java-kotlin'
-        name: Build the client
+      - name: Build the client
         working-directory: android-native
         run: ./gradlew --no-daemon --no-build-cache assembleDebug
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4
         with:
-          category: /language:${{ matrix.language }}
+          category: /language:java-kotlin
