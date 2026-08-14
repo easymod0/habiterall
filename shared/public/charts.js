@@ -9,6 +9,7 @@
 import {
   calendarWindow, zoomLevel, calendarWidth, CALENDAR_PAD_LEFT, DEFAULT_ZOOM,
 } from './ui/calendar.js';
+import { SKIP, YES } from './ui/values.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
@@ -242,7 +243,17 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // faintly so the grid keeps its shape.
       const isFuture = date > todayISO;
       const value = entriesByDate[date];
-      const isSkip = skips ? skips.has(date) : value === 3;
+      // `skips` when the caller supplied it — it is the only thing that can be
+      // trusted, since 3 is a legitimate amount for a measurable habit. The
+      // fallback used to read a bare 3 as a skip for ANY habit, which would
+      // paint "3 pages" and "3 cigarettes" as days that never happened while
+      // every figure computed from them counted the 3. Narrowed to the one case
+      // where the sentinel is unambiguous, matching `normalizeEntry` in
+      // shared/src/stats.js. Both live callers pass `skips`; this is what the
+      // next one gets if it forgets.
+      const isSkip = skips
+        ? skips.has(date)
+        : habit.type === 'boolean' && value === SKIP;
 
       let fill = empty;
       let label = `${date}: no entry`;
@@ -255,7 +266,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
           fill = cssVar('--surface-2');
           label = `${date}: skipped`;
         } else if (habit.type === 'boolean') {
-          if (value === 2) { fill = shade(color, 1); label = `${date}: done`; }
+          if (value === YES) { fill = shade(color, 1); label = `${date}: done`; }
           else label = `${date}: not done`;
         } else {
           // For an "at most" habit a low number is the good outcome, so 0 is a

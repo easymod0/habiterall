@@ -22,10 +22,13 @@ import androidx.compose.material3.*
 // A subpackage, so the wildcard above does not reach it.
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -53,16 +56,6 @@ import java.time.LocalDate
  * work, since something appeared and vanished with no result to show for it.
  */
 private const val REFRESH_FLOOR_MS = 350L
-
-/**
- * A page of the server's web UI, and what the top bar calls it.
- *
- * The two travel together because they are decided together: opening a habit
- * means both a fragment and that habit's name, and a screen titled
- * "Statistics" showing one habit's page is the kind of small lie that makes an
- * embedded browser feel embedded.
- */
-private data class WebTarget(val url: String, val title: String)
 
 /**
  * A write that has been made but not yet acknowledged by the server.
@@ -151,7 +144,13 @@ class MainActivity : ComponentActivity() {
 
                 // The web UI is a screen of this app, not a trip to a
                 // browser. See WebScreen for why that matters.
-                var web by remember { mutableStateOf<WebTarget?>(null) }
+                //
+                // Saveable, and two plain strings rather than one small class:
+                // rotating while reading a habit's charts used to drop you back
+                // on the list, and surviving that needs a Saver for a data class
+                // where a String needs nothing.
+                var webUrl by rememberSaveable { mutableStateOf<String?>(null) }
+                var webTitle by rememberSaveable { mutableStateOf("") }
 
                 when {
                     !checked -> Loading()
@@ -159,22 +158,57 @@ class MainActivity : ComponentActivity() {
                         url = it
                         Reminders.rescheduleAll(this@MainActivity)
                     })
-                    web != null -> WebScreen(
-                        url = web!!.url,
-                        title = web!!.title,
-                        onClose = { web = null },
-                    )
-                    else -> HabitListScreen(
-                        serverUrl = url!!,
-                        onOpenStats = { web = WebTarget(url!!, "Statistics") },
-                        // Straight to that habit's own page, titled with its
-                        // name: landing on the dashboard and hunting for the
-                        // habit you just tapped is the seam this removes.
-                        onOpenHabit = { habit ->
-                            web = WebTarget(ServerUrl.habitRoute(url!!, habit.id), habit.name)
-                        },
-                        onChangeServer = { url = null },
-                    )
+                    // The list stays composed underneath rather than being
+                    // swapped out. Swapping discarded everything it remembers —
+                    // so scrolling back to March, opening that habit's chart and
+                    // coming back put you at today with a spinner and a fresh
+                    // 30-day window, every time. It is covered, not gone.
+                    else -> Box(Modifier.fillMaxSize()) {
+                        Box(
+                            Modifier.fillMaxSize().then(
+                                // Out of the accessibility tree while covered,
+                                // or a screen reader walks a grid nobody can see.
+                                if (webUrl != null) Modifier.clearAndSetSemantics {}
+                                else Modifier
+                            )
+                        ) {
+                            HabitListScreen(
+                                serverUrl = url!!,
+                                onOpenStats = { webUrl = url; webTitle = "Statistics" },
+                                // Straight to that habit's own page, titled with
+                                // its name: landing on the dashboard and hunting
+                                // for the habit you just tapped is the seam this
+                                // removes.
+                                onOpenHabit = { habit ->
+                                    webUrl = ServerUrl.habitRoute(url!!, habit.id)
+                                    webTitle = habit.name
+                                },
+                                onChangeServer = { url = null },
+                            )
+                        }
+
+                        if (webUrl != null) {
+                            // Between the two, and doing nothing but swallowing
+                            // input. Compose hit-tests front to back and a plain
+                            // background does not consume, so without this a tap
+                            // on the web screen's toolbar would fall through and
+                            // record a day on the grid underneath — invisibly.
+                            Box(
+                                Modifier.fillMaxSize().pointerInput(Unit) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            awaitPointerEvent().changes.forEach { it.consume() }
+                                        }
+                                    }
+                                }
+                            )
+                            WebScreen(
+                                url = webUrl!!,
+                                title = webTitle,
+                                onClose = { webUrl = null },
+                            )
+                        }
+                    }
                 }
             }
         }
