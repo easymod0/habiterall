@@ -178,6 +178,21 @@ class MainActivity : ComponentActivity() {
                 var webUrl by rememberSaveable { mutableStateOf<String?>(null) }
                 var webTitle by rememberSaveable { mutableStateOf("") }
 
+                // One WebView for the life of the activity, rather than one per
+                // tap. See WebHost — this is what stops every habit opening with
+                // a cold browser start in front of the user.
+                val webHost = remember { WebHost() }
+                DisposableEffect(webHost) { onDispose { webHost.destroy() } }
+
+                // Warm while nothing is open, and navigate when something is.
+                // Keyed on both, so closing the screen re-enters with a target of
+                // null and `warm()` declines to undo the habit already loaded.
+                LaunchedEffect(url, webUrl) {
+                    if (url == null) return@LaunchedEffect
+                    val target = webUrl
+                    if (target == null) webHost.warm() else webHost.show(target)
+                }
+
                 // A reminder tap lands on the list, whatever was on screen when
                 // the app was last left. Coming back to a chart from three days
                 // ago is not an answer to "did you exercise today?".
@@ -235,12 +250,20 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             )
-                            WebScreen(
-                                url = webUrl!!,
-                                title = webTitle,
-                                onClose = { webUrl = null },
-                            )
                         }
+
+                        // Unconditional, unlike the blocker above it: the screen
+                        // is hidden rather than removed, because a WebView that
+                        // leaves the tree is a WebView that has to be built again
+                        // on the next tap. `shown` carries the difference, and
+                        // WebScreen raises its own zIndex above this Box when it
+                        // is true.
+                        WebScreen(
+                            host = webHost,
+                            title = webTitle,
+                            shown = webUrl != null,
+                            onClose = { webUrl = null },
+                        )
                     }
                 }
             }
