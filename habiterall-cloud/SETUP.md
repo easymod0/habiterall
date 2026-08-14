@@ -1,7 +1,7 @@
 # habiterall-cloud setup
 
-The compose stack runs five services: the app, its Postgres, and an
-[Authentik](https://goauthentik.io) identity provider (server, worker, Redis).
+The compose stack runs four services: the app, its Postgres, and an
+[Authentik](https://goauthentik.io) identity provider (server, worker).
 Only the reverse proxy needs to face the internet.
 
 ## 1. Configure
@@ -32,7 +32,7 @@ and the app logs a warning otherwise.
 ## 2. Start the stack
 
 ```bash
-docker compose up -d db redis authentik-server authentik-worker
+docker compose up -d db authentik-server authentik-worker
 ```
 
 Authentik takes a minute or two on first boot while it migrates its database.

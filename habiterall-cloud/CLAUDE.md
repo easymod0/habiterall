@@ -94,7 +94,7 @@ to date".
 
 ## Local stack
 
-`docker compose up -d` brings up Postgres, Redis, Authentik (server +
+`docker compose up -d` brings up Postgres, Authentik (server +
 worker), and the app. The app listens on **:3100**; Authentik's admin UI is on
 **:9000**. First run needs `scripts/bootstrap-authentik.mjs` to
 create the OIDC client — see `SETUP.md`.

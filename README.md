@@ -164,26 +164,13 @@ services:
       retries: 20
     restart: unless-stopped
 
-  authentik-redis:
-    image: redis:7-alpine
-    command: ['redis-server', '--save', '60', '1']
-    volumes:
-      - authentik-redis-data:/data
-    healthcheck:
-      test: ['CMD-SHELL', 'redis-cli ping | grep PONG']
-      interval: 5s
-      retries: 20
-    restart: unless-stopped
-
   authentik-server:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.5.6
     command: server
     depends_on:
       authentik-db: { condition: service_healthy }
-      authentik-redis: { condition: service_healthy }
     environment:
       AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?openssl rand -base64 60}
-      AUTHENTIK_REDIS__HOST: authentik-redis
       AUTHENTIK_POSTGRESQL__HOST: authentik-db
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
@@ -196,14 +183,12 @@ services:
     restart: unless-stopped
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.5.6
     command: worker
     depends_on:
       authentik-db: { condition: service_healthy }
-      authentik-redis: { condition: service_healthy }
     environment:
       AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
-      AUTHENTIK_REDIS__HOST: authentik-redis
       AUTHENTIK_POSTGRESQL__HOST: authentik-db
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
@@ -260,7 +245,6 @@ services:
 volumes:
   db-data:
   authentik-db-data:
-  authentik-redis-data:
 ```
 
 **Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
@@ -296,7 +280,7 @@ Then start it in two goes, because the OIDC client cannot exist before the
 provider that issues it:
 
 ```bash
-docker compose up -d authentik-db authentik-redis authentik-server authentik-worker
+docker compose up -d authentik-db authentik-server authentik-worker
 ```
 
 If you brought the whole stack up instead, `app` will be restarting in a loop
@@ -354,7 +338,7 @@ script is not in the published image, which ships `src/` and `public/` only.
 git clone <your-repo-url> habiterall
 cd habiterall/habiterall-cloud
 cp .env.example .env          # then fill in the secrets it lists
-docker compose up -d db redis authentik-server authentik-worker
+docker compose up -d db authentik-server authentik-worker
 
 # create the OIDC client (waits for Authentik to finish booting)
 export $(grep AUTHENTIK_BOOTSTRAP_TOKEN .env | xargs)
