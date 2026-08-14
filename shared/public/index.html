@@ -37,7 +37,13 @@
     </h1>
     <div class="topbar-actions">
       <button id="btn-new" class="btn btn-primary">New habit</button>
-      <button id="btn-data" class="btn">Backup</button>
+      <!--
+        Backup lives at the foot of the settings dialog, not here. Four
+        buttons plus the brand did not fit a 360px phone, and of the four this
+        is the one nobody presses daily — the gear is already where everything
+        that is not a habit lives. The empty state still offers "Import a
+        backup" directly, which is where a new account needs it.
+      -->
       <button id="btn-settings" class="btn btn-icon" title="Settings" aria-label="Settings">⚙</button>
       <button id="btn-theme" class="btn btn-icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
       <!-- Multi-user edition only; the no-auth adapter never reveals it. -->

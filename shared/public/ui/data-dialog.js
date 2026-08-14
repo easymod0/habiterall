@@ -1,6 +1,11 @@
 /**
  * Backup and restore. Owns `#data-dialog`, the export buttons and the import
- * form, plus the "Backup" button that opens it.
+ * form.
+ *
+ * Nothing in the top bar opens it any more: `openDataDialog` is called from
+ * the foot of the settings dialog and from the empty state's "Import a
+ * backup". Both are exports rather than a button this module binds, because
+ * neither of those elements belongs to it.
  *
  * Import and export both bypass `api.js` deliberately: one sends raw bytes
  * the server sniffs, the other hands the URL to the browser so a large export
@@ -96,7 +101,6 @@ async function runImport() {
 }
 
 export function init() {
-  $('#btn-data').addEventListener('click', openDataDialog);
   $('#data-close').addEventListener('click', () => dialog.close());
 
   $('#export-json').addEventListener('click',

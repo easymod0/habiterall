@@ -823,7 +823,7 @@ Import a Loop backup and keep your history. Both editions accept:
 | **CSV export** (`.zip`) | Loop → Settings → Export as CSV |
 | A bare `Checkmarks.csv` | from that zip |
 
-Use the **Backup** button, or:
+Use ⚙ → **Backup & Restore**, or:
 
 ```bash
 curl -X POST --data-binary @"Loop Habits Backup.db" localhost:3000/api/import
@@ -835,8 +835,8 @@ timestamps are epoch-millisecond UTC midnights, entry values are scaled by
 preserved. Backups predating Loop's `unit`, `target_type` or `notes` columns
 import fine.
 
-**And back out again** — *Backup → Loop .db* writes a real Loop database you
-can restore on Android. You are not locked in.
+**And back out again** — ⚙ → *Backup & Restore* → *Loop .db* writes a real Loop
+database you can restore on Android. You are not locked in.
 
 ---
 
@@ -844,7 +844,7 @@ can restore on Android. You are not locked in.
 
 | What | Where |
 |---|---|
-| Full JSON backup (round-trippable) | `GET /api/export` |
+| Full JSON backup (round-trippable) | ⚙ → Backup & Restore, or `GET /api/export` |
 | CSV archive — `Habits.csv` + `Checkmarks.csv`, zipped | `GET /api/export.csv` |
 | Loop-compatible `.db` | `GET /api/export-loop.db` |
 
@@ -903,7 +903,7 @@ Two kinds, and they are for different things.
 > write-ahead log.
 
 **A portable export** — for moving between editions, or leaving:
-`GET /api/export` (or ⚙ → Backup) writes a JSON file that imports into either
+`GET /api/export` (or ⚙ → Backup & Restore) writes a JSON file that imports into either
 edition, and into a fresh install of anything you replace this with. See
 [Backup and restore](#backup-and-restore).
 

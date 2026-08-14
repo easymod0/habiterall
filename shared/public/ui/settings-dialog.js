@@ -14,6 +14,7 @@
  * has been stored yet.
  */
 
+import { openDataDialog } from '/shared/ui/data-dialog.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, set } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
@@ -195,7 +196,49 @@ function renderSettingsBody() {
     body.append(group);
   }
 
+  body.append(backupSection());
+
   refreshFooter();
+}
+
+/**
+ * Backup and restore, at the foot of the dialog.
+ *
+ * Not from the registry, and deliberately: it is not a setting, it has nothing
+ * to store, and `sections()` is derived from `SETTINGS` — a section with no
+ * entries in it never renders at all. It is here because the top bar was four
+ * buttons and a brand on a 360px phone, and this was the one that could move.
+ *
+ * The backup dialog opens ON TOP of this one rather than replacing it. Closing
+ * settings to make room would throw the draft away, so a trip to the backup
+ * screen would silently discard whatever had just been typed; stacked, closing
+ * it puts you back in settings where you were. It is also not a
+ * `SECTION_ACTIONS` entry, which would disable it while the draft is dirty:
+ * that rule exists because those ask the SERVER to act on stored settings, and
+ * this asks the browser to open a dialog.
+ */
+function backupSection() {
+  const group = document.createElement('section');
+  group.className = 'data-section';
+
+  const heading = document.createElement('h3');
+  heading.textContent = 'Backup & Restore';
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn';
+  // Named so a test can ask for it rather than counting buttons, exactly as
+  // the settings controls are.
+  button.id = 'settings-backup';
+  button.textContent = 'Back up or restore…';
+  button.addEventListener('click', openDataDialog);
+
+  group.append(
+    heading,
+    settingHelp('Export everything as JSON, CSV or a Loop backup — or import one back.'),
+    button,
+  );
+  return group;
 }
 
 /**

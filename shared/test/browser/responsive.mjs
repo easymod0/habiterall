@@ -164,15 +164,23 @@ try {
     ck(`${vp.label}: stat tiles present`, charts.tiles === 4, String(charts.tiles));
 
     /* ---- dialogs ---- */
+    // Backup is reached THROUGH settings now — the top bar no longer carries
+    // it — and it opens stacked on top rather than replacing it. So each step
+    // measures the LAST open dialog, which is the one actually in front of the
+    // user, and the teardown closes however many are open.
+    const closeAll =
+      `[...document.querySelectorAll('dialog[open]')].reverse().forEach(d => d.close())`;
     for (const [name, opener] of [
       ['settings', `document.getElementById('btn-settings').click()`],
-      ['backup', `document.getElementById('btn-data').click()`],
+      ['backup', `document.getElementById('btn-settings').click();`
+        + ` document.getElementById('settings-backup').click()`],
     ]) {
-      await ev(`(() => { const d = document.querySelector('dialog[open]'); if (d) d.close(); })()`);
+      await ev(`(() => { ${closeAll}; })()`);
       await ev(opener);
       await sleep(350);
       const dlg = await ev(`(() => {
-        const d = document.querySelector('dialog[open]');
+        const open = document.querySelectorAll('dialog[open]');
+        const d = open[open.length - 1];
         if (!d) return null;
         const b = d.getBoundingClientRect();
         const de = document.documentElement;
@@ -185,7 +193,7 @@ try {
       })()`);
       ck(`${vp.label}: ${name} dialog fits the screen`,
         dlg && dlg.fitsWidth && dlg.onScreen, JSON.stringify(dlg));
-      await ev(`(() => { const d = document.querySelector('dialog[open]'); if (d) d.close(); })()`);
+      await ev(`(() => { ${closeAll}; })()`);
       await sleep(200);
     }
   }
