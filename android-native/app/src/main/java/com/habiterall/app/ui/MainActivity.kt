@@ -351,6 +351,17 @@ class MainActivity : ComponentActivity() {
         /** True once a fetch has finished, however it went. See the spinner rule below. */
         var loaded by remember { mutableStateOf(false) }
         var reload by remember { mutableStateOf(0) }
+        /**
+         * Whether the fetch `reload` is about to start should show itself.
+         *
+         * Recording a day has to re-ask the server — the streak on each row is
+         * its arithmetic, not something this client can advance — but that is
+         * not a refresh the user asked for, and putting the pull indicator up
+         * on every tap turns a check-off into something that looks like work.
+         * Written together with `reload`, in the same event, so the effect
+         * below reads the two as one decision.
+         */
+        var quiet by remember { mutableStateOf(false) }
         var reminderFor by remember { mutableStateOf<Habit?>(null) }
         /** Writes made here that the server has not confirmed yet. */
         var pending by remember { mutableStateOf(mapOf<Pair<Long, String>, PendingWrite>()) }
@@ -422,7 +433,13 @@ class MainActivity : ComponentActivity() {
         val api = remember(serverUrl) { Api(serverUrl) }
 
         LaunchedEffect(reload, serverUrl, windowDays) {
-            loading = true
+            // Read and cleared in one go: `quiet` describes THIS fetch only,
+            // and clearing it here rather than at the end means a fetch cut
+            // short — by paging into more history, say — cannot leave the next
+            // one silent as well.
+            val silent = quiet
+            quiet = false
+            if (!silent) loading = true
             val started = SystemClock.elapsedRealtime()
 
             // Cancellation is rethrown rather than reported, here and below.
@@ -469,8 +486,9 @@ class MainActivity : ComponentActivity() {
 
             // Hold the indicator up for a moment, but only once it is the
             // thing on screen — the first load has the full-screen spinner
-            // instead, and delaying that would just make the app slower.
-            if (loaded) {
+            // instead, and delaying that would just make the app slower. A
+            // silent fetch has no indicator to hold up.
+            if (loaded && !silent) {
                 val left = REFRESH_FLOOR_MS - (SystemClock.elapsedRealtime() - started)
                 if (left > 0) delay(left)
             }
@@ -649,6 +667,16 @@ class MainActivity : ComponentActivity() {
                         habits = habits.withPending(mapOf(key to mine))
                     }
                     pending = pending - key
+                }
+                if (state == WorkInfo.State.SUCCEEDED) {
+                    // The row shows a streak, and a streak is the server's
+                    // arithmetic over the whole history — not something the
+                    // overlay above can advance, since it knows one day. Ticking
+                    // today and watching the number sit still is exactly the
+                    // moment it is being looked at. Silent, and only once the
+                    // write is acknowledged, so the answer includes it.
+                    quiet = true
+                    reload++
                 }
                 if (state != WorkInfo.State.SUCCEEDED) {
                     // A write the server refused for good. Saying nothing left

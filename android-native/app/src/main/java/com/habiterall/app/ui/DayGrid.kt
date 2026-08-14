@@ -89,6 +89,10 @@ private fun describe(
     return "${habit.name}, ${spokenDate(date)}: $state"
 }
 
+/** What a screen reader says about a streak, since "🔥" is not a word. */
+fun streakSpoken(days: Int): String =
+    if (days == 1) "Current streak: 1 day" else "Current streak: $days days"
+
 /** `2026-08-13` → `Thursday 13 August`, or the raw string if it will not parse. */
 private fun spokenDate(date: String): String = runCatching {
     LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("EEEE d MMMM"))
@@ -134,7 +138,7 @@ fun DayHeader(dates: List<String>, today: String, scroll: ScrollState) {
 }
 
 /**
- * One habit: its name, its reminder, and its days.
+ * One habit: its name, its streak, its reminder, and its days.
  *
  * The Yes/No buttons this replaced only ever spoke about today. They are gone
  * rather than kept alongside, because two ways to record the same day — one of
@@ -167,6 +171,28 @@ fun HabitGridRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.clickable(onClickLabel = "Open habit") { onOpen() },
             )
+
+            // The same "🔥 5" the web dashboard puts under a habit's name, and
+            // the server's own arithmetic either way — `currentStreak` arrives
+            // with the overview, so nothing here recomputes what `computeStats`
+            // already decided.
+            //
+            // Absent at zero rather than shown as "🔥 0", which is the web's
+            // rule too: a habit you have not started yet has no streak to
+            // report, and a row of zeroes reads as a scolding.
+            if (habit.currentStreak > 0) {
+                Text(
+                    "🔥 ${habit.currentStreak}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // The emoji is decoration to a screen reader and a
+                    // pictogram name to some of them; say the number instead.
+                    modifier = Modifier.semantics {
+                        contentDescription = streakSpoken(habit.currentStreak)
+                    },
+                )
+            }
+
             TextButton(
                 onClick = onSetReminder,
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
