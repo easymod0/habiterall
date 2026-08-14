@@ -113,7 +113,8 @@ docker compose pull && docker compose up -d
 <details>
 <summary><b>Or from a clone, with no Docker at all</b></summary>
 
-Requires **Node 22.5+**. There is no build step — what runs is what is on disk.
+Requires **Node 26+**, the major both Docker images ship. There is no build
+step — what runs is what is on disk.
 
 ```bash
 git clone <your-repo-url> habiterall

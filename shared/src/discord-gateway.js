@@ -15,7 +15,7 @@
  *
  * Hand-rolled rather than a library: this needs four opcodes out of Discord's
  * twelve, no voice, no cache, no sharding, and one intent-free IDENTIFY —
- * against a dependency that would be the largest in the project. Node 22's
+ * against a dependency that would be the largest in the project. Node's
  * global WebSocket does the rest.
  *
  * The state machine below is the part that is easy to get subtly wrong, so it

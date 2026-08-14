@@ -38,7 +38,7 @@ async function main() {
   const wsUrl = await devtoolsUrl(PORT, chrome);
   const { WebSocket } = await import('node:worker_threads').then(() => import('ws')).catch(() => ({}));
 
-  // Node 22 has a global WebSocket — no dependency needed.
+  // Node has a global WebSocket — no dependency needed.
   ws = new globalThis.WebSocket(wsUrl);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
 

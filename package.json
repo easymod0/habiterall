@@ -21,7 +21,7 @@
     "test:notify": "npm run test:notify -w habiterall-personal"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=26.0.0"
   },
   "license": "GPL-3.0-or-later",
   "devDependencies": {
