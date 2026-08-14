@@ -237,6 +237,31 @@ export function needsServerDelivery(settings = {}, ctx = {}) {
 }
 
 /**
+ * Destinations switched on that can never deliver as things stand.
+ *
+ * The complement of `serverChannels` within the enabled ones, and it exists
+ * because "enabled but not configured" is the one state the notifier handles by
+ * doing nothing at all: `needsServerDelivery` is false, the account is skipped,
+ * and not a single line above debug level says so. Reminders then never arrive
+ * and every visible surface — the settings dialog, the habit, the reminder time
+ * — looks correct.
+ *
+ * The case that motivated it: a channel id and no webhook URL, on an instance
+ * with no DISCORD_BOT_TOKEN. That is the recommended setup missing one operator
+ * credential, it is silent forever, and the settings dialog's test button says
+ * nothing either, because it reports only on channels that ARE ready.
+ *
+ * @param {Record<string, any>} [settings]
+ * @param {{bot?: boolean}} [ctx]
+ * @returns {string[]}
+ */
+export function unreachableChannels(settings = {}, ctx = {}) {
+  return enabledChannels(settings).filter(
+    (id) => CHANNELS[id]?.delivery === 'server' && !channelConfigured(id, settings, ctx)
+  );
+}
+
+/**
  * A Discord id (channel, user, message). 17–20 digits, and validated because
  * it is interpolated into a request path.
  *
