@@ -1,6 +1,6 @@
 # Built from the REPO ROOT so the shared workspace is available:
 #   docker build -f habiterall-cloud/Dockerfile .
-FROM node:22-alpine
+FROM node:26-alpine
 
 ENV NODE_ENV=production
 WORKDIR /app
