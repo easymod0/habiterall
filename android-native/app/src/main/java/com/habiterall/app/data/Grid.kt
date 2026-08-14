@@ -26,21 +26,56 @@ object Grid {
      */
     const val MAX_DAYS = 365
 
-    /** What a day shows, for a yes/no habit. */
-    enum class DayState { UNSET, DONE, SKIPPED }
+    /**
+     * What a day shows, for a yes/no habit.
+     *
+     * UNKNOWN is the absence of a row and NO is a row holding 0. They look
+     * identical unless question marks are on, but they are not the same claim —
+     * see the note in shared/src/constants.js.
+     */
+    enum class DayState { UNKNOWN, DONE, SKIPPED, NO }
 
     /**
-     * unset → done → skipped → unset.
+     * The cycle a tap follows, mirroring `nextDayState` in
+     * shared/public/ui/toggle.js — which in turn mirrors Loop's own
+     * `Entry.nextToggleValue`. The two clients show the same squares to the same
+     * person, and a tap that means something different depending on which one
+     * they opened is the kind of difference nobody reads a changelog to
+     * discover. `GridTest` and `test/toggle.test.js` are pinned to the same
+     * examples for exactly that reason.
      *
-     * The same cycle as the web grid's `onCheckClick`, deliberately: the two
-     * clients show the same squares to the same person, and a tap that means
-     * something different depending on which one they opened is the kind of
-     * difference nobody reads a changelog to discover.
+     * Note that with [questionMarks] off there is no way back to UNKNOWN from
+     * the grid: a touched day is done or not-done from then on, and clearing it
+     * means the day editor. That is Loop's behaviour, and it is right — with the
+     * setting off the two states paint identically, so a step between them would
+     * be a tap that appears to do nothing.
      */
-    fun nextState(current: DayState): DayState = when (current) {
-        DayState.UNSET -> DayState.DONE
-        DayState.DONE -> DayState.SKIPPED
-        DayState.SKIPPED -> DayState.UNSET
+    /**
+     * Which state a day is in, from what the API reported for it.
+     *
+     * [value] must be what the entries map actually HELD — null for a day with
+     * no row. Defaulting a missing day to 0.0 here would report every day nobody
+     * has answered as an answered "no" and start the cycle in the wrong place.
+     * Mirrors `dayStateOf` in shared/public/ui/toggle.js.
+     */
+    fun dayStateOf(value: Double?, isSkip: Boolean, done: Boolean): DayState = when {
+        isSkip -> DayState.SKIPPED
+        value == null -> DayState.UNKNOWN
+        done -> DayState.DONE
+        else -> DayState.NO
+    }
+
+    fun nextState(
+        current: DayState,
+        skipDays: Boolean = false,
+        questionMarks: Boolean = false,
+    ): DayState = when (current) {
+        DayState.DONE -> if (skipDays) DayState.SKIPPED else DayState.NO
+        // Straight to NO even when skips have since been switched off: the day
+        // is already a skip, and a tap has to take it somewhere.
+        DayState.SKIPPED -> DayState.NO
+        DayState.NO -> if (questionMarks) DayState.UNKNOWN else DayState.DONE
+        DayState.UNKNOWN -> DayState.DONE
     }
 
     /**

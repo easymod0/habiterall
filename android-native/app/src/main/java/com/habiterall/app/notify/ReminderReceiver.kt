@@ -117,7 +117,12 @@ class ReminderReceiver : BroadcastReceiver() {
             Notifications.post(
                 applicationContext,
                 Notifications.notificationId(habitId),
-                Notifications.buildReminder(applicationContext, habit, today),
+                // From the mirror, not the network: this worker runs on whatever
+                // connectivity the phone has at 08:00, and the actions offered
+                // must not depend on that.
+                Notifications.buildReminder(
+                    applicationContext, habit, today, settings.cachedSkipDays()
+                ),
             )
             Log.i(TAG, "posted reminder for habit $habitId")
             return Result.success()

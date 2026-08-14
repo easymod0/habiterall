@@ -269,6 +269,7 @@ function render(stats, entries) {
     weeks: CAL_WEEKS,
     endDate: calEnd,
     skips: skipSet,
+    unknownMark: settings.get('questionMarks'),
     // Bands behind runs of 3+, so a good stretch reads as one thing rather
     // than a scatter of filled squares.
     streaks: stats.streaks,

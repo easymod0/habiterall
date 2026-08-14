@@ -51,7 +51,9 @@ const MAX_HABITS_PER_USER = Number(process.env.MAX_HABITS_PER_USER) || 200;
  */
 export async function applyImport(userId, habits, mode = 'merge') {
   const result = {
-    habitsCreated: 0, habitsMerged: 0, entriesImported: 0, skipped: [],
+    // `entriesKept` counts days the file wanted to mark as missed and the account
+    // already had an answer for. Declared here so the reply shape is stable.
+    habitsCreated: 0, habitsMerged: 0, entriesImported: 0, entriesKept: 0, skipped: [],
   };
 
   if (habits.length > MAX_HABITS_PER_IMPORT) {
@@ -190,17 +192,20 @@ export async function applyImport(userId, habits, mode = 'merge') {
 
         const notes = String(e.notes ?? '').slice(0, 500);
 
-        // Boolean "not done" is the absence of a row, unless a note needs
-        // somewhere to live.
-        if (type === 'boolean' && value !== YES) {
-          if (!notes) continue;
-          await upsert(db, userId, habitId, e.date, UNSET, '', notes);
-          result.entriesImported++;
-          continue;
-        }
-
-        await upsert(db, userId, habitId, e.date, value, '', notes);
-        result.entriesImported++;
+        // A row is an answer, whatever it says — the same rule as the personal
+        // edition's writer, and the reason it changed is written there. Dropping
+        // a boolean 0 without a note turned every stated lapse in the file into a
+        // day nobody had answered.
+        const stored = type === 'boolean' && value !== YES ? UNSET : value;
+        // And the same exception: in merge mode a bare lapse yields to an answer
+        // the account already has, because a merge may add what is missing and
+        // must not delete a completion. A Loop backup is full of explicit NO rows.
+        const yielding = mode === 'merge' && stored === UNSET && !notes &&
+          type === 'boolean';
+        const written = await upsert(
+          db, userId, habitId, e.date, stored, '', notes, { yielding });
+        if (written) result.entriesImported++;
+        else result.entriesKept++;
       }
     }
   });
@@ -208,14 +213,24 @@ export async function applyImport(userId, habits, mode = 'merge') {
   return result;
 }
 
-function upsert(db, userId, habitId, date, value, status, notes) {
-  return db.query(
+/**
+ * @param {{yielding?: boolean}} [opts] `yielding` leaves a row that is already
+ *   there alone — a merge adding a bare "not done" must not overwrite an answer.
+ * @returns {Promise<boolean>} whether a row was written
+ */
+async function upsert(db, userId, habitId, date, value, status, notes, opts = {}) {
+  const onConflict = opts.yielding
+    ? 'DO NOTHING'
+    : `DO UPDATE
+         SET value = EXCLUDED.value,
+             status = EXCLUDED.status,
+             notes = EXCLUDED.notes`;
+
+  const { rowCount } = await db.query(
     `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
      VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (habit_id, date) DO UPDATE
-       SET value = EXCLUDED.value,
-           status = EXCLUDED.status,
-           notes = EXCLUDED.notes`,
+     ON CONFLICT (habit_id, date) ${onConflict}`,
     [habitId, userId, date, value, status, String(notes ?? '').slice(0, 500)]
   );
+  return rowCount > 0;
 }

@@ -78,9 +78,14 @@ private fun describe(
     skipped: Boolean,
     value: Double?,
     met: Boolean?,
+    unanswered: Boolean = false,
 ): String {
     val state = when {
         skipped -> "skipped"
+        // Said whether or not question marks are on: a screen reader has no
+        // square to look at, and "not done" for a day nobody has answered is the
+        // same conflation the setting exists to undo.
+        unanswered -> "no entry"
         habit.isNumerical && value != null ->
             "${trimNumber(value)} of ${trimNumber(habit.targetValue)} ${habit.unit}".trim()
         met == true -> "done"
@@ -156,6 +161,7 @@ fun HabitGridRow(
     onSetReminder: () -> Unit,
     onTapDay: (String) -> Unit,
     onHoldDay: (String) -> Unit,
+    questionMarks: Boolean = false,
 ) {
     val color = habitColor(habit.color)
 
@@ -212,6 +218,7 @@ fun HabitGridRow(
                     date = date,
                     isToday = date == today,
                     color = color,
+                    questionMarks = questionMarks,
                     onTap = { onTapDay(date) },
                     onHold = { onHoldDay(date) },
                 )
@@ -235,6 +242,7 @@ private fun DayCell(
     date: String,
     isToday: Boolean,
     color: Color,
+    questionMarks: Boolean,
     onTap: () -> Unit,
     onHold: () -> Unit,
 ) {
@@ -244,6 +252,10 @@ private fun DayCell(
     val skipped = habit.isSkipped(date)
     val value = habit.valueOn(date)
     val met = habit.isMet(value, skipped)
+    // No row at all, as against a day answered "no" — which is `entries` holding
+    // 0. Only visible when the account asks for it, and the two are the same
+    // empty square when it does not.
+    val unknown = !skipped && habit.entries[date] == null
 
     // How full the square looks. A measurable habit that fell short shows a
     // faint version of its own colour rather than nothing, because "8 of 20
@@ -257,6 +269,7 @@ private fun DayCell(
 
     val label = when {
         skipped -> "–"
+        questionMarks && unknown -> "?"
         habit.isNumerical -> value?.let { trimNumber(it) } ?: ""
         met == true -> "✓"
         else -> ""
@@ -278,7 +291,9 @@ private fun DayCell(
                 onClick = onTap,
                 onLongClick = onHold,
             )
-            .semantics { contentDescription = describe(habit, date, skipped, value, met) },
+            .semantics {
+                contentDescription = describe(habit, date, skipped, value, met, unknown)
+            },
         contentAlignment = Alignment.Center,
     ) {
         Box(

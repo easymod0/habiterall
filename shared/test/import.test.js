@@ -42,8 +42,12 @@ test('boolean sentinels map to habiterall encoding', () => {
   assert.deepEqual(convertLoopValue(2, false), { value: YES, status: '' }, 'YES_MANUAL');
   assert.deepEqual(convertLoopValue(1, false), { value: YES, status: '' }, 'YES_AUTO counts as done');
   assert.deepEqual(convertLoopValue(3, false), { value: 0, status: 'skip' }, 'SKIP');
-  assert.equal(convertLoopValue(0, false), null, 'NO is stored as absence');
-  assert.equal(convertLoopValue(-1, false), null, 'UNKNOWN is dropped');
+  // NO and UNKNOWN are two different days, and collapsing them was losing real
+  // data: on a backup from anyone not using Loop's question marks, an explicit
+  // "I missed it" is most of the history, and all of it used to be dropped.
+  assert.deepEqual(convertLoopValue(0, false), { value: 0, status: '' },
+    'NO is a stated lapse and keeps its row');
+  assert.equal(convertLoopValue(-1, false), null, 'UNKNOWN has no row at all');
 });
 
 test('numerical values are unscaled by 1000', () => {
@@ -107,12 +111,14 @@ test('Checkmarks.csv yields one habit per column', () => {
   const meditate = habits[0];
   assert.deepEqual(
     meditate.entries.map((e) => [e.date, e.value, e.status]),
-    [['2026-01-01', YES, ''], ['2026-01-02', 0, 'skip']],
-    'NO rows are omitted entirely; skip is flagged out-of-band'
+    [['2026-01-01', YES, ''], ['2026-01-02', 0, 'skip'], ['2026-01-03', 0, '']],
+    'a NO cell is a stated lapse and keeps its row; skip is flagged out-of-band'
   );
 
   const read = habits[1];
-  assert.deepEqual(read.entries.map((e) => e.value), [YES, YES], 'YES_AUTO counts');
+  assert.deepEqual(read.entries.map((e) => [e.date, e.value]),
+    [['2026-01-01', 0], ['2026-01-02', YES], ['2026-01-03', YES]],
+    'YES_AUTO counts as done, and the NO on the first day is a row of its own');
 });
 
 test('numerical columns use Habits.csv metadata', () => {
@@ -232,8 +238,13 @@ test('Loop .db backup imports habits, types, targets and entries', async () => {
   assert.equal(meditate.description, 'Daily sit');
   assert.deepEqual(
     meditate.entries.map((e) => [e.date, e.value, e.status]),
-    [['2026-01-01', YES, ''], ['2026-01-02', 0, 'skip'], ['2026-01-04', YES, '']],
-    'NO is dropped; YES_AUTO becomes YES; skip is out-of-band'
+    [
+      ['2026-01-01', YES, ''],
+      ['2026-01-02', 0, 'skip'],
+      ['2026-01-03', 0, ''],       // Loop NO: a day the user said they missed
+      ['2026-01-04', YES, ''],
+    ],
+    'NO keeps its row; YES_AUTO becomes YES; skip is out-of-band'
   );
   assert.equal(meditate.entries[0].notes, 'felt good', 'notes survive');
 
@@ -334,9 +345,10 @@ test('a blank header column does not shift later habits\' data', () => {
   assert.equal(a.entries.length, 1, 'A keeps its own YES');
   assert.equal(a.entries[0].value, 2);
 
-  // B's own cell is NO, which is stored as absence — it must NOT inherit the
-  // blank column's SKIP.
-  assert.deepEqual(b.entries, [],
+  // B's own cell is NO — a row holding 0, and emphatically not the blank
+  // column's SKIP. The status is what this is really checking: a misaligned read
+  // would hand B a skip.
+  assert.deepEqual(b.entries.map((e) => [e.value, e.status]), [[0, '']],
     `B took the blank column's value: ${JSON.stringify(b.entries)}`);
 });
 

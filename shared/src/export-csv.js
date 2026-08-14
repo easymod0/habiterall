@@ -97,10 +97,15 @@ export function buildCheckmarksCsv(habits, entriesFor) {
     const row = [date];
     for (const b of byHabit) {
       const e = b.entries.get(date);
+      // An empty cell is a day with no row — Loop's UNKNOWN, and what the
+      // importer reads back as one. A boolean row that is not YES is a stated
+      // lapse and says so, or the round trip loses the distinction the whole
+      // `questionMarks` setting rests on.
       if (e == null) row.push('');
       else if (e.status === 'skip') row.push('SKIP');
-      else if (b.habit.type === 'boolean') row.push(Number(e.value) === YES ? 'YES_MANUAL' : '');
-      else row.push(String(e.value));
+      else if (b.habit.type === 'boolean') {
+        row.push(Number(e.value) === YES ? 'YES_MANUAL' : 'NO');
+      } else row.push(String(e.value));
     }
     lines.push(row.join(','));
   }

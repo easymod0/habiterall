@@ -76,15 +76,27 @@ test('anything not ours is not parsed', () => {
   }
 });
 
-test('a yes/no habit gets three buttons, a measurable one gets a box', () => {
+test('a yes/no habit gets two buttons, a measurable one gets a box', () => {
   const [row] = reminderComponents(habit(), { date: '2026-08-13' });
   assert.equal(row.type, 1);
-  assert.deepEqual(row.components.map((b) => b.label), ['Yes', 'No', 'Skip']);
+  assert.deepEqual(row.components.map((b) => b.label), ['Yes', 'No']);
 
   const [numeric] = reminderComponents(habit({ type: 'numerical' }), { date: '2026-08-13' });
-  assert.deepEqual(numeric.components.map((b) => b.label), ['Enter amount', 'Skip']);
+  assert.deepEqual(numeric.components.map((b) => b.label), ['Enter amount']);
   // There is no button that can mean "6", so the first one opens a modal.
   assert.equal(parseAction(numeric.components[0].custom_id).action, 'amount');
+});
+
+test('Skip is offered only when the account uses skip days', () => {
+  // The setting has to reach every surface that can record one, or it hides the
+  // step from the two clients with a grid while the shade goes on offering it.
+  const opts = { date: '2026-08-13', skipDays: true };
+  const [row] = reminderComponents(habit(), opts);
+  assert.deepEqual(row.components.map((b) => b.label), ['Yes', 'No', 'Skip']);
+  assert.equal(parseAction(row.components[2].custom_id).action, 'skip');
+
+  const [numeric] = reminderComponents(habit({ type: 'numerical' }), opts);
+  assert.deepEqual(numeric.components.map((b) => b.label), ['Enter amount', 'Skip']);
 });
 
 test('an answer reads back as what was recorded', () => {
@@ -104,6 +116,7 @@ test('a bot message carries the buttons and the token', async () => {
     token: 'bot-token', channelId: '123456789012345678',
     habit: habit({ reminder_message: 'Did you exercise today?' }),
     date: '2026-08-13',
+    skipDays: true,
   }, { fetch });
 
   assert.equal(result.ok, true);

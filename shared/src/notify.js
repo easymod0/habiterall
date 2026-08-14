@@ -565,29 +565,37 @@ const STYLE = { primary: 1, secondary: 2, success: 3, danger: 4 };
 /**
  * The buttons under a reminder.
  *
- * A yes/no habit gets Yes / No / Skip. A measurable one gets "Enter amount",
- * which opens a modal — there is no button that can mean "6". Skip is offered
- * on both, because "not applicable today" is a distinct answer from either.
+ * A yes/no habit gets Yes / No. A measurable one gets "Enter amount", which
+ * opens a modal — there is no button that can mean "6". Skip joins either when
+ * the account has skip days switched on, because "not applicable today" is a
+ * distinct answer from both — and is absent when it does not, or the setting
+ * would hide the step from the two clients that own a grid while offering it
+ * from the shade of a third.
+ *
+ * A press on a skip button in an OLD message is still honoured: the message is
+ * already sitting in a channel, the id in it says what it says, and refusing it
+ * would mean a button that visibly does nothing. Switching the setting off stops
+ * new ones being offered, which is what it promises.
  *
  * Returns `[]` when there is nothing to attach, so a webhook send (which
  * cannot carry components at all) simply gets an empty list.
  *
  * @param {import('./types.js').Habit} habit
- * @param {{date?: string, test?: boolean}} [opts]
+ * @param {{date?: string, test?: boolean, skipDays?: boolean}} [opts]
  */
-export function reminderComponents(habit, { date = '', test = false } = {}) {
+export function reminderComponents(habit, { date = '', test = false, skipDays = false } = {}) {
   const id = (action) => encodeAction({ habitId: habit.id, date, action, test });
 
   const buttons = habit.type === 'numerical'
-    ? [
-      { type: 2, style: STYLE.primary, label: 'Enter amount', custom_id: id('amount') },
-      { type: 2, style: STYLE.secondary, label: 'Skip', custom_id: id('skip') },
-    ]
+    ? [{ type: 2, style: STYLE.primary, label: 'Enter amount', custom_id: id('amount') }]
     : [
       { type: 2, style: STYLE.success, label: 'Yes', custom_id: id('yes') },
       { type: 2, style: STYLE.secondary, label: 'No', custom_id: id('no') },
-      { type: 2, style: STYLE.secondary, label: 'Skip', custom_id: id('skip') },
     ];
+
+  if (skipDays) {
+    buttons.push({ type: 2, style: STYLE.secondary, label: 'Skip', custom_id: id('skip') });
+  }
 
   return [{ type: 1, components: buttons }];
 }

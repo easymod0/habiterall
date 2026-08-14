@@ -202,6 +202,9 @@ try {
     notifyChannels: ['discord'],
     discordChannelId: BOT_CHANNEL,
     notifyTimezone: 'UTC',
+    // The account's own setting decides whether Skip is one of the answers, so
+    // the channel offers what the grid does. Without it there are two.
+    skipDays: true,
   }, habits: [{
     id: wiredHabit, name: 'Meditate', type: 'boolean', unit: '', color: '#3b82f6',
     target_value: 0, target_type: 'at_least', reminder_time: '08:00',
@@ -228,6 +231,22 @@ try {
     JSON.stringify(botFetch.calls[0]?.body?.components));
   check('and the habit\'s own prompt',
     botFetch.calls[0]?.body?.embeds?.[0]?.title === 'Did you exercise today?');
+
+  // The same account with skips switched off gets Yes / No and nothing else.
+  const noSkipFetch = fakeFetch();
+  await deliverAccount(
+    { ...botAccount, settings: { ...botAccount.settings, skipDays: false } },
+    {
+      instant: new Date(Date.UTC(yy, mm - 1, dd, 8, 0)),
+      mark: async () => {},
+      fetch: noSkipFetch,
+      botToken: 'test-bot-token',
+    }
+  );
+  check('and no Skip button when the account does not use skip days',
+    (noSkipFetch.calls[0]?.body?.components?.[0]?.components ?? [])
+      .every((b) => b.label !== 'Skip'),
+    JSON.stringify(noSkipFetch.calls[0]?.body?.components));
 
   /* ---------- answering from a button ---------- */
 

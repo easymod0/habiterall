@@ -157,9 +157,24 @@ export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
  * The rule:
  *   - a skip is stored as a row with `status = 'skip'` and value 0, never as a
  *     magic value, because a numerical habit may legitimately record 3;
- *   - "not done" on a yes/no habit is the ABSENCE of a row, so clearing a
- *     checkmark deletes it — unless a note is attached, which needs a row to
- *     live on.
+ *   - anything else WRITES A ROW, including `value = 0`. A row is an answer,
+ *     and 0 is the answer "no".
+ *
+ * That second clause used to read "not done on a yes/no habit is the absence of
+ * a row, so clearing a checkmark deletes it — unless a note is attached, which
+ * needs a row to live on". The note exception is what gave it away: the row was
+ * already the difference between a day the user answered and a day nothing is
+ * known about, but only a note could bring one into being. Nothing could then
+ * offer Loop's "show question marks for missing data", because the two states it
+ * differentiates were one state here — and a Loop backup's explicit `NO` rows
+ * had to be discarded on import for the same reason. `DELETE` is how a day goes
+ * back to unknown now, which is the verb it always was.
+ *
+ * The cost, paid once and knowingly: `PUT {value: 0}` used to mean "clear this
+ * day" to every client, and now means "record a lapse". Anything old still
+ * sending it writes a row where it meant to write nothing — invisible while
+ * question marks are off, since a lapse and an unknown day paint identically,
+ * and never wrong in what it claims: the user did answer no.
  *
  * @param {import('./types.js').Habit} habit
  * @param {{value: number, status: string, notes: string}} parsed from parseEntry
@@ -167,7 +182,9 @@ export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
  * @returns {{op: 'upsert'|'delete', value: number, status: string, notes: string,
  *            reply: {value: number, status?: string, notes: string}}}
  *   `reply` is what the API echoes back: it reports a skip with the SKIP wire
- *   value even though 0 is what gets stored.
+ *   value even though 0 is what gets stored. `op` keeps its union — the callers
+ *   switch on it — but nothing returns 'delete' any more; clearing a day is the
+ *   DELETE route's own business.
  */
 export function entryWrite(habit, parsed, { UNSET, SKIP }) {
   const { value, status, notes } = parsed;
@@ -176,19 +193,6 @@ export function entryWrite(habit, parsed, { UNSET, SKIP }) {
     return {
       op: 'upsert', value: 0, status: 'skip', notes,
       reply: { value: SKIP, status: 'skip', notes },
-    };
-  }
-
-  if (habit.type === 'boolean' && value === UNSET) {
-    if (notes) {
-      return {
-        op: 'upsert', value: UNSET, status: '', notes,
-        reply: { value: UNSET, notes },
-      };
-    }
-    return {
-      op: 'delete', value: UNSET, status: '', notes: '',
-      reply: { value: UNSET, notes: '' },
     };
   }
 
@@ -229,6 +233,19 @@ export const SETTING_VALUES = {
   // falls back to 'day', so the setting would appear to do nothing.
   historyGranularity: ['day', 'week', 'month', 'quarter', 'year'],
   historyMode: ['percent', 'count'],
+
+  /* --- what a tap can record: Loop's two, with Loop's defaults --- */
+
+  // `pref_skip_enabled`. Whether the tap cycle offers "not applicable today".
+  // Off by default, as in Loop: three states are what most people want, and a
+  // skip that keeps a streak alive is a thing to opt into knowingly. Turning it
+  // off hides the control and takes the step out of the cycle; it never touches
+  // a skip already recorded, so an imported Loop history still reads correctly.
+  skipDays: [true, false],
+  // `pref_unknown_enabled`. Whether a day with no row is drawn as `?` rather
+  // than as a plain miss — which is only meaningful because a lapse is now a
+  // row of its own; see `entryWrite` above.
+  questionMarks: [true, false],
   // Resolution of the strength chart. Display only — the score is always
   // computed daily, since it is an EWMA and skipping days would change the
   // value rather than the resolution.
@@ -253,6 +270,69 @@ export const SETTING_VALUES = {
   // cloud account lives on a box in another country.
   notifyTimezone: parseTimeZone,
 };
+
+/**
+ * The settings a BACKUP may carry, in and out.
+ *
+ * An allowlist rather than "everything except the notification keys", so a
+ * setting added later travels only once someone has decided it should — the
+ * safe default being that it does not. `test/settings.test.js` fails on a key
+ * that is in neither list, which is what forces the decision to be made.
+ *
+ * The notification keys are deliberately absent, and it is not a hedge. A
+ * backup file is a document people email to themselves, sync to a cloud drive
+ * and attach to bug reports, while `discordWebhook` is a bearer capability:
+ * whoever holds the URL can post into that channel. Exporting it puts it in
+ * every copy of the file, and importing it means a "starter habits" JSON someone
+ * shares can silently repoint the victim's reminders at a channel the ATTACKER
+ * reads — habit names and reminder prompts included. That is the same reasoning
+ * that keeps DISCORD_BOT_TOKEN out of the settings table altogether, one step
+ * further out.
+ *
+ * What is left is what a restore actually needs: how the app is displayed, and —
+ * the reason any of this exists — what the rows in the same file MEAN.
+ */
+export const PORTABLE_SETTINGS = Object.freeze([
+  'dayOrder',
+  'weekStart',
+  'confirmDelete',
+  'calendarZoom',
+  'historyGranularity',
+  'historyMode',
+  'scoreGranularity',
+  'skipDays',
+  'questionMarks',
+]);
+
+/**
+ * Keys deliberately kept out of a backup. Declared rather than implied, so the
+ * test can tell "excluded on purpose" from "nobody has looked at it yet".
+ */
+export const UNPORTABLE_SETTINGS = Object.freeze([
+  'notifyChannels',
+  'discordWebhook',
+  'discordChannelId',
+  'discordUserId',
+  'notifyTimezone',
+]);
+
+/**
+ * Keep only what a backup may carry.
+ *
+ * Used on the way OUT by both editions' `/export` and on the way IN by both
+ * `/import` routes — one function, because an asymmetry between them is either a
+ * leak or a setting that cannot be restored.
+ *
+ * @param {Record<string, any>} [settings]
+ * @returns {Record<string, any>}
+ */
+export function portableSettings(settings = {}) {
+  const out = {};
+  for (const key of PORTABLE_SETTINGS) {
+    if (Object.hasOwn(settings, key)) out[key] = settings[key];
+  }
+  return out;
+}
 
 /**
  * Validate a settings patch, dropping anything unknown or out of range.

@@ -232,6 +232,9 @@ export async function sendToChannel(channel, args, deps = {}) {
         token: botToken,
         channelId: settings.discordChannelId,
         habit, date, appUrl, test,
+        // The account's own setting decides whether a Skip button is offered, so
+        // the shade, the grid and the channel agree about what answers exist.
+        skipDays: settings.skipDays === true,
       }, deps);
       return { mode: 'bot', ...result };
     }

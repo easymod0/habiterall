@@ -52,20 +52,68 @@ class GridTest {
 
     /* ---------- the cycle ---------- */
 
+    /* ---------- the tap cycle ---------- */
+
+    // Case for case with `test/toggle.test.js`, which pins the same examples
+    // against `nextDayState`. Both mirror Loop's own `Entry.nextToggleValue`.
+    // If one changes, all three must: they are the same squares to the same
+    // person, and a tap that means something different depending on which client
+    // is open is not a difference anyone finds in a changelog.
+
     @Test
-    fun `tapping cycles unset to done to skipped and back`() {
-        // The same order as the web grid's onCheckClick. If one changes, both
-        // must: they are the same squares to the same person.
-        assertEquals(DayState.DONE, Grid.nextState(DayState.UNSET))
-        assertEquals(DayState.SKIPPED, Grid.nextState(DayState.DONE))
-        assertEquals(DayState.UNSET, Grid.nextState(DayState.SKIPPED))
+    fun `with both settings off a day is done or not done and never unknown again`() {
+        assertEquals(DayState.DONE, Grid.nextState(DayState.UNKNOWN))
+        assertEquals(DayState.NO, Grid.nextState(DayState.DONE))
+        assertEquals(DayState.DONE, Grid.nextState(DayState.NO))
     }
 
     @Test
-    fun `three taps return a day to where it started`() {
-        var state = DayState.UNSET
-        repeat(3) { state = Grid.nextState(state) }
-        assertEquals(DayState.UNSET, state)
+    fun `skip days adds one step between done and not done`() {
+        assertEquals(DayState.DONE, Grid.nextState(DayState.UNKNOWN, skipDays = true))
+        assertEquals(DayState.SKIPPED, Grid.nextState(DayState.DONE, skipDays = true))
+        assertEquals(DayState.NO, Grid.nextState(DayState.SKIPPED, skipDays = true))
+        assertEquals(DayState.NO, Grid.nextState(DayState.DONE, skipDays = false))
+    }
+
+    @Test
+    fun `question marks are what let a tap clear a day`() {
+        assertEquals(DayState.UNKNOWN, Grid.nextState(DayState.NO, questionMarks = true))
+        assertEquals(DayState.DONE, Grid.nextState(DayState.UNKNOWN, questionMarks = true))
+        assertEquals(DayState.NO, Grid.nextState(DayState.DONE, questionMarks = true))
+    }
+
+    @Test
+    fun `both on is the full four-state cycle`() {
+        var state = DayState.UNKNOWN
+        val seen = mutableListOf<DayState>()
+        repeat(4) {
+            state = Grid.nextState(state, skipDays = true, questionMarks = true)
+            seen.add(state)
+        }
+        assertEquals(
+            listOf(DayState.DONE, DayState.SKIPPED, DayState.NO, DayState.UNKNOWN),
+            seen,
+        )
+    }
+
+    @Test
+    fun `a skipped day still moves on once skips are switched off`() {
+        // The setting does not erase the skips already recorded — an imported
+        // Loop history is full of them — so a tap on one has to go somewhere.
+        assertEquals(DayState.NO, Grid.nextState(DayState.SKIPPED))
+        assertEquals(DayState.NO, Grid.nextState(DayState.SKIPPED, questionMarks = true))
+    }
+
+    @Test
+    fun `no row is unknown and a row holding zero is a stated no`() {
+        // The distinction the whole feature rests on. Passing 0.0 where the map
+        // held nothing would report every unanswered day as an answered "no".
+        assertEquals(DayState.UNKNOWN, Grid.dayStateOf(null, isSkip = false, done = false))
+        assertEquals(DayState.NO, Grid.dayStateOf(0.0, isSkip = false, done = false))
+        assertEquals(DayState.DONE, Grid.dayStateOf(2.0, isSkip = false, done = true))
+        assertEquals(DayState.NO, Grid.dayStateOf(8.0, isSkip = false, done = false))
+        assertEquals(DayState.SKIPPED, Grid.dayStateOf(null, isSkip = true, done = false))
+        assertEquals(DayState.SKIPPED, Grid.dayStateOf(0.0, isSkip = true, done = false))
     }
 
     /* ---------- when to load more ---------- */

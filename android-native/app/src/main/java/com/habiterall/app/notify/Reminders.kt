@@ -352,9 +352,16 @@ object Reminders {
                 // A property on the response, not a call — and `cachedAndroidReminders`
                 // below is the suspend read of the mirror. Two similarly-named
                 // things, so they are spelled differently on purpose.
-                val fresh = api.settings().androidRemindersEnabled
-                runCatching { settings.cacheAndroidReminders(fresh) }
-                fresh
+                val fresh = api.settings()
+                runCatching { settings.cacheAndroidReminders(fresh.androidRemindersEnabled) }
+                // The shade's Skip action comes from the same response, and this is
+                // the OTHER path that can learn a new value for it: the six-hourly
+                // sync runs whether or not anyone opens the app, so a `skipDays`
+                // switched off in a browser reached the alarms and not the actions
+                // beside them. Whichever of the two paths ran last decided, which
+                // is the drift this whole mirror exists to prevent.
+                runCatching { settings.cacheSkipDays(fresh.skipDaysEnabled) }
+                fresh.androidRemindersEnabled
             } catch (e: Exception) {
                 settings.cachedAndroidReminders()
             }

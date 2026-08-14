@@ -269,8 +269,12 @@ try {
 
   await press(`hab|${habitId}|${day}|no`);
   const afterNo = await api(`/api/habits/${habitId}/entries`);
-  ck('pressing No removes the row, exactly as the API would',
-    !afterNo.body.some((e) => e.date === day),
+  // A row holding 0, exactly as the API would: an answer of "no" is an answer,
+  // and it overwrites the skip above rather than deleting the day. It used to
+  // remove the row, which made "I missed it" indistinguishable from a day nobody
+  // had been asked about — see `entryWrite`.
+  ck('pressing No records a lapse, exactly as the API would',
+    afterNo.body.some((e) => e.date === day && e.value === 0 && e.status === ''),
     JSON.stringify(afterNo.body.filter((e) => e.date === day)));
 
   const wrongChannel = [];

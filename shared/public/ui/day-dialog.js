@@ -8,6 +8,7 @@
  */
 
 import { api } from '/shared/ui/api.js';
+import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 import { UNSET, YES } from '/shared/ui/values.js';
@@ -63,16 +64,32 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
     valueInput.value = value != null && !isSkip ? String(value) : '';
     valueInput.placeholder = isSkip ? 'skipped' : 'leave empty to clear';
   } else {
-    // Highlight whichever state the day is currently in.
+    // Highlight whichever state the day is currently in. With question marks on,
+    // a day with no row is in NEITHER state — that is the state the setting
+    // exists to show — so "Not done" must stop claiming it. With them off the
+    // two are one thing and it goes on claiming it, as it always has.
+    const unanswered = value == null;
     for (const b of booleanBlock.querySelectorAll('.day-choice')) {
       const isDone = b.dataset.action === 'done';
-      const active = !isSkip && (isDone ? value === YES : value == null || value === UNSET);
+      const active = !isSkip && (isDone
+        ? value === YES
+        : value === UNSET || (unanswered && !settings.get('questionMarks')));
       b.setAttribute('aria-pressed', String(active));
     }
   }
 
-  // "Clear" only means something when there's an entry to remove.
-  clear.hidden = value == null && !isSkip;
+  // "Clear" only means something when there's an entry to remove. It is also
+  // the only way back to "no data" while question marks are off, since the
+  // grid's cycle then never returns there — Loop's behaviour, deliberately.
+  //
+  // Hidden on a skipped day, where "Unskip" below issues the same write: both
+  // take the day back to having no row, and two differently-labelled buttons
+  // doing one thing reads as one of them doing something else.
+  clear.hidden = isSkip || value == null;
+  // Skips switched off hide the control, but never on a day that already is
+  // one: an imported Loop history has skips in it, and "Unskip" must stay
+  // reachable or they cannot be undone at all.
+  skip.hidden = !settings.get('skipDays') && !isSkip;
   skip.setAttribute('aria-pressed', String(!!isSkip));
   skip.textContent = isSkip ? 'Unskip' : 'Skip day';
 
@@ -122,11 +139,11 @@ export function init() {
 
   for (const b of booleanBlock.querySelectorAll('.day-choice')) {
     b.addEventListener('click', () => {
-      if (b.dataset.action === 'done') return saveDay({ value: YES });
-      // "Not done" is stored as the absence of a row, so a note would have
-      // nowhere to live — keep an explicit 0 row when one was written.
-      const note = notes.value.trim();
-      saveDay(note ? { value: UNSET, notes: note } : null);
+      // Both buttons write a row. "Not done" used to delete one unless a note
+      // came with it, which made the note the only way to state a lapse; it is
+      // an answer either way, and Clear is what means "nothing is known".
+      const value = b.dataset.action === 'done' ? YES : UNSET;
+      saveDay({ value });
     });
   }
 

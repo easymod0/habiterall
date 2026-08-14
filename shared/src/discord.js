@@ -127,16 +127,19 @@ export async function discordRequest(req, deps = {}) {
  * @param {string} [args.date]
  * @param {string} [args.appUrl]
  * @param {boolean} [args.test]
+ * @param {boolean} [args.skipDays] whether the account offers skip days
  * @param {{fetch?: typeof globalThis.fetch}} [deps]
  */
 export function postReminder(args, deps = {}) {
-  const { token, channelId, habit, date = '', appUrl = '', test = false } = args;
+  const {
+    token, channelId, habit, date = '', appUrl = '', test = false, skipDays = false,
+  } = args;
   const message = reminderMessage(habit, { test });
   const payload = discordPayload({ habit, message, date, appUrl });
 
   // `username` is a webhook-only field; a bot message carrying it is rejected.
   delete payload.username;
-  payload.components = reminderComponents(habit, { date, test });
+  payload.components = reminderComponents(habit, { date, test, skipDays });
 
   return discordRequest(
     { token, path: `/channels/${channelId}/messages`, body: payload },

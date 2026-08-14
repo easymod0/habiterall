@@ -20,11 +20,12 @@ const SUMMARY_WINDOW_DAYS = 400;
 const STREAK_HISTORY_DAYS = 1830;
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
-import { parseUpload } from '@habiterall/shared/import.js';
+import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
 import { sendTest } from './notifier.js';
 import {
-  parseHabit, parseEntry, parseSettings, entryWrite, assertDate, assertNotFuture,
+  parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
+  assertNotFuture,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
@@ -245,9 +246,10 @@ api.put('/habits/:id/entries/:date', (req, res) => {
 
   const parsed = parseEntry(habit, req.body, { UNSET, YES, SKIP });
 
-  // The rule — a skip is out of band, and "not done" is the absence of a row
-  // unless a note needs one — lives in shared/validate.js, because the cloud
-  // edition and the Discord button handler have to apply exactly the same one.
+  // The rule — a skip is out of band, and every other write is a ROW, including
+  // value 0, which is the answer "no" — lives in shared/validate.js, because the
+  // other edition and the Discord button handler have to apply exactly the same
+  // one. Clearing a day is the DELETE route below, not a PUT of zero.
   const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
   if (write.op === 'delete') q.deleteEntry.run(id, date);
@@ -400,14 +402,18 @@ function storedWeekStart() {
  * captured by the same backup as the habits. Values are stored as JSON text
  * because SQLite has no boolean.
  */
-api.get('/settings', (req, res) => {
+function readSettings() {
   const out = {};
   for (const { key, value } of q.allSettings.all()) {
     // node:sqlite returns loosely-typed columns; both are TEXT by schema.
     try { out[String(key)] = JSON.parse(String(value)); }
     catch { /* skip a corrupt row rather than fail the whole request */ }
   }
-  res.json(out);
+  return out;
+}
+
+api.get('/settings', (req, res) => {
+  res.json(readSettings());
 });
 
 /** Merge a patch. Unknown or invalid keys are dropped, not rejected. */
@@ -449,6 +455,14 @@ api.get('/export', (req, res) => {
     app: 'habiterall',
     exported_at: new Date().toISOString(),
     habits: habits.map((h) => ({ ...toApiHabit(h), entries: q.entriesFor.all(h.id) })),
+    // Preferences travel with the data. They are the account, not the device —
+    // and two of them (skipDays, questionMarks) now decide what the same rows
+    // MEAN, so a backup that dropped them restored a history the app then read
+    // differently. Only a replace-mode import applies them; see the route.
+    //
+    // `portableSettings`, not the whole table: a backup is a file people email
+    // to themselves, and `discordWebhook` is a bearer capability for a channel.
+    settings: portableSettings(readSettings()),
   };
 
   if (req.query.download === 'true') {
@@ -520,7 +534,30 @@ api.post('/import', (req, res, next) => {
   parseUpload(buf)
     .then((habits) => {
       if (!habits.length) throw httpError(400, 'no habits found in the uploaded file');
-      res.json({ mode, ...applyImport(habits, mode) });
+      const result = applyImport(habits, mode);
+
+      // Replace mode only: it means "make this account look like the file", and
+      // the file's preferences are part of that. A merge is "add these habits to
+      // what I have" and has no business rewriting how the rest of the account
+      // is displayed. Through parseSettings, so a hand-edited backup cannot
+      // store a value the API would refuse.
+      let settings = 0;
+      if (mode === 'replace') {
+        const raw = backupSettings(buf);
+        if (raw) {
+          // Filtered BEFORE the validator, so a file cannot set a notification
+          // destination however well-formed its value is: a shared "starter
+          // habits" backup would otherwise repoint the reminders of everyone who
+          // restored it at a channel its author reads.
+          const { accepted } = parseSettings(portableSettings(raw));
+          for (const [key, value] of Object.entries(accepted)) {
+            q.putSetting.run(key, JSON.stringify(value));
+          }
+          settings = Object.keys(accepted).length;
+        }
+      }
+
+      res.json({ mode, ...result, settings });
     })
     .catch(next);
 });

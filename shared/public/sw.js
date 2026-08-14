@@ -22,6 +22,10 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v9: the day grid and the day editor started importing ui/toggle.js, which is
+// a new shell asset. An installed PWA holding the old shell would fetch it on
+// first use — and be offline exactly when a tap needs it.
+//
 // v7: app.js was split into one module per view and dialog, so an installed
 // PWA holding the old single file alongside the new index.html would boot a
 // shell whose scripts no longer exist.
@@ -33,7 +37,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v8';
+const CACHE_VERSION = 'v9';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -78,6 +82,7 @@ const SHELL = [
   '/shared/ui/theme.js',
   '/shared/ui/time.js',
   '/shared/ui/toast.js',
+  '/shared/ui/toggle.js',
   '/shared/ui/values.js',
   '/shared/ui/views.js',
   '/shared/ui/window.js',
