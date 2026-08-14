@@ -16,7 +16,7 @@
     "test:notify": "node test/notify.integration.mjs"
   },
   "dependencies": {
-    "express": "^4.21.2",
+    "express": "^5.2.1",
     "@habiterall/shared": "*"
   },
   "license": "GPL-3.0-or-later"
