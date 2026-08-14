@@ -9,8 +9,14 @@ import { hideAll } from '/shared/ui/views.js';
 
 const $ = (sel) => document.querySelector(sel);
 
-/** Buttons that mean nothing to a signed-out visitor. */
-const SIGNED_IN_ONLY = ['btn-new', 'btn-data'];
+/**
+ * Buttons that mean nothing to a signed-out visitor.
+ *
+ * The gear is in the list because backup and restore moved inside it: hiding
+ * `btn-data` used to be what kept an export button away from someone with no
+ * session, and every other thing the dialog offers is per-account anyway.
+ */
+const SIGNED_IN_ONLY = ['btn-new', 'btn-settings'];
 
 export const auth = {
   enabled: true,
