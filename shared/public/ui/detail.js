@@ -42,7 +42,15 @@ const historyGranularity = () => state.granularity ?? settings.get('historyGranu
 const historyMode = () => state.historyMode ?? settings.get('historyMode');
 const scoreGranularity = () => state.scoreGranularity ?? settings.get('scoreGranularity');
 
-/** Open (or redraw) the detail view for one habit. */
+/**
+ * Open (or redraw) the detail view for one habit.
+ *
+ * Reports whether it rendered. Every caller but one ignores that: the boot in
+ * `app.js` opens a deep link without a list behind it, so it is the one place
+ * that has to know a refused habit left nothing on screen.
+ *
+ * @returns {Promise<boolean>}
+ */
 export async function open(id) {
   // Every control in the detail view — zoom, calendar paging, granularity,
   // history mode — re-renders through here, and replaceChildren() drops the
@@ -68,8 +76,10 @@ export async function open(id) {
       // nothing moved, not like a jump and a glide back.
       requestAnimationFrame(() => window.scrollTo(0, scroll));
     }
+    return true;
   } catch (e) {
     toast(e.message);
+    return false;
   }
 }
 

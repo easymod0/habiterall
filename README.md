@@ -666,7 +666,7 @@ A reminder has two halves, set in two places:
 
 | Destination | Delivered by | Answer from it | Works offline | Needs |
 |---|---|---|---|---|
-| **Android app** | the phone, as a local alarm | Yes / No / a count, from the shade | yes | the [native app](android-native/README.md) |
+| **Android app** | the phone, as a local alarm | Yes / No / a count, from the shade — or tap the notification itself to open the app on that habit | yes | the [native app](android-native/README.md) |
 | **Discord (bot)** | your server | Yes / No / Skip buttons, and a box for an amount | no | a Discord application |
 | **Discord (webhook)** | your server | nothing — text only | no | a webhook URL |
 
@@ -752,7 +752,7 @@ button is how you find out.
 
 ## Install on a phone
 
-Three options, in increasing order of effort:
+Two options, in increasing order of effort:
 
 | | What you get | Needs |
 |---|---|---|
@@ -762,17 +762,18 @@ Three options, in increasing order of effort:
 The native client talks to the **personal** edition today; signing in to cloud
 needs an OIDC flow it does not have yet.
 
-The native APK is attached to every [release](../../releases). It is unsigned
-unless the repository has signing secrets configured, so Android will ask you to
-allow *Install unknown apps* for whatever you download it with — that is
-expected, not a warning about the app.
+The native APK is attached to every [release](../../releases), signed — a
+release that has no signing key fails rather than publishing an APK, because
+Android refuses to install an unsigned one at all. Installing it still means
+allowing *Install unknown apps* for whatever you download it with, which every
+sideloaded app needs and is not a warning about this one.
 
 <div align="center">
 <img src="docs/screenshots/dashboard-mobile.png" width="300"
      alt="The web app at phone width: each habit is a card with its name, frequency, strength and streak, above a row of seven day squares.">
 &nbsp;&nbsp;
 <img src="docs/screenshots/android-list.png" width="300"
-     alt="The native Android app: a Today list of four habits, each with its current state, a reminder time or an Add reminder link, and Yes / No buttons or an amount button.">
+     alt="The native Android app: a Today list of four habits, each with its current streak and a reminder time or an Add reminder link, beside a scrolling row of day squares — checkmarks, amounts, and today outlined.">
 <br><sub>The web app added to the home screen · the native app, which can answer from the shade</sub>
 </div>
 
@@ -795,10 +796,13 @@ Reminders are local alarms, so they fire whether or not the server is
 reachable, and the reminder *times* live on the server so they follow your
 account to a new phone.
 
-Everything a web page does well — charts, the calendar, history editing —
-opens the server's own UI inside the app, so there is one implementation of the
-statistics rather than two. The habit list, quick check-offs and server
-settings are native.
+The list itself is native: a row of days per habit — its current streak beside
+the name, tappable squares back through a year of history, the whole grid
+scrolling together and running whichever way your `dayOrder` setting says.
+Everything a web page does well — charts, the calendar, history editing — opens
+the server's own UI inside the app, so there is one implementation of the
+statistics rather than two, and tapping a habit lands on *that* habit's page
+rather than the dashboard.
 
 > The native app talks to the **personal** edition. The cloud edition needs an
 > OIDC sign-in flow it does not implement yet.
@@ -1142,8 +1146,9 @@ a backup round-trip check that exports every format, re-imports it, and asserts
 nothing changed.
 
 **The main suite needs no configuration** — fork it, push, and everything runs.
-Only the two Android release workflows need secrets, and only to *sign* an APK;
-see **[.github/workflows/README.md](.github/workflows/README.md)**.
+The only secrets anything needs are the four Android signing ones, and only to
+*sign* a released APK; see
+**[.github/workflows/README.md](.github/workflows/README.md)**.
 
 The browser suites drive real Chrome and check things unit tests structurally
 cannot — a CSS rule silently defeating the `hidden` attribute, offline

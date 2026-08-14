@@ -26,8 +26,9 @@ name: Release
 
 on:
   push:
-    # Only vX.Y.Z. `v*` would fire on any tag beginning with v, including the
-    # android-v* tags the Android workflows use for their own builds.
+    # Only vX.Y.Z. `v*` would fire on any tag that merely begins with v —
+    # `verify-me`, or a per-component tag someone cuts by hand — and each of
+    # those would publish a release of the whole project.
     tags: ['v[0-9]+.[0-9]+.[0-9]+*']
   workflow_dispatch:
     inputs:
@@ -139,9 +140,10 @@ jobs:
           fi
           CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
 
-          # The previous release, for the changelog. Excludes the tag being
-          # released (which exists already on a tag-triggered run) and the
-          # android-* tags, which are not releases of the whole project.
+          # The previous release, for the changelog. `v[0-9]*` so only real
+          # release tags count, and the tag being released is excluded — on a
+          # tag-triggered run it already exists, and would otherwise be its own
+          # predecessor and produce an empty changelog.
           PREVIOUS=$(git tag --list 'v[0-9]*' --sort=-v:refname \
                       | grep -vFx "$TAG" | head -1 || true)
 
