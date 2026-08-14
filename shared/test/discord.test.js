@@ -10,7 +10,7 @@ const {
   discordRequest, ephemeral, handleInteraction, postReminder, respondInteraction,
 } = await import('../src/discord.js');
 
-const { FATAL_CLOSE_CODES, OP, connectGateway } =
+const { FATAL_CLOSE_CODES, OP, connectGateway, resumeTarget } =
   await import('../src/discord-gateway.js');
 
 const habit = (over = {}) => ({
@@ -655,7 +655,7 @@ test('a resumable session resumes; an unresumable one starts over', () => {
   socket.emit(hello);
   socket.emit({
     op: OP.DISPATCH, s: 3, t: 'READY',
-    d: { session_id: 's1', resume_gateway_url: 'wss://resume.example' },
+    d: { session_id: 's1', resume_gateway_url: 'wss://gateway-us-east1-b.discord.gg' },
   });
 
   // Discord asks us to reconnect: the session is still good, so the next
@@ -666,6 +666,84 @@ test('a resumable session resumes; an unresumable one starts over', () => {
   assert.equal(gateway.state(), 'waiting');
 
   gateway.stop();
+});
+
+test('a resume goes where READY said, but only if that is Discord', () => {
+  // Regional, and the regions are not enumerable from here — so the rule is a
+  // suffix, and the query READY sent is dropped in favour of our own.
+  assert.equal(
+    resumeTarget('wss://gateway-us-east1-b.discord.gg'),
+    'wss://gateway-us-east1-b.discord.gg/?v=10&encoding=json',
+  );
+  assert.equal(
+    resumeTarget('wss://gateway.discord.gg/?v=6&encoding=etf'),
+    'wss://gateway.discord.gg/?v=10&encoding=json',
+  );
+
+  // Anything else falls back to the published gateway, which costs a fresh
+  // session and nothing else. The RESUME frame carries the bot token, so a
+  // READY naming somewhere else is asking for it to be posted there.
+  for (const bad of [
+    'wss://evil.example',
+    'wss://discord.gg.evil.example',     // suffix match must not be substring
+    'ws://gateway.discord.gg',           // plaintext
+    'https://gateway.discord.gg',        // not a socket
+    'wss://user:pw@gateway.discord.gg',  // credentials in the authority
+    'not a url', '', null, undefined,
+  ]) {
+    assert.equal(resumeTarget(bad), null, `accepted ${bad}`);
+  }
+});
+
+test('a resume the socket actually opens is the canonical URL', () => {
+  const opened = [];
+  const gateway = connectGateway({
+    token: 't', onInteraction: () => {}, log: quiet,
+    WebSocketImpl: class extends FakeSocket {
+      constructor(url) { super(url); opened.push(url); }
+    },
+    setTimeoutImpl: (fn) => { fn(); return { unref() {} }; },
+  });
+  const socket = FakeSocket.last;
+  socket.emit(hello);
+  socket.emit({
+    op: OP.DISPATCH, s: 3, t: 'READY',
+    d: { session_id: 's1', resume_gateway_url: 'wss://evil.example/steal' },
+  });
+  socket.emit({ op: OP.RECONNECT });
+
+  assert.ok(opened.length >= 2, 'no reconnect happened');
+  assert.match(opened.at(-1), /^wss:\/\/gateway\.discord\.gg\//);
+  gateway.stop();
+});
+
+test('the heartbeat period HELLO asks for is gated, not clamped', () => {
+  const periods = [];
+  const run = (d) => {
+    const gateway = connectGateway({
+      token: 't', onInteraction: () => {}, WebSocketImpl: FakeSocket, log: quiet,
+      setIntervalImpl: (fn, ms) => { periods.push(ms); return { unref() {} }; },
+    });
+    FakeSocket.last.emit({ op: OP.HELLO, d });
+    gateway.stop();
+  };
+
+  run({ heartbeat_interval: 45_000 });
+  run({ heartbeat_interval: 1_000 });        // the floor itself is in range
+  run({ heartbeat_interval: 600_000 });      // and so is the ceiling
+  // A HELLO is remote input that sets a timer in this process. `1` is a busy
+  // loop that starves the reminder tick sharing the event loop; a day is a
+  // socket Discord kills for going silent. Neither is clamped to the nearer
+  // bound — a frame this wrong is not one to take a hint from.
+  run({ heartbeat_interval: 1 });
+  run({ heartbeat_interval: 86_400_000 });
+  run({ heartbeat_interval: 'soon' });
+  run({});
+
+  assert.deepEqual(
+    periods,
+    [45_000, 1_000, 600_000, 41_250, 41_250, 41_250, 41_250],
+  );
 });
 
 test('an invalid session that cannot be resumed forgets it', () => {
@@ -759,19 +837,25 @@ test('stopping closes cleanly and stays closed', () => {
   assert.equal(gateway.state(), 'stopped');
 });
 
-test('a silent socket is noticed rather than trusted', async () => {
+test('a silent socket is noticed rather than trusted', () => {
   // The failure mode that matters: the connection stays open, Discord stops
   // acknowledging, and nothing arrives. Without the ack check the bot looks
   // connected forever.
+  //
+  // The beat is driven by hand rather than waited out: a period under a second
+  // is rejected in favour of the 41.25s default now, so a test that slept
+  // through two of them would take a minute and a half to say the same thing.
+  let beat = () => {};
   const gateway = connectGateway({
     token: 't', onInteraction: () => {}, WebSocketImpl: FakeSocket, log: quiet,
+    setIntervalImpl: (fn) => { beat = fn; return { unref() {} }; },
   });
   const socket = FakeSocket.last;
-  socket.emit({ op: OP.HELLO, d: { heartbeat_interval: 15 } });
+  socket.emit(hello);
   socket.emit({ op: OP.DISPATCH, s: 1, t: 'READY', d: { session_id: 's1' } });
 
-  // Two intervals with no ACK in between.
-  await new Promise((r) => setTimeout(r, 60));
+  beat();  // sends one, and marks it unacked
+  beat();  // still unacked: the socket is silent
   assert.equal(socket.closed, 4000);
   gateway.stop();
 });

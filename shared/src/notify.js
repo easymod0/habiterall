@@ -650,7 +650,14 @@ export function discordPayload({ habit, message, date = '', appUrl = '' }) {
   if (date) embed.footer = { text: date };
   // Makes the embed title a link into the app. Only when the deployment has
   // told us its own address — guessing one would produce a dead link.
-  if (/^https?:\/\//.test(appUrl)) embed.url = appUrl.replace(/\/+$/, '') + '/';
+  // Trailing slashes are counted off rather than matched: `/\/+$/` is unanchored
+  // at the start, so on a string of many slashes the engine retries from every
+  // one of them — quadratic work for a one-line normalisation.
+  if (/^https?:\/\//.test(appUrl)) {
+    let end = appUrl.length;
+    while (end > 0 && appUrl[end - 1] === '/') end--;
+    embed.url = `${appUrl.slice(0, end)}/`;
+  }
 
   return {
     username: 'habiterall',

@@ -522,6 +522,44 @@ rebuilds the URL from the parts it checked, and the sender refuses redirects.
 Without the host check, `discordWebhook` aims the server at cloud metadata or a
 port on its own network and reports the result as a status code.
 
+**The gateway's own frames are remote input too, and two of them steer this
+process.** A settings URL is the obvious case; the socket is the one that reads
+as trusted because it was authenticated. It is not: `resume_gateway_url` in READY
+says where the NEXT socket opens, and the RESUME frame it then sends carries the
+bot token — so `resumeTarget` applies `parseDiscordWebhook`'s reasoning one step
+out, suffix-matching `*.discord.gg` / `*.discord.com` (the value is regional and
+the regions are not enumerable from here) and rebuilding the URL from the host
+alone. Falling back to the published gateway costs a fresh session and nothing
+else, which is why a rejected value is not an error. HELLO's
+`heartbeat_interval` is the same shape of problem with a different sink: it sets
+a timer in this process, so anything outside 1s–10min takes Discord's published
+default instead of being clamped to the nearer bound. Ungated, a `1` is a busy
+loop starving the reminder tick that shares the event loop.
+
+**`/healthz` is the only unauthenticated route in cloud that touches Postgres,
+and it has four callers rather than the two it looks like.** The container
+healthcheck and an attacker are the obvious pair; the other two are the PWA's
+connectivity probe (`isReachable`, on every boot and every visibilitychange) and
+the Android setup screen's, and both read anything but a 200 as *the server is
+unreachable*. So a per-IP 429 does not shed load, it makes a browser banner
+itself offline and divert writes to the outbox while the server is perfectly
+healthy — self-feeding, because going offline starts a backoff poll into the
+same bucket, and shared, because an office NAT is one bucket for everyone behind
+it. `/healthz` therefore never answers 429: over the limit it answers from the
+memo. `skip` covers the other direction, since a healthchecker reads 429 as
+"down" and restarts the container.
+
+What protects the pool is that memo (`habiterall-cloud/src/health.js`), not the
+limit. `PG_POOL_MAX` is 10, and a per-IP limit is the wrong shape for pool
+exhaustion anyway — a distributed flood pays nothing for a fresh bucket, while
+one second of memo caps the cost at one connection per second however many
+callers arrive. Its `inflight` half is what makes that true of the case that
+matters: a burst on a cold memo would otherwise open a connection each and fill
+the memo afterwards. It lives in its own file because `server.js` starts a
+server at import time, so nothing declared in it can be unit tested — and the
+failure mode here is silent in the worst direction, an `inflight` left set
+reporting the last good answer forever while Postgres is down.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —

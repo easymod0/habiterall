@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { pool, closePool, poolGauge } from './db/pool.js';
+import { LOCAL_IPS, createHealthProbe, sendHealth } from './health.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api } from './api.js';
 import { start as startNotifier } from './notifier.js';
@@ -108,6 +109,12 @@ app.use(session({
   },
 }));
 
+/* ---------- health ---------- */
+
+// Declared up here because `healthLimiter` answers from it; the route itself
+// is down with the static files.
+const healthProbe = createHealthProbe(() => pool.query('SELECT 1'));
+
 /* ---------- rate limits ---------- */
 
 const loginLimiter = rateLimit({
@@ -134,6 +141,38 @@ const notifyTestLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, limit: 10,
   keyGenerator: (req) => (req.session?.user?.id ? `u:${req.session.user.id}` : req.ip),
   message: { error: 'too many test notifications, try again in a few minutes' },
+});
+
+/**
+ * `/healthz` is the only unauthenticated route that touches Postgres, but the
+ * pool is not what this limit protects — the memo in health.js is, and a per-IP
+ * limit is the wrong shape for pool exhaustion anyway, since a distributed
+ * flood pays nothing for a fresh bucket. This is the cheaper outer bound on
+ * request handling.
+ *
+ * It must never answer 429, and that is the part worth writing down. `/healthz`
+ * has four callers, not two: the container healthcheck, an attacker, the PWA's
+ * connectivity probe (`isReachable` in shared/public/offline.js, on every boot
+ * and every visibilitychange) and the Android setup screen's. Both clients read
+ * anything but a 200 as "the server is unreachable" — so a rate-limited browser
+ * banners itself offline and diverts writes to the outbox while the server is
+ * perfectly healthy, and it is self-feeding, because going offline starts a
+ * backoff poll against the same bucket. Real clients arrive through the proxy,
+ * which is exactly the side of `skip` the limit applies to. So over the limit
+ * we answer from the memo instead: the same truth as a fresh probe, at no cost
+ * at all — which is also what the limit is now for, since the memo already
+ * bounds the pool. `cached()` is null only before the first request of the
+ * process has landed, and being over a limit of 60 implies 60 that were not.
+ *
+ * `skip` still matters for the other direction. A healthchecker reads 429 as
+ * "down" and restarts the container, and those probes arrive on the container's
+ * own interface rather than through the proxy.
+ */
+const healthLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 60,
+  standardHeaders: true, legacyHeaders: false,
+  skip: (req) => LOCAL_IPS.test(req.ip ?? ''),
+  handler: async (req, res) => sendHealth(res, healthProbe.cached() ?? await healthProbe()),
 });
 
 const importLimiter = rateLimit({
@@ -194,13 +233,8 @@ app.use('/api', requireAuth, apiLimiter, api);
 
 /* ---------- static ---------- */
 
-app.get('/healthz', async (req, res) => {
-  try {
-    await pool.query('SELECT 1');
-    res.json({ ok: true });
-  } catch {
-    res.status(503).json({ ok: false, error: 'database unavailable' });
-  }
+app.get('/healthz', healthLimiter, async (req, res) => {
+  sendHealth(res, await healthProbe());
 });
 
 const SHARED_PUBLIC = join(__dirname, '..', '..', 'shared', 'public');
