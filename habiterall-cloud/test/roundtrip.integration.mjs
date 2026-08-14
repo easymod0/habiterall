@@ -27,6 +27,8 @@ const {
   parseLoopCheckmarksCSV, parseLoopHabitsCSV,
 } = await import('@habiterall/shared/import.js');
 const { unzip } = await import('@habiterall/shared/unzip.js');
+const { parseSettings, portableSettings } =
+  await import('@habiterall/shared/validate.js');
 const {
   FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, JSON_HABIT_FIELDS,
 } = await import('@habiterall/shared/test/roundtrip-fixture.mjs');
@@ -173,6 +175,82 @@ const afterTwice = snapshot(await read(alice), { fields: JSON_HABIT_FIELDS });
 ck('a second JSON restore is idempotent',
   diff(baselineFull, afterTwice) === null,
   diff(baselineFull, afterTwice) ?? '');
+
+/* ---------- what a merge must not do, and what a backup may carry ---------- */
+
+console.log('\n--- merge, and the settings a file may set ---');
+
+// A row is an answer now, so a file's bare "not done" reaches the writer where it
+// used to be dropped. In merge mode it must yield to an answer the account
+// already has: a Loop backup is full of explicit NO rows, and merging one taken
+// before the web history would otherwise wipe every completion they disagree on.
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+const lapseFile = parseHabiterallJSON({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'boolean',
+    entries: [
+      { date: '2026-01-05', value: 0, status: '', notes: '' },   // a completion
+      { date: '2026-01-11', value: 0, status: '', notes: '' },   // no row at all
+    ],
+  }],
+});
+const mergedLapses = await applyImport(alice, lapseFile, 'merge');
+const meditate = (await read(alice)).find((h) => h.name === 'Meditate');
+const on = (date) => meditate.entries.find((e) => e.date === date);
+
+ck('a merge leaves a completion it disagrees with alone',
+  Number(on('2026-01-05')?.value) === 2, JSON.stringify(on('2026-01-05')));
+ck('and reports the day it kept', mergedLapses.entriesKept === 1,
+  JSON.stringify(mergedLapses));
+ck('while a lapse on an unanswered day still lands',
+  Number(on('2026-01-11')?.value) === 0 && on('2026-01-11')?.status === '',
+  JSON.stringify(on('2026-01-11')));
+
+// The settings half of a backup, which only this edition stores as JSONB under
+// RLS. `portableSettings` is what keeps a capability out of the file in both
+// directions — the notification keys are absent by design.
+await withUser(alice, (db) => db.query(
+  `UPDATE users SET settings = $1::jsonb WHERE id = $2`,
+  [JSON.stringify({
+    skipDays: true, questionMarks: true,
+    discordWebhook: 'https://discord.com/api/webhooks/1/secret',
+  }), alice]
+));
+
+const exported = portableSettings(await withUser(alice, (db) =>
+  db.query(`SELECT settings FROM users WHERE id = $1`, [alice])
+    .then((r) => r.rows[0]?.settings ?? {})));
+
+ck('a backup carries the tracking settings',
+  exported.skipDays === true && exported.questionMarks === true,
+  JSON.stringify(exported));
+ck('and no notification destination',
+  !Object.keys(exported).some((k) => k.startsWith('discord') || k.startsWith('notify')),
+  JSON.stringify(exported));
+
+const fromFile = parseSettings(portableSettings({
+  questionMarks: false,
+  discordWebhook: 'https://discord.com/api/webhooks/999/attacker',
+})).accepted;
+await withUser(alice, (db) => db.query(
+  `UPDATE users SET settings = settings || $1::jsonb WHERE id = $2`,
+  [JSON.stringify(fromFile), alice]
+));
+const nowStored = await withUser(alice, (db) =>
+  db.query(`SELECT settings FROM users WHERE id = $1`, [alice])
+    .then((r) => r.rows[0]?.settings ?? {}));
+
+ck('an uploaded file can set a display preference',
+  nowStored.questionMarks === false, JSON.stringify(nowStored.questionMarks));
+ck('but cannot repoint the reminders',
+  nowStored.discordWebhook === 'https://discord.com/api/webhooks/1/secret',
+  String(nowStored.discordWebhook));
+
+// Back to the fixture for the format sections below.
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
 
 /* ---------- Loop .db ---------- */
 

@@ -24,6 +24,20 @@ const insertEntry = db.prepare(`
                                             status = excluded.status,
                                             notes = excluded.notes
 `);
+/**
+ * The same insert, but yielding to a row that is already there.
+ *
+ * Used for one case: a bare "not done" arriving in MERGE mode. A merge may add
+ * what the account does not have; it must not delete an answer, and overwriting a
+ * recorded completion with a lapse is deleting one. Now that a boolean 0 is a row
+ * rather than a dropped value, the plain upsert above would do exactly that — and
+ * a Loop backup is full of explicit NO rows, so merging a phone export taken
+ * before the web history would have wiped every completion it disagreed with.
+ */
+const insertEntryIfAbsent = db.prepare(`
+  INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(habit_id, date) DO NOTHING
+`);
 const findHabitByName = db.prepare(`SELECT * FROM habits WHERE name = ? LIMIT 1`);
 const maxPosition = db.prepare(`SELECT COALESCE(MAX(position) + 1, 0) AS p FROM habits`);
 const clearAllEntries = db.prepare(`DELETE FROM entries`);
@@ -43,7 +57,11 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  *     freq_numerator, freq_denominator, color, archived, entries: [{date, value, notes}] }
  */
 export function applyImport(habits, mode = 'merge') {
-  const result = { habitsCreated: 0, habitsMerged: 0, entriesImported: 0, skipped: [] };
+  // `entriesKept` counts days the file wanted to mark as missed and the account
+  // already had an answer for. Declared here so the reply shape is stable.
+  const result = {
+    habitsCreated: 0, habitsMerged: 0, entriesImported: 0, entriesKept: 0, skipped: [],
+  };
 
   db.prepare('BEGIN').run();
   try {
@@ -125,8 +143,16 @@ export function applyImport(habits, mode = 'merge') {
         // day with no answer has no row in the file either, so there is nothing
         // here to decide about it.
         const stored = type === 'boolean' && value !== YES ? UNSET : value;
-        insertEntry.run(habitId, e.date, stored, '', notes);
-        result.entriesImported++;
+        // A bare lapse yields to whatever the account already holds for that day,
+        // in merge mode only — see `insertEntryIfAbsent`. With a note it is
+        // content rather than an absence of one, and in replace mode there is
+        // nothing to yield to.
+        const yielding = mode === 'merge' && stored === UNSET && !notes &&
+          type === 'boolean';
+        const written = (yielding ? insertEntryIfAbsent : insertEntry)
+          .run(habitId, e.date, stored, '', notes);
+        if (written.changes > 0) result.entriesImported++;
+        else result.entriesKept++;
       }
     }
 

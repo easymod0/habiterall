@@ -20,7 +20,8 @@ import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
-  parseHabit, parseEntry, parseSettings, entryWrite, assertDate, assertNotFuture,
+  parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
+  assertNotFuture,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
@@ -201,9 +202,10 @@ api.put('/habits/:id/entries/:date', route(async (req, res) => {
 
   const parsed = parseEntry(habit, req.body, { UNSET, YES, SKIP });
 
-  // The rule — a skip is out of band, and "not done" is the absence of a row
-  // unless a note needs one — lives in shared/validate.js, because the personal
-  // edition and the Discord button handler have to apply exactly the same one.
+  // The rule — a skip is out of band, and every other write is a ROW, including
+  // value 0, which is the answer "no" — lives in shared/validate.js, because the
+  // personal edition and the Discord button handler have to apply exactly the
+  // same one. Clearing a day is the DELETE route below, not a PUT of zero.
   const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
   await withUser(uid(req), async (db) => {
@@ -491,8 +493,9 @@ api.get('/export', route(async (req, res) => {
     exported_at: new Date().toISOString(),
     habits: data,
     // Part of the account, and two of them now decide what the rows MEAN — see
-    // the personal edition's export for the whole reasoning.
-    settings,
+    // the personal edition's export for the whole reasoning. Filtered: a webhook
+    // URL is a capability, and a backup file travels.
+    settings: portableSettings(settings),
   });
 }));
 
@@ -575,7 +578,9 @@ api.post('/import', route(async (req, res) => {
   let settings = 0;
   if (mode === 'replace') {
     const raw = backupSettings(buf);
-    const { accepted } = raw ? parseSettings(raw) : { accepted: {} };
+    // Filtered before the validator — see the personal edition's route for what
+    // an unfiltered file could do to a reader's notification settings.
+    const { accepted } = raw ? parseSettings(portableSettings(raw)) : { accepted: {} };
     if (Object.keys(accepted).length) {
       await withUser(uid(req), (db) => db.query(
         `UPDATE users SET settings = settings || $1::jsonb WHERE id = $2`,

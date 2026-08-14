@@ -4,7 +4,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const { parseSettings, SETTING_VALUES, ValidationError, entryWrite } =
+const {
+  parseSettings, portableSettings, PORTABLE_SETTINGS, UNPORTABLE_SETTINGS,
+  SETTING_VALUES, ValidationError, entryWrite,
+} =
   await import('../src/validate.js');
 const { computeHistory } = await import('../src/stats.js');
 
@@ -239,4 +242,63 @@ test('a numerical zero is a recorded amount, not an absence', () => {
     { value: 0, status: '', notes: '' }, SENTINELS);
   assert.equal(write.op, 'upsert');
   assert.equal(write.value, 0);
+});
+
+/* ---------- what a backup may carry ---------- */
+
+test('every setting is classified as portable or not', () => {
+  // The list a backup writes and reads is an allowlist, so a setting added later
+  // travels only once someone has decided it should. This is the thing that
+  // forces the decision: a new key in neither list fails here rather than
+  // silently defaulting to "goes in the file", which for a credential-shaped
+  // value is the wrong default to have by accident.
+  const classified = new Set([...PORTABLE_SETTINGS, ...UNPORTABLE_SETTINGS]);
+  const unclassified = Object.keys(SETTING_VALUES).filter((k) => !classified.has(k));
+  assert.deepEqual(unclassified, [],
+    'add each of these to PORTABLE_SETTINGS or UNPORTABLE_SETTINGS in validate.js');
+
+  for (const key of classified) {
+    assert.ok(Object.hasOwn(SETTING_VALUES, key), `${key} is not a setting at all`);
+  }
+  assert.deepEqual(
+    PORTABLE_SETTINGS.filter((k) => UNPORTABLE_SETTINGS.includes(k)), [],
+    'a setting cannot be both');
+});
+
+test('a backup carries no notification destination, in either direction', () => {
+  // A backup file is emailed, synced and attached to bug reports, and
+  // `discordWebhook` is a bearer capability for a channel. Out: it would sit in
+  // every copy of the file. In: a shared "starter habits" backup could repoint
+  // the reminders of everyone who restored it at a channel its author reads.
+  const full = {
+    dayOrder: 'newest-right',
+    skipDays: true,
+    questionMarks: true,
+    notifyChannels: ['discord'],
+    discordWebhook: 'https://discord.com/api/webhooks/1/abc',
+    discordChannelId: '123456789012345678',
+    discordUserId: '123456789012345678',
+    notifyTimezone: 'Europe/Berlin',
+  };
+
+  const portable = portableSettings(full);
+  assert.deepEqual(portable,
+    { dayOrder: 'newest-right', skipDays: true, questionMarks: true });
+
+  for (const key of UNPORTABLE_SETTINGS) {
+    assert.ok(!Object.hasOwn(portable, key), `${key} survived the filter`);
+  }
+
+  // Absent keys stay absent rather than arriving as undefined, so a restore
+  // cannot blank a setting the file simply did not mention.
+  assert.deepEqual(portableSettings({ skipDays: false }), { skipDays: false });
+  assert.deepEqual(portableSettings({}), {});
+  assert.deepEqual(portableSettings(), {});
+});
+
+test('the filter is not fooled by a prototype key', () => {
+  // The same reasoning as parseSettings' own guard: this reads keys from a file.
+  const hostile = JSON.parse('{"__proto__": {"polluted": true}, "skipDays": true}');
+  assert.deepEqual(portableSettings(hostile), { skipDays: true });
+  assert.equal(/** @type {any} */ ({}).polluted, undefined);
 });

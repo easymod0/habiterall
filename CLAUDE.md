@@ -76,12 +76,31 @@ show, and a Loop backup's explicit `NO` rows were discarded on import because
 there was nowhere to put them.
 
 `entryWrite` therefore never deletes: `PUT {value: 0}` records a stated lapse and
-`DELETE` is how a day goes back to unknown. Two consequences to know. Nothing
-about the arithmetic moves — `isCompleted` is `false` for a 0 row and every
-caller treats a missing row as a miss, so no score, streak or resilience figure
-changes — and `PUT {value: 0}` has changed meaning for every client that used it
-to clear, which is invisible while question marks are off (a lapse and an
-unknown day paint identically) and never wrong about what it claims.
+`DELETE` is how a day goes back to unknown. `PUT {value: 0}` has changed meaning
+for every client that used it to clear, which is invisible while question marks
+are off (a lapse and an unknown day paint identically) and never wrong about what
+it claims. Two more consequences, and the first is easy to state too strongly.
+
+**The score, the streaks and the completion count do not move — the
+window-derived figures can.** `isCompleted` is `false` for a 0 row and every
+caller treats a missing row as a miss, so for the same window in, the same
+numbers come out: `computeStats` is identical for a 0 row and no row, and both
+editions' `countCompleted` still keys on `value = 2`. But some ranges *start* at
+the earliest stored entry (`from = start ?? firstEntry` in `computeScores`, and
+the history and weekday aggregations behind it), and a lapse is a stored entry
+where there was none. Every unknown day between it and the next row then reads as
+a miss — which is the model working as designed, and also why resilience can go
+from "nothing has ever been missed" (`recovery.rate === null`) to a real lapse the
+moment one day is marked as missed. One ancient Loop `NO` now extends a habit's
+history back to its own date, where before it was dropped on import. Nothing is
+miscounted; the window is simply older, and honest about it.
+
+**A merge may add an answer and must never delete one.** Now that a bare "not
+done" in a file reaches the writer, a plain upsert would overwrite a recorded
+completion with it — and a Loop backup is full of explicit `NO` rows, so merging a
+phone export taken before the web history would have wiped every completion the
+two disagreed about. Both editions' `applyImport` yield to the existing row for
+exactly that case — bare lapse, merge mode — and count it as `entriesKept`.
 
 **Loop's two tracking settings are `skipDays` and `questionMarks`,** both
 defaulting off as Loop's own do, and both read from Loop's source rather than

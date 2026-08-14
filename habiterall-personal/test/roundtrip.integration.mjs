@@ -280,6 +280,56 @@ ck('CSV: a 3-per-7 frequency survives',
   csvGym.freq_numerator === 3 && csvGym.freq_denominator === 7,
   `${csvGym.freq_numerator}/${csvGym.freq_denominator}`);
 
+/* ---------- a merge adds, and never deletes an answer ---------- */
+
+console.log('\n--- merge does not overwrite an answer with a lapse ---');
+
+// A row is an answer now, so a file's bare "not done" reaches the writer where it
+// used to be dropped — and the plain upsert would then overwrite a recorded
+// completion. A Loop backup is full of explicit NO rows (its cycle is YES -> NO
+// with question marks off), so merging a phone export taken before the web
+// history would have wiped every completion the two disagreed about.
+await restore(jsonBackup, 'replace');
+// Looked up on demand: a replace recreates every habit, so an id captured before
+// one is stale afterwards.
+const meditateId = async () => (await (await api('/api/habits')).json())
+  .find((h) => h.name === 'Meditate').id;
+
+const lapseOverDone = JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'boolean',
+    // 01-05 is a completion in the fixture; 01-11 is a day it has no row for.
+    entries: [
+      { date: '2026-01-05', value: 0, status: '', notes: '' },
+      { date: '2026-01-11', value: 0, status: '', notes: '' },
+    ],
+  }],
+});
+const mergedLapses = await restore(Buffer.from(lapseOverDone, 'utf8'), 'merge');
+const afterLapseMerge = await (await api(`/api/habits/${await meditateId()}/entries`)).json();
+const on = (date) => afterLapseMerge.find((e) => e.date === date);
+
+ck('the completion it disagreed with is still a completion',
+  on('2026-01-05')?.value === 2, JSON.stringify(on('2026-01-05')));
+ck('and it says so rather than counting a write it did not make',
+  mergedLapses.entriesKept === 1 && mergedLapses.entriesImported === 1,
+  JSON.stringify(mergedLapses));
+ck('a lapse on a day the account had no answer for still lands',
+  on('2026-01-11')?.value === 0 && on('2026-01-11')?.status === '',
+  JSON.stringify(on('2026-01-11')));
+
+// Replace mode has nothing to yield to, and must not start yielding.
+await restore(Buffer.from(lapseOverDone, 'utf8'), 'replace');
+const afterLapseReplace =
+  await (await api(`/api/habits/${await meditateId()}/entries`)).json();
+ck('in replace mode the file is the whole truth',
+  afterLapseReplace.length === 2 &&
+  afterLapseReplace.every((e) => e.value === 0),
+  JSON.stringify(afterLapseReplace));
+
+await restore(jsonBackup, 'replace');
+
 /* ---------- settings travel with the data ---------- */
 
 console.log('\n--- settings ---');
@@ -302,6 +352,34 @@ ck('the JSON backup carries the settings',
   exported.skipDays === true && exported.questionMarks === true &&
   exported.dayOrder === 'newest-right',
   JSON.stringify(exported));
+
+// And nothing that is a capability rather than a preference. A backup file is
+// emailed and synced; a webhook URL is a bearer token for a channel.
+await putSettings({ discordWebhook: 'https://discord.com/api/webhooks/1/secret' });
+const guarded = JSON.parse(
+  Buffer.from(await (await api('/api/export')).arrayBuffer()).toString('utf8'));
+ck('and no notification destination',
+  !Object.keys(guarded.settings ?? {}).some((k) => k.startsWith('discord') ||
+    k.startsWith('notify')),
+  JSON.stringify(guarded.settings));
+
+// The reverse: a file cannot set one either.
+const hostile = JSON.stringify({
+  version: 1, app: 'habiterall', habits: [{ name: 'Meditate', type: 'boolean', entries: [] }],
+  settings: { discordWebhook: 'https://discord.com/api/webhooks/999/attacker',
+    notifyChannels: ['discord'], questionMarks: true },
+});
+await restore(Buffer.from(hostile, 'utf8'), 'replace');
+const afterHostile = await getSettings();
+ck('an uploaded file cannot repoint the reminders',
+  afterHostile.discordWebhook === 'https://discord.com/api/webhooks/1/secret',
+  afterHostile.discordWebhook);
+ck('though it can still set a display preference',
+  afterHostile.questionMarks === true, JSON.stringify(afterHostile.questionMarks));
+
+// Put the habits back for the sections below.
+await restore(jsonBackup, 'replace');
+await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right' });
 
 await putSettings({ skipDays: false, questionMarks: false, dayOrder: 'newest-left' });
 const restored = await restore(withSettings, 'replace');

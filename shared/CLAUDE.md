@@ -89,7 +89,12 @@ wrong for numerical ones, where `3` is a real amount.
 **A missing day and a day holding 0 are different states, and only the display
 knows.** `unknown` is the absence of a row, `no` is a row with value 0, and
 `isCompleted` answers `false` for both — deliberately, so `questionMarks` costs
-nothing in the arithmetic. What must never happen is a *reader* collapsing them:
+nothing in the arithmetic. One thing it does cost, because a range that starts at
+the earliest stored entry now has an earlier one to start at: a lapse extends the
+window, and the unknown days after it read as misses, which is how a habit with
+one marked miss acquires a lapse in `computeRecovery` where it had none. The
+figures are right; the window is older. See the root CLAUDE.md for the whole of
+it. What must never happen is a *reader* collapsing them:
 `habit.entries[date] ?? UNSET` reports every unanswered day as an answered "no",
 which starts the tap cycle in the wrong place and paints away the one difference
 the setting draws. Ask whether the map HOLDS the date (`Object.hasOwn`, or a null

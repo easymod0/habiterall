@@ -272,6 +272,69 @@ export const SETTING_VALUES = {
 };
 
 /**
+ * The settings a BACKUP may carry, in and out.
+ *
+ * An allowlist rather than "everything except the notification keys", so a
+ * setting added later travels only once someone has decided it should — the
+ * safe default being that it does not. `test/settings.test.js` fails on a key
+ * that is in neither list, which is what forces the decision to be made.
+ *
+ * The notification keys are deliberately absent, and it is not a hedge. A
+ * backup file is a document people email to themselves, sync to a cloud drive
+ * and attach to bug reports, while `discordWebhook` is a bearer capability:
+ * whoever holds the URL can post into that channel. Exporting it puts it in
+ * every copy of the file, and importing it means a "starter habits" JSON someone
+ * shares can silently repoint the victim's reminders at a channel the ATTACKER
+ * reads — habit names and reminder prompts included. That is the same reasoning
+ * that keeps DISCORD_BOT_TOKEN out of the settings table altogether, one step
+ * further out.
+ *
+ * What is left is what a restore actually needs: how the app is displayed, and —
+ * the reason any of this exists — what the rows in the same file MEAN.
+ */
+export const PORTABLE_SETTINGS = Object.freeze([
+  'dayOrder',
+  'weekStart',
+  'confirmDelete',
+  'calendarZoom',
+  'historyGranularity',
+  'historyMode',
+  'scoreGranularity',
+  'skipDays',
+  'questionMarks',
+]);
+
+/**
+ * Keys deliberately kept out of a backup. Declared rather than implied, so the
+ * test can tell "excluded on purpose" from "nobody has looked at it yet".
+ */
+export const UNPORTABLE_SETTINGS = Object.freeze([
+  'notifyChannels',
+  'discordWebhook',
+  'discordChannelId',
+  'discordUserId',
+  'notifyTimezone',
+]);
+
+/**
+ * Keep only what a backup may carry.
+ *
+ * Used on the way OUT by both editions' `/export` and on the way IN by both
+ * `/import` routes — one function, because an asymmetry between them is either a
+ * leak or a setting that cannot be restored.
+ *
+ * @param {Record<string, any>} [settings]
+ * @returns {Record<string, any>}
+ */
+export function portableSettings(settings = {}) {
+  const out = {};
+  for (const key of PORTABLE_SETTINGS) {
+    if (Object.hasOwn(settings, key)) out[key] = settings[key];
+  }
+  return out;
+}
+
+/**
  * Validate a settings patch, dropping anything unknown or out of range.
  *
  * Returns only the accepted keys, so a caller can merge the result without

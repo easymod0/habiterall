@@ -395,6 +395,12 @@ class MainActivity : ComponentActivity() {
         // state the account has switched off.
         var skipDays by remember { mutableStateOf(false) }
         var questionMarks by remember { mutableStateOf(false) }
+        // Seeded from the mirror the notification already reads, so the grid and
+        // the shade agree during the first paint — before any fetch lands, and for
+        // as long as one cannot (the mirror is what works offline).
+        LaunchedEffect(Unit) {
+            runCatching { skipDays = settings.cachedSkipDays() }
+        }
 
         /** One scroll position, shared by the header and every habit row. */
         val dayScroll = rememberScrollState()
@@ -995,8 +1001,11 @@ class MainActivity : ComponentActivity() {
                     // Back to "nothing is known about this day", which with
                     // question marks off is the only way there: the tap cycle
                     // deliberately does not return to it. Offered only when there
-                    // is something to remove.
-                    if (answered) {
+                    // is something to remove — and not on a skipped day, where
+                    // "Unskip" above is the same write and two differently-labelled
+                    // buttons doing one thing reads as one of them doing something
+                    // else.
+                    if (answered && !skipped) {
                         TextButton(onClick = { onPick(null, false) }, modifier = option) {
                             Text("Clear", Modifier.fillMaxWidth())
                         }

@@ -361,6 +361,10 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
           fill: dim,
           // Or the glyph swallows the click that the cell underneath it wants.
           'pointer-events': 'none',
+          // Names the cell it belongs to, so the hover/focus `raise` can carry it
+          // along — SVG has no z-index, so a raised cell would otherwise be
+          // painted over the top of it.
+          'data-mark-for': date,
         }, '?'));
       }
 
@@ -510,13 +514,23 @@ function attachCellPopover(svg) {
    */
   const raise = (cell) => {
     const parent = cell.parentNode;
-    if (!parent || parent.lastElementChild === cell) return;
+    // The `?` on an unanswered day, drawn as its own node just after the cell.
+    // Looked up before the early return, because a cell that is already last
+    // still has its mark sitting behind it after the first raise.
+    const mark = parent?.querySelector?.(
+      `[data-mark-for="${cell.getAttribute('data-date')}"]`);
+    if (!parent || (parent.lastElementChild === cell && !mark)) return;
 
     // Re-appending a focused element blurs it, which silently broke arrow-key
     // navigation: the handler reads document.activeElement, and after the
     // move there was nothing focused to read. Restore focus if we took it.
     const refocus = document.activeElement === cell;
     parent.append(cell);
+    // The glyph goes with it, or raising the cell buries the very thing the
+    // hovered day is being asked about: an opaque square lands on top of the `?`
+    // and the 1.45x hover scale covers what is left. Every question mark
+    // disappeared exactly under the cursor — which is where it was being read.
+    if (mark) parent.append(mark);
     if (refocus) cell.focus({ preventScroll: true });
   };
 

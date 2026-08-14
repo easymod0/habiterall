@@ -216,6 +216,43 @@ try {
   ck('after which it cycles between the two answers and never back into a skip',
     back?.value === 0 && back?.status === '', JSON.stringify(back));
 
+  /* ---------- the '?' survives its own cell being hovered ---------- */
+
+  console.log('\n--- the calendar mark and the hover raise ---');
+
+  // SVG has no z-index, so hovering a cell re-appends it to the end of the SVG to
+  // stop its neighbours clipping the 1.45x growth. That put the opaque square on
+  // top of the very glyph the hovered day was being asked about: every `?`
+  // vanished exactly under the cursor, and on keyboard focus too. `raise` carries
+  // the mark with the cell now, which only a real browser can check — the offline
+  // render suites never dispatch an event.
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ questionMarks: true }) })`);
+  await boot();
+  await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    location.hash = '#/habit/' + habits.find(h => !h.archived).id;
+  })()`);
+  await sleep(2500);
+
+  const raised = await ev(`(() => {
+    const svg = document.querySelector('svg[aria-label="Completion calendar"]');
+    if (!svg) return { error: 'no calendar rendered' };
+    const mark = svg.querySelector('[data-mark-for]');
+    if (!mark) return { error: 'no ? marks in the calendar' };
+    const date = mark.getAttribute('data-mark-for');
+    const cell = svg.querySelector('.cal-cell[data-date="' + date + '"]');
+    if (!cell) return { error: 'a mark with no cell: ' + date };
+    const idx = (n) => [...svg.children].indexOf(n);
+    cell.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+    return { date, cell: idx(cell), mark: idx(mark) };
+  })()`);
+
+  ck('a hovered unanswered cell keeps its ?',
+    !raised.error && raised.mark > raised.cell,
+    raised.error ?? `cell at ${raised.cell}, mark at ${raised.mark}`);
+
   // Leave the account as the fixtures left it, or the next suite inherits this.
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

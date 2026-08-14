@@ -81,7 +81,11 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
   // "Clear" only means something when there's an entry to remove. It is also
   // the only way back to "no data" while question marks are off, since the
   // grid's cycle then never returns there — Loop's behaviour, deliberately.
-  clear.hidden = value == null && !isSkip;
+  //
+  // Hidden on a skipped day, where "Unskip" below issues the same write: both
+  // take the day back to having no row, and two differently-labelled buttons
+  // doing one thing reads as one of them doing something else.
+  clear.hidden = isSkip || value == null;
   // Skips switched off hide the control, but never on a day that already is
   // one: an imported Loop history has skips in it, and "Unskip" must stay
   // reachable or they cannot be undone at all.
