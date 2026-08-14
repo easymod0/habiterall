@@ -455,7 +455,13 @@ class MainActivity : ComponentActivity() {
                 // not worth a message: the grid renders perfectly well in the
                 // default order, and the overview below is the fetch that
                 // matters.
-                newestLeft = api.settings().newestLeft
+                val fetched = api.settings()
+                newestLeft = fetched.newestLeft
+                // The same fetch answers whether this phone is still a
+                // destination, and the alarms read that from the local mirror —
+                // so this is where a choice made in a browser reaches them.
+                // Free: the request was already being made for the day order.
+                settings.cacheAndroidReminders(fetched.androidRemindersEnabled)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -467,6 +473,11 @@ class MainActivity : ComponentActivity() {
                 habits = data.habits.filter { h -> !h.archived }
                 loadedDays = windowDays
                 error = null
+                // Re-arm from what just arrived. A reminder time set in a
+                // browser shows up in this list immediately and used to change
+                // nothing about the alarms — see `Reminders.armFrom`, which is
+                // where the whole reason is written down.
+                Reminders.armFrom(this@MainActivity, data.habits)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

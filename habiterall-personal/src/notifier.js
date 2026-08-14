@@ -12,7 +12,7 @@
 
 import { db, UNSET, YES, SKIP } from './db.js';
 import {
-  answerText, completedIds, needsServerDelivery, serverChannels, zonedClock,
+  answeredIds, answerText, needsServerDelivery, serverChannels, zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
   notifierConfig, sendToChannel, startNotifier,
@@ -89,7 +89,7 @@ export function collect(now = new Date()) {
   // date "already done" and "already sent" are asked about.
   const clock = zonedClock(now, settings.notifyTimezone ?? '');
 
-  const doneToday = completedIds(habits, /** @type {any} */ (q.entriesOn.all(clock.date)));
+  const doneToday = answeredIds(habits, /** @type {any} */ (q.entriesOn.all(clock.date)));
   const sent = new Set(
     q.sentOn.all(clock.date).map((r) => `${r.habit_id}:${r.channel}`)
   );

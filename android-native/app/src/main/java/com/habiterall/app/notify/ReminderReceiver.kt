@@ -3,6 +3,7 @@ package com.habiterall.app.notify
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.Data
@@ -13,6 +14,9 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.habiterall.app.data.Settings
 import java.time.LocalDate
+
+/** `adb logcat -s habiterall.notify` is the whole point of this being one tag. */
+private const val TAG = "habiterall.notify"
 
 /**
  * Fires at a habit's reminder time.
@@ -42,7 +46,14 @@ class ReminderReceiver : BroadcastReceiver() {
 
         // Alarms are one-shot; the next day's must be armed now, and this must
         // happen regardless of whether the notification itself succeeds.
-        Reminders.rescheduleOne(context, habitId)
+        //
+        // `goAsync`, because arming it reads DataStore on another dispatcher and
+        // this process may be killed the moment `onReceive` returns — the same
+        // race BootReceiver holds itself open for, on the occasion that decides
+        // whether there is a reminder tomorrow at all. Losing it silently is
+        // most of what "sometimes I get it, sometimes I don't" was.
+        val pending = goAsync()
+        Reminders.rescheduleOne(context, habitId) { pending.finish() }
     }
 
     class NotifyWorker(
@@ -63,6 +74,7 @@ class ReminderReceiver : BroadcastReceiver() {
             // point of posting, or switching this destination off would appear
             // not to work until the next sync.
             if (!settings.cachedAndroidReminders()) {
+                drop(habitId, "this device is not a destination")
                 Reminders.cancel(applicationContext, habitId)
                 return Result.success()
             }
@@ -73,27 +85,33 @@ class ReminderReceiver : BroadcastReceiver() {
             // "the habit was deleted", and only the latter should stay silent.
             val fresh = if (api == null) null else try {
                 api.habits().firstOrNull { it.id == habitId }
-                    ?: return Result.success()   // genuinely gone server-side
+                    ?: return drop(habitId, "no such habit on the server")
             } catch (e: Exception) {
                 null                              // unreachable; use the cache
             }
 
             val habit = fresh
                 ?: settings.cachedReminders().firstOrNull { it.id == habitId }
-                ?: return Result.success()
+                ?: return drop(habitId, "not on the server and not in the cache")
 
-            if (habit.archived || habit.reminderTime.isBlank()) return Result.success()
+            if (habit.archived || habit.reminderTime.isBlank()) {
+                return drop(habitId, "archived, or its reminder time was cleared")
+            }
 
             val today = LocalDate.now().toString()
             // Already answered today — a reminder would be noise. If the check
             // itself fails we notify anyway: a redundant reminder is a far
             // smaller harm than a missed one.
-            val alreadyDone = if (api == null) false else try {
-                api.entries(habitId).any { it.date == today }
+            //
+            // `needsReminder`, not "a row exists for today": the two are not the
+            // same question, and the difference silenced a day recorded as three
+            // of eight glasses while the server went on asking about it.
+            val needed = if (api == null) true else try {
+                Reminders.needsReminder(habit, api.entries(habitId), today)
             } catch (e: Exception) {
-                false
+                true
             }
-            if (alreadyDone) return Result.success()
+            if (!needed) return drop(habitId, "already answered today")
 
             Notifications.ensureChannel(applicationContext)
             Notifications.post(
@@ -101,6 +119,27 @@ class ReminderReceiver : BroadcastReceiver() {
                 Notifications.notificationId(habitId),
                 Notifications.buildReminder(applicationContext, habit, today),
             )
+            Log.i(TAG, "posted reminder for habit $habitId")
+            return Result.success()
+        }
+
+        /**
+         * Say why nothing was posted, and succeed.
+         *
+         * Six conditions end this worker early and every one of them is
+         * invisible from outside — a reminder that does not arrive looks
+         * identical to a broken alarm, which sends people to check the thing
+         * that is working. The server's tick has explained itself per habit for
+         * exactly this reason (`notify.skip` in shared/src/notify-send.js); this
+         * is the phone's half, readable with:
+         *
+         *     adb logcat -s habiterall.notify
+         *
+         * Ids only, never a habit name: a log is read by more people than the
+         * app, and the naming policy in shared/src/log.js applies here too.
+         */
+        private fun drop(habitId: Long, reason: String): Result {
+            Log.i(TAG, "no reminder for habit $habitId: $reason")
             return Result.success()
         }
     }

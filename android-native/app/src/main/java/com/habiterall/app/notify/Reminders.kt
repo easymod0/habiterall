@@ -8,19 +8,26 @@ import android.os.Build
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.Data
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.habiterall.app.data.Entry
 import com.habiterall.app.data.Habit
+import com.habiterall.app.data.Sentinels
 import com.habiterall.app.data.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
+import java.util.concurrent.TimeUnit
 
 /**
  * Turns each habit's `reminder_time` into an Android alarm.
@@ -89,6 +96,33 @@ object Reminders {
     fun wantsAlarm(habit: Habit, androidEnabled: Boolean): Boolean =
         androidEnabled && !habit.archived && parseTime(habit.reminderTime) != null
 
+    /**
+     * Whether this habit still needs its reminder for [date].
+     *
+     * The same rule the server applies — `answeredIds` in shared/src/notify.js —
+     * and it has to be, or the two destinations disagree about the same day and
+     * whichever one stays quiet reads as broken. An answer is a COMPLETION or an
+     * explicit SKIP; anything else still deserves the nudge.
+     *
+     * This used to ask only whether a row existed for the day, which was a third
+     * rule neither side had. Six of eight glasses, or a "no" that a note keeps
+     * alive, silenced the phone for the rest of the day while Discord went on
+     * asking — and an explicitly skipped day was the reverse, silent here and
+     * nagged there.
+     *
+     * A skip reaches this two ways, exactly as `Habit.isSkipped` documents: in
+     * `status`, where it lives now, and as a bare 3 for a yes/no habit in an
+     * imported history. For a measurable habit 3 is an amount.
+     */
+    fun needsReminder(habit: Habit, entries: List<Entry>, date: String): Boolean {
+        val entry = entries.firstOrNull { it.date == date } ?: return true
+        val skipped = entry.status == "skip" ||
+            (!habit.isNumerical && entry.value == Sentinels.SKIP)
+        // `isMet` is tri-state: false is a real miss, null is "not applicable",
+        // and only the miss is worth a notification.
+        return habit.isMet(entry.value, skipped) == false
+    }
+
     fun schedule(context: Context, habit: Habit, androidEnabled: Boolean) {
         // The null check is stated again here rather than left to `wantsAlarm`
         // so `time` smart-casts below; the two cannot disagree.
@@ -117,10 +151,56 @@ object Reminders {
         alarmManager(context).cancel(pendingIntent(context, habitId))
     }
 
-    /** Re-arms one habit's alarm after it fired. */
-    fun rescheduleOne(context: Context, habitId: Long) {
-        armFromCache(context, habitId)
+    /**
+     * Re-arms one habit's alarm after it fired.
+     *
+     * `onDone` exists for the same reason it does on [rescheduleAll], and this is
+     * the call site where it matters most: an alarm is one-shot, so the work
+     * being raced here is the existence of TOMORROW's. Lose that race and the
+     * habit goes quiet until the app is next cold-started or the phone reboots —
+     * which is exactly what "reminders are unreliable" looks like from outside.
+     */
+    fun rescheduleOne(context: Context, habitId: Long, onDone: (() -> Unit)? = null) {
+        armFromCache(context, habitId, onDone)
         enqueueSync(context, habitId)
+    }
+
+    /**
+     * Arm from habits that have just been fetched, and mirror them for the next
+     * cold boot.
+     *
+     * This is how a reminder time set in a BROWSER reaches the phone. Nothing
+     * else on the refresh path touches an alarm: the list is drawn straight from
+     * the response, so the new time appeared while the alarm was still the old
+     * one — or absent — and only a cold process start corrected it. Since
+     * Android usually keeps the process alive, closing and reopening the app was
+     * not enough, which made the whole thing look intermittent rather than
+     * missing.
+     *
+     * The mirror is rewritten before arming, so a cold boot with no network arms
+     * the times this fetch saw rather than the ones before it. Habits that have
+     * dropped out of the list since — deleted, or archived — have their alarms
+     * cancelled: `schedule` only ever cancels for a habit it is handed.
+     *
+     * `NonCancellable`, deliberately: the caller is a fetch effect that restarts
+     * whenever the visible window grows, and a half-armed schedule is the bug
+     * being fixed here. It is a DataStore write and a handful of binder calls.
+     */
+    suspend fun armFrom(context: Context, habits: List<Habit>) {
+        val app = context.applicationContext
+        withContext(NonCancellable + Dispatchers.IO) {
+            runCatching {
+                val settings = Settings(app)
+                val enabled = settings.cachedAndroidReminders()
+                val stale = settings.cachedReminders().map { it.id }.toSet() -
+                    habits.map { it.id }.toSet()
+
+                settings.cacheReminders(habits)
+                Notifications.ensureChannel(app)
+                habits.forEach { schedule(app, it, enabled) }
+                stale.forEach { cancel(app, it) }
+            }
+        }
     }
 
     /**
@@ -176,6 +256,34 @@ object Reminders {
         }
     }
 
+    /**
+     * A slow heartbeat that re-arms everything, so a broken chain heals itself.
+     *
+     * Every other path here is an event: a launch, a boot, a reminder firing, a
+     * fetch. Each one hands off to the next, and a single dropped link — a
+     * process killed mid-reschedule, an alarm lost to a force-stop, an OEM
+     * battery manager — leaves the habit silent indefinitely, with nothing
+     * scheduled to notice. A periodic worker cannot make alarms punctual, but it
+     * bounds how long a broken schedule can stay broken.
+     *
+     * `KEEP`, so relaunching does not restart the period and push the next run
+     * away; six hours because the worker's only job is to correct drift, and
+     * WorkManager will batch it with whatever else is waiting.
+     */
+    fun enqueuePeriodicSync(context: Context) {
+        val request = PeriodicWorkRequestBuilder<ScheduleWorker>(6, TimeUnit.HOURS)
+            .setConstraints(
+                Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+            )
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            "schedule:heartbeat",
+            ExistingPeriodicWorkPolicy.KEEP,
+            request,
+        )
+    }
+
     private fun enqueueSync(context: Context, habitId: Long?) {
         val data = Data.Builder()
         if (habitId != null) data.putLong(Notifications.EXTRA_HABIT_ID, habitId)
@@ -223,6 +331,14 @@ object Reminders {
                 return Result.retry()
             }
 
+            // Read before the cache is rewritten: a habit that has dropped out
+            // of the list — deleted, or archived — still holds an alarm, and
+            // `schedule` can only cancel for a habit it is handed. Without this
+            // the alarm survives and wakes the phone every day to post nothing.
+            val stale = runCatching {
+                settings.cachedReminders().map { it.id }.toSet() - habits.map { it.id }.toSet()
+            }.getOrDefault(emptySet())
+
             // Refresh the offline cache on every successful fetch. This is
             // what makes the next cold boot able to arm alarms with no
             // network — the whole point of the cache.
@@ -255,6 +371,7 @@ object Reminders {
                 else schedule(applicationContext, habit, enabled)
             } else {
                 habits.forEach { schedule(applicationContext, it, enabled) }
+                stale.forEach { cancel(applicationContext, it) }
             }
             return Result.success()
         }

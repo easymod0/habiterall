@@ -273,6 +273,14 @@ you add a form to one, add it to both. The two that catch people out: `12 am` is
 unparseable text is an error to report — the caller does different things with
 them, so they are `''` and `null` rather than both falsy.
 
+**A day that needs no reminder is one that has been ANSWERED, not one that has
+been completed.** `answeredIds` tests `isCompleted(...) !== false` because
+`isCompleted` returns `null` for a skip — falsy, so a truthiness test asked again
+about every day the user had explicitly skipped. `false` is a real miss and still
+gets its nudge. The Kotlin `Reminders.needsReminder` is the mirror of this, for
+the same reason `ReminderTime` mirrors `ui/time.js`: two clients answering one
+question differently is indistinguishable from one of them being broken.
+
 **The notifier reads its clock through `zonedClock`, never `new Date()`
 locally.** The zone decides two things, and the second is easy to miss: what
 time it is, *and* which calendar day the send is filed under. A server in UTC

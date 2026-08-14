@@ -1,7 +1,9 @@
 package com.habiterall.app
 
 import com.habiterall.app.data.AppSettings
+import com.habiterall.app.data.Entry
 import com.habiterall.app.data.Habit
+import com.habiterall.app.data.Sentinels
 import com.habiterall.app.notify.Reminders
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -163,5 +165,52 @@ class RemindersTest {
         assertTrue(AppSettings(listOf("discord", "android")).androidRemindersEnabled)
         assertFalse(AppSettings(listOf("discord")).androidRemindersEnabled)
         assertFalse(AppSettings(emptyList()).androidRemindersEnabled)
+    }
+
+    /* ---------- whether the day still needs asking about ---------- */
+
+    private val today = "2026-08-14"
+
+    private fun entry(value: Double, status: String = "", date: String = today) =
+        Entry(date = date, value = value, status = status)
+
+    private fun boolHabit() = Habit(id = 1, name = "Meditate")
+
+    private fun countHabit(target: Double = 8.0, type: String = "at_least") =
+        Habit(id = 1, name = "Water", type = "numerical", targetValue = target, targetType = type)
+
+    @Test
+    fun `a day with nothing recorded needs its reminder`() {
+        assertTrue(Reminders.needsReminder(boolHabit(), emptyList(), today))
+        // A row for another day is not a row for this one.
+        assertTrue(Reminders.needsReminder(
+            boolHabit(), listOf(entry(Sentinels.YES, date = "2026-08-13")), today))
+    }
+
+    @Test
+    fun `a completion or a skip is an answer`() {
+        assertFalse(Reminders.needsReminder(boolHabit(), listOf(entry(Sentinels.YES)), today))
+        assertFalse(Reminders.needsReminder(boolHabit(), listOf(entry(0.0, "skip")), today))
+        assertFalse(Reminders.needsReminder(countHabit(), listOf(entry(8.0)), today))
+        // A skip carried as a bare 3, the way an imported Loop history has it.
+        // Only for a yes/no habit: for a measurable one 3 is an amount.
+        assertFalse(Reminders.needsReminder(boolHabit(), listOf(entry(Sentinels.SKIP)), today))
+    }
+
+    @Test
+    fun `a miss still needs asking about, however it is recorded`() {
+        // The three that a bare "is there a row for today?" silenced, while the
+        // server went on asking about the same day. `answeredIds` in
+        // shared/src/notify.js is the rule this mirrors.
+        assertTrue(Reminders.needsReminder(countHabit(), listOf(entry(3.0)), today))
+        assertTrue(Reminders.needsReminder(boolHabit(), listOf(entry(Sentinels.UNSET)), today))
+        assertTrue(Reminders.needsReminder(countHabit(), listOf(entry(Sentinels.SKIP)), today))
+    }
+
+    @Test
+    fun `an at-most habit is met by staying under its target`() {
+        val smoking = countHabit(target = 2.0, type = "at_most")
+        assertFalse(Reminders.needsReminder(smoking, listOf(entry(1.0)), today))
+        assertTrue(Reminders.needsReminder(smoking, listOf(entry(5.0)), today))
     }
 }

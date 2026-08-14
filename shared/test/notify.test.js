@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
-  channelConfigured, completedIds, discordPayload, dueReminders, enabledChannels,
+  answeredIds, channelConfigured, discordPayload, dueReminders, enabledChannels,
   minutesOfDay, needsServerDelivery, parseChannelList, parseDiscordWebhook,
   parseTimeZone, reminderMessage, serverChannels, zonedClock,
 } = await import('../src/notify.js');
@@ -371,18 +371,26 @@ test('the due date follows the user\'s zone, not the server\'s', () => {
   assert.equal(due[0].date, '2026-08-14');
 });
 
-test('completedIds asks isCompleted, so a numerical 3 is an amount', () => {
+test('answeredIds asks isCompleted, so a numerical 3 is an amount', () => {
   const habits = [
     habit({ id: 1, type: 'boolean' }),
     habit({ id: 2, type: 'numerical', target_value: 3, target_type: 'at_least' }),
     habit({ id: 3, type: 'numerical', target_value: 3, target_type: 'at_least' }),
+    habit({ id: 4, type: 'numerical', target_value: 8, target_type: 'at_least' }),
+    habit({ id: 5, type: 'boolean' }),
   ];
-  const done = completedIds(habits, [
+  const done = answeredIds(habits, [
     { habit_id: 1, value: 2, status: '' },     // a checkmark
     { habit_id: 2, value: 3, status: '' },     // three of something: done
     { habit_id: 3, value: 3, status: 'skip' }, // a skip that happens to hold 3
+    { habit_id: 4, value: 3, status: '' },     // three of eight: not done
+    { habit_id: 5, value: 0, status: '' },     // a 'no' kept alive by a note
   ]);
-  assert.deepEqual([...done].sort(), [1, 2]);
+  // 3 is there because a skip is an ANSWER; 4 and 5 are not, because a partial
+  // amount and an explicit 'no' are days that still deserve a nudge. Asking for
+  // the merely *completed* ids nagged about every skipped day; asking whether a
+  // row exists — which is what the phone used to do — silenced 4 and 5 too.
+  assert.deepEqual([...done].sort(), [1, 2, 3]);
 });
 
 /* ---------- what it says ---------- */
