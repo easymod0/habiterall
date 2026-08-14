@@ -99,7 +99,64 @@ data class Habit(
             value == Sentinels.YES
         }
     }
+
+    /** This habit as a write payload — see [HabitInput] for why that is its own type. */
+    fun toInput() = HabitInput(
+        name = name,
+        description = description,
+        type = type,
+        unit = unit,
+        targetValue = targetValue,
+        targetType = targetType,
+        freqNumerator = freqNumerator,
+        freqDenominator = freqDenominator,
+        color = color,
+        reminderTime = reminderTime,
+        reminderMessage = reminderMessage,
+        archived = archived,
+    )
 }
+
+/** Mirrors `DEFAULT_COLOR` in shared/src/validate.js. */
+const val DEFAULT_HABIT_COLOR = "#3b82f6"
+
+/**
+ * A habit as the server ACCEPTS one, which is not a habit as the server returns
+ * one. Two things make this its own type rather than a reused [Habit].
+ *
+ * **`PUT /habits/:id` is a replace, not a patch.** It runs the whole body
+ * through `parseHabit` (shared/src/validate.js), which supplies a default for
+ * every absent field — so a field left out of the payload is not left alone, it
+ * is RESET. A partial habit silently clears its description, unit, frequency and
+ * reminder.
+ *
+ * **kotlinx.serialization omits defaults unless told otherwise**, which is what
+ * makes the above dangerous rather than theoretical: serialising a [Habit] with
+ * `encodeDefaults = false` drops every field that happens to equal its Kotlin
+ * default, and the write then resets exactly those fields. That has been correct
+ * so far only because the defaults here were chosen to match `parseHabit`'s — a
+ * coincidence that holds until one of the two moves, and fails silently when it
+ * does.
+ *
+ * So: an explicit type carrying exactly the fields `parseHabit` reads, written
+ * with `encodeDefaults = true`. The read model keeps the response-only figures
+ * ([Habit.score], the streaks, [Habit.entries]) that have no business in a write.
+ */
+@Serializable
+data class HabitInput(
+    val name: String,
+    val description: String = "",
+    val type: String = "boolean",
+    val unit: String = "",
+    @SerialName("target_value") val targetValue: Double = 0.0,
+    @SerialName("target_type") val targetType: String = "at_least",
+    @SerialName("freq_numerator") val freqNumerator: Int = 1,
+    @SerialName("freq_denominator") val freqDenominator: Int = 1,
+    val color: String = DEFAULT_HABIT_COLOR,
+    @SerialName("reminder_time") val reminderTime: String = "",
+    @SerialName("reminder_message") val reminderMessage: String = "",
+    val archived: Boolean = false,
+)
 
 /**
  * The account's preferences, of which this client cares about exactly one.
@@ -136,6 +193,29 @@ data class AppSettings(
      */
     @SerialName("skipDays") val skipDays: Boolean? = null,
     @SerialName("questionMarks") val questionMarks: Boolean? = null,
+    /**
+     * The rest of the account's display preferences, carried so the phone can
+     * SET them as well as be governed by them.
+     *
+     * Null throughout means "the server has never been told", which is not the
+     * same as a value — and it is why nothing here has a Kotlin default matching
+     * the server's. The defaults live in one place, `SETTINGS` in
+     * shared/public/ui/settings.js, and are applied by the accessors below;
+     * duplicating them into the field initialisers would put a second copy in
+     * the type where a `null` check cannot tell them apart.
+     *
+     * The four chart keys do nothing to this app's own UI. They are here because
+     * they are the ACCOUNT's, and a settings screen that silently governs less
+     * than the web's is how the two clients start disagreeing about what the
+     * user set. `PUT /settings` merges a patch, so sending only what changed is
+     * safe — unlike a habit write, which replaces.
+     */
+    @SerialName("weekStart") val weekStart: String? = null,
+    @SerialName("confirmDelete") val confirmDelete: Boolean? = null,
+    @SerialName("calendarZoom") val calendarZoom: String? = null,
+    @SerialName("historyGranularity") val historyGranularity: String? = null,
+    @SerialName("historyMode") val historyMode: String? = null,
+    @SerialName("scoreGranularity") val scoreGranularity: String? = null,
 ) {
     val androidRemindersEnabled: Boolean
         get() = notifyChannels?.contains(CHANNEL_ANDROID) ?: true
@@ -148,13 +228,44 @@ data class AppSettings(
 
     val questionMarksEnabled: Boolean get() = questionMarks ?: false
 
+    /**
+     * Whether deleting a habit asks first.
+     *
+     * Defaults to ON when the server has never been told, and that direction is
+     * deliberate: the phone is the client where a destructive action is a stray
+     * thumb, and `DELETE /habits/:id` cascades to every entry the habit ever had.
+     * The web's own default is the same.
+     */
+    val confirmDeleteEnabled: Boolean get() = confirmDelete ?: true
+
+    val weekStartsMonday: Boolean get() = (weekStart ?: DEFAULT_WEEK_START) == DEFAULT_WEEK_START
+
     companion object {
         const val CHANNEL_ANDROID = "android"
 
         /** Matches `SETTINGS.dayOrder.default` in shared/public/ui/settings.js. */
         const val DEFAULT_DAY_ORDER = "newest-left"
+
+        /** Matches `SETTINGS.weekStart.default` in the same registry. */
+        const val DEFAULT_WEEK_START = "monday"
     }
 }
+
+/**
+ * What `PUT /settings` answers with.
+ *
+ * Not the whole settings object — the accepted subset and the keys it threw
+ * away. That shape is the reason the phone must not assume its own patch was
+ * stored: `SETTING_VALUES` in shared/src/validate.js normalises as well as
+ * validates, so an ACCEPTED value can differ from the one sent, and an unknown
+ * key is dropped in silence so that an older server tolerates a newer client.
+ * `ui/settings.js` waits for this answer rather than assuming; so does this one.
+ */
+@Serializable
+data class SettingsPatchResult(
+    val settings: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
+    val ignored: List<String> = emptyList(),
+)
 
 @Serializable
 data class Overview(
@@ -177,6 +288,14 @@ class ApiException(val status: Int, message: String) : Exception(message)
 class Api(private val baseUrl: String) {
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    /**
+     * The serializer for anything SENT, and the one difference is the point:
+     * `encodeDefaults = true`, so a field equal to its Kotlin default is still
+     * written. [HabitInput] explains what that prevents — a habit PUT is a
+     * replace, and an omitted field is reset rather than left alone.
+     */
+    private val writeJson = Json { encodeDefaults = true; explicitNulls = false }
 
     private val http = OkHttpClient.Builder()
         // A phone on a flaky connection should fail fast and queue, rather
@@ -245,8 +364,21 @@ class Api(private val baseUrl: String) {
         return json.decodeFromString(request(Request.Builder().url(url(query)).get().build()))
     }
 
-    suspend fun habits(): List<Habit> =
-        json.decodeFromString(request(Request.Builder().url(url("/api/habits")).get().build()))
+    /**
+     * Every habit, and the archived ones only when asked.
+     *
+     * `/overview` deliberately does not carry archived habits — it is the day
+     * grid's data, and an archived habit has no business in it — so the archive
+     * is a separate read rather than a filter over what the list already holds.
+     */
+    suspend fun habits(archived: Boolean = false): List<Habit> =
+        json.decodeFromString(
+            request(
+                Request.Builder()
+                    .url(url(if (archived) "/api/habits?archived=true" else "/api/habits"))
+                    .get().build()
+            )
+        )
 
     /**
      * The account's preferences. Every key but the ones declared above is
@@ -298,18 +430,79 @@ class Api(private val baseUrl: String) {
      * would reset it.
      */
     suspend fun setReminder(habit: Habit, time: String, message: String = habit.reminderMessage) {
-        // The explicit serializer rather than the reified `encodeToString(value)`:
-        // the reified overload is an extension that needs its own import, and
-        // without it the compiler binds to the two-argument
-        // `encodeToString(strategy, value)` and reports a baffling type error.
-        val updated = json.encodeToString(
-            Habit.serializer(),
-            habit.copy(reminderTime = time, reminderMessage = message),
+        updateHabit(habit.id, habit.toInput().copy(reminderTime = time, reminderMessage = message))
+    }
+
+    /* ------------------------------------------------------------ habits */
+
+    /** Create a habit. The server answers 201 with the habit as stored. */
+    suspend fun createHabit(input: HabitInput): Habit =
+        json.decodeFromString(
+            request(
+                Request.Builder().url(url("/api/habits"))
+                    .post(writeJson.encodeToString(HabitInput.serializer(), input).asBody())
+                    .build()
+            )
         )
-        request(
-            Request.Builder().url(url("/api/habits/${habit.id}"))
-                .put(updated.toRequestBody("application/json".toMediaType()))
-                .build()
+
+    /**
+     * Replace a habit. [HabitInput] carries every field for the reason its own
+     * documentation gives: this route defaults whatever the payload omits, so a
+     * partial write is a reset rather than a patch.
+     */
+    suspend fun updateHabit(id: Long, input: HabitInput): Habit =
+        json.decodeFromString(
+            request(
+                Request.Builder().url(url("/api/habits/$id"))
+                    .put(writeJson.encodeToString(HabitInput.serializer(), input).asBody())
+                    .build()
+            )
+        )
+
+    /** Delete a habit, and with it every entry it ever had. Answers 204. */
+    suspend fun deleteHabit(id: Long) {
+        request(Request.Builder().url(url("/api/habits/$id")).delete().build())
+    }
+
+    /**
+     * Store a new order. The ids are positions 0..n-1 in the order given, and
+     * the server answers with the unarchived habits as they now stand — which is
+     * what the caller should render, rather than the order it just proposed.
+     */
+    suspend fun reorderHabits(ids: List<Long>): List<Habit> {
+        val body = buildJsonObject {
+            put("order", kotlinx.serialization.json.JsonArray(
+                ids.map { kotlinx.serialization.json.JsonPrimitive(it) }
+            ))
+        }
+        return json.decodeFromString(
+            request(
+                Request.Builder().url(url("/api/habits/reorder"))
+                    .post(body.toString().asBody()).build()
+            )
         )
     }
+
+    /* ---------------------------------------------------------- settings */
+
+    /**
+     * Merge a settings patch, and report what the server actually stored.
+     *
+     * A patch rather than a whole object, because `PUT /settings` merges — the
+     * opposite of the habit route above, and worth holding in mind when reading
+     * the two together. Sending only what changed is therefore both correct and
+     * the only way two clients editing different settings do not clobber each
+     * other between fetches.
+     */
+    suspend fun updateSettings(patch: Map<String, kotlinx.serialization.json.JsonElement>):
+        SettingsPatchResult =
+        json.decodeFromString(
+            request(
+                Request.Builder().url(url("/api/settings"))
+                    .put(kotlinx.serialization.json.JsonObject(patch).toString().asBody())
+                    .build()
+            )
+        )
+
+    private fun String.asBody() = toRequestBody("application/json".toMediaType())
 }

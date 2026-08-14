@@ -158,6 +158,7 @@ fun HabitGridRow(
     today: String,
     scroll: ScrollState,
     onOpen: () -> Unit,
+    onEdit: () -> Unit,
     onSetReminder: () -> Unit,
     onTapDay: (String) -> Unit,
     onHoldDay: (String) -> Unit,
@@ -175,7 +176,18 @@ fun HabitGridRow(
                 fontWeight = FontWeight.Medium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.clickable(onClickLabel = "Open habit") { onOpen() },
+                // Tap opens, hold edits — the same pairing a day cell already
+                // uses (`onTapDay` / `onHoldDay`), so the gesture is learned
+                // once. Both are labelled, which is also what puts Edit in the
+                // accessibility menu: a long press is not discoverable to a
+                // screen reader, and `onLongClickLabel` is what makes it an
+                // action rather than a secret.
+                modifier = Modifier.combinedClickable(
+                    onClickLabel = "Open habit",
+                    onLongClickLabel = "Edit habit",
+                    onLongClick = onEdit,
+                    onClick = onOpen,
+                ),
             )
 
             // The same "🔥 5" the web dashboard puts under a habit's name, and
