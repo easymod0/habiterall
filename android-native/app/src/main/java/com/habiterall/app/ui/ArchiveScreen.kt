@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -53,7 +54,17 @@ import kotlinx.coroutines.launch
 fun ArchiveScreen(
     load: suspend () -> List<Habit>,
     onUnarchive: suspend (Habit) -> Unit,
-    onEdit: (Habit) -> Unit,
+    /**
+     * Leaves for the habit's edit form, carrying whether this screen has already
+     * written something.
+     *
+     * The flag travels because this is a hand-off and not a close: the caller
+     * REPLACES this screen with the form, so an `onClose` never fires and every
+     * restore done before tapping Edit would otherwise be forgotten. Restore a
+     * habit, edit another, back out unchanged, and the list behind would still
+     * not know the first one came back.
+     */
+    onEdit: (habit: Habit, changed: Boolean) -> Unit,
     onClose: (changed: Boolean) -> Unit,
 ) {
     var rows by remember { mutableStateOf<List<Habit>?>(null) }
@@ -68,8 +79,11 @@ fun ArchiveScreen(
         try {
             rows = load()
         } catch (e: Exception) {
+            // `rows` stays null, which is what tells the body apart from an
+            // archive that is genuinely empty: "Nothing archived" under an error
+            // message is the screen confidently answering a question it could
+            // not ask.
             error = e.message ?: "Could not load the archive"
-            rows = emptyList()
         }
     }
 
@@ -81,6 +95,9 @@ fun ArchiveScreen(
                     IconButton(onClick = { onClose(changed) }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    if (busy) CircularProgressIndicator(Modifier.size(22.dp).padding(end = 12.dp))
                 },
             )
         }
@@ -95,6 +112,9 @@ fun ArchiveScreen(
             }
 
             when {
+                // The load failed, and the message above is the whole screen. No
+                // spinner, because nothing is still coming.
+                rows == null && error != null -> Unit
                 rows == null -> Row(
                     Modifier.fillMaxWidth().padding(24.dp),
                     horizontalArrangement = Arrangement.Center,
@@ -116,13 +136,17 @@ fun ArchiveScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(habit.name, Modifier.weight(1f))
-                                TextButton(onClick = { onEdit(habit) }, enabled = !busy) {
+                                TextButton(onClick = { onEdit(habit, changed) }, enabled = !busy) {
                                     Text("Edit")
                                 }
                                 TextButton(
                                     enabled = !busy,
                                     onClick = {
                                         busy = true
+                                        // Cleared before the attempt, so a
+                                        // message from a failure two taps ago
+                                        // does not sit over one that worked.
+                                        error = null
                                         scope.launch {
                                             try {
                                                 onUnarchive(habit)

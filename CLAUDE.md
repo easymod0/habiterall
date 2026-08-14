@@ -181,6 +181,20 @@ decides what gets stored. That rule is what let the phone become a full client
 without doubling the mirror surface — and it is the question to ask of anything
 added next, because a sixth mirror is a real cost and a sixth server call is not.
 
+**A setting's DEFAULT is a mirror even though its rule is not.** `GET /settings`
+returns only the keys that have been stored — neither edition fills gaps — so a
+setting nobody has touched arrives as nothing, and every client has to supply the
+same answer for it or the two disagree about what the account is set to. The web
+has `SETTINGS` in `shared/public/ui/settings.js`; the phone has the constants in
+`AppSettings`, and `AppSettingsDefaultsTest` reads the registry and fails if they
+drift, which is the Kotlin half of what `shared/test/settings.test.js` already
+does. The one that will catch you is `historyGranularity`, whose default is
+`week` — the only default in the registry that is not the first option in its own
+list, and duly copied as `day` the first time the phone grew a settings screen.
+That combination is nastier than it sounds: the screen showed a value the charts
+were not using, and a chip already drawn as selected does not fire, so the value
+it claimed was set was the one value it would not store.
+
 **The two habit routes disagree about what a write means, on purpose.**
 `PUT /habits/:id` REPLACES — the body goes through `parseHabit`, which supplies a
 default for every absent field, so a partial write resets what it omits rather

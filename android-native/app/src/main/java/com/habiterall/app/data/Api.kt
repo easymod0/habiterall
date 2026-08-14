@@ -240,6 +240,38 @@ data class AppSettings(
 
     val weekStartsMonday: Boolean get() = (weekStart ?: DEFAULT_WEEK_START) == DEFAULT_WEEK_START
 
+    /*
+     * The value a setting HAS, which for an untouched account is the server's
+     * default and not null.
+     *
+     * Every one of these exists so that no screen writes `?: "something"` at a
+     * call site. That is not tidiness: `GET /settings` returns only the keys
+     * that have been stored, so a default written at the point of use is a
+     * silent second copy of the registry, and the first one of those drifted the
+     * day it was written — `historyGranularity` defaults to WEEK on the server
+     * and was read here as day, which made the settings screen show a value the
+     * charts were not using and then refuse to store it (the chip was already
+     * "selected", so tapping it did nothing).
+     *
+     * `AppSettingsDefaultsTest` pins all of them against
+     * shared/public/ui/settings.js, which is the only reason this can be trusted
+     * to stay in step.
+     */
+
+    val dayOrderOrDefault: String get() = dayOrder ?: DEFAULT_DAY_ORDER
+
+    val weekStartOrDefault: String get() = weekStart ?: DEFAULT_WEEK_START
+
+    val calendarZoomOrDefault: String get() = calendarZoom ?: DEFAULT_CALENDAR_ZOOM
+
+    val historyGranularityOrDefault: String
+        get() = historyGranularity ?: DEFAULT_HISTORY_GRANULARITY
+
+    val historyModeOrDefault: String get() = historyMode ?: DEFAULT_HISTORY_MODE
+
+    val scoreGranularityOrDefault: String
+        get() = scoreGranularity ?: DEFAULT_SCORE_GRANULARITY
+
     companion object {
         const val CHANNEL_ANDROID = "android"
 
@@ -248,6 +280,23 @@ data class AppSettings(
 
         /** Matches `SETTINGS.weekStart.default` in the same registry. */
         const val DEFAULT_WEEK_START = "monday"
+
+        /** `SETTINGS.calendarZoom.default`. */
+        const val DEFAULT_CALENDAR_ZOOM = "default"
+
+        /**
+         * `SETTINGS.historyGranularity.default` — WEEK, not day, and the
+         * registry says why: a day-level history of a year is ~365 bars, which
+         * reads as noise. It is the one default here that is not the first
+         * option in its own list, which is exactly how it got copied wrong.
+         */
+        const val DEFAULT_HISTORY_GRANULARITY = "week"
+
+        /** `SETTINGS.historyMode.default`. */
+        const val DEFAULT_HISTORY_MODE = "percent"
+
+        /** `SETTINGS.scoreGranularity.default`. */
+        const val DEFAULT_SCORE_GRANULARITY = "day"
     }
 }
 

@@ -61,6 +61,18 @@ fun ReorderScreen(
     onClose: (changed: Boolean) -> Unit,
 ) {
     var rows by remember { mutableStateOf(habits) }
+    /**
+     * The last order the server confirmed — where a failed nudge goes back to.
+     *
+     * Not [habits], which is only ever the order this screen OPENED on. Reverting
+     * to that after an earlier move had already succeeded puts an order on screen
+     * that the database does not hold, and the damage is not cosmetic: the next
+     * nudge is computed from what is on screen and posted as the WHOLE order, so
+     * one failed request between two successful ones silently undoes the first.
+     * That is precisely the failure [HabitOrder] is documented against, reached
+     * through the error path instead of through the arithmetic.
+     */
+    var stored by remember { mutableStateOf(habits) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var changed by remember { mutableStateOf(false) }
@@ -84,13 +96,15 @@ fun ReorderScreen(
         error = null
         scope.launch {
             try {
-                rows = onReorder(moved)
+                val fresh = onReorder(moved)
+                rows = fresh
+                stored = fresh
                 changed = true
             } catch (e: Exception) {
                 error = e.message ?: "Could not save the new order"
                 // Put back what the server still believes, rather than leaving
                 // an order on screen that was never stored.
-                rows = habits
+                rows = stored
             } finally {
                 busy = false
             }

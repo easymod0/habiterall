@@ -41,6 +41,23 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
 
 /**
+ * What a patch did, once the server has been asked again.
+ *
+ * Two things rather than one, because a settings write has three outcomes and
+ * not two. It can fail — an exception. It can be stored. Or it can be ACCEPTED
+ * with a 200 and quietly dropped, which is what `ignored` reports and what an
+ * older server does with a key it has never heard of. Returning only the fresh
+ * settings collapses the third case into the second: the control springs back to
+ * where it was and nothing anywhere says why.
+ */
+data class PatchOutcome(
+    /** The settings as the server reports them AFTER the write — not the patch. */
+    val settings: AppSettings,
+    /** The keys it threw away, verbatim from the reply's `ignored`. */
+    val ignored: List<String>,
+)
+
+/**
  * The account's preferences, edited from the phone.
  *
  * These are the SAME settings the web dialog edits — one row per user in the
@@ -63,13 +80,19 @@ import kotlinx.serialization.json.JsonArray
  * place to type one. They stay in the web dialog, where they already are.
  * `notifyTimezone` is absent for a duller reason: it is a zone NAME, and a
  * picker over the whole tz database is a screen of its own.
+ *
+ * **The option lists are this app's menu; the DEFAULTS are a mirror.** Nothing
+ * here supplies one — `AppSettings` does, pinned to the web registry by
+ * `AppSettingsDefaultsTest`. A `?: "day"` written at a call site below is how a
+ * screen ends up naming a value the account is not set to, and then refusing to
+ * store the one it claims is already selected.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     initial: AppSettings,
     androidRemindersSupported: Boolean,
-    onPatch: suspend (Map<String, JsonElement>) -> AppSettings,
+    onPatch: suspend (Map<String, JsonElement>) -> PatchOutcome,
     /** Closes, saying whether any setting was actually stored. */
     onClose: (changed: Boolean) -> Unit,
 ) {
@@ -89,14 +112,30 @@ fun SettingsScreen(
 
     BackHandler(enabled = !busy) { onClose(changed) }
 
-    /** Send one key, and take whatever the server then says the settings are. */
-    fun put(key: String, value: JsonElement) {
+    /**
+     * Send one key, and take whatever the server then says the settings are.
+     *
+     * [label] is only ever used to explain a refusal, and that is the case worth
+     * spelling out. `PUT /settings` does not fail on a key it will not store: it
+     * returns 200 with the key listed in `ignored`, which is what lets an older
+     * server tolerate a newer client. So the failure has no exception, no error
+     * status and — since the re-read simply reports the old value — no visible
+     * effect beyond a control that springs back. Saying so is the difference
+     * between "this server does not support that" and "this app is broken".
+     */
+    fun put(key: String, label: String, value: JsonElement) {
         busy = true
         error = null
         scope.launch {
             try {
-                settings = onPatch(mapOf(key to value))
-                changed = true
+                val outcome = onPatch(mapOf(key to value))
+                settings = outcome.settings
+                if (key in outcome.ignored) {
+                    error = "This server did not store $label. It may be older than " +
+                        "this app, or may no longer allow that value."
+                } else {
+                    changed = true
+                }
             } catch (e: Exception) {
                 error = e.message ?: "Could not save"
             } finally {
@@ -164,7 +203,8 @@ fun SettingsScreen(
                         ?: listOf(AppSettings.CHANNEL_ANDROID)
                     val next = if (on) (current + AppSettings.CHANNEL_ANDROID).distinct()
                     else current - AppSettings.CHANNEL_ANDROID
-                    put("notifyChannels", JsonArray(next.map { JsonPrimitive(it) }))
+                    put("notifyChannels", "the reminder destinations",
+                        JsonArray(next.map { JsonPrimitive(it) }))
                 },
             )
 
@@ -179,7 +219,7 @@ fun SettingsScreen(
                     "break a streak and does not count as a miss.",
                 checked = settings.skipDaysEnabled,
                 enabled = !busy,
-                onChange = { put("skipDays", JsonPrimitive(it)) },
+                onChange = { put("skipDays", "skip days", JsonPrimitive(it)) },
             )
             SwitchRow(
                 title = "Question marks",
@@ -188,7 +228,7 @@ fun SettingsScreen(
                     "step back to unanswered — the day editor's Clear is how you get there.",
                 checked = settings.questionMarksEnabled,
                 enabled = !busy,
-                onChange = { put("questionMarks", JsonPrimitive(it)) },
+                onChange = { put("questionMarks", "question marks", JsonPrimitive(it)) },
             )
 
             HorizontalDivider()
@@ -202,23 +242,23 @@ fun SettingsScreen(
                     "newest-left" to "Today on the left",
                     "newest-right" to "Today on the right",
                 ),
-                selected = settings.dayOrder ?: AppSettings.DEFAULT_DAY_ORDER,
+                selected = settings.dayOrderOrDefault,
                 enabled = !busy,
-                onPick = { put("dayOrder", JsonPrimitive(it)) },
+                onPick = { put("dayOrder", "the day order", JsonPrimitive(it)) },
             )
             ChoiceRow(
                 title = "Week starts on",
                 options = listOf("monday" to "Monday", "sunday" to "Sunday"),
-                selected = settings.weekStart ?: AppSettings.DEFAULT_WEEK_START,
+                selected = settings.weekStartOrDefault,
                 enabled = !busy,
-                onPick = { put("weekStart", JsonPrimitive(it)) },
+                onPick = { put("weekStart", "the first day of the week", JsonPrimitive(it)) },
             )
             SwitchRow(
                 title = "Confirm before deleting",
                 subtitle = "Deleting a habit takes every day recorded for it.",
                 checked = settings.confirmDeleteEnabled,
                 enabled = !busy,
-                onChange = { put("confirmDelete", JsonPrimitive(it)) },
+                onChange = { put("confirmDelete", "the delete confirmation", JsonPrimitive(it)) },
             )
 
             HorizontalDivider()
@@ -238,16 +278,16 @@ fun SettingsScreen(
                     "day" to "Day", "week" to "Week", "month" to "Month",
                     "quarter" to "Quarter", "year" to "Year",
                 ),
-                selected = settings.historyGranularity ?: "day",
+                selected = settings.historyGranularityOrDefault,
                 enabled = !busy,
-                onPick = { put("historyGranularity", JsonPrimitive(it)) },
+                onPick = { put("historyGranularity", "the history resolution", JsonPrimitive(it)) },
             )
             ChoiceRow(
                 title = "History shows",
                 options = listOf("percent" to "Percent", "count" to "Count"),
-                selected = settings.historyMode ?: "percent",
+                selected = settings.historyModeOrDefault,
                 enabled = !busy,
-                onPick = { put("historyMode", JsonPrimitive(it)) },
+                onPick = { put("historyMode", "what the history shows", JsonPrimitive(it)) },
             )
             ChoiceRow(
                 title = "Strength resolution",
@@ -255,9 +295,9 @@ fun SettingsScreen(
                     "day" to "Day", "week" to "Week", "month" to "Month",
                     "quarter" to "Quarter", "year" to "Year",
                 ),
-                selected = settings.scoreGranularity ?: "day",
+                selected = settings.scoreGranularityOrDefault,
                 enabled = !busy,
-                onPick = { put("scoreGranularity", JsonPrimitive(it)) },
+                onPick = { put("scoreGranularity", "the strength resolution", JsonPrimitive(it)) },
             )
             ChoiceRow(
                 title = "Calendar zoom",
@@ -265,9 +305,9 @@ fun SettingsScreen(
                     "closest" to "Closest", "close" to "Close",
                     "default" to "Default", "wide" to "Wide",
                 ),
-                selected = settings.calendarZoom ?: "default",
+                selected = settings.calendarZoomOrDefault,
                 enabled = !busy,
-                onPick = { put("calendarZoom", JsonPrimitive(it)) },
+                onPick = { put("calendarZoom", "the calendar zoom", JsonPrimitive(it)) },
             )
 
             Text(

@@ -113,7 +113,7 @@ private fun ManageScreen(
     api: Api,
     account: AppSettings,
     onAccount: (AppSettings) -> Unit,
-    onEditArchived: (Habit) -> Unit,
+    onEditArchived: (habit: Habit, changed: Boolean) -> Unit,
     onDone: (changed: Boolean) -> Unit,
 ) {
     val context = LocalContext.current
@@ -161,7 +161,11 @@ private fun ManageScreen(
             androidRemindersSupported =
                 NotificationManagerCompat.from(context).areNotificationsEnabled(),
             onPatch = { patch ->
-                api.updateSettings(patch)
+                // What it would not take, kept: a key this server does not know
+                // comes back in `ignored` with a 200 rather than as an error, so
+                // this is the only evidence that a control which sprang back did
+                // so because the write never happened.
+                val ignored = api.updateSettings(patch).ignored
                 // Re-read rather than trusting the patch. `PUT /settings`
                 // answers with what it ACCEPTED, not with the settings — and
                 // `SETTING_VALUES` normalises as well as validates, so the
@@ -178,7 +182,7 @@ private fun ManageScreen(
                 Settings(context).cacheAndroidReminders(fresh.androidRemindersEnabled)
                 Settings(context).cacheSkipDays(fresh.skipDaysEnabled)
                 Reminders.rescheduleAll(context)
-                fresh
+                PatchOutcome(fresh, ignored)
             },
             onClose = onDone,
         )
@@ -373,8 +377,16 @@ class MainActivity : ComponentActivity() {
                             Modifier.fillMaxSize().then(
                                 // Out of the accessibility tree while covered,
                                 // or a screen reader walks a grid nobody can see.
-                                if (webUrl != null) Modifier.clearAndSetSemantics {}
-                                else Modifier
+                                // Both covers count: the management sheets stop
+                                // TOUCHES with the pointer-consuming Box below,
+                                // and a swipe-to-explore gesture is not a touch —
+                                // it would otherwise read out the grid behind an
+                                // open form.
+                                if (webUrl != null || manage != null) {
+                                    Modifier.clearAndSetSemantics {}
+                                } else {
+                                    Modifier
+                                }
                             )
                         ) {
                             HabitListScreen(
@@ -427,7 +439,16 @@ class MainActivity : ComponentActivity() {
                                     // the other way to restore, and coming back
                                     // to a list that no longer holds the habit
                                     // is a screen showing a stale row.
-                                    onEditArchived = { manage = Manage.EditHabit(it) },
+                                    onEditArchived = { habit, wrote ->
+                                        // The archive's own writes are banked
+                                        // here rather than at a close it never
+                                        // gets: this replaces that screen, so a
+                                        // habit restored a moment ago would
+                                        // otherwise be forgotten if the form is
+                                        // then backed out of unchanged.
+                                        if (wrote) refreshKey++
+                                        manage = Manage.EditHabit(habit)
+                                    },
                                     onDone = { changed ->
                                         manage = null
                                         // Only when something was actually
@@ -648,15 +669,6 @@ class MainActivity : ComponentActivity() {
         // state the account has switched off.
         var skipDays by remember { mutableStateOf(false) }
         var questionMarks by remember { mutableStateOf(false) }
-        /**
-         * The account's settings as last fetched, whole.
-         *
-         * The three flags above are the ones this screen itself obeys; this is
-         * the rest of them, kept so the settings screen can be opened on what
-         * the server said a moment ago instead of fetching again and possibly
-         * showing something different from the grid behind it.
-         */
-        var account by remember { mutableStateOf(AppSettings()) }
         // Seeded from the mirror the notification already reads, so the grid and
         // the shade agree during the first paint — before any fetch lands, and for
         // as long as one cannot (the mirror is what works offline).
@@ -729,10 +741,10 @@ class MainActivity : ComponentActivity() {
                 // default order, and the overview below is the fetch that
                 // matters.
                 val fetched = api.settings()
-                // Held so the settings screen opens on what the server actually
-                // says, rather than on a second fetch of its own that could
-                // disagree with the grid already on screen.
-                account = fetched
+                // Reported upward, not kept: the three flags below are all this
+                // screen itself obeys, and the whole object belongs to the
+                // activity, which is where the screens above it read it from. A
+                // second copy here would be a second thing to keep current.
                 onAccount(fetched)
                 newestLeft = fetched.newestLeft
                 skipDays = fetched.skipDaysEnabled
@@ -1029,7 +1041,10 @@ class MainActivity : ComponentActivity() {
                         ) {
                             DropdownMenuItem(
                                 text = { Text("Reorder habits") },
-                                enabled = shown.isNotEmpty(),
+                                // Two, not one: a single habit has nowhere to
+                                // go, and a screen whose every button is
+                                // disabled is worse than a menu item that is.
+                                enabled = shown.size > 1,
                                 onClick = { menuOpen = false; onReorder(shown) },
                             )
                             DropdownMenuItem(

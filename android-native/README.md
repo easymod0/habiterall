@@ -50,6 +50,18 @@ be one more thing to keep in step, and the mirrors this client does keep
 (`Grid.nextState`, `ReminderTime`, `Reminders.needsReminder`) all earn their
 place by having to work **offline** — which none of these do.
 
+**The DEFAULTS are the exception, and they are a real mirror.** `GET /settings`
+returns only the keys that have been stored — no gaps filled — so a setting
+nobody has touched arrives as nothing at all, and every client has to know what
+that means. They live in `AppSettings`, one constant and one `…OrDefault`
+accessor each, and `AppSettingsDefaultsTest` reads `shared/public/ui/settings.js`
+and fails if the two disagree. It is not a formality: `historyGranularity`
+defaults to `week`, the only default in the registry that is not the first option
+in its own list, and the first version of the settings screen read it as `day` —
+which showed a value the charts were not using and then refused to store the one
+it claimed was already selected, since a chip drawn as chosen does not fire. Never
+write `?: "day"` at a call site; add the constant, and let the test check it.
+
 Tapping a habit's name opens **that habit's** page in the embedded web UI
 rather than the dashboard, via the `#/habit/<id>` route the web app added for
 it. `ServerUrl.habitRoute` builds the fragment and `shared/public/ui/routes.js`

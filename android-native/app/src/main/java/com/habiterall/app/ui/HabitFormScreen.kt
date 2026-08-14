@@ -98,8 +98,21 @@ private fun Habit.toDraft() = Draft(
     archived = archived,
 )
 
-private fun formatAmount(v: Double): String =
+internal fun formatAmount(v: Double): String =
     if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+
+/**
+ * A typed amount as a number, or null if it is not one yet.
+ *
+ * The comma is the point. `KeyboardType.Decimal` shows whatever separator the
+ * phone's locale uses, which across most of Europe is `,` — so "8,5" is what the
+ * keyboard invites and `toDoubleOrNull` refuses, and the old elvis turned that
+ * refusal into a silent target of 0 that no entry could ever meet. Half-typed
+ * text still returns null; [HabitFormScreen] disables Save for it rather than
+ * guessing, which is the same treatment the reminder time already gets.
+ */
+internal fun parseAmount(text: String): Double? =
+    text.trim().replace(',', '.').toDoubleOrNull()
 
 /**
  * The draft as the server accepts it.
@@ -118,7 +131,10 @@ private fun Draft.toInput() = HabitInput(
     description = description.trim(),
     type = if (numerical) "numerical" else "boolean",
     unit = if (numerical) unit.trim() else "",
-    targetValue = if (numerical) target.trim().toDoubleOrNull() ?: 0.0 else 0.0,
+    // An empty box is a habit with no target, which parseHabit reads as 0.
+    // Anything else has been through `parseAmount` and Save, so the elvis here
+    // is unreachable rather than lossy — see [canSave].
+    targetValue = if (numerical) parseAmount(target) ?: 0.0 else 0.0,
     targetType = if (atMost) "at_most" else "at_least",
     freqNumerator = freqNumerator.toIntOrNull() ?: 1,
     freqDenominator = freqDenominator.toIntOrNull() ?: 1,
@@ -173,10 +189,15 @@ fun HabitFormScreen(
     BackHandler(enabled = !busy) { onClose(false) }
 
     val timeParsed = ReminderTime.parse(draft.reminderTime)
-    // The only two things that disable Save, and neither is a validation rule
-    // duplicated from the server: a habit with no name has nothing to submit,
-    // and an unparseable time would be silently sent as "no reminder".
-    val canSave = draft.name.isNotBlank() && timeParsed != null && !busy
+    // A blank target is a habit with no target; anything else has to be a
+    // number, because the alternative is sending 0 for text the user typed.
+    val targetOk = !draft.numerical || draft.target.isBlank() ||
+        parseAmount(draft.target) != null
+    // The only three things that disable Save, and none is a validation rule
+    // duplicated from the server: a habit with no name has nothing to submit, an
+    // unparseable time would be silently sent as "no reminder", and an
+    // unparseable target would be silently sent as zero.
+    val canSave = draft.name.isNotBlank() && timeParsed != null && targetOk && !busy
 
     Scaffold(
         topBar = {
@@ -271,6 +292,10 @@ fun HabitFormScreen(
                         label = { Text("Target") },
                         placeholder = { Text("8") },
                         singleLine = true,
+                        isError = !targetOk,
+                        supportingText = if (targetOk) null else {
+                            { Text("Not a number", color = MaterialTheme.colorScheme.error) }
+                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.weight(1f),
                     )
