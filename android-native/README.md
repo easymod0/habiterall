@@ -135,12 +135,12 @@ set these repository secrets:
 
 You need **JDK 21** and the Android SDK (platform 36, build-tools 36). The
 Gradle wrapper jar is not committed — it is a binary that cannot be reviewed in
-a diff — so generate it once with a system Gradle **8.14.3**:
+a diff — so generate it once with a system Gradle **9.7.0**:
 
 ```bash
 cd android-native
 echo "sdk.dir=/path/to/Android/sdk" > local.properties
-gradle wrapper --gradle-version 8.14.3    # once, needs Gradle 8.14.3 on PATH
+gradle wrapper --gradle-version 9.7.0    # once, needs Gradle 9.7.0 on PATH
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -149,10 +149,15 @@ The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk` (~17 MB).
 It is signed with the standard Android debug key, so it installs on a phone
 with *Install unknown apps* enabled — no keystore needed to try it.
 
-> **Gradle 9 does not work.** AGP 8.x caps out at Gradle 8, and the version
-> here is pinned in `gradle/wrapper/gradle-wrapper.properties`. If you invoke a
-> newer system Gradle directly rather than through `./gradlew`, configuration
-> fails before the wrapper is ever consulted.
+> **AGP decides the Gradle version, and now the Kotlin one too.** AGP 9.3.1
+> requires Gradle ≥ 9.5, so the wrapper is pinned to 9.7.0 in
+> `gradle/wrapper/gradle-wrapper.properties` — the single place that number
+> appears, which CI reads rather than repeats. Invoke a system Gradle that
+> disagrees, directly rather than through `./gradlew`, and configuration fails
+> before the wrapper is ever consulted. From AGP 9 the same is true of Kotlin:
+> it is built in (2.2.10 here), applying `org.jetbrains.kotlin.android`
+> alongside it is a build failure, and the compiler plugins and Kotlin-compiled
+> libraries must not get ahead of it. See the root `build.gradle.kts`.
 
 ## Tests
 

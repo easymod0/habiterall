@@ -41,9 +41,9 @@ on:
 
   # Nightly, an hour after ci.yml's, so a red morning reads in order rather than
   # as two unrelated failures. This client is the most exposed thing here to a
-  # runner moving under it: JDK 21, Android SDK 36 and Gradle 8.14.3 are pinned
-  # against whatever `ubuntu-latest` ships, and the AGP-8.x-does-not-support-
-  # Gradle-9 trap in the README is exactly that failure with a different version
+  # runner moving under it: JDK 21, Android SDK 36 and the wrapper's Gradle are
+  # pinned against whatever `ubuntu-latest` ships, and the AGP-decides-the-
+  # Gradle-version trap in the README is exactly that failure wearing a version
   # number. The schedule builds unconditionally — nothing in the repository
   # changed, the ground did.
   schedule:
@@ -130,21 +130,37 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # The version is READ from the wrapper properties rather than written
+      # here as well, and that is the fix for a whole class of red run. The
+      # number used to appear in both places, so a Dependabot bump of the
+      # properties file could only ever fail: the system Gradle pinned here
+      # configured the project — loading the new AGP — before the wrapper it
+      # generates was ever consulted, and an AGP that needs Gradle 9 asked
+      # Gradle 8 for a class it does not have. One place to change now, and
+      # `setup-gradle` cannot install a Gradle the project disagrees with.
+      #
+      # Pinning of some kind is still required: unpinned, the action installs
+      # whatever Gradle is newest, which is the same failure with the versions
+      # the other way round.
+      - name: Read the pinned Gradle version
+        id: gradle
+        run: |
+          v=$(sed -n 's|^distributionUrl=.*/gradle-\(.*\)-bin\.zip$|\1|p' \
+                android-native/gradle/wrapper/gradle-wrapper.properties)
+          [ -n "$v" ] || { echo "::error::no Gradle version in gradle-wrapper.properties"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       # The repo does not commit gradle-wrapper.jar — a binary nobody can
-      # review in a diff. This generates the wrapper from the version pinned
-      # in gradle/wrapper/gradle-wrapper.properties instead.
+      # review in a diff. This generates the wrapper from the version read
+      # above instead.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
-          # Pin it. Without this the action installs the newest Gradle — 9.x —
-          # and `gradle wrapper` below runs under that, configuring the project
-          # before the wrapper it generates is ever used. AGP 8.x does not
-          # support Gradle 9, so the build failed during that very step.
-          gradle-version: '8.14.3'
+          gradle-version: ${{ steps.gradle.outputs.version }}
 
       - name: Generate the wrapper
         working-directory: android-native
-        run: gradle wrapper --gradle-version 8.14.3
+        run: gradle wrapper --gradle-version ${{ steps.gradle.outputs.version }}
 
       - name: Unit tests
         working-directory: android-native

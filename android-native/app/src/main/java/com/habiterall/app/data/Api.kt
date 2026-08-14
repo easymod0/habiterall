@@ -189,7 +189,9 @@ class Api(private val baseUrl: String) {
 
     private suspend fun request(req: Request): String = withContext(Dispatchers.IO) {
         http.newCall(req).execute().use { res ->
-            val body = res.body?.string().orEmpty()
+            // `body` is non-null from OkHttp 5; a safe call here is dead code
+            // the compiler warns about rather than a guard against anything.
+            val body = res.body.string()
             if (!res.isSuccessful) {
                 val message = runCatching {
                     json.parseToJsonElement(body).toString()
