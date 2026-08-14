@@ -9,6 +9,7 @@
  */
 
 import pg from 'pg';
+import { assertConnectionString } from './url.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -27,6 +28,8 @@ if (!appPassword) {
   console.error('APP_DB_PASSWORD must be set so the app role can be created');
   process.exit(1);
 }
+
+assertConnectionString(adminUrl, 'DATABASE_URL_ADMIN');
 
 const client = new pg.Client({ connectionString: adminUrl });
 await client.connect();

@@ -74,7 +74,7 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
-      - '3000:3000'
+      - '${APP_PORT:-3000}:3000'
     volumes:
       # Your entire database is one file in here. Back it up by copying it.
       - habiterall-data:/data
@@ -230,7 +230,7 @@ services:
       migrate: { condition: service_completed_successfully }
       authentik-server: { condition: service_started }
     ports:
-      - '3100:3000'
+      - '${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -262,19 +262,33 @@ volumes:
   authentik-redis-data:
 ```
 
+**Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
+`OIDC_ISSUER` is where Authentik does, and they must be different origins
+unless your proxy path-routes `/application/*`, `/if/*` and
+`/outpost.goauthentik.io/*` to Authentik. Point `auth.example.com` at the
+Authentik container's published port and `habits.example.com` at the app's.
+Putting the issuer on the app's own hostname produces a memorable failure: the
+proxy asks habiterall for Authentik's discovery document, the app is still
+starting — because it is waiting on that very document — and you get a 502
+that looks like a proxy fault rather than a configuration one.
+
 Alongside it, a `.env`:
 
 ```bash
-DB_OWNER_PASSWORD=$(openssl rand -base64 36)
-APP_DB_PASSWORD=$(openssl rand -base64 36)
+# hex, not base64: these two go into a connection URL, and base64's '/' ends
+# the URL's authority — about half of generated passwords contain one.
+DB_OWNER_PASSWORD=$(openssl rand -hex 32)
+APP_DB_PASSWORD=$(openssl rand -hex 32)
 AUTHENTIK_DB_PASSWORD=$(openssl rand -base64 36)
 AUTHENTIK_SECRET_KEY=$(openssl rand -base64 60)
 AUTHENTIK_BOOTSTRAP_PASSWORD=       # the first admin's password
 SESSION_SECRET=$(openssl rand -base64 36)
 PUBLIC_URL=https://habits.example.com
-OIDC_ISSUER=https://habits.example.com/application/o/habiterall/
+OIDC_ISSUER=https://auth.example.com/application/o/habiterall/
 OIDC_CLIENT_ID=                     # filled in below
 OIDC_CLIENT_SECRET=                 # filled in below
+APP_PORT=3100                       # optional — the host port the app answers on
+AUTHENTIK_PORT=9000                 # optional — the host port Authentik answers on
 ```
 
 Then start it in two goes, because the OIDC client cannot exist before the
@@ -284,11 +298,35 @@ provider that issues it:
 docker compose up -d authentik-db authentik-redis authentik-server authentik-worker
 ```
 
+If you brought the whole stack up instead, `app` will be restarting in a loop
+until the two values below exist — that check lives in the app rather than in
+compose, so the failure is a log line rather than a refusal to start:
+
+```bash
+docker compose logs app --tail=20
+#   OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set
+```
+
+That is expected between the two phases, and it clears on the next `up -d`.
+
 Sign in to Authentik at **<http://localhost:9000>** as `akadmin`, and create an
-**OAuth2/OIDC provider** named `habiterall` with the redirect URI
-`${PUBLIC_URL}/auth/callback` and scopes `openid profile email`, then an
-application pointing at it. Put its client id and secret in `.env` and bring up
-the rest:
+**OAuth2/OIDC provider** named `habiterall`, then an application pointing at it:
+
+| Field | Value |
+|---|---|
+| Authorization flow | `default-provider-authorization-**implicit**-consent` — habiterall is a first-party app, so approving it on every sign-in is a click and no security |
+| Invalidation flow | `default-provider-invalidation-flow` — what makes signing out here end the Authentik session too |
+| Client type | Confidential |
+| Redirect URI | `${PUBLIC_URL}/auth/callback`, exactly |
+| Scopes | `openid`, `profile`, `email` |
+| Signing key | any certificate in the list; Authentik ships one |
+
+Watch the flow name: the *explicit* one is `...authorization-explicit-consent`,
+and "explicit" contains "implicit" as a substring — matching on the shorter word
+picks the wrong flow, which is a mistake this repo has already made once in
+code.
+
+Put the client id and secret in `.env` and bring up the rest:
 
 ```bash
 docker compose up -d
@@ -371,7 +409,7 @@ services:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     ports:
-      - '3100:3000'
+      - '${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -719,13 +757,10 @@ Three options, in increasing order of effort:
 | | What you get | Needs |
 |---|---|---|
 | **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
-| **[Native app](android-native/README.md)** — *personal edition* | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline and a plain-http LAN address | Download the APK from [Releases](../../releases) |
-| **[TWA wrapper](android/SETUP.md)** — *cloud edition* | The same PWA, as an installable APK, signed in through the ordinary OIDC flow | A public HTTPS host, then a workflow run |
+| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline and a plain-http LAN address | Download the APK from [Releases](../../releases) |
 
-The edition decides which of the two, and it is about **authentication rather
-than preference**: the TWA shares Chrome's cookie jar so cloud sign-in works
-untouched, while the native client has no OIDC flow yet. When it gains one it
-becomes the better answer for both, and that row is the one to revisit.
+The native client talks to the **personal** edition today; signing in to cloud
+needs an OIDC flow it does not have yet.
 
 The native APK is attached to every [release](../../releases). It is unsigned
 unless the repository has signing secrets configured, so Android will ask you to
@@ -750,16 +785,7 @@ to your dashboard, and check-offs that queue until you reconnect.
 > Requires HTTPS. Browsers disable service workers (and therefore offline
 > support) on plaintext origins other than `localhost`.
 
-### The two Android apps
-
-They are different things, and which you want depends on one question: do you
-want to record a habit **without opening anything**?
-
-**[`android/`](android/SETUP.md) — Trusted Web Activity.** A thin native shell
-around the PWA. Same UI, same code, installable as an APK, and it verifies
-against your domain so no URL bar appears. Built by bubblewrap in GitHub
-Actions, so nothing needs installing locally. Choose this if you just want an
-app icon and a Play-Store-shaped package.
+### The Android app
 
 **[`android-native/`](android-native/README.md) — native Kotlin client.**
 Exists for one reason the web cannot do: a reminder notification with **Yes /
@@ -896,9 +922,9 @@ Every [release](../../releases) carries:
 
 Merging to `master` publishes nothing — it runs the tests and stops. A release is
 a decision, taken by tagging. The Android `versionCode` is derived from the
-version (`1.4.0` → `10400`), so it always increases; and signing, image pushing
-and the TWA build each skip themselves when their credentials are absent, so a
-fork can cut a release having configured nothing. Details in
+version (`1.4.0` → `10400`), so it always increases; and signing and image
+pushing each skip themselves when their credentials are absent, so a fork can
+cut a release having configured nothing. Details in
 [`.github/workflows/README.md`](.github/workflows/README.md).
 
 ---
@@ -1087,7 +1113,6 @@ shared/               everything both editions have in common
   public/             the entire UI, plus the PWA
 habiterall-personal/  single user, SQLite, no auth
 habiterall-cloud/     multi user, Postgres, OIDC
-android/              Trusted Web Activity wrapper for the PWA
 android-native/       native Kotlin client, for notification actions
 ```
 

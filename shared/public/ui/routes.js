@@ -100,7 +100,8 @@ let ourEntry = false;
  * leaves the screen. But returning to the list used to `replaceState` over
  * that entry rather than pop it, which left a duplicate behind: after five
  * habits the user pressed Back six times, five of them changing nothing, and
- * in the TWA that reads as an app refusing to close. `history.back()` is
+ * in the Android client's WebView that reads as a screen refusing to
+ * close. `history.back()` is
  * therefore how the list is reached whenever the entry showing is one we
  * pushed; `replaceState` remains for every other case, including the first
  * paint of a cold deep link, where there is nothing of ours to unwind.

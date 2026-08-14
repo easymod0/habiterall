@@ -12,7 +12,6 @@ release builds — unsigned APKs and all the tests work with no setup at all.
 |---|---|---|---|
 | `ci.yml` | every push and PR | nothing | **nothing** |
 | `android-native.yml` | PRs and pushes touching `android-native/` | nothing | only to sign |
-| `android-release.yml` | PRs and pushes touching `android/` | nothing | `TWA_HOST` + signing |
 | `release.yml` | **a `vX.Y.Z` tag**, or manual | APKs, images, a GitHub release | nothing (each part skips itself) |
 
 ### Releasing
@@ -43,7 +42,7 @@ Either route runs `release.yml`, which:
    (`1.4.0` → `10400`, monotonic by construction);
 2. runs the whole test suite again — tagging a commit whose tests never ran is
    the failure a release pipeline exists to prevent;
-3. builds the native APK and the TWA APK, both stamped with that version;
+3. builds the native APK, stamped with that version;
 4. builds both Docker images and pushes `1.4.0`, `1.4` and `latest` — the
    moving `X.Y` tag only from `1.0.0` up, since under semver a `0.x` series
    promises no compatibility for it to stand for;
@@ -56,10 +55,9 @@ To try it without publishing, use **Actions → Release → Run workflow** and l
 *dry_run* ticked: everything builds, nothing is pushed, and the summary lists
 what would have been attached.
 
-Most parts degrade on their own. No `TWA_HOST` means no TWA asset. No
-`DOCKERHUB_*` secrets means the images go to GHCR only — which needs no secrets
-at all, so images are published either way. The release still succeeds and says
-which parts were skipped.
+Most parts degrade on their own. No `DOCKERHUB_*` secrets means the images go
+to GHCR only — which needs no secrets at all, so images are published either
+way. The release still succeeds and says which parts were skipped.
 
 Signing is the exception: **a publishing run with no keystore fails.** An
 unsigned APK cannot be installed on any device, so degrading there would mean
@@ -73,7 +71,6 @@ validate the build.
 | documentation or workflow config only | nothing but the change detector (~5s) |
 | any code, anywhere | the whole of `ci.yml` |
 | `android-native/**`, or a shared file the Kotlin client mirrors | the Android workflow as well |
-| `android/**` or the PWA assets | the TWA workflow as well |
 | a push to `master` | everything, always — that run is what says master is releasable |
 
 Two deliberate choices in there.
@@ -183,35 +180,6 @@ A publishing release therefore **fails** if the secrets are absent, rather than
 attaching a file nobody can install. A dry run still builds an unsigned APK, so
 the build itself can be validated without a keystore.
 
-### `android-release.yml` — the TWA wrapper
-
-This one **does** need configuration, because a Trusted Web Activity is bound
-to a specific domain: it must know which host it is wrapping, and the app must
-be signed so that host can vouch for it.
-
-## Repository variable
-
-*Settings → Secrets and variables → Actions → **Variables** → New variable*
-
-| Name | Value | Notes |
-|---|---|---|
-| `TWA_HOST` | `habits.example.com` | Hostname only — no `https://`, no trailing path. The workflow rejects both rather than producing a silently broken manifest. |
-
-You can skip this and pass the host as an input on a manual run instead.
-
-## Repository secrets
-
-*Settings → Secrets and variables → Actions → **Secrets** → New secret*
-
-| Name | Value |
-|---|---|
-| `ANDROID_KEYSTORE_BASE64` | the keystore file, base64-encoded |
-| `ANDROID_KEYSTORE_PASSWORD` | keystore password |
-| `ANDROID_KEY_ALIAS` | key alias |
-| `ANDROID_KEY_PASSWORD` | key password |
-
-Both Android workflows read the same four, so one keystore covers both apps.
-
 ### Generating a keystore
 
 Once, on your own machine:
@@ -237,17 +205,6 @@ certutil -encode habiterall.keystore tmp.b64 && findstr /v CERTIFICATE tmp.b64  
 > than this repository, and never commit it (`*.jks` and `*.keystore` are
 > gitignored).
 
-## Digital Asset Links (TWA only)
-
-For the TWA to launch without a URL bar, your server must serve a file at
-`https://<TWA_HOST>/.well-known/assetlinks.json` naming your signing key's
-SHA-256 fingerprint. Both editions already serve that path; you supply the
-content. See [`android/SETUP.md`](../../android/SETUP.md) — the workflow prints
-the exact JSON to paste, so run it once and copy from the log.
-
-The native app needs none of this: it is an ordinary app, not a wrapper around
-your domain.
-
 ## Triggering a release
 
 ```bash
@@ -257,7 +214,6 @@ git push origin android-v0.1.0
 
 Both Android workflows fire on `android-v*` tags and attach their APK to the
 GitHub release. Or run either manually from the **Actions** tab —
-`android-native.yml` takes a *release* checkbox, `android-release.yml` takes an
 optional host override.
 
 ## If a run fails
@@ -273,6 +229,5 @@ optional host override.
 - **Browser suites fail but pass locally** — check
   `shared/test/browser/fixtures.mjs` first. Several "failures" have been stale
   test data, and a cached service worker can serve old CSS.
-- **`TWA_HOST` errors** — the value must be a bare hostname. A scheme or path
   is rejected deliberately, because either produces a manifest that builds fine
   and then fails verification on the phone.

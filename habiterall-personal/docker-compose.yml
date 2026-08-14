@@ -12,7 +12,7 @@ services:
     image: habiterall:latest
     container_name: habiterall
     ports:
-      - "3000:3000"
+      - "${APP_PORT:-3000}:3000"
     volumes:
       - habiterall-data:/data
     environment:
