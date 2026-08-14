@@ -32,6 +32,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -182,7 +183,26 @@ class MainActivity : ComponentActivity() {
                 // tap. See WebHost — this is what stops every habit opening with
                 // a cold browser start in front of the user.
                 val webHost = remember { WebHost() }
-                DisposableEffect(webHost) { onDispose { webHost.destroy() } }
+
+                // Stopped while the app is not being looked at. A WebView that
+                // outlives the screen also outlives the app being on screen, and
+                // destroying it on the way out is what used to guarantee its
+                // JavaScript was not still running in a pocket — see WebHost.pause.
+                val lifecycleOwner = LocalLifecycleOwner.current
+                DisposableEffect(lifecycleOwner, webHost) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        when (event) {
+                            Lifecycle.Event.ON_PAUSE -> webHost.pause()
+                            Lifecycle.Event.ON_RESUME -> webHost.resume()
+                            else -> Unit
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                        webHost.destroy()
+                    }
+                }
 
                 // Warm while nothing is open, and navigate when something is.
                 // Keyed on both, so closing the screen re-enters with a target of
