@@ -166,7 +166,12 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   transitions. A reminder is a wall-clock promise: 08:30 must stay 08:30
   across a clock change, which computing in UTC millis would silently break.
   It also pins the destination rule above, including that an *absent*
-  `notifyChannels` means enabled while an *empty* one means off.
+  `notifyChannels` means enabled while an *empty* one means off — and
+  `needsReminder`, which decides whether a day has been answered. That one
+  mirrors `answeredIds` in `shared/src/notify.js` case for case: a completion or
+  a skip is an answer, a partial amount or an explicit "no" is not. It used to
+  ask whether a row existed for the day, which silenced the phone on days the
+  server was still asking about.
 - **`ReminderTimeTest`** — the time parser, case for case with
   `shared/test/time.test.js`. Two parsers with one contract only stay honest if
   both are held to the same examples; `12 am` versus `12 pm` is the one that

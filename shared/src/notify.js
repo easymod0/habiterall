@@ -318,8 +318,20 @@ export function minutesOfDay(hhmm) {
 }
 
 /**
- * The habit ids already satisfied on a day, so a reminder is not sent for
- * something that is done.
+ * The habit ids that need no reminder on a day, because they have been
+ * answered: either completed, or explicitly skipped.
+ *
+ * A skip is an ANSWER, not a gap, and that is the whole reason this is not
+ * simply "the completed ones". `isCompleted` returns `null` for a skip — "not
+ * applicable" — which is falsy, so a truthiness test put every skipped habit
+ * back in the queue and asked about a day the user had already dealt with.
+ * `!== false` is the distinction: `false` is a real miss and still deserves its
+ * reminder, `null` does not.
+ *
+ * The native client applies the same rule to the same day (`Reminders
+ * .needsReminder`), and the two must not disagree — a destination that nags
+ * about a skipped day while the other stays quiet reads as one of them being
+ * broken.
  *
  * `isCompleted` takes the whole row, never a bare value: a numerical habit
  * recording 3 is an amount, not a skip.
@@ -328,16 +340,17 @@ export function minutesOfDay(hhmm) {
  * @param {{habit_id: number, value: number, status?: string}[]} rows that day's entries
  * @returns {Set<number>}
  */
-export function completedIds(habits, rows) {
+export function answeredIds(habits, rows) {
   const byId = new Map(habits.map((h) => [h.id, h]));
-  const done = new Set();
+  const answered = new Set();
   for (const row of rows) {
     const habit = byId.get(row.habit_id);
-    if (habit && isCompleted(habit, { value: row.value, status: row.status ?? '' })) {
-      done.add(row.habit_id);
+    if (!habit) continue;
+    if (isCompleted(habit, { value: row.value, status: row.status ?? '' }) !== false) {
+      answered.add(row.habit_id);
     }
   }
-  return done;
+  return answered;
 }
 
 /**
@@ -359,7 +372,7 @@ export function completedIds(habits, rows) {
  * @param {Date|number} args.instant
  * @param {string} [args.timeZone]
  * @param {(habitId: number, date: string) => boolean} [args.alreadySent]
- * @param {Set<number>} [args.doneToday]
+ * @param {Set<number>} [args.doneToday] answered today — see `answeredIds`
  * @param {number} [args.catchUpMinutes]
  * @param {(habit: import('./types.js').Habit, reason: string, detail: Record<string, any>) => void} [args.onSkip]
  * @returns {{habit: import('./types.js').Habit, date: string, time: string}[]}

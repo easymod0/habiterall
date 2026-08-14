@@ -22,7 +22,7 @@
 
 import { withNotifierScope, withUser } from './db/pool.js';
 import {
-  answerText, CHANNELS, completedIds, needsServerDelivery, serverChannels,
+  answeredIds, answerText, CHANNELS, needsServerDelivery, serverChannels,
   zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
@@ -126,7 +126,7 @@ export async function collect(instant) {
         id: row.id,
         settings,
         habits,
-        doneToday: completedIds(habits, entries),
+        doneToday: answeredIds(habits, entries),
         alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
       };
     });

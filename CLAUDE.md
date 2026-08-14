@@ -223,6 +223,34 @@ per channel, or enabling a second destination is silenced for its first day by
 the send to the first; keyed on the local date, or a user east of the server
 gets it filed under the wrong day and again a few hours later.
 
+**The phone's alarms follow the server only when something re-arms them, and a
+refresh used not to count.** `habits.reminder_time` is the schedule, but an
+alarm is a local copy of it, so every path that learns a new time has to arm
+one. The habit list draws itself straight from `/api/overview`, which meant a
+time set in a browser *appeared* on the phone immediately and changed nothing:
+the alarm stayed as it was, or absent. The only correction was
+`Application.onCreate`, which runs on a COLD start — and Android usually keeps
+the process, so closing and reopening the app was not one. That is why this
+presented as "notifications are unreliable" rather than as a missing feature:
+whether the phone agreed with the server depended on whether it had happened to
+die since. `Reminders.armFrom` now arms from every fetch the list makes (the
+settings request it already made answers `androidRemindersEnabled` too), and
+`enqueuePeriodicSync` is a six-hourly backstop, because every other path here is
+an event handing off to the next and one dropped link is otherwise silent
+forever. `ReminderReceiver` also holds itself open with `goAsync` now: it was
+arming *tomorrow's* alarm in a detached coroutine while the process was free to
+die, which is the same race `BootReceiver` already guarded.
+
+**A skip is an answer, and both destinations have to agree.** `answeredIds`
+(shared/src/notify.js) and `Reminders.needsReminder` are deliberate mirrors, and
+the rule is `isCompleted(...) !== false` rather than a truthiness test:
+`isCompleted` returns `null` for a skip, so asking "is it completed?" put every
+skipped day back in the queue and asked about a day the user had already dealt
+with. The phone had a third rule of its own — "does a row exist for today?" —
+which silenced six-of-eight-glasses and a note-bearing "no" while the server
+went on asking about the same day. Three rules for one question is how one
+destination ends up looking broken.
+
 **`SETTING_VALUES` rules are an array *or* a normaliser.** A URL and a timezone
 name cannot be enumerated, so those entries are functions returning the value
 to store (or `undefined` to reject) — which is also why an accepted setting may
