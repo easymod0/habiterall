@@ -117,11 +117,26 @@ export async function start(adapter) {
     // render or the dashboard paints with the wrong day order and flips.
     await settings.init();
 
-    await dashboard.load();
-    // After the dashboard, not instead of it: the habit view's Back button
-    // expects a list to go back to, and a habit that no longer exists then
-    // leaves the app on the dashboard rather than on nothing at all.
-    if (opening.view === 'habit') await detail.open(opening.id);
+    if (opening.view === 'habit') {
+      // A link straight to a habit does NOT paint the list on the way. It used
+      // to load and render the dashboard first, so every deep link showed a
+      // full grid of every habit for as long as the stats request took and
+      // then replaced it — the app looked like it had opened the wrong screen,
+      // and in the Android client, where tapping a habit is the ordinary way
+      // in, that flash was on the path most travelled. Nothing else needs the
+      // list: `state.habits` is the dashboard's alone, and Back reloads it.
+      //
+      // The URL still moves through the list, because that is the entry Back
+      // returns to. `paint()` is what normally writes it, and skipping the
+      // paint would otherwise mean Back from a deep-linked habit left the site
+      // rather than reaching the dashboard.
+      routes.go(routes.LIST);
+      // Falling back to the list when the habit will not open, or a deleted
+      // habit's link leaves the app showing nothing at all.
+      if (!await detail.open(opening.id)) await dashboard.load();
+    } else {
+      await dashboard.load();
+    }
     handleLaunchAction();
   } catch (e) {
     toast(e.message);

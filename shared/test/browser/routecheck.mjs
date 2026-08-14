@@ -177,6 +177,58 @@ try {
   ck('Back from a cold deep link reaches the dashboard',
     afterBack.list && !afterBack.detail, JSON.stringify(afterBack));
 
+  /* ---------- and the dashboard is never painted on the way ---------- */
+
+  // The boot used to load and paint the dashboard and only THEN open the
+  // habit, so a deep link showed a full grid of every habit for as long as the
+  // stats request took and then replaced it. Nothing was broken by it and no
+  // other check here could see it: it is a flash of the wrong screen, on the
+  // Android client's most-used path into the app.
+  //
+  // A third tab, because catching this needs a watcher installed before the
+  // app's first line runs and that means navigating a tab that already exists
+  // — which leaves the initial about:blank in the history and would break the
+  // count asserted above. Each tab measures one thing.
+  //
+  // Watched from inside the page rather than polled from here: the flash lasts
+  // one request, which on localhost is a few milliseconds — less than a
+  // devtools round trip, so a poll would report "no flash" on a page that
+  // flashed.
+  const flashTab = await send('Target.createTarget', { url: 'about:blank' });
+  const flashSession = (await send('Target.attachToTarget',
+    { targetId: flashTab.targetId, flatten: true })).sessionId;
+  const flashEv = async (e) => {
+    const r = await send('Runtime.evaluate',
+      { expression: e, awaitPromise: true, returnByValue: true }, flashSession);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
+    return r.result.value;
+  };
+  await send('Page.enable', {}, flashSession);
+  await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `
+      window.__listFlash = false;
+      new MutationObserver(() => {
+        const grid = document.getElementById('grid');
+        const detail = document.getElementById('view-detail');
+        // Rows in the dashboard's grid while the habit view is still hidden:
+        // the user is looking at the list they did not ask for.
+        if (grid && grid.childElementCount > 0 && detail && detail.hidden) {
+          window.__listFlash = true;
+        }
+      }).observe(document, { childList: true, subtree: true, attributes: true });
+    `,
+  }, flashSession);
+  await send('Page.navigate', { url: `${APP}/#/habit/${habit.id}` }, flashSession);
+  for (let i = 0; i < 80; i++) {
+    if (await flashEv(`!!document.querySelector('#view-detail h2')`).catch(() => 0)) break;
+    await sleep(200);
+  }
+  await sleep(400);
+
+  const flashed = await flashEv(`window.__listFlash`);
+  ck('a cold deep link never paints the dashboard on the way',
+    flashed === false, `__listFlash=${flashed}`);
+
   /* ---------- and junk is the dashboard, not an error ---------- */
 
   // Its own tab, for the reason the deep-link case above needed one and this
