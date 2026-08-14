@@ -1025,17 +1025,25 @@ The ones worth a dashboard or an alert:
 | `notify.starting` | info | `mode=bot` or `mode=webhook` — whether reminders can carry buttons at all |
 | `notify.sent` | info | A reminder actually went, with the channel and how long it took |
 | `notify.failed` | warn | It did not. `permanent=true` means it will not be retried, so this is the one to alert on |
+| `notify.too_late` | warn | A reminder was **lost**: its minute passed while nothing was running and it will not be retried today. An outage, an overrunning tick, or a `TZ` the container never got. Said once per habit, channel and day |
+| `notify.unreachable` | warn | A destination is switched on but cannot deliver — most often a Discord channel id on an instance with no `DISCORD_BOT_TOKEN`. Nothing else reports this: the settings dialog's test button only speaks for channels that *are* ready. Said once per process |
 | `notify.tick` | info / debug | Per tick: sent, failed, and a count per reason nothing was sent. Debug when it had nothing to do |
 | `notify.skip` | debug | **Why one habit was skipped**, with the clock it judged against |
 | `notify.tick_slow` | warn | A tick is overrunning its interval, so the next one is skipped and the last accounts are starved |
 | `auth.login` / `auth.suspended` | info / warn | Cloud: who signed in (id and issuer, never the subject or the email), and who was turned away |
 | `pg.client_error` | error | Cloud: a pooled connection failed |
 
-**When a reminder does not arrive, set `LOG_LEVEL=debug` and wait a minute.**
-`notify.skip` names the gate that dropped it — `not_yet`, `too_late`,
-`done_today`, `already_sent`, `archived`, `no_reminder_time` — and prints the
-clock it compared against. `too_late` with a `zone` you did not expect is the
-`TZ` problem above.
+**When a reminder does not arrive, read the warnings first.** The two states
+that used to be silent now name themselves at `warn`: `notify.unreachable` if
+the destination could never have delivered, and `notify.too_late` if the
+reminder was there and its minute went by unserved.
+
+If neither appears, **set `LOG_LEVEL=debug` and wait a minute.** `notify.skip`
+names the gate that dropped it — `not_yet`, `done_today`, `already_sent`,
+`too_late`, `archived`, `no_reminder_time` — and prints the clock it compared
+against. Those are in the order they are asked, which is why `already_sent`
+rather than `too_late` is what a delivered reminder reports for the rest of the
+day. `too_late` with a `zone` you did not expect is the `TZ` problem above.
 
 ### In-app settings
 

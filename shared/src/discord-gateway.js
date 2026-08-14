@@ -33,6 +33,14 @@
  * nothing. That is what the `acked` flag is for — an unacknowledged heartbeat
  * closes the socket and resumes rather than waiting for a close that will never
  * come.
+ *
+ * One disconnect must produce exactly ONE reconnect, and that is harder than it
+ * looks: closing a socket ourselves also fires its own `onclose`, so a handler
+ * left attached schedules a second one. Two sockets then race, only the newer is
+ * heartbeated, and Discord closes the older a couple of intervals later — whose
+ * `onclose` schedules a third. `detach` and the identity guard in `open` are
+ * both there for that, and `scheduleReconnect` is idempotent as a third line of
+ * defence.
  */
 
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
@@ -83,7 +91,8 @@ const INTENTS = 0;
  * @param {(interaction: any) => any} opts.onInteraction
  * @param {new (url: string) => any} [opts.WebSocketImpl] injected for tests
  * @param {{log?: Function, warn?: Function, error?: Function}} [opts.log]
- * @param {(ms: number) => any} [opts.setTimeoutImpl]
+ * @param {(fn: () => void, ms: number) => any} [opts.setTimeoutImpl] injected for
+ *   tests, so a reconnect can be observed without waiting for one
  * @returns {{stop: () => void, state: () => string}}
  */
 export function connectGateway(opts) {
@@ -92,6 +101,7 @@ export function connectGateway(opts) {
     onInteraction,
     WebSocketImpl = globalThis.WebSocket,
     log = console,
+    setTimeoutImpl = setTimeout,
   } = opts;
 
   if (!token) throw new Error('connectGateway needs a bot token');
@@ -99,6 +109,7 @@ export function connectGateway(opts) {
 
   let ws = null;
   let heartbeat = null;
+  let reconnect = null;
   let sequence = null;
   let sessionId = null;
   let resumeUrl = null;
@@ -110,6 +121,20 @@ export function connectGateway(opts) {
   function clearHeartbeat() {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
+  }
+
+  /**
+   * Stop listening to a socket we are done with.
+   *
+   * `close()` fires `onclose`, so a socket being deliberately discarded still
+   * reports itself as an unexpected disconnect unless its handlers come off
+   * first — which is how one reconnect became two.
+   */
+  function detach(socket) {
+    if (!socket) return;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.onerror = null;
   }
 
   function send(payload) {
@@ -156,20 +181,33 @@ export function connectGateway(opts) {
 
   function closeAndReconnect(code = 4000) {
     clearHeartbeat();
-    try {
-      ws?.close(code);
-    } catch { /* already gone */ }
+    // Nulled BEFORE the close, so the identity guard in `open` already sees this
+    // socket as superseded if its `onclose` fires synchronously.
+    const dying = ws;
     ws = null;
+    detach(dying);
+    try {
+      dying?.close(code);
+    } catch { /* already gone */ }
     scheduleReconnect();
   }
 
+  /**
+   * Idempotent: a second call while one is already pending is a no-op rather
+   * than a second socket. Nothing should reach here twice for one disconnect,
+   * but the cost of being wrong about that is socket churn against Discord's
+   * identify limit, so it is cheap insurance.
+   */
   function scheduleReconnect() {
-    if (stopped) return;
+    if (stopped || reconnect) return;
     const delay = RECONNECT_DELAYS[Math.min(attempt, RECONNECT_DELAYS.length - 1)];
     attempt++;
     state = 'waiting';
-    const timer = setTimeout(open, delay);
-    timer.unref?.();
+    reconnect = setTimeoutImpl(() => {
+      reconnect = null;
+      open();
+    }, delay);
+    reconnect?.unref?.();
   }
 
   function handle(frame) {
@@ -236,15 +274,22 @@ export function connectGateway(opts) {
     // published one.
     const url = sessionId && resumeUrl ? `${resumeUrl}/?v=10&encoding=json` : GATEWAY_URL;
 
+    let socket;
     try {
-      ws = new WebSocketImpl(url);
+      socket = new WebSocketImpl(url);
     } catch (err) {
       log.error?.('discord gateway: could not open a socket', err?.message ?? err);
       scheduleReconnect();
       return;
     }
+    ws = socket;
 
-    ws.onmessage = (event) => {
+    // Every handler below asks whether it is still the current socket first. A
+    // real close is asynchronous, so a socket can be replaced before its own
+    // events arrive; without the guard, a superseded socket's late close tears
+    // down the connection that replaced it.
+    socket.onmessage = (event) => {
+      if (socket !== ws) return;
       let frame;
       try {
         frame = JSON.parse(typeof event.data === 'string' ? event.data : String(event.data));
@@ -258,7 +303,8 @@ export function connectGateway(opts) {
       }
     };
 
-    ws.onclose = (event) => {
+    socket.onclose = (event) => {
+      if (socket !== ws) return;
       clearHeartbeat();
       ws = null;
       const code = event?.code;
@@ -280,7 +326,7 @@ export function connectGateway(opts) {
       scheduleReconnect();
     };
 
-    ws.onerror = (err) => {
+    socket.onerror = (err) => {
       // A socket error is always followed by a close, which is where the
       // reconnect happens; logging twice would be noise.
       log.warn?.('discord gateway: socket error', err?.message ?? '');
@@ -293,10 +339,14 @@ export function connectGateway(opts) {
     stop() {
       stopped = true;
       clearHeartbeat();
-      try {
-        ws?.close(1000);
-      } catch { /* already gone */ }
+      if (reconnect) clearTimeout(reconnect);
+      reconnect = null;
+      const dying = ws;
       ws = null;
+      detach(dying);
+      try {
+        dying?.close(1000);
+      } catch { /* already gone */ }
       state = 'stopped';
     },
     state: () => state,

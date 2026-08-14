@@ -251,6 +251,39 @@ which silenced six-of-eight-glasses and a note-bearing "no" while the server
 went on asking about the same day. Three rules for one question is how one
 destination ends up looking broken.
 
+**One disconnect must produce exactly one reconnect.** Closing a socket
+ourselves also fires its own `onclose`, so the handler left attached reported a
+deliberate close as an unexpected one and scheduled a second connect — two live
+sockets, of which only the newer was heartbeated, so Discord closed the older a
+couple of intervals later and *that* scheduled a third. Buttons then answer
+twice (the second `respondInteraction` fails on a spent token) and the backoff
+advances at double speed toward Discord's identify limit. Three things stop it
+now and the ordering of the first is load bearing: `ws` is nulled *before* the
+close, the socket is detached, and `scheduleReconnect` is idempotent. The
+regression test counts scheduled timers, because every wrong version of this
+still reports `state() === 'waiting'`.
+
+**The two silences in a tick that are worth a warning.** Everything a tick
+decides is at debug, and rightly — 1,440 lines a day of "nothing was due" is how
+a log stops being read. Two exceptions, both routed through the `once` dedupe in
+notify-send.js. `notify.too_late` means a reminder was *lost*: its minute passed
+while nothing was running and it will not be retried today, which is what an
+outage, an overrunning tick or an unset container timezone looks like. That claim
+rests entirely on the ORDER of the gates in `dueReminders`: the catch-up window
+closes half an hour after the reminder, so from 08:31 a habit whose reminder went
+out at 08:00 is also past it, and asking about lateness before `done_today` and
+`already_sent` reported every delivered reminder as a lost one, once per habit
+per channel per healthy day — which is worse than not warning at all, because a
+real loss then arrives in a crowd. Answered and sent are asked first, so
+`too_late` is only ever said about a day still outstanding. And
+`notify.unreachable` covers the state that produced no output whatsoever — a
+destination switched on but not configured, where `needsServerDelivery` is false,
+the account is skipped, and every visible surface looks correct. The case that
+motivated it is a Discord channel id on an instance with no `DISCORD_BOT_TOKEN`:
+the recommended setup, missing the one credential a user cannot supply
+themselves, silent forever, and the settings dialog's test button says nothing
+either because it only reports on channels that are ready.
+
 **`SETTING_VALUES` rules are an array *or* a normaliser.** A URL and a timezone
 name cannot be enumerated, so those entries are functions returning the value
 to store (or `undefined` to reject) — which is also why an accepted setting may

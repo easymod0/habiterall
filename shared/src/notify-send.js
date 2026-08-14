@@ -17,11 +17,75 @@
 
 import {
   CHANNELS, dueReminders, discordPayload, reminderMessage, serverChannels,
+  unreachableChannels,
 } from './notify.js';
 import { postReminder } from './discord.js';
 
 /** A webhook that hangs must not hold up the rest of the tick. */
 const SEND_TIMEOUT_MS = 10_000;
+
+/**
+ * What has already been said, so a tick every minute does not repeat it.
+ *
+ * Both users of this are conditions that persist until someone changes a
+ * setting: a destination that cannot deliver, and a reminder dropped for being
+ * too late. Logged once each, they are actionable; logged 1,440 times a day they
+ * are the reason nobody reads the log.
+ *
+ * Cleared wholesale past a bound rather than pruned. The keys carry a date, so
+ * the set grows by a handful a day and the only cost of forgetting is saying
+ * something twice — where the cost of a leak in a process that runs for months
+ * is unbounded memory.
+ */
+const said = new Set();
+const MAX_SAID = 5_000;
+
+/** @returns {boolean} whether this is the first time, and so worth saying */
+function once(key) {
+  if (said.has(key)) return false;
+  if (said.size >= MAX_SAID) said.clear();
+  said.add(key);
+  return true;
+}
+
+/** Test seam: the dedupe is process-wide state, and a test needs it empty. */
+export function resetSaid() {
+  said.clear();
+}
+
+/**
+ * Say — once — that a destination the user has switched on cannot deliver.
+ *
+ * Called by each edition's `collect`, because that is where an account is
+ * skipped for exactly this reason and the shared tick never sees it. One
+ * implementation rather than two, so the wording and the dedupe cannot drift.
+ *
+ * @param {NotifyAccount} account
+ * @param {{botToken?: string, log?: any}} [ctx]
+ * @returns {string[]} the unreachable channel ids
+ */
+export function warnUnreachable(account, ctx = {}) {
+  const settings = account?.settings ?? {};
+  const log = ctx.log ?? console;
+  const broken = unreachableChannels(settings, { bot: !!ctx.botToken });
+  const who = account?.id ?? 'self';
+
+  for (const channel of broken) {
+    // Not keyed on a date: this is a configuration, and it stays wrong until
+    // someone fixes it. Saying so once per process start is the right cadence.
+    if (!once(`unreachable:${who}:${channel}`)) continue;
+
+    const botOnly = channel === 'discord' && settings.discordChannelId && !ctx.botToken;
+    log.warn?.('notify.unreachable', {
+      channel,
+      user: account?.id ?? null,
+      reason: botOnly
+        ? 'a channel id needs this instance to have a DISCORD_BOT_TOKEN — with only a URL, use the webhook field'
+        : 'switched on but nothing is configured for it',
+    });
+  }
+  return broken;
+}
 
 /**
  * One user's world, as a tick needs it: read once, up front, so no storage is
@@ -223,6 +287,24 @@ export async function deliverAccount(account, ctx) {
         log.debug?.('notify.skip', {
           channel, habit: habit.id, user: account.id, reason, ...detail,
         });
+
+        // `too_late` is the one skip that means a reminder was LOST rather than
+        // handled: its time came and went while nothing was running, and it will
+        // not be retried today. Every other reason is a normal outcome — not yet,
+        // already answered, already sent — and belongs at debug where it cannot
+        // bury anything. This one is what an outage, an overrunning tick or an
+        // unset container timezone looks like, and at debug it went unseen.
+        //
+        // Once per habit per channel per day: the condition holds for the rest of
+        // the day, so a per-tick warning would be 1,400 lines about one loss.
+        if (reason === 'too_late'
+            && once(`late:${account.id ?? 'self'}:${channel}:${habit.id}:${detail.date}`)) {
+          log.warn?.('notify.too_late', {
+            channel, habit: habit.id, user: account.id, date: detail.date,
+            at: detail.at, late_minutes: detail.late_minutes, catch_up: detail.catch_up,
+            zone: detail.zone,
+          });
+        }
       },
     });
 
