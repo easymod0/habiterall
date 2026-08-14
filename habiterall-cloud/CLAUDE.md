@@ -52,8 +52,18 @@ transaction-local `app.scope = 'notifier'` that only `withNotifierScope` sets.
 The two conditions are mutually exclusive by construction, so it cannot widen a
 request already scoped to a user, and it reaches no table but `users`. Once it
 has the ids, `src/notifier.js` goes back through `withUser` for the habits, the
-entries, and `notify_log` — so a mistake there still fails closed. Read the
-header of `008_notify_log.sql` before touching any of it.
+entries, `notify_log` and `notify_status` — so a mistake there still fails
+closed. Read the header of `008_notify_log.sql` before touching any of it.
+
+**`notify_status` (migration 010) is the one thing the notifier writes FOR the
+user.** One row per account per channel holding the last delivery outcome, so a
+deleted webhook is something the settings dialog can say rather than a warn line
+nobody can read. Ordinary owner policy — the key leads with `user_id`, so the
+invisible-row squat migrations 007 and 008 guard against cannot arise here — and
+`SELECT, INSERT, UPDATE` only, because it is upserted in place and nothing
+deletes one. It carries an error string straight from Discord, which is why the
+tenancy suite attacks it: a leak would hand one account a running commentary on
+another's destinations.
 
 **A button press is authorised by its channel.** `interactionAdapter` in
 `src/notifier.js` resolves the account from `interaction.channel_id` — through

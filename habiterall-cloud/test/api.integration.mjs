@@ -108,6 +108,78 @@ ck('another user cannot read them',
   bobSettings.length === 1 && !JSON.stringify(bobSettings).includes('newest-left'),
   JSON.stringify(bobSettings));
 
+/* ---------- what /overview means by `end` ---------- */
+
+console.log('--- overview ---');
+// The one place this suite goes through the router rather than the data layer,
+// because the bug was in the route: `end` decided both the grid window and the
+// date the row summary was computed as of, so paging the dashboard back a month
+// restated "43%" and a streak of 0 as if they were today's. The grid must still
+// follow `end` — that is what the parameter is for — while strength and the
+// streaks stay anchored on today. Mirrors habiterall-personal's
+// test/overview.integration.mjs; the two editions promise the same API.
+const express = (await import('express')).default;
+const { api } = await import('../src/api.js');
+
+const overviewApp = express();
+// Enough of a session for `uid(req)`. The OIDC flow is browser-tested; what is
+// under test here is arithmetic behind the route.
+overviewApp.use((req, _res, next) => { req.session = { user: { id: alice } }; next(); });
+overviewApp.use('/api', api);
+const overviewServer = await new Promise((resolve) => {
+  const s = overviewApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const overviewBase = `http://127.0.0.1:${overviewServer.address().port}`;
+
+const isoDaysAgo = (n) => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+};
+
+// A run of completions ending today, and nothing in the month before it.
+const RECENT_DAYS = 10;
+await withUser(alice, async (db) => {
+  for (let i = 0; i < RECENT_DAYS; i++) {
+    await db.query(
+      `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+       VALUES ($1,$2,$3,9,'','')
+       ON CONFLICT (habit_id, date) DO UPDATE SET value = excluded.value`,
+      [habitId, alice, isoDaysAgo(i)]
+    );
+  }
+});
+
+const getOverview = (params) =>
+  fetch(`${overviewBase}/api/overview?${new URLSearchParams(params)}`).then((r) => r.json());
+
+const nowView = await getOverview({ days: 7 });
+const pagedView = await getOverview({ days: 7, end: isoDaysAgo(40) });
+const rowNow = nowView.habits.find((h) => h.id === habitId);
+const rowPaged = pagedView.habits.find((h) => h.id === habitId);
+
+ck('paging back does not move the strength percentage',
+  rowPaged.score === rowNow.score, `${rowPaged.score} vs ${rowNow.score}`);
+ck('paging back does not move the current streak',
+  rowPaged.currentStreak === rowNow.currentStreak,
+  `${rowPaged.currentStreak} vs ${rowNow.currentStreak}`);
+ck('paging back does not drop a best streak set after that date',
+  rowPaged.bestStreak === rowNow.bestStreak,
+  `${rowPaged.bestStreak} vs ${rowNow.bestStreak}`);
+ck('the summary is describing the run, not an empty window',
+  rowNow.currentStreak === RECENT_DAYS, String(rowNow.currentStreak));
+ck('the grid window still follows end',
+  pagedView.end === isoDaysAgo(40) && Object.keys(rowPaged.entries).length === 0,
+  `${pagedView.end}, ${Object.keys(rowPaged.entries).length} entries`);
+ck("today's window still carries its entries",
+  Object.keys(rowNow.entries).length === 7,
+  String(Object.keys(rowNow.entries).length));
+
+overviewServer.close();
+// The rows above would otherwise be counted by the checks that follow.
+await withUser(alice, (db) =>
+  db.query(`DELETE FROM entries WHERE habit_id = $1 AND date <> '2026-01-01'`, [habitId]));
+
 /* ---------- import isolation ---------- */
 
 console.log('--- import ---');

@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { withUser } from './db/pool.js';
 import { applyImport } from './apply-import.js';
-import { sendTest } from './notifier.js';
+import { deliveryStatus, sendTest } from './notifier.js';
 import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 // Format sniffing and every parser live in shared: the two editions had
@@ -290,10 +290,19 @@ api.get('/overview', route(async (req, res) => {
   // The dashboard can page back through history, so it asks for the window it
   // is actually showing. Without this the grid rendered empty cells for any
   // day outside the most recent fortnight — the entries were never fetched.
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : today();
-  const end = requestedEnd > today() ? today() : requestedEnd;
+  const now = today();
+  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const end = requestedEnd > now ? now : requestedEnd;
   const start = addDays(end, -(days - 1));
   const archived = req.query.archived === 'true';
+
+  // ...and `end` decides the GRID window only. The row summary — strength,
+  // current streak, best streak — is a statement about the habit now, so it is
+  // anchored on today whatever window is on screen. They shared one date, and
+  // paging back a month restated the summary as of that month: "43%" with
+  // nothing on the row to say it was not today's. The detail view is the
+  // surface that answers "as of when", and it has its own range controls.
+  const summaryEnd = now;
 
   const payload = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
@@ -321,7 +330,7 @@ api.get('/overview', route(async (req, res) => {
     // STREAK_HISTORY_DAYS bounds what the streak scan reads. A streak longer
     // than this reports as capped rather than reading the whole table; the
     // count below is done in SQL instead of in JS.
-    const streakFrom = addDays(end, -STREAK_HISTORY_DAYS);
+    const streakFrom = addDays(summaryEnd, -STREAK_HISTORY_DAYS);
     const { rows: allRows } = await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
        FROM entries WHERE habit_id = ANY($1) AND date >= $2 ORDER BY date`,
@@ -362,7 +371,7 @@ api.get('/overview', route(async (req, res) => {
     const byHabit = new Map(ids.map((id) => [id, []]));
     for (const r of allRows) byHabit.get(r.habit_id).push(r);
 
-    const cutoff = addDays(end, -SUMMARY_WINDOW_DAYS);
+    const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
 
     return {
       start,
@@ -370,15 +379,15 @@ api.get('/overview', route(async (req, res) => {
       habits: habits.map((h) => {
         const all = byHabit.get(h.id) ?? [];
         const recent = all.filter((e) => e.date >= cutoff);
-        const stats = computeStats(h, recent, { end });
+        const stats = computeStats(h, recent, { end: summaryEnd });
 
         const totalCompleted = totals.get(h.id) ?? 0;
 
         const streaks = computeStreaks(
           h,
           new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
-          all.length ? all[0].date : end,
-          end
+          all.length ? all[0].date : summaryEnd,
+          summaryEnd
         );
 
         return {
@@ -455,6 +464,26 @@ api.post('/notify/test', route(async (req, res) => {
       .then((r) => r.rows[0]?.settings ?? {})
   );
   res.json({ results: await sendTest(uid(req), settings) });
+}));
+
+/**
+ * How each destination last behaved.
+ *
+ * The test button above is the other half of this and has one flaw: it has to
+ * be PRESSED, and nothing suggests pressing it. A webhook deleted in April
+ * stops the reminders while the habit, its time and the destination toggle all
+ * go on looking correct — and on a shared instance the warn line it produces is
+ * unreachable: the user cannot see it, and the operator has no reason to be
+ * reading one account's warnings. So this reports what the notifier already
+ * learned at 08:00, and the settings dialog shows it without being asked.
+ *
+ * Only the last outcome per channel, and only for channels something has
+ * actually been attempted for. It is deliberately NOT a statement about
+ * configuration: `channelConfigured` stays the authority on whether a
+ * destination can deliver, and this says only whether it did.
+ */
+api.get('/notify/status', route(async (req, res) => {
+  res.json({ channels: await deliveryStatus(uid(req)) });
 }));
 
 /* ---------- export ---------- */

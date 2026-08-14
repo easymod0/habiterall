@@ -32,6 +32,14 @@ export const INTERACTION = { PING: 1, COMMAND: 2, COMPONENT: 3, AUTOCOMPLETE: 4,
 export const CALLBACK = {
   MESSAGE: 4,
   DEFER: 5,
+  /**
+   * "Received, nothing to show yet" — the acknowledgement that leaves the
+   * message exactly as it is. `DEFER` (5) posts a visible "thinking" placeholder
+   * for a REPLY; this one is its counterpart for an EDIT, and it is what a
+   * reminder wants: the answer arrives as a change to the reminder itself, so
+   * anything shown in the meantime would be a second message to clean up.
+   */
+  DEFER_UPDATE: 6,
   UPDATE_MESSAGE: 7,
   MODAL: 9,
 };
@@ -148,21 +156,50 @@ export function postReminder(args, deps = {}) {
 }
 
 /**
- * Answer an interaction. Must happen within three seconds of the click, which
- * is why nothing slow may sit between receiving one and calling this.
+ * Answer an interaction, before or after it has been acknowledged.
  *
- * The interaction token is single-use and short-lived, so this needs no bot
- * token — which is also why it is safe for the gateway loop to hand the token
- * straight through.
+ * The FIRST answer has three seconds to leave, and goes to the callback
+ * endpoint. That endpoint is then spent: everything after it goes to the
+ * webhook on the same interaction token, which stays valid for fifteen minutes.
+ * `deps.acknowledged` says which of the two this is.
+ *
+ * Two shapes reach the second case, and the response the caller already built
+ * says which — so `handleInteraction` reads the same either way:
+ *
+ *   UPDATE_MESSAGE  -> PATCH the message the button was on. This is the
+ *                      reminder becoming its own answer, which is the point of
+ *                      editing rather than replying.
+ *   MESSAGE         -> POST a new message. Ours are all ephemeral, so this is
+ *                      a private note to whoever clicked and nothing else.
+ *
+ * The interaction token is single-use and short-lived, so none of this needs a
+ * bot token — which is also why it is safe for the gateway loop to hand the
+ * token straight through. `application_id` rides on the interaction, so the
+ * webhook path needs no extra call to find out who we are either.
+ *
+ * @param {any} interaction
+ * @param {any} response
+ * @param {{fetch?: typeof globalThis.fetch, timeoutMs?: number,
+ *          acknowledged?: boolean}} [deps]
  */
 export function respondInteraction(interaction, response, deps = {}) {
-  return discordRequest(
-    {
-      path: `/interactions/${interaction.id}/${interaction.token}/callback`,
-      body: response,
-    },
-    deps
-  );
+  if (!deps.acknowledged) {
+    return discordRequest(
+      {
+        path: `/interactions/${interaction.id}/${interaction.token}/callback`,
+        body: response,
+      },
+      deps
+    );
+  }
+
+  const webhook = `/webhooks/${interaction.application_id}/${interaction.token}`;
+  return response?.type === CALLBACK.UPDATE_MESSAGE
+    ? discordRequest(
+      { method: 'PATCH', path: `${webhook}/messages/@original`, body: response.data },
+      deps
+    )
+    : discordRequest({ method: 'POST', path: webhook, body: response.data }, deps);
 }
 
 /* ---------- the shapes of an answer ---------- */
@@ -275,10 +312,14 @@ function daysApart(a, b) {
  *          log?: {warn?: Function, error?: Function}}} adapter
  */
 export async function handleInteraction(interaction, adapter) {
-  const respond = adapter.respond ?? ((i, r) => respondInteraction(i, r));
+  const respond = adapter.respond ?? ((i, r, opts) => respondInteraction(i, r, opts));
   const log = adapter.log ?? console;
+
+  // Whether the three-second callback has been spent, which is all `respond`
+  // needs to know to pick an endpoint.
+  let acknowledged = false;
   const send = async (response) => {
-    await respond(interaction, response);
+    await respond(interaction, response, { acknowledged });
     return response;
   };
 
@@ -295,6 +336,32 @@ export async function handleInteraction(interaction, adapter) {
       interaction.message,
       'Nothing — this was a test message.'
     ));
+  }
+
+  // Acknowledge BEFORE touching storage, because everything below this line is
+  // storage. Discord allows three seconds and the work is up to three round
+  // trips through the database — resolve the channel, ask what day it is there,
+  // record — so on a cold pool or a container that has just started, the press
+  // was written and Discord had already told the user "This interaction
+  // failed". The worst kind of failure message: it says the opposite of what
+  // happened, and the natural response is to press again. Deferred, the token
+  // is good for fifteen minutes and the storage work has all the time it needs.
+  //
+  // A modal is the exception, and cannot be helped: it must be OPENED within
+  // the three seconds, so there is nothing to defer to. It does one lookup and
+  // no write, which is why it is the path that can afford to stay as it was.
+  //
+  // Ordering worth knowing rather than rediscovering: it is removing the
+  // buttons that stops a second click recording twice, and a defer delays that
+  // — so the buttons stay live while the write is in flight. `record` is an
+  // upsert for every action, so a double press is idempotent and the window
+  // costs nothing.
+  const opensModal = type === INTERACTION.COMPONENT && parsed.action === 'amount';
+  if (!opensModal && interaction.message) {
+    // Not conditional on the result: a defer that fails leaves the interaction
+    // lost either way, and the write is the half worth finishing.
+    await respond(interaction, { type: CALLBACK.DEFER_UPDATE }, { acknowledged });
+    acknowledged = true;
   }
 
   const account = await adapter.resolveChannel(interaction.channel_id);
@@ -323,8 +390,10 @@ export async function handleInteraction(interaction, adapter) {
     ));
   }
 
-  // A number cannot come from a button, so the button opens a box first.
-  if (type === INTERACTION.COMPONENT && parsed.action === 'amount') {
+  // A number cannot come from a button, so the button opens a box first. This
+  // is the `opensModal` path above, undeferred and answered inside the three
+  // seconds — a callback of type MODAL is the only way to open one at all.
+  if (opensModal) {
     const habit = await adapter.findHabit?.(account, parsed.habitId);
     if (!habit) return send(ephemeral('That habit no longer exists.'));
     return send(amountModal(habit, {

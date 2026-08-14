@@ -254,6 +254,22 @@ section action like "send a test notification" asks the server to use the
 settings it *holds*, so it is disabled while the draft is dirty rather than
 quietly testing the old value.
 
+**A section can also SAY something, and that arrives late.**
+`SECTION_NOTICES` mirrors `SECTION_ACTIONS` — keyed by section, given the draft,
+returning prose — and the one entry is "your last reminder was not delivered",
+from `GET /api/notify/status`. Three things about how it is rendered. It is
+*not* awaited by `openSettings`: waiting on a request before showing the
+settings would make every open feel slow to spare the one that has something to
+report, and offline the dialog would never open at all. The redraw when the
+answer lands is *conditional* — a clean draft and a changed set of notices —
+for the same reason `stage` rebuilds sparingly: a rebuild tears every control
+out and takes a text field's focus with it, and a late answer must not do that
+to someone already typing. And the notices read the **draft**, so switching a
+destination off makes its warning disappear immediately rather than after a save
+and a refetch. Pressing "send a test notification" re-asks, because a test is a
+real delivery attempt and is what clears the notice once a replacement webhook
+works.
+
 **A setting the server normalises cannot be judged here.** Whether a webhook
 URL is acceptable depends on a host allowlist that lives with the fetch, so the
 control has to show what was *stored* rather than what was typed. `saveAll`

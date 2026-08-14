@@ -8,11 +8,14 @@
  *
  * Both editions supply the same small adapter and get the same behaviour:
  *
- *   collect() -> [{ id, settings, habits, doneToday, alreadySent }]
+ *   collect() -> [{ id, settings, habits, doneToday, alreadySent, delivered }]
  *   mark(account, habitId, channel, date)
+ *   recordOutcome(account, channel, outcome)
  *
  * `collect` reads storage, `mark` writes the watermark that stops a reminder
- * being sent twice. Everything between them is here.
+ * being sent twice, and `recordOutcome` writes the one thing a *user* can see
+ * about all this — whether their last reminder actually arrived. Everything
+ * between them is here.
  */
 
 import {
@@ -97,6 +100,23 @@ export function warnUnreachable(account, ctx = {}) {
  * @property {import('./types.js').Habit[]} [habits] those with a reminder time
  * @property {Set<number>} [doneToday]
  * @property {(habitId: number, channel: string, date: string) => boolean} [alreadySent]
+ * @property {Record<string, boolean>} [delivered] channel -> whether the last
+ *   attempt landed, as stored. Absent means nothing has been recorded for that
+ *   channel yet. Only used to decide whether the outcome below is NEWS.
+ */
+
+/**
+ * What is worth remembering about a delivery attempt, once it differs from the
+ * last one. `error` is the prose the sender already produced — re-inventing it
+ * in the UI is how the two would come to say different things about one 404.
+ *
+ * @typedef {object} DeliveryOutcome
+ * @property {boolean} ok
+ * @property {number} [status]
+ * @property {string} [error]
+ * @property {boolean} [permanent]
+ * @property {'bot'|'webhook'} [mode]
+ * @property {string} [date] the local date the reminder was for
  */
 
 /**
@@ -115,6 +135,11 @@ export function warnUnreachable(account, ctx = {}) {
  * @typedef {object} NotifyContext
  * @property {(instant: Date|number) => Promise<NotifyAccount[]>|NotifyAccount[]} collect
  * @property {(account: NotifyAccount, habitId: number, channel: string, date: string) => any} mark
+ * @property {(account: NotifyAccount, channel: string, outcome: DeliveryOutcome) => any} [recordOutcome]
+ *   Store the last delivery outcome for a destination, so the settings dialog
+ *   can say a reminder failed. Called only when the outcome DIFFERS from what
+ *   is stored, which turns "a write per reminder per channel" into "a write
+ *   when something changes".
  * @property {Date|number} [instant]
  * @property {string} [appUrl] this deployment's public address, for the link
  * @property {string} [botToken] DISCORD_BOT_TOKEN, when the instance has one
@@ -273,6 +298,37 @@ export async function deliverAccount(account, ctx) {
   /** reason -> count, for the tick summary. */
   const skipped = {};
 
+  // What the last attempt on each channel was recorded as, so only a CHANGE is
+  // written. Seeded from storage and then kept up to date in memory, or five
+  // habits failing at 08:00 would be five identical writes — and the second
+  // through fifth say nothing the first did not.
+  const wasDelivered = { ...(account.delivered ?? {}) };
+
+  /**
+   * Remember an outcome if it is news.
+   *
+   * News is a change of state, or the first thing ever recorded for a channel.
+   * A failure to STORE the outcome must not become a failure to deliver: this
+   * is a diagnostic, and the reminder itself has already gone (or not).
+   */
+  const noteOutcome = async (channel, result, date) => {
+    if (!ctx.recordOutcome) return;
+    if (wasDelivered[channel] === result.ok) return;
+    wasDelivered[channel] = result.ok;
+    try {
+      await ctx.recordOutcome(account, channel, {
+        ok: result.ok,
+        status: result.status,
+        error: result.error,
+        permanent: !!result.permanent,
+        mode: result.mode,
+        date,
+      });
+    } catch (err) {
+      log.error?.('notify.outcome_not_stored', { channel, user: account.id }, err);
+    }
+  };
+
   for (const channel of channels) {
     const due = dueReminders({
       habits: account.habits ?? [],
@@ -337,6 +393,9 @@ export async function deliverAccount(account, ctx) {
 
       if (result.ok) {
         await ctx.mark(account, item.habit.id, channel, item.date);
+        // A success is worth storing for one reason: it CLEARS a failure the
+        // user is being shown. Nothing changed, nothing is written.
+        await noteOutcome(channel, result, item.date);
         sent++;
         // A handful a day per user, and the only positive proof delivery works.
         log.info?.('notify.sent', {
@@ -349,8 +408,15 @@ export async function deliverAccount(account, ctx) {
       failed++;
       // A permanent failure is recorded as sent: the reminder is never going
       // to arrive, and retrying it every minute until midnight helps nobody.
-      // The settings dialog's test button is how the user finds out.
       if (result.permanent) await ctx.mark(account, item.habit.id, channel, item.date);
+
+      // ...and this is how the user finds out, rather than by pressing a test
+      // button nothing suggests pressing. A deleted webhook or a bot removed
+      // from the channel used to stop reminders while every visible surface —
+      // the habit, its time, the destination toggle — went on looking correct,
+      // and the only record was a warn line a cloud user cannot read and an
+      // operator has no reason to look for.
+      await noteOutcome(channel, result, item.date);
 
       // `permanent` is the field to alert on: it means this reminder is gone and
       // will not be retried, so nobody finds out unless a log says so.

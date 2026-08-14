@@ -184,6 +184,65 @@ try{
   ck('choosing in the dialog overrides the toggle', afterDialog === atDefault,
      `expected ${atDefault}px, got ${afterDialog}px`);
 
+  /* --- "your last reminder was not delivered" --- */
+  //
+  // A permanent delivery failure used to have exactly one surface: a warn line
+  // in the server log. This is the surface that replaced it, and only a real
+  // browser can say whether it actually SHOWS — the `hidden`-beaten-by-display
+  // class of bug is why this directory exists.
+  //
+  // Only the transport is faked. Making the server produce a genuine failure
+  // would mean pointing it at Discord for real, which no suite here does; the
+  // storage half is covered by habiterall-personal/test/notify.integration.mjs.
+  console.log('--- a failed delivery is reported in the dialog ---');
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({notifyChannels:['android','discord']})}).then(r=>r.ok)`);
+  await load();
+
+  await ev(`(()=>{const real=window.fetch;
+    window.fetch=(u,o)=>String(u).includes('/api/notify/status')
+      ? Promise.resolve(new Response(JSON.stringify({channels:[{
+          channel:'discord', ok:false, status:404, permanent:true,
+          error:'the webhook was deleted or is no longer accepted — create a new one',
+          date:'2026-08-15', mode:'webhook', at:''}]}),
+          {headers:{'Content-Type':'application/json'}}))
+      : real(u,o);})()`);
+
+  await ev(`document.getElementById('btn-settings').click()`); await sleep(900);
+  ck('the failure is shown without being asked for',
+     await ev(`!!document.querySelector('.setting-problem')`));
+  ck('naming the destination and quoting the sender, not a status code',
+     /discord/i.test(await ev(`document.querySelector('.setting-problem')?.textContent??''`)) &&
+     /webhook was deleted/i.test(await ev(`document.querySelector('.setting-problem')?.textContent??''`)),
+     await ev(`document.querySelector('.setting-problem')?.textContent??''`));
+  // The bug this directory exists for: a stylesheet rule can silently defeat an
+  // element that is present in the DOM.
+  ck('and it is actually visible, not merely present',
+     await ev(`(()=>{const p=document.querySelector('.setting-problem');
+       if(!p) return false;
+       const s=getComputedStyle(p);
+       return s.display!=='none' && s.visibility!=='hidden' && p.getBoundingClientRect().height>0;})()`));
+  ck('above the controls it is about, not below them',
+     await ev(`(()=>{const g=document.querySelector('.setting-problem')?.closest('.data-section');
+       if(!g) return false;
+       const kids=[...g.children];
+       const problem=kids.findIndex(k=>k.classList.contains('setting-problem'));
+       const control=kids.findIndex(k=>k.tagName==='LABEL'||k.classList.contains('setting-multi'));
+       return problem>=0 && control>=0 && problem<control;})()`));
+
+  // It reads the DRAFT, so switching the destination off clears the warning
+  // there and then rather than after a save and a refetch.
+  await ev(`(()=>{const b=[...document.querySelectorAll('#settings-body input[type=checkbox]')]
+    .find(i=>i.closest('label')?.textContent.toLowerCase().includes('discord'));
+    if(b&&b.checked){b.checked=false;b.dispatchEvent(new Event('change',{bubbles:true}));}
+    return !!b;})()`);
+  await sleep(500);
+  ck('switching the destination off clears its warning immediately',
+     await ev(`!document.querySelector('.setting-problem')`));
+
+  await ev(`document.getElementById('settings-cancel').click()`); await sleep(300);
+
   console.log(fails===0?'\nALL SETTINGS CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}
 finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}

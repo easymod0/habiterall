@@ -162,6 +162,63 @@ try {
   ck('a habit already ticked off today is not nagged', fetch4.calls.length === 0,
     `posted ${fetch4.calls.length} times`);
 
+  /* ---------- a failure the user can see ---------- */
+  //
+  // The watermark above answers "has it gone yet". This answers the question
+  // the user actually asks — "why did it never arrive?" — which before had no
+  // surface at all: a deleted webhook was recorded as sent, logged at warn, and
+  // the habit, its time and the destination toggle all went on looking correct.
+
+  const failDay = new Date(Date.UTC(2026, 7, 15, 8, 0));
+  await deliverAccount(notifier.collect(failDay)[0], {
+    instant: failDay,
+    mark: notifier.mark,
+    recordOutcome: notifier.recordOutcome,
+    fetch: fakeFetch(404),           // the webhook was deleted
+    log: { warn: () => {}, debug: () => {} },
+  });
+
+  const failed = await api('/api/notify/status');
+  const discord = failed.body.channels.find((c) => c.channel === 'discord');
+  ck('a permanent delivery failure is readable over the API',
+    discord?.ok === false && discord?.permanent === true, JSON.stringify(failed.body));
+  ck('and carries the sender\'s own words rather than a code',
+    /webhook/i.test(discord?.error ?? ''), discord?.error);
+  ck('filed under the day the reminder was for',
+    discord?.date === '2026-08-15', discord?.date);
+
+  // The second failing day says nothing new, so nothing is written — but the
+  // row must not vanish either.
+  const stillFailing = new Date(Date.UTC(2026, 7, 16, 8, 0));
+  await deliverAccount(
+    { ...notifier.collect(stillFailing)[0] },
+    {
+      instant: stillFailing,
+      mark: notifier.mark,
+      recordOutcome: notifier.recordOutcome,
+      fetch: fakeFetch(404),
+      log: { warn: () => {}, debug: () => {} },
+    }
+  );
+  const stillThere = await api('/api/notify/status');
+  ck('a second failing day leaves the report where it was',
+    stillThere.body.channels.find((c) => c.channel === 'discord')?.date === '2026-08-15',
+    JSON.stringify(stillThere.body.channels));
+
+  // ...and a working send clears it, which is what makes the notice go away.
+  const fixedDay = new Date(Date.UTC(2026, 7, 17, 8, 0));
+  await deliverAccount(notifier.collect(fixedDay)[0], {
+    instant: fixedDay,
+    mark: notifier.mark,
+    recordOutcome: notifier.recordOutcome,
+    fetch: fakeFetch(204),
+    log: { warn: () => {}, debug: () => {} },
+  });
+  const cleared = await api('/api/notify/status');
+  ck('a success clears the failure',
+    cleared.body.channels.find((c) => c.channel === 'discord')?.ok === true,
+    JSON.stringify(cleared.body.channels));
+
   /* ---------- switching it off ---------- */
 
   await api('/api/settings', {
@@ -285,7 +342,7 @@ try {
     message: { embeds: [] },
   }, { ...adapter, respond: async (i, r) => { wrongChannel.push(r); } });
   ck('a click from another channel writes nothing',
-    wrongChannel[0]?.data?.flags === 64, JSON.stringify(wrongChannel[0]));
+    wrongChannel.at(-1)?.data?.flags === 64, JSON.stringify(wrongChannel.at(-1)));
 
   // A forged habit id: the account is resolved from the channel, and the habit
   // is looked up inside it, so this finds nothing rather than someone else's.
@@ -297,7 +354,7 @@ try {
     message: { embeds: [] },
   }, { ...adapter, respond: async (i, r) => { forged.push(r); } });
   ck('a habit id that is not ours is refused',
-    /no longer exists/i.test(forged[0]?.data?.content ?? ''), JSON.stringify(forged[0]));
+    /no longer exists/i.test(forged.at(-1)?.data?.content ?? ''), JSON.stringify(forged.at(-1)));
 
   console.log(`\n${fails ? `${fails} check(s) failed` : 'all checks passed'}`);
 } finally {

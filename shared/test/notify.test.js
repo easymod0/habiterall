@@ -617,6 +617,94 @@ test('a permanently failed send IS recorded, so it is not retried all day', asyn
   assert.equal(marked.length, 1, 'a deleted webhook will not start working before midnight');
 });
 
+test('a failure is written down where the user can see it', async () => {
+  // The whole point: a deleted webhook was recorded as sent, logged at warn, and
+  // that was the ONLY surface. Reminders stopped while the habit, its time and
+  // the destination toggle all went on looking correct — and on a shared
+  // instance the log is unreachable to the person it concerns.
+  const outcomes = [];
+  await deliverAccount(account(), {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => {},
+    recordOutcome: (acc, channel, outcome) => outcomes.push({ user: acc.id, channel, ...outcome }),
+    fetch: fakeFetch([{ status: 404 }]),
+    log: { warn: () => {} },
+  });
+
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].ok, false);
+  assert.equal(outcomes[0].channel, 'discord');
+  assert.equal(outcomes[0].permanent, true);
+  assert.equal(outcomes[0].date, '2026-08-13');
+  // The sender's own words, not a second phrasing invented for the UI.
+  assert.match(outcomes[0].error, /webhook/i);
+});
+
+test('an outcome is written when it CHANGES, not once per reminder', async () => {
+  // Five habits failing at 08:00 is one piece of news, not five writes — and the
+  // second through fifth say nothing the first did not.
+  const outcomes = [];
+  const ctx = {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => {},
+    recordOutcome: (acc, channel, outcome) => outcomes.push({ channel, ok: outcome.ok }),
+    log: { warn: () => {} },
+  };
+  const three = account({
+    habits: [habit({ id: 1 }), habit({ id: 2 }), habit({ id: 3 })],
+  });
+
+  await deliverAccount(three, { ...ctx, fetch: fakeFetch([{ status: 404 }]) });
+  assert.deepEqual(outcomes, [{ channel: 'discord', ok: false }]);
+
+  // A tick that finds it still broken has nothing new to say.
+  outcomes.length = 0;
+  await deliverAccount({ ...three, delivered: { discord: false } },
+    { ...ctx, fetch: fakeFetch([{ status: 404 }]) });
+  assert.deepEqual(outcomes, [], 'the same failure was written twice');
+
+  // ...and a success once it is fixed IS news, because it clears the notice the
+  // user is being shown.
+  outcomes.length = 0;
+  await deliverAccount({ ...three, delivered: { discord: false } },
+    { ...ctx, fetch: fakeFetch([{ status: 204 }]) });
+  assert.deepEqual(outcomes, [{ channel: 'discord', ok: true }]);
+
+  // A healthy instance writes to this table roughly never.
+  outcomes.length = 0;
+  await deliverAccount({ ...three, delivered: { discord: true } },
+    { ...ctx, fetch: fakeFetch([{ status: 204 }]) });
+  assert.deepEqual(outcomes, []);
+});
+
+test('failing to STORE an outcome does not fail the delivery', async () => {
+  // This is a diagnostic bolted onto the send. The reminder has already gone
+  // out (or already not); losing the note about it must not cost the reminder,
+  // and must not take the rest of the tick's accounts down with it.
+  const errors = [];
+  const result = await deliverAccount(account(), {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => {},
+    recordOutcome: () => { throw new Error('storage gone'); },
+    fetch: fakeFetch([{ status: 204 }]),
+    log: { warn: () => {}, error: (msg) => errors.push(msg) },
+  });
+
+  assert.deepEqual(result, { sent: 1, failed: 0, skipped: {} });
+  assert.deepEqual(errors, ['notify.outcome_not_stored']);
+});
+
+test('an edition that supplies no recordOutcome still delivers', async () => {
+  // The adapter property is optional, and both editions had shipped without it.
+  const result = await deliverAccount(account(), {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => {},
+    fetch: fakeFetch([{ status: 204 }]),
+    log: { warn: () => {} },
+  });
+  assert.deepEqual(result, { sent: 1, failed: 0, skipped: {} });
+});
+
 test('a reminder lost to the catch-up window is a warning, once', async () => {
   // Every other skip is a normal outcome. This one means the reminder is GONE:
   // its minute passed while nothing was running, and it will not be retried

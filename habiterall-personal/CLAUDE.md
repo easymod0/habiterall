@@ -15,9 +15,10 @@ Only what is coupled to storage:
 - a `settings` key/value table — preferences live server-side, so they survive
   a browser reset and are captured by the same backup as the habits
 - `src/notifier.js` — the storage half of server-sent reminders: read this
-  user's settings and habits, and record what has been sent (`notify_log`).
-  The scheduling and the delivery are in `@habiterall/shared/notify.js` and
-  `notify-send.js`
+  user's settings and habits, record what has been sent (`notify_log`), and
+  record how each destination last behaved (`notify_status`, which is what
+  `GET /api/notify/status` and the settings dialog read). The scheduling and
+  the delivery are in `@habiterall/shared/notify.js` and `notify-send.js`
 - `public/app-entry.js` — three lines: pick the no-auth adapter, `start()`
 
 The entire UI is in `shared/public/` and served by the static mounts in
@@ -51,6 +52,13 @@ otherwise start posting to whatever webhook the developer's own database holds.
 **`/overview` is bounded.** It reads lifetime entries for the streak figures,
 so the clamp inside `computeStreaks` is what keeps a distant-past entry from
 blocking the process. Don't reintroduce an unbounded range here.
+
+**`/overview` also has two end dates on purpose.** `end` is the grid window the
+dashboard is paging through; `summaryEnd` is `today()` and is what the row's
+strength and streaks are computed as of. They were one variable, and paging back
+a month restated the summary as of that month. Both lookbacks count back from
+`summaryEnd`, so the bound above still holds. `test/overview.integration.mjs`
+pins it, and the cloud edition mirrors it exactly.
 
 ## Running
 

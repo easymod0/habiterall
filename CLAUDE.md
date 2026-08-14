@@ -159,6 +159,20 @@ export.
 entries for that window had never been loaded — the days looked unrecorded
 while the stats view showed them fine.
 
+**...but `end` moves the GRID only.** It was deciding two things, and they want
+different dates: which days are painted, and the date the row summary is
+computed as of. So paging back a month restated the strength and the streak as
+of that month — "43%" and no fire, under a habit that is on a twelve-day run,
+with nothing on the row to say the figures had moved. `summaryEnd` is `today()`
+in both editions' `/overview`, and `bestStreak` was the tell: paging back also
+*dropped* any run set after the date on screen. The detail view is the surface
+that answers "as of when", and it has its own range controls. The Android
+client always sent `end = null` (it grows `windowDays` backward instead), so it
+never had this. Pinned by `habiterall-personal/test/overview.integration.mjs`
+and the `--- overview ---` block in the cloud API suite — the one place that
+one goes through the router rather than the data layer, because the bug was in
+the route and `computeStats` was always doing exactly as it was told.
+
 **Column count scales with viewport width**, not one breakpoint. At 768px the
 14-column layout needed 668px of a 698px row and squeezed the habit name to
 zero width. 7 / 10 / 14 columns by width.
@@ -311,12 +325,70 @@ is written, and the habit is then looked up inside that account, so a forged id
 finds nothing. `discordUserId` narrows it further to one Discord user — without
 it, anyone who can see the channel can answer.
 
+**A press is acknowledged before any storage is touched.** Discord allows an
+interaction three seconds, and answering one used to be the LAST thing
+`handleInteraction` did — after resolving the channel, asking what day it is
+there, and recording. Three round trips through a database, under RLS on the
+cloud side; on a cold pool or a container that has just started that is over the
+line, and the user is shown **"This interaction failed"** on a press that *was*
+written. The worst kind of failure message: it says the opposite of what
+happened, and the natural response is to press again. So the first thing out is
+`DEFER_UPDATE` (type **6**, not `DEFER`'s 5 — 6 leaves the message alone, where
+5 posts a visible "thinking" placeholder that would then need cleaning up), and
+the real answer follows on the same token, good for fifteen minutes.
+`respondInteraction` takes `acknowledged` and picks the endpoint: the callback
+first, then `PATCH …/messages/@original` for an edit or `POST …/webhooks/{app}`
+for a private note — chosen from the response shape the handler already built,
+so everything above that line reads the same either way. `application_id` rides
+on the interaction, so this needs no extra call and still no bot token.
+
+Two exceptions, and both are deliberate. **A modal cannot be deferred at all** —
+it has to be *opened* inside the three seconds, and a callback of type MODAL is
+the only way to open one — so the `amount` button keeps its lookup-and-answer
+shape; it does one read and no write. And the **test button** touches no storage.
+Note the ordering this costs: it is removing the buttons that stops a second
+click recording twice, and a defer delays that, so the buttons stay live while
+the write is in flight. `record` is an upsert for every action, so a double press
+is idempotent and the window costs nothing.
+
 **A server-sent reminder is written down after it is sent** (`notify_log`,
 keyed on habit + channel + the user's *local* date). Without that watermark a
 minute-by-minute tick re-sends for as long as the catch-up window lasts. Keyed
 per channel, or enabling a second destination is silenced for its first day by
 the send to the first; keyed on the local date, or a user east of the server
 gets it filed under the wrong day and again a few hours later.
+
+**How it WENT is written down too, and that one is for the user.** A permanent
+failure — a deleted webhook, the bot kicked from its channel, a revoked token —
+is marked as sent (a 404 answers 404 forever, and retrying every minute until
+midnight helps nobody) and logged at warn. The log was the only surface, and it
+is the wrong one: reminders simply stopped while the habit, its time and the
+destination toggle all went on looking correct, and on a shared instance the
+warning is unreachable to the person it concerns and invisible to an operator
+with no reason to read one account's lines. `notify_status` — a table in
+personal, migration 010 with the ordinary owner policy in cloud — holds the
+LAST outcome per channel and nothing more, and the settings dialog shows it
+without being asked. Four things about it are load bearing:
+
+- It is **not** in the settings blob, though that is where it would have been
+  cheapest. Settings are what `PUT /api/settings` writes and `/api/export`
+  carries, so a diagnostic living there would end up in people's backups and in
+  both round-trip suites. This is the server reporting on itself.
+- It says whether a destination **did** deliver, never whether it **can**.
+  `channelConfigured` stays the only authority on the second, or the two come
+  to disagree about one setting.
+- Written on a **change of state**, not per send: `collect` reads the stored
+  verdict into `account.delivered` and `noteOutcome` compares. Five habits
+  failing at 08:00 is one piece of news, and a healthy instance writes here
+  roughly never. A success is stored for one reason — it clears a notice the
+  user is being shown.
+- The wording is the **sender's own**, from `postWebhook` / `discordRequest`.
+  Re-phrasing it in the UI is how the dialog and the log come to say different
+  things about the same 404.
+
+`sendTest` records unconditionally rather than on a change, because a press
+there is one deliberate act rather than a tick, and it is what clears the notice
+the moment a replacement webhook works instead of tomorrow morning.
 
 **The phone's alarms follow the server only when something re-arms them, and a
 refresh used not to count.** `habits.reminder_time` is the schedule, but an
@@ -410,6 +482,7 @@ Several layers, and they catch different things:
 | Reminders | `npm run test:notify` | nothing |
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
+| Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |

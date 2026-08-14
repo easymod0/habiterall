@@ -22,7 +22,7 @@ const STREAK_HISTORY_DAYS = 1830;
 // separate copies of the sniffing, and they had drifted.
 import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
-import { sendTest } from './notifier.js';
+import { deliveryStatus, sendTest } from './notifier.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
   assertNotFuture,
@@ -308,9 +308,18 @@ api.get('/overview', (req, res) => {
   // The dashboard can page back through history, so it asks for the window it
   // is actually showing. Without this the grid rendered empty cells for any
   // day outside the most recent fortnight — the entries were never fetched.
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : today();
-  const end = requestedEnd > today() ? today() : requestedEnd;
+  const now = today();
+  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const end = requestedEnd > now ? now : requestedEnd;
   const start = addDays(end, -(days - 1));
+
+  // ...and `end` decides the GRID window only. The row summary — strength,
+  // current streak, best streak — is a statement about the habit now, so it is
+  // anchored on today whatever window is on screen. They shared one date, and
+  // paging back a month restated the summary as of that month: "43%" with
+  // nothing on the row to say it was not today's. The detail view is the
+  // surface that answers "as of when", and it has its own range controls.
+  const summaryEnd = now;
 
   // Archived habits are hidden by default but can be requested explicitly.
   const habits = /** @type {any[]} */ (req.query.archived === 'true'
@@ -347,11 +356,16 @@ api.get('/overview', (req, res) => {
       // dashboard O(lifetime x habits) and, worse, fed an unbounded array
       // into computeStreaks — hundreds of thousands of iterations of
       // synchronous work on a single-threaded server.
+      //
+      // Both lookbacks count back from `summaryEnd`, not from the grid's
+      // `end`: these three figures describe the habit today.
       const entries = /** @type {any} */ (
-        q.entriesForSince.all(h.id, addDays(end, -STREAK_HISTORY_DAYS))
+        q.entriesForSince.all(h.id, addDays(summaryEnd, -STREAK_HISTORY_DAYS))
       );
-      const windowed = /** @type {any} */ (q.entriesForSince.all(h.id, addDays(end, -SUMMARY_WINDOW_DAYS)));
-      const stats = computeStats(h, windowed, { end });
+      const windowed = /** @type {any} */ (
+        q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
+      );
+      const stats = computeStats(h, windowed, { end: summaryEnd });
 
       // Counted in SQLite rather than by walking every row in JS. The
       // expression mirrors isCompleted exactly, including that a skip is
@@ -367,8 +381,8 @@ api.get('/overview', (req, res) => {
       const allStreaks = computeStreaks(
         h,
         new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
-        entries.length ? entries[0].date : end,
-        end
+        entries.length ? entries[0].date : summaryEnd,
+        summaryEnd
       );
 
       return {
@@ -444,6 +458,24 @@ api.post('/notify/test', (req, res, next) => {
   sendTest()
     .then((results) => res.json({ results }))
     .catch(next);
+});
+
+/**
+ * How each destination last behaved.
+ *
+ * The test button above is the other half of this and has one flaw: it has to
+ * be PRESSED, and nothing suggests pressing it. A webhook deleted in April
+ * stops the reminders while the habit, its time and the destination toggle all
+ * go on looking correct — so this reports what the notifier already learned at
+ * 08:00, and the settings dialog shows it without being asked.
+ *
+ * Only the last outcome per channel, and only for channels something has
+ * actually been attempted for. It is deliberately NOT a statement about
+ * configuration: `channelConfigured` stays the authority on whether a
+ * destination can deliver, and this says only whether it did.
+ */
+api.get('/notify/status', (req, res) => {
+  res.json({ channels: deliveryStatus() });
 });
 
 /* ---------- export / import ---------- */

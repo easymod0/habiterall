@@ -237,6 +237,47 @@ try {
 } catch { aliceCanStillLog = false; }
 check('and alice can still use that slot herself', aliceCanStillLog);
 
+console.log('--- notify_status is isolated too ---');
+// The table that tells a user their reminders stopped arriving. It carries an
+// error string straight from Discord, so a leak here would hand one account a
+// running commentary on another's destinations.
+await withUser(alice.id, (db) => db.query(
+  `INSERT INTO notify_status (user_id, channel, ok, status, error)
+   VALUES ($1, 'discord', false, 404, 'alice private failure')`, [alice.id]));
+
+const bobSeesStatus = await withUser(bob.id, (db) =>
+  db.query('SELECT * FROM notify_status').then((r) => r.rows.length));
+check("bob cannot read alice's delivery failures", bobSeesStatus === 0,
+  `rows=${bobSeesStatus}`);
+
+// The key leads with user_id, so the squat that migration 007/008 guards
+// against cannot arise here — but a forged user_id on an INSERT must still be
+// refused by WITH CHECK, exactly as everywhere else.
+let statusForgeBlocked = false;
+try {
+  await withUser(bob.id, (db) => db.query(
+    `INSERT INTO notify_status (user_id, channel, ok) VALUES ($1, 'discord', true)`,
+    [alice.id]));
+} catch { statusForgeBlocked = true; }
+check("bob cannot write a delivery outcome into alice's account", statusForgeBlocked);
+
+// And bob keeps his own row, on the same channel, unaffected by alice's.
+let bobHasHisOwn = false;
+try {
+  await withUser(bob.id, (db) => db.query(
+    `INSERT INTO notify_status (user_id, channel, ok) VALUES ($1, 'discord', true)`,
+    [bob.id]));
+  bobHasHisOwn = true;
+} catch { bobHasHisOwn = false; }
+check('and bob has his own row for the same channel', bobHasHisOwn);
+
+// Nothing deletes one; the app role should not be able to either.
+let statusDeleteBlocked = false;
+try {
+  await withUser(alice.id, (db) => db.query(`DELETE FROM notify_status`));
+} catch { statusDeleteBlocked = true; }
+check('the app role cannot DELETE from notify_status', statusDeleteBlocked);
+
 console.log('--- attack: claim the notifier scope from a user session ---');
 const scoped = async (claimScope) => withUser(alice.id, async (db) => {
   if (claimScope) await db.query(`SELECT set_config('app.scope', 'notifier', true)`);

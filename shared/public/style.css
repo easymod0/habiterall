@@ -820,6 +820,18 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 .setting-help { margin: -6px 0 12px; font-size: 12px; }
 #settings-dialog label:not(.checkbox) { margin-bottom: 4px; }
 
+/* "Your last reminder was not delivered." Sits above the controls it is about,
+   because it is the answer to the question that brought the user here. Loud
+   enough not to read as another hint — the whole failure mode this fixes is a
+   destination that stopped working while everything on screen looked fine. */
+.setting-problem {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: var(--danger);
+}
+
 /* A group of checkboxes that together are one setting (notification
    destinations). The fieldset carries the group's name, so the rows inside it
    need no label of their own. */
