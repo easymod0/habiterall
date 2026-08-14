@@ -562,6 +562,27 @@ function paintCheckbox(box, habit, value, isSkip = false) {
   box.style.fontSize = '9.5px';
 }
 
+/**
+ * Add or remove a date from a habit's `skips`, in place.
+ *
+ * The optimistic paths below edit `habit.entries` and then repaint, and since
+ * the grid started reading `skips` to tell a skip from an amount, editing one
+ * without the other leaves the cell asserting the old state. Offline that is
+ * not a flash before the refetch corrects it: `api()` queues the write and
+ * throws, so the refetch never runs and the cell stays wrong while taps
+ * accumulate — the failure the long comment below was written to prevent,
+ * arriving by a different door.
+ *
+ * @returns {boolean} whether the date was a skip before this call
+ */
+function setSkip(habit, date, on) {
+  habit.skips ??= [];
+  const was = habit.skips.includes(date);
+  if (on && !was) habit.skips.push(date);
+  if (!on && was) habit.skips = habit.skips.filter((d) => d !== date);
+  return was;
+}
+
 async function onCheckClick(habit, date) {
   try {
     let next;
@@ -586,12 +607,14 @@ async function onCheckClick(habit, date) {
         // showing a value the user has just cleared.
         const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
         delete habit.entries[date];
+        const wasSkip = setSkip(habit, date, false);
         paint();
         try {
           await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
         } catch (e) {
           if (!e.queued) {
             if (had !== undefined) habit.entries[date] = had;
+            setSkip(habit, date, wasSkip);
             paint();
           }
           throw e;
@@ -612,6 +635,10 @@ async function onCheckClick(habit, date) {
     const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
     if (next === UNSET) delete habit.entries[date];
     else habit.entries[date] = next;
+    // `skips` is what the cell is painted from, so it moves with the value.
+    // Only a boolean habit can reach SKIP from here; a measurable one is
+    // recording an amount, which by definition ends any skip on that day.
+    const wasSkip = setSkip(habit, date, next === SKIP && habit.type === 'boolean');
     paint();
 
     try {
@@ -626,6 +653,7 @@ async function onCheckClick(habit, date) {
       if (!e.queued) {
         if (previous === undefined) delete habit.entries[date];
         else habit.entries[date] = previous;
+        setSkip(habit, date, wasSkip);
         paint();
       }
       throw e;

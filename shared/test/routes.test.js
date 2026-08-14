@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { LIST, current, go, hashFor, parseRoute } from '../public/ui/routes.js';
+import { LIST, current, go, hashFor, init, parseRoute } from '../public/ui/routes.js';
 
 /* ---------- parsing ---------- */
 
@@ -65,41 +65,93 @@ test('the dashboard has no fragment', () => {
 
 /* ---------- writing the URL ---------- */
 
-/** A fake `location`/`history` that records what was done to it. */
-function fakeUrl(hash = '') {
+/**
+ * A fake `location`/`history`/`window` that records what was done to it.
+ *
+ * `init` is called on the way out so each test starts from "nothing showing is
+ * ours" — the module tracks that across calls, and without the reset these
+ * tests would pass or fail depending on the order they ran in.
+ *
+ * @returns {{calls: any[], fire: () => void, listeners: string[]}}
+ */
+function fakeUrl(hash = '', onRoute = () => {}) {
   const calls = [];
+  const listeners = [];
+  const handlers = [];
   globalThis.location = { hash, pathname: '/', search: '' };
   globalThis.history = {
-    pushState: (_s, _t, url) => { calls.push(['push', url]); },
-    replaceState: (_s, _t, url) => { calls.push(['replace', url]); },
+    pushState: (_s, _t, url) => { calls.push(['push', url]); globalThis.location.hash = url; },
+    replaceState: (_s, _t, url) => { calls.push(['replace', url]); globalThis.location.hash = ''; },
+    back: () => { calls.push(['back']); },
   };
-  return calls;
+  globalThis.window = {
+    addEventListener: (type, fn) => { listeners.push(type); handlers.push(fn); },
+  };
+  init(onRoute);
+  return { calls, listeners, fire: () => { for (const h of handlers) h(); } };
 }
 
 test('opening a habit pushes, so Back leaves it', () => {
-  const calls = fakeUrl('');
+  const { calls } = fakeUrl('');
   go({ view: 'habit', id: 7 });
   assert.deepEqual(calls, [['push', '#/habit/7']]);
 });
 
-test('the list replaces, so it does not become a step of its own', () => {
-  const calls = fakeUrl('#/habit/7');
+test('returning to the list unwinds the push rather than writing over it', () => {
+  // Overwriting left the entry in place with the list's URL, so Back landed on
+  // a second copy of the list and appeared to do nothing — once per habit ever
+  // opened.
+  const { calls } = fakeUrl('');
+  go({ view: 'habit', id: 7 });
+  go(LIST);
+  assert.deepEqual(calls, [['push', '#/habit/7'], ['back']]);
+});
+
+test('the list replaces when there is nothing of ours to unwind', () => {
+  // A cold load straight onto a habit: that entry is the first in the session,
+  // so going back from it would leave the site.
+  const { calls } = fakeUrl('#/habit/7');
   go(LIST);
   assert.deepEqual(calls, [['replace', '/']]);
+});
+
+test('one Back press does the work once, not twice', () => {
+  // popstate and hashchange both fire for a single fragment traversal in
+  // Chrome (measured). Acting on both ran two dashboard loads — four requests
+  // — for one press.
+  const seen = [];
+  const { fire, listeners } = fakeUrl('', (route) => seen.push(route));
+  assert.deepEqual(listeners, ['hashchange', 'popstate']);
+
+  globalThis.location.hash = '#/habit/9';   // the browser has traversed
+  fire();                                   // both listeners run
+
+  assert.equal(seen.length, 1, 'route change handled once');
+  assert.deepEqual(seen[0], { view: 'habit', id: 9 });
+});
+
+test('a traversal to a habit leaves that entry unwindable', () => {
+  // Forward onto a habit is as much "our" entry as opening it was, or the
+  // duplicate-list bug comes back through the Forward button.
+  const { calls, fire } = fakeUrl('');
+  globalThis.location.hash = '#/habit/9';
+  fire();
+  go(LIST);
+  assert.deepEqual(calls, [['back']]);
 });
 
 test('a route already showing writes nothing', () => {
   // The detail view re-enters `open()` for every zoom, page and granularity
   // control. Without this each of those would be a history entry, and Back
   // would walk through a dozen redraws of one habit before leaving it.
-  const calls = fakeUrl('#/habit/7');
+  const { calls } = fakeUrl('#/habit/7');
   go({ view: 'habit', id: 7 });
   go({ view: 'habit', id: 7 });
   assert.deepEqual(calls, []);
 
-  const listCalls = fakeUrl('');
+  const list = fakeUrl('');
   go(LIST);
-  assert.deepEqual(listCalls, []);
+  assert.deepEqual(list.calls, []);
 });
 
 test('current() reads the address bar', () => {

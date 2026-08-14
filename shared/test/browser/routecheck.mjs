@@ -159,6 +159,14 @@ try {
   // happen — Back should leave a screen you arrived at from the native list —
   // so this asserts the browser's half, and the app's half is checked on a
   // device.
+  const coldEntries = await coldEv(`history.length`);
+  // Exactly two: the load itself, replaced in place by the first paint, and the
+  // habit pushed on top. Asserting the count is what catches the opposite
+  // regression — a boot that *stacks* entries — which "Back reached the
+  // dashboard" alone would still pass through.
+  ck('a cold deep link leaves exactly one entry to go back to',
+    coldEntries === 2, `history.length=${coldEntries}`);
+
   await coldEv(`history.back()`);
   await sleep(1200);
   const afterBack = await coldEv(`(() => ({
@@ -171,12 +179,38 @@ try {
 
   /* ---------- and junk is the dashboard, not an error ---------- */
 
-  await send('Page.navigate', { url: `${APP}/#/habit/does-not-exist` }, sessionId);
-  await waitFor('#grid .habit-row');
+  // Its own tab, for the reason the deep-link case above needed one and this
+  // case previously did not have one: navigating a tab that is already at
+  // `APP` to `APP/#/junk` changes only the fragment, so the page never reloads
+  // and `parseRoute` is never asked anything. The check passed because the
+  // dashboard was already showing — it proved nothing. The give-away was in its
+  // own output: the fragment was still `#/habit/does-not-exist` afterwards,
+  // where a real boot would have cleared it on the first paint.
+  const junkTab = await send('Target.createTarget',
+    { url: `${APP}/#/habit/does-not-exist` });
+  const junkSession = (await send('Target.attachToTarget',
+    { targetId: junkTab.targetId, flatten: true })).sessionId;
+  const junkEv = async (e) => {
+    const r = await send('Runtime.evaluate',
+      { expression: e, awaitPromise: true, returnByValue: true }, junkSession);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
+    return r.result.value;
+  };
+  for (let i = 0; i < 80; i++) {
+    if (await junkEv(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+    await sleep(200);
+  }
+  await sleep(400);
 
-  const junk = await where();
+  const junk = await junkEv(`(() => ({
+    list: !document.querySelector('#view-list').hidden,
+    detail: !document.querySelector('#view-detail').hidden,
+    hash: location.hash,
+  }))()`);
   ck('an unparseable fragment falls back to the dashboard', junk.list && !junk.detail,
     JSON.stringify(junk));
+  ck('and the fragment is cleared, proving the page really booted',
+    junk.hash === '', `hash=${junk.hash}`);
 
   console.log(fails === 0 ? '\nALL ROUTE CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {

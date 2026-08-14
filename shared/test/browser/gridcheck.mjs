@@ -184,8 +184,8 @@ try{
     });
     await put(read.id, d(1), { value: 3 });         // three pages, genuinely
     await put(read.id, d(2), { status: 'skip' });   // an actual skipped day
-    await put(yesno.id, d(3), { value: 3 });        // Loop's sentinel, as imported
-    return { read: read.id, yesno: yesno.id, amount: d(1), skip: d(2), legacy: d(3) };
+    await put(yesno.id, d(3), { status: 'skip' });  // one to clear, offline, below
+    return { read: read.id, yesno: yesno.id, amount: d(1), skip: d(2), clearMe: d(3) };
   })()`);
 
   await send('Page.navigate',{url:APP},sessionId);
@@ -199,14 +199,38 @@ try{
       return el ? (el.textContent || '').trim() : null;
     };
     return { amount: box(s.read, s.amount), skip: box(s.read, s.skip),
-             legacy: box(s.yesno, s.legacy) };
+             toClear: box(s.yesno, s.clearMe) };
   })()`);
 
   ck('a measurable 3 paints as the amount, not as a skip',
      painted.amount === '3', JSON.stringify(painted));
   ck('a real skip still paints as one', painted.skip === '–', JSON.stringify(painted));
-  ck('a yes/no habit’s bare 3 is still a skip, as an import carries it',
-     painted.legacy === '–', JSON.stringify(painted));
+  ck('a skipped yes/no day paints as one too', painted.toClear === '–',
+     JSON.stringify(painted));
+
+  // --- clearing a skip repaints the cell, with no server to ask
+  //
+  // The optimistic paths edit `habit.entries`; the cell is painted from
+  // `habit.skips`. Edit one without the other and the cell keeps asserting the
+  // old state until a refetch corrects it — which offline never happens, since
+  // `api()` queues the write and throws. Emulating offline is what makes this
+  // deterministic: online the refetch hides the bug behind a repaint.
+  await send('Network.emulateNetworkConditions',
+    { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
+
+  await ev(`document.querySelector(
+    '[data-focus-key="check:${seeded.yesno}:${seeded.clearMe}"]')?.click()`);
+  await sleep(1200);
+
+  const cleared = await ev(`(() => {
+    const el = document.querySelector('[data-focus-key="check:${seeded.yesno}:${seeded.clearMe}"] .check-box');
+    return el ? (el.textContent || '').trim() : null;
+  })()`);
+  ck('clearing a skip while offline repaints the cell', cleared === '',
+     `cell reads "${cleared}" after the tap`);
+
+  await send('Network.emulateNetworkConditions',
+    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
 
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}

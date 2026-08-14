@@ -99,11 +99,14 @@ class GridTest {
     @Test
     fun `the cap is honoured, since the server has one too`() {
         // /api/overview clamps days to 365, so past the cap every extra request
-        // returns the same window and the grid would ask forever.
+        // returns the same window and the grid would ask forever. Both
+        // directions, because the two take different branches.
         assertFalse(
             Grid.needsMore(1000, 1000, Grid.MAX_DAYS, newestLeft = true, threshold = 120)
         )
-        assertTrue(Grid.MAX_DAYS >= Grid.INITIAL_DAYS)
+        assertFalse(
+            Grid.needsMore(0, 1000, Grid.MAX_DAYS, newestLeft = false, threshold = 120)
+        )
     }
 
     /* ---------- keeping your place ---------- */
