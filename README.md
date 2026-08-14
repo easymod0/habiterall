@@ -262,6 +262,16 @@ volumes:
   authentik-redis-data:
 ```
 
+**Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
+`OIDC_ISSUER` is where Authentik does, and they must be different origins
+unless your proxy path-routes `/application/*`, `/if/*` and
+`/outpost.goauthentik.io/*` to Authentik. Point `auth.example.com` at the
+Authentik container's published port and `habits.example.com` at the app's.
+Putting the issuer on the app's own hostname produces a memorable failure: the
+proxy asks habiterall for Authentik's discovery document, the app is still
+starting — because it is waiting on that very document — and you get a 502
+that looks like a proxy fault rather than a configuration one.
+
 Alongside it, a `.env`:
 
 ```bash
@@ -272,7 +282,7 @@ AUTHENTIK_SECRET_KEY=$(openssl rand -base64 60)
 AUTHENTIK_BOOTSTRAP_PASSWORD=       # the first admin's password
 SESSION_SECRET=$(openssl rand -base64 36)
 PUBLIC_URL=https://habits.example.com
-OIDC_ISSUER=https://habits.example.com/application/o/habiterall/
+OIDC_ISSUER=https://auth.example.com/application/o/habiterall/
 OIDC_CLIENT_ID=                     # filled in below
 OIDC_CLIENT_SECRET=                 # filled in below
 APP_PORT=3100                       # optional — the host port the app answers on
@@ -285,6 +295,17 @@ provider that issues it:
 ```bash
 docker compose up -d authentik-db authentik-redis authentik-server authentik-worker
 ```
+
+If you brought the whole stack up instead, `app` will be restarting in a loop
+until the two values below exist — that check lives in the app rather than in
+compose, so the failure is a log line rather than a refusal to start:
+
+```bash
+docker compose logs app --tail=20
+#   OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set
+```
+
+That is expected between the two phases, and it clears on the next `up -d`.
 
 Sign in to Authentik at **<http://localhost:9000>** as `akadmin`, and create an
 **OAuth2/OIDC provider** named `habiterall`, then an application pointing at it:
