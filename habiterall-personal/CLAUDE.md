@@ -25,9 +25,10 @@ The entire UI is in `shared/public/` and served by the static mounts in
 
 ## Why `node:sqlite`
 
-Built into Node 22, so there is no native module to compile, no rebuild on
+Built into Node, so there is no native module to compile, no rebuild on
 Node upgrades, and the Docker image builds in about a second with one runtime
-dependency. `DatabaseSync` is synchronous — fine for one user, and precisely
+dependency. It is why a major bump is a `FROM` line and a CI pin rather than a
+toolchain problem. `DatabaseSync` is synchronous — fine for one user, and precisely
 why the cloud edition uses Postgres instead.
 
 ## Traps

@@ -1,17 +1,12 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-// node:sqlite is stable in Node 22 but still emits an ExperimentalWarning on
-// import. Filter just that warning so it doesn't clutter container logs.
-const emit = process.emitWarning;
-process.emitWarning = (warning, ...rest) => {
-  const name = typeof rest[0] === 'string' ? rest[0] : rest[0]?.type;
-  if (name === 'ExperimentalWarning' && String(warning).includes('SQLite')) return;
-  return emit.call(process, warning, ...rest);
-};
-
-const { DatabaseSync } = await import('node:sqlite');
-process.emitWarning = emit;
+// A plain static import: node:sqlite no longer emits an ExperimentalWarning
+// on Node 26, which is the floor `engines` now states. Under Node 22 it did,
+// and this was a dynamic import wrapped in a `process.emitWarning` patch to
+// keep one line out of every container log — restore that, not the import,
+// if the floor ever goes back down.
+import { DatabaseSync } from 'node:sqlite';
 
 const DB_PATH = process.env.HABITERALL_DB ?? './data/habiterall.db';
 

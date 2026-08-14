@@ -141,6 +141,10 @@ Seven jobs, all self-contained. Postgres comes from a service container, Chrome
 is preinstalled on the runner, and the personal edition is started by the
 workflow itself.
 
+Every job pins **Node 26**, the same major as both Dockerfiles and the
+`engines` floor. The three move together on purpose: a Dockerfile bump that
+leaves the pins behind ships a runtime no job ever ran.
+
 | Job | What it proves |
 |---|---|
 | Unit tests | scoring, streaks, resilience, validation, Loop encoding |

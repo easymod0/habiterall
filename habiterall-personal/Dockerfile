@@ -1,7 +1,7 @@
 # Built from the REPO ROOT so the shared workspace is available:
 #   docker build -f habiterall-personal/Dockerfile .
 #
-# Node 22 ships node:sqlite, so there is no native module to compile and no
+# Node ships node:sqlite, so there is no native module to compile and no
 # build stage — the frontend is plain ES modules served statically.
 FROM node:26-alpine
 

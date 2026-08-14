@@ -49,9 +49,10 @@ updates:
       gradle:
         patterns: ['*']
 
-  # Both Dockerfiles are node:22-alpine. A major bump is a real decision — the
-  # root package.json says node >=22.5.0 — so it is left to arrive as a PR
-  # rather than ignored here.
+  # Both Dockerfiles are node:26-alpine. A major bump is a real decision — it
+  # has to move with the `engines` floor and the six node-version pins in
+  # ci.yml, or the images run a major nothing tested — so it is left to arrive
+  # as a PR rather than ignored here.
   - package-ecosystem: docker
     directory: /habiterall-personal
     schedule:
