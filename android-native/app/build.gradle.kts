@@ -103,7 +103,7 @@ dependencies {
     // which belongs in a toolchain upgrade. The failure is at least loud: AGP
     // checks AAR metadata and names the dependency. `activity-compose` and
     // `browser` below are current; they still ask for 36.
-    implementation("androidx.core:core-ktx:1.18.0")
+    implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     // LocalLifecycleOwner and repeatOnLifecycle from a composable. The
     // -ktx artifact above does not provide them; Compose UI has its own
@@ -135,7 +135,7 @@ dependencies {
     // reads like a corrupt artifact and is really a version ceiling. The
     // coroutines line below is fine at 1.11.0 — it is built against 2.2.20,
     // the same metadata generation as ours.
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     testImplementation("junit:junit:4.13.2")
