@@ -1,0 +1,164 @@
+# habiterall, cloud edition — multi user, Postgres, with Authentik included.
+#
+# The copy in README.md is generated from this file, and a unit test fails if the
+# two drift, so edit this one.
+#
+# Use this when you do NOT already run an identity provider. If you do — Authelia,
+# Keycloak, Google, an existing Authentik — use docker-compose.cloud.yml instead
+# and point it at that; nothing here is required.
+#
+# Needs a .env beside it:
+#
+#   DB_OWNER_PASSWORD=...          openssl rand -base64 36
+#   APP_DB_PASSWORD=...            openssl rand -base64 36
+#   AUTHENTIK_DB_PASSWORD=...      openssl rand -base64 36
+#   AUTHENTIK_SECRET_KEY=...       openssl rand -base64 60
+#   AUTHENTIK_BOOTSTRAP_PASSWORD=. the first admin's password — change it after
+#   SESSION_SECRET=...             openssl rand -base64 36
+#   PUBLIC_URL=https://habits.example.com
+#   OIDC_ISSUER=https://habits.example.com/application/o/habiterall/
+#   OIDC_CLIENT_ID=...             from Authentik, once created (below)
+#   OIDC_CLIENT_SECRET=...         from Authentik, once created (below)
+#
+# Two starts, because the OIDC client cannot exist before the provider does:
+#
+#   docker compose -f docker-compose.cloud-authentik.yml up -d authentik-db authentik-redis authentik-server authentik-worker
+#   # sign in at :9000 as akadmin, create an OAuth2/OIDC provider named
+#   # habiterall with redirect URI ${PUBLIC_URL}/auth/callback and scopes
+#   # openid profile email, then an application pointing at it. Copy the client
+#   # id and secret into .env.
+#   docker compose -f docker-compose.cloud-authentik.yml up -d
+#
+# With a clone of the repo you can skip the clicking: habiterall-cloud/scripts/
+# bootstrap-authentik.mjs creates the provider and application over the API and
+# prints the two values. It is not in the image, which ships src/ and public/
+# only, so on a server without the source the UI is the path.
+#
+# Authentik gets its own Postgres here rather than sharing habiterall's. It is
+# how upstream ships it, it keeps one compromise from reaching the other's data,
+# and it needs no init script mounted from a repo you do not have.
+#
+# Pin the image tag rather than tracking `latest`: this edition runs migrations
+# on deploy, so `latest` means taking a schema change at a moment you did not
+# choose.
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: habiterall
+      POSTGRES_USER: habiterall_owner
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?set it in .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U habiterall_owner -d habiterall']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  authentik-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: ${AUTHENTIK_DB_PASSWORD:?set it in .env}
+    volumes:
+      - authentik-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U authentik -d authentik']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  authentik-redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--save', '60', '1']
+    volumes:
+      - authentik-redis-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping | grep PONG']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2025.8
+    command: server
+    depends_on:
+      authentik-db: { condition: service_healthy }
+      authentik-redis: { condition: service_healthy }
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?openssl rand -base64 60}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+      # Only needed to create the first admin; harmless to leave set.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+    ports:
+      - '${AUTHENTIK_PORT:-9000}:9000'
+    restart: unless-stopped
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2025.8
+    command: worker
+    depends_on:
+      authentik-db: { condition: service_healthy }
+      authentik-redis: { condition: service_healthy }
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+    restart: unless-stopped
+
+  # Runs once per deploy, as a SEPARATE credential the app never holds — it is
+  # the only thing allowed to change the schema. `up -d` waits for it to finish.
+  migrate:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL_ADMIN: postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set it in .env}
+    command: ['node', 'src/db/migrate.js']
+    restart: 'no'
+
+  app:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      authentik-server: { condition: service_started }
+    ports:
+      - '3100:3000'
+    environment:
+      NODE_ENV: production
+      # The RESTRICTED role — not the owner. This is what makes a forgotten
+      # WHERE clause return nothing instead of another user's rows.
+      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
+      SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      OIDC_ISSUER: ${OIDC_ISSUER:?from Authentik, ends in a slash}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
+      TRUST_PROXY: 1
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      # The fallback clock: a container has no timezone, so it is UTC. Users can
+      # override it for their own reminders in ⚙ → Notifications, but this is
+      # what "the server's own timezone" means, and it is also the clock that
+      # decides which day a check-off with no explicit date belongs to.
+      TZ: ${TZ:-Etc/UTC}
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  authentik-db-data:
+  authentik-redis-data:

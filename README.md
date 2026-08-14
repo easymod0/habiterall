@@ -58,13 +58,10 @@ straight into cloud later if you outgrow it.
 
 ## Quick start
 
-```bash
-git clone <your-repo-url> habiterall
-cd habiterall
-npm install
-```
-
-Requires **Node 22.5+**. There is no build step — what runs is what is on disk.
+Both editions ship as published images on GHCR, so there is nothing to clone,
+nothing to build, and no source code on your server. Each section below ends
+with a note for running from a checkout instead, which is what you want for
+development.
 
 ### personal edition
 
@@ -106,8 +103,8 @@ configuration.
 
 That file is also in the repository as
 [`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
-(and the cloud one beside it), with a test that fails if it drifts from what is
-printed here. To update:
+(and the two cloud ones beside it), with a test that fails if it drifts from
+what is printed here. To update:
 
 ```bash
 docker compose pull && docker compose up -d
@@ -116,7 +113,11 @@ docker compose pull && docker compose up -d
 <details>
 <summary><b>Or from a clone, with no Docker at all</b></summary>
 
+Requires **Node 22.5+**. There is no build step — what runs is what is on disk.
+
 ```bash
+git clone <your-repo-url> habiterall
+cd habiterall
 npm install
 npm run start:personal
 ```
@@ -128,8 +129,185 @@ Also **<http://localhost:3000>**, with the database at
 
 ### cloud edition
 
+Multi user, so it needs a database and somewhere to sign in. This brings both:
+the published image, Postgres, and Authentik as the identity provider — nothing
+to build, and no source on the server. Save as `docker-compose.yml`:
+
+```yaml
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: habiterall
+      POSTGRES_USER: habiterall_owner
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?set it in .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U habiterall_owner -d habiterall']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  authentik-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: ${AUTHENTIK_DB_PASSWORD:?set it in .env}
+    volumes:
+      - authentik-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U authentik -d authentik']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  authentik-redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--save', '60', '1']
+    volumes:
+      - authentik-redis-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping | grep PONG']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2025.8
+    command: server
+    depends_on:
+      authentik-db: { condition: service_healthy }
+      authentik-redis: { condition: service_healthy }
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?openssl rand -base64 60}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+      # Only needed to create the first admin; harmless to leave set.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+    ports:
+      - '${AUTHENTIK_PORT:-9000}:9000'
+    restart: unless-stopped
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2025.8
+    command: worker
+    depends_on:
+      authentik-db: { condition: service_healthy }
+      authentik-redis: { condition: service_healthy }
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+    restart: unless-stopped
+
+  # Runs once per deploy, as a SEPARATE credential the app never holds — it is
+  # the only thing allowed to change the schema. `up -d` waits for it to finish.
+  migrate:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL_ADMIN: postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set it in .env}
+    command: ['node', 'src/db/migrate.js']
+    restart: 'no'
+
+  app:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      authentik-server: { condition: service_started }
+    ports:
+      - '3100:3000'
+    environment:
+      NODE_ENV: production
+      # The RESTRICTED role — not the owner. This is what makes a forgotten
+      # WHERE clause return nothing instead of another user's rows.
+      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
+      SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      OIDC_ISSUER: ${OIDC_ISSUER:?from Authentik, ends in a slash}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
+      TRUST_PROXY: 1
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      # The fallback clock: a container has no timezone, so it is UTC. Users can
+      # override it for their own reminders in ⚙ → Notifications, but this is
+      # what "the server's own timezone" means, and it is also the clock that
+      # decides which day a check-off with no explicit date belongs to.
+      TZ: ${TZ:-Etc/UTC}
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  authentik-db-data:
+  authentik-redis-data:
+```
+
+Alongside it, a `.env`:
+
 ```bash
-cd habiterall-cloud
+DB_OWNER_PASSWORD=$(openssl rand -base64 36)
+APP_DB_PASSWORD=$(openssl rand -base64 36)
+AUTHENTIK_DB_PASSWORD=$(openssl rand -base64 36)
+AUTHENTIK_SECRET_KEY=$(openssl rand -base64 60)
+AUTHENTIK_BOOTSTRAP_PASSWORD=       # the first admin's password
+SESSION_SECRET=$(openssl rand -base64 36)
+PUBLIC_URL=https://habits.example.com
+OIDC_ISSUER=https://habits.example.com/application/o/habiterall/
+OIDC_CLIENT_ID=                     # filled in below
+OIDC_CLIENT_SECRET=                 # filled in below
+```
+
+Then start it in two goes, because the OIDC client cannot exist before the
+provider that issues it:
+
+```bash
+docker compose up -d authentik-db authentik-redis authentik-server authentik-worker
+```
+
+Sign in to Authentik at **<http://localhost:9000>** as `akadmin`, and create an
+**OAuth2/OIDC provider** named `habiterall` with the redirect URI
+`${PUBLIC_URL}/auth/callback` and scopes `openid profile email`, then an
+application pointing at it. Put its client id and secret in `.env` and bring up
+the rest:
+
+```bash
+docker compose up -d
+```
+
+| | |
+|---|---|
+| **The app** | **<http://localhost:3100>** |
+| Authentik admin | <http://localhost:9000> (sign in as `akadmin`) |
+
+Create users in Authentik under *Directory → Users*; a habiterall account is
+provisioned the first time each one signs in.
+
+<details>
+<summary><b>Or from a clone, which can create the OIDC client for you</b></summary>
+
+The compose file in the repository builds from source and mounts an init script,
+so it needs the checkout — but it also gets you
+`habiterall-cloud/scripts/bootstrap-authentik.mjs`, which creates the provider
+and application over Authentik's API and prints the client id and secret. That
+script is not in the published image, which ships `src/` and `public/` only.
+
+```bash
+git clone <your-repo-url> habiterall
+cd habiterall/habiterall-cloud
 cp .env.example .env          # then fill in the secrets it lists
 docker compose up -d db redis authentik-server authentik-worker
 
@@ -140,14 +318,7 @@ node scripts/bootstrap-authentik.mjs   # paste its output into .env
 docker compose run --rm migrate
 docker compose up -d app
 ```
-
-| | |
-|---|---|
-| **The app** | **<http://localhost:3100>** |
-| Authentik admin | <http://localhost:9000> (sign in as `akadmin`) |
-
-Create users in Authentik under *Directory → Users*; a habiterall account is
-provisioned the first time each one signs in.
+</details>
 
 **Already run an identity provider?** The stack above brings its own Authentik,
 which is the quickest way to have *one*. If you already have Keycloak, Authelia,
