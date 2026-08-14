@@ -37,6 +37,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.work.WorkInfo
 import com.habiterall.app.data.*
+import com.habiterall.app.notify.Notifications
 import com.habiterall.app.notify.Reminders
 import com.habiterall.app.notify.ReminderTime
 import kotlinx.coroutines.CancellationException
@@ -109,11 +110,36 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var settings: Settings
 
+    /**
+     * The habit a notification tap asked for, until the list has shown it.
+     *
+     * Snapshot state rather than a plain field: `setContent` runs once, and the
+     * second and later taps arrive at `onNewIntent` long after it — nothing
+     * would recompose to notice them otherwise.
+     */
+    private var openHabit by mutableStateOf<Long?>(null)
+
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best effort */ }
 
+    /** The habit id a reminder's content intent carries, if this launch is one. */
+    private fun habitFrom(intent: Intent?): Long? =
+        intent?.getLongExtra(Notifications.EXTRA_HABIT_ID, -1L)?.takeIf { it >= 0 }
+
+    /**
+     * A tap that arrives while the app is already up. `singleTop` sends it
+     * here instead of building a second copy of the activity.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openHabit = habitFrom(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        openHabit = habitFrom(intent)
 
         // Say what we want of the window instead of inheriting it. From
         // targetSdk 35 the system draws every app edge to edge whether it asked
@@ -152,6 +178,11 @@ class MainActivity : ComponentActivity() {
                 var webUrl by rememberSaveable { mutableStateOf<String?>(null) }
                 var webTitle by rememberSaveable { mutableStateOf("") }
 
+                // A reminder tap lands on the list, whatever was on screen when
+                // the app was last left. Coming back to a chart from three days
+                // ago is not an answer to "did you exercise today?".
+                LaunchedEffect(openHabit) { if (openHabit != null) webUrl = null }
+
                 when {
                     !checked -> Loading()
                     url == null -> SetupScreen(onSaved = {
@@ -174,6 +205,8 @@ class MainActivity : ComponentActivity() {
                         ) {
                             HabitListScreen(
                                 serverUrl = url!!,
+                                focusHabit = openHabit,
+                                onFocused = { openHabit = null },
                                 onOpenStats = { webUrl = url; webTitle = "Statistics" },
                                 // Straight to that habit's own page, titled with
                                 // its name: landing on the dashboard and hunting
@@ -306,6 +339,8 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun HabitListScreen(
         serverUrl: String,
+        focusHabit: Long?,
+        onFocused: () -> Unit,
         onOpenStats: () -> Unit,
         onOpenHabit: (Habit) -> Unit,
         onChangeServer: () -> Unit,
@@ -530,6 +565,21 @@ class MainActivity : ComponentActivity() {
                 }
         }
 
+        // Put the habit a notification was about on screen.
+        //
+        // Waits for the fetch rather than for the list: a tap that cold-starts
+        // the app arrives before there are any habits to look through, and
+        // scrolling to "not found" is just the top. Cleared once `loaded`,
+        // found or not — a habit archived since its alarm was armed must not
+        // leave a focus pending forever, because the resume snap below defers
+        // to it.
+        LaunchedEffect(focusHabit, shown, loaded) {
+            if (focusHabit == null || !loaded) return@LaunchedEffect
+            val index = shown.indexOfFirst { it.id == focusHabit }
+            if (index >= 0) listState.scrollToItem(index)
+            onFocused()
+        }
+
         // Coming back to the app shows today, from the top.
         //
         // The check above runs when the list SIZE changes, which is not the same
@@ -538,6 +588,10 @@ class MainActivity : ComponentActivity() {
         // that actually matters, and it is also the right moment to refetch —
         // the app is most often reopened because the day moved on.
         val lifecycle = LocalLifecycleOwner.current.lifecycle
+        // Read inside the coroutine below, which outlives the composition that
+        // launched it: the parameter captured there would be whatever it was
+        // when the screen first appeared, and a tap only ever changes it later.
+        val pendingFocus = rememberUpdatedState(focusHabit)
         LaunchedEffect(lifecycle) {
             var first = true
             lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -550,7 +604,12 @@ class MainActivity : ComponentActivity() {
                     // day and every column moves.
                     today = LocalDate.now().toString()
                     reload++
-                    listState.scrollToItem(0)
+                    // Unless this resume IS a notification tap: the two would
+                    // race, and whichever landed second decided where the list
+                    // sat. Snapping to the top is the right default for coming
+                    // back to the app; it is the wrong answer to "show me the
+                    // habit I was just asked about".
+                    if (pendingFocus.value == null) listState.scrollToItem(0)
                     // Horizontally too: reopening the app to a grid still
                     // scrolled to last March is the same staleness the vertical
                     // snap above exists to fix.

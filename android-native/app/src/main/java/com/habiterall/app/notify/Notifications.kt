@@ -13,6 +13,7 @@ import androidx.core.content.ContextCompat
 import com.habiterall.app.R
 import com.habiterall.app.data.Habit
 import com.habiterall.app.ui.CountEntryActivity
+import com.habiterall.app.ui.MainActivity
 
 /**
  * Builds the reminder notification and its actions.
@@ -21,6 +22,11 @@ import com.habiterall.app.ui.CountEntryActivity
  * ever coming to the foreground. A yes/no habit gets Yes / No / Skip inline; a
  * measurable one gets a small activity to type the number, because a
  * notification action cannot collect an arbitrary value.
+ *
+ * Tapping anywhere *else* — the text, the icon, the gap around the buttons —
+ * opens the app on the habit the reminder was about. That is the platform's
+ * own convention for a notification body, and a reminder that answered nothing
+ * and did nothing when tapped read as broken.
  */
 object Notifications {
 
@@ -94,6 +100,29 @@ object Notifications {
         )
     }
 
+    /**
+     * Opens the app on this habit — what a tap on the notification body does.
+     *
+     * `CLEAR_TOP` with MainActivity's `singleTop` launch mode reuses the
+     * instance that is already there and delivers the habit through
+     * `onNewIntent`, rather than stacking a second copy of the app on top of
+     * the one the user left. The distinct `data` is again what keeps two
+     * habits' reminders from sharing one PendingIntent.
+     */
+    private fun openIntent(context: Context, habit: Habit, date: String): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            putExtra(EXTRA_HABIT_ID, habit.id)
+            data = android.net.Uri.parse("habiterall://${habit.id}/$date/open")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
     fun buildReminder(context: Context, habit: Habit, date: String): Notification {
         // A custom prompt leads, because "Did you exercise today?" is a question
         // where the habit's name is a label. The name then becomes the second
@@ -106,6 +135,11 @@ object Notifications {
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
+            // The body opens the app for every habit type. It used to open the
+            // number pad for a measurable habit and do nothing at all for a
+            // yes/no one — so the most ordinary gesture there is, a tap on the
+            // notification, was a dead spot on two thirds of the shade.
+            .setContentIntent(openIntent(context, habit, date))
 
         if (habit.isNumerical) {
             val target = formatTarget(habit)
@@ -118,7 +152,6 @@ object Notifications {
                     "${habit.name} · ${context.getString(R.string.reminder_measurable, target)}"
                 }
             )
-            builder.setContentIntent(countIntent(context, habit, date))
             builder.addAction(
                 0,
                 context.getString(R.string.action_enter_count),
