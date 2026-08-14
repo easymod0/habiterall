@@ -33,6 +33,12 @@ together. Tapping a day cycles it the way the web grid does (unset → done →
 skipped → unset) and a measurable habit asks for a number instead; holding one
 opens a dialog that names the choices rather than making you count taps.
 
+Each row carries its current streak (`🔥 8`), the same figure the web dashboard
+shows under a habit's name and the server's own arithmetic — the row prints
+`currentStreak` from `/api/overview` and computes nothing. Recording a day
+therefore re-asks the server, silently: the optimistic overlay knows about one
+day, and a streak is the whole history.
+
 Which end today sits at is the account's `dayOrder` setting, not this app's, so
 changing it in the web app moves the phone too. Pull down to refresh.
 
@@ -68,6 +74,11 @@ which becomes the notification's title, with the habit's name beneath it.
 The app schedules a local alarm, so a reminder fires whether or not the phone has
 connectivity, and whether or not the server is reachable.
 
+The buttons answer without the app coming forward; **tapping the notification
+itself opens the app** on the habit it was about, which is what a notification
+body does everywhere else and what the reminder should do when the answer is
+"let me look at it".
+
 Reminder times are stored **on the server** as a field on the habit, so they
 follow your account to a new phone and the web UI can set them too.
 
@@ -98,15 +109,20 @@ when connectivity returns — the same guarantee the web app's outbox gives.
 CI builds the APK; see `.github/workflows/android-native.yml`. Nothing needs
 installing locally.
 
-- **Every PR touching `android-native/`** runs the unit tests and lint, and
-  uploads a debug APK as a build artifact.
-- **Pushing a tag matching `android-v*`** builds a release APK and attaches it
-  to a GitHub release. A manual run with *release* ticked does the same
-  without tagging.
+- **Every PR touching `android-native/`**, and every push to `master`, runs the
+  unit tests and lint and uploads a debug APK as a build artifact. That
+  workflow never publishes.
+- **Releases come from `release.yml`**, on a `vX.Y.Z` tag or a manual run: it
+  builds the signed APK, stamps it with the version, and attaches it to the
+  GitHub release. Merging does not ship.
 
-Signing is optional. With no `ANDROID_KEYSTORE_BASE64` secret the release
-build still succeeds and produces an **unsigned** APK, which is fine for
-sideloading. To sign, set these repository secrets:
+**Signing is required for a release.** With no `ANDROID_KEYSTORE_BASE64` secret
+a publishing run *fails* rather than attaching an APK — an unsigned one is
+rejected by Android's package manager itself
+(`INSTALL_PARSE_FAILED_NO_CERTIFICATES`), which reaches the user as a bare "App
+not installed", so no setting and no `adb install` gets around it. A dry run
+still builds an unsigned APK, which is enough to validate the build. To sign,
+set these repository secrets:
 
 | Secret | What |
 |---|---|
@@ -155,6 +171,15 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   `shared/test/time.test.js`. Two parsers with one contract only stay honest if
   both are held to the same examples; `12 am` versus `12 pm` is the one that
   catches every hand-rolled converter.
+- **`GridTest`** — the day grid's arithmetic, pulled out of Compose because
+  these rules only misbehave on a real phone mid-gesture: which end today sits
+  at, what a tap cycles to, when the far edge should load more history, and the
+  scroll correction that keeps a prepended month from sliding the grid sideways.
+- **`ScrollRestoreTest`** — a restored scroll position that no longer fits the
+  list. The version inlined in the screen only covered a clipped *first* row.
+- **`HabitEntryTest`** — what a stored day means, including the one that has bit
+  this project twice: a bare `3` is a skip for a yes/no habit and a real amount
+  for a measurable one.
 
 ## Roadmap
 

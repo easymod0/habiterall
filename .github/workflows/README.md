@@ -3,16 +3,17 @@
 What each workflow needs before it will run green.
 
 **Short version: `ci.yml` needs nothing.** Push the repo and every test runs.
-Only the two Android workflows need configuring, and only for *signed*
-release builds — unsigned APKs and all the tests work with no setup at all.
+The only thing that needs configuring is APK **signing**, and only for a
+publishing release — every test, and the debug APK the Android workflow
+uploads, work with no setup at all.
 
 ## The workflows
 
 | Workflow | Runs on | Publishes | Needs setup |
 |---|---|---|---|
 | `ci.yml` | every push and PR | nothing | **nothing** |
-| `android-native.yml` | PRs and pushes touching `android-native/` | nothing | only to sign |
-| `release.yml` | **a `vX.Y.Z` tag**, or manual | APKs, images, a GitHub release | nothing (each part skips itself) |
+| `android-native.yml` | PRs and pushes touching `android-native/` | nothing | **nothing** |
+| `release.yml` | **a `vX.Y.Z` tag**, or manual | the APK, images, a GitHub release | signing, and only for a publishing run |
 
 ### Releasing
 
@@ -49,7 +50,7 @@ Either route runs `release.yml`, which:
 5. writes release notes listing every commit since the previous `v*` tag,
    grouped by subject prefix, with anything unprefixed under *Other* rather
    than dropped;
-6. creates the release with the APKs attached.
+6. creates the release with the APK attached.
 
 To try it without publishing, use **Actions → Release → Run workflow** and leave
 *dry_run* ticked: everything builds, nothing is pushed, and the summary lists
@@ -166,15 +167,17 @@ every merge a release of `latest`.
 
 ### `android-native.yml` — the native client
 
-On a PR touching `android-native/` it runs the unit tests, lints, and uploads a
-**debug APK** as a build artifact. That path needs no configuration.
+On a PR touching `android-native/`, and on a push to `master`, it runs the unit
+tests, lints, and uploads a **debug APK** as a build artifact. It never
+publishes and it needs no configuration: a debug APK carries the standard
+Android debug signature and installs anywhere.
 
-**Signing is required for a usable APK.** With no `ANDROID_KEYSTORE_BASE64`
-secret the build still succeeds, but it produces an **unsigned** APK — and
-Android will not install one under any circumstances. It is rejected by the
-package manager itself (`INSTALL_PARSE_FAILED_NO_CERTIFICATES`), so neither
-*Install unknown apps* nor `adb install` gets around it; the user just sees
-"App not installed".
+**The release APK is `release.yml`'s, and signing it is required.** With no
+`ANDROID_KEYSTORE_BASE64` secret the Gradle build still succeeds, but what it
+produces is an **unsigned** APK — and Android will not install one under any
+circumstances. It is rejected by the package manager itself
+(`INSTALL_PARSE_FAILED_NO_CERTIFICATES`), so neither *Install unknown apps* nor
+`adb install` gets around it; the user just sees "App not installed".
 
 A publishing release therefore **fails** if the secrets are absent, rather than
 attaching a file nobody can install. A dry run still builds an unsigned APK, so
@@ -208,13 +211,16 @@ certutil -encode habiterall.keystore tmp.b64 && findstr /v CERTIFICATE tmp.b64  
 ## Triggering a release
 
 ```bash
-git tag android-v0.1.0
-git push origin android-v0.1.0
+git tag v1.4.0
+git push origin v1.4.0
 ```
 
-Both Android workflows fire on `android-v*` tags and attach their APK to the
-GitHub release. Or run either manually from the **Actions** tab —
-optional host override.
+`release.yml` is the only workflow that publishes anything, and a `vX.Y.Z` tag
+— or **Actions → Release → Run workflow** — is the only thing that starts it.
+`android-native.yml` has no tag trigger at all: it builds and tests the client
+on every PR that touches it, and stops there. There is no separate Android
+release tag; the APK is versioned and attached by the same run that publishes
+the images.
 
 ## If a run fails
 

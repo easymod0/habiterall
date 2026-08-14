@@ -118,6 +118,20 @@ purpose: a cold deep link leaves an entry a browser's Back walks into, while
 WebView's own back skips an entry pushed without a user gesture and closes the
 screen — which is what returns you to the native list you tapped from.
 
+**A deep link does not paint the list on its way.** `start()` used to load and
+render the dashboard and only then open the habit, so a link straight to one
+showed a full grid of every habit for as long as the stats request took and
+then replaced it — a flash of the wrong screen, on the native client's most
+used path in. The boot now opens the habit alone; nothing else needs the list
+(`state.habits` is the dashboard's), and Back reloads it. Two things keep it
+honest, and both are the reason this is written down rather than obvious: the
+URL still moves through the list (`routes.go(LIST)` before the habit is
+opened), because that is the entry Back returns to; and `detail.open()` reports
+whether it rendered, because a habit that will not open would otherwise leave
+the app showing nothing at all. `routecheck.mjs` pins the flash with a
+MutationObserver installed before the app boots — it lasts one request, which
+is less than a devtools round trip, so it cannot be polled for from outside.
+
 **The native day grid runs whichever way `dayOrder` says, and only one
 direction is free.** With today on the left, loading more history appends past
 the right edge and the scroll offset is still correct. With today on the right
@@ -126,6 +140,25 @@ with it or the grid jumps a month sideways at the moment it loads —
 `Grid.scrollAfterGrowth` is that correction and it is unit-tested. All rows and
 the date header share one `ScrollState`, because two lazy rows cannot share one
 state and rows that scroll apart stop lining up with the dates above them.
+
+**The notification body opens the app; only the buttons answer.** Yes / No /
+Skip and the number pad are the whole point of the native client, but the
+notification is also just a notification, and a tap anywhere else has to do what
+every other app does. `MainActivity` is `singleTop` so the tap reaches the
+instance already running instead of stacking a second one, and the habit id
+rides along so the list lands on the habit that asked. That focus and the
+resume snap-to-top would otherwise race — whichever ran second decided where the
+list sat — so the snap defers while a tap is pending, and the focus is cleared
+once a fetch has landed whether or not the habit was found, or an archived habit
+would suppress the snap forever.
+
+**A row's streak is the server's arithmetic, so recording a day re-asks for
+it.** The optimistic overlay knows one day and a streak is the whole history;
+without a refetch, ticking today left the number sitting still at the exact
+moment it is being watched. The refetch is *silent* — same fetch, no pull
+indicator — because a check-off should not look like work. `quiet` is read and
+cleared at the top of the fetch effect, so a fetch cut short by paging cannot
+leave the next one silent too.
 
 **A time is parsed, not pattern-matched.** `08:30` is what gets stored, but
 `8:30`, `8:30 pm`, `830` and `8` are what people type, and an `^HH:MM$` check

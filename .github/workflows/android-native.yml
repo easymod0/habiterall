@@ -9,8 +9,10 @@
 # own sources, this workflow, or the two shared files whose contract it
 # hard-codes.
 #
-# Signing is optional. Without the secrets the release build still succeeds and
-# produces an unsigned APK, which is enough for sideloading via `adb install`.
+# Nothing here needs a secret: the APK it builds is a DEBUG one, signed with the
+# standard Android debug key, which installs anywhere. Release signing belongs to
+# release.yml, where a publishing run without a keystore fails outright — an
+# unsigned release APK cannot be installed on any device.
 
 name: Android (native)
 
@@ -58,9 +60,9 @@ on:
       - 'shared/public/ui/time.js'
   workflow_dispatch:
 
-# Read-only by default; only the release job needs to publish, and it asks
-# for write itself. The build job runs on every fork PR and must not carry
-# write scope it never uses.
+# Read-only, and there is nothing here that could want more: this workflow
+# builds and tests, and publishing lives entirely in release.yml. The job runs
+# on every fork PR and must not carry write scope it never uses.
 permissions:
   contents: read
 
