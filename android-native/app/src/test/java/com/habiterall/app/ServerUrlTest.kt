@@ -91,6 +91,34 @@ class ServerUrlTest {
         rejected("http://999.999.999.999")
     }
 
+    /**
+     * Pinned to the same examples as `shared/test/routes.test.js`, because the
+     * fragment this builds is parsed by `shared/public/ui/routes.js` — one of
+     * them changing shape alone is a habit page that silently opens the
+     * dashboard instead.
+     */
+    @Test
+    fun `habitRoute names the habit the web UI will show`() {
+        assertEquals(
+            "http://192.168.1.50:3000/#/habit/42",
+            ServerUrl.habitRoute("http://192.168.1.50:3000", 42)
+        )
+        assertEquals(
+            "https://habits.example.com/#/habit/1",
+            ServerUrl.habitRoute("https://habits.example.com", 1)
+        )
+    }
+
+    @Test
+    fun `habitRoute does not double the slash`() {
+        // A base with a trailing slash yields `//#/habit/3`, which loads the
+        // app and then shows the dashboard — it works, just not as asked.
+        assertEquals(
+            "http://10.0.2.2:3000/#/habit/3",
+            ServerUrl.habitRoute("http://10.0.2.2:3000/", 3)
+        )
+    }
+
     @Test
     fun `isPrivateHost covers the boundaries`() {
         assertTrue(ServerUrl.isPrivateHost("10.0.0.0"))

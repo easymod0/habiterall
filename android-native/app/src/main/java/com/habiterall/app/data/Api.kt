@@ -70,6 +70,25 @@ data class Habit(
 ) {
     val isNumerical get() = type == "numerical"
 
+    /**
+     * Whether a day is a skip.
+     *
+     * Two encodings reach this client and both are real. `skips` is where a
+     * skip lives now; a bare value of 3 is where it lived in Loop, and an
+     * imported history — or a database seeded before the change — still
+     * carries it. The sentinel counts only for a yes/no habit, where 3 cannot
+     * mean anything else. For a measurable habit 3 is an amount, and reading
+     * it as a skip is the collision that turns a real failure into a bridged
+     * streak. This mirrors `normalizeEntry` in shared/src/stats.js, which is
+     * what the server scores with.
+     */
+    fun isSkipped(date: String): Boolean =
+        date in skips || (!isNumerical && entries[date] == Sentinels.SKIP)
+
+    /** The amount recorded on a day, or null if there is none to show. */
+    fun valueOn(date: String): Double? =
+        if (isSkipped(date)) null else entries[date]
+
     /** Whether this habit was satisfied on a day, given its raw value. */
     fun isMet(value: Double?, skipped: Boolean): Boolean? {
         if (skipped) return null                       // not applicable
@@ -98,12 +117,29 @@ data class Habit(
 @Serializable
 data class AppSettings(
     @SerialName("notifyChannels") val notifyChannels: List<String>? = null,
+    /**
+     * Which end of the day grid today sits at: 'newest-left' or 'newest-right'.
+     *
+     * The account's setting, not this app's — it is already in the web app's
+     * dialog and already stored per user, so setting "today on the left" on a
+     * laptop has to move the phone too. Null means untouched, which is not the
+     * same as empty: the default below mirrors `SETTINGS.dayOrder.default` in
+     * shared/public/ui/settings.js, and the two must not drift.
+     */
+    @SerialName("dayOrder") val dayOrder: String? = null,
 ) {
     val androidRemindersEnabled: Boolean
         get() = notifyChannels?.contains(CHANNEL_ANDROID) ?: true
 
+    /** True when today belongs at the left-hand end of the grid. */
+    val newestLeft: Boolean
+        get() = (dayOrder ?: DEFAULT_DAY_ORDER) == DEFAULT_DAY_ORDER
+
     companion object {
         const val CHANNEL_ANDROID = "android"
+
+        /** Matches `SETTINGS.dayOrder.default` in shared/public/ui/settings.js. */
+        const val DEFAULT_DAY_ORDER = "newest-left"
     }
 }
 

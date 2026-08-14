@@ -31,6 +31,7 @@ Postgres one.
 | `public/ui/settings-dialog.js` | the settings dialog, built from the registry |
 | `public/ui/components.js` | card, subheading, segmented control, `windowedChart`, `cardInnerWidth` |
 | `public/ui/views.js` | which of the two main views is showing |
+| `public/ui/routes.js` | which view the URL names, and keeping the two in step |
 | `public/ui/api.js` | every request, and what to do when one cannot be made |
 | `public/ui/connectivity.js` | the offline banner, the outbox badge, reconnect handling |
 | `public/ui/toast.js` | the transient message strip |

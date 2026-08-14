@@ -13,11 +13,28 @@ icon on your phone.
 
 | | |
 |---|---|
-| **Native** | notifications with Yes / No / count actions, per-habit reminders, the habit list, quick check-offs, server settings |
-| **Embedded web** | stats, charts, calendar editing, import/export |
+| **Native** | notifications with Yes / No / count actions, per-habit reminders, the day grid and everything you can record in it, server settings |
+| **Embedded web** | stats, charts, the calendar, import/export |
 
 Individual screens can be ported to native later if any of them feel wrong.
 Nothing about this design forces the split to stay where it is.
+
+Tapping a habit's name opens **that habit's** page in the embedded web UI
+rather than the dashboard, via the `#/habit/<id>` route the web app added for
+it. `ServerUrl.habitRoute` builds the fragment and `shared/public/ui/routes.js`
+reads it; they are pinned to the same examples, because a route only one of
+them understands is a page that silently opens the dashboard instead.
+
+## The day grid
+
+The list shows a row of days per habit — at least five on the narrowest phone,
+scrolling back through a year of history, every row and the date header moving
+together. Tapping a day cycles it the way the web grid does (unset → done →
+skipped → unset) and a measurable habit asks for a number instead; holding one
+opens a dialog that names the choices rather than making you count taps.
+
+Which end today sits at is the account's `dayOrder` setting, not this app's, so
+changing it in the web app moves the phone too. Pull down to refresh.
 
 ## Requirements
 

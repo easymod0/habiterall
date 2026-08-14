@@ -12,6 +12,7 @@ import {
   addDaysISO, datesEndingOn, freqLabel, iso, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
+import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
 import { on, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
@@ -76,6 +77,10 @@ export async function load() {
 
 export function paint() {
   state.openHabitId = null;
+  // The URL follows the view. Cheap to call on every repaint — and this is
+  // called on every check-off — because `go` does nothing when the address bar
+  // already says this.
+  routes.go(routes.LIST);
   const root = views.showList();
 
   // Everything below is rebuilt from scratch, which destroys whatever had
@@ -169,7 +174,7 @@ export function paint() {
 
       const box = document.createElement('span');
       box.className = 'check-box';
-      paintCheckbox(box, habit, value);
+      paintCheckbox(box, habit, value, habit.skips?.includes(date) ?? false);
 
       const day = document.createElement('span');
       day.className = 'check-day';
@@ -497,19 +502,32 @@ async function persistOrder(order) {
 
 /* ---------- the checkboxes ---------- */
 
-function paintCheckbox(box, habit, value) {
+/**
+ * @param isSkip  whether `/overview` listed this date in the habit's `skips`
+ *
+ * The flag is why this takes four arguments. `/overview` flattens a skip onto
+ * the SKIP wire value so the grid has something paintable, *and* lists the date
+ * in `skips` — and the second is the only one that can be trusted, because 3 is
+ * a legitimate amount for a measurable habit. Reading the sentinel alone
+ * painted "3 pages" and "3 cigarettes" as skipped days, while the score behind
+ * them counted the 3: the cell disagreed with every figure computed from it.
+ * The bare sentinel still counts for a *boolean* habit, where it cannot mean
+ * anything else and is what an imported Loop history carries — the same rule as
+ * `normalizeEntry` in shared/src/stats.js.
+ */
+function paintCheckbox(box, habit, value, isSkip = false) {
   box.textContent = '';
   box.style.background = 'var(--grid-empty)';
   box.style.color = '#fff';
 
-  if (value == null) return;
-
-  if (value === SKIP) {
+  if (isSkip || (habit.type === 'boolean' && value === SKIP)) {
     box.style.background = 'var(--surface-2)';
     box.style.color = 'var(--text-dim)';
     box.textContent = '–';
     return;
   }
+
+  if (value == null) return;
 
   if (habit.type === 'boolean') {
     if (value === YES) {

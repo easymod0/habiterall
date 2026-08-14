@@ -26,6 +26,13 @@ const CANDIDATES = {
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
     '/snap/bin/chromium',
+    // Chrome for Testing, unzipped here by hand. Last, and deliberately not a
+    // Flatpak: a Flatpak Chromium passes a suite run on its own and then fails
+    // a full one, because `closeChrome` cannot reach the browser behind
+    // `bwrap` — measured at 86 surviving processes after twenty suites, with
+    // later suites hanging on a launch that normally takes 300ms. It is a
+    // usable browser and an unusable test runner, so it is not searched for.
+    `${process.env.HOME}/.local/chrome/chrome-linux64/chrome`,
   ],
 };
 
@@ -44,8 +51,10 @@ export function findChrome() {
   }
 
   throw new Error(
-    `No Chrome found for platform "${platform}". ` +
-    'Install Chrome or set CHROME_PATH to its location.'
+    `No Chrome found for platform "${platform}". Install one, set CHROME_PATH, ` +
+    'or unzip Chrome for Testing into ~/.local/chrome — the last of those is ' +
+    'searched for and needs no root:\n' +
+    '  https://googlechromelabs.github.io/chrome-for-testing/'
   );
 }
 
