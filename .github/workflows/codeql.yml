@@ -1,0 +1,118 @@
+# CodeQL static analysis.
+#
+# This file replaces the repository's DEFAULT SETUP, and it exists for one
+# reason: the native client would not build under it. Default setup analyses
+# Kotlin with `autobuild`, which picks a JDK from what the Android plugin
+# *recommends* — 17 — while app/build.gradle.kts compiles at source level 21.
+# The whole job died on `error: invalid source release: 21`, and nothing in
+# default setup can pass it a `setup-java`.
+#
+# Both halves of that are worth knowing before editing this file:
+#
+#   - Kotlin has to be COMPILED. `build-mode: none` is how the other languages
+#     here are analysed without a build, but it does not support Kotlin — it
+#     reports the language as unsupported and extracts nothing.
+#   - Default setup and a workflow file cannot split a repository between them.
+#     Enabling default setup blocks the API upload an advanced run does, so the
+#     analysis succeeds and the results are rejected. That is why javascript
+#     and actions moved in here rather than being left where they were.
+#
+# The java-kotlin build steps are android-native.yml's, deliberately: same JDK,
+# same pinned Gradle, same generate-the-wrapper dance. If that workflow's
+# toolchain moves, move this one with it or the client stops being scanned.
+
+name: CodeQL
+
+on:
+  pull_request:
+
+  # Unlike ci.yml and android-native.yml, this one DOES run on master, and the
+  # reason is not symmetry with them. Code scanning treats the default branch
+  # as the source of truth: a pull request run annotates that pull request, but
+  # only a default-branch run updates the Security tab. Drop this trigger and
+  # the alert list silently freezes at whatever master last said.
+  push:
+    branches: [master]
+
+  # A weekly sweep, which default setup also did. Nothing in the repository
+  # needs to change for this to be worth running — the queries themselves are
+  # updated, so a rule written after the last commit still finds what it finds.
+  schedule:
+    - cron: '47 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      # The whole point: uploading the SARIF results.
+      security-events: write
+      # Lets CodeQL read the workflow runs it needs to attribute results.
+      actions: read
+      contents: read
+
+    strategy:
+      # One language failing should not hide what the others found.
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+          - language: java-kotlin
+            build-mode: manual
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- java-kotlin only: the toolchain autobuild could not guess ----
+
+      - if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # The repo does not commit gradle-wrapper.jar — a binary nobody can
+      # review in a diff — so the wrapper is generated from the version pinned
+      # in gradle/wrapper/gradle-wrapper.properties. Pin the Gradle that does
+      # the generating too: unpinned, the action installs 9.x, and AGP 8.x does
+      # not support Gradle 9.
+      - if: matrix.language == 'java-kotlin'
+        name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - if: matrix.language == 'java-kotlin'
+        name: Generate the wrapper
+        working-directory: android-native
+        run: gradle wrapper --gradle-version 8.14.3
+
+      # ---- analysis ----
+
+      # Init comes after the toolchain is in place but before any app code is
+      # compiled: with `build-mode: manual` this is what traces the build below.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # assembleDebug rather than the unit tests or lint: this run exists to
+      # produce a database, and android-native.yml already owns proving the
+      # client works. Debug, so no keystore is involved.
+      - if: matrix.language == 'java-kotlin'
+        name: Build the client
+        working-directory: android-native
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

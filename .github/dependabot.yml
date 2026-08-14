@@ -1,0 +1,74 @@
+# Dependabot version updates.
+#
+# Security updates are a repository setting and are already on; they open a PR
+# the moment an advisory lands, regardless of anything here. This file is the
+# other half — routine bumps — and its only real design goal is to stay quiet
+# enough to keep being read. Everything is grouped, so each ecosystem opens at
+# most one PR per cycle instead of one per package.
+
+version: 2
+
+updates:
+  # One npm workspace with one lockfile at the root, so a single entry covers
+  # shared, personal and cloud. Eight direct dependencies; grouping them means
+  # a quiet week produces nothing and a busy one produces a single PR.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # A freshly published version is when a compromised release is most likely
+    # to still be live; a week is long enough for one to be yanked. Security
+    # updates do not wait on this.
+    cooldown:
+      default-days: 7
+    groups:
+      npm:
+        patterns: ['*']
+
+  # The workflows currently float on major tags (actions/checkout@v4), which
+  # absorb a retagged compromise silently. Dependabot is the half of the fix
+  # that only helps once the actions are pinned to SHAs — with floating tags
+  # it will merely bump v4 to v5 when that appears.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  # Monthly, because Android dependencies churn and the constraints here are
+  # tighter than the manifests say: AGP 8.x does not support Gradle 9, and the
+  # wrapper version is not something Dependabot touches. Read a PR that moves
+  # AGP against android-native/README.md before merging it.
+  - package-ecosystem: gradle
+    directory: /android-native
+    schedule:
+      interval: monthly
+    groups:
+      gradle:
+        patterns: ['*']
+
+  # Both Dockerfiles are node:22-alpine. A major bump is a real decision — the
+  # root package.json says node >=22.5.0 — so it is left to arrive as a PR
+  # rather than ignored here.
+  - package-ecosystem: docker
+    directory: /habiterall-personal
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: docker
+    directory: /habiterall-cloud
+    schedule:
+      interval: monthly
+
+  # compose is local testing only (Postgres, Redis, Authentik) — it ships to
+  # nobody, but it is what the cloud suites run against, so a broken image
+  # here reads as a broken test run.
+  - package-ecosystem: docker-compose
+    directory: /habiterall-cloud
+    schedule:
+      interval: monthly
+    groups:
+      compose:
+        patterns: ['*']
