@@ -552,7 +552,13 @@ const BUCKETERS = {
  */
 export function computeHistory(habit, entryMap, start, end, granularity = 'day',
                                weekStart = 'monday') {
-  const bucketOf = BUCKETERS[granularity] ?? BUCKETERS.day;
+  // `Object.hasOwn`, because `granularity` is a query parameter and
+  // `BUCKETERS['valueOf']` is an inherited function: truthy, so `??` never
+  // reaches the default, and calling it unbound throws instead of bucketing
+  // by day. Both editions pass the parameter straight through.
+  const bucketOf = Object.hasOwn(BUCKETERS, granularity)
+    ? BUCKETERS[granularity]
+    : BUCKETERS.day;
   const buckets = new Map();
 
   for (const date of boundedRange(start, end)) {
