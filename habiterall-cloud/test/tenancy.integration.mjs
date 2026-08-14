@@ -301,10 +301,15 @@ const scan = await withNotifierScope(async (db) => ({
   habits: (await db.query('SELECT COUNT(*)::int c FROM habits')).rows[0].c,
   entries: (await db.query('SELECT COUNT(*)::int c FROM entries')).rows[0].c,
   log: (await db.query('SELECT COUNT(*)::int c FROM notify_log')).rows[0].c,
+  // `users_notifier_scan` is FOR SELECT on `users` alone, so this must be 0 —
+  // and it is worth asking, because notify_status is the newest table the
+  // notifier writes and it carries an error string straight from Discord.
+  status: (await db.query('SELECT COUNT(*)::int c FROM notify_status')).rows[0].c,
 }));
 check('the scan can enumerate accounts (it has to)', scan.users === 2, JSON.stringify(scan));
-check('but reaches no habit, entry, or send history',
-  scan.habits === 0 && scan.entries === 0 && scan.log === 0, JSON.stringify(scan));
+check('but reaches no habit, entry, send history or delivery report',
+  scan.habits === 0 && scan.entries === 0 && scan.log === 0 && scan.status === 0,
+  JSON.stringify(scan));
 
 let scanWriteBlocked = false;
 try {

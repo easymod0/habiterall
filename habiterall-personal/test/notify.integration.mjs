@@ -169,55 +169,58 @@ try {
   // surface at all: a deleted webhook was recorded as sent, logged at warn, and
   // the habit, its time and the destination toggle all went on looking correct.
 
-  const failDay = new Date(Date.UTC(2026, 7, 15, 8, 0));
-  await deliverAccount(notifier.collect(failDay)[0], {
-    instant: failDay,
-    mark: notifier.mark,
-    recordOutcome: notifier.recordOutcome,
-    fetch: fakeFetch(404),           // the webhook was deleted
-    log: { warn: () => {}, debug: () => {} },
-  });
-
-  const failed = await api('/api/notify/status');
-  const discord = failed.body.channels.find((c) => c.channel === 'discord');
-  ck('a permanent delivery failure is readable over the API',
-    discord?.ok === false && discord?.permanent === true, JSON.stringify(failed.body));
-  ck('and carries the sender\'s own words rather than a code',
-    /webhook/i.test(discord?.error ?? ''), discord?.error);
-  ck('filed under the day the reminder was for',
-    discord?.date === '2026-08-15', discord?.date);
-
-  // The second failing day says nothing new, so nothing is written — but the
-  // row must not vanish either.
-  const stillFailing = new Date(Date.UTC(2026, 7, 16, 8, 0));
-  await deliverAccount(
-    { ...notifier.collect(stillFailing)[0] },
-    {
-      instant: stillFailing,
+  /** One day's delivery, collected fresh so the stored verdict is re-read. */
+  const deliverOn = async (day, status) => {
+    const instant = new Date(Date.UTC(2026, 7, day, 8, 0));
+    await deliverAccount(notifier.collect(instant)[0], {
+      instant,
       mark: notifier.mark,
       recordOutcome: notifier.recordOutcome,
-      fetch: fakeFetch(404),
+      fetch: fakeFetch(status),
       log: { warn: () => {}, debug: () => {} },
-    }
-  );
-  const stillThere = await api('/api/notify/status');
-  ck('a second failing day leaves the report where it was',
-    stillThere.body.channels.find((c) => c.channel === 'discord')?.date === '2026-08-15',
-    JSON.stringify(stillThere.body.channels));
+    });
+    return (await api('/api/notify/status')).body.channels
+      .find((c) => c.channel === 'discord');
+  };
+
+  // Day one: Discord is having a bad afternoon. Retryable, so the reminder is
+  // not written off — but the user is still owed an explanation.
+  const transient = await deliverOn(15, 500);
+  ck('a delivery failure is readable over the API',
+    transient?.ok === false, JSON.stringify(transient));
+  ck('a retryable one is not reported as permanent',
+    transient?.permanent === false && transient?.status === 500,
+    JSON.stringify(transient));
+  ck('dated from when it started going wrong',
+    transient?.date === '2026-08-15', transient?.date);
+
+  // REGRESSION. Day two: the webhook is deleted. Both days are `ok: false`, so
+  // a change test that looked only at THAT wrote nothing here — and the dialog
+  // went on saying "webhook returned 500" forever while the one actionable
+  // sentence Discord gave us, "create a new one", never reached the person who
+  // could act on it. Which is the same silence this feature exists to end.
+  const permanent = await deliverOn(16, 404);
+  ck('a failure that changes its REASON is written down',
+    /deleted|create a new one/i.test(permanent?.error ?? ''), permanent?.error);
+  ck('and updates whether it is worth retrying',
+    permanent?.permanent === true && permanent?.status === 404,
+    JSON.stringify(permanent));
+  ck('and re-dates itself to when the new state began',
+    permanent?.date === '2026-08-16', permanent?.date);
+
+  // Day three: the same failure again. Nothing new to say, so nothing is
+  // written — the date stays at when this state began, which is what the
+  // dialog's "not delivered since" reads from. The row must not vanish either.
+  const repeated = await deliverOn(17, 404);
+  ck('an unchanged failure is not rewritten every day',
+    repeated?.date === '2026-08-16' && repeated?.status === 404,
+    JSON.stringify(repeated));
 
   // ...and a working send clears it, which is what makes the notice go away.
-  const fixedDay = new Date(Date.UTC(2026, 7, 17, 8, 0));
-  await deliverAccount(notifier.collect(fixedDay)[0], {
-    instant: fixedDay,
-    mark: notifier.mark,
-    recordOutcome: notifier.recordOutcome,
-    fetch: fakeFetch(204),
-    log: { warn: () => {}, debug: () => {} },
-  });
-  const cleared = await api('/api/notify/status');
-  ck('a success clears the failure',
-    cleared.body.channels.find((c) => c.channel === 'discord')?.ok === true,
-    JSON.stringify(cleared.body.channels));
+  const cleared = await deliverOn(18, 204);
+  ck('a success clears the failure', cleared?.ok === true, JSON.stringify(cleared));
+  ck('and the timestamp is ISO, as the cloud edition also reports it',
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(cleared?.at ?? ''), cleared?.at);
 
   /* ---------- switching it off ---------- */
 

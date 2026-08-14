@@ -127,7 +127,7 @@ export async function collect(instant) {
         [clock.date]
       );
       const { rows: status } = await db.query(
-        `SELECT channel, ok FROM notify_status`
+        `SELECT channel, ok, status, error, permanent FROM notify_status`
       );
 
       const already = new Set(sent.map((s) => `${s.habit_id}:${s.channel}`));
@@ -138,8 +138,14 @@ export async function collect(instant) {
         doneToday: answeredIds(habits, entries),
         alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
         // Read here rather than at write time so `recordOutcome` is only called
-        // when the news is new — see `noteOutcome` in notify-send.js.
-        delivered: Object.fromEntries(status.map((s) => [s.channel, s.ok === true])),
+        // when the news is new — see `noteOutcome` in notify-send.js, which
+        // needs the stored REASON and not merely whether it worked.
+        delivered: Object.fromEntries(status.map((s) => [s.channel, {
+          ok: s.ok === true,
+          status: s.status ?? undefined,
+          error: String(s.error ?? ''),
+          permanent: s.permanent === true,
+        }])),
       };
     });
 

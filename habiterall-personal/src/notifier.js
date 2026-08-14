@@ -52,7 +52,12 @@ const q = {
   allStatus: db.prepare(`SELECT * FROM notify_status ORDER BY channel`),
   upsertStatus: db.prepare(`
     INSERT INTO notify_status (channel, ok, status, error, permanent, mode, date, at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    -- ISO 8601 with the Z, because the cloud edition's TIMESTAMPTZ serialises
+    -- that way and the two editions promise the same API. SQLite's bare
+    -- datetime('now') is "2026-08-14 22:45:20" — space-separated and silent
+    -- about its zone, which is the kind of drift this project has paid for
+    -- before: archived coming back as 0 here and false there.
+    VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     ON CONFLICT(channel) DO UPDATE SET ok = excluded.ok,
                                        status = excluded.status,
                                        error = excluded.error,
@@ -116,9 +121,15 @@ export function collect(now = new Date()) {
     doneToday,
     alreadySent: (habitId, channel) => sent.has(`${habitId}:${channel}`),
     // Read here rather than at write time so `recordOutcome` is only called
-    // when the news is new — see `noteOutcome` in notify-send.js.
+    // when the news is new — see `noteOutcome` in notify-send.js, which needs
+    // the stored REASON and not merely whether it worked.
     delivered: Object.fromEntries(
-      q.allStatus.all().map((r) => [String(r.channel), r.ok === 1])
+      q.allStatus.all().map((r) => [String(r.channel), {
+        ok: r.ok === 1,
+        status: r.status == null ? undefined : Number(r.status),
+        error: String(r.error ?? ''),
+        permanent: r.permanent === 1,
+      }])
     ),
   }];
 }

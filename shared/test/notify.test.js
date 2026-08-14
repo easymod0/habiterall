@@ -657,24 +657,107 @@ test('an outcome is written when it CHANGES, not once per reminder', async () =>
   await deliverAccount(three, { ...ctx, fetch: fakeFetch([{ status: 404 }]) });
   assert.deepEqual(outcomes, [{ channel: 'discord', ok: false }]);
 
-  // A tick that finds it still broken has nothing new to say.
+  // A tick that finds it still broken, for the same reason, has nothing new to
+  // say. `delivered` carries the stored REASON and not just `ok`, so that the
+  // reason changing IS news — the test below this one is why.
+  const gone = {
+    discord: {
+      ok: false,
+      status: 404,
+      error: 'the webhook was deleted or is no longer accepted — create a new one',
+      permanent: true,
+    },
+  };
   outcomes.length = 0;
-  await deliverAccount({ ...three, delivered: { discord: false } },
+  await deliverAccount({ ...three, delivered: gone },
     { ...ctx, fetch: fakeFetch([{ status: 404 }]) });
   assert.deepEqual(outcomes, [], 'the same failure was written twice');
 
   // ...and a success once it is fixed IS news, because it clears the notice the
   // user is being shown.
   outcomes.length = 0;
-  await deliverAccount({ ...three, delivered: { discord: false } },
+  await deliverAccount({ ...three, delivered: gone },
     { ...ctx, fetch: fakeFetch([{ status: 204 }]) });
   assert.deepEqual(outcomes, [{ channel: 'discord', ok: true }]);
 
   // A healthy instance writes to this table roughly never.
   outcomes.length = 0;
-  await deliverAccount({ ...three, delivered: { discord: true } },
+  await deliverAccount(
+    { ...three, delivered: { discord: { ok: true, status: 204, error: undefined } } },
     { ...ctx, fetch: fakeFetch([{ status: 204 }]) });
   assert.deepEqual(outcomes, []);
+});
+
+test('a failure that changes its REASON is news, even though it is still a failure', async () => {
+  // REGRESSION. Both a 500 and a deleted webhook are `ok: false`, so a change
+  // test that compares only that wrote nothing for the second — and the user
+  // was shown "webhook returned 500" indefinitely while the one actionable
+  // sentence Discord gave us, "create a new one", never arrived. A softer
+  // version of the exact silence this feature exists to end.
+  const outcomes = [];
+  const ctx = {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => {},
+    recordOutcome: (_a, channel, outcome) => outcomes.push({ channel, ...outcome }),
+    log: { warn: () => {} },
+  };
+
+  const wasFlaky = account({
+    delivered: {
+      discord: { ok: false, status: 500, error: 'webhook returned 500', permanent: false },
+    },
+  });
+  await deliverAccount(wasFlaky, { ...ctx, fetch: fakeFetch([{ status: 404 }]) });
+
+  assert.equal(outcomes.length, 1, 'the reason changed and was not written down');
+  assert.equal(outcomes[0].permanent, true);
+  assert.equal(outcomes[0].status, 404);
+  assert.match(outcomes[0].error, /deleted|create a new one/i);
+  // ...and the date moves with it, because what is stored is when THIS state
+  // began — which is what the dialog's "not delivered since" reads from.
+  assert.equal(outcomes[0].date, '2026-08-13');
+
+  // The identical failure again says nothing new. This is the half that keeps
+  // it from being a write per reminder, so it has to survive the fix above.
+  outcomes.length = 0;
+  const wasGone = account({
+    delivered: {
+      discord: {
+        ok: false,
+        status: 404,
+        error: 'the webhook was deleted or is no longer accepted — create a new one',
+        permanent: true,
+      },
+    },
+  });
+  await deliverAccount(wasGone, { ...ctx, fetch: fakeFetch([{ status: 404 }]) });
+  assert.deepEqual(outcomes, [], 'the same failure was written twice');
+});
+
+test('one channel\'s verdict does not stand in for another\'s', async () => {
+  // `delivered` is per channel and the comparison must be too, or a working
+  // webhook would vouch for a broken bot. Two destinations, one of each.
+  const outcomes = [];
+  const both = account({
+    settings: {
+      notifyChannels: ['android', 'discord'],
+      discordWebhook: 'https://discord.com/api/webhooks/1/abc',
+      notifyTimezone: 'UTC',
+    },
+    delivered: { discord: { ok: true, status: 204 } },
+  });
+
+  await deliverAccount(both, {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => {},
+    recordOutcome: (_a, channel, outcome) => outcomes.push({ channel, ok: outcome.ok }),
+    fetch: fakeFetch([{ status: 404 }]),
+    log: { warn: () => {} },
+  });
+
+  // Android is delivered by the phone and never reaches a send, so the only
+  // verdict here is Discord's own.
+  assert.deepEqual(outcomes, [{ channel: 'discord', ok: false }]);
 });
 
 test('failing to STORE an outcome does not fail the delivery', async () => {

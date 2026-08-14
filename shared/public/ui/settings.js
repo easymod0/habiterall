@@ -363,8 +363,12 @@ export function deliveryProblems(values = load()) {
   return deliveryStatus
     .filter((s) => !s.ok && enabled.has(s.channel))
     .map((s) => {
-      const when = s.date ? ` on ${s.date}` : '';
-      return `${label(s.channel)} — the last reminder${when} was not delivered: ` +
+      // "since", not "on". The stored date is when this state BEGAN, because
+      // the row is only rewritten when the reason changes — a failure that has
+      // persisted for a week still carries the date it started. Saying "the
+      // last reminder on <date>" would be a claim the data does not support.
+      const when = s.date ? ` since ${s.date}` : '';
+      return `${label(s.channel)} — reminders have not been delivered${when}: ` +
         `${s.error || 'no reason was given'}.`;
     });
 }

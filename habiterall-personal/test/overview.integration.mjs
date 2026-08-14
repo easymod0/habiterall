@@ -34,11 +34,19 @@ const ck = (label, cond, extra = '') => {
   if (!cond) fails++;
 };
 
-const iso = (d) => d.toISOString().slice(0, 10);
+/**
+ * `n` days ago on the LOCAL calendar, which is the calendar the server keeps.
+ *
+ * `toISOString().slice(0,10)` is the obvious way to write this and is wrong
+ * everywhere east of UTC: it yields tomorrow's date, `assertNotFuture` refuses
+ * the write, and the suite fails with a column count. CI runs in UTC, so that
+ * only ever breaks on somebody's laptop.
+ */
 const daysAgo = (n) => {
   const d = new Date();
-  d.setUTCDate(d.getUTCDate() - n);
-  return iso(d);
+  d.setDate(d.getDate() - n);
+  const pad = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
 const post = (path, body) => fetch(`${base}/api${path}`, {

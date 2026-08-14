@@ -342,6 +342,16 @@ for a private note — chosen from the response shape the handler already built,
 so everything above that line reads the same either way. `application_id` rides
 on the interaction, so this needs no extra call and still no bot token.
 
+One consequence of deferring is that the *old* failure mode was at least
+visible: an unanswered interaction showed "This interaction failed", which was
+wrong but loud. A type-6 defer has no loading state to time out, so an uncaught
+throw afterwards leaves the reminder sitting unchanged and the press looking
+like it did nothing. The `try` therefore wraps **all** the storage — a pool that
+has gone away takes `resolveChannel` and `today` down as readily as `record` —
+and the defer itself is wrapped too, so a failure to acknowledge cannot skip the
+write it exists to protect. Deferring also requires `application_id`: without it
+the follow-up would post to `/webhooks/undefined/…` after spending the callback.
+
 Two exceptions, and both are deliberate. **A modal cannot be deferred at all** —
 it has to be *opened* inside the three seconds, and a callback of type MODAL is
 the only way to open one — so the `amount` button keeps its lookup-and-answer
@@ -382,6 +392,17 @@ without being asked. Four things about it are load bearing:
   failing at 08:00 is one piece of news, and a healthy instance writes here
   roughly never. A success is stored for one reason — it clears a notice the
   user is being shown.
+- **The state is the REASON, not just `ok`** — `stateKey` covers
+  `ok`/`permanent`/`status`/`error`. A 500 on Monday and a deleted webhook on
+  Tuesday are both `ok: false`, so comparing that alone froze the message at
+  whichever failure came first: "webhook returned 500" forever, while the one
+  actionable sentence — *create a new one* — never arrived. That is a softer
+  version of the silence this whole feature exists to end. `date` is
+  deliberately **out** of the key, because it moves every day a failure
+  persists and including it would make this a write per reminder again. So what
+  is stored is the date the state BEGAN, and the dialog says "not delivered
+  **since**" rather than "the last reminder **on**" — a claim the data would
+  not support.
 - The wording is the **sender's own**, from `postWebhook` / `discordRequest`.
   Re-phrasing it in the UI is how the dialog and the log come to say different
   things about the same 404.

@@ -91,6 +91,20 @@ export function warnUnreachable(account, ctx = {}) {
 }
 
 /**
+ * What a destination's recorded state amounts to, for "is this news?".
+ *
+ * Everything the settings dialog puts in front of the user, and nothing that
+ * moves on its own — see `noteOutcome`.
+ *
+ * @param {{ok?: boolean, status?: number, error?: string, permanent?: boolean}} [o]
+ */
+function stateKey(o) {
+  if (!o) return '';
+  return [o.ok ? 'ok' : 'no', o.permanent ? 'permanent' : '', o.status ?? '', o.error ?? '']
+    .join('|');
+}
+
+/**
  * One user's world, as a tick needs it: read once, up front, so no storage is
  * touched while a webhook is in flight.
  *
@@ -100,9 +114,10 @@ export function warnUnreachable(account, ctx = {}) {
  * @property {import('./types.js').Habit[]} [habits] those with a reminder time
  * @property {Set<number>} [doneToday]
  * @property {(habitId: number, channel: string, date: string) => boolean} [alreadySent]
- * @property {Record<string, boolean>} [delivered] channel -> whether the last
- *   attempt landed, as stored. Absent means nothing has been recorded for that
- *   channel yet. Only used to decide whether the outcome below is NEWS.
+ * @property {Record<string, DeliveryOutcome>} [delivered] channel -> the outcome
+ *   currently stored for it. Absent means nothing has been recorded for that
+ *   channel yet. Only used to decide whether a new outcome is NEWS, so it needs
+ *   the REASON and not just `ok` — see `noteOutcome`.
  */
 
 /**
@@ -298,23 +313,31 @@ export async function deliverAccount(account, ctx) {
   /** reason -> count, for the tick summary. */
   const skipped = {};
 
-  // What the last attempt on each channel was recorded as, so only a CHANGE is
-  // written. Seeded from storage and then kept up to date in memory, or five
-  // habits failing at 08:00 would be five identical writes — and the second
-  // through fifth say nothing the first did not.
-  const wasDelivered = { ...(account.delivered ?? {}) };
+  // What is currently recorded for each channel, so only a CHANGE is written.
+  // Seeded from storage and then kept up to date in memory, or five habits
+  // failing at 08:00 would be five identical writes — and the second through
+  // fifth say nothing the first did not.
+  const recorded = { ...(account.delivered ?? {}) };
 
   /**
    * Remember an outcome if it is news.
    *
-   * News is a change of state, or the first thing ever recorded for a channel.
-   * A failure to STORE the outcome must not become a failure to deliver: this
-   * is a diagnostic, and the reminder itself has already gone (or not).
+   * News is a change of STATE — and the state is not just "did it work". A
+   * 500 on Monday and a deleted webhook on Tuesday are both `ok: false`, so
+   * comparing that alone froze the reason at whichever failure came first: the
+   * user would be shown "webhook returned 500" forever while the actionable
+   * "create a new one" never arrived. Which is a softer version of the exact
+   * silence this whole feature exists to end, so the reason is part of the key.
+   *
+   * `date` deliberately is NOT. It moves every day a failure persists, and
+   * including it would make this a write per reminder again — so what is stored
+   * is the date this state BEGAN, which is what "not delivered since" reads
+   * from.
    */
   const noteOutcome = async (channel, result, date) => {
     if (!ctx.recordOutcome) return;
-    if (wasDelivered[channel] === result.ok) return;
-    wasDelivered[channel] = result.ok;
+    if (stateKey(recorded[channel]) === stateKey(result)) return;
+    recorded[channel] = result;
     try {
       await ctx.recordOutcome(account, channel, {
         ok: result.ok,

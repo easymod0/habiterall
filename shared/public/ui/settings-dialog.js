@@ -302,10 +302,17 @@ export function openSettings() {
  * nobody has started.
  */
 function refreshDeliveryNotices() {
-  const before = JSON.stringify(settings.SECTION_NOTICES.Notifications(draft));
+  // Every section's notices, not just the one that has any today: the body is
+  // rendered from the whole registry, so reading a single key here would leave
+  // a second entry drawn on open and never redrawn when its answer landed.
+  const snapshot = () => JSON.stringify(
+    Object.values(settings.SECTION_NOTICES).map((notices) => notices(draft))
+  );
+
+  const before = snapshot();
   settings.refreshDelivery().then(() => {
     if (!dialog.open || isDirty()) return;
-    if (JSON.stringify(settings.SECTION_NOTICES.Notifications(draft)) === before) return;
+    if (snapshot() === before) return;
     renderSettingsBody();
   });
 }

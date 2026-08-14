@@ -356,67 +356,87 @@ export async function handleInteraction(interaction, adapter) {
   // — so the buttons stay live while the write is in flight. `record` is an
   // upsert for every action, so a double press is idempotent and the window
   // costs nothing.
+  // `application_id` is what the follow-up is addressed to, so a deferral
+  // without one would spend the callback and then post to
+  // `/webhooks/undefined/…`. It is always present on a gateway
+  // INTERACTION_CREATE; this is what makes that a stated requirement rather
+  // than an assumption.
   const opensModal = type === INTERACTION.COMPONENT && parsed.action === 'amount';
-  if (!opensModal && interaction.message) {
-    // Not conditional on the result: a defer that fails leaves the interaction
-    // lost either way, and the write is the half worth finishing.
-    await respond(interaction, { type: CALLBACK.DEFER_UPDATE }, { acknowledged });
-    acknowledged = true;
-  }
-
-  const account = await adapter.resolveChannel(interaction.channel_id);
-  if (!account) {
-    return send(ephemeral(
-      'This channel is not linked to a habiterall account any more.'
-    ));
-  }
-
-  // When the account has named its Discord user, only that user's clicks count.
-  // Without it, anyone who can see the channel can answer — which is fine for a
-  // private channel and is why the setting exists for every other case.
-  const owner = String(account.settings?.discordUserId ?? '');
-  if (owner && clickedBy(interaction) !== owner) {
-    return send(ephemeral('These are not your habits.'));
-  }
-
-  const today = await adapter.today(account);
-  const age = daysApart(parsed.date, today);
-  if (age < 0) {
-    return send(ephemeral('That reminder is for a future date, which cannot be recorded.'));
-  }
-  if (age > MAX_ANSWER_AGE_DAYS) {
-    return send(ephemeral(
-      `That reminder is ${age} days old — open the app to record it.`
-    ));
-  }
-
-  // A number cannot come from a button, so the button opens a box first. This
-  // is the `opensModal` path above, undeferred and answered inside the three
-  // seconds — a callback of type MODAL is the only way to open one at all.
-  if (opensModal) {
-    const habit = await adapter.findHabit?.(account, parsed.habitId);
-    if (!habit) return send(ephemeral('That habit no longer exists.'));
-    return send(amountModal(habit, {
-      date: parsed.date,
-      prompt: String(habit.reminder_message ?? '').trim(),
-    }));
-  }
-
-  let value;
-  if (type === INTERACTION.MODAL) {
-    const raw = modalValue(interaction);
-    const text = String(raw ?? '').trim().replace(',', '.');
-    // The emptiness check comes first, and on purpose: `Number('')` is 0, which
-    // is finite and non-negative, so an empty box would record a zero — and for
-    // an "at most" habit a zero is a *success*. The input is marked required,
-    // but that is Discord's promise to keep, not ours to assume.
-    value = text === '' ? NaN : Number(text);
-    if (!Number.isFinite(value) || value < 0) {
-      return send(ephemeral(`"${raw}" is not a number I can record.`));
+  if (!opensModal && interaction.message && interaction.application_id) {
+    try {
+      await respond(interaction, { type: CALLBACK.DEFER_UPDATE }, { acknowledged });
+      acknowledged = true;
+    } catch (err) {
+      // A defer that fails leaves the interaction lost either way, and the
+      // write is the half worth finishing — so this is swallowed rather than
+      // thrown. `acknowledged` stays false, so a later answer still tries the
+      // callback, which is the right guess when we do not know the defer landed.
+      log.error?.('discord: acknowledging an interaction failed:', err);
     }
   }
 
+  // Everything from here is storage, and all of it can throw — a pool that has
+  // gone away takes `resolveChannel` and `today` down as readily as `record`.
+  // The catch used to wrap the write alone, which was survivable while an
+  // unanswered interaction still showed "This interaction failed": wrong, but
+  // visible. After a type-6 defer there is no loading state to time out, so an
+  // uncaught throw here leaves the reminder sitting unchanged and the press
+  // looking like it did nothing. A database outage must not be quieter than a
+  // recording error.
   try {
+    const account = await adapter.resolveChannel(interaction.channel_id);
+    if (!account) {
+      return send(ephemeral(
+        'This channel is not linked to a habiterall account any more.'
+      ));
+    }
+
+    // When the account has named its Discord user, only that user's clicks
+    // count. Without it, anyone who can see the channel can answer — which is
+    // fine for a private channel and is why the setting exists for every other
+    // case.
+    const owner = String(account.settings?.discordUserId ?? '');
+    if (owner && clickedBy(interaction) !== owner) {
+      return send(ephemeral('These are not your habits.'));
+    }
+
+    const today = await adapter.today(account);
+    const age = daysApart(parsed.date, today);
+    if (age < 0) {
+      return send(ephemeral('That reminder is for a future date, which cannot be recorded.'));
+    }
+    if (age > MAX_ANSWER_AGE_DAYS) {
+      return send(ephemeral(
+        `That reminder is ${age} days old — open the app to record it.`
+      ));
+    }
+
+    // A number cannot come from a button, so the button opens a box first. This
+    // is the `opensModal` path above, undeferred and answered inside the three
+    // seconds — a callback of type MODAL is the only way to open one at all.
+    if (opensModal) {
+      const habit = await adapter.findHabit?.(account, parsed.habitId);
+      if (!habit) return send(ephemeral('That habit no longer exists.'));
+      return send(amountModal(habit, {
+        date: parsed.date,
+        prompt: String(habit.reminder_message ?? '').trim(),
+      }));
+    }
+
+    let value;
+    if (type === INTERACTION.MODAL) {
+      const raw = modalValue(interaction);
+      const text = String(raw ?? '').trim().replace(',', '.');
+      // The emptiness check comes first, and on purpose: `Number('')` is 0,
+      // which is finite and non-negative, so an empty box would record a zero —
+      // and for an "at most" habit a zero is a *success*. The input is marked
+      // required, but that is Discord's promise to keep, not ours to assume.
+      value = text === '' ? NaN : Number(text);
+      if (!Number.isFinite(value) || value < 0) {
+        return send(ephemeral(`"${raw}" is not a number I can record.`));
+      }
+    }
+
     const result = await adapter.record(account, {
       habitId: parsed.habitId,
       date: parsed.date,

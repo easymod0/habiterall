@@ -131,10 +131,14 @@ const overviewServer = await new Promise((resolve) => {
 });
 const overviewBase = `http://127.0.0.1:${overviewServer.address().port}`;
 
+// `n` days ago on the LOCAL calendar, which is the calendar `today()` keeps.
+// `toISOString()` here yields tomorrow's date everywhere east of UTC, and CI
+// runs in UTC — so the obvious spelling only ever fails on somebody's laptop.
 const isoDaysAgo = (n) => {
   const d = new Date();
-  d.setUTCDate(d.getUTCDate() - n);
-  return d.toISOString().slice(0, 10);
+  d.setDate(d.getDate() - n);
+  const pad = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
 // A run of completions ending today, and nothing in the month before it.
@@ -174,6 +178,31 @@ ck('the grid window still follows end',
 ck("today's window still carries its entries",
   Object.keys(rowNow.entries).length === 7,
   String(Object.keys(rowNow.entries).length));
+
+// While the router is mounted, the other route added alongside it. The notify
+// suite exercises the storage behind this through `notifier.deliveryStatus`
+// directly, which would go on passing if the route itself were wired to the
+// wrong function or forgot to scope itself to the session's user.
+const { recordOutcome } = await import('../src/notifier.js');
+await recordOutcome({ id: alice }, 'discord', {
+  ok: false, status: 404, error: 'the webhook was deleted', permanent: true, date: '2026-08-15',
+});
+// Bob's own, on the same channel and with the opposite verdict, so "scoped to
+// the session" is a real question rather than one row being the only row.
+await recordOutcome({ id: bob }, 'discord', {
+  ok: true, status: 204, error: '', permanent: false, date: '2026-08-15',
+});
+
+const status = await fetch(`${overviewBase}/api/notify/status`).then((r) => r.json());
+ck('GET /notify/status reports the last delivery outcome',
+  status.channels?.[0]?.channel === 'discord' && status.channels[0].ok === false,
+  JSON.stringify(status));
+ck('and it is the session\'s own, not whoever failed last',
+  status.channels.length === 1 && status.channels[0].error === 'the webhook was deleted',
+  JSON.stringify(status));
+ck('the timestamp is ISO, as the personal edition also reports it',
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(status.channels[0].at ?? ''),
+  status.channels[0].at);
 
 overviewServer.close();
 // The rows above would otherwise be counted by the checks that follow.
