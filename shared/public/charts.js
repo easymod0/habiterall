@@ -34,20 +34,36 @@ function svgRoot(width, height) {
   return svg;
 }
 
-/** Reads a CSS custom property so charts follow the active theme. */
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
+/**
+ * A theme colour, as a reference CSS resolves rather than a value read now.
+ *
+ * These used to be read with `getComputedStyle` at draw time and written into
+ * the `fill` attribute as a literal — which freezes the palette the chart was
+ * drawn under. An SVG attribute does not follow the theme, and the only thing
+ * that can correct it is a re-render; for the detail view a re-render is a
+ * REFETCH, so switching to dark left every unrecorded calendar square holding
+ * the light `#e6e9ef` — near-white against the dark card — for two requests,
+ * and permanently if either failed. Reported as "the blank squares are
+ * sometimes white until I refresh".
+ *
+ * A `var()` in a presentation attribute is a live reference: the same square
+ * now follows the theme with no redraw, no request, and nothing to go stale.
+ */
+const themed = (name) => `var(${name})`;
 
-/** Blend a hex color toward the surface color by `t` (0 = surface, 1 = full). */
+/**
+ * Blend a hex colour toward the empty-cell colour by `t` (0 = empty, 1 = full).
+ *
+ * `color-mix` for the same reason as [themed] — the blend used to be computed
+ * in JS against whichever palette was current, which baked the answer in. The
+ * blend was always toward `--grid-empty` (its two literals were that variable's
+ * two values), so this is the same arithmetic with the second colour left for
+ * CSS to resolve. `t >= 1` returns the colour itself: a mix with nothing to mix
+ * is noise in the DOM, and the habit's own colour is not a theme colour.
+ */
 function shade(hex, t) {
-  const dark = document.documentElement.dataset.theme === 'dark';
-  const base = dark ? [35, 40, 48] : [230, 233, 239];
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  const mix = (c, i) => Math.round(base[i] + (c - base[i]) * t);
-  return `rgb(${mix(r, 0)}, ${mix(g, 1)}, ${mix(b, 2)})`;
+  if (t >= 1) return hex;
+  return `color-mix(in srgb, ${hex} ${Math.round(t * 100)}%, var(--grid-empty))`;
 }
 
 function title(node, text) {
@@ -66,8 +82,8 @@ export function scoreChart(scores, color, { width = 720, height = 200 } = {}) {
 
   const w = width - pad.left - pad.right;
   const h = height - pad.top - pad.bottom;
-  const dim = cssVar('--text-dim');
-  const border = cssVar('--border');
+  const dim = themed('--text-dim');
+  const border = themed('--border');
 
   const x = (i) => pad.left + (scores.length === 1 ? w / 2 : (i / (scores.length - 1)) * w);
   const y = (v) => pad.top + h - v * h;
@@ -144,8 +160,8 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Completion calendar');
 
-  const dim = cssVar('--text-dim');
-  const empty = cssVar('--grid-empty');
+  const dim = themed('--text-dim');
+  const empty = themed('--grid-empty');
 
   const iso = (d) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -263,7 +279,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         label = `${date}: in the future`;
       } else if (value != null) {
         if (isSkip) {
-          fill = cssVar('--surface-2');
+          fill = themed('--surface-2');
           label = `${date}: skipped`;
         } else if (habit.type === 'boolean') {
           if (value === YES) { fill = shade(color, 1); label = `${date}: done`; }
@@ -600,7 +616,7 @@ export function weekdayMonthChart(months, color, { width = 720 } = {}) {
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Weekday consistency by month');
 
-  const dim = cssVar('--text-dim');
+  const dim = themed('--text-dim');
   if (!months.length) {
     svg.appendChild(el('text', {
       x: pad.left, y: pad.top + 16, 'font-size': 12, fill: dim,
@@ -691,7 +707,7 @@ export function missDistributionChart(buckets, color, { width = 720 } = {}) {
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'How long lapses last');
 
-  const dim = cssVar('--text-dim');
+  const dim = themed('--text-dim');
   if (!rows.length) {
     svg.appendChild(el('text', {
       x: pad.left, y: pad.top + 16, 'font-size': 12, fill: dim,
@@ -720,7 +736,7 @@ export function missDistributionChart(buckets, color, { width = 720 } = {}) {
 
     svg.appendChild(el('text', {
       x: pad.left + Math.max(barW, 2) + 6, y: y + 16,
-      'font-size': 11, fill: cssVar('--text'),
+      'font-size': 11, fill: themed('--text'),
     }, String(b.count)));
   });
 
@@ -738,7 +754,7 @@ export function survivalChart(points, color, { width = 720, height = 190 } = {})
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Share of streaks reaching each length');
 
-  const dim = cssVar('--text-dim');
+  const dim = themed('--text-dim');
   if (points.length < 1) {
     svg.appendChild(el('text', {
       x: pad.left, y: pad.top + 16, 'font-size': 12, fill: dim,
@@ -748,7 +764,7 @@ export function survivalChart(points, color, { width = 720, height = 190 } = {})
 
   const w = width - pad.left - pad.right;
   const h = height - pad.top - pad.bottom;
-  const border = cssVar('--border');
+  const border = themed('--border');
 
   for (const frac of [0, 0.5, 1]) {
     const y = pad.top + h - frac * h;
@@ -810,8 +826,8 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
 
   const w = width - pad.left - pad.right;
   const h = height - pad.top - pad.bottom;
-  const dim = cssVar('--text-dim');
-  const border = cssVar('--border');
+  const dim = themed('--text-dim');
+  const border = themed('--border');
 
   const vals = buckets.map((b) =>
     showPercent ? (b.total ? b.completed / b.total : 0) : b.completed
@@ -871,8 +887,8 @@ export function weekdayChart(days, color, { width = 720, height = 170 } = {}) {
 
   const w = width - pad.left - pad.right;
   const h = height - pad.top - pad.bottom;
-  const dim = cssVar('--text-dim');
-  const border = cssVar('--border');
+  const dim = themed('--text-dim');
+  const border = themed('--border');
 
   const rates = days.map((d) => (d.total ? d.completed / d.total : 0));
 
@@ -934,8 +950,8 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Longest streaks');
 
-  const dim = cssVar('--text-dim');
-  const empty = cssVar('--grid-empty');
+  const dim = themed('--text-dim');
+  const empty = themed('--grid-empty');
 
   if (!top.length) {
     svg.appendChild(el('text', {
@@ -973,7 +989,7 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
     // length
     svg.appendChild(el('text', {
       x: width - pad.right, y: cy + 4, 'text-anchor': 'end',
-      'font-size': 12, fill: cssVar('--text'), 'font-weight': 600,
+      'font-size': 12, fill: themed('--text'), 'font-weight': 600,
     }, String(s.length)));
   });
 
@@ -1021,7 +1037,7 @@ export function frequencyChart(months, color, { width = 720 } = {}) {
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Times per week by month');
 
-  const dim = cssVar('--text-dim');
+  const dim = themed('--text-dim');
   const w = width - pad.left - pad.right;
   const colW = w / maxPerWeek;
 

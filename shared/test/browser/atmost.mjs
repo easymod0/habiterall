@@ -11,11 +11,9 @@ class N{constructor(n){this.name=n;this.attrs={};this.children=[];this.text=null
  appendChild(c){this.children.push(c);return c;}addEventListener(){}
  set textContent(v){this.text=v;}get textContent(){return this.text;}
  walk(f){f(this);for(const c of this.children)c.walk(f);}}
-globalThis.document={documentElement:{dataset:{theme:'light'}},
- createElementNS:(ns,n)=>new N(n),createElement:(n)=>new N(n)};
-globalThis.getComputedStyle=()=>({getPropertyValue:(n)=>({
- '--text-dim':'#666e7d','--border':'#dcdfe6','--grid-empty':'#e6e9ef',
- '--text':'#14181f','--surface-2':'#eef0f4'}[n]??'#000')});
+// No getComputedStyle, and no theme on documentElement: charts.js must not
+// read the palette at draw time. See rendercheck.mjs for the whole story.
+globalThis.document={createElementNS:(ns,n)=>new N(n),createElement:(n)=>new N(n)};
 
 const {calendarChart}=await import(sharedPublic('charts.js'));
 let fails=0;
@@ -37,10 +35,11 @@ const paint=(entries,color,habit)=>{
 
 const snacks={type:'numerical',target_value:0,target_type:'at_most',unit:'snacks'};
 const cells=paint({[d0]:0,[d1]:2,[d2]:1},'#10b981',snacks);
-const empty='#e6e9ef';
+// A reference, not a value — the point of the change these pin.
+const empty='var(--grid-empty)';
 
 check('0 snacks (perfect) is painted, not blank', cells[d0]&&cells[d0]!==empty, `fill=${cells[d0]}`);
-check('0 snacks gets FULL strength colour', cells[d0]==='rgb(16, 185, 129)', cells[d0]);
+check('0 snacks gets FULL strength colour', cells[d0]==='#10b981', cells[d0]);
 check('2 snacks dimmer than 0', cells[d1]!==cells[d0], `fill=${cells[d1]}`);
 check('1 vs 2 snacks are distinguishable', cells[d2]!==cells[d1], `1=${cells[d2]} 2=${cells[d1]}`);
 check('1 snack still painted', cells[d2]&&cells[d2]!==empty, `fill=${cells[d2]}`);
@@ -48,12 +47,12 @@ check('1 snack still painted', cells[d2]&&cells[d2]!==empty, `fill=${cells[d2]}`
 const water={type:'numerical',target_value:8,target_type:'at_least',unit:'glasses'};
 const c2=paint({[d0]:0,[d1]:8,[d2]:4},'#0ea5e9',water);
 check('at_least: 0 glasses stays blank', c2[d0]===empty, `fill=${c2[d0]}`);
-check('at_least: 8 glasses full colour', c2[d1]==='rgb(14, 165, 233)', c2[d1]);
+check('at_least: 8 glasses full colour', c2[d1]==='#0ea5e9', c2[d1]);
 check('at_least: 4 glasses partial', c2[d2]!==empty&&c2[d2]!==c2[d1], `fill=${c2[d2]}`);
 
 const bool={type:'boolean',target_value:0,target_type:'at_least'};
 const c3=paint({[d0]:2,[d1]:0},'#8b5cf6',bool);
-check('boolean: done is full colour', c3[d0]==='rgb(139, 92, 246)', c3[d0]);
+check('boolean: done is full colour', c3[d0]==='#8b5cf6', c3[d0]);
 check('boolean: not-done stays blank', c3[d1]===empty, c3[d1]);
 
 console.log(fails===0?'\nALL AT-MOST CHECKS PASSED':`\n${fails} FAILED`);
