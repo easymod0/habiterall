@@ -30,7 +30,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: habiterall-redis
     command: --save 60 1 --loglevel warning
     volumes:
@@ -44,7 +44,7 @@ services:
 
   # ------------------------------------------------------------- authentik
   authentik-server:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.8
     container_name: authentik-server
     command: server
     depends_on:
@@ -69,7 +69,7 @@ services:
     restart: unless-stopped
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2025.8
+    image: ghcr.io/goauthentik/server:2026.8
     container_name: authentik-worker
     command: worker
     depends_on:
