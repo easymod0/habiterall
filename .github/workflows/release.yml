@@ -289,18 +289,28 @@ jobs:
           # string. Gradle reads it with getenv, where "" is not null.
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      # AGP 8.x does not support Gradle 9, and `gradle wrapper` below runs
-      # under whatever this puts on PATH — so the version is pinned here as
-      # well as in gradle-wrapper.properties.
+      # `gradle wrapper` below runs under whatever this puts on PATH, and it
+      # configures the project — so that Gradle has to be one the pinned AGP
+      # supports. It is read out of gradle-wrapper.properties rather than
+      # written here as a second copy of the number; see android-native.yml for
+      # what the second copy cost.
+      - name: Read the pinned Gradle version
+        id: gradle
+        run: |
+          v=$(sed -n 's|^distributionUrl=.*/gradle-\(.*\)-bin\.zip$|\1|p' \
+                android-native/gradle/wrapper/gradle-wrapper.properties)
+          [ -n "$v" ] || { echo "::error::no Gradle version in gradle-wrapper.properties"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '8.14.3'
+          gradle-version: ${{ steps.gradle.outputs.version }}
 
       # The wrapper jar is deliberately not committed (a binary nobody can
-      # review in a diff), so it is generated from the pinned version.
+      # review in a diff), so it is generated from that same version.
       - name: Generate the Gradle wrapper
         working-directory: android-native
-        run: gradle wrapper --gradle-version 8.14.3
+        run: gradle wrapper --gradle-version ${{ steps.gradle.outputs.version }}
 
       - name: Build the native APK
         working-directory: android-native

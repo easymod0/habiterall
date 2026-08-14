@@ -217,17 +217,26 @@ jobs:
 
       # The repo does not commit gradle-wrapper.jar — a binary nobody can
       # review in a diff — so the wrapper is generated from the version pinned
-      # in gradle/wrapper/gradle-wrapper.properties. Pin the Gradle that does
-      # the generating too: unpinned, the action installs 9.x, and AGP 8.x does
-      # not support Gradle 9.
+      # in gradle/wrapper/gradle-wrapper.properties. The Gradle that does the
+      # generating has to be pinned too (unpinned, the action installs whatever
+      # is newest and configures the project under it), so it is read from that
+      # same file rather than written out again here. See android-native.yml.
+      - name: Read the pinned Gradle version
+        id: gradle
+        run: |
+          v=$(sed -n 's|^distributionUrl=.*/gradle-\(.*\)-bin\.zip$|\1|p' \
+                android-native/gradle/wrapper/gradle-wrapper.properties)
+          [ -n "$v" ] || { echo "::error::no Gradle version in gradle-wrapper.properties"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '8.14.3'
+          gradle-version: ${{ steps.gradle.outputs.version }}
 
       - name: Generate the wrapper
         working-directory: android-native
-        run: gradle wrapper --gradle-version 8.14.3
+        run: gradle wrapper --gradle-version ${{ steps.gradle.outputs.version }}
 
       # Init comes after the toolchain is in place but before any app code is
       # compiled: with `build-mode: manual` this is what traces the build below.

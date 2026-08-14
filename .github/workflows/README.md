@@ -348,9 +348,10 @@ caching is untouched, and `android-native.yml` keeps its cache hits because a
 cached build still proves the client builds.
 
 **Its toolchain is `android-native.yml`'s**, deliberately — same JDK 21, same
-pinned Gradle 8.14.3, same generate-the-wrapper step, for the same reasons
-documented there. Move one and the other has to move with it, or the client
-quietly stops being scanned while every check stays green.
+read-the-version-then-generate-the-wrapper pair of steps, for the same reasons
+documented there. Both now read the number out of `gradle-wrapper.properties`
+instead of stating it, which is what stops the two drifting apart and the client
+quietly ceasing to be scanned while every check stays green.
 
 Unlike `ci.yml` and `android-native.yml`, this one **does** run on a push to
 `master`, and not for symmetry with anything. Code scanning treats the default
@@ -420,14 +421,26 @@ the images.
 
 ## If a run fails
 
-- **`gradle wrapper` fails during configuration** — the Gradle version is
-  pinned in both `setup-gradle` and `gradle/wrapper/gradle-wrapper.properties`.
-  They must agree, and must be a version the pinned AGP supports (AGP 8.x does
-  not support Gradle 9).
+- **`gradle wrapper` fails during configuration** — that step configures the
+  project under the Gradle `setup-gradle` installed, before the wrapper it
+  writes is ever used, so that Gradle has to be one the pinned AGP supports
+  (AGP 9.3 requires ≥ 9.5). It is read from
+  `gradle/wrapper/gradle-wrapper.properties` for exactly this reason: the
+  version used to be written there *and* in three workflows, and a Dependabot
+  bump of the properties file was then guaranteed to be red. A
+  `NoClassDefFoundError` naming a `org.gradle.*` class is this and nothing else
+  — a new AGP asking an old Gradle for a class it does not have.
 - **"Compose Compiler Gradle plugin is required"** — from Kotlin 2.0 the
   Compose compiler is a separate plugin whose version must match Kotlin's
   exactly. `composeOptions.kotlinCompilerExtensionVersion` is the pre-2.0
   mechanism and is now a configuration error.
+- **A `kotlin` extension is declared twice, or Kotlin metadata is "an
+  incompatible version"** — AGP 9 has built-in Kotlin, so it *is* the Kotlin
+  version (2.2.10 for AGP 9.3.1). Applying `org.jetbrains.kotlin.android`
+  alongside it fails outright, and a library compiled by a later Kotlin cannot
+  be read at all. Both look like broken artifacts and are really one ceiling —
+  the one Dependabot cannot see, because it bumps the Kotlin plugins to the
+  newest Kotlin published.
 - **Every `Analyze` job fails at the upload** — "CodeQL analyses from advanced
   configurations cannot be processed when the default setup is enabled".
   Nothing is wrong with the code or the workflow: default setup has been turned

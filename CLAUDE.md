@@ -53,9 +53,11 @@ cd habiterall-cloud && docker compose up -d   # app :3100, Authentik :9000
 cd android-native && ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-The native Android client needs JDK 21, Android SDK 36 and Gradle **8.14.3**
-— see `android-native/README.md`. AGP 8.x does not support Gradle 9, and the
-wrapper jar is generated rather than committed.
+The native Android client needs JDK 21, Android SDK 36 and Gradle **9.7.0**
+— see `android-native/README.md`. The wrapper jar is generated rather than
+committed, so that version lives in `gradle-wrapper.properties` and CI reads it
+from there. AGP is what caps it at both ends: 9.3.1 requires Gradle ≥ 9.5 and
+carries its own Kotlin (2.2.10), which nothing in the build may contradict.
 
 ## Non-obvious decisions
 

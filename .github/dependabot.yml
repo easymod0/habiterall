@@ -38,9 +38,14 @@ updates:
         patterns: ['*']
 
   # Monthly, because Android dependencies churn and the constraints here are
-  # tighter than the manifests say: AGP 8.x does not support Gradle 9, and the
-  # wrapper version is not something Dependabot touches. Read a PR that moves
-  # AGP against android-native/README.md before merging it.
+  # tighter than the manifests say. AGP fixes both the Gradle version (9.3
+  # requires ≥ 9.5) and, from AGP 9, the KOTLIN one — Kotlin is built in, so
+  # the compiler plugins must name AGP's Kotlin rather than the newest
+  # published, and a runtime library compiled by a later Kotlin cannot be read
+  # at all. Dependabot knows none of that and will offer all three. Read a PR
+  # that moves AGP or Kotlin against android-native/README.md before merging
+  # it; the version numbers it proposes for the plugins are the ones to check
+  # first.
   - package-ecosystem: gradle
     directory: /android-native
     schedule:
