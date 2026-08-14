@@ -12,7 +12,7 @@ uploads, work with no setup at all.
 | Workflow | Runs on | Publishes | Needs setup |
 |---|---|---|---|
 | `ci.yml` | every PR, and nightly at 05:17 UTC | nothing | **nothing** |
-| `android-native.yml` | PRs and pushes touching `android-native/`, and nightly at 06:17 UTC | nothing | **nothing** |
+| `android-native.yml` | every PR (it builds only if the client can be affected), and nightly at 06:17 UTC | nothing | **nothing** |
 | `release.yml` | **a `vX.Y.Z` tag**, or manual | the APK, images, a GitHub release | signing, and only for a publishing run |
 
 ### Releasing
@@ -71,11 +71,11 @@ validate the build.
 
 | A pull request touching | runs |
 |---|---|
-| documentation or workflow config only | nothing but the change detector (~5s) |
+| documentation or workflow config only | nothing but the two change detectors (~5s) |
 | any code, anywhere | the whole of `ci.yml` |
 | `android-native/**`, or a shared file the Kotlin client mirrors | the Android workflow as well |
-| — a merge to `master` | only the Android workflow, and only if it touched those paths |
-| — the nightly schedule | everything in both workflows, path filters ignored |
+| — a merge to `master` | nothing at all |
+| — the nightly schedule | everything in both workflows, unconditionally |
 
 Four deliberate choices in there.
 
@@ -161,22 +161,26 @@ what makes the absent push-to-master trigger safe, so the two are one decision:
 | Bypass actors | **none**, admins included |
 | Force push / deletion | blocked |
 
-The required checks are every job in `ci.yml`:
+The required checks are every job in both workflows:
 
 ```
-What changed            Multi-tenant isolation
-Unit tests              Cloud API (Postgres)
-Type check              Backup round-trip (personal)
-Browser suites          Docker images
+What changed              Multi-tenant isolation
+Unit tests                Cloud API (Postgres)
+Type check                Backup round-trip (personal)
+Browser suites            Docker images
+
+Android — what changed    Build APK
 ```
 
 Three things about that list are easy to get wrong.
 
-**`Build APK` is deliberately absent.** `android-native.yml` filters
-`pull_request` at the *workflow* level with `paths:`, so a pull request touching
-no Android file never runs it and it never reports a status. A required check
-that never reports stays **Pending forever** and the pull request can never
-merge. Requiring it means first giving that workflow `ci.yml`'s shape.
+**Requiring `Build APK` is what forced `android-native.yml`'s shape.** It used to
+filter `pull_request` at the *workflow* level with `paths:`, and a workflow
+filtered that way does not run at all when nothing matches — it reports no
+status, so a required check on it sits **Pending forever** and the pull request
+can never merge. The filter therefore had to move down into an
+always-running `Android — what changed` job before the check could be required.
+That order is the whole trick, and it is the same one `ci.yml` uses.
 
 **A skipped job passes, and that is the documented behaviour** — "a job that is
 skipped will report its status as `Success`. It will not prevent a pull request
@@ -185,12 +189,13 @@ expensive jobs are gated with a job-level `if:`: on a docs-only pull request the
 all report Success and it merges. Skipping a whole *workflow* is the opposite,
 per above.
 
-**`What changed` is required for a reason that is not obvious.** A job skipped
-because a job it `needs` *failed* also reports Success. So if the detector ever
+**Both detectors are required for a reason that is not obvious.** A job skipped
+because a job it `needs` *failed* also reports Success. So if a detector ever
 dies — a checkout error, the script tripping `set -euo pipefail` — every job
 behind it skips, each reports Success, and an untested pull request goes green.
 Requiring the detector itself is what turns that silent pass into a red check.
-If the list is ever trimmed, this is the entry that cannot go.
+If the list is ever trimmed, `What changed` and `Android — what changed` are the
+entries that cannot go.
 
 > Adding a job to `ci.yml` does **not** add it to this list. Add the new job
 > name to the ruleset too, or it runs and is allowed to fail.
@@ -240,18 +245,23 @@ every merge a release of `latest`.
 
 ### `android-native.yml` — the native client
 
-On a PR touching `android-native/`, on a push to `master`, and nightly, it runs
-the unit tests, lints, and uploads a **debug APK** as a build artifact. It never
-publishes and it needs no configuration: a debug APK carries the standard
-Android debug signature and installs anywhere.
+Its detector runs on every PR; the build itself runs when the change can affect
+the client — `android-native/**`, this workflow, or one of the shared files the
+Kotlin code mirrors by hand. It then runs the unit tests, lints, and uploads a
+**debug APK** as a build artifact. It never publishes and it needs no
+configuration: a debug APK carries the standard Android debug signature and
+installs anywhere. Nightly it builds regardless.
 
-**This one keeps its push-to-master trigger, where `ci.yml` dropped its own.**
-That looks inconsistent and is not: `Build APK` cannot be a required check while
-the workflow is paths-filtered (see *Required checks* above), so on a pull
-request it is advisory — nothing stops a red Android build from merging. The
-post-merge run is therefore the only thing other than a person that catches a
-broken client, and it stays until this workflow is restructured the way `ci.yml`
-is. Worth knowing as a live gap, not just a note.
+**The mirrored-file list lives in the detector's `grep`, not in a `paths:`
+filter,** and that is the only place it lives now. Keep it in step with the
+Kotlin side: `types.js` / `constants.js` are the REST contract, `ui/time.js` is
+`ReminderTime.kt`'s twin, `notify.js` backs `AppSettings.androidRemindersEnabled`,
+`validate.js` holds the reminder-prompt cap. A shared file the app copies that is
+not matched there can break the client with nothing to catch it.
+
+**`Build APK` is a required check, so a red client blocks a merge.** That is new,
+and it is why this workflow no longer runs on a push to `master` — the gate moved
+to the pull request, where it can actually stop something.
 
 **The release APK is `release.yml`'s, and signing it is required.** With no
 `ANDROID_KEYSTORE_BASE64` secret the Gradle build still succeeds, but what it
