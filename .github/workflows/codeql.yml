@@ -107,10 +107,20 @@ jobs:
       # assembleDebug rather than the unit tests or lint: this run exists to
       # produce a database, and android-native.yml already owns proving the
       # client works. Debug, so no keystore is involved.
+      #
+      # `--no-build-cache` is what makes this a real build, and without it the
+      # job fails in a way that reads like a configuration error rather than a
+      # cache hit: gradle.properties sets `org.gradle.caching=true`, so
+      # compileDebugKotlin and compileDebugJavaWithJavac come back FROM-CACHE,
+      # their outputs are unpacked without a compiler ever running, and CodeQL
+      # — which learns what the code is by TRACING the compiler — finalizes an
+      # empty database and says "could not process any code written in
+      # Java/Kotlin". BUILD SUCCESSFUL in 16s, nothing analysed. Dependency
+      # caching is untouched; only the task-output cache is bypassed.
       - if: matrix.language == 'java-kotlin'
         name: Build the client
         working-directory: android-native
-        run: ./gradlew --no-daemon assembleDebug
+        run: ./gradlew --no-daemon --no-build-cache assembleDebug
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4
