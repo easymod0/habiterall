@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,6 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,6 +59,40 @@ val CELL_WIDTH = 40.dp
 val NAME_WIDTH = 120.dp
 
 private val CELL_SIZE = 34.dp
+
+/** Material's minimum touch target. The square drawn inside stays smaller. */
+private val MIN_TOUCH = 48.dp
+
+/**
+ * What a screen reader says about one day.
+ *
+ * The cell's own text is a tick, a dash, a bare number or nothing at all —
+ * none of which says which habit, which day, or what state. Announcing the
+ * date alone was no better: "Record 2026-08-13" is a serial number read aloud,
+ * and it left the one thing that matters, whether the day is already done,
+ * entirely unspoken.
+ */
+private fun describe(
+    habit: Habit,
+    date: String,
+    skipped: Boolean,
+    value: Double?,
+    met: Boolean?,
+): String {
+    val state = when {
+        skipped -> "skipped"
+        habit.isNumerical && value != null ->
+            "${trimNumber(value)} of ${trimNumber(habit.targetValue)} ${habit.unit}".trim()
+        met == true -> "done"
+        else -> "not done"
+    }
+    return "${habit.name}, ${spokenDate(date)}: $state"
+}
+
+/** `2026-08-13` → `Thursday 13 August`, or the raw string if it will not parse. */
+private fun spokenDate(date: String): String = runCatching {
+    LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("EEEE d MMMM"))
+}.getOrElse { date }
 
 /**
  * The date row above the grid, scrolling in lockstep with every habit row.
@@ -199,7 +236,25 @@ private fun DayCell(
         else -> ""
     }
 
-    Box(Modifier.width(CELL_WIDTH), contentAlignment = Alignment.Center) {
+    // The whole column is the target, not the square drawn inside it: 34dp was
+    // well under the 48dp minimum, and on a grid every neighbour is a valid
+    // target of the same kind, so a near miss did not do nothing — it recorded
+    // the wrong day. Height reaches 48dp, which is free; width stays at the
+    // column, because 48dp columns leave room for four days on a 360dp phone
+    // and five is the least that makes this grid worth having.
+    Box(
+        Modifier
+            .width(CELL_WIDTH)
+            .heightIn(min = MIN_TOUCH)
+            .combinedClickable(
+                onClickLabel = "Record $date",
+                onLongClickLabel = "Edit $date",
+                onClick = onTap,
+                onLongClick = onHold,
+            )
+            .semantics { contentDescription = describe(habit, date, skipped, value, met) },
+        contentAlignment = Alignment.Center,
+    ) {
         Box(
             Modifier
                 .size(CELL_SIZE)
@@ -215,12 +270,6 @@ private fun DayCell(
                     if (isToday) Modifier.border(
                         2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp)
                     ) else Modifier
-                )
-                .combinedClickable(
-                    onClickLabel = "Record $date",
-                    onLongClickLabel = "Edit $date",
-                    onClick = onTap,
-                    onLongClick = onHold,
                 ),
             contentAlignment = Alignment.Center,
         ) {
