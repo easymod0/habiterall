@@ -149,15 +149,25 @@ The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk` (~17 MB).
 It is signed with the standard Android debug key, so it installs on a phone
 with *Install unknown apps* enabled — no keystore needed to try it.
 
-> **AGP decides the Gradle version, and now the Kotlin one too.** AGP 9.3.1
-> requires Gradle ≥ 9.5, so the wrapper is pinned to 9.7.0 in
+> **AGP decides the Gradle version. It does not decide the Kotlin one.** AGP
+> 9.3.1 requires Gradle ≥ 9.5, so the wrapper is pinned to 9.7.0 in
 > `gradle/wrapper/gradle-wrapper.properties` — the single place that number
 > appears, which CI reads rather than repeats. Invoke a system Gradle that
 > disagrees, directly rather than through `./gradlew`, and configuration fails
-> before the wrapper is ever consulted. From AGP 9 the same is true of Kotlin:
-> it is built in (2.2.10 here), applying `org.jetbrains.kotlin.android`
-> alongside it is a build failure, and the compiler plugins and Kotlin-compiled
-> libraries must not get ahead of it. See the root `build.gradle.kts`.
+> before the wrapper is ever consulted.
+>
+> Kotlin is different, and this note used to claim otherwise. From AGP 9 the
+> compiler is built in, so applying `org.jetbrains.kotlin.android` alongside it
+> *is* a build failure — but the version AGP ships is a default, not a pin. The
+> two compiler plugins in the root `build.gradle.kts` select the compiler
+> through the Build Tools API, so the number they name is the one that compiles
+> the app. They must agree with each other, and the Kotlin-compiled libraries
+> below them must not get ahead of *them*.
+
+> **`compileSdk` is 37 and `targetSdk` is 36, deliberately.** `androidx.core`
+> 1.19.0 declares `minCompileSdk=37`, and compiling against 37 only widens which
+> APIs are available. `targetSdk` is the opt-in to new runtime behaviour, which
+> is a change with its own testing rather than a dependency bump.
 
 ## Tests
 

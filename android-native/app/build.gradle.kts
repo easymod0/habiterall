@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "com.habiterall.app"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.habiterall.app"
@@ -97,13 +97,14 @@ dependencies {
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
-    // 1.18.0 and not 1.19.0: from 1.19.0 androidx.core declares
-    // `minCompileSdk=37`, and raising `compileSdk` is a decision of its own —
-    // it changes which APIs compile and what lint has an opinion about, none of
-    // which belongs in a toolchain upgrade. The failure is at least loud: AGP
-    // checks AAR metadata and names the dependency. `activity-compose` and
-    // `browser` below are current; they still ask for 36.
-    implementation("androidx.core:core-ktx:1.18.0")
+    // 1.19.0 declares `minCompileSdk=37`, which is why `compileSdk` above moved
+    // and `targetSdk` did not. AGP's AAR metadata check is what refuses the
+    // mismatch, and it names the dependency, so the failure is at least loud:
+    // "requires libraries and applications that depend on it to compile against
+    // version 37 or later". Compiling against 37 only changes which APIs are
+    // available to compile against; `targetSdk` is the opt-in to new RUNTIME
+    // behaviour, and that is a separate decision with its own testing.
+    implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     // LocalLifecycleOwner and repeatOnLifecycle from a composable. The
     // -ktx artifact above does not provide them; Compose UI has its own
@@ -128,14 +129,17 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
-    // NOT 1.10 or later, and this is the ceiling AGP's built-in Kotlin sets
-    // rather than a preference: those are compiled by Kotlin 2.3, and a class
-    // compiled by 2.3 cannot be read by the 2.2.10 compiler AGP 9.3.1 carries.
-    // It fails as "compiled with an incompatible version of Kotlin", which
-    // reads like a corrupt artifact and is really a version ceiling. The
-    // coroutines line below is fine at 1.11.0 — it is built against 2.2.20,
-    // the same metadata generation as ours.
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    // This was pinned at 1.9.0 against a ceiling that turns out not to exist,
+    // and the correction is worth keeping because the reasoning sounded right.
+    // A class compiled by a later Kotlin cannot be read by an earlier compiler,
+    // so 1.10+ — built by Kotlin 2.3 — was held below the 2.2.10 that AGP 9 was
+    // believed to fix. AGP does not fix it. The Kotlin Gradle plugins in the
+    // root build file SELECT the compiler through the Build Tools API: asking
+    // for 2.4.10 resolves `kotlin-build-tools-impl:2.4.10`, and that is what
+    // does the compiling. So the ceiling moves with the plugin version, not with
+    // AGP — and measured both ways before this line changed, 1.11.0 compiles
+    // under 2.4.10 and under 2.2.10 alike.
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     testImplementation("junit:junit:4.13.2")
