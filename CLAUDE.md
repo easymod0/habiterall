@@ -109,6 +109,29 @@ phone export taken before the web history would have wiped every completion the
 two disagreed about. Both editions' `applyImport` yield to the existing row for
 exactly that case — bare lapse, merge mode — and count it as `entriesKept`.
 
+Note "bare" is `!notes.trim()` and not `!notes`: a note of one space is truthy,
+and content is what suspends the rule, so whitespace was enough to buy a lapse
+the right to overwrite eight recorded glasses.
+
+**On a merge the FILE's type says how a value was written down; the ACCOUNT's
+says what may be stored.** These are two questions and answering them with one
+type is how a file claiming `numerical` put an `8` on a boolean habit — a value
+`PUT /entries/:date` answers 400 to, and one `isCompleted` reads as *not done*
+forever. But the file's type still has to decide the *encoding*, because a `3`
+is Loop's skip sentinel in a boolean column and three-of-something in a
+numerical one; reading that against the account would re-create the value/skip
+collision this file opens with. So the two rules run together, and the yield
+above was gated on `type === 'boolean'` while they did not — which is what let a
+merge rewrite eight glasses to a 2.
+
+Where the two types genuinely disagree only a **lapse and a skip cross**: zero
+glasses and "no" mean the same thing, and so does a skipped day. An amount is
+not a yes and a yes carries no amount, so those days are reported in `skipped`
+rather than invented. One asymmetry, deliberate and pinned by a test: a **skip
+does not yield**. It is an answer — `isCompleted` returns `null` for it, not
+`false` — so a `SKIP` cell in a bare Checkmarks.csv does overwrite a recorded
+amount, where a bare lapse does not.
+
 **Loop's two tracking settings are `skipDays` and `questionMarks`,** both
 defaulting off as Loop's own do, and both read from Loop's source rather than
 guessed (`pref_skip_enabled`, `pref_unknown_enabled`). The tap cycle is
@@ -121,6 +144,31 @@ The day editor's Clear is what gets there. Every surface that can record an
 answer reads `skipDays` — both grids, both day editors, the Discord buttons
 (`reminderComponents`) and the Android notification, which reads it from a local
 mirror because an alarm fires whether or not the phone has a network.
+
+**An export reports what it could not carry; it does not fail on it.**
+`isoToLoopTimestamp` is `Date.UTC`, which rolls a date over rather than refusing
+one, so `2026-02-30` left as 2026-03-02 — and if that day held a real row, the
+Loop file's UNIQUE index on (habit, timestamp) rejected the insert and
+`/api/export-loop.db` answered **500 for as long as the row existed**, naming
+neither the habit nor the date. Restoring your own backup is how such a row gets
+in. `isLoopEncodableDate` is the gate, and it asks the exporter's question
+rather than the calendar's — *does the timestamp read back as the day it came
+from* — which is narrower than `assertDate` on purpose: that one also rejects
+years 1-99, as a side effect of the same legacy two-digit mapping, and #81 is
+teaching the encoder to carry them. This gate weakens by itself as the encoder
+improves, with nothing here to remember to update.
+
+The collision is only the loud half. With no real row on the day it rolled onto,
+the export SUCCEEDED and filed the entry under a day the user never recorded, so
+catching the UNIQUE violation alone would have left the silent corruption in
+place and called it fixed. Two surfaces report the skips because neither reaches
+everybody: `X-Habiterall-Export-Skipped` carries the count for a client that
+made the request itself, and `export.rows_skipped` carries the rows at warn for
+the browser, which downloads through an `<a download>` and reads no headers.
+The count-only header is not timidity — a habit name is free text and a `\r\n`
+in one would throw inside the route, which is the 500 all over again. For the
+same reason the report is `{habit, date, reason}` rather than `applyImport`'s
+sentence: its reader is a log, where names never go.
 
 **Every date range is clamped** (`boundedRange`, `MAX_RANGE_DAYS`). Ranges
 derived from *stored* data are attacker-controlled: one entry dated year 0100
@@ -711,7 +759,7 @@ limits and the `TRUST_PROXY` rule, because those describe `shared/public/` rathe
 than an edition — two copies of a CSP is two chances to break the PWA in exactly
 one of them. What stays per edition is `keyGenerator`: cloud keys per
 authenticated user, personal keys on IP through `ipKeyGenerator`, which
-normalises IPv6 to its /64 (a bare `req.ip` gives one client 2^64 buckets to
+normalises IPv6 to its /56 (a bare `req.ip` gives one client 2^64 buckets to
 rotate through, and express-rate-limit v8 says so at startup rather than
 failing).
 
@@ -875,6 +923,7 @@ Several layers, and they catch different things:
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
+| Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
@@ -898,10 +947,11 @@ nothing changed. They found two real bugs on their first run, both in the CSV
 path. Three suites build a ~15-line fake DOM instead of a browser —
 `atmost.mjs` and `rendercheck.mjs` drive `charts.js`, `daydialog.mjs` replays
 `openDayDialog` — so anything reaching for a browser API there crashes them
-outright rather than failing a check. Note `OFFLINE_SUITES` in `run.mjs`, the
-set the runner will start without a server, lists only `rendercheck` and
-`daydialog`: `atmost` needs no server either but is not in it, so a full run
-demands one on its behalf.
+outright rather than failing a check. `OFFLINE_SUITES` in `run.mjs` is the set
+the runner will start without a server, and all three are in it — `atmost` was
+not, so the runner demanded a server on behalf of a suite that builds its own
+DOM, and reset the fixtures for it too. Add a suite to that set when it needs
+neither.
 
 `unknowncheck.mjs` is where a tap is followed all the way to storage: it taps a
 day and then asks the API what the row says, because the whole `questionMarks`

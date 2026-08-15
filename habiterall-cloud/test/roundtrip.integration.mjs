@@ -27,10 +27,12 @@ const {
   parseLoopCheckmarksCSV, parseLoopHabitsCSV,
 } = await import('@habiterall/shared/import.js');
 const { unzip } = await import('@habiterall/shared/unzip.js');
-const { parseSettings, portableSettings } =
+// LIMITS because the clamp import must honour is the one the API enforces, so
+// the test asks the same table rather than restating a number.
+const { parseSettings, portableSettings, LIMITS } =
   await import('@habiterall/shared/validate.js');
 const {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, JSON_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS, JSON_HABIT_FIELDS,
 } = await import('@habiterall/shared/test/roundtrip-fixture.mjs');
 
 const pg = (await import('pg')).default;
@@ -150,8 +152,11 @@ await seed(alice);
 const seeded = await read(alice);
 const baselineFull = snapshot(seeded, { fields: JSON_HABIT_FIELDS });
 const baselineLoop = snapshot(seeded, { fields: LOOP_HABIT_FIELDS, notes: false });
-// The .db carries a reminder time as well; Habits.csv has no column for one.
-const baselineLoopDb = snapshot(seeded, { fields: LOOP_DB_HABIT_FIELDS, notes: false });
+// The CSV keeps the colour exactly, where the .db snaps it to a palette index.
+const baselineCsv = snapshot(seeded, { fields: CSV_HABIT_FIELDS, notes: false });
+// The .db carries a reminder time as well, and per-day notes, which is why this
+// one is not `notes: false`. Habits.csv has no column for either.
+const baselineLoopDb = snapshot(seeded, { fields: LOOP_DB_HABIT_FIELDS });
 
 ck('fixture seeded', baselineFull.length === FIXTURE.length,
   `${baselineFull.length} habits`);
@@ -215,6 +220,144 @@ ck('while a lapse on an unanswered day still lands',
   Number(on('2026-01-11')?.value) === 0 && on('2026-01-11')?.status === '',
   JSON.stringify(on('2026-01-11')));
 
+/* ---------- ...and the same promise on a MEASURABLE habit ---------- */
+
+console.log('\n--- merge does not overwrite an amount either ---');
+
+// Everything above this line is about Meditate, which is boolean — and the yield
+// was gated on `type === 'boolean'`, so both suites watched the protection work
+// right beside the hole. A numerical habit's lapse is a row holding 0 too.
+const habitNamed = async (name) => (await read(alice)).find((h) => h.name === name);
+const dayOf = async (name, date) =>
+  (await habitNamed(name)).entries.find((e) => e.date === date);
+
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+
+const mergedZeros = await applyImport(alice, parseHabiterallJSON({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Water', type: 'numerical',
+    // 01-05 holds 8 glasses in the fixture; 01-11 has no row at all.
+    entries: [
+      { date: '2026-01-05', value: 0, status: '', notes: '' },
+      { date: '2026-01-11', value: 0, status: '', notes: '' },
+    ],
+  }],
+}), 'merge');
+
+ck('a bare 0 does not overwrite a recorded amount',
+  Number((await dayOf('Water', '2026-01-05'))?.value) === 8,
+  JSON.stringify(await dayOf('Water', '2026-01-05')));
+ck('and the day it kept is counted as kept',
+  mergedZeros.entriesKept === 1 && mergedZeros.entriesImported === 1,
+  JSON.stringify(mergedZeros));
+ck('while a 0 on a day the habit has no answer for still lands',
+  Number((await dayOf('Water', '2026-01-11'))?.value) === 0,
+  JSON.stringify(await dayOf('Water', '2026-01-11')));
+
+/* ---------- a merge types entries by the habit, not by the file ---------- */
+
+console.log('\n--- the account\'s own type decides what a value means ---');
+
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+
+// The most ordinary file there is: a bare Checkmarks.csv, with no Habits.csv
+// beside it to say what a habit is, so every column parses as boolean. Merged
+// into this account it rewrote 8 and 10 glasses to the YES sentinel — 2, against
+// a target of 8 — and reported two imported entries and no error at all.
+const mergedCsvTypes = await applyImport(alice, parseLoopCheckmarksCSV([
+  'Date,Water',
+  '2026-01-05,YES_MANUAL',
+  '2026-01-07,YES_MANUAL',
+  '2026-01-12,NO',
+].join('\n') + '\n'), 'merge');
+
+ck('a yes/no file does not restate an amount',
+  Number((await dayOf('Water', '2026-01-05'))?.value) === 8 &&
+  Number((await dayOf('Water', '2026-01-07'))?.value) === 10,
+  JSON.stringify((await habitNamed('Water')).entries));
+ck('and the days it could not translate are reported',
+  mergedCsvTypes.skipped.length === 1 && mergedCsvTypes.skipped[0].includes('Water'),
+  JSON.stringify(mergedCsvTypes.skipped));
+ck('but a NO still crosses, since a lapse means the same on both sides',
+  Number((await dayOf('Water', '2026-01-12'))?.value) === 0,
+  JSON.stringify(await dayOf('Water', '2026-01-12')));
+
+// And the other direction, which `PUT /entries/:date` answers 400 to: an 8 on a
+// boolean habit is a day `isCompleted` reads as not done forever, and the tap
+// cycle has no state for it.
+const mergedClaim = await applyImport(alice, parseHabiterallJSON({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'numerical',
+    entries: [{ date: '2026-01-12', value: 8, status: '', notes: '' }],
+  }],
+}), 'merge');
+
+ck('an import claiming a yes/no habit is measurable writes no amount',
+  (await dayOf('Meditate', '2026-01-12')) === undefined &&
+  mergedClaim.skipped.length === 1,
+  JSON.stringify([await dayOf('Meditate', '2026-01-12'), mergedClaim.skipped]));
+
+/* ---------- an import obeys the rules the API obeys ---------- */
+
+console.log('\n--- impossible dates, and over-long notes ---');
+
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+
+// `2026-02-30` matches YYYY-MM-DD and is not a day. Here it reached Postgres,
+// where the column is a real DATE: a 22008 that surfaced as an unhandled 500 and
+// rolled back the entire upload — the personal edition stored the string instead.
+// One check in the same place ends both.
+const badDates = await applyImport(alice, parseHabiterallJSON({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'boolean',
+    entries: [
+      { date: '2026-02-30', value: 2, status: '', notes: '' },
+      { date: '2026-13-45', value: 2, status: '', notes: '' },
+      { date: '2026-01-12', value: 2, status: '', notes: '' },
+    ],
+  }],
+}), 'merge');
+const meditateDates = (await habitNamed('Meditate')).entries.map((e) => e.date);
+
+ck('a date that is not a day is reported rather than thrown',
+  badDates.skipped.length === 2 &&
+  !meditateDates.some((d) => d === '2026-02-30' || d === '2026-13-45'),
+  JSON.stringify([badDates.skipped, meditateDates]));
+ck('and the rest of the file still lands',
+  badDates.entriesImported === 1 && meditateDates.includes('2026-01-12'),
+  JSON.stringify(badDates));
+
+// Cloud has always clamped these and personal had no clamp at all, so the two
+// disagreed about what an import may store — and the number was written out here
+// rather than derived, which is how it drifted from the API's in the first place.
+const longNote = 'x'.repeat(LIMITS.notes + 400);
+await applyImport(alice, parseHabiterallJSON({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'boolean',
+    entries: [
+      { date: '2026-01-13', value: 2, status: '', notes: longNote },
+      { date: '2026-01-14', value: 0, status: 'skip', notes: longNote },
+    ],
+  }],
+}), 'merge');
+
+ck('an imported note is clamped to what the API stores',
+  (await dayOf('Meditate', '2026-01-13'))?.notes.length === LIMITS.notes,
+  String((await dayOf('Meditate', '2026-01-13'))?.notes.length));
+ck('a skip\'s note too, which took the other path out',
+  (await dayOf('Meditate', '2026-01-14'))?.notes.length === LIMITS.notes,
+  String((await dayOf('Meditate', '2026-01-14'))?.notes.length));
+
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+
 // The settings half of a backup, which only this edition stores as JSONB under
 // RLS. `portableSettings` is what keeps a capability out of the file in both
 // directions — the notification keys are absent by design.
@@ -273,12 +416,15 @@ ck('the Loop export is a SQLite file',
 const loopHabits = await parseLoopDatabase(loopPath);
 await wipe(alice);
 const loopResult = await applyImport(alice, loopHabits, 'replace');
-const afterLoop = snapshot(await read(alice), { fields: LOOP_DB_HABIT_FIELDS, notes: false });
+const afterLoop = snapshot(await read(alice), { fields: LOOP_DB_HABIT_FIELDS });
 try { unlinkSync(loopPath); } catch { /* best effort */ }
 
 // Every entry, with no exception left: Loop's NO is a day habiterall can both
 // hold and write now, so a stated lapse survives whether or not a note came with
-// it. Notes are still outside this comparison (`notes: false`).
+// it. The note itself is inside this comparison now — `Repetitions.notes` is a
+// real column both halves of the round trip have always used, and the fixture
+// header said otherwise for long enough that dropping it would have failed
+// nothing. Only Checkmarks.csv genuinely cannot carry one.
 ck('Loop round-trip preserves habits and entries',
   diff(baselineLoopDb, afterLoop) === null,
   diff(baselineLoopDb, afterLoop) ?? '');
@@ -286,13 +432,16 @@ ck('Loop restore skipped nothing',
   loopResult.skipped.length === 0, loopResult.skipped.join('; '));
 
 const loopMeditate = afterLoop.find((h) => h.name === 'Meditate');
+// The trailing field is the note, which this comparison now carries — so this
+// asserts the lapse AND the text on it, where before it asserted neither for
+// the noted one.
 ck('Loop: a stated lapse survives, with or without a note',
-  statedLapses().every((e) => loopMeditate.entries.includes(`${e.date}|0|`)),
+  statedLapses().every((e) => loopMeditate.entries.includes(`${e.date}|0||${e.notes}`)),
   loopMeditate.entries.join(' '));
 
 const loopWater = afterLoop.find((h) => h.name === 'Water');
 ck('Loop: numerical 3 stays 3, not a skip',
-  loopWater.entries.includes('2026-01-06|3|'), loopWater.entries.join(' '));
+  loopWater.entries.includes('2026-01-06|3||busy day'), loopWater.entries.join(' '));
 ck('Loop: target values are not scaled by 1000',
   loopWater.target_value === 8, String(loopWater.target_value));
 
@@ -310,6 +459,21 @@ ck('Loop: the reminder prompt survives as question',
   loopMeditate.reminder_message === 'Did you sit for ten minutes?',
   String(loopMeditate.reminder_message));
 
+// The three the fixture header called impossible. Named one at a time as well
+// as being inside the comparison above, because "the .db cannot carry this" is
+// the claim that kept them out, and a diff line is a poor place to read a
+// refutation of it.
+ck('Loop: the description survives',
+  loopMeditate.description === 'Ten minutes, morning', String(loopMeditate.description));
+ck('Loop: archived state survives',
+  afterLoop.find((h) => h.name === 'Reading').archived === true &&
+  loopMeditate.archived === false,
+  `Reading=${afterLoop.find((h) => h.name === 'Reading').archived} Meditate=${loopMeditate.archived}`);
+ck('Loop: a per-day note survives, on a done day and on a lapse',
+  loopMeditate.entries.includes('2026-01-06|2||felt good') &&
+  loopMeditate.entries.includes('2026-01-08|0||overslept'),
+  loopMeditate.entries.join(' '));
+
 /* ---------- CSV archive ---------- */
 
 console.log('\n--- CSV archive (Habits.csv + Checkmarks.csv) ---');
@@ -326,11 +490,11 @@ const csvHabits = parseLoopCheckmarksCSV(members.get('Checkmarks.csv').toString(
 
 await wipe(alice);
 const csvResult = await applyImport(alice, csvHabits, 'replace');
-const afterCsv = snapshot(await read(alice), { fields: LOOP_HABIT_FIELDS, notes: false });
+const afterCsv = snapshot(await read(alice), { fields: CSV_HABIT_FIELDS, notes: false });
 
 ck('CSV round-trip preserves habits and entries',
-  diff(baselineLoop, afterCsv) === null,
-  diff(baselineLoop, afterCsv) ?? '');
+  diff(baselineCsv, afterCsv) === null,
+  diff(baselineCsv, afterCsv) ?? '');
 ck('CSV restore skipped nothing',
   csvResult.skipped.length === 0, csvResult.skipped.join('; '));
 

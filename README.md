@@ -80,6 +80,10 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
+      # BIND_ADDR empty (the default) is every interface, both address
+      # families — Docker's own behaviour. Set it to 127.0.0.1 when a
+      # reverse proxy on this host is the only thing that should reach the
+      # port. Do not write 0.0.0.0: that is IPv4 only.
       - '${BIND_ADDR:-}:${APP_PORT:-3000}:3000'
     volumes:
       - habiterall-data:/data        # your whole database is one file in here
@@ -664,8 +668,11 @@ been told not to believe.
 One thing that follows and is easy to get wrong: **if you set `TRUST_PROXY=1`,
 the app's port must only be reachable through the proxy.** Leaving 3000 open on
 the LAN as a shortcut means anything on that LAN can send those headers itself.
-Publish the port only to the proxy's network, or firewall it, and reach the app
-by its proxied name from inside the house as well as outside.
+Set `BIND_ADDR=127.0.0.1` so the port is published to loopback only, or
+firewall it, and reach the app by its proxied name from inside the house as
+well as outside. If the proxy runs on a *different* host, leave `BIND_ADDR`
+empty and firewall to that host instead — loopback would put the app out of
+the proxy's reach too.
 
 ### Turning the guards off
 
@@ -1105,7 +1112,10 @@ rather than a deployment setting; and `NODE_ENV`, which the image already sets.
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
+| `BIND_ADDR` | empty | Which interface the published port appears on. Empty is every interface; `127.0.0.1` restricts it to a reverse proxy on this host. Not `0.0.0.0`, which is IPv4 only |
 | `NODE_ENV` | `production` in both images | `production` turns on HSTS. See [Turning the guards off](#turning-the-guards-off) before unsetting it |
+| `MAX_PARSE_HABITS` | `10000` | Habits a single uploaded file may declare. A bound on a hostile file, not a product limit — see [Limits on an import](#limits-on-an-import) |
+| `MAX_PARSE_ENTRIES` | `250000` | Entries one file may declare, totalled across its habits |
 
 To set `HABITERALL_PASSWORD_HASH` and keep the plaintext out of your compose
 file and out of `docker inspect`:
@@ -1126,12 +1136,29 @@ comment on each, alongside `TRUST_PROXY`, `NOTIFY_MAX_ACCOUNTS`,
 `ALLOW_INSECURE_OIDC` — the last of which is for local HTTP testing and never a
 real deployment.
 
-Four more are read but shipped in no quickstart, because tuning them is a
+Six more are read but shipped in no quickstart, because tuning them is a
 considered change rather than a deployment step: `MAX_HABITS_PER_IMPORT`,
-`PG_POOL_MAX` (10 — what the `/healthz` memo is sized against), `PGSSL`, and
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` (see below), `PG_POOL_MAX` (10 — what the `/healthz` memo is sized against), `PGSSL`, and
 `PORT`, which is fixed inside the container by the image and the published
 mapping. `APP_PORT` is the host-side knob.
 
+### Limits on an import
+
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` bound what a single uploaded file
+may *declare*, before anything is built from it. They exist because the row
+count of a SQLite file is a claim rather than a measurement: a few kilobytes
+can assert millions of rows, and reading them all takes the process out of
+service in a way no `try`/`catch` can answer.
+
+They are not a product limit, and the defaults are far above any real account
+— 10,000 habits is fifty times cloud's own per-account cap, and 250,000 entries
+is roughly 68 habits answered every day since Loop shipped in 2016. They are
+settable because the personal edition has no other cap on either, so a fixed
+ceiling here would leave its importer refusing files its own API would happily
+have created one habit at a time.
+
+Raising them trades memory for generosity: a file sitting on both defaults
+costs roughly 90MB to parse, and half a million entries alone costs 143MB.
 ### Published images
 
 Every release publishes both editions to GitHub Container Registry, for
@@ -1214,6 +1241,7 @@ The ones worth a dashboard or an alert:
 | `notify.tick` | info / debug | Per tick: sent, failed, and a count per reason nothing was sent. Debug when it had nothing to do |
 | `notify.skip` | debug | **Why one habit was skipped**, with the clock it judged against |
 | `notify.tick_slow` | warn | A tick is overrunning its interval, so the next one is skipped and the last accounts are starved |
+| `export.rows_skipped` | warn | A backup left rows out rather than failing. `rows` names each one as `habit@date=reason` — `bad_date` is an entry filed under a day that does not exist, which no API here can write but an older import could. The export is otherwise complete, and the response carries the count in `X-Habiterall-Export-Skipped` |
 | `auth.login` / `auth.suspended` | info / warn | Cloud: who signed in (id and issuer, never the subject or the email), and who was turned away |
 | `pg.client_error` | error | Cloud: a pooled connection failed |
 

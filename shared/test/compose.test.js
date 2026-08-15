@@ -119,6 +119,10 @@ const ELSEWHERE = new Map([
   ['MAX_HABITS_PER_USER', 'a limit — README and .env.example'],
   ['MAX_HABITS_PER_IMPORT', 'a limit — README and .env.example'],
   ['MAX_ENTRIES_PER_IMPORT', 'a limit — README and .env.example'],
+  ['MAX_PARSE_HABITS', 'a bound on a hostile file rather than a deployment ' +
+    'setting, and the default is fifty times what any real account holds — ' +
+    'README → Limits'],
+  ['MAX_PARSE_ENTRIES', 'as MAX_PARSE_HABITS — README → Limits'],
   ['PG_POOL_MAX', 'pool tuning; the default of 10 is what the health memo is ' +
     'sized against, so raising it is a considered change, not a quickstart one'],
   ['PGSSL', 'for a managed Postgres reached over TLS; every compose file here ' +

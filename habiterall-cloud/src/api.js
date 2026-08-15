@@ -13,8 +13,11 @@ import { randomUUID } from 'node:crypto';
 import { withUser } from './db/pool.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
-import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
+import {
+  writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
+} from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
+import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
 import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
@@ -507,7 +510,15 @@ api.get('/export', route(async (req, res) => {
     // possible between them.
     const { rows } = await db.query(`SELECT settings FROM users WHERE id = $1`, [uid(req)]);
     return {
-      data: habits.map((h) => ({ ...h, entries: byHabit.get(h.id) ?? [] })),
+      // `user_id` comes off `SELECT *` and has no business in a portable file:
+      // it is this deployment's tenancy key, it means nothing anywhere else,
+      // and the personal edition — which has no such column — writes a backup
+      // without it, so the two editions described the same account with two
+      // different shapes. Dropped here rather than by naming columns in the
+      // query, because a backup that silently omits a NEW column is the worse
+      // failure of the two: migration 009 added `reminder_message`, and a
+      // hand-kept SELECT list is exactly what would have left it behind.
+      data: habits.map(({ user_id, ...h }) => ({ ...h, entries: byHabit.get(h.id) ?? [] })),
       settings: rows[0]?.settings ?? {},
     };
   });
@@ -550,7 +561,16 @@ api.get('/export.csv', route(async (req, res) => {
   res.send(body);
 }));
 
-/** A Loop Habit Tracker .db backup of this user's data. */
+/**
+ * A Loop Habit Tracker .db backup of this user's data.
+ *
+ * The skip report is here as well as in the personal edition even though
+ * Postgres' `DATE` column has never let an impossible date in, because what
+ * `writeLoopDatabase` refuses is not "an invalid date" but "a date Loop's
+ * encoding cannot carry back unchanged" — a question about the exporter, which
+ * both editions run the same copy of. A route that answered it in only one of
+ * them is the drift this project keeps paying for.
+ */
 api.get('/export-loop.db', route(async (req, res) => {
   const { habits, byHabit } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
@@ -565,10 +585,18 @@ api.get('/export-loop.db', route(async (req, res) => {
 
   const path = join(tmpdir(), `habiterall-loop-${randomUUID()}.db`);
   try {
-    await writeLoopDatabase(path, habits, (id) => byHabit.get(id) ?? []);
+    const { skipped } = await writeLoopDatabase(path, habits, (id) => byHabit.get(id) ?? []);
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition',
       `attachment; filename="Loop Habits Backup ${today()}.db"`);
+    if (skipped.length) {
+      res.setHeader(EXPORT_SKIPPED_HEADER, String(skipped.length));
+      // Ids and dates only — see the README's rule on what a log may hold.
+      (req.log ?? log).warn('export.rows_skipped', {
+        user: uid(req), format: 'loop_db',
+        skipped: skipped.length, rows: skipsForLog(skipped),
+      });
+    }
     res.send(readFileSync(path));
   } finally {
     try { unlinkSync(path); } catch { /* best effort */ }

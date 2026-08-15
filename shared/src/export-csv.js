@@ -21,6 +21,46 @@ export function esc(value) {
 }
 
 /**
+ * A number as plain decimal digits, never JS exponent notation.
+ *
+ * `String(1e-7)` is `1e-7` and `String(1e21)` is `1e+21`, and both are what a
+ * cell used to hold — the API accepts any finite non-negative amount, so both
+ * are reachable by writing one. Our own importer survives them because it
+ * parses with `Number()`, but this is Loop's format and other tools read it;
+ * a reader that expects a decimal sees text.
+ *
+ * The rewrite is an exact expansion, not a rounding, and it only ever runs on
+ * a value whose shortest representation HAS an exponent — an ordinary 8 or 0.5
+ * comes back byte for byte. That restraint is the point: silently restating
+ * the precision of every amount in the file would be a worse bug than the one
+ * this fixes. The price is paid at the extremes instead, where the cell gets
+ * long (5e-324 is 326 characters), which is what not changing the number costs.
+ */
+export function csvNumber(value) {
+  const n = Number(value);
+  const s = String(n);
+  const m = /^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(s);
+  if (!m) return s;
+
+  const [, sign, int, frac = '', exp] = m;
+  const digits = int + frac;
+  // Where the point falls in `digits`. Placing it rather than computing is what
+  // makes this lossless: the digits are the shortest ones that round-trip, and
+  // they are copied, not arithmetic.
+  const point = digits.length + Number(exp) - frac.length;
+  if (point >= digits.length) return sign + digits + '0'.repeat(point - digits.length);
+  // The middle case — a point falling INSIDE the digits — is unreachable today
+  // and kept because it is the correct answer if it ever is reached. JS only
+  // uses exponential form at exponents >= 21 or <= -7, and always with exactly
+  // one integer digit, so `point` is either well past the end (the branch above)
+  // or at or below zero (the branch below). Confirmed over ~930,000 doubles: no
+  // hits. Do not delete it to raise coverage; it is a guard, not dead weight.
+  return point > 0
+    ? sign + digits.slice(0, point) + '.' + digits.slice(point)
+    : sign + '0.' + '0'.repeat(-point) + digits;
+}
+
+/**
  * The metadata file. Column names match what `parseLoopHabitsCSV` looks for,
  * so our own export can be read back by our own importer.
  *
@@ -47,14 +87,36 @@ export function esc(value) {
  * Nothing stops duplicate names existing — the validator does not require
  * uniqueness — so the export has to disambiguate. A suffix is visible and
  * reversible by hand; silently losing a habit's history is not.
+ *
+ * The suffix has to be checked against the OTHER habits, not just counted per
+ * name. `Run`, `Run`, `Run (2)` used to produce the header
+ * `Date,Run,Run (2),Run (2)` — the exact collision this function exists to
+ * prevent, re-created by the fix for it, and every consequence above then
+ * followed for a user who had simply named a habit `Run (2)` by hand.
+ *
+ * Two rules make the answer independent of the order the duplicates arrive in.
+ * A name is claimed by the FIRST habit that carries it, so a suffix never
+ * displaces a habit that was named that way on purpose. And the candidate is
+ * tested against every original name as well as the ones already handed out,
+ * because the habit that owns the plain `Run (2)` may not have been reached
+ * yet — checking only what has been assigned so far would rename it instead,
+ * which is the same collision one habit further along.
  */
-function uniqueNames(habits) {
-  const seen = new Map();
+export function uniqueNames(habits) {
+  const original = new Set(habits.map((h) => String(h.name ?? '')));
+  const assigned = new Set();
   return habits.map((h) => {
     const name = String(h.name ?? '');
-    const n = (seen.get(name) ?? 0) + 1;
-    seen.set(name, n);
-    return n === 1 ? h : { ...h, name: `${name} (${n})` };
+    if (!assigned.has(name)) {
+      assigned.add(name);
+      return h;
+    }
+    // `original` is finite, so this terminates: at worst it walks past every
+    // name in the export.
+    let n = 2;
+    while (original.has(`${name} (${n})`) || assigned.has(`${name} (${n})`)) n++;
+    assigned.add(`${name} (${n})`);
+    return { ...h, name: `${name} (${n})` };
   });
 }
 
@@ -76,13 +138,13 @@ export function buildHabitsCsv(habits) {
       // for `description`, which is what kept the duplication invisible.
       esc(h.reminder_message ?? ''),
       esc(h.description ?? ''),
-      Number(h.freq_numerator ?? 1),
-      Number(h.freq_denominator ?? 1),
+      csvNumber(h.freq_numerator ?? 1),
+      csvNumber(h.freq_denominator ?? 1),
       esc(h.color ?? ''),
       // The enum name Loop writes, which the parser matches on.
       h.type === 'numerical' ? 'NUMERICAL' : 'YES_NO',
       esc(h.unit ?? ''),
-      Number(h.target_value ?? 0),
+      csvNumber(h.target_value ?? 0),
       h.target_type === 'at_most' ? 'AT_MOST' : 'AT_LEAST',
       h.archived ? 'true' : 'false',
     ].join(','));
@@ -119,7 +181,7 @@ export function buildCheckmarksCsv(habits, entriesFor) {
       else if (e.status === 'skip') row.push('SKIP');
       else if (b.habit.type === 'boolean') {
         row.push(Number(e.value) === YES ? 'YES_MANUAL' : 'NO');
-      } else row.push(String(e.value));
+      } else row.push(csvNumber(e.value));
     }
     lines.push(row.join(','));
   }

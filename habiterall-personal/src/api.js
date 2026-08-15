@@ -28,8 +28,11 @@ import {
   assertNotFuture,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
-import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
+import {
+  writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
+} from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
+import { log } from '@habiterall/shared/log.js';
 
 export const api = express.Router();
 
@@ -525,6 +528,24 @@ api.get('/export.csv', (req, res) => {
 /**
  * Export everything as a Loop Habit Tracker .db backup, so the data can be
  * restored into the Loop Android app.
+ *
+ * A row Loop cannot carry is left out rather than taking the request down with
+ * it, and `writeLoopDatabase` says which. Both surfaces are here because
+ * neither reaches everybody: the header is for a client that made the request
+ * itself — curl or devtools — and the log is for the one that did not, since
+ * the browser downloads this through an `<a download>`, which reads no headers.
+ *
+ * Not `Api.kt`, despite the shape of that sentence: the Android client makes no
+ * export request at all, and its one response accessor keeps a status and a
+ * body and no headers. If it ever does export, this is where its surface has to
+ * be reconsidered rather than assumed.
+ *
+ * SQLite makes this edition the EASIER one to reach — `2026-02-30` is stored as
+ * the string it was given, so an import writer checking only the shape of a
+ * date left the row sitting there. But cloud is reachable too, which is why the
+ * same code is there and not merely for symmetry: Postgres accepts any year
+ * 1–99 as a DATE, `to_char` hands back `0050-03-15`, and that is a date this
+ * exporter cannot encode either.
  */
 api.get('/export-loop.db', (req, res, next) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
@@ -534,11 +555,17 @@ api.get('/export-loop.db', (req, res, next) => {
   const path = join(tmpdir(), `habiterall-loop-${randomUUID()}.db`);
 
   writeLoopDatabase(path, habits, (id) => q.entriesFor.all(id))
-    .then(() => {
+    .then(({ skipped }) => {
       const body = readFileSync(path);
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Disposition',
         `attachment; filename="Loop Habits Backup ${today()}.db"`);
+      if (skipped.length) {
+        res.setHeader(EXPORT_SKIPPED_HEADER, String(skipped.length));
+        // Ids and dates only — see the README's rule on what a log may hold.
+        (req.log ?? log).warn('export.rows_skipped',
+          { format: 'loop_db', skipped: skipped.length, rows: skipsForLog(skipped) });
+      }
       res.send(body);
     })
     .catch(next)

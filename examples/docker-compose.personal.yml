@@ -11,6 +11,10 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
+      # BIND_ADDR empty (the default) is every interface, both address
+      # families — Docker's own behaviour. Set it to 127.0.0.1 when a
+      # reverse proxy on this host is the only thing that should reach the
+      # port. Do not write 0.0.0.0: that is IPv4 only.
       - '${BIND_ADDR:-}:${APP_PORT:-3000}:3000'
     volumes:
       - habiterall-data:/data        # your whole database is one file in here
