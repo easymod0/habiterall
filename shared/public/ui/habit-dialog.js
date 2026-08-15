@@ -101,6 +101,16 @@ async function saveHabit(e) {
     emit(state.openHabitId != null ? 'change' : 'reload');
   } catch (err) {
     toast(err.message);
+    // A create that timed out is the one failure nobody here can classify: the
+    // request was abandoned, not recalled, so the habit may exist. Closing and
+    // reloading is what turns "check whether it was created" from an
+    // instruction into something the user can just see — and leaving the dialog
+    // open over a list that might already hold the habit is how they make a
+    // second one.
+    if (err.indeterminate) {
+      dialog.close();
+      emit('reload');
+    }
   }
 }
 
