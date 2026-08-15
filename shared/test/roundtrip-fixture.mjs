@@ -7,12 +7,21 @@
  * a test that asserts nothing:
  *
  *   JSON  — habiterall's own backup. Lossless. Everything must survive.
- *   Loop .db — Loop's schema. Carries type, target, unit, frequency, colour
- *              and every entry, but has nowhere to put per-day notes, our
- *              description text, or archived state.
- *   CSV   — Loop's Checkmarks.csv. Dates and values only; every habit
- *           attribute is absent, so a restore can only rebuild boolean
- *           habits with their check pattern.
+ *   Loop .db — Loop's schema, and the only thing it loses is the colour.
+ *   CSV   — Loop's Habits.csv + Checkmarks.csv. Everything the .db carries
+ *           except a reminder time, and no per-day notes.
+ *
+ * That reads nothing like what stood here, which claimed the .db had "nowhere
+ * to put per-day notes, our description text, or archived state" and excluded
+ * all three. Every word of it was false of the code beneath: `writeLoopDatabase`
+ * writes `Habits.description`, `Habits.archived` and `Repetitions.notes`, and
+ * `parseLoopDatabase` selects all three back. It was true once, and a comment
+ * that has outlived its code is worse here than in most places — this file is
+ * where the two editions agree what a faithful restore MEANS, so a field named
+ * as impossible is a field neither suite will ever notice going missing.
+ * Habits.csv turned out to carry the first two as well (a `Description` and an
+ * `Archived` column, both read by `parseLoopHabitsCSV`), so they are in the
+ * list BOTH formats are held to rather than the .db's own.
  *
  * The fixture deliberately includes the cases that have actually broken:
  * a 3 on a numerical habit (must not become a skip), an at_most target
@@ -156,17 +165,29 @@ export function entrySetWithNotes(entries) {
 }
 
 /**
- * Fields BOTH Loop formats can carry. Notes, description and archived state
- * have nowhere to live in Loop's schema, so they are excluded here rather
- * than being asserted and failing for a reason that is not a bug.
+ * Fields BOTH Loop formats can carry.
  *
  * `reminder_message` is Loop's `question` — the prompt a reminder asks, which
  * is the same field under another name. The .db has the column and Habits.csv
  * has the header, so both formats carry it.
+ *
+ * `description` and `archived` are here for the same reason and were left out
+ * for years anyway, on a comment rather than a measurement. Both formats have
+ * always had somewhere to put them; the CSV's `Description` column is in fact
+ * already asserted a few lines apart in both suites, by hand, for one habit.
+ *
+ * `color` is the one habit field that stays out, and it belongs in NEITHER
+ * list rather than in one of them: the .db stores Loop's palette *index*, so
+ * `colorToLoopIndex` snaps `#123456` to `#475569` on the way out, while
+ * Habits.csv writes the hex verbatim and keeps it. The fixture's colours all
+ * happen to be palette entries, so asserting it here would pin a property of
+ * the fixture and not of the format — which is how the excluded fields above
+ * got excluded in the first place.
  */
 export const LOOP_HABIT_FIELDS = [
   'name', 'type', 'unit', 'target_value', 'target_type',
   'freq_numerator', 'freq_denominator', 'reminder_message',
+  'description', 'archived',
 ];
 
 /**
@@ -174,13 +195,17 @@ export const LOOP_HABIT_FIELDS = [
  * `reminder_hour` / `reminder_min` in the Habits *table* and exports neither to
  * Habits.csv, so a reminder time survives one Loop format and not the other.
  * That asymmetry is the format's, not a bug, which is why it is two lists.
+ *
+ * Per-day notes are the .db's other exclusive, and they are not a field on the
+ * habit — they ride on `Repetitions.notes`, so they are the `notes` flag to
+ * `snapshot` rather than an entry here. Checkmarks.csv is a grid of values with
+ * nowhere to hang one, which is why the CSV comparisons keep `notes: false`
+ * and the .db comparisons no longer do.
  */
 export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
 
 /** Fields the lossless JSON backup must preserve exactly. */
-export const JSON_HABIT_FIELDS = [
-  ...LOOP_DB_HABIT_FIELDS, 'description', 'color', 'archived',
-];
+export const JSON_HABIT_FIELDS = [...LOOP_DB_HABIT_FIELDS, 'color'];
 
 export function pick(obj, fields) {
   const out = {};
