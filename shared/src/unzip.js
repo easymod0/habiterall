@@ -66,6 +66,19 @@ export function unzip(buf) {
     new Error('archive expands to too much data'), { status: 400 }
   );
 
+  /**
+   * The per-member cap, said out loud. The name is echoed from the uploaded
+   * file, so it is quoted and clamped — nothing else here trusts it either.
+   */
+  const memberTooLarge = (name, size) => Object.assign(
+    new Error(
+      `zip member ${JSON.stringify(name.slice(0, 100))} declares ` +
+      `${Math.round(size / (1024 * 1024))} MB, over the ` +
+      `${MAX_ENTRY_BYTES / (1024 * 1024)} MB limit for a single member`
+    ),
+    { status: 400 }
+  );
+
   for (let i = 0; i < Math.min(entryCount, MAX_ENTRIES); i++) {
     if (offset + 46 > buf.length || buf.readUInt32LE(offset) !== CD_SIG) break;
 
@@ -86,7 +99,16 @@ export function unzip(buf) {
     if (name.endsWith('/')) continue;                    // directory entry
     if (/(^|[\\/])\.\.([\\/]|$)/.test(name)) continue;    // refuse traversal paths
     if (/^([a-zA-Z]:)?[\\/]/.test(name)) continue;        // refuse absolute paths
-    if (uncompressedSize > MAX_ENTRY_BYTES) continue;     // declared size too large
+    // Not a `continue` like the three above, and the difference is who owns the
+    // member. A directory entry is not data and a traversal path is an attack,
+    // so both are dropped in silence. An over-large member is the user's OWN
+    // history — dropping it left `parseZipExport` to report the only thing it
+    // could see, "zip does not contain a Checkmarks.csv", about a file sitting
+    // right there in the archive. The Zip64 gate above already answers this
+    // shape of problem the same way: fail loudly rather than import a
+    // truncated subset. The cap does not move and nothing is decompressed on
+    // this path either way, so the bomb defence is exactly as it was.
+    if (uncompressedSize > MAX_ENTRY_BYTES) throw memberTooLarge(name, uncompressedSize);
 
     // The local header repeats the name/extra lengths, which may differ from
     // the central directory's, so the data offset must be read from it.

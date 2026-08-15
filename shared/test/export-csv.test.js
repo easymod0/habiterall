@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { zip } from '../src/zip.js';
 import { unzip } from '../src/unzip.js';
 import {
-  buildHabitsCsv, buildCheckmarksCsv, buildCsvArchive, esc, uniqueNames,
+  buildHabitsCsv, buildCheckmarksCsv, buildCsvArchive, esc, uniqueNames, csvNumber,
 } from '../src/export-csv.js';
 import { parseLoopHabitsCSV, parseLoopCheckmarksCSV } from '../src/import.js';
 
@@ -28,6 +28,30 @@ test('zip round-trips UTF-8 and embedded newlines', () => {
   assert.equal(out.get('ü.csv').toString('utf8'), content);
 });
 
+test('a non-ASCII member name is flagged as UTF-8, in both headers', () => {
+  // Our own reader cannot see this — `unzip.js` decodes UTF-8 whatever the
+  // flag says — so the check is on the bytes. Without bit 11 a reader is
+  // entitled to CP437, and Python's `zipfile` takes it: `Haébits你.csv` came
+  // back as `Ha├⌐bitsΣ╜á.csv`.
+  const archive = zip([{ name: 'Haébits你.csv', data: 'x' }]);
+  const cdAt = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+
+  assert.equal(archive.readUInt16LE(6) & 0x0800, 0x0800, 'local header');
+  assert.equal(archive.readUInt16LE(cdAt + 8) & 0x0800, 0x0800, 'central directory');
+  assert.ok(unzip(archive).has('Haébits你.csv'));
+});
+
+test('an ASCII member name is left alone', () => {
+  // The flag says nothing about a name CP437 and UTF-8 agree on, and setting
+  // it anyway would change every archive this project has ever written for a
+  // case that does not exist. `Habits.csv` and `Checkmarks.csv` are both here.
+  const archive = zip([{ name: 'Checkmarks.csv', data: 'x' }]);
+  const cdAt = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+
+  assert.equal(archive.readUInt16LE(6), 0);
+  assert.equal(archive.readUInt16LE(cdAt + 8), 0);
+});
+
 test('zip handles an empty member', () => {
   const out = unzip(zip([{ name: 'empty.txt', data: '' }]));
   assert.equal(out.get('empty.txt').length, 0);
@@ -41,6 +65,34 @@ test('esc quotes only fields that need it', () => {
   assert.equal(esc('has"quote'), '"has""quote"');
   assert.equal(esc('has\nnewline'), '"has\nnewline"');
   assert.equal(esc(null), '');
+});
+
+/* ---------- numbers ---------- */
+
+test('csvNumber leaves ordinary amounts exactly as they were', () => {
+  // The half of this that matters most. Anything a person actually records
+  // must come out byte for byte, or the fix would be restating the precision
+  // of every value in the file.
+  for (const v of [0, 1, 2, 3, 8, 0.5, 12.25, 1000, 0.000001, 1e20, 123456.789]) {
+    assert.equal(csvNumber(v), String(v), `${v} should be untouched`);
+  }
+});
+
+test('csvNumber writes plain digits where JS would write an exponent', () => {
+  assert.equal(csvNumber(1e-7), '0.0000001');
+  assert.equal(csvNumber(1.5e-7), '0.00000015');
+  assert.equal(csvNumber(1e21), '1000000000000000000000');
+  assert.equal(csvNumber(1.25e21), '1250000000000000000000');
+});
+
+test('csvNumber round-trips through Number() at the extremes', () => {
+  // Exact expansion, not rounding: whatever went in has to come back, or a
+  // backup would quietly hold a different amount from the one recorded.
+  for (const v of [1e-7, 1.5e-7, 5e-324, 1e21, 1.7976931348623157e308, 6.02e23]) {
+    const written = csvNumber(v);
+    assert.ok(!/e/i.test(written), `${v} still has an exponent: ${written}`);
+    assert.equal(Number(written), v, `${written} should read back as ${v}`);
+  }
 });
 
 /* ---------- the CSV pair ---------- */
@@ -127,6 +179,26 @@ test('a measurable 3 survives the CSV pair instead of becoming a skip', () => {
 
   const jan1 = water.entries.find((e) => e.date === '2026-01-01');
   assert.equal(jan1.value, 8, 'amounts above the sentinel range are not dropped');
+});
+
+test('an extreme amount reaches the cell as digits, both files', () => {
+  // Reachable by writing one: `parseEntry` takes any finite non-negative
+  // number, and `parseHabit` any finite non-negative target. Both used to be
+  // handed to `String`, so the cell read `1e-7` / `1e+21`.
+  const habits = [{
+    ...HABITS[0], id: 9, name: 'Trace', unit: 'g', target_value: 1e21,
+  }];
+  const entries = { 9: [{ date: '2026-01-01', value: 1e-7, status: '' }] };
+
+  const habitsCsv = buildHabitsCsv(habits);
+  assert.ok(habitsCsv.includes(',1000000000000000000000,'), habitsCsv);
+
+  const checkmarksCsv = buildCheckmarksCsv(habits, (id) => entries[id] ?? []);
+  assert.match(checkmarksCsv, /2026-01-01,0\.0000001\b/);
+
+  const parsed = parseLoopCheckmarksCSV(checkmarksCsv, parseLoopHabitsCSV(habitsCsv));
+  const trace = parsed.find((h) => h.name === 'Trace');
+  assert.equal(trace.entries[0].value, 1e-7, 'the amount survives the new spelling');
 });
 
 test('without Habits.csv the checkmarks alone are ambiguous', () => {

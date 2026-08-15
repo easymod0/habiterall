@@ -30,6 +30,30 @@ function dosDateTime(date) {
 }
 
 /**
+ * General-purpose flag bit 11: "the name in this entry is UTF-8".
+ *
+ * Names are written as UTF-8 unconditionally a few lines below, and without
+ * this bit a reader is entitled to decode them as CP437 — which Python's
+ * `zipfile` does, turning `Haébits你.csv` into `Ha├⌐bitsΣ╜á.csv`. The two
+ * agree for ASCII, which is the only reason the archive habiterall actually
+ * writes (`Habits.csv`, `Checkmarks.csv`) has never shown it, and why our own
+ * reader could not: `unzip.js` decodes UTF-8 whatever the flag says.
+ *
+ * So this is not a new capability, it is the declaration of one that was
+ * already there. Set only when the name needs it, so every archive this project
+ * produces today is byte for byte what it was.
+ *
+ * "Needs it" here is any byte outside printable ASCII, which is slightly WIDER
+ * than Python's `zipfile`, which flags only non-ASCII: a tab or a DEL in a name
+ * gets the bit from us and not from it. That is deliberate rather than an
+ * oversight — CP437 maps 0x01–0x1F to glyphs, so a control byte really does
+ * decode differently under the two readings — but do not read this predicate as
+ * a copy of `zipfile`'s. No archive habiterall writes is affected either way;
+ * both names are plain ASCII.
+ */
+const UTF8_NAME_FLAG = 0x0800;
+
+/**
  * Build a ZIP archive.
  *
  * @param {Array<{name: string, data: Buffer|string}>} files
@@ -46,11 +70,14 @@ export function zip(files, modified = new Date()) {
     const name = Buffer.from(file.name, 'utf8');
     const data = Buffer.isBuffer(file.data) ? file.data : Buffer.from(file.data, 'utf8');
     const sum = crc32(data);
+    // ASCII is the same bytes under either reading, so the flag only says
+    // anything once the name has left it.
+    const flags = /[^\x20-\x7e]/.test(file.name) ? UTF8_NAME_FLAG : 0;
 
     const lfh = Buffer.alloc(30);
     lfh.writeUInt32LE(LFH_SIG, 0);
     lfh.writeUInt16LE(20, 4);        // version needed
-    lfh.writeUInt16LE(0, 6);         // flags
+    lfh.writeUInt16LE(flags, 6);
     lfh.writeUInt16LE(0, 8);         // method: stored
     lfh.writeUInt16LE(time, 10);
     lfh.writeUInt16LE(day, 12);
@@ -66,8 +93,10 @@ export function zip(files, modified = new Date()) {
     cd.writeUInt32LE(CD_SIG, 0);
     cd.writeUInt16LE(20, 4);         // version made by
     cd.writeUInt16LE(20, 6);         // version needed
-    cd.writeUInt16LE(0, 8);
-    cd.writeUInt16LE(0, 10);
+    // Both copies, or a reader that trusts the directory (most of them, since
+    // that is the index) still decodes the name the other way.
+    cd.writeUInt16LE(flags, 8);
+    cd.writeUInt16LE(0, 10);         // method: stored
     cd.writeUInt16LE(time, 12);
     cd.writeUInt16LE(day, 14);
     cd.writeUInt32LE(sum, 16);

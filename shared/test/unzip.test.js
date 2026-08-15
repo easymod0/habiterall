@@ -127,6 +127,23 @@ test('a large but legitimate archive is accepted', () => {
   assert.equal(out.get('Checkmarks.csv').length, 10 * 1024 * 1024);
 });
 
+test('a member over the per-entry cap is named, not silently dropped', () => {
+  // A real Checkmarks.csv past 32MB, stored uncompressed. It used to be
+  // `continue`d past, which left the only remaining evidence to `parseZipExport`
+  // — and what it said was "zip does not contain a Checkmarks.csv", about a
+  // file the user could see in the archive. The cap is not the bug; the
+  // sentence was.
+  const archive = zip([
+    { name: 'Habits.csv', data: 'Position,Name\n0,Run\n' },
+    { name: 'Checkmarks.csv', data: 'x'.repeat(33 * 1024 * 1024) },
+  ]);
+
+  assert.throws(() => unzip(archive), (err) =>
+    err.status === 400 &&
+    err.message.includes('Checkmarks.csv') &&
+    /limit/.test(err.message));
+});
+
 test('one corrupt member does not abort the whole import', () => {
   // Deliberately distinct from the budget failure above: per-member damage is
   // tolerated, an over-budget archive is not.
