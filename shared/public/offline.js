@@ -178,6 +178,14 @@ export async function isReachable(url = '/healthz', timeoutMs = 4000) {
  * So this also re-probes when the tab becomes visible, and — only while
  * offline — polls with a backoff. The polling stops the moment the server
  * answers, so a healthy app makes no extra requests at all.
+ *
+ * Which leaves one hole, and it is the one an outage actually falls into: while
+ * the watcher believes it is online it makes no requests, and `online` /
+ * `offline` / `visibilitychange` none of them fire when the interface is up and
+ * only the route is dead. The app's own failed requests are the missing input,
+ * so `reportOffline` is returned alongside `stop` — see the note on it.
+ *
+ * @returns {{stop: () => void, reportOffline: () => void}}
  */
 export function watchConnectivity(
   onChange,
@@ -235,11 +243,27 @@ export function watchConnectivity(
 
   emit();
 
-  return () => {
-    stopped = true;
-    clear();
-    window.removeEventListener('online', emit);
-    window.removeEventListener('offline', goOffline);
-    document.removeEventListener('visibilitychange', onVisible);
+  return {
+    stop: () => {
+      stopped = true;
+      clear();
+      window.removeEventListener('online', emit);
+      window.removeEventListener('offline', goOffline);
+      document.removeEventListener('visibilitychange', onVisible);
+    },
+
+    /**
+     * "A request of ours just failed to reach the server."
+     *
+     * This is `goOffline` — the same entry point the browser's `offline` event
+     * uses — and it must stay that way rather than becoming a `setOffline` from
+     * outside. Setting the state behind the watcher's back leaves its own `last`
+     * at `true`, so it neither starts polling nor ever reports the transition it
+     * has already missed: the banner goes up and stays up until a
+     * `visibilitychange` happens to re-probe. Coming in through here reports the
+     * transition once and arms the backoff poll, which is what takes the banner
+     * back down a second or two after a blip.
+     */
+    reportOffline: goOffline,
   };
 }

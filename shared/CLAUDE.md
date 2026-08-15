@@ -129,6 +129,13 @@ offline until a manual reload. `watchConnectivity` also re-probes on
 requests at all once the server answers. It reports transitions, not polls, or
 reconnecting would re-render the dashboard every few seconds.
 
+Which leaves it blind to the outage it is most likely to meet, so the watcher
+takes an input as well: `reportOffline`, called by `ui/api.js` when a write has
+to be queued. A failed request of our own is better evidence than a probe — it
+is the actual traffic — and it must come in through there rather than as a
+`setOffline` from outside, or the watcher's `last` stays `true` and it neither
+polls nor reports the transition. See the root CLAUDE.md.
+
 **The score formula is deliberate.** It feeds a trailing-window adherence
 ratio (always `[0,1]`) into an EWMA. Do not "simplify" it back to scaling a
 day's credit by `1/frequency` — that overshoots for every non-daily habit and
