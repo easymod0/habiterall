@@ -28,6 +28,30 @@ test('zip round-trips UTF-8 and embedded newlines', () => {
   assert.equal(out.get('ü.csv').toString('utf8'), content);
 });
 
+test('a non-ASCII member name is flagged as UTF-8, in both headers', () => {
+  // Our own reader cannot see this — `unzip.js` decodes UTF-8 whatever the
+  // flag says — so the check is on the bytes. Without bit 11 a reader is
+  // entitled to CP437, and Python's `zipfile` takes it: `Haébits你.csv` came
+  // back as `Ha├⌐bitsΣ╜á.csv`.
+  const archive = zip([{ name: 'Haébits你.csv', data: 'x' }]);
+  const cdAt = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+
+  assert.equal(archive.readUInt16LE(6) & 0x0800, 0x0800, 'local header');
+  assert.equal(archive.readUInt16LE(cdAt + 8) & 0x0800, 0x0800, 'central directory');
+  assert.ok(unzip(archive).has('Haébits你.csv'));
+});
+
+test('an ASCII member name is left alone', () => {
+  // The flag says nothing about a name CP437 and UTF-8 agree on, and setting
+  // it anyway would change every archive this project has ever written for a
+  // case that does not exist. `Habits.csv` and `Checkmarks.csv` are both here.
+  const archive = zip([{ name: 'Checkmarks.csv', data: 'x' }]);
+  const cdAt = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+
+  assert.equal(archive.readUInt16LE(6), 0);
+  assert.equal(archive.readUInt16LE(cdAt + 8), 0);
+});
+
 test('zip handles an empty member', () => {
   const out = unzip(zip([{ name: 'empty.txt', data: '' }]));
   assert.equal(out.get('empty.txt').length, 0);
