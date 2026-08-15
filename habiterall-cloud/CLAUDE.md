@@ -179,6 +179,38 @@ provider", which arrives at the app as `AuthorizationResponseError` and at the
 user as a 500 on `/auth/callback`. That was a real bug here, and a fresh stack
 could not log in at all.
 
+**Signing out needs TWO redirect URIs and an ID token, and neither half works
+alone.** Authentik has no separate post-logout field: `post_logout_redirect_uris`
+is a property over `redirect_uris` filtered on a per-entry `redirect_uri_type`,
+which defaults to `authorization`. So registering only the callback leaves that
+list empty, `EndSessionView` gates its whole redirect block on it being
+non-empty, and the `post_logout_redirect_uri` the app sends is discarded in
+silence — signing out ends both sessions correctly and leaves the user sitting
+on the identity provider's page, which reads as "sign-out took me to the wrong
+site" rather than as anything being broken.
+
+Registering the logout URI **on its own is worse than not registering it**,
+which is why the bootstrap and `server.js` have to change together and why one
+test asserts both. Once that URI exists, Authentik validates `id_token_hint`
+*before* it plans the invalidation flow, so a request without one is an
+`id_token_hint_missing` error page — a redirect that went nowhere becomes a
+sign-out that does not happen. `completeLogin` therefore returns the ID token
+beside the user and the callback stores it on the session, inside `regenerate`,
+because regenerate discards whatever the old session held. Nothing reads a claim
+out of it; it is carried, not trusted.
+
+Both URIs are built with `new URL` rather than interpolated. `PUBLIC_URL` is
+used raw here where `ISSUER_BASE` strips a trailing slash, and Authentik matches
+these as exact strings — so a `PUBLIC_URL` ending in `/` registered
+`https://host//auth/callback` against the single-slash form the app actually
+sends, and the logout entry, whose path is a bare `/`, is where that bites
+first.
+
+None of this is visible to a test that calls `/auth/logout` with `fetch` and
+checks for a 401, which is what existed and what passed throughout. The
+redirect is the half only a real navigation can see —
+`test/browser/cloudlogin.mjs` follows it now.
+
 **Registration and branding are blueprints, applied with a context this script
 chooses.** `blueprints/*.yaml` are mounted read-only into both Authentik
 containers and carry `instantiate: "false"`, so Authentik's own discovery never

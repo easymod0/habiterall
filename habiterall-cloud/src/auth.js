@@ -95,6 +95,11 @@ export async function beginLogin(req) {
 /**
  * Complete login: exchange the code, validate the ID token, then map the
  * IdP subject onto a local user row.
+ *
+ * Returns the ID TOKEN alongside the user, because signing out needs it back.
+ * `id_token_hint` is how the IdP knows whose session to end, and it is the only
+ * copy we will ever be given — so the caller stores it on the session. Nothing
+ * reads a claim out of it afterwards; it is carried, not trusted.
  */
 export async function completeLogin(req) {
   const pending = req.session.oidc;
@@ -132,7 +137,7 @@ export async function completeLogin(req) {
   // (issuer, subject) and the subject is a stable handle on a person. An
   // account id is enough to follow a session through the rest of the log.
   log.info('auth.login', { user: user.id, issuer: claims.iss, blocked: !!user.blocked });
-  return user;
+  return { user, idToken: tokens.id_token ?? null };
 }
 
 /**
@@ -155,7 +160,16 @@ async function upsertUser({ subject, issuer, email, name }) {
   });
 }
 
-/** Build the IdP logout URL, so signing out here also ends the IdP session. */
+/**
+ * Build the IdP logout URL, so signing out here also ends the IdP session.
+ *
+ * The hint is not optional in practice, though the signature tolerates its
+ * absence. Authentik's `EndSessionView` validates `id_token_hint` BEFORE it
+ * plans the invalidation flow, so once a logout redirect URI is registered a
+ * missing hint is an `id_token_hint_missing` error page — where before it was
+ * merely a redirect that went nowhere. The two halves of that fix have to ship
+ * together; see the redirect_uris comment in scripts/bootstrap-authentik.mjs.
+ */
 export function logoutUrl(idTokenHint) {
   try {
     return client.buildEndSessionUrl(config, {

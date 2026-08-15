@@ -51,3 +51,37 @@ Each format is held to what it can actually carry. JSON is lossless. The Loop
 nowhere to put per-day notes, so a day whose only content is a note is
 expected to be dropped — and the test asserts that exactly one such day
 disappears, rather than loosening the comparison.
+
+## `browser/cloudlogin.mjs`
+
+The only suite that signs in for real: Chrome, the Authentik container, the
+whole OIDC round trip, then the authenticated app and signing out again.
+
+**It needs an account that nothing creates.** `testuser` /
+`TestPassw0rd!123` is a prerequisite, and its absence does not look like one —
+Authentik re-serves the password prompt, the suite submits it twelve times and
+then reports "returned to the application after login" as the failure, which
+reads as a broken redirect rather than a missing user. With the bootstrap token
+still in `.env`:
+
+```bash
+TOK=$(grep '^AUTHENTIK_BOOTSTRAP_TOKEN=' .env | cut -d= -f2-)
+PK=$(curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d '{"username":"testuser","name":"Test User","email":"testuser@example.com","is_active":true,"path":"users"}' \
+  http://localhost:9000/api/v3/core/users/ | python3 -c 'import json,sys; print(json.load(sys.stdin)["pk"])')
+curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d '{"password":"TestPassw0rd!123"}' "http://localhost:9000/api/v3/core/users/$PK/set_password/"
+```
+
+It also **creates a habit and does not clean up**, so a second run reports
+`["Cloud Habit","Cloud Habit"]` against a check that wants one. Delete that
+habit between runs; the rest of the suite is idempotent.
+
+Signing out is checked in two halves, and the second is the one that had a bug.
+A `fetch` to `/auth/logout` can see the app's own session go away, and that is
+all it can see — the browser being left on the identity provider's page is
+invisible to it. So the suite reads the `redirect` out of the response and
+**navigates to it**, then asserts where it landed. Both `id_token_hint` and
+`post_logout_redirect_uri` are asserted on the URL as well, because Authentik
+needs each for a different reason and either one alone is broken: see the
+`redirect_uris` comment in `scripts/bootstrap-authentik.mjs`.
