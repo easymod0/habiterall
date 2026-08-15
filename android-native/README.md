@@ -120,13 +120,15 @@ A tapped notification does not need any of this to be up: alarms are local, and
 an answer given while the session has expired is queued and sent when you sign
 in again rather than being dropped.
 
-**Nothing blocks on a server you cannot reach.** A dropped signal is not a
-signed-out session, so the app carries on to screens that report their own
-network trouble and offer to retry — and if there was a session to ask for, the
-first request that gets through returns 401 and lands you here. What does stop
-the app is a server that *answers* something meaningless: a proxy's 502, a rate
-limit, a captive portal's login page. Those are reported rather than guessed at,
-because a sign-in form drawn over one has no control that can work.
+**Nothing about this can stop the app opening.** If that one request fails — no
+signal, a 429, a proxy's 502, a captive portal's login page — the app carries on
+to the list, which reports its own trouble and offers a retry, exactly as it did
+before any of this existed. That matters most for the configuration with **no
+sign-in at all**, which never needed this endpoint and must not acquire a way to
+fail at boot because of it.
+
+Being wrong that way costs a round trip. If there was a session to ask for, the
+first request that gets through returns 401, and that is what brings you here.
 
 Sign out from the list's ⋮ menu. It is absent on a server with no sign-in.
 

@@ -425,23 +425,12 @@ class MainActivity : ComponentActivity() {
                     // later, which is the flash of the wrong screen that
                     // `start()` was rewritten in the web app to avoid.
                     session == null -> Loading()
-                    // The server ANSWERED something that says nothing about
-                    // authentication — a 502 from a proxy, a captive portal, a
-                    // rate limit. `Auth.read` refuses to guess a mode from it,
-                    // and this is the error path that refusal exists to reach.
-                    // Drawing a sign-in form here is exactly the bug the web
-                    // adapter shipped: a form whose only control 404s, over an
-                    // instance that was working.
-                    //
-                    // `Session.Unreachable` is deliberately NOT here: a server
-                    // that answered nothing is a tunnel, and the app carries on
-                    // to screens that report their own network trouble. See its
-                    // declaration.
-                    session is Session.Unusable -> ServerProblem(
-                        why = (session as Session.Unusable).message,
-                        onRetry = { authKey++ },
-                        onChangeServer = { url = null },
-                    )
+                    // `Session.Unknown` is deliberately not a branch here. The
+                    // app carries on to the list, whose own error handling is
+                    // better at reporting a broken server than a screen invented
+                    // for the purpose — and an instance with NO sign-in must not
+                    // acquire a way to fail at boot that it never had. See
+                    // Session.Unknown for the whole argument.
                     session is Session.Absent -> SignInScreen(
                         api = remember(url) { Api(url!!) },
                         mode = (session as Session.Absent).mode,
@@ -625,36 +614,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * The server answered, but not with anything about authentication.
-     *
-     * Its own screen rather than the sign-in one, and that is the whole point of
-     * `Auth.read` refusing to guess: a 429, a proxy's 502 or a captive portal
-     * says nothing about how this instance signs people in, and drawing a form
-     * over it puts a control in front of the user that cannot work. This says
-     * what happened and offers the two things that can help.
-     *
-     * Not for a server that could not be REACHED — that one is a tunnel, and the
-     * app carries on past it. See `Session.Unreachable`.
-     */
-    @OptIn(ExperimentalMaterial3Api::class)
-    @Composable
-    private fun ServerProblem(why: String, onRetry: () -> Unit, onChangeServer: () -> Unit) {
-        Scaffold(topBar = { TopAppBar(title = { Text("The server answered oddly") }) }) { pad ->
-            Column(
-                Modifier.padding(pad).padding(24.dp).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                Text(why, color = MaterialTheme.colorScheme.error)
-                Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
-                    Text("Try again")
-                }
-                TextButton(onClick = onChangeServer, modifier = Modifier.fillMaxWidth()) {
-                    Text("Use a different server")
-                }
-            }
-        }
-    }
+    // There is deliberately no "the server answered oddly" screen. An early
+    // version had one, and it was a new way to break the one configuration that
+    // never needed this endpoint: an instance with no sign-in, where a 429 from
+    // the IP-keyed read limiter would have covered a working app. The list's own
+    // error state already reports a broken server, with a retry, and it is
+    // reached by the requests that actually need the server to work.
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable

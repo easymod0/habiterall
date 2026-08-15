@@ -72,28 +72,29 @@ sealed interface Session {
     data class Absent(val mode: AuthMode) : Session
 
     /**
-     * The server answered something that says nothing about authentication.
-     * This is an error to report, never a reason to draw a sign-in screen.
-     */
-    data class Unusable(val status: Int, val message: String) : Session
-
-    /**
-     * The server could not be reached at all.
+     * The server said nothing about authentication — a 429, a proxy's 502, a
+     * captive portal's HTML, or no answer at all ([status] 0).
      *
-     * Kept apart from [Unusable] because a phone is the client this happens to,
-     * and the two want opposite treatment. A server that ANSWERED something
-     * useless — a proxy's 502, a rate limit, a captive portal — is a state the
-     * user has to be told about, because every screen behind it would fail the
-     * same way with a worse message.
+     * **This is not a state the app stops for.** It is tempting to make it one:
+     * something is clearly wrong, so say so. But the app cannot know what, and
+     * the one configuration it must never break is the one with no sign-in at
+     * all — where every screen worked before this endpoint was ever called, and
+     * a boot-time gate over it is a new way to fail that instance for a reason
+     * it does not have. The personal edition's read limiter keys on IP, so a
+     * household behind one NAT can 429 this route while the server is perfectly
+     * healthy: exactly the shape of the bug `auth-session.js` shipped, which put
+     * a sign-in form over a working instance.
      *
-     * A server that answered nothing is just a tunnel. Blocking the whole app on
-     * it would put a dead-end error page in front of someone whose signal
-     * dropped for a moment, in place of screens that already report their own
-     * network trouble and offer to retry. And it costs nothing to be wrong: if
-     * there IS a session to ask for, the first request to get through 401s, and
-     * that is already what sends the app to the sign-in screen.
+     * So the app carries on, and the ordinary requests decide. They will: they
+     * are the ones with data to fetch, they already report their own failures
+     * with a retry, and a 401 among them is what routes to the sign-in screen.
+     * Being wrong here costs a round trip; being wrong the other way costs the
+     * whole app.
+     *
+     * The status and message are kept because they are worth reporting when a
+     * screen does fail — not because anything branches on them.
      */
-    data class Unreachable(val message: String) : Session
+    data class Unknown(val status: Int, val message: String) : Session
 }
 
 object Auth {
@@ -102,18 +103,24 @@ object Auth {
      * Read `GET /api/me`.
      *
      * **Only 200 and 401 say anything about how an instance authenticates.**
-     * Everything else is a fault and belongs on an error path. The web adapter
-     * learned this the expensive way: it read the absence of a field as a
-     * statement, so a 429 from the rate limiter — which the personal edition
-     * keys on IP, and one household behind one NAT shares — replaced a working
-     * app with a sign-in screen whose only control 404s, on an instance with no
-     * authentication at all. A 500 or a proxy's 502 did the same, permanently.
+     * Everything else is [Session.Unknown], which the app carries on past. The
+     * web adapter learned the first half the expensive way: it read the absence
+     * of a field as a statement, so a 429 from the rate limiter — which the
+     * personal edition keys on IP, and one household behind one NAT shares —
+     * replaced a working app with a sign-in screen whose only control 404s, on
+     * an instance with no authentication at all. A 500 or a proxy's 502 did the
+     * same, permanently.
      *
-     * The same trap is sharper here than in a browser: a phone meets captive
-     * portals and proxies that answer 200 with HTML, and reading one of those as
-     * "signed in, mode unknown" would put the app into a state no retry escapes.
-     * A body that is not an object is therefore treated as no body at all, which
-     * on a 200 leaves [AuthMode.of] to make the one guess this makes at all.
+     * The second half is this client's own lesson, and it is why `Unknown` is
+     * not an error screen: a native app boots through this route, so making a
+     * bad answer fatal breaks the same instance the web bug broke, by a
+     * different route. See [Session.Unknown].
+     *
+     * The trap is sharper here than in a browser: a phone meets captive portals
+     * and proxies that answer 200 with HTML, and reading one of those as "signed
+     * in, mode unknown" would put the app into a state no retry escapes. A body
+     * that is not an object is therefore treated as no body at all, which on a
+     * 200 leaves [AuthMode.of] to make the one guess this makes at all.
      *
      * @param status the HTTP status
      * @param body the response body, which need not be JSON
@@ -123,7 +130,7 @@ object Auth {
             .getOrElse { JsonObject(emptyMap()) }
 
         if (status != 200 && status != 401) {
-            return Session.Unusable(status, json.str("error") ?: "The server answered $status.")
+            return Session.Unknown(status, json.str("error") ?: "The server answered $status.")
         }
 
         val mode = AuthMode.of(json.str("mode"))

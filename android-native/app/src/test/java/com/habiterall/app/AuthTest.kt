@@ -87,24 +87,29 @@ class AuthTest {
         // itself. None of them is a statement about sign-in.
         for (status in listOf(429, 500, 502, 503)) {
             val session = Auth.read(status, "")
-            assertTrue("$status was read as an answer", session is Session.Unusable)
-            assertEquals(status, (session as Session.Unusable).status)
+            assertTrue("$status was read as an answer", session is Session.Unknown)
+            assertEquals(status, (session as Session.Unknown).status)
         }
     }
 
     @Test
-    fun `an unreachable server is a different state from an odd answer`() {
-        // `Auth.read` never produces it — it only ever sees an answer — but the
-        // distinction it guards is the one a phone meets most. A server that
-        // answered nothing says nothing about the session, and blocking the app
-        // on it would put a dead end in front of a dropped signal. A server that
-        // answered 502 has to be reported, because every screen behind it fails
-        // the same way with a worse message.
-        //
-        // Pinned here so the two cannot be merged back into one without the
-        // reasoning being read again.
-        assertTrue(Auth.read(502, "") is Session.Unusable)
-        assertFalse(Auth.read(502, "") is Session.Unreachable)
+    fun `an instance with no sign-in is never blocked by this endpoint`() {
+        // The configuration this app shipped supporting, and the one that must
+        // not acquire a new way to fail. It answers 200 with mode `none`, and
+        // nothing about it needs a session.
+        val ok = Auth.read(200, body("mode" to str("none"), "id" to "0", "name" to str("")))
+        assertTrue(ok is Session.Active)
+        assertFalse((ok as Session.Active).mode.needsSignIn)
+
+        // And when this one request fails on such an instance — a 429 from the
+        // read limiter, which the personal edition keys on IP, or no answer at
+        // all — the answer is `Unknown`, which the app carries on past. Nothing
+        // here may report a signed-OUT session, because that is what would draw
+        // a sign-in screen over a server that has none.
+        for (session in listOf(Auth.read(429, ""), Auth.read(0, ""))) {
+            assertTrue(session is Session.Unknown)
+            assertFalse(session is Session.Absent)
+        }
     }
 
     @Test
@@ -113,8 +118,8 @@ class AuthTest {
         // loop them through a provider that will authenticate them perfectly
         // well, back to the same refusal.
         val session = Auth.read(403, body("error" to str("account suspended")))
-        assertTrue(session is Session.Unusable)
-        assertEquals("account suspended", (session as Session.Unusable).message)
+        assertTrue(session is Session.Unknown)
+        assertEquals("account suspended", (session as Session.Unknown).message)
     }
 
     @Test

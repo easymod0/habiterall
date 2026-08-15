@@ -618,10 +618,21 @@ a **mirror** of `shared/public/auth-session.js`, pinned by `AuthTest` for the
 same reason `ReminderTime` and `Grid.nextState` are pinned: both clients boot
 the whole app on one answer, and two readings of it are indistinguishable from
 one being broken. The rule that matters most is the one the web adapter shipped
-wrong — only 200 and 401 say anything about how an instance authenticates, and
-everything else is a fault. On a phone that is sharper than in a browser: a
-captive portal answering 200 with HTML is a state no retry escapes if it is read
-as "signed in".
+wrong — only 200 and 401 say anything about how an instance authenticates. On a
+phone that is sharper than in a browser: a captive portal answering 200 with
+HTML is a state no retry escapes if it is read as "signed in".
+
+**But the phone adds a second half to that rule, and it is the opposite of an
+error path.** Everything that is not 200 or 401 is `Session.Unknown`, and the
+app **carries on past it** rather than stopping. A native client boots through
+this route, so making a bad answer fatal breaks the same instance the web bug
+broke, by a different road: `HABITERALL_AUTH=off` never needed `/api/me` at all,
+and the personal edition's read limiter keys on IP — so a household behind one
+NAT can 429 it while the server is perfectly healthy. An early version of this
+had a "the server answered oddly" screen and that is exactly what it would have
+covered. The list's own error state already reports a broken server, with a
+retry, and it is reached by the requests that actually need one. Being wrong
+this way costs a round trip; being wrong the other way costs the whole app.
 
 One consequence reached further than the sign-in screen. `Outbox`'s worker
 dropped every 4xx as permanently inapplicable, which was right while nothing

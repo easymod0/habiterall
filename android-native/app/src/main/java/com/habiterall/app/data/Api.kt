@@ -475,10 +475,11 @@ class Api(
         val (status, body) = raw(Request.Builder().url(url("/api/me")).get().build())
         Auth.read(status, body)
     } catch (e: Exception) {
-        // Unreachable is not signed-out, and it is not "the server said
-        // something odd" either — see [Session.Unreachable]. Saying either would
-        // put a screen in front of someone whose train went into a tunnel.
-        Session.Unreachable(e.message ?: "Could not reach the server")
+        // Unreachable is not signed-out, and it is not fatal either — status 0
+        // is [Session.Unknown]'s "no answer at all", which the app carries on
+        // past. Anything else would put a screen in front of someone whose train
+        // went into a tunnel.
+        Session.Unknown(0, e.message ?: "Could not reach the server")
     }
 
     /**
