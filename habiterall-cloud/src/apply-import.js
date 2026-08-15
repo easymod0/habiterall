@@ -209,6 +209,13 @@ export async function applyImport(userId, habits, mode = 'merge') {
         // a numerical one 3 is a real amount and must stay one. That question is
         // about how the value was written down, so it asks the file's type even
         // where the habit's is what decides the storage.
+        // A skip does NOT yield, and that is the one asymmetry in the rule above.
+        // A skip is an answer — `isCompleted` returns null for it, not false —
+        // so a file asserting one is asserting something, where a bare lapse may
+        // only be the absence of a row. The consequence is worth stating plainly
+        // because it is the headline case inverted: a `SKIP` cell in a bare
+        // Checkmarks.csv DOES overwrite a recorded eight glasses. Both editions
+        // agree, and this is unchanged from before the yield was widened.
         const isSkip = e.status === 'skip' ||
           (fileType === 'boolean' && Number(e.value) === SKIP);
 
@@ -258,7 +265,11 @@ export async function applyImport(userId, habits, mode = 'merge') {
         // must not delete a completion. A Loop backup is full of explicit NO rows.
         // Not gated on the type — a numerical habit's lapse is a row holding 0,
         // and gating it there let a merge write one over eight recorded glasses.
-        const yielding = mode === 'merge' && stored === UNSET && !notes;
+        // `!notes.trim()`, not `!notes`: a note of one space is truthy and was
+        // enough to defeat the yield, so a file could overwrite eight recorded
+        // glasses with a lapse by carrying whitespace. Widening this carve-out
+        // beyond boolean habits is what gave that reach over an amount.
+        const yielding = mode === 'merge' && stored === UNSET && !notes.trim();
         const written = await upsert(
           db, userId, habitId, e.date, stored, '', notes, { yielding });
         if (written) result.entriesImported++;

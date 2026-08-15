@@ -108,6 +108,29 @@ phone export taken before the web history would have wiped every completion the
 two disagreed about. Both editions' `applyImport` yield to the existing row for
 exactly that case — bare lapse, merge mode — and count it as `entriesKept`.
 
+Note "bare" is `!notes.trim()` and not `!notes`: a note of one space is truthy,
+and content is what suspends the rule, so whitespace was enough to buy a lapse
+the right to overwrite eight recorded glasses.
+
+**On a merge the FILE's type says how a value was written down; the ACCOUNT's
+says what may be stored.** These are two questions and answering them with one
+type is how a file claiming `numerical` put an `8` on a boolean habit — a value
+`PUT /entries/:date` answers 400 to, and one `isCompleted` reads as *not done*
+forever. But the file's type still has to decide the *encoding*, because a `3`
+is Loop's skip sentinel in a boolean column and three-of-something in a
+numerical one; reading that against the account would re-create the value/skip
+collision this file opens with. So the two rules run together, and the yield
+above was gated on `type === 'boolean'` while they did not — which is what let a
+merge rewrite eight glasses to a 2.
+
+Where the two types genuinely disagree only a **lapse and a skip cross**: zero
+glasses and "no" mean the same thing, and so does a skipped day. An amount is
+not a yes and a yes carries no amount, so those days are reported in `skipped`
+rather than invented. One asymmetry, deliberate and pinned by a test: a **skip
+does not yield**. It is an answer — `isCompleted` returns `null` for it, not
+`false` — so a `SKIP` cell in a bare Checkmarks.csv does overwrite a recorded
+amount, where a bare lapse does not.
+
 **Loop's two tracking settings are `skipDays` and `questionMarks`,** both
 defaulting off as Loop's own do, and both read from Loop's source rather than
 guessed (`pref_skip_enabled`, `pref_unknown_enabled`). The tap cycle is

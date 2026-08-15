@@ -407,6 +407,32 @@ ck('while a 0 on a day the habit has no answer for still lands',
   (await dayOf('Water', '2026-01-11'))?.value === 0,
   JSON.stringify(await dayOf('Water', '2026-01-11')));
 
+// A note of one space is truthy, and `!notes` was enough to defeat the yield —
+// so a file could overwrite a recorded amount with a lapse by carrying
+// whitespace. It is content that suspends the rule, and a space is not content.
+await restore(jsonBackup, 'replace');
+const spaceNote = JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [{ name: 'Water', type: 'numerical',
+    entries: [{ date: '2026-01-05', value: 0, status: '', notes: '  ' }] }],
+});
+await restore(Buffer.from(spaceNote, 'utf8'), 'merge');
+ck('a whitespace-only note does not buy a lapse the right to overwrite',
+  (await dayOf('Water', '2026-01-05'))?.value === 8,
+  JSON.stringify(await dayOf('Water', '2026-01-05')));
+
+// ...and the one asymmetry, pinned so it is a decision and not an accident: a
+// SKIP is an answer, so it DOES overwrite. `isCompleted` returns null for a
+// skip rather than false, and a file asserting one is asserting something,
+// where a bare lapse may only be the absence of a row.
+await restore(jsonBackup, 'replace');
+await restore(Buffer.from('Date,Water\n2026-01-05,SKIP\n', 'utf8'), 'merge');
+ck('a skip DOES overwrite an amount, which is deliberate',
+  (await dayOf('Water', '2026-01-05'))?.status === 'skip',
+  JSON.stringify(await dayOf('Water', '2026-01-05')));
+
+await restore(jsonBackup, 'replace');
+
 /* ---------- a merge types entries by the habit, not by the file ---------- */
 
 console.log('\n--- the account\'s own type decides what a value means ---');
