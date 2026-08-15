@@ -381,16 +381,50 @@ export function parseCSV(text) {
 }
 
 /**
+ * One habit as the CSV pair describes it, with no entries on it yet.
+ *
+ * Both readers of the pair need this exact shape and neither may guess at it:
+ * `parseLoopCheckmarksCSV` builds a habit field by field from the metadata map,
+ * so a field missing from THIS list is dropped however well Habits.csv parsed
+ * it, and `parseZipExport` fills the same shape for a habit Checkmarks.csv
+ * never mentioned. Two copies of the list is one place for the next field to be
+ * added and one place for it to be forgotten.
+ */
+function habitFromCsvMeta(name, meta = {}) {
+  return {
+    name,
+    description: meta.description ?? '',
+    reminder_message: meta.reminder_message ?? '',
+    type: meta.type ?? 'boolean',
+    unit: meta.unit ?? '',
+    target_value: meta.target_value ?? 0,
+    target_type: meta.target_type ?? 'at_least',
+    freq_numerator: meta.freq_numerator ?? 1,
+    freq_denominator: meta.freq_denominator ?? 1,
+    color: meta.color ?? '#3b82f6',
+    archived: meta.archived ?? 0,
+    entries: [],
+  };
+}
+
+/**
  * Parse Loop's Checkmarks.csv, whose shape is:
  *   Date,Habit A,Habit B,...
  *   2026-01-01,YES_MANUAL,3,...
  *
  * `habitMeta` optionally supplies type/target info parsed from Habits.csv so
  * numerical columns are interpreted correctly.
+ *
+ * The habits come from the HEADER, and a file with nothing under it still has
+ * one. This used to bail on `rows.length < 2` — one row means no entries, which
+ * was read as no habits — so an account that backed itself up before recording
+ * anything exported two fully described habits and restored none of them, with
+ * the API's "no habits found in the uploaded file" 400 on top. The row count
+ * says how many days have been answered; only the header says what exists.
  */
 export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
   const rows = parseCSV(text);
-  if (rows.length < 2) return [];
+  if (!rows.length) return [];
 
   const header = rows[0].map((h) => h.trim());
   if (!/^date$/i.test(header[0])) {
@@ -410,23 +444,7 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
     .slice(1)
     .filter((c) => c.name !== '');
 
-  const habits = columns.map(({ name }) => {
-    const meta = habitMeta.get(name) ?? {};
-    return {
-      name,
-      description: meta.description ?? '',
-      reminder_message: meta.reminder_message ?? '',
-      type: meta.type ?? 'boolean',
-      unit: meta.unit ?? '',
-      target_value: meta.target_value ?? 0,
-      target_type: meta.target_type ?? 'at_least',
-      freq_numerator: meta.freq_numerator ?? 1,
-      freq_denominator: meta.freq_denominator ?? 1,
-      color: meta.color ?? '#3b82f6',
-      archived: meta.archived ?? 0,
-      entries: [],
-    };
-  });
+  const habits = columns.map(({ name }) => habitFromCsvMeta(name, habitMeta.get(name)));
 
   for (const row of rows.slice(1)) {
     const date = (row[0] ?? '').trim();
@@ -632,6 +650,14 @@ export async function parseUpload(buf) {
  * Both are needed. Checkmarks.csv has one column per habit and nothing saying
  * what a habit IS, so parsed alone every column defaults to boolean — and a
  * measurable habit's 3 is then read as Loop's SKIP sentinel.
+ *
+ * Which is why Habits.csv is a source of habits here and not only a lookup
+ * table: it names every habit the archive describes, and a habit it names is
+ * one the file HAS whether or not a column for it survived. Reading the
+ * checkmarks header rather than its rows already covers the case that motivated
+ * this — an account with no entries at all — so this union is what the mixed
+ * cases need, and what keeps "no habits found in the uploaded file" an honest
+ * thing to say about the pair rather than about one of the two files.
  */
 function parseZipExport(buf, fail) {
   const files = unzip(buf);
@@ -648,7 +674,16 @@ function parseZipExport(buf, fail) {
 
   const habitsCsv = find('habits.csv');
   const meta = habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map();
-  return parseLoopCheckmarksCSV(checkmarksCsv, meta);
+  const habits = parseLoopCheckmarksCSV(checkmarksCsv, meta);
+
+  // Checkmarks order first, then Habits.csv order for the rest — both are the
+  // order those files were written in, so the same archive always restores the
+  // same way round.
+  const columns = new Set(habits.map((h) => h.name));
+  for (const [name, habitMeta] of meta) {
+    if (!columns.has(name)) habits.push(habitFromCsvMeta(name, habitMeta));
+  }
+  return habits;
 }
 
 /**

@@ -224,6 +224,23 @@ test('Checkmarks.csv rejects a file with no Date column', () => {
   assert.throws(() => parseLoopCheckmarksCSV('Foo,Bar\n1,2\n'), /Date/);
 });
 
+test('a Checkmarks.csv with no rows under it still names its habits', () => {
+  // The row count says how many days have been answered; only the header says
+  // what exists. Bailing on `rows.length < 2` read "no entries" as "no habits",
+  // which is what an account that backs itself up on its first day exports.
+  const habits = parseLoopCheckmarksCSV('Date,Alpha,Beta\n');
+  assert.deepEqual(habits.map((h) => h.name), ['Alpha', 'Beta']);
+  assert.deepEqual(habits.map((h) => h.entries.length), [0, 0]);
+});
+
+test('a header-only Checkmarks.csv still has to be a Checkmarks.csv', () => {
+  // Reading the header rather than the rows must not turn the Date check into
+  // something only a file with data has to pass.
+  assert.throws(() => parseLoopCheckmarksCSV('Foo,Bar\n'), /Date/);
+  assert.deepEqual(parseLoopCheckmarksCSV(''), [],
+    'an empty file describes nothing, and the API answers 400 for that');
+});
+
 /* ---------- Loop .db backup ---------- */
 
 /** Build a synthetic Loop database matching the real schema. */
@@ -595,6 +612,82 @@ test('a Loop CSV zip is recognised, and needs its Habits.csv', async () => {
   assert.equal(parsed[0].type, 'numerical',
     'without Habits.csv the type is unknown and a 3 reads as Loop\'s SKIP');
   assert.equal(parsed[0].entries[0].value, 3);
+});
+
+test('a CSV archive of an account with no entries restores its habits', async () => {
+  // A new account that backs itself up before recording anything. Habits.csv
+  // described both habits in full and Checkmarks.csv was the lone header
+  // `Date,Alpha,Beta` — which restored as nothing at all, with the API's
+  // "no habits found in the uploaded file" 400 on top. The .db format has
+  // always handled the same account correctly.
+  const habits = [
+    {
+      id: 1, name: 'Alpha', type: 'boolean', unit: '', target_value: 0,
+      target_type: 'at_least', freq_numerator: 1, freq_denominator: 1,
+      color: '#22c55e', description: 'Nothing recorded yet', archived: 0,
+    },
+    {
+      id: 2, name: 'Beta', type: 'numerical', unit: 'km', target_value: 5,
+      target_type: 'at_least', freq_numerator: 3, freq_denominator: 7,
+      color: '#f59e0b', description: '', archived: 0,
+    },
+  ];
+
+  const parsed = await parseUpload(buildCsvArchive(habits, () => []));
+  assert.deepEqual(parsed.map((h) => h.name), ['Alpha', 'Beta']);
+  assert.equal(parsed[0].description, 'Nothing recorded yet');
+  assert.equal(parsed[1].type, 'numerical',
+    'the metadata is read for a habit that has no column data to interpret');
+  assert.equal(parsed[1].unit, 'km');
+  assert.equal(parsed[1].freq_denominator, 7);
+
+  // The mixed case: one habit with entries and one without, in one archive.
+  const mixed = await parseUpload(buildCsvArchive(habits, (id) =>
+    (id === 1 ? [{ date: '2026-01-05', value: 2, status: '', notes: '' }] : [])));
+  assert.deepEqual(mixed.map((h) => [h.name, h.entries.length]),
+    [['Alpha', 1], ['Beta', 0]]);
+});
+
+test('a habit only Habits.csv knows about is still restored', async () => {
+  // Habits.csv names every habit the archive describes, so it is a source of
+  // habits and not only a lookup table. A column lost from Checkmarks.csv
+  // otherwise takes the whole habit with it, metadata and all.
+  const { zip } = await import('../src/zip.js');
+  const archive = zip([
+    {
+      name: 'Habits.csv',
+      data: [
+        'Position,Name,Type,Question,Description,FrequencyNumerator,FrequencyDenominator,Color,Unit,Target Type,Target Value,Archived?',
+        '001,Water,NUMERICAL,,Stay hydrated,1,1,10,glasses,AT_LEAST,8.0,false',
+        '002,Ghost,YES_NO,,Never checked off,1,1,11,,,,false',
+      ].join('\n') + '\n',
+    },
+    { name: 'Checkmarks.csv', data: 'Date,Water\n2026-01-05,6\n' },
+  ]);
+
+  const parsed = await parseUpload(archive);
+  assert.deepEqual(parsed.map((h) => h.name), ['Water', 'Ghost'],
+    'checkmarks order first, then Habits.csv order for the rest');
+  assert.equal(parsed[0].entries.length, 1);
+  assert.deepEqual(parsed[1].entries, []);
+  assert.equal(parsed[1].description, 'Never checked off');
+});
+
+test('an archive describing no habits at all is still empty', async () => {
+  // The guard the API turns into a 400 has to keep working: reading the header
+  // must not make every unusable upload look like a successful empty import.
+  const { zip } = await import('../src/zip.js');
+  assert.deepEqual(
+    await parseUpload(zip([{ name: 'Checkmarks.csv', data: 'Date\n' }])), [],
+    'a Date column and nothing else names no habits');
+
+  // A zero-byte member reads as an ABSENT one, because `find` returns its
+  // contents and '' is falsy. Pinned as it stands: the answer is a 400 either
+  // way, and which of the two sentences it is belongs with the "oversized
+  // member reported as a missing one" note in #80 rather than here.
+  await assert.rejects(
+    () => parseUpload(zip([{ name: 'Checkmarks.csv', data: '' }])),
+    /Checkmarks\.csv/);
 });
 
 test('an unrecognised upload is a 400, not a 500', async () => {
