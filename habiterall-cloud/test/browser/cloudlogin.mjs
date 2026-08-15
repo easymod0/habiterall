@@ -155,14 +155,42 @@ try {
     exported?.habits?.length === 1 && exported.habits[0].entries.length === 1,
     JSON.stringify(exported?.habits?.map(h=>h.name)));
 
-  /* ---- 5. sign out ---- */
+  /* ---- 5. sign out, and come back ---- */
+  //
+  // ONE logout, because a second one has nothing left to sign out of. The
+  // route reads `id_token_hint` off the session, so calling it twice reports a
+  // missing hint on the second — which looks exactly like the bug this section
+  // is here to catch, and is not it.
   console.log('--- sign out ---');
-  await ev(`fetch('/auth/logout',{method:'POST',credentials:'same-origin'})`);
+  const bye = await ev(`(async()=>await (await fetch('/auth/logout',
+    {method:'POST',credentials:'same-origin'})).json())()`);
   await sleep(1200);
   const afterLogout = await ev(`(async()=>{
     const r = await fetch('/api/me',{credentials:'same-origin'}); return r.status;
   })()`);
   check('session is invalidated after logout', afterLogout === 401, String(afterLogout));
+
+  // The app's own session going away is only half of it, and it is the half a
+  // `fetch` can see. Where the browser LANDS is the other half: with no
+  // logout-typed redirect URI registered on the provider, Authentik discards
+  // `post_logout_redirect_uri` in silence and the user is left on its page.
+  const redirect = bye?.redirect || '';
+  check('logout URL is the IdP end-session endpoint',
+    redirect.includes('/end-session'), redirect);
+  check('logout URL carries post_logout_redirect_uri',
+    redirect.includes('post_logout_redirect_uri='), redirect);
+  // Both parameters or neither is useful: once the logout URI IS registered,
+  // Authentik validates the hint BEFORE planning the invalidation flow, so a
+  // missing one is an id_token_hint_missing error page rather than a redirect
+  // that merely went nowhere.
+  check('logout URL carries id_token_hint',
+    redirect.includes('id_token_hint='), redirect);
+
+  await goto(redirect);
+  await sleep(2500);
+  const landed = await href();
+  check('signing out lands back on the app, not on the IdP',
+    landed.startsWith(APP), landed);
 
   console.log(fails === 0 ? '\nALL CLOUD LOGIN CHECKS PASSED' : `\n${fails} CHECK(S) FAILED`);
 } catch (e) {

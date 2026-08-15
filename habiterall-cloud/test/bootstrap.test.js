@@ -102,3 +102,41 @@ test('both compose files default outgoing mail to submission and STARTTLS', () =
     for (const [, on] of tls) assert.equal(on, 'true', `${name} defaults STARTTLS to ${on}`);
   }
 });
+
+test('signing out is registered, and its two halves cannot ship apart', () => {
+  // Authentik has no separate post-logout field. `post_logout_redirect_uris`
+  // is `redirect_uris` filtered on a per-entry `redirect_uri_type`, which
+  // defaults to `authorization` — so with only the callback registered the
+  // list is empty, EndSessionView drops the `post_logout_redirect_uri` the app
+  // sends without a word, and signing out stops on Authentik's page.
+  assert.match(
+    bootstrap, /redirect_uri_type:\s*'logout'/,
+    'no logout-typed redirect URI: post_logout_redirect_uri will be discarded'
+  );
+
+  // And the half that must land WITH it. Once a logout URI exists, Authentik
+  // validates `id_token_hint` BEFORE planning the invalidation flow, so a
+  // missing hint turns a redirect that went nowhere into an error page that
+  // does not sign you out at all. Registering the URI alone is worse than
+  // neither, which is why one test guards both.
+  const server = read(CLOUD, 'src', 'server.js');
+  assert.match(
+    server, /logoutUrl\(req\.session\?\.idToken\)/,
+    'the logout route sends no id_token_hint: Authentik will answer '
+    + 'id_token_hint_missing rather than ending the session'
+  );
+  assert.match(
+    server, /req\.session\.idToken = idToken/,
+    'nothing stores the ID token, so the hint above is always undefined'
+  );
+
+  // Built from parts rather than interpolated. PUBLIC_URL is used raw where
+  // ISSUER_BASE strips a trailing slash, and Authentik compares these as exact
+  // strings — a PUBLIC_URL ending in `/` would register a double slash the app
+  // never sends. The logout entry, whose path is a bare `/`, is where that
+  // bites hardest.
+  assert.doesNotMatch(
+    bootstrap, /url:\s*`\$\{PUBLIC_URL\}/,
+    'a redirect URI is interpolated: a trailing slash in PUBLIC_URL breaks it'
+  );
+});

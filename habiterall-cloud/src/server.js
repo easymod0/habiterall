@@ -172,7 +172,7 @@ app.get('/auth/login', loginLimiter, async (req, res, next) => {
 
 app.get('/auth/callback', loginLimiter, async (req, res, next) => {
   try {
-    const user = await completeLogin(req);
+    const { user, idToken } = await completeLogin(req);
     if (user.blocked) return res.status(403).send('This account is suspended.');
 
     // Prevent session fixation: a brand-new id for the authenticated session.
@@ -182,13 +182,18 @@ app.get('/auth/callback', loginLimiter, async (req, res, next) => {
         id: user.id, email: user.email,
         name: user.display_name, blocked: user.blocked,
       };
+      // Set INSIDE regenerate, with the user: the hint has to live on the
+      // session the browser leaves with, and regenerate discards whatever was
+      // on the old one.
+      req.session.idToken = idToken;
       req.session.save((err2) => (err2 ? next(err2) : res.redirect('/')));
     });
   } catch (e) { next(e); }
 });
 
 app.post('/auth/logout', (req, res) => {
-  const url = logoutUrl();
+  // Read before destroy — the session object is gone by the callback.
+  const url = logoutUrl(req.session?.idToken);
   req.session.destroy(() => {
     res.clearCookie('habiterall.sid');
     res.json({ ok: true, redirect: url });

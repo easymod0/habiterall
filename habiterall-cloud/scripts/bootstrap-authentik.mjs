@@ -305,7 +305,29 @@ const providerBody = {
   // never refreshes a token.
   grant_types: ['authorization_code'],
   // Authentik derives the issuer from this slug.
-  redirect_uris: [{ matching_mode: 'strict', url: `${PUBLIC_URL}/auth/callback` }],
+  //
+  // TWO entries, and the second is not decoration. Authentik has no separate
+  // post-logout field: `post_logout_redirect_uris` is a property over THIS list
+  // filtered on a per-entry `redirect_uri_type`, which defaults to
+  // `authorization`. With only the callback here that property is empty, and
+  // `EndSessionView` gates its whole redirect block on it being non-empty — so
+  // the `post_logout_redirect_uri` the app sends was discarded in silence and
+  // signing out stopped on Authentik's own page instead of coming home.
+  //
+  // Built with `new URL` rather than interpolated. `PUBLIC_URL` is used raw
+  // where `ISSUER_BASE` strips a trailing slash, so a `PUBLIC_URL` ending in `/`
+  // registered `https://host//auth/callback` against the single-slash form the
+  // app actually sends. Authentik compares these as exact strings, so both
+  // sides have to build them the same way — and the logout entry, whose path is
+  // a bare `/`, is where that would bite hardest.
+  redirect_uris: [
+    { matching_mode: 'strict', url: new URL('/auth/callback', PUBLIC_URL).href },
+    {
+      matching_mode: 'strict',
+      url: new URL('/', PUBLIC_URL).href,
+      redirect_uri_type: 'logout',
+    },
+  ],
   property_mappings: scopeIds,
   signing_key: signingKey.pk,
   sub_mode: 'hashed_user_id',
