@@ -193,8 +193,19 @@ try {
   check('and the strip went away with it', !recovered.bar, JSON.stringify(recovered));
 
   // The whole point: the answer the user gave survived and reached the server.
+  //
+  // Both parts are checked against their own shape before going back into a
+  // URL. They come out of a request this test intercepted, which is a value
+  // from outside the test even though the test is what caused it — and
+  // interpolating that into a fetch is the request-forgery shape, which CodeQL
+  // is right to flag whatever the origin. Asserting them also means a change
+  // to the route's path fails here loudly rather than quietly requesting
+  // something else and finding no entry.
   const [, , , habitId, , date] = new URL(write.url).pathname.split('/');
-  const stored = await fetch(`${APP}/api/habits/${habitId}/entries`)
+  if (!/^\d+$/.test(habitId ?? '') || !/^\d{4}-\d{2}-\d{2}$/.test(date ?? '')) {
+    throw new Error(`held write has an unexpected path: ${new URL(write.url).pathname}`);
+  }
+  const stored = await fetch(`${APP}/api/habits/${Number(habitId)}/entries`)
     .then((r) => r.json()).catch(() => []);
   check('the check-off that was held is now recorded on the server',
     stored.some?.((e) => e.date === date), `${habitId} ${date}`);
