@@ -104,10 +104,81 @@ to date".
 
 ## Local stack
 
-`docker compose up -d` brings up Postgres, Authentik (server +
-worker), and the app. The app listens on **:3100**; Authentik's admin UI is on
-**:9000**. First run needs `scripts/bootstrap-authentik.mjs` to
-create the OIDC client — see `SETUP.md`.
+`docker compose up -d` brings up Postgres, Authentik (server + worker), the
+migrations, the bootstrap and the app. The app listens on **:3100**;
+Authentik's admin UI is on **:9000**. See `SETUP.md`.
+
+## Authentik is configured by a script that runs on every `up`
+
+`scripts/bootstrap-authentik.mjs` creates the OIDC provider and application,
+switches self-service registration on or off, and applies the branding. It is
+idempotent by design, because that is what lets `.env` be the source of truth:
+edit a value, `docker compose up -d`, and the identity provider agrees with the
+file again. Authentik has no declarative config for the application in the free
+tier, so this drives its API with `AUTHENTIK_BOOTSTRAP_TOKEN` — and with the
+token gone it exits 0 having done nothing, which is what keeps `up` working
+after the production checklist has you delete it.
+
+**The client id and secret are pushed, not read back.** They are generated
+into `.env` like every other secret and *set* on the provider, so the app and
+the IdP are configured from the same two lines. Left empty, Authentik
+generates a pair and the script prints it — the old paste-it-back flow, still
+supported, no longer the path.
+
+**`grant_types` must be sent explicitly.** The field defaults to an empty list
+and an empty list permits nothing: a provider created without it looks correct
+in the admin UI and rejects every sign-in with "Invalid grant\_type for
+provider", which arrives at the app as `AuthorizationResponseError` and at the
+user as a 500 on `/auth/callback`. That was a real bug here, and a fresh stack
+could not log in at all.
+
+**Registration and branding are blueprints, applied with a context this script
+chooses.** `blueprints/*.yaml` are mounted read-only into both Authentik
+containers and carry `instantiate: "false"`, so Authentik's own discovery never
+applies them — it would apply them with an EMPTY context, and an empty context
+means "signup off", which would quietly close registration on the next boot.
+The script uses `POST /managed/blueprints/import/`, which applies once and
+answers with the importer's own logs, so a broken blueprint fails the run
+instead of leaving a task to go and read.
+
+The switches are real booleans in that context, never `!Env` in the blueprint:
+every truth test a blueprint does is Python truthiness, so `AUTHENTIK_SELF_SIGNUP=false`
+would read as a non-empty string and turn registration **on**. The script
+parses the environment strictly and refuses a value it does not recognise.
+
+Three things about the blueprints are load bearing, and all three were found by
+running them:
+
+- **Every `absent` entry asks whether the object exists first**
+  (`conditions: [!Condition [OR, …, !Find […]]]`). Authentik builds a throwaway
+  model instance for identifiers that match nothing, and `Flow`/`FlowStageBinding`
+  take their primary key from a `default=uuid4` — so the throwaway looks saved,
+  `absent` deletes an object with a pk and no row, and the importer raises
+  `RelatedObjectDoesNotExist` and fails the whole apply.
+- **The "Sign up" link is written by the script, not the blueprint.** It is one
+  field on the login flow's identification stage, and that serializer rejects a
+  partial update omitting `user_fields` ("When no user fields are selected, at
+  least one source must be selected"). A blueprint could only set the link by
+  restating which fields the login form asks for, every `up`, over whatever an
+  operator had chosen. So the script reads the stage and writes it back with one
+  field changed.
+- **The flow background is set per flow, not on the brand.**
+  `branding_default_flow_background` is the setting for it and does not reach the
+  screen in 2026.5.6: the challenge is built by `flow.background_url(use_cache=False)`
+  with no request, and without a request the fallback is a hardcoded path to
+  Authentik's own photograph rather than the brand's value.
+
+**Turning registration off deletes the flow.** An enrollment flow is reachable
+at `/if/flow/<slug>/` whether or not the login page offers a link to it, so
+unlinking alone would leave the door open with the sign hidden.
+
+**What a signed-out user sees was read off the rendered page, not guessed** —
+brand title, brand logo, the *flow's* title, and a footer line. Three are
+fields; "Powered by authentik" is appended unconditionally by `ak-brand-links`
+in the shipped bundle, so it is hidden with the brand's custom CSS, which
+Authentik adopts into the flow's shadow roots. The logo's `alt` is still
+"authentik Logo" and stays that way: it is hardcoded in the same bundle, and
+the alternative is patching a file inside the image on every upgrade.
 
 Two guards deliberately refuse to run insecurely and must be overridden for a
 local HTTP stack (`ALLOW_INSECURE_OIDC=true`), both logging loud warnings:

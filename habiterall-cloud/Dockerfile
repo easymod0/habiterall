@@ -26,6 +26,8 @@ RUN npm ci --omit=dev \
 
 COPY habiterall-cloud/src ./habiterall-cloud/src
 COPY habiterall-cloud/public ./habiterall-cloud/public
+# The same image runs the app, the migrations and the Authentik bootstrap.
+COPY habiterall-cloud/scripts ./habiterall-cloud/scripts
 
 WORKDIR /app/habiterall-cloud
 
