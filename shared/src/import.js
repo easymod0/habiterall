@@ -235,8 +235,19 @@ export function backupSettings(buf) {
  * parsed array, which is far too late to be a defence — this is the bound that
  * has to hold before that array exists. Fifty times cloud's cap, so nothing real
  * comes near it, and a file sitting exactly on it parses in 81ms for 20MB.
+ *
+ * `PARSE` and not `IMPORT` in the name for exactly that distinction, and to keep
+ * a reader from reaching for cloud's similarly-spelled `MAX_HABITS_PER_IMPORT`
+ * when they mean this one.
+ *
+ * Tunable because otherwise it is the personal edition's first cap on anything:
+ * that API will create habits all day, so a fixed ceiling here would make the
+ * importer stricter than the API it exists to agree with, with no way out for
+ * someone who genuinely has more. Cloud's own limits are all env-settable for
+ * the same reason. Lowering it is a legitimate hardening choice; raising it
+ * trades memory for generosity and the figures above are what to trade against.
  */
-export const MAX_IMPORT_HABITS = 10_000;
+export const MAX_PARSE_HABITS = Number(process.env.MAX_PARSE_HABITS) || 10_000;
 
 /**
  * Ceiling on entries, and it is a TOTAL across the import rather than per habit.
@@ -244,7 +255,7 @@ export const MAX_IMPORT_HABITS = 10_000;
  * `unzip.js` records why, one attack over: a per-member cap is not a defence
  * when the number of members is also attacker-chosen, because each one stays
  * legal and the product does not. Per-habit here would be
- * `MAX_IMPORT_HABITS × the cap` rows — 10,000 legal habits multiplying out to
+ * `MAX_PARSE_HABITS × the cap` rows — 10,000 legal habits multiplying out to
  * something no ceiling was ever asked about.
  *
  * 250,000 is past what Loop could physically have produced: it shipped in 2016,
@@ -253,7 +264,7 @@ export const MAX_IMPORT_HABITS = 10_000;
  * 69MB, against 143MB at half a million. Both ceilings together are ~89MB, which
  * a small container survives; the unbounded read did not survive anything.
  */
-export const MAX_IMPORT_ENTRIES = 250_000;
+export const MAX_PARSE_ENTRIES = Number(process.env.MAX_PARSE_ENTRIES) || 250_000;
 
 /**
  * Read a Loop SQLite backup. `path` must point at a file on disk; node:sqlite
@@ -355,7 +366,7 @@ export async function parseLoopDatabase(path) {
     // The budget is spent by every row READ, not by every entry kept. A file of
     // nothing but UNKNOWN rows is dropped on the floor a line later and still
     // costs the read, which is the work being bounded.
-    let entryBudget = MAX_IMPORT_ENTRIES;
+    let entryBudget = MAX_PARSE_ENTRIES;
 
     // `.iterate()`, not `.all()` — the ceiling has to apply where the rows are
     // PRODUCED. `.all()` materialises the whole result inside node:sqlite before
@@ -364,14 +375,14 @@ export async function parseLoopDatabase(path) {
     // never gets to run at all. The `LIMIT` is the other half: it is what keeps
     // SQLite's own sorter bounded, since `ORDER BY` over an unindexed column
     // would otherwise sort every row before yielding the first.
-    for (const r of src.prepare(sql).iterate(MAX_IMPORT_HABITS + 1)) {
-      if (habits.length >= MAX_IMPORT_HABITS) throw tooMuch(`${MAX_IMPORT_HABITS} habits`);
+    for (const r of src.prepare(sql).iterate(MAX_PARSE_HABITS + 1)) {
+      if (habits.length >= MAX_PARSE_HABITS) throw tooMuch(`${MAX_PARSE_HABITS} habits`);
 
       const isNumerical = Number(r.type) === 1;
       const entries = [];
 
       for (const rep of reps.iterate(r.id, entryBudget + 1)) {
-        if (entryBudget <= 0) throw tooMuch(`${MAX_IMPORT_ENTRIES} entries`);
+        if (entryBudget <= 0) throw tooMuch(`${MAX_PARSE_ENTRIES} entries`);
         entryBudget--;
         const date = loopTimestampToISO(rep.timestamp);
         if (!date) continue;
