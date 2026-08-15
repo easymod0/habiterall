@@ -108,14 +108,16 @@ to date".
 migrations, the bootstrap and the app. The app listens on **:3100**;
 Authentik's admin UI is on **:9000**. See `SETUP.md`.
 
+`cp ../examples/cloud.env.example .env` first — the template moved out of this
+package, because a downloader of `examples/docker-compose.cloud.yml` needs the
+same one and one copy is the point.
+
 `db`, `migrate` and `app` carry no environment block here: they `extends` the
 ones in `examples/docker-compose.cloud.yml` and add the build. That file is the
 one place this edition's variables are written down, and the root CLAUDE.md has
-the whole argument. Two things are restated by hand there rather than
-inherited — the top-level `volumes:` declarations, which `extends` does not
-carry, and `depends_on`, which it may or may not (v1 never did; the current
-documentation says neither way) and whose absence looks like the app racing an
-unmigrated schema.
+the whole argument. Only the top-level `volumes:` declarations are restated by
+hand; `depends_on` IS inherited — measured, where this used to hedge — so `app`
+writes just the `authentik-bootstrap` key and the other two merge in beside it.
 
 The topology still differs from `examples/docker-compose.cloud-authentik.yml`
 on purpose: Authentik's database lives in the *same* Postgres server here,
@@ -123,8 +125,11 @@ created by `scripts/init-authentik-db.sh`, which is a file a downloader of that
 example does not have.
 
 Which is why the `authentik-*` services here are still a hand-kept copy of that
-example's, rather than extended from it — unified for the app, guarded for the
-rest. Both files are in `compose.test.js`'s list, so a new switch in
+example's, rather than extended from it — and the blocker is exactly the
+inheritance above. `depends_on` merges key by key and a key cannot be removed,
+so extending services that depend on an `authentik-db` this stack does not run
+gives `depends on undefined service "authentik-db": invalid compose project`.
+Unified for the app, guarded for the rest. Both files are in `compose.test.js`'s list, so a new switch in
 `bootstrap-authentik.mjs` has to reach both or one of them fails. If you add one
 through `flag()`, add it to the `@env` marker beside it as well: it reads
 `process.env[name]`, and nothing can see through that.

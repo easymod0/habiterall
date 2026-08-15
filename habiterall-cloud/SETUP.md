@@ -10,8 +10,12 @@ reverse proxy needs to face the internet.
 
 ```bash
 cd habiterall-cloud
-cp .env.example .env
+cp ../examples/cloud.env.example .env
 ```
+
+That template lives in `examples/` because it is the same one a downloader of
+`examples/docker-compose.cloud.yml` needs, and one copy is the point. It
+describes every variable the compose stack here reads.
 
 Generate a distinct value for every secret:
 
