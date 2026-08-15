@@ -52,6 +52,23 @@ services:
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
       AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      # Authentik's own names, so what is in .env is what its documentation
+      # calls the setting. Only self-service registration with email
+      # verification needs these; nothing else here sends mail.
+      #
+      # Submission port and STARTTLS by default, as .env.example and the
+      # published example both have it. These fall back for an .env written
+      # before those lines existed, and the minimal edit to such a file is to
+      # fill in the host and the credentials — which on port 25 with TLS off
+      # puts an SMTP password and an account-activation link on the wire in
+      # the clear. Lower it only for a relay on the same host.
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-true}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-authentik@localhost}
     # `/data`, not `/media`: 2025.12 reworked file storage and serves uploads
     # from `/files`, with the local backend expecting one mount at `/data`. A
     # `/media` mount is not an error — it is simply somewhere nothing writes,
@@ -60,6 +77,22 @@ services:
     volumes:
       - authentik-data:/data
       - authentik-templates:/templates
+      # Read-only, and read by both containers: the server serves the file
+      # list this path is validated against, the worker is what produces it.
+      - ./blueprints:/blueprints/custom:ro
+      # The sign-in page's logo and backdrop, as Authentik's own static
+      # assets — /web/dist/assets is what it serves at /static/dist/assets,
+      # and a `/static/...` path is one of the two values its brand fields
+      # take without an upload. The app could serve these instead, and its
+      # `Cross-Origin-Resource-Policy: same-origin` is why it does not.
+      #
+      # DIRECTORIES, into subdirectories of Authentik's own. Mounting the two
+      # files individually works until one is edited: a bind-mounted file
+      # follows the inode, and an editor that saves atomically leaves the
+      # container serving the version from when it started. Mounting the
+      # parent directories over Authentik's would instead hide its own images.
+      - ../shared/public/icons:/web/dist/assets/icons/habiterall:ro
+      - ./branding:/web/dist/assets/images/habiterall:ro
     ports:
       - '${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
@@ -79,11 +112,60 @@ services:
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
       AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      # Same defaults as the server above, and for the same reason: the worker
+      # is what actually sends the mail.
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-true}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-authentik@localhost}
     volumes:
       - authentik-data:/data
       - authentik-templates:/templates
       - authentik-certs:/certs
+      - ./blueprints:/blueprints/custom:ro
+      - ../shared/public/icons:/web/dist/assets/icons/habiterall:ro
+      - ./branding:/web/dist/assets/images/habiterall:ro
     restart: unless-stopped
+
+  # The OIDC application, and the self-service registration switch. One-shot
+  # and idempotent, so it runs on every `up` and there is no first-run
+  # checklist: with OIDC_CLIENT_ID / OIDC_CLIENT_SECRET set in .env, both the
+  # provider and the app are configured from the same two lines and nothing
+  # is pasted between them.
+  #
+  # Without AUTHENTIK_BOOTSTRAP_TOKEN it exits 0 having done nothing, which is
+  # what keeps `up` working after the production checklist has you delete it.
+  authentik-bootstrap:
+    build:
+      context: ..
+      dockerfile: habiterall-cloud/Dockerfile
+    container_name: habiterall-authentik-bootstrap
+    depends_on:
+      authentik-server: { condition: service_started }
+      authentik-worker: { condition: service_started }
+    environment:
+      # The API is reached over the compose network; the ISSUER has to be the
+      # string a browser sees, and they are not the same host.
+      AUTHENTIK_URL: http://authentik-server:9000
+      AUTHENTIK_PUBLIC_URL: ${AUTHENTIK_PUBLIC_URL:-http://localhost:${AUTHENTIK_PORT:-9000}}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      # Whether strangers may create their own accounts, and whether they must
+      # confirm an email address first. Parsed strictly — an unrecognised
+      # value fails this container rather than being read as "on".
+      AUTHENTIK_SELF_SIGNUP: ${AUTHENTIK_SELF_SIGNUP:-off}
+      AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL: ${AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL:-off}
+      # The sign-in and sign-up pages in habiterall's name. On by default.
+      AUTHENTIK_BRANDING: ${AUTHENTIK_BRANDING:-on}
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-}
+    command: ['node', 'scripts/bootstrap-authentik.mjs']
+    restart: 'no'
 
   # ------------------------------------------------------------ application
   migrate:
@@ -107,6 +189,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
+      authentik-bootstrap: { condition: service_completed_successfully }
     environment:
       NODE_ENV: production
       PORT: 3000

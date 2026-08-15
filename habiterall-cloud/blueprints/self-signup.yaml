@@ -1,0 +1,245 @@
+# Self-service registration for habiterall.
+#
+# Mounted read-only at /blueprints/custom/self-signup.yaml in both Authentik
+# containers, and applied by scripts/bootstrap-authentik.mjs — which is what
+# turns AUTHENTIK_SELF_SIGNUP in .env into the two context values below. The
+# `instantiate: "false"` label is why: Authentik would otherwise discover this
+# file and apply it with an EMPTY context, and an empty context here means
+# "signup off", so a stack that had it on would silently lose it on the next
+# boot. Nothing applies this but the bootstrap.
+#
+# The stages are Authentik's own example enrollment flows
+# (/blueprints/example/flows-enrollment-2-stage.yaml and
+# ...-email-verification.yaml) with one flow serving both: email verification
+# is a stage binding and an inactive-until-confirmed user write, so it is two
+# fields rather than a second flow.
+#
+# Both switches are real booleans in the blueprint context, NOT strings from
+# the environment, because every truth test in a blueprint is Python
+# truthiness: `!Env [X, ""]` resolving to "false" is a non-empty string and
+# would turn signup ON. The bootstrap parses the environment and sends
+# `true`/`false`; a value it does not recognise is an error there, not a
+# guess here.
+version: 1
+metadata:
+  name: habiterall - self-service registration
+  labels:
+    blueprints.goauthentik.io/instantiate: 'false'
+context:
+  signup: false
+  verify_email: false
+entries:
+  # The flow itself. `absent` when signup is off, so the sign-up page is gone
+  # rather than merely unlinked: an enrollment flow is reachable at
+  # /if/flow/<slug>/ whether or not the login page offers a link to it.
+  # Deleting it takes its stage bindings with it (FK cascade); the stages and
+  # prompts below outlive it, inert, and are picked back up if signup returns.
+  #
+  # The `!Find` in the condition is what makes the delete conditional on the
+  # flow EXISTING, and it is not belt-and-braces. Authentik builds a throwaway
+  # `Flow()` for an entry whose identifiers match nothing, and Flow's primary
+  # key is a `default=uuid4`, so that throwaway looks saved: `absent` then
+  # deletes an object with a pk and no row, which raises RelatedObjectDoesNotExist
+  # inside the importer and fails the whole apply (Authentik 2026.5.6). Every
+  # `absent` here therefore asks first.
+  - id: flow
+    model: authentik_flows.flow
+    state: !If [!Context [signup, false], present, absent]
+    conditions:
+      - !Condition [
+          OR,
+          !Context [signup, false],
+          !Find [authentik_flows.flow, [slug, habiterall-enrollment]],
+        ]
+    identifiers:
+      slug: habiterall-enrollment
+    attrs:
+      name: habiterall enrollment
+      # The heading on the card, and half of the tab title — the other half is
+      # the brand's name, so this does not repeat it. See branding.yaml.
+      title: Create your account
+      designation: enrollment
+      authentication: require_unauthenticated
+
+  # Everything below builds that flow, so it is skipped entirely when signup
+  # is off — the entries reference the flow by !KeyOf, which has nothing to
+  # resolve to once the flow is absent.
+  - id: prompt-username
+    model: authentik_stages_prompt.prompt
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-field-username
+    attrs:
+      field_key: username
+      label: Username
+      type: username
+      required: true
+      placeholder: Username
+      placeholder_expression: false
+      order: 0
+  - id: prompt-password
+    model: authentik_stages_prompt.prompt
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-field-password
+    attrs:
+      field_key: password
+      label: Password
+      type: password
+      required: true
+      placeholder: Password
+      placeholder_expression: false
+      order: 1
+  - id: prompt-password-repeat
+    model: authentik_stages_prompt.prompt
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-field-password-repeat
+    attrs:
+      field_key: password_repeat
+      label: Password (repeat)
+      type: password
+      required: true
+      placeholder: Password (repeat)
+      placeholder_expression: false
+      order: 2
+  - id: prompt-name
+    model: authentik_stages_prompt.prompt
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-field-name
+    attrs:
+      field_key: name
+      label: Name
+      type: text
+      required: true
+      placeholder: Name
+      placeholder_expression: false
+      order: 0
+  # Required whether or not it is verified: habiterall reads `email` from the
+  # ID token, and Authentik cannot send a confirmation to a field it never
+  # asked for.
+  - id: prompt-email
+    model: authentik_stages_prompt.prompt
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-field-email
+    attrs:
+      field_key: email
+      label: Email
+      type: email
+      required: true
+      placeholder: Email
+      placeholder_expression: false
+      order: 1
+
+  - id: stage-prompt-credentials
+    model: authentik_stages_prompt.promptstage
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-prompt-credentials
+    attrs:
+      fields:
+        - !KeyOf prompt-username
+        - !KeyOf prompt-password
+        - !KeyOf prompt-password-repeat
+  - id: stage-prompt-details
+    model: authentik_stages_prompt.promptstage
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-prompt-details
+    attrs:
+      fields:
+        - !KeyOf prompt-name
+        - !KeyOf prompt-email
+
+  # The one field that differs between the two variants: with verification on,
+  # the account is created switched off and the email stage is what switches it
+  # on, so an unconfirmed address never becomes a habiterall account.
+  - id: stage-user-write
+    model: authentik_stages_user_write.userwritestage
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-user-write
+    attrs:
+      user_creation_mode: always_create
+      create_users_as_inactive: !If [!Context [verify_email, false], true, false]
+
+  # Created even when unused: an email stage bound to nothing does nothing,
+  # and the binding below is what actually decides. Uses Authentik's global
+  # email settings (AUTHENTIK_EMAIL__* in .env) rather than its own copy.
+  - id: stage-email-verification
+    model: authentik_stages_email.emailstage
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-email-verification
+    attrs:
+      use_global_settings: true
+      template: email/account_confirmation.html
+      activate_user_on_success: true
+      # The subject is the STAGE's, not the brand's: `EmailStage.subject`
+      # defaults to the literal word "authentik" and the confirmation template
+      # is never handed a brand, so without this line the one message a new
+      # user gets arrives titled after software they have not heard of.
+      subject: Confirm your habiterall account
+
+  - id: stage-user-login
+    model: authentik_stages_user_login.userloginstage
+    conditions: [!Context [signup, false]]
+    identifiers:
+      name: habiterall-enrollment-user-login
+
+  - model: authentik_flows.flowstagebinding
+    conditions: [!Context [signup, false]]
+    identifiers:
+      target: !KeyOf flow
+      stage: !KeyOf stage-prompt-credentials
+      order: 10
+  - model: authentik_flows.flowstagebinding
+    conditions: [!Context [signup, false]]
+    identifiers:
+      target: !KeyOf flow
+      stage: !KeyOf stage-prompt-details
+      order: 11
+  - model: authentik_flows.flowstagebinding
+    conditions: [!Context [signup, false]]
+    identifiers:
+      target: !KeyOf flow
+      stage: !KeyOf stage-user-write
+      order: 20
+  # Between the write and the login: the user exists but is inactive, and the
+  # link in the mail is what completes the flow. Removing this binding is the
+  # whole of turning verification back off — same `!Find` guard as the flow,
+  # for the same reason.
+  - model: authentik_flows.flowstagebinding
+    state: !If [!Context [verify_email, false], present, absent]
+    conditions:
+      - !Context [signup, false]
+      - !Condition [
+          OR,
+          !Context [verify_email, false],
+          !Find [
+            authentik_flows.flowstagebinding,
+            [target__slug, habiterall-enrollment],
+            [stage__name, habiterall-enrollment-email-verification],
+          ],
+        ]
+    identifiers:
+      target: !KeyOf flow
+      stage: !KeyOf stage-email-verification
+      order: 30
+  - model: authentik_flows.flowstagebinding
+    conditions: [!Context [signup, false]]
+    identifiers:
+      target: !KeyOf flow
+      stage: !KeyOf stage-user-login
+      order: 100
+
+  # The "Sign up" link on the login page is one field on the login flow's
+  # identification stage — and it is NOT set here. IdentificationStage's
+  # serializer rejects a partial update that omits `user_fields` ("When no
+  # user fields are selected, at least one source must be selected"), so a
+  # blueprint can only write that link by also restating which fields the
+  # login form asks for, and restating them on every `up` would quietly
+  # revert an operator who had changed them. bootstrap-authentik.mjs reads
+  # the stage and writes back one field instead.

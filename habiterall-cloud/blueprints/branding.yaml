@@ -1,0 +1,133 @@
+# The sign-in and sign-up pages, in habiterall's name rather than Authentik's.
+#
+# Applied by scripts/bootstrap-authentik.mjs (see the header of
+# self-signup.yaml for why nothing else applies these files), and only when
+# AUTHENTIK_BRANDING is on — turning it off stops this from being managed,
+# which is not the same as putting Authentik's own branding back.
+#
+# The FLOW-level settings below (titles, backdrop) are scoped to the sign-in
+# and sign-up pages. The brand-level ones are not, and saying otherwise would
+# be a nice-sounding lie: `base/skeleton.html` renders `branding_title`,
+# `branding_favicon` and `branding_custom_css` into the admin and user
+# interfaces too, so those three follow you in there — a habiterall tab title,
+# a habiterall favicon, and the accent on Authentik's own primary buttons.
+# That is cosmetic and, for an Authentik that exists to log people into
+# habiterall, not wrong. Nothing here rewords the admin UI, which is
+# Authentik's and whose readers know it.
+#
+# What a signed-out user actually sees was read off the rendered page rather
+# than guessed, and it is four things: the tab title (brand title), the mark
+# above the card (brand logo), the heading on the card (the FLOW's title, not
+# the brand's), and a footer line. Three are fields. The fourth is not:
+# `ak-brand-links` appends "Powered by authentik" to its list unconditionally
+# in the source, so the only lever short of patching the bundle is the custom
+# CSS below.
+#
+# One string is left and stays left: the logo's `alt` is "authentik Logo",
+# hardcoded in the same bundle. It is read by a screen reader and by anyone
+# whose images failed, and the alternative is patching a file inside the
+# image on every upgrade.
+#
+# The two images are Authentik's OWN static assets as far as it is concerned:
+# compose bind-mounts them into /web/dist/assets/, which is the directory it
+# serves at /static/dist/assets/. That path is also the only kind of value the
+# brand's file fields accept without an upload — they are validated as file
+# NAMES, with `/static/...` and `http(s)://...` the two exceptions. The other
+# exception was tried first and is worse: pointing them at PUBLIC_URL gives
+# the login page a broken image, because the app answers static requests with
+# `Cross-Origin-Resource-Policy: same-origin` and the IdP is another origin.
+version: 1
+metadata:
+  name: habiterall - branding
+  labels:
+    blueprints.goauthentik.io/instantiate: 'false'
+entries:
+  - model: authentik_brands.brand
+    # The brand Authentik's own default blueprint creates. Matching on the
+    # domain rather than on `default: true` means an operator who has made
+    # their own default brand keeps it — we would edit the stock one, which is
+    # a visible no-op, rather than quietly taking over theirs.
+    #
+    # Guarded on it EXISTING, and this is a first-boot race rather than
+    # paranoia: Authentik answers its API before it has finished applying its
+    # own blueprints, so an unguarded entry here can win and create the brand
+    # itself — without `default: true`, since that is not ours to claim.
+    # Authentik would then find no default brand, create a SECOND one, and
+    # every setting below would be sitting on the brand nobody reads. The
+    # bootstrap waits for this brand for the same reason; the condition is
+    # what makes losing that wait harmless.
+    conditions:
+      - !Find [authentik_brands.brand, [domain, authentik-default]]
+    identifiers:
+      domain: authentik-default
+    attrs:
+      # The tab title's suffix, everywhere. NOT the confirmation email's
+      # subject, which comes from the email stage — see self-signup.yaml.
+      branding_title: habiterall
+      branding_logo: /static/dist/assets/icons/habiterall/logo.svg
+      branding_favicon: /static/dist/assets/icons/habiterall/logo.svg
+      branding_default_flow_background: /static/dist/assets/images/habiterall/auth-background.svg
+      # Authentik adopts this stylesheet into the flow's shadow roots as well
+      # as the page, which is why rules for elements inside `ak-flow-executor`
+      # work at all.
+      branding_custom_css: |
+        /* "Powered by authentik", the one line with no setting behind it.
+           The footer's other items are links; this one is the only
+           data-kind="text", so operator-configured links survive. */
+        ak-brand-links li[data-kind='text'] { display: none !important; }
+        /* Authentik's own logo is a wordmark and this one is a square 512px
+           app icon, so unconstrained it scales to the card's width and fills
+           it — measured at 402px tall. */
+        img.branding-logo {
+          max-height: 4.5rem;
+          width: auto;
+        }
+        /* The app's accent, so the button here matches the one that sent
+           you. */
+        .pf-c-button.pf-m-primary {
+          background-color: #3b82f6;
+        }
+        .pf-c-button.pf-m-primary:hover {
+          background-color: #2f6fd9;
+        }
+
+  # The heading on the login card. Authentik's default blueprint owns this
+  # flow and sets "Welcome to authentik!", but it only re-applies when its own
+  # file changes — i.e. on an upgrade — and the next `docker compose up` puts
+  # this back. Short, because the tab title is "<flow title> - <brand title>"
+  # and "Sign in to habiterall - habiterall" says it twice.
+  #
+  # The backdrop is set HERE, per flow, and not only on the brand above.
+  # `branding_default_flow_background` is the setting that ought to do it, and
+  # in 2026.5.6 it does not reach this screen: the challenge is built by
+  # `flow.background_url(use_cache=False)` with no request, and that argument
+  # is what the fallback needs to find a brand — without it the fallback is a
+  # hardcoded path to Authentik's own photograph. The brand field is left set
+  # regardless, for the surfaces that do consult it.
+  #
+  # Guarded on existence for the same reason as the enrollment flow below, and
+  # this one is the sharper case: Authentik's API answers before its default
+  # blueprints have all landed, and an unguarded `present` here would try to
+  # CREATE `default-authentication-flow` from a slug, a title and a background.
+  # The serializer refuses that (`name` and `designation` are required), so the
+  # whole apply fails — on the one boot where it matters.
+  - model: authentik_flows.flow
+    conditions:
+      - !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+    identifiers:
+      slug: default-authentication-flow
+    attrs:
+      title: Sign in
+      background: /static/dist/assets/images/habiterall/auth-background.svg
+
+  # The same for the sign-up flow, if there is one. Guarded on its existence
+  # rather than assumed, because self-service registration is a separate
+  # switch: an unguarded `present` entry here would CREATE an empty flow at
+  # that slug on an instance that had signup off.
+  - model: authentik_flows.flow
+    conditions:
+      - !Find [authentik_flows.flow, [slug, habiterall-enrollment]]
+    identifiers:
+      slug: habiterall-enrollment
+    attrs:
+      background: /static/dist/assets/images/habiterall/auth-background.svg

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The backdrop behind the sign-in and sign-up cards.
+
+  Nothing in habiterall renders it — it is bind-mounted into the Authentik
+  containers as /web/dist/assets/images/, which is what Authentik serves at
+  /static/dist/assets/images/. Serving it from the app instead was the first
+  attempt and it does not work: the app answers with
+  `Cross-Origin-Resource-Policy: same-origin`, so the login page (another
+  origin) gets a broken image. Doing it this way also means the sign-in page
+  still looks like itself while the app is down.
+
+  Three gradients and no bitmap, so it is about a kilobyte on the wire and
+  cannot pixelate: it is painted onto `body::before` at
+  `background-size: cover`, over whatever the viewport is. (Authentik hides
+  that layer below 35rem wide, so a phone gets the card on a flat background —
+  its choice, not ours.)
+
+  The colours are deliberately louder than the app's own dark theme. The first
+  version used the theme's own background (#0f1216) with a 28%-opacity accent
+  wash, which is correct as a palette and invisible as a backdrop: against the
+  card sitting on it, it read as one flat grey. What is wanted here is the
+  accent (#3b82f6) present enough to be recognised, with the middle staying
+  dark enough for a dark card to sit on.
+
+  Do not name a CSS custom property in this comment. An XML comment may not
+  contain a double hyphen, so a passing mention of one costs the whole file:
+  the parser stops, nothing paints, and the page shows the plain background
+  colour underneath — which looks exactly like a gradient that was too subtle,
+  and was mistaken for one until the file was opened on its own.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900"
+     preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="deep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#12325f"/>
+      <stop offset="45%" stop-color="#0e1a2b"/>
+      <stop offset="100%" stop-color="#0b0e13"/>
+    </linearGradient>
+    <radialGradient id="wash" cx="0.12" cy="0.08" r="0.85">
+      <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.65"/>
+      <stop offset="40%" stop-color="#3b82f6" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="counter" cx="0.92" cy="0.96" r="0.7">
+      <stop offset="0%" stop-color="#2f6fd9" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#2f6fd9" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#deep)"/>
+  <rect width="1600" height="900" fill="url(#wash)"/>
+  <rect width="1600" height="900" fill="url(#counter)"/>
+</svg>

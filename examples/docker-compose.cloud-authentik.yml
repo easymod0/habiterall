@@ -15,24 +15,40 @@
 #   AUTHENTIK_SECRET_KEY=...       openssl rand -base64 60
 #   AUTHENTIK_BOOTSTRAP_PASSWORD=. the first admin's password — change it after
 #   SESSION_SECRET=...             openssl rand -base64 36
+#   AUTHENTIK_BOOTSTRAP_TOKEN=..   openssl rand -base64 36  (see below)
 #   PUBLIC_URL=https://habits.example.com
 #   OIDC_ISSUER=https://auth.example.com/application/o/habiterall/
-#   OIDC_CLIENT_ID=...             from Authentik, once created (below)
-#   OIDC_CLIENT_SECRET=...         from Authentik, once created (below)
+#   AUTHENTIK_PUBLIC_URL=https://auth.example.com
+#   OIDC_CLIENT_ID=...             openssl rand -hex 32   (yours to choose)
+#   OIDC_CLIENT_SECRET=...         openssl rand -hex 32   (yours to choose)
 #
-# Two starts, because the OIDC client cannot exist before the provider does:
+# One start:
 #
-#   docker compose -f docker-compose.cloud-authentik.yml up -d authentik-db authentik-server authentik-worker
-#   # sign in at :9000 as akadmin, create an OAuth2/OIDC provider named
-#   # habiterall with redirect URI ${PUBLIC_URL}/auth/callback and scopes
-#   # openid profile email, then an application pointing at it. Copy the client
-#   # id and secret into .env.
 #   docker compose -f docker-compose.cloud-authentik.yml up -d
 #
-# With a clone of the repo you can skip the clicking: habiterall-cloud/scripts/
-# bootstrap-authentik.mjs creates the provider and application over the API and
-# prints the two values. It is not in the image, which ships src/ and public/
-# only, so on a server without the source the UI is the path.
+# There is no phase where you click through Authentik's UI and paste values
+# back. The `authentik-bootstrap` service below runs the same image as the app
+# and creates the OIDC provider and application over Authentik's API, GIVING
+# it the client id and secret from .env — so both sides are configured from
+# the same two lines. It is idempotent and runs on every `up`, which is how a
+# changed .env takes effect. It needs AUTHENTIK_BOOTSTRAP_TOKEN, which becomes
+# an Authentik admin API token; drop it once you are done configuring and the
+# bootstrap will say it has nothing to do and leave everything as it stands.
+#
+# Optional, and off unless set:
+#
+#   AUTHENTIK_SELF_SIGNUP=on              a "Sign up" link on the login page —
+#                                         anyone who can reach it gets an
+#                                         account, so read SETUP.md first
+#   AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL=on  confirm the address first; needs the
+#                                         AUTHENTIK_EMAIL__* settings below
+#   AUTHENTIK_BRANDING=off                keep Authentik's own name and logo on
+#                                         the sign-in pages (default: habiterall's)
+#
+# The blueprints and images those two need travel INSIDE the habiterall image
+# and are copied into the three volumes at the bottom on every `up`, which is
+# why this file needs no checkout of the repository to mount from — and why an
+# upgraded image's versions of them actually land.
 #
 # The two database passwords are hex rather than base64 because they are
 # substituted into a connection URL: base64 emits '/', which ends the URL's
@@ -99,6 +115,23 @@ services:
       # Only needed to create the first admin; harmless to leave set.
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      # Only self-service registration with email verification sends mail.
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-true}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-habiterall@example.com}
+    # Filled by authentik-bootstrap out of the habiterall image. The two asset
+    # volumes land under directories Authentik already serves at
+    # /static/dist/assets/, which is one of the two forms its brand settings
+    # accept without an upload.
+    volumes:
+      - authentik-blueprints:/blueprints/custom
+      - authentik-icons:/web/dist/assets/icons/habiterall
+      - authentik-images:/web/dist/assets/images/habiterall
     ports:
       - '${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
@@ -116,7 +149,65 @@ services:
       AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-true}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-habiterall@example.com}
+    # The worker is what lists the blueprint directory for the endpoint that
+    # applies one, and what sends the mail. It needs the same files.
+    volumes:
+      - authentik-blueprints:/blueprints/custom
+      - authentik-icons:/web/dist/assets/icons/habiterall
+      - authentik-images:/web/dist/assets/images/habiterall
     restart: unless-stopped
+
+  # Configures Authentik from this file's .env: the OIDC provider and
+  # application, self-service registration, and the branding on the sign-in
+  # pages. Runs to completion on every `up`, and is idempotent — everything is
+  # looked up before it is written, so re-running it is how a changed .env
+  # takes effect.
+  #
+  # It also copies the blueprints and the two images out of the habiterall
+  # image into the volumes above, which is the step that makes this file work
+  # without a checkout of the repository. That copy OVERWRITES, so pulling a
+  # newer image is what updates them.
+  #
+  # Without AUTHENTIK_BOOTSTRAP_TOKEN it does nothing and exits 0 — supported,
+  # and the reason `up` keeps working once you have removed the token. It says
+  # so, and names the switches that have no effect while it is gone.
+  authentik-bootstrap:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      authentik-server: { condition: service_started }
+      authentik-worker: { condition: service_started }
+    environment:
+      AUTHENTIK_URL: http://authentik-server:9000
+      # The API is reached over this network; the ISSUER has to be the string a
+      # browser sees, and they are not the same host.
+      AUTHENTIK_PUBLIC_URL: ${AUTHENTIK_PUBLIC_URL:-http://localhost:${AUTHENTIK_PORT:-9000}}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
+      AUTHENTIK_SELF_SIGNUP: ${AUTHENTIK_SELF_SIGNUP:-off}
+      AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL: ${AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL:-off}
+      AUTHENTIK_BRANDING: ${AUTHENTIK_BRANDING:-on}
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-}
+      # Set only here: this is the container with the files to copy.
+      AUTHENTIK_BLUEPRINTS_OUT: /out/blueprints
+      AUTHENTIK_ICONS_OUT: /out/icons
+      AUTHENTIK_IMAGES_OUT: /out/images
+    volumes:
+      - authentik-blueprints:/out/blueprints
+      - authentik-icons:/out/icons
+      - authentik-images:/out/images
+    command: ['node', 'scripts/bootstrap-authentik.mjs']
+    restart: 'no'
 
   # Runs once per deploy, as a SEPARATE credential the app never holds — it is
   # the only thing allowed to change the schema. `up -d` waits for it to finish.
@@ -135,7 +226,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
-      authentik-server: { condition: service_started }
+      authentik-bootstrap: { condition: service_completed_successfully }
     ports:
       - '${APP_PORT:-3100}:3000'
     environment:
@@ -146,14 +237,15 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
       PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
       OIDC_ISSUER: ${OIDC_ISSUER:?from Authentik, ends in a slash}
-      # Not `:?` like the rest, and that is load bearing: compose interpolates
-      # the WHOLE file before it works out which services you asked for, so a
-      # required-and-empty value here fails `up authentik-server` too — the
-      # first half of a two-phase start, whose entire purpose is to create the
-      # client these will hold. The app checks them itself at boot and says
-      # exactly this if they are missing (habiterall-cloud/src/auth.js).
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      # `:?` now, where this file once had `:-`. There used to be a phase where
+      # these were legitimately empty — the first of a two-phase start, whose
+      # purpose was to create the client they would hold — and compose
+      # interpolates the WHOLE file before it works out which services you
+      # asked for, so requiring them here would have failed that phase too.
+      # The bootstrap ends the two-phase start: these are values you generate,
+      # not values you collect, so there is no moment when empty is correct.
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
       TRUST_PROXY: 1
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       # The fallback clock: a container has no timezone, so it is UTC. Users can
@@ -166,3 +258,11 @@ services:
 volumes:
   db-data:
   authentik-db-data:
+  # Refilled from the habiterall image by authentik-bootstrap on every `up`,
+  # and read by Authentik. They mirror the image rather than holding config of
+  # your own: a file edited in here is overwritten on the next start, which is
+  # what makes an upgraded image's blueprints and branding take effect. Change
+  # them in an image you build.
+  authentik-blueprints:
+  authentik-icons:
+  authentik-images:
