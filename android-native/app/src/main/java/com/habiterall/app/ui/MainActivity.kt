@@ -287,6 +287,64 @@ class MainActivity : ComponentActivity() {
                     checked = true
                 }
 
+                /**
+                 * What the server says about this client's session, and null
+                 * while nothing has asked yet.
+                 *
+                 * Asked once per server rather than per screen. `/api/me` is the
+                 * only route that answers a caller with no session, so it is
+                 * both how the app learns it is signed out and how it learns
+                 * which sign-in this instance HAS — a personal server with a
+                 * password and a cloud one behind an identity provider need
+                 * different screens, and only the server knows which it is.
+                 */
+                var session by remember { mutableStateOf<Session?>(null) }
+
+                /** Bumped to re-ask, after a sign-in, a sign-out, or a 401. */
+                var authKey by remember { mutableIntStateOf(0) }
+
+                /**
+                 * One client for asking about the session and ending it.
+                 *
+                 * `Api` builds an OkHttpClient with its own dispatcher and
+                 * connection pool, and this is asked again on every 401 from
+                 * anywhere — so building one per check is the cost the
+                 * management screens already take care to avoid.
+                 */
+                val authApi = remember(url) { url?.let { Api(it) } }
+
+                LaunchedEffect(authApi, authKey) {
+                    // Null first, so the app is never on screen against a
+                    // session belonging to the previous server.
+                    session = null
+                    session = authApi?.me()
+                }
+
+                /**
+                 * A refused session, from anywhere, sends the whole app back to
+                 * the sign-in screen.
+                 *
+                 * One handler rather than one per screen: every screen already
+                 * catches something to show a message, and not every one of them
+                 * would remember to ask what the status was. Hopped onto the
+                 * main thread because this is called from OkHttp's.
+                 *
+                 * Remembered, and that is not tidiness: the screens below key
+                 * their `Api` on it, and a lambda rebuilt every recomposition
+                 * would rebuild the client — and its connection pool — with it.
+                 */
+                val onUnauthorized: () -> Unit = remember { { runOnUiThread { authKey++ } } }
+
+                /**
+                 * Whether there is a session to end.
+                 *
+                 * False on an instance with `HABITERALL_AUTH=off`, where the
+                 * menu item would offer to sign out of something that does not
+                 * exist — and raise the question of why signing in is not on
+                 * offer either.
+                 */
+                val canSignOut = (session as? Session.Active)?.mode?.needsSignIn == true
+
                 // The web UI is a screen of this app, not a trip to a
                 // browser. See WebScreen for why that matters.
                 //
@@ -331,6 +389,25 @@ class MainActivity : ComponentActivity() {
                     if (target == null) webHost.warm() else webHost.show(target)
                 }
 
+                // A web screen belongs to the session that opened it. `show()`
+                // declines to navigate when the WebView is already on the target
+                // URL, so leaving one open across a sign-out would re-show the
+                // previous account's page to the next one — same habit id, same
+                // URL, nothing to tell it to reload. Closing it means the next
+                // open is a real load.
+                //
+                // `is Absent`, NOT `!is Active`, and the difference is a bug that
+                // shipped in the first version of this. `session` is plain
+                // `remember`, so it is null on every activity recreation, while
+                // `webUrl` is `rememberSaveable` precisely so that rotating while
+                // reading a habit's charts does not drop you back on the list —
+                // see its declaration. `!is Active` fires during that null phase
+                // and throws the restored value away, undoing the one thing
+                // saving it was for. It also fired on every silent re-check.
+                LaunchedEffect(session) {
+                    if (session is Session.Absent) webUrl = null
+                }
+
                 /** Which management screen is over the list, if any. */
                 var manage by remember { mutableStateOf<Manage?>(null) }
                 /** Bumped when one of them writes something the list must refetch. */
@@ -361,6 +438,23 @@ class MainActivity : ComponentActivity() {
                         url = it
                         Reminders.rescheduleAll(this@MainActivity)
                     })
+                    // Nothing is drawn against an unknown session. The
+                    // alternative is showing the list and replacing it a request
+                    // later, which is the flash of the wrong screen that
+                    // `start()` was rewritten in the web app to avoid.
+                    session == null -> Loading()
+                    // `Session.Unknown` is deliberately not a branch here. The
+                    // app carries on to the list, whose own error handling is
+                    // better at reporting a broken server than a screen invented
+                    // for the purpose — and an instance with NO sign-in must not
+                    // acquire a way to fail at boot that it never had. See
+                    // Session.Unknown for the whole argument.
+                    session is Session.Absent && authApi != null -> SignInScreen(
+                        api = authApi,
+                        mode = (session as Session.Absent).mode,
+                        onSignedIn = { authKey++ },
+                        onChangeServer = { url = null },
+                    )
                     // The list stays composed underneath rather than being
                     // swapped out. Swapping discarded everything it remembers —
                     // so scrolling back to March, opening that habit's chart and
@@ -371,7 +465,7 @@ class MainActivity : ComponentActivity() {
                         // per opening: `Api` builds an OkHttpClient, and a screen
                         // that can be opened and closed all afternoon should not
                         // leave a connection pool behind each time.
-                        val manageApi = remember(url) { Api(url!!) }
+                        val manageApi = remember(url) { Api(url!!, onUnauthorized) }
 
                         Box(
                             Modifier.fillMaxSize().then(
@@ -403,6 +497,20 @@ class MainActivity : ComponentActivity() {
                                     webTitle = habit.name
                                 },
                                 onChangeServer = { url = null },
+                                // Null when this instance has no sign-in, so the
+                                // personal edition with `HABITERALL_AUTH=off`
+                                // does not offer to sign out of nothing.
+                                onSignOut = if (canSignOut && authApi != null) {
+                                    {
+                                        lifecycleScope.launch {
+                                            authApi.signOut()
+                                            authKey++
+                                        }
+                                    }
+                                } else {
+                                    null
+                                },
+                                onUnauthorized = onUnauthorized,
                                 refreshKey = refreshKey,
                                 onNewHabit = { manage = Manage.NewHabit },
                                 onEditHabit = { manage = Manage.EditHabit(it) },
@@ -523,6 +631,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // There is deliberately no "the server answered oddly" screen. An early
+    // version had one, and it was a new way to break the one configuration that
+    // never needed this endpoint: an instance with no sign-in, where a 429 from
+    // the IP-keyed read limiter would have covered a working app. The list's own
+    // error state already reports a broken server, with a retry, and it is
+    // reached by the requests that actually need the server to work.
+
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun SetupScreen(onSaved: (String) -> Unit) {
@@ -594,6 +709,14 @@ class MainActivity : ComponentActivity() {
         onOpenStats: () -> Unit,
         onOpenHabit: (Habit) -> Unit,
         onChangeServer: () -> Unit,
+        /**
+         * End the session and go back to the sign-in screen. Absent — as a
+         * disabled menu item — on an instance with no sign-in, where there is
+         * nothing to end and the control would only raise the question.
+         */
+        onSignOut: (() -> Unit)?,
+        /** Hands a refused session up to the activity; see its declaration. */
+        onUnauthorized: () -> Unit,
         /**
          * Bumped by the caller when a screen it owns has changed the data.
          *
@@ -715,7 +838,7 @@ class MainActivity : ComponentActivity() {
          * reminder that wakes you at 8am is exactly the path that gets there.
          */
         var today by remember { mutableStateOf(LocalDate.now().toString()) }
-        val api = remember(serverUrl) { Api(serverUrl) }
+        val api = remember(serverUrl, onUnauthorized) { Api(serverUrl, onUnauthorized) }
 
         LaunchedEffect(reload, serverUrl, windowDays, refreshKey) {
             // Read and cleared in one go: `quiet` describes THIS fetch only,
@@ -1055,6 +1178,12 @@ class MainActivity : ComponentActivity() {
                                 text = { Text("Settings") },
                                 onClick = { menuOpen = false; onOpenSettings() },
                             )
+                            onSignOut?.let { signOut ->
+                                DropdownMenuItem(
+                                    text = { Text("Sign out") },
+                                    onClick = { menuOpen = false; signOut() },
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("Change server") },
                                 onClick = { menuOpen = false; onChangeServer() },

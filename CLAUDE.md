@@ -600,6 +600,49 @@ login page, which the offline replay queue feeds straight to a JSON parser. Both
 editions therefore issue the same cookie (`SESSION_NAME`, `httpOnly`,
 `SameSite=Lax`), so one path in `Api.kt` can carry either.
 
+**And the phone gets that cookie two ways, because the two editions ask
+different things of a person.** The personal edition holds one credential and
+can be asked for it, so the app draws a form and posts `/auth/login`. The cloud
+edition redirects to an identity provider, which decides for itself whether that
+means a password, a passkey or somebody else's login page — no native form can
+stand in for it. So cloud sign-in is the *server's own page*, loaded in the
+app's WebView, and it works because the session is a cookie and
+`WebSession` makes Android's `CookieManager` the one store OkHttp and the
+WebView share. A Custom Tab could not do this: its cookies belong to the
+browser. `httpOnly` is untouched by any of it — that flag stops JavaScript
+reading a cookie, and this is the native API underneath.
+
+That is what makes a token endpoint unnecessary, and with it an OAuth client the
+operator would have to register. The cost is that `AuthMode` and `Auth.read` are
+a **mirror** of `shared/public/auth-session.js`, pinned by `AuthTest` for the
+same reason `ReminderTime` and `Grid.nextState` are pinned: both clients boot
+the whole app on one answer, and two readings of it are indistinguishable from
+one being broken. The rule that matters most is the one the web adapter shipped
+wrong — only 200 and 401 say anything about how an instance authenticates. On a
+phone that is sharper than in a browser: a captive portal answering 200 with
+HTML is a state no retry escapes if it is read as "signed in".
+
+**But the phone adds a second half to that rule, and it is the opposite of an
+error path.** Everything that is not 200 or 401 is `Session.Unknown`, and the
+app **carries on past it** rather than stopping. A native client boots through
+this route, so making a bad answer fatal breaks the same instance the web bug
+broke, by a different road: `HABITERALL_AUTH=off` never needed `/api/me` at all,
+and the personal edition's read limiter keys on IP — so a household behind one
+NAT can 429 it while the server is perfectly healthy. An early version of this
+had a "the server answered oddly" screen and that is exactly what it would have
+covered. The list's own error state already reports a broken server, with a
+retry, and it is reached by the requests that actually need one. Being wrong
+this way costs a round trip; being wrong the other way costs the whole app.
+
+One consequence reached further than the sign-in screen. `Outbox`'s worker
+dropped every 4xx as permanently inapplicable, which was right while nothing
+could 401 — and became a silent data loss the moment sign-in existed, because
+the answer tapped on a notification is still true about that day when the cookie
+ages out. `ApiException.isPermanent` is the rule now, and 403 is excluded
+alongside 401 for the reason the web outbox already had: a proxy rewriting
+`Host` with no hop trusted makes every write look cross-origin, and that is a
+misconfiguration that gets fixed.
+
 **The security config is shared; the limiter's key is not.**
 `shared/src/security.js` holds the CSP, the session cookie shape, the four rate
 limits and the `TRUST_PROXY` rule, because those describe `shared/public/` rather

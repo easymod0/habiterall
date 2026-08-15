@@ -332,9 +332,43 @@ data class Entry(
 )
 
 /** Thrown for any non-2xx response, carrying the server's message. */
-class ApiException(val status: Int, message: String) : Exception(message)
+class ApiException(val status: Int, message: String) : Exception(message) {
+    /**
+     * Whether this is the session's fault rather than the request's.
+     *
+     * 403 belongs here with 401, and that is not obvious. `sameOriginOnly` on
+     * both editions refuses a write whose `Origin` does not match, and
+     * `req.host` is trust-proxy-aware — so a proxy that rewrites `Host` with no
+     * hop trusted makes every write from this app look cross-origin. The web
+     * outbox treated that as a verdict on the write and destroyed its queue on
+     * the first flush; see the root CLAUDE.md. It is a misconfiguration that
+     * gets fixed, so the write should still be there when it is.
+     */
+    val isAuthFailure: Boolean get() = status == 401 || status == 403
 
-class Api(private val baseUrl: String) {
+    /**
+     * Whether retrying this write could only ever fail the same way.
+     *
+     * The outbox's whole rule, here rather than in the worker so it can be
+     * tested without Android. A 4xx is the request's fault and will be refused
+     * identically forever — a habit that no longer exists, a date the server
+     * will not take — so retrying it only burns battery. The two above are the
+     * exception: they are about the SESSION, they stop being true the moment
+     * somebody signs in or a proxy is corrected, and the answer that was tapped
+     * on a notification is still a true statement about that day.
+     */
+    val isPermanent: Boolean get() = status in 400..499 && !isAuthFailure
+}
+
+/**
+ * @param onUnauthorized called when the server refuses the session, so one
+ *   screen can send the whole app back to sign-in. Absent for background
+ *   callers, which queue and retry instead of asking anybody anything.
+ */
+class Api(
+    private val baseUrl: String,
+    private val onUnauthorized: (() -> Unit)? = null,
+) {
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
@@ -351,23 +385,54 @@ class Api(private val baseUrl: String) {
         // than hang a notification action for half a minute.
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        // Both editions authenticate with one cookie, and [WebSession] is where
+        // it lives — shared with the WebView, which is what lets the charts and
+        // this client be signed in together, and what makes the cloud edition's
+        // redirect sign-in reachable from a native app at all.
+        .cookieJar(WebSession.jar())
+        // The OIDC flow is redirects, and OkHttp follows them by default. That
+        // is left ON deliberately: `POST /auth/logout` answers with where to go
+        // next, and a login that lands mid-chain would leave the cookie unset.
         .build()
 
     private fun url(path: String) = baseUrl.trimEnd('/') + path
 
-    private suspend fun request(req: Request): String = withContext(Dispatchers.IO) {
+    /** A response's status and body, with nothing decided about either. */
+    private data class Raw(val status: Int, val body: String)
+
+    private suspend fun raw(req: Request): Raw = withContext(Dispatchers.IO) {
         http.newCall(req).execute().use { res ->
             // `body` is non-null from OkHttp 5; a safe call here is dead code
             // the compiler warns about rather than a guard against anything.
-            val body = res.body.string()
-            if (!res.isSuccessful) {
-                val message = runCatching {
-                    json.parseToJsonElement(body).toString()
-                }.getOrElse { body.ifBlank { "request failed" } }
-                throw ApiException(res.code, message)
-            }
-            body
+            Raw(res.code, res.body.string())
         }
+    }
+
+    private suspend fun request(req: Request): String {
+        val (status, body) = raw(req)
+        if (status in 200..299) return body
+
+        val message = runCatching {
+            json.parseToJsonElement(body).toString()
+        }.getOrElse { body.ifBlank { "request failed" } }
+        val failure = ApiException(status, message)
+
+        // Announced before it is thrown, so a caller that only catches to show a
+        // message still sends the app back to sign-in. Every screen catches
+        // something; not every screen would remember to ask about the status.
+        //
+        // **401 only**, though `isAuthFailure` also covers 403, and the two are
+        // not interchangeable here. A 401 says "sign in again", which re-asking
+        // resolves. A 403 says the session is fine and this is refused anyway —
+        // a suspended cloud account, or `sameOriginOnly` behind a proxy that
+        // rewrites `Host` — and re-asking cannot help. Firing on it built a
+        // loop with no delay in it: `/api/me` answers 403, `Auth.read` calls
+        // that Unknown, the app carries on to the list, the list's fetch 403s,
+        // that bumps the key, and the session is asked for again. Twice per
+        // pass, since two requests fail. The screen's own error state is where a
+        // 403 belongs, and it says what the server said.
+        if (status == 401) onUnauthorized?.invoke()
+        throw failure
     }
 
     /** Cheap liveness probe, used when validating a server URL. */
@@ -400,6 +465,113 @@ class Api(private val baseUrl: String) {
     } catch (e: Exception) {
         e.message ?: e.javaClass.simpleName
     }
+
+    /* -------------------------------------------------------------- auth */
+
+    /**
+     * Who this client is, and how this instance signs people in.
+     *
+     * The one route that reads a session WITHOUT requiring one, so it answers a
+     * caller who has none — which is the whole point: a signed-out client is
+     * exactly the one that needs to know whether to draw a form or a link, and
+     * this response is all it gets. [Auth.read] is where that answer is
+     * interpreted, and why a 429 or a captive portal's 200 is not read as a
+     * statement about authentication.
+     *
+     * Deliberately does not go through `request`: a 401 here is an answer, not
+     * a failure, and routing it through the shared error path would fire
+     * [onUnauthorized] while asking the very question that decides it.
+     */
+    suspend fun me(): Session = try {
+        val (status, body) = raw(Request.Builder().url(url("/api/me")).get().build())
+        Auth.read(status, body)
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        // Cancellation is not a failure, and swallowing it here is not merely
+        // untidy: this runs in a `LaunchedEffect` keyed on the session, so a
+        // second bump cancels the first probe — and a cancelled probe that
+        // RETURNS goes on to assign its stale answer over the state the new
+        // effect has already reset. The list then composes against a session
+        // that is not the current one. The list's own fetch already rethrows for
+        // the same reason.
+        throw e
+    } catch (e: Exception) {
+        // Unreachable is not signed-out, and it is not fatal either — status 0
+        // is [Session.Unknown]'s "no answer at all", which the app carries on
+        // past. Anything else would put a screen in front of someone whose train
+        // went into a tunnel.
+        Session.Unknown(0, e.message ?: "Could not reach the server")
+    }
+
+    /**
+     * Sign in with a username and password (the personal edition).
+     *
+     * @return null when it worked, or the server's own message. The wording is
+     *   the server's on purpose: it answers one message for a wrong username
+     *   and a wrong password alike, and improving on that here would leak which
+     *   half was right.
+     */
+    suspend fun signIn(username: String, password: String): String? =
+        postCredentials("/auth/login", username, password)
+
+    /**
+     * Claim an instance that has auth on and no account yet ([AuthMode.SETUP]).
+     *
+     * The same form and a different endpoint, because it is a different act:
+     * this one CREATES the account, and the server guards it with nothing —
+     * whoever reaches it first owns the instance.
+     */
+    suspend fun createAccount(username: String, password: String): String? =
+        postCredentials("/auth/setup", username, password)
+
+    private suspend fun postCredentials(path: String, username: String, password: String): String? {
+        val payload = buildJsonObject {
+            put("username", username)
+            put("password", password)
+        }
+        return try {
+            val (status, body) = raw(
+                Request.Builder().url(url(path)).post(payload.toString().asBody()).build()
+            )
+            if (status in 200..299) null else errorIn(body) ?: "Sign-in failed ($status)."
+        } catch (e: Exception) {
+            e.message ?: "Could not reach the server"
+        }
+    }
+
+    /**
+     * Where the browser flow starts, for an instance whose sign-in this client
+     * cannot draw. It is a normal page load: the server redirects to the
+     * identity provider and the cookie is set on the way back.
+     *
+     * Cloud's route, and only cloud's. The personal edition mounts `/auth/login`
+     * as a POST and would answer a page load with "Cannot GET" — which matters
+     * because [AuthMode.of] sends an unrecognised mode down this path too. That
+     * is a dead end rather than a wrong session, and it is reachable only from a
+     * server newer than this app; the alternative, loading `/` and letting the
+     * web UI offer its own sign-in, costs the cloud path an extra tap on the one
+     * mode that is not hypothetical.
+     */
+    val signInUrl: String get() = url("/auth/login")
+
+    /**
+     * End the session, on the server and on the device.
+     *
+     * The local half runs whether or not the request does. A sign-out that
+     * fails because the network did is one the user has every reason to believe
+     * happened — and the cookie they wanted gone is still on the phone.
+     */
+    suspend fun signOut() {
+        runCatching {
+            raw(Request.Builder().url(url("/auth/logout")).post("{}".asBody()).build())
+        }
+        WebSession.clear(baseUrl)
+    }
+
+    /** The `error` a failed auth response carries, if it carries one. */
+    private fun errorIn(body: String): String? = runCatching {
+        (json.parseToJsonElement(body) as kotlinx.serialization.json.JsonObject)["error"]
+            ?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }
+    }.getOrNull()
 
     /**
      * The dashboard payload: habits plus their entries for a window.

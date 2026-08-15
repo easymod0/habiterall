@@ -51,6 +51,15 @@ object Outbox {
      * tap on the same day REPLACEd this work — not a failure, and reporting it
      * as one would put "could not be saved" on screen every time somebody
      * tapped a cell twice in quick succession.
+     *
+     * There is a fourth outcome and it is deliberately not one of the three:
+     * work that is RETRYING never reaches a terminal state, so this never
+     * returns and the caller's optimistic overlay stays up. That is the right
+     * answer for the case it has always covered — a write made offline, which
+     * lands when the signal does — and now also covers a session that has
+     * expired, which lands when the user signs in. The value on screen is one
+     * that WILL be stored; what is missing is any word to the user while it
+     * waits, and the same silence has always applied to the offline case.
      */
     suspend fun awaitWrite(context: Context, habitId: Long, date: String): WorkInfo.State {
         val manager = WorkManager.getInstance(context)
@@ -114,9 +123,15 @@ object Outbox {
                 }
                 Result.success()
             } catch (e: ApiException) {
-                // A 4xx will fail identically forever — retrying only burns
-                // battery. 5xx and transport errors are worth another go.
-                if (e.status in 400..499) Result.failure() else Result.retry()
+                // `isPermanent` is the whole rule, and it lives on the exception
+                // so it can be tested without Android — see it for why 401 and
+                // 403 are not in it. This worker did not have to tell a refused
+                // SESSION from a refused WRITE until the app could be signed out
+                // at all: a 401 dropped here loses an answer the user actually
+                // gave, silently, which is the one failure an outbox exists to
+                // prevent. Both come back when they sign in again, and
+                // WorkManager's exponential backoff is what keeps the wait cheap.
+                if (e.isPermanent) Result.failure() else Result.retry()
             } catch (e: Exception) {
                 Result.retry()
             }

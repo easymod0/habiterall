@@ -88,16 +88,49 @@ changing it in the web app moves the phone too. Pull down to refresh.
 ## Requirements
 
 - **Android 8.0 (API 26)** or newer — notification channels and exact alarms
-- A running **habiterall personal** server the phone can reach: a LAN address
-  (`http://192.168.1.50:3000`) or a public HTTPS URL
-
-> The cloud edition is not supported yet: it requires an OIDC sign-in flow
-> the app does not implement. See [Roadmap](#roadmap).
+- A running **habiterall** server the phone can reach — either edition: a LAN
+  address (`http://192.168.1.50:3000`) or a public HTTPS URL
 
 ## Setup
 
 On first launch the app asks for your server URL. It accepts `http://` for a
 LAN address and `https://` for anything public.
+
+## Signing in
+
+The app asks the server how it signs people in (`GET /api/me`) and shows
+whichever of the two it reports:
+
+| The server says | You get |
+|---|---|
+| `none` — personal with `HABITERALL_AUTH=off` | Nothing. There is no sign-in to do |
+| `password` — personal with a credential | A username and password form |
+| `setup` — personal, auth on, no account yet | The same form, creating the account. Whoever fills it in first owns the instance |
+| `oidc` — the cloud edition | Your identity provider's own sign-in page |
+
+The last one is why this works at all without the app shipping an OAuth client
+you would have to register. **The session is a cookie, and the app and its
+WebView share one cookie store** — so signing in on the provider's page, in the
+app's own WebView, leaves the session exactly where the native API client reads
+it. The server side of that decision is in `shared/src/security.js`: both
+editions issue one cookie name with one `SameSite`, so this is one code path
+rather than two.
+
+A tapped notification does not need any of this to be up: alarms are local, and
+an answer given while the session has expired is queued and sent when you sign
+in again rather than being dropped.
+
+**Nothing about this can stop the app opening.** If that one request fails — no
+signal, a 429, a proxy's 502, a captive portal's login page — the app carries on
+to the list, which reports its own trouble and offers a retry, exactly as it did
+before any of this existed. That matters most for the configuration with **no
+sign-in at all**, which never needed this endpoint and must not acquire a way to
+fail at boot because of it.
+
+Being wrong that way costs a round trip. If there was a session to ask for, the
+first request that gets through returns 401, and that is what brings you here.
+
+Sign out from the list's ⋮ menu. It is absent on a server with no sign-in.
 
 Plaintext HTTP is permitted only for private-range addresses
 (`10.x`, `192.168.x`, `172.16–31.x`) via a network security config — a
@@ -243,9 +276,16 @@ with *Install unknown apps* enabled — no keystore needed to try it.
 - **`HabitEntryTest`** — what a stored day means, including the one that has bit
   this project twice: a bare `3` is a skip for a yes/no habit and a real amount
   for a measurable one.
+- **`AuthTest`** — what `GET /api/me` is saying, pinned to the same cases as
+  `shared/public/auth-session.js`. Only 200 and 401 say anything about how an
+  instance authenticates; a 429, a proxy's 502 or a captive portal's HTML is a
+  fault, and reading one as a statement is how the web app once replaced a
+  working instance with a sign-in form whose only control 404s.
+- **`OutboxRetryTest`** — which refusals a queued check-off gives up on. 401 and
+  403 are not among them: they are about the session rather than the write, and
+  the answer is still true when it comes back.
 
 ## Roadmap
 
-- Cloud-edition sign-in (OAuth2 + PKCE via AppAuth)
 - A home-screen widget
 - Porting individual screens from web to native where it clearly helps
