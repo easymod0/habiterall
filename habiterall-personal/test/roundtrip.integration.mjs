@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS,
 } from '@habiterall/shared/test/roundtrip-fixture.mjs';
 
 let fails = 0;
@@ -109,8 +109,11 @@ await seed();
 console.log('--- baseline ---');
 const baselineFull = await current();
 const baselineLoop = await current({ fields: LOOP_HABIT_FIELDS, notes: false });
-// The .db carries a reminder time as well; Habits.csv has no column for one.
-const baselineLoopDb = await current({ fields: LOOP_DB_HABIT_FIELDS, notes: false });
+// The CSV keeps the colour exactly, where the .db snaps it to a palette index.
+const baselineCsv = await current({ fields: CSV_HABIT_FIELDS, notes: false });
+// The .db carries a reminder time as well, and per-day notes, which is why this
+// one is not `notes: false`. Habits.csv has no column for either.
+const baselineLoopDb = await current({ fields: LOOP_DB_HABIT_FIELDS });
 
 ck('fixture seeded', baselineFull.length === FIXTURE.length,
   `${baselineFull.length} habits`);
@@ -193,19 +196,24 @@ ck('the Loop export is a SQLite file',
   loopDb.subarray(0, 15).toString());
 
 const loopResult = await restore(loopDb);
-const afterLoop = await current({ fields: LOOP_DB_HABIT_FIELDS, notes: false });
+const afterLoop = await current({ fields: LOOP_DB_HABIT_FIELDS });
 
 // Every entry, with no exception left: Loop's NO is a day habiterall can now
 // both hold and write, so a stated lapse survives whether or not a note came
-// with it. Notes themselves are still outside this comparison (`notes: false`),
-// which is what the CSV cannot carry.
+// with it. The note itself is inside this comparison now — `Repetitions.notes`
+// is a real column that both halves of the round trip have always used, and
+// the fixture header said otherwise for long enough that dropping it would
+// have failed nothing. Only Checkmarks.csv genuinely cannot carry one.
 ck('Loop round-trip preserves habits and entries',
   diff(baselineLoopDb, afterLoop) === null,
   diff(baselineLoopDb, afterLoop) ?? '');
 
 const loopMeditate = afterLoop.find((h) => h.name === 'Meditate');
+// The trailing field is the note, which this comparison now carries — so this
+// asserts the lapse AND the text on it, where before it asserted neither for
+// the noted one.
 ck('Loop: a stated lapse survives, with or without a note',
-  statedLapses().every((e) => loopMeditate.entries.includes(`${e.date}|0|`)),
+  statedLapses().every((e) => loopMeditate.entries.includes(`${e.date}|0||${e.notes}`)),
   `${statedLapses().length} lapses in the fixture; got ${loopMeditate.entries.join(' ')}`);
 ck('Loop restore skipped nothing',
   (loopResult.skipped ?? []).length === 0,
@@ -214,10 +222,10 @@ ck('Loop restore skipped nothing',
 // The specific encoding traps, asserted individually so a failure names itself.
 const loopWater = afterLoop.find((h) => h.name === 'Water');
 ck('Loop: numerical 3 stays 3, not a skip',
-  loopWater.entries.includes('2026-01-06|3|'),
+  loopWater.entries.includes('2026-01-06|3||busy day'),
   loopWater.entries.join(' '));
 ck('Loop: a real skip stays a skip',
-  loopWater.entries.includes('2026-01-08|0|skip'),
+  loopWater.entries.includes('2026-01-08|0|skip|'),
   loopWater.entries.join(' '));
 ck('Loop: target values are not scaled by 1000',
   loopWater.target_value === 8, String(loopWater.target_value));
@@ -226,7 +234,7 @@ const loopSnacks = afterLoop.find((h) => h.name === 'Snacks');
 ck('Loop: at_most target type survives',
   loopSnacks.target_type === 'at_most', loopSnacks.target_type);
 ck('Loop: a zero on an at_most habit survives',
-  loopSnacks.entries.includes('2026-01-05|0|'),
+  loopSnacks.entries.includes('2026-01-05|0||'),
   loopSnacks.entries.join(' '));
 
 const loopReading = afterLoop.find((h) => h.name === 'Reading');
@@ -244,6 +252,20 @@ ck('Loop: no reminder stays no reminder',
 ck('Loop: the reminder prompt survives as question',
   loopMeditate.reminder_message === 'Did you sit for ten minutes?',
   String(loopMeditate.reminder_message));
+
+// The three the fixture header called impossible. Named one at a time as well
+// as being inside the comparison above, because "the .db cannot carry this" is
+// the claim that kept them out, and a diff line is a poor place to read a
+// refutation of it.
+ck('Loop: the description survives',
+  loopMeditate.description === 'Ten minutes, morning', String(loopMeditate.description));
+ck('Loop: archived state survives',
+  loopReading.archived === true && loopMeditate.archived === false,
+  `Reading=${loopReading.archived} Meditate=${loopMeditate.archived}`);
+ck('Loop: a per-day note survives, on a done day and on a lapse',
+  loopMeditate.entries.includes('2026-01-06|2||felt good') &&
+  loopMeditate.entries.includes('2026-01-08|0||overslept'),
+  loopMeditate.entries.join(' '));
 
 /* ---------- CSV ---------- */
 
@@ -263,7 +285,7 @@ ck('the archive contains both CSVs',
   [...members.keys()].join(', '));
 
 const csvResult = await restore(csvZip);
-const afterCsv = await current({ fields: LOOP_HABIT_FIELDS, notes: false });
+const afterCsv = await current({ fields: CSV_HABIT_FIELDS, notes: false });
 
 ck('CSV restore skipped nothing',
   (csvResult.skipped ?? []).length === 0,
@@ -272,8 +294,8 @@ ck('CSV restore skipped nothing',
 // The CSV pair carries the same information the Loop .db does, so it is held to
 // the same standard: every entry, notes aside.
 ck('CSV round-trip preserves habits and entries',
-  diff(baselineLoop, afterCsv) === null,
-  diff(baselineLoop, afterCsv) ?? '');
+  diff(baselineCsv, afterCsv) === null,
+  diff(baselineCsv, afterCsv) ?? '');
 
 const csvMeditate = afterCsv.find((h) => h.name === 'Meditate');
 ck('CSV: a stated lapse survives as a NO cell',
