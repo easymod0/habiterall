@@ -156,10 +156,12 @@ test('Habits.csv accepts Loop\'s NUMERICAL / YES_NO enum names', () => {
 });
 
 test('Habits.csv question and description are two fields, not one', () => {
-  // `question` used to be read as a FALLBACK for description, so a Loop backup
-  // with a prompt and no description imported the prompt as the habit's
-  // description — while the .db path dropped it entirely. Loop's question is
-  // habiterall's reminder_message, and that is where it goes now.
+  // `question` used to be read as a FALLBACK for description. `idx` matches on
+  // HEADERS and a real Loop export always has a `Description` one, so the
+  // fallback never fired there and the prompt was simply DROPPED, exactly as
+  // the .db path dropped it. Loop's question is habiterall's reminder_message,
+  // and that is where it goes now — note Floss below, which has a prompt and an
+  // empty description and did NOT come back with the prompt as its description.
   const csv = [
     'Position,Name,Type,Question,Description,FrequencyNumerator,FrequencyDenominator,Color,Unit,Target Type,Target Value,Archived?',
     '001,Meditate,YES_NO,Did you sit today?,Ten minutes each morning,1,1,11,,,,false',
@@ -246,11 +248,11 @@ async function makeLoopDb(path) {
   // where both columns are 0 and only a presence check tells it from no
   // reminder at all; Gym leaves both NULL, which is Loop's "no reminder".
   d.prepare(`INSERT INTO Habits (id,name,description,question,freq_num,freq_den,color,
-    position,archived,type,target_value,target_type,unit,reminder_hour,reminder_min)
-    VALUES (1,'Meditate','Daily sit','Did you sit today?',1,1,11,0,0,0,0,0,'',7,5)`).run();
+    position,archived,type,target_value,target_type,unit,reminder_hour,reminder_min,reminder_days)
+    VALUES (1,'Meditate','Daily sit','Did you sit today?',1,1,11,0,0,0,0,0,'',7,5,127)`).run();
   d.prepare(`INSERT INTO Habits (id,name,description,question,freq_num,freq_den,color,
-    position,archived,type,target_value,target_type,unit,reminder_hour,reminder_min)
-    VALUES (2,'Water','','',1,1,9,1,0,1,8,0,'glasses',0,0)`).run();
+    position,archived,type,target_value,target_type,unit,reminder_hour,reminder_min,reminder_days)
+    VALUES (2,'Water','','',1,1,9,1,0,1,8,0,'glasses',0,0,127)`).run();
   d.prepare(`INSERT INTO Habits (id,name,description,question,freq_num,freq_den,color,
     position,archived,type,target_value,target_type,unit)
     VALUES (3,'Gym','','',3,7,5,2,1,0,0,0,'')`).run();
@@ -345,6 +347,110 @@ test('habit targets are NOT scaled, but entry values ARE', async () => {
   assert.equal(habit.target_type, 'at_most');
   assert.equal(habit.unit, 'Times');
   assert.equal(habit.entries[0].value, 2, 'the entry value IS scaled by 1000');
+
+  unlinkSync(path);
+});
+
+test('only an all-days Loop reminder comes across', async () => {
+  // reminder_days is a 7-bit weekday mask and habiterall has no concept of one.
+  // Importing the time alone turned a Monday-only reminder into seven
+  // notifications a week — and re-exporting wrote that widening back into the
+  // user's own Loop app. Missing is the honest answer until habiterall grows
+  // the concept; `days = 0` is the sharp case, a reminder that fires on no day
+  // becoming a daily one.
+  const path = join(tmpdir(), `loop-days-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, freq_num INTEGER,
+      freq_den INTEGER, reminder_hour INTEGER, reminder_min INTEGER,
+      reminder_days INTEGER);
+    CREATE TABLE Repetitions (id INTEGER PRIMARY KEY, habit INTEGER,
+      timestamp INTEGER, value INTEGER);
+  `);
+  const ins = d.prepare(`INSERT INTO Habits VALUES (?,?,1,1,8,0,?)`);
+  ins.run(1, 'EveryDay', 127);
+  ins.run(2, 'MondayOnly', 2);
+  ins.run(3, 'NoDaysAtAll', 0);
+  d.close();
+
+  const byName = Object.fromEntries(
+    (await parseLoopDatabase(path)).map((h) => [h.name, h])
+  );
+  assert.equal(byName['EveryDay'].reminder_time, '08:00', 'all seven bits: kept');
+  assert.equal(byName['MondayOnly'].reminder_time, '',
+    'a weekday-restricted reminder has no faithful form here');
+  assert.equal(byName['NoDaysAtAll'].reminder_time, '',
+    'a reminder that fires on no day must not become a daily one');
+
+  unlinkSync(path);
+});
+
+test('a reminder column holding text is not coerced into a time', async () => {
+  // `Number('')` is 0, so a bare `Number.isInteger(Number(x))` guard read an
+  // EMPTY column as a real midnight reminder — a notification on a habit that
+  // never had one. An INTEGER column holds text happily: SQLite's affinity
+  // converts a well-formed number on the way in (so '1e1' really is stored as
+  // 10, and reading it as 10:00 is SQLite's doing and correct) but leaves
+  // everything else exactly as typed.
+  const path = join(tmpdir(), `loop-textcol-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, freq_num INTEGER,
+      freq_den INTEGER, reminder_hour INTEGER, reminder_min INTEGER,
+      reminder_days INTEGER);
+    CREATE TABLE Repetitions (id INTEGER PRIMARY KEY, habit INTEGER,
+      timestamp INTEGER, value INTEGER);
+  `);
+  const ins = d.prepare(`INSERT INTO Habits VALUES (?,?,1,1,?,?,127)`);
+  ins.run(1, 'Empty', '', '');
+  ins.run(2, 'Spaces', ' ', ' ');
+  ins.run(3, 'Hex', '0x7', '0');
+  ins.run(4, 'Words', 'abc', 'def');
+  ins.run(5, 'Real', 8, 0);
+  d.close();
+
+  const byName = Object.fromEntries(
+    (await parseLoopDatabase(path)).map((h) => [h.name, h])
+  );
+  for (const n of ['Empty', 'Spaces', 'Hex', 'Words']) {
+    assert.equal(byName[n].reminder_time, '', `${n} must not become a time`);
+  }
+  assert.equal(byName['Real'].reminder_time, '08:00', 'a real one still works');
+
+  unlinkSync(path);
+});
+
+test('an out-of-range reminder column does not reject the whole backup', async () => {
+  // These columns are selected as TEXT precisely so node:sqlite's row decoder
+  // never sees them: an integer above 2^53 makes it throw for the entire
+  // `.all()`, so one garbage cell used to take a whole importable backup with
+  // it.
+  const path = join(tmpdir(), `loop-huge-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, freq_num INTEGER,
+      freq_den INTEGER, reminder_hour INTEGER, reminder_min INTEGER,
+      reminder_days INTEGER);
+    CREATE TABLE Repetitions (id INTEGER PRIMARY KEY, habit INTEGER,
+      timestamp INTEGER, value INTEGER);
+  `);
+  d.prepare(`INSERT INTO Habits VALUES (1,'Huge',1,1,9223372036854775807,0,127)`).run();
+  d.prepare(`INSERT INTO Habits VALUES (2,'Fine',1,1,8,0,127)`).run();
+  d.close();
+
+  const habits = await parseLoopDatabase(path);
+  assert.equal(habits.length, 2, 'the importable habit still imports');
+  assert.equal(habits[0].reminder_time, '', 'the garbage column is just no reminder');
+  assert.equal(habits[1].reminder_time, '08:00');
 
   unlinkSync(path);
 });

@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { LOOP_ALL_DAYS } from './import.js';
 
 const MILLIS_PER_DAY = 86_400_000;
 const LOOP_NUMERIC_SCALE = 1000;
@@ -177,7 +178,7 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
                           highlight, name, position, reminder_hour, reminder_min,
                           reminder_days, type, target_type, target_value, unit,
                           question, uuid)
-      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 127, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertRep = db.prepare(`
       INSERT INTO Repetitions (habit, timestamp, value, notes) VALUES (?, ?, ?, ?)
@@ -187,10 +188,14 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
 
     habits.forEach((h, position) => {
       const isNumerical = h.type === 'numerical';
-      // reminder_days stays the literal 127 (all seven bits) in the statement
-      // above: habiterall has no per-weekday reminder concept, so all-days is
-      // the only honest thing to tell Loop. When one lands, it is written here.
+      // habiterall has no per-weekday reminder concept, so a reminder it does
+      // have is an all-days one: 127, every bit of Loop's weekday mask. A habit
+      // with NO reminder gets 0, which is what Loop's own writer stores
+      // (`reminder?.days?.toInteger() ?: 0`) — Loop never reads the mask unless
+      // both hour and minute are non-null, so this is fidelity rather than
+      // function. When per-weekday reminders land, this is where they go.
       const [reminderHour, reminderMin] = timeToLoopReminder(h.reminder_time);
+      const reminderDays = reminderHour === null ? 0 : LOOP_ALL_DAYS;
 
       insertHabit.run(
         h.id,
@@ -203,6 +208,7 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
         position,
         reminderHour,
         reminderMin,
+        reminderDays,
         isNumerical ? 1 : 0,
         h.target_type === 'at_most' ? 1 : 0,
         // Targets are stored UNSCALED in Loop's Habits table, unlike entry

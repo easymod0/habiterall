@@ -236,6 +236,20 @@ test('a full export re-imports with identical data', async () => {
   assert.equal(cigs.reminder_message, '');
   assert.equal(gym.reminder_time, '23:59');
 
+  // reminder_days is Loop's weekday mask, and is what the import gate reads.
+  // A habit with a reminder gets all seven bits; one without gets 0, which is
+  // what Loop's own writer stores. Read from the file, since nothing above
+  // surfaces it.
+  const { DatabaseSync } = await import('node:sqlite');
+  const raw = new DatabaseSync(path, { readOnly: true });
+  const days = Object.fromEntries(
+    raw.prepare(`SELECT name, reminder_days FROM Habits`).all()
+      .map((r) => [r.name, r.reminder_days])
+  );
+  raw.close();
+  assert.equal(days['Meditate'], 127, 'a reminder is an all-days one');
+  assert.equal(days['Cigarettes'], 0, 'no reminder, so no days — as Loop writes it');
+
   unlinkSync(path);
 });
 

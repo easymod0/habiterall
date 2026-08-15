@@ -157,10 +157,39 @@ that Loop never had.
 The CSV's version of this was a *pair* of bugs that concealed each other: the
 export wrote `description` into the `Question` column as well as its own, and
 the import read `idx('description', 'question')` — question as a fallback FOR
-description. So a habiterall round trip copied the description over the prompt,
-and a Loop backup with a question and no description imported the question as
-the habit's description. Both halves had to move together; fixing either alone
-looks like it works.
+description. So a habiterall round trip copied the description over the prompt.
+Both halves had to move together; fixing either alone looks like it works, and
+the fixtures that catch it are the ones where a habit's description and prompt
+DIFFER — make them equal and the broken code passes.
+
+Be precise about what the import half did, because the obvious reading is wrong
+and issue #67 had it wrong too: `idx` matches on **headers**, and Loop's
+Habits.csv always has a `Description` one, so on a real Loop export the fallback
+never fired and the question was simply **dropped**. It fired only for a file
+with a `Question` header and no `Description` header — and there it was
+arguably right. Loop's migration 23 is `update Habits set question =
+description`: pre-v2 Loop had one free-text field and v2 renamed it, so in a
+backup from a migrated install the user's prose sits in `question` because Loop
+moved it. Reading it as a description was true to what they wrote. Following
+Loop's reclassification is still correct — it shows that text in the
+notification — but this is a reassignment of existing prose, not purely a fix.
+
+**Only an ALL-DAYS Loop reminder is imported.** `reminder_days` is a 7-bit
+weekday mask (127 is every bit; `WeekdayList` in Loop's source) and habiterall
+has no concept of one, so a Monday-only reminder has no faithful form here.
+Taking the time alone turned it into seven notifications a week AND wrote that
+widening back into the user's own Loop app on the way out; a mask of `0` — a
+reminder that fires on no day — became a daily one, which is exactly what the
+hour/minute rule above refuses to do. Missing is the honest answer until #72
+lands. On export the mask is `127` for a habit with a reminder and `0` for one
+without, which is what Loop's own writer stores.
+
+Two smaller traps in reading those columns, both of which produced a reminder
+out of nothing. `Number('')` is `0`, so an empty column passed a
+`Number.isInteger(Number(x))` guard as midnight — only digits count now. And the
+three columns are selected as **TEXT**: read as INTEGER, a value above 2^53
+makes node:sqlite's row decoder throw for the whole `.all()`, so one garbage
+cell rejected an entire backup that used to import fine.
 
 That is why the fidelity rules are now two lists. `LOOP_HABIT_FIELDS` is what
 both Loop formats carry and `LOOP_DB_HABIT_FIELDS` adds `reminder_time`, because

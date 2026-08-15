@@ -99,6 +99,24 @@ export function convertLoopValue(raw, isNumerical) {
   }
 }
 
+/** Loop's `reminder_days`: all seven bits of the weekday mask set. */
+export const LOOP_ALL_DAYS = 127;
+
+/**
+ * A column that should hold a whole number, read strictly.
+ *
+ * The reminder columns are selected as TEXT (see `parseLoopDatabase`), so a
+ * real value arrives as `'7'` and anything else as itself. `Number()` alone is
+ * far too generous to be the gate: `Number('')` and `Number(' ')` are both `0`,
+ * which turned an empty column into a real midnight reminder, and `'0x7'` /
+ * `'1e1'` are accepted as 7 and 10. Only digits count.
+ */
+function wholeNumber(value) {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : null;
+  if (typeof value === 'string' && /^-?\d+$/.test(value)) return Number(value);
+  return null;
+}
+
 /**
  * Loop stores a reminder as two integer columns and NULL for "no reminder";
  * habiterall stores one `HH:MM` string and `''`. Anything that is not a whole
@@ -106,14 +124,17 @@ export function convertLoopValue(raw, isNumerical) {
  * with a NULL minute) is not a time, and inventing `:00` for it would put a
  * notification on someone's phone that their Loop install never had.
  *
+ * Loop's own rule, from `SQLiteHabitList.copyTo`, is a null check on BOTH
+ * columns rather than a truthiness test — which is why `0, 0` is a real
+ * midnight reminder here and not the absence of one.
+ *
  * The inverse lives in export-loop.js as `timeToLoopReminder`, alongside the
  * other half of every conversion in this file.
  */
 export function loopReminderToTime(hour, min) {
-  if (hour === null || hour === undefined || min === null || min === undefined) return '';
-  const h = Number(hour);
-  const m = Number(min);
-  if (!Number.isInteger(h) || !Number.isInteger(m)) return '';
+  const h = wholeNumber(hour);
+  const m = wholeNumber(min);
+  if (h === null || m === null) return '';
   if (h < 0 || h > 23 || m < 0 || m > 59) return '';
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
@@ -232,6 +253,13 @@ export async function parseLoopDatabase(path) {
     // `question`, `unit`, `target_type` and friends arrived in later schema
     // versions; select only what this backup actually has.
     const pick = (name, fallback) => (cols.has(name) ? name : `${fallback} AS ${name}`);
+    // The reminder columns come back as TEXT, and `wholeNumber` is what reads
+    // them. Selecting them as INTEGER means node:sqlite decodes them, and a
+    // value above 2^53 makes the decoder throw for the whole `.all()` — so one
+    // garbage cell would reject an entire backup that used to import fine.
+    const pickInt = (name, fallback) => (cols.has(name)
+      ? `CAST(${name} AS TEXT) AS ${name}`
+      : `${fallback} AS ${name}`);
     const sql = `SELECT id, name,
                         ${pick('description', "''")},
                         ${pick('question', "''")},
@@ -244,8 +272,9 @@ export async function parseLoopDatabase(path) {
                         ${pick('target_value', '0')},
                         ${pick('target_type', '0')},
                         ${pick('unit', "''")},
-                        ${pick('reminder_hour', 'NULL')},
-                        ${pick('reminder_min', 'NULL')}
+                        ${pickInt('reminder_hour', 'NULL')},
+                        ${pickInt('reminder_min', 'NULL')},
+                        ${pickInt('reminder_days', `'${LOOP_ALL_DAYS}'`)}
                  FROM Habits ORDER BY position, id`;
 
     const rows = src.prepare(sql).all();
@@ -293,7 +322,17 @@ export async function parseLoopDatabase(path) {
         // `reminder_message` holds. `normaliseImportedHabit` flattens and clamps
         // it, so a Loop file cannot store a prompt the habit dialog could not.
         reminder_message: String(r.question ?? ''),
-        reminder_time: loopReminderToTime(r.reminder_hour, r.reminder_min),
+        // Only an ALL-DAYS reminder comes across. `reminder_days` is a 7-bit
+        // weekday mask and habiterall has no concept of one, so a Monday-only
+        // reminder has no faithful form here: importing the time alone turns it
+        // into seven notifications a week, and re-exporting writes that widening
+        // back into the user's Loop app. A mask of 0 — a reminder that fires on
+        // no day at all — would become a daily one, which is exactly what
+        // `loopReminderToTime` refuses to do a line above. Missing is the
+        // honest answer until habiterall grows the concept.
+        reminder_time: wholeNumber(r.reminder_days) === LOOP_ALL_DAYS
+          ? loopReminderToTime(r.reminder_hour, r.reminder_min)
+          : '',
         archived: Number(r.archived) ? 1 : 0,
         entries,
       };
@@ -462,16 +501,24 @@ export function parseLoopHabitsCSV(text) {
   const cType = idx('type');
   // `question` and `description` are two different Loop fields and land in two
   // different habiterall ones. This used to read `idx('description', 'question')`
-  // — question as a *fallback* for description — so a Loop backup with a prompt
-  // and no description imported the prompt as the habit's description, while the
-  // .db path dropped it entirely. Re-importing such a file now puts it where it
-  // belongs; the old copy in `description` is left alone, since nothing here can
-  // tell it from a description the user wrote.
+  // — question as a *fallback* for description. `idx` matches on HEADERS, and
+  // Loop's Habits.csv always has a `Description` one, so on a real Loop export
+  // the fallback never fired and the prompt was simply DROPPED, exactly as the
+  // .db path dropped it.
+  //
+  // The fallback only fired for a file with a `Question` header and no
+  // `Description` header, and there it was arguably right: Loop's migration 23
+  // is `update Habits set question = description`, so in a backup from a
+  // migrated pre-v2 install the user's prose sits in `question` because Loop
+  // moved it there. Reading it as a description was true to what they wrote.
+  // Loop reclassified that text as the reminder prompt and shows it in the
+  // notification, so following Loop is still the right call — but it is a
+  // reassignment of existing prose, not purely a bug fix.
   const cDesc = idx('description');
   const cQuestion = idx('question');
-  // Loop's own Habits.csv labels these NumRepetitions/Interval; other exports
-  // (and older versions) spell them out. Accept both, or a 3-times-a-week
-  // habit silently comes back as daily.
+  // Loop 2.x spells these out; `NumRepetitions`/`Interval` is the 1.8.x form,
+  // and also what habiterall's own export writes. Accept both, or a
+  // 3-times-a-week habit silently comes back as daily.
   const cNum = idx('frequencynumerator', 'frequency numerator', 'numrepetitions');
   const cDen = idx('frequencydenominator', 'frequency denominator', 'interval');
   const cColor = idx('color');

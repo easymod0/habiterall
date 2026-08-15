@@ -53,7 +53,10 @@ const HABITS = [
     reminder_message: 'How many glasses so far?',
   },
   {
-    id: 2, name: 'Gym, early', description: '', type: 'boolean',
+    // A description and NO prompt. The description must not leak into the
+    // Question column — with both fields empty this habit could not tell the
+    // difference, and the assertion below silently tested nothing.
+    id: 2, name: 'Gym, early', description: 'Before work', type: 'boolean',
     unit: '', target_value: 0, target_type: 'at_least',
     freq_numerator: 3, freq_denominator: 7, color: '#f59e0b', archived: 0,
   },
@@ -102,8 +105,11 @@ test('Question and Description are two columns holding two fields', () => {
   assert.equal(water.reminder_message, 'How many glasses so far?');
   assert.equal(water.description, 'Hydrate');
 
-  // A habit with no prompt writes an empty Question rather than a copy.
+  // A habit with no prompt writes an empty Question rather than a copy of its
+  // description — which is the actual old behaviour, and needs a habit whose
+  // description is non-empty to be visible at all.
   const gym = meta.get('Gym, early');
+  assert.equal(gym.description, 'Before work');
   assert.equal(gym.reminder_message, '');
 });
 
