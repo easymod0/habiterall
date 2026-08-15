@@ -71,3 +71,8 @@ Thumbs.db
 coverage/
 .idea/
 .vscode/
+
+# Claude Code working directory: agent worktrees and scratch notes.
+# Untracked and must stay so — a bare `git add -A` otherwise stages the
+# worktrees as broken gitlinks, which is exactly what happened twice.
+.claude/
