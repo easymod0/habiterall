@@ -60,11 +60,26 @@ import { TIME_RE } from './constants.js';
  * `0000-01-01`; a negative year is BCE, which nothing downstream represents;
  * and a timestamp past the ECMAScript range arrives as a NaN year. Refusing
  * all three here rather than leaving them to a regex three files away is what
- * keeps "this reader emits a real date or nothing" true of the function
- * itself.
+ * keeps "this reader emits a real date or nothing" true of the function itself.
+ *
+ * That sentence is only true because the guard below is about the TYPE and not
+ * the value. `Number(null)`, `Number('')`, `Number([])` and `Number(false)` are
+ * all `0` — and 0 is a perfectly real timestamp, the epoch — so a `Number()`
+ * check let an absent column read back as 1970-01-01 while `undefined` and
+ * `NaN` were correctly refused. A missing timestamp is not a day in 1970.
+ *
+ * One cost, and it is the reason this is written down. A row this refuses is
+ * dropped by `parseLoopDatabase`'s `if (!date) continue` with no report, where
+ * before it reached `applyImport` and came back as `bad date on "X": 0-01-01`.
+ * The parser has no `skipped` channel of its own to say it in. That is a real
+ * loss of visibility, paid for by the years 1–999 this now RESCUES — those used
+ * to be reported-and-discarded and are now imported. Give the parser a report
+ * and this trade goes away.
  */
 export function loopTimestampToISO(millis) {
-  const n = Number(millis);
+  const n = typeof millis === 'number'
+    ? millis
+    : (typeof millis === 'string' && /^-?\d+$/.test(millis.trim()) ? Number(millis) : NaN);
   if (!Number.isFinite(n)) return null;
   const days = Math.floor(n / MILLIS_PER_DAY);
   const d = new Date(days * MILLIS_PER_DAY);

@@ -53,6 +53,21 @@ test('invalid timestamps are rejected', () => {
   assert.equal(loopTimestampToISO(undefined), null);
 });
 
+test('an absent timestamp is not a day in 1970', () => {
+  // `Number(null)`, `Number('')`, `Number([])` and `Number(false)` are all 0,
+  // and 0 IS a real timestamp — the epoch — so a value check cannot tell a
+  // missing column from a genuine 1970-01-01. Only `undefined` and `NaN` were
+  // being refused; everything else read back as a real date on a row that had
+  // none.
+  for (const absent of [null, '', ' ', [], {}, true, false]) {
+    assert.equal(loopTimestampToISO(absent), null, JSON.stringify(absent) ?? String(absent));
+  }
+  // ...while the epoch itself still reads as the day it is.
+  assert.equal(loopTimestampToISO(0), '1970-01-01');
+  // A numeric string is what a CAST(... AS TEXT) column hands back, and is real.
+  assert.equal(loopTimestampToISO(String(Date.UTC(1998, 2, 10))), '1998-03-10');
+});
+
 test('a timestamp outside years 1-9999 is no date at all', () => {
   // Padding to four digits is what makes this worth stating: year 0 formats as
   // `0000-01-01`, which the writers' date regex would have accepted as an
