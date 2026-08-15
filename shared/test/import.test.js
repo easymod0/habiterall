@@ -576,6 +576,7 @@ test('several blank columns keep every habit aligned', () => {
 
 const { parseUpload } = await import('../src/import.js');
 const { buildCsvArchive } = await import('../src/export-csv.js');
+const { zip } = await import('../src/zip.js');
 
 test('a habiterall JSON backup is recognised from its bytes', async () => {
   const backup = JSON.stringify({
@@ -652,7 +653,6 @@ test('a habit only Habits.csv knows about is still restored', async () => {
   // Habits.csv names every habit the archive describes, so it is a source of
   // habits and not only a lookup table. A column lost from Checkmarks.csv
   // otherwise takes the whole habit with it, metadata and all.
-  const { zip } = await import('../src/zip.js');
   const archive = zip([
     {
       name: 'Habits.csv',
@@ -676,7 +676,6 @@ test('a habit only Habits.csv knows about is still restored', async () => {
 test('an archive describing no habits at all is still empty', async () => {
   // The guard the API turns into a 400 has to keep working: reading the header
   // must not make every unusable upload look like a successful empty import.
-  const { zip } = await import('../src/zip.js');
   assert.deepEqual(
     await parseUpload(zip([{ name: 'Checkmarks.csv', data: 'Date\n' }])), [],
     'a Date column and nothing else names no habits');
@@ -704,7 +703,6 @@ test('an unrecognised upload is a 400, not a 500', async () => {
 });
 
 test('a zip without a Checkmarks.csv says so', async () => {
-  const { zip } = await import('../src/zip.js');
   // zip() takes {name, data}, not a pair — the CSV export is its only other
   // caller, so this is easy to get wrong from memory.
   const bogus = zip([{ name: 'Habits.csv', data: 'Name\nMeditate\n' }]);
