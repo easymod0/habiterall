@@ -35,8 +35,11 @@ test('the stylesheet forces [hidden] to win over display rules', () => {
 test('the day editor has exactly one control per habit type', () => {
   // Yes/no -> #day-boolean, measurable -> #day-numeric. Both start hidden so
   // neither flashes before openDayDialog picks one.
-  const boolBlock = html.match(/<div id="day-boolean"[^>]*>/)?.[0] ?? '';
-  const numBlock = html.match(/<label id="day-numeric"[^>]*>/)?.[0] ?? '';
+  // Matched on the id rather than the tag: the numeric block was a <label>
+  // wrapping one input and is a <div> around a fieldset now that the amount is
+  // a control rather than a box. What has to hold is that it starts hidden.
+  const boolBlock = html.match(/<\w+ id="day-boolean"[^>]*>/)?.[0] ?? '';
+  const numBlock = html.match(/<\w+ id="day-numeric"[^>]*>/)?.[0] ?? '';
 
   assert.ok(boolBlock.includes('hidden'), '#day-boolean must start hidden');
   assert.ok(numBlock.includes('hidden'), '#day-numeric must start hidden');

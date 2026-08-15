@@ -41,6 +41,8 @@ Postgres one.
 | `public/ui/connectivity.js` | the offline banner, the outbox badge, reconnect handling |
 | `public/ui/toast.js` | the transient message strip |
 | `public/ui/reminder-field.js` | the reminder time picker inside the habit dialog |
+| `public/ui/amount.js` | reading, stepping and formatting an amount, DOM-free so it is testable |
+| `public/ui/count-field.js` | the amount control over those rules, in the day editor and over the grid |
 | `public/ui/settings.js` | the preference registry and its server sync |
 | `public/ui/calendar.js` | calendar window/zoom maths, DOM-free so it is testable |
 | `public/ui/window.js` | how many columns a chart fits, and which slice to show |
@@ -86,6 +88,29 @@ precache list drifts silently.
 comes from stored data. `dateRange` is unbounded and a distant-past entry
 turns one request into ~700,000 iterations on a single-threaded server. Every
 aggregation in `stats.js` already uses the bounded form; keep it that way.
+
+**An amount is parsed, not typed into `<input type="number">`.** That input
+does not report what it cannot read — it filters the keystrokes it dislikes and
+hands back whatever survived. Measured in Chrome against the day editor's own
+attributes: typing `8,5` left `85` in the box, so eight and a half was recorded
+as eighty-five; typing `abc` left `''`, which the day editor read as "no entry"
+and answered with a DELETE. The decimal comma is the one that matters, because
+`inputmode="decimal"` is what shows it and most of Europe's keyboards offer it —
+`HabitFormScreen.parseAmount` on the phone has a comment about the same input.
+
+So the box is `type="text"` and `ui/amount.js` owns the reading, with the same
+three-answer convention `parseTimeInput` uses and the same trap in it: `''`
+(empty — a delete), `null` (unreadable — say so, write nothing) and a number, of
+which `0` is a real answer. Two of the three are falsy, so callers compare with
+`===`. `parseAmount` is also stricter than `Number()`, which the root CLAUDE.md
+already records as too generous about form — `1e3` is not a thing anyone types
+into a box asking how many glasses of water they drank.
+
+The step comes from the goal rather than being 1: an eighth of the target,
+snapped to a round number, because 1 is right for "8 glasses" and useless for
+"10,000 steps". `test/browser/countcheck.mjs` follows a tap all the way to
+storage, which is the only thing that can catch the control and the database
+disagreeing about what was typed.
 
 **`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
 still works for boolean habits (where `3` is unambiguously a skip) but is

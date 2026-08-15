@@ -153,11 +153,13 @@ try {
     await ev(`getComputedStyle(document.getElementById('day-notes-wrap')).display !== 'none'`));
 
   const clickInfo = await ev(`(()=>{
-    const v=document.getElementById('day-value');
+    // The amount is a control now, not a bare number input — the box inside it
+    // is what is read, which is the rule ui/count-field.js is built on.
+    const v=document.getElementById('day-count-typed');
     const n=document.getElementById('day-notes');
     const s=document.getElementById('day-save');
     v.value='7'; n.value='short on time';
-    const info={ valueVisible:getComputedStyle(v.closest('label')).display!=='none',
+    const info={ valueVisible:getComputedStyle(document.getElementById('day-numeric')).display!=='none',
                  saveHidden:s.hidden, saveDisplay:getComputedStyle(s).display,
                  title:document.getElementById('day-title').textContent };
     s.click();

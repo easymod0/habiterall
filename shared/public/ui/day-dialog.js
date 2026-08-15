@@ -8,6 +8,7 @@
  */
 
 import { api } from '/shared/ui/api.js';
+import { dayCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
@@ -20,8 +21,6 @@ const title = $('#day-title');
 const sub = $('#day-sub');
 const booleanBlock = $('#day-boolean');
 const numericBlock = $('#day-numeric');
-const numericLabel = $('#day-numeric-label');
-const valueInput = $('#day-value');
 const notes = $('#day-notes');
 const skip = $('#day-skip');
 const clear = $('#day-clear');
@@ -60,9 +59,10 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
   save.hidden = !numeric; // boolean saves happen on the choice buttons
 
   if (numeric) {
-    numericLabel.textContent = habit.unit ? `Amount (${habit.unit})` : 'Amount';
-    valueInput.value = value != null && !isSkip ? String(value) : '';
-    valueInput.placeholder = isSkip ? 'skipped' : 'leave empty to clear';
+    // A skipped day has no amount to prefill: for a measurable habit the SKIP
+    // wire value is a legitimate amount, so the skip is what says the day has
+    // no number rather than the value doing it.
+    dayCountField.set(habit, isSkip ? null : value);
   } else {
     // Highlight whichever state the day is currently in. With question marks on,
     // a day with no row is in NEITHER state — that is the state the setting
@@ -94,7 +94,7 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
   skip.textContent = isSkip ? 'Unskip' : 'Skip day';
 
   dialog.showModal();
-  if (numeric) valueInput.focus();
+  if (numeric) dayCountField.focus();
 }
 
 async function saveDay(body) {
@@ -130,11 +130,15 @@ export function init() {
   clear.addEventListener('click', () => saveDay(null));
 
   save.addEventListener('click', () => {
-    const raw = valueInput.value.trim();
-    if (raw === '') return saveDay(null); // empty means "no entry"
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n < 0) return toast('Enter a non-negative number');
-    saveDay({ value: n });
+    // Three answers, and two of them are falsy — `===` is load bearing. An
+    // EMPTY box is "nothing is known about this day", which is a delete; an
+    // UNREADABLE one is a mistake to report, and used to be indistinguishable
+    // from empty because `<input type="number">` handed back `''` for it and
+    // this deleted the day. `0` is the third and is a real answer.
+    const amount = dayCountField.value();
+    if (amount === '') return saveDay(null);
+    if (amount === null) return dayCountField.complain();
+    saveDay({ value: amount });
   });
 
   for (const b of booleanBlock.querySelectorAll('.day-choice')) {
@@ -147,7 +151,5 @@ export function init() {
     });
   }
 
-  valueInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); save.click(); }
-  });
+  dayCountField.onEnter(() => save.click());
 }

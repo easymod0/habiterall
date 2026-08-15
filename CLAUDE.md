@@ -1047,6 +1047,19 @@ its own scheme, personal makes it an explicit opt-in
 is commonly reachable over both schemes at once and deriving it would break the
 plain-http half.
 
+**Recording an amount is a control, not a `prompt()` and not a spinner.** The
+dashboard asked with `window.prompt()` — which blocks the event loop, cannot
+show a unit or a target, and is suppressed outright by a browser that decides
+the page makes too many dialogs, after which tapping a measurable day did
+nothing at all with no error anywhere. The day editor had
+`<input type="number">`, which is worse than it looks: `shared/CLAUDE.md`
+records what that does to `8,5`. Both are `ui/count-field.js` now, over the
+rules in `ui/amount.js`, and the dashboard keeps its own write path —
+`recordValue`, which paints before awaiting, because offline `api()` queues the
+write and THEN throws. Routing the grid's writes through the day editor's
+`saveDay` would have undone that whole comment, which is why there are two
+dialogs over one control rather than one dialog.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —

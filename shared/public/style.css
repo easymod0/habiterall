@@ -862,6 +862,57 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 .timefield .field-hint { display: block; margin-top: 7px; }
 .timefield .field-hint.error { color: var(--danger); }
 
+/* ---------- amount field ---------- */
+
+/* The same shape as .timefield above, and for the same reason: several
+   controls over one value, with the typed box as the one that is read. */
+.countfield {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 11px 9px;
+  margin: 0 0 11px;
+  /* See .timefield — a fieldset ignores its container without this, and the
+     row below would push a dialog past a 360px screen instead of wrapping. */
+  min-width: 0;
+}
+.countfield legend { padding: 0 5px; font-size: 13px; color: var(--text-dim); }
+
+.countfield-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* The steppers size to their content and the box takes what is left. They are
+   deliberately wide enough to be a comfortable target on a phone — this is the
+   control people use every day on a measurable habit. */
+.countfield-step {
+  flex: 0 0 auto;
+  min-width: 44px;
+  font-size: 17px;
+  line-height: 1;
+}
+.countfield-typed {
+  width: auto;
+  margin-top: 0;
+  flex: 1 1 5.5em;
+  min-width: 5.5em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.countfield-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.countfield-presets:empty { display: none; }
+.countfield .field-hint { display: block; margin-top: 7px; }
+.countfield .field-hint.error { color: var(--danger); }
+
+#count-dialog { width: min(380px, 92vw); }
+
 /* ---------- settings dialog ---------- */
 
 #settings-dialog { width: min(460px, 92vw); }

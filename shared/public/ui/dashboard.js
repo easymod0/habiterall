@@ -9,10 +9,11 @@
 import { api } from '/shared/ui/api.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import {
-  addDaysISO, datesEndingOn, freqLabel, iso, targetLabel, todayISO,
+  addDaysISO, datesEndingOn, freqLabel, fromISOLocal, iso, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
+import { gridCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { on, state } from '/shared/ui/store.js';
 import { DAY, dayStateOf, nextDayState } from '/shared/ui/toggle.js';
@@ -621,6 +622,67 @@ async function clearDay(habit, date) {
   await load();
 }
 
+/* ---------- recording an amount from the grid ---------- */
+
+const countDialog = $('#count-dialog');
+const countTitle = $('#count-title');
+const countSub = $('#count-sub');
+const countClear = $('#count-clear');
+
+/** Which habit and day the dialog is editing, while it is open. */
+let counting = null;
+
+/**
+ * Ask for an amount, over the grid.
+ *
+ * This is a dialog rather than the day editor, which also has an amount field:
+ * the day editor writes through its own `saveDay`, which awaits the request and
+ * then announces, while a check-off from the grid has to go through
+ * `recordValue` below — optimistic paint first, because offline `api()` queues
+ * the write and THEN throws, so anything after the await is skipped. Routing
+ * the grid's writes through the other path would undo the whole comment on
+ * `recordValue`.
+ */
+function openCountDialog(habit, date) {
+  // A skipped day has no amount to prefill: for a measurable habit the SKIP
+  // wire value is a legitimate amount, so the skip is what says the day has no
+  // number rather than the value doing it.
+  const skipped = habit.skips?.includes(date) ?? false;
+  const current = skipped ? null : habit.entries[date];
+
+  counting = { habit, date };
+  countTitle.textContent = habit.name;
+  // The date in words. A grid cell is a square in a row of squares, so the
+  // dialog has to say which day it is about — the ISO string reads as a serial
+  // number, and the whole risk of an editable history is fixing the wrong one.
+  countSub.textContent = fromISOLocal(date).toLocaleDateString(undefined, {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  }) + (habit.unit ? ` · ${habit.unit}` : '');
+  countClear.hidden = current == null;
+  gridCountField.set(habit, current);
+  countDialog.showModal();
+  gridCountField.focus();
+}
+
+async function saveCount() {
+  if (!counting) return;
+  // Three answers and two of them are falsy, so `===` is load bearing — see
+  // the day editor, which had this collapsed and deleted days because of it.
+  const amount = gridCountField.value();
+  if (amount === null) return gridCountField.complain();
+
+  const { habit, date } = counting;
+  countDialog.close();
+  counting = null;
+
+  try {
+    if (amount === '') await clearDay(habit, date);
+    else await recordValue(habit, date, amount);
+  } catch (e) {
+    if (!e.queued) toast(e.message);
+  }
+}
+
 async function onCheckClick(habit, date) {
   try {
     let next;
@@ -645,64 +707,64 @@ async function onCheckClick(habit, date) {
       if (to === DAY.UNKNOWN) return await clearDay(habit, date);
       next = to === DAY.DONE ? YES : to === DAY.SKIP ? SKIP : UNSET;
     } else {
-      // A skipped day has no numeric value to prefill. For numerical habits
-      // the SKIP wire value is only meaningful when the day is actually
-      // flagged as a skip — 3 is otherwise a legitimate amount.
-      const cur = habit.entries[date];
-      const skipped = habit.skips?.includes(date);
-      const raw = prompt(
-        `${habit.name} — ${date}\nEnter value${habit.unit ? ` (${habit.unit})` : ''}:`,
-        cur != null && !skipped ? String(cur) : ''
-      );
-      if (raw === null) return;
-      // An empty box means "nothing is known about this day", which is a
-      // deletion. Typing 0 is a different answer and writes a row.
-      if (raw.trim() === '') return await clearDay(habit, date);
-      next = Number(raw);
-      if (!Number.isFinite(next) || next < 0) return toast('Enter a non-negative number');
+      // A measurable day is asked for rather than cycled to, and the answer
+      // comes back through `saveCount` into the very same `recordValue`.
+      return openCountDialog(habit, date);
     }
 
-    // Apply optimistically BEFORE awaiting the request. Offline, `api()`
-    // enqueues the write and then throws, so anything after the await is
-    // skipped — which used to leave `habit.entries` stale. The next tap then
-    // recomputed the cycle from the same starting value and queued another
-    // identical write: three offline taps meaning "clear this day" all queued
-    // `value: 2`, and the day synced as DONE. The cell stayed blank the whole
-    // time, so there was no hint anything was wrong.
-    const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
-    // Set, never delete: UNSET is a row now — a stated "no" — and deleting the
-    // key here would paint the cell as unknown while the server holds an
-    // answer, which with question marks on is a visible lie until the refetch.
-    habit.entries[date] = next;
-    // `skips` is what the cell is painted from, so it moves with the value.
-    // Only a boolean habit can reach SKIP from here; a measurable one is
-    // recording an amount, which by definition ends any skip on that day.
-    const wasSkip = setSkip(habit, date, next === SKIP && habit.type === 'boolean');
-    paint();
-
-    try {
-      await api(`/habits/${habit.id}/entries/${date}`, {
-        method: 'PUT',
-        body: JSON.stringify({ value: next }),
-      });
-    } catch (e) {
-      // A queued write will still land, so the optimistic state is correct and
-      // must stand. Any other failure did not reach the server, so roll back
-      // rather than leave the UI asserting something untrue.
-      if (!e.queued) {
-        if (previous === undefined) delete habit.entries[date];
-        else habit.entries[date] = previous;
-        setSkip(habit, date, wasSkip);
-        paint();
-      }
-      throw e;
-    }
-
-    // Re-fetch so score and streak reflect the change.
-    await load();
+    await recordValue(habit, date, next);
   } catch (e) {
     toast(e.message);
   }
+}
+
+/**
+ * Write one day's value, paint it before the request, and put it back if the
+ * request turns out not to have been made.
+ *
+ * One function because there are two ways in — the boolean tap cycle and the
+ * amount dialog — and every line of what follows is a rule that must not exist
+ * in only one of them.
+ */
+async function recordValue(habit, date, next) {
+  // Apply optimistically BEFORE awaiting the request. Offline, `api()`
+  // enqueues the write and then throws, so anything after the await is
+  // skipped — which used to leave `habit.entries` stale. The next tap then
+  // recomputed the cycle from the same starting value and queued another
+  // identical write: three offline taps meaning "clear this day" all queued
+  // `value: 2`, and the day synced as DONE. The cell stayed blank the whole
+  // time, so there was no hint anything was wrong.
+  const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
+  // Set, never delete: UNSET is a row now — a stated "no" — and deleting the
+  // key here would paint the cell as unknown while the server holds an
+  // answer, which with question marks on is a visible lie until the refetch.
+  habit.entries[date] = next;
+  // `skips` is what the cell is painted from, so it moves with the value.
+  // Only a boolean habit can reach SKIP from here; a measurable one is
+  // recording an amount, which by definition ends any skip on that day.
+  const wasSkip = setSkip(habit, date, next === SKIP && habit.type === 'boolean');
+  paint();
+
+  try {
+    await api(`/habits/${habit.id}/entries/${date}`, {
+      method: 'PUT',
+      body: JSON.stringify({ value: next }),
+    });
+  } catch (e) {
+    // A queued write will still land, so the optimistic state is correct and
+    // must stand. Any other failure did not reach the server, so roll back
+    // rather than leave the UI asserting something untrue.
+    if (!e.queued) {
+      if (previous === undefined) delete habit.entries[date];
+      else habit.entries[date] = previous;
+      setSkip(habit, date, wasSkip);
+      paint();
+    }
+    throw e;
+  }
+
+  // Re-fetch so score and streak reflect the change.
+  await load();
 }
 
 export function init() {
@@ -710,6 +772,24 @@ export function init() {
     state.showArchived = !state.showArchived;
     load().catch((e) => toast(e.message));
   });
+
+  $('#count-cancel').addEventListener('click', () => { countDialog.close(); counting = null; });
+  $('#count-save').addEventListener('click', saveCount);
+  countClear.addEventListener('click', async () => {
+    // Clearing takes the day back to having no row at all, which is the one
+    // thing an empty box also does — but a button says so, where an empty box
+    // is something you have to know. Both go through `clearDay`.
+    if (!counting) return;
+    const { habit, date } = counting;
+    countDialog.close();
+    counting = null;
+    try {
+      await clearDay(habit, date);
+    } catch (e) {
+      if (!e.queued) toast(e.message);
+    }
+  });
+  gridCountField.onEnter(saveCount);
 
   $('#empty-new').addEventListener('click', () => openDialog());
   $('#empty-import').addEventListener('click', openDataDialog);
