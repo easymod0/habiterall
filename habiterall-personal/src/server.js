@@ -15,7 +15,7 @@ import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
-  sameOriginOnly,
+  sameOriginOnly, warnOnUntrustedProxy,
 } from '@habiterall/shared/security.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,7 +64,16 @@ app.use(requestLog(log));
 // client's to choose, and the twenty-guesses-per-quarter-hour bound on a single
 // shared password becomes twenty per header value. An operator who puts a proxy
 // in front knows they did; nobody knows they accidentally trusted one.
-app.set('trust proxy', trustProxy(process.env.TRUST_PROXY, 0));
+const trustProxyHops = trustProxy(process.env.TRUST_PROXY, 0);
+app.set('trust proxy', trustProxyHops);
+
+// The safe default is only safe if being wrong the other way is noticeable, and
+// it was not: no proxy trusted while standing behind one collapses every caller
+// into the proxy's bucket, and says nothing at all.
+app.use(warnOnUntrustedProxy({
+  trusted: trustProxyHops,
+  warn: (fields) => log.warn('proxy_untrusted', fields),
+}));
 
 app.use(helmet({
   contentSecurityPolicy: { directives: cspDirectives(upgradeInsecure) },
@@ -218,6 +227,9 @@ if (isEntryPoint) {
       // `setup` means the account is still unclaimed and anyone may take it.
       auth: mode(),
       configured_by: authState.managed ? 'environment' : 'database',
+      // The setting most likely to be wrong, and until now the only one of
+      // these not printed: it decides whose address every rate limit keys on.
+      trust_proxy: trustProxyHops,
       // Both of these are off-by-default hardening the operator can turn on or
       // off, so the log says which way they landed rather than leaving it to be
       // inferred from a response header.

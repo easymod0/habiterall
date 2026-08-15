@@ -138,6 +138,16 @@ in cloud, and the difference is the whole point: this edition's quickstart is
 alone. Trusting a hop that is not there makes `X-Forwarded-For` the caller's to
 choose — forty guesses walked through a limit of twenty by rotating one header.
 
+Being wrong the *other* way is an availability bug rather than a security one —
+every caller keys on the proxy's address, so one client can spend everyone's
+allowance — and a safe default is only safe if that failure is noticeable.
+It was not, so two things now make it so: `trust_proxy` is in the startup line
+beside `auth` and `rate_limits`, and `warnOnUntrustedProxy` says something the
+first time a request arrives carrying `X-Forwarded-For` while nothing is
+trusted. Once per process — a per-request warning is one nobody reads, and a
+client can forge the header to repeat it. **If you put this behind a reverse
+proxy, set `TRUST_PROXY=1`.**
+
 **`/api/import` authenticates before it buffers.** The raw body parser sat above
 `requireAuth`, so an unauthenticated 70MB POST was read into memory and *then*
 refused — 413 rather than 401, with `importLimiter` never running to bound the

@@ -15,7 +15,7 @@ import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
-  sameOriginOnly,
+  sameOriginOnly, warnOnUntrustedProxy,
 } from '@habiterall/shared/security.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +57,14 @@ app.use(requestLog(log));
 // the one setting that decides whose address the limiters key on.
 const trustProxyHops = trustProxy(process.env.TRUST_PROXY);
 app.set('trust proxy', trustProxyHops);
+
+// Rarely fires here, since this edition defaults to trusting one hop — but an
+// operator who set TRUST_PROXY=0 behind the documented compose stack lands in
+// exactly the same silent hole.
+app.use(warnOnUntrustedProxy({
+  trusted: trustProxyHops,
+  warn: (fields) => log.warn('proxy_untrusted', fields),
+}));
 
 app.use(helmet({
   contentSecurityPolicy: { directives: cspDirectives(publicIsHttps) },

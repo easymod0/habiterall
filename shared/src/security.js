@@ -209,6 +209,46 @@ function canonicalOrigin(value) {
 }
 
 /**
+ * Say once, if a proxy appears to be in front that this app does not trust.
+ *
+ * The counterpart to `trustProxy` below, and the reason its safe default is
+ * safe to ship. Getting that setting wrong is a security bug in one direction
+ * and an availability bug in the other, and only the second one is recoverable
+ * by noticing — so it had better be noticeable. It was not: trusting no proxy
+ * while standing behind one makes every caller share the proxy's address, so all
+ * the rate limits collapse into a single bucket, and the only symptom is a 429
+ * nobody can explain.
+ *
+ * `X-Forwarded-For` arriving while nothing is trusted is exactly that state.
+ * Once per process, because a warning repeated per request is a warning nobody
+ * reads — the same cadence `notify-send.js` uses for the two silences worth
+ * breaking. A client can forge the header and trigger this spuriously; the cost
+ * of that is one log line for the life of the process.
+ *
+ * @param {{trusted: number|false, warn: (fields: object) => void}} options
+ * @returns Express-shaped middleware
+ */
+export function warnOnUntrustedProxy({ trusted, warn }) {
+  if (trusted !== false && trusted !== 0) {
+    return function proxyTrusted(req, res, next) { next(); };
+  }
+
+  let said = false;
+  return function untrustedProxy(req, res, next) {
+    if (!said && req.headers?.['x-forwarded-for']) {
+      said = true;
+      warn({
+        reason: 'a request arrived with X-Forwarded-For but TRUST_PROXY is 0',
+        consequence: 'every caller keys on the proxy address, so one client can '
+          + 'exhaust the rate limits for everyone',
+        fix: 'set TRUST_PROXY to the number of proxies in front (usually 1)',
+      });
+    }
+    next();
+  };
+}
+
+/**
  * How many reverse proxies sit in front of the app, as Express wants it.
  *
  * This was hardcoded to 1 in the cloud edition while `.env.example` and

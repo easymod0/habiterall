@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sameOriginOnly } from '../src/security.js';
+import { sameOriginOnly, warnOnUntrustedProxy, trustProxy } from '../src/security.js';
 
 /** Drive the middleware without Express. */
 function run(guard, { method = 'POST', origin, host = 'habits.example.com', xfh, reqHost } = {}) {
@@ -110,4 +110,58 @@ test('a rejection is reported to the caller-supplied hook', () => {
   const g = sameOriginOnly({ onReject: (req, origin) => seen.push([req.path, origin]) });
   run(g, { origin: 'https://evil.example.com' });
   assert.deepEqual(seen, [['/api/habits', 'https://evil.example.com']]);
+});
+
+
+/* ---------- the proxy that nobody trusts ---------- */
+
+/** Drive the warning middleware without Express. */
+function proxyRun(mw, headers = {}) {
+  let passed = false;
+  mw({ headers }, {}, () => { passed = true; });
+  return passed;
+}
+
+test('an untrusted proxy is reported, once', () => {
+  const said = [];
+  const mw = warnOnUntrustedProxy({ trusted: false, warn: (f) => said.push(f) });
+
+  assert.equal(proxyRun(mw, { 'x-forwarded-for': '203.0.113.9' }), true);
+  assert.equal(said.length, 1);
+  assert.match(said[0].fix, /TRUST_PROXY/);
+
+  // Once per process: a warning repeated per request is one nobody reads, and
+  // a client can forge the header to make it repeat.
+  proxyRun(mw, { 'x-forwarded-for': '203.0.113.10' });
+  proxyRun(mw, { 'x-forwarded-for': '203.0.113.11' });
+  assert.equal(said.length, 1);
+});
+
+test('nothing is said when no forwarded header ever arrives', () => {
+  // The ordinary LAN case, which is what the default is for. A warning here
+  // would train the operator to ignore the one that matters.
+  const said = [];
+  const mw = warnOnUntrustedProxy({ trusted: false, warn: (f) => said.push(f) });
+  proxyRun(mw, {});
+  proxyRun(mw, { host: 'habits.example.com' });
+  assert.equal(said.length, 0);
+});
+
+test('nothing is said when a proxy IS trusted', () => {
+  const said = [];
+  const mw = warnOnUntrustedProxy({ trusted: 1, warn: (f) => said.push(f) });
+  assert.equal(proxyRun(mw, { 'x-forwarded-for': '203.0.113.9' }), true);
+  assert.equal(said.length, 0);
+});
+
+test('the warning fires for whatever trustProxy resolved to falsy', () => {
+  // `trustProxy` returns `false` for "0", and Express treats the number 0 the
+  // same way — so both have to count as untrusted here or the check is blind to
+  // half its own inputs.
+  for (const trusted of [trustProxy('0'), 0, false]) {
+    const said = [];
+    const mw = warnOnUntrustedProxy({ trusted, warn: (f) => said.push(f) });
+    proxyRun(mw, { 'x-forwarded-for': '203.0.113.9' });
+    assert.equal(said.length, 1, String(trusted));
+  }
 });
