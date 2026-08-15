@@ -20,8 +20,7 @@
 import { withUser } from './db/pool.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import { normaliseImportedHabit } from '@habiterall/shared/import.js';
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+import { assertDate, LIMITS } from '@habiterall/shared/validate.js';
 
 /** Ceilings so one upload cannot exhaust the database on a shared host. */
 const MAX_HABITS_PER_IMPORT = Number(process.env.MAX_HABITS_PER_IMPORT) || 200;
@@ -121,16 +120,27 @@ export async function applyImport(userId, habits, mode = 'merge') {
         continue;
       }
 
-      const type = h.type === 'numerical' ? 'numerical' : 'boolean';
+      // What the FILE says, which is how its values are encoded — a `3` is a
+      // skip sentinel in a boolean column and three of something in a numerical
+      // one. It is not a claim about what this account can store.
+      const fileType = h.type === 'numerical' ? 'numerical' : 'boolean';
+      // ...and on a merge the habit already exists, so its own type is the
+      // authority for what may be WRITTEN. Taking the file's meant a file
+      // claiming `numerical` could put an 8 on a boolean habit through import
+      // that `PUT /entries/:date` answers 400 to — and `isCompleted` is
+      // `value === YES` there, so that day reads as not done forever and the
+      // tap cycle has no state for it.
+      let type = fileType;
 
       // Match on NAME, never on an id from the file.
       let habitId = null;
       if (mode === 'merge') {
         const { rows } = await db.query(
-          `SELECT id FROM habits WHERE name = $1 LIMIT 1`, [name]
+          `SELECT id, type FROM habits WHERE name = $1 LIMIT 1`, [name]
         );
         if (rows.length) {
           habitId = rows[0].id;
+          type = rows[0].type;
           result.habitsMerged++;
         }
       }
@@ -168,18 +178,42 @@ export async function applyImport(userId, habits, mode = 'merge') {
         result.habitsCreated++;
       }
 
+      // Days the file answered in a vocabulary this habit has no room for; see
+      // below. Counted rather than listed, because it is one fact about the
+      // habit and not news about each of a year of days.
+      let untranslatable = 0;
+
       for (const e of h.entries ?? []) {
         if (!e || typeof e !== 'object') continue;
-        if (!DATE_RE.test(e.date ?? '')) {
+        // The shape being right does not make the date real, and the pattern
+        // this used to be was the whole check: `2026-02-30` matched it, reached
+        // Postgres, and came back as a 22008 that surfaced as a 500 and rolled
+        // the whole import back — where personal filed the row under a day that
+        // does not exist. `assertDate` is the rule the API already applies; see
+        // its own comment, which records this being paid for once already.
+        try {
+          assertDate(e.date);
+        } catch {
           result.skipped.push(`bad date on "${name}": ${e.date}`);
           continue;
         }
 
+        // Clamped to what `parseEntry` accepts, read from LIMITS rather than
+        // restated: the literal 500 that was here is the same number by
+        // coincidence rather than by construction, and personal had no clamp at
+        // all — so a note this edition truncates was one that edition stored.
+        const notes = String(e.notes ?? '').slice(0, LIMITS.notes);
+
+        // An explicit status always wins. The legacy SKIP wire value is only
+        // honoured for a boolean FILE, where 3 is unambiguously a sentinel — in
+        // a numerical one 3 is a real amount and must stay one. That question is
+        // about how the value was written down, so it asks the file's type even
+        // where the habit's is what decides the storage.
         const isSkip = e.status === 'skip' ||
-          (type === 'boolean' && Number(e.value) === SKIP);
+          (fileType === 'boolean' && Number(e.value) === SKIP);
 
         if (isSkip) {
-          await upsert(db, userId, habitId, e.date, 0, 'skip', e.notes);
+          await upsert(db, userId, habitId, e.date, 0, 'skip', notes);
           result.entriesImported++;
           continue;
         }
@@ -190,22 +224,53 @@ export async function applyImport(userId, habits, mode = 'merge') {
           continue;
         }
 
-        const notes = String(e.notes ?? '').slice(0, 500);
+        // What the file says about the day, read in the file's own vocabulary: a
+        // boolean file says "done" only with YES, a numerical one with any
+        // amount above zero.
+        const lapse = fileType === 'boolean' ? value !== YES : value === 0;
 
-        // A row is an answer, whatever it says — the same rule as the personal
-        // edition's writer, and the reason it changed is written there. Dropping
-        // a boolean 0 without a note turned every stated lapse in the file into a
-        // day nobody had answered.
-        const stored = type === 'boolean' && value !== YES ? UNSET : value;
+        let stored;
+        if (fileType === type) {
+          // A row is an answer, whatever it says — the same rule as the personal
+          // edition's writer, and the reason it changed is written there. Dropping
+          // a boolean 0 without a note turned every stated lapse in the file into a
+          // day nobody had answered.
+          stored = lapse ? UNSET : value;
+        } else if (lapse) {
+          // The two disagree, which only a merge into a habit whose type has
+          // changed can produce. A lapse is the one answer that means the same
+          // thing on both sides — zero glasses and "no" are both a day the user
+          // says they did not do it — so it crosses.
+          stored = UNSET;
+        } else {
+          // Nothing else does. An amount is not a yes, and a yes carries no
+          // amount: writing 8 into a boolean habit is what the API refuses, and
+          // reading a boolean YES as "2 glasses" against a target of 8 turns a
+          // completed day into a failure. Both were being done silently. There
+          // is no faithful form for the day here, so it is reported rather than
+          // invented — the same answer `reminder_days` gets for a weekday mask.
+          untranslatable++;
+          continue;
+        }
+
         // And the same exception: in merge mode a bare lapse yields to an answer
         // the account already has, because a merge may add what is missing and
         // must not delete a completion. A Loop backup is full of explicit NO rows.
-        const yielding = mode === 'merge' && stored === UNSET && !notes &&
-          type === 'boolean';
+        // Not gated on the type — a numerical habit's lapse is a row holding 0,
+        // and gating it there let a merge write one over eight recorded glasses.
+        const yielding = mode === 'merge' && stored === UNSET && !notes;
         const written = await upsert(
           db, userId, habitId, e.date, stored, '', notes, { yielding });
         if (written) result.entriesImported++;
         else result.entriesKept++;
+      }
+
+      if (untranslatable) {
+        result.skipped.push(
+          `the file records "${name}" as ${fileType} and this account has it as ` +
+          `${type}: ${untranslatable} answered ` +
+          `${untranslatable === 1 ? 'day has' : 'days have'} no faithful form here`
+        );
       }
     }
   });
@@ -230,7 +295,7 @@ async function upsert(db, userId, habitId, date, value, status, notes, opts = {}
     `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
      VALUES ($1,$2,$3,$4,$5,$6)
      ON CONFLICT (habit_id, date) ${onConflict}`,
-    [habitId, userId, date, value, status, String(notes ?? '').slice(0, 500)]
+    [habitId, userId, date, value, status, String(notes ?? '').slice(0, LIMITS.notes)]
   );
   return rowCount > 0;
 }

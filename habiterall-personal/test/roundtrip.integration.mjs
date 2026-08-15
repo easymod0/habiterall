@@ -18,6 +18,9 @@ import { join } from 'node:path';
 import {
   FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS,
 } from '@habiterall/shared/test/roundtrip-fixture.mjs';
+// The clamp import must honour is the one the API enforces, so the test asks
+// the same table rather than restating a number that could drift from it.
+import { LIMITS } from '@habiterall/shared/validate.js';
 
 let fails = 0;
 const ck = (label, cond, extra = '') => {
@@ -364,6 +367,152 @@ ck('in replace mode the file is the whole truth',
   afterLapseReplace.length === 2 &&
   afterLapseReplace.every((e) => e.value === 0),
   JSON.stringify(afterLapseReplace));
+
+await restore(jsonBackup, 'replace');
+
+/* ---------- ...and the same promise on a MEASURABLE habit ---------- */
+
+console.log('\n--- merge does not overwrite an amount either ---');
+
+// Everything above this line is about Meditate, which is boolean — and the
+// yield was gated on `type === 'boolean'`, so the suite watched the protection
+// work right beside the hole. A numerical habit's lapse is a row holding 0 too.
+const idOf = async (name) =>
+  (await (await api('/api/habits')).json()).find((h) => h.name === name).id;
+const entriesOf = async (name) =>
+  (await (await api(`/api/habits/${await idOf(name)}/entries`)).json());
+const dayOf = async (name, date) =>
+  (await entriesOf(name)).find((e) => e.date === date);
+
+const zeroOverAmount = JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Water', type: 'numerical',
+    // 01-05 holds 8 glasses in the fixture; 01-11 has no row at all.
+    entries: [
+      { date: '2026-01-05', value: 0, status: '', notes: '' },
+      { date: '2026-01-11', value: 0, status: '', notes: '' },
+    ],
+  }],
+});
+const mergedZeros = await restore(Buffer.from(zeroOverAmount, 'utf8'), 'merge');
+
+ck('a bare 0 does not overwrite a recorded amount',
+  (await dayOf('Water', '2026-01-05'))?.value === 8,
+  JSON.stringify(await dayOf('Water', '2026-01-05')));
+ck('and the day it kept is counted as kept',
+  mergedZeros.entriesKept === 1 && mergedZeros.entriesImported === 1,
+  JSON.stringify(mergedZeros));
+ck('while a 0 on a day the habit has no answer for still lands',
+  (await dayOf('Water', '2026-01-11'))?.value === 0,
+  JSON.stringify(await dayOf('Water', '2026-01-11')));
+
+/* ---------- a merge types entries by the habit, not by the file ---------- */
+
+console.log('\n--- the account\'s own type decides what a value means ---');
+
+await restore(jsonBackup, 'replace');
+
+// The most ordinary file there is: a bare Checkmarks.csv, with no Habits.csv
+// beside it to say what a habit is, so every column parses as boolean. Merged
+// into this account it rewrote 8 and 10 glasses to the YES sentinel — 2, against
+// a target of 8 — and reported two imported entries and a 200.
+const bareCheckmarks = [
+  'Date,Water',
+  '2026-01-05,YES_MANUAL',
+  '2026-01-07,YES_MANUAL',
+  '2026-01-12,NO',
+].join('\n') + '\n';
+const mergedCsv = await restore(Buffer.from(bareCheckmarks, 'utf8'), 'merge');
+
+ck('a yes/no file does not restate an amount',
+  (await dayOf('Water', '2026-01-05'))?.value === 8 &&
+  (await dayOf('Water', '2026-01-07'))?.value === 10,
+  JSON.stringify(await entriesOf('Water')));
+ck('and the days it could not translate are reported',
+  mergedCsv.skipped.length === 1 && mergedCsv.skipped[0].includes('Water'),
+  JSON.stringify(mergedCsv.skipped));
+ck('but a NO still crosses, since a lapse means the same on both sides',
+  (await dayOf('Water', '2026-01-12'))?.value === 0,
+  JSON.stringify(await dayOf('Water', '2026-01-12')));
+
+// And the other direction, which the API answers 400 to: an 8 on a boolean
+// habit is a day `isCompleted` reads as not done forever, and the tap cycle has
+// no state for it.
+const claimsNumerical = JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'numerical',
+    entries: [{ date: '2026-01-12', value: 8, status: '', notes: '' }],
+  }],
+});
+const mergedClaim = await restore(Buffer.from(claimsNumerical, 'utf8'), 'merge');
+const apiOnBoolean = await fetch(
+  `${base}/api/habits/${await idOf('Meditate')}/entries/2026-01-12`,
+  { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value: 8 }) });
+
+ck('the API refuses an amount on a yes/no habit', apiOnBoolean.status === 400,
+  String(apiOnBoolean.status));
+ck('and so does an import claiming the habit is measurable',
+  (await dayOf('Meditate', '2026-01-12')) === undefined &&
+  mergedClaim.skipped.length === 1,
+  JSON.stringify([await dayOf('Meditate', '2026-01-12'), mergedClaim.skipped]));
+
+/* ---------- an import obeys the rules the API obeys ---------- */
+
+console.log('\n--- impossible dates, and over-long notes ---');
+
+await restore(jsonBackup, 'replace');
+
+// `2026-02-30` matches YYYY-MM-DD and is not a day. The API has refused it since
+// `assertDate` was written; import checked the pattern only, so SQLite filed a
+// row under a date no range query can reach — and the cloud edition, where the
+// column is a real DATE, lost the whole upload to a 22008.
+const impossibleDates = JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'boolean',
+    entries: [
+      { date: '2026-02-30', value: 2, status: '', notes: '' },
+      { date: '2026-13-45', value: 2, status: '', notes: '' },
+      { date: '2026-01-12', value: 2, status: '', notes: '' },
+    ],
+  }],
+});
+const badDates = await restore(Buffer.from(impossibleDates, 'utf8'), 'merge');
+const meditateDates = (await entriesOf('Meditate')).map((e) => e.date);
+
+ck('a date that is not a day is reported rather than stored',
+  badDates.skipped.length === 2 &&
+  !meditateDates.some((d) => d === '2026-02-30' || d === '2026-13-45'),
+  JSON.stringify([badDates.skipped, meditateDates]));
+ck('and the rest of the file still lands',
+  badDates.entriesImported === 1 && meditateDates.includes('2026-01-12'),
+  JSON.stringify(badDates));
+
+// Notes were clamped in cloud and unbounded here, so this edition accepted
+// through import what its own API truncates — and a personal-to-cloud migration
+// then lost the tail with nothing said.
+const longNote = 'x'.repeat(LIMITS.notes + 400);
+const overLongNotes = JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: 'Meditate', type: 'boolean',
+    entries: [
+      { date: '2026-01-13', value: 2, status: '', notes: longNote },
+      { date: '2026-01-14', value: 0, status: 'skip', notes: longNote },
+    ],
+  }],
+});
+await restore(Buffer.from(overLongNotes, 'utf8'), 'merge');
+
+ck('an imported note is clamped to what the API stores',
+  (await dayOf('Meditate', '2026-01-13'))?.notes.length === LIMITS.notes,
+  String((await dayOf('Meditate', '2026-01-13'))?.notes.length));
+ck('a skip\'s note too, which took the other path out',
+  (await dayOf('Meditate', '2026-01-14'))?.notes.length === LIMITS.notes,
+  String((await dayOf('Meditate', '2026-01-14'))?.notes.length));
 
 await restore(jsonBackup, 'replace');
 
