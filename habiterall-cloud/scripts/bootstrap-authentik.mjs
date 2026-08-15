@@ -72,6 +72,15 @@ const flag = (name, fallback = false) => {
 
 // Parsed before anything is created, so a bad value fails the run rather than
 // leaving Authentik half configured.
+//
+// `flag` reaches the environment through a VARIABLE key, so nothing reading
+// this file can see which variables these are — `shared/test/compose.test.js`
+// walks the source to check every one is documented in a compose file, and a
+// `process.env[name]` is where that walk goes blind. The marker below is what
+// it reads instead, and it fails the build if a file does this and has none.
+// Add the name here as well as calling `flag` with it.
+//
+// @env AUTHENTIK_SELF_SIGNUP AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL AUTHENTIK_BRANDING
 const selfSignup = flag('AUTHENTIK_SELF_SIGNUP');
 const verifyEmail = flag('AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL');
 // On unless someone says otherwise: this Authentik exists to log people into

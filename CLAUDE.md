@@ -43,6 +43,7 @@ npm run test:browser        # UI suites — needs Chrome + a running server
 npm run test:tenancy        # cloud isolation attacks — needs Postgres
 
 npm run typecheck           # JSDoc types via tsc --noEmit
+npm run docs:compose        # rewrite the README's compose blocks from examples/
 npm run test:cloud          # cloud API + Loop round trip — needs Postgres
 npm run test:notify         # reminder delivery + its watermark, against SQLite
 npm run test:roundtrip -w habiterall-personal   # backup fidelity, all formats
@@ -682,6 +683,76 @@ rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —
 that is why `test/browser/` exists.
 
+**There is one environment block per edition, and it lives in `examples/`.**
+The published file and the checkout's own were maintained by hand and kept
+drifting the same way: #54 added ten variables to
+`habiterall-personal/docker-compose.yml`, none of them reached
+`examples/docker-compose.personal.yml` or the README, and every test passed —
+because the only check compared the examples against the README, and the two
+stale copies agreed with each other. Verbatim equality could never have been
+that check: the files differ on purpose, one carrying `build:` and the other
+`image: ghcr.io/…`.
+
+So each edition's own compose file **`extends`** the published example and adds
+nothing but the build. `extends`, not `include`, and they are not
+interchangeable: include loads another file's services *alongside* this one's
+and warns rather than merging when a name appears in both, so the same shape
+written with it yields a container with a `build:` and no environment at all —
+which starts, and looks fine. Two things are restated by hand rather than
+inherited: the top-level `volumes:` declarations, which `extends` genuinely
+does not carry because it works at the service level, and `depends_on` —
+Compose v1 never shared that between extending services and the current
+documentation says neither way, so it is written out, which a mapping merge
+makes free if it would have been inherited and correct if not. What is at stake
+there is the cloud app starting against an unmigrated schema.
+
+The published Authentik file is the exception and stays standalone, repeating
+`db` / `migrate` / `app`, because downloading ONE file and running it is the
+whole point of `examples/`. `shared/test/compose.test.js` is what keeps that
+copy honest, and it is tied to the SOURCE rather than to the other file: it
+walks the module graph from each edition's entry points and fails when a
+variable something reads is documented in no compose file that ships it.
+
+**Three wrinkles defeat the naive version, and each has its own test.**
+`HABITERALL_USERNAME` and its two neighbours are read off an *injected* `env`
+object in `shared/src/password.js` and never as `process.env.…` — those are
+precisely the three #54 added, so a grep would have passed. `shared/src` is
+shared, so attributing a read to an edition by file path is wrong: `password.js`
+is personal's and `notify-send.js` is both editions'. Which modules a server
+actually imports is the only honest answer, and it needs no list to maintain.
+
+And the one that cannot be read at all: **`process.env[name]` with a computed
+key.** `flag('AUTHENTIK_BRANDING')` in `bootstrap-authentik.mjs` reaches the
+environment a function call away, so the name is nowhere near the read — and
+self-service registration, its email-verification switch and the branding were
+invisible to the discovery while every test was green. A file that does this
+declares its own names in an **`@env NAME NAME`** marker, and a test fails when
+one does it without a marker, so the next helper of that shape is loud rather
+than silent. A marker is hand-kept and can go stale, so `flag`'s call sites —
+which do name their variable — are checked against what the discovery ended up
+with. That hole was found by a review, not by the suite: worth remembering when
+adding the fourth form of reading an environment variable.
+
+The **checkout compose files are in that manifest too**, listed rather than
+taken on trust. `extends` covers `db` / `migrate` / `app` only, so the Authentik
+services in `habiterall-cloud/docker-compose.yml` remain a hand-kept copy of the
+published Authentik file's — unified for the app, guarded for the rest. Leaving
+those files out would have reproduced #54 one service over.
+
+`ELSEWHERE` in that test is the decision of what an operator is expected to
+*tune* — the log settings, the limits, the pool — and each entry carries its
+reason, with a test that fails when one outlives the variable it excuses. What
+none of this covers is a variable documented with the **wrong default or a
+stale comment**: all of it checks presence, and nothing short of booting a
+container catches the rest.
+
+The README's copies are generated (`npm run docs:compose`, `--check` in CI and
+in `examples.test.js`) from HTML-comment markers, so the README stops being a
+place you can forget to edit. Note what that replaced was itself broken:
+"everything up to the first blank line" reduced `examples/Caddyfile` — four
+lines, no header — to the empty string, and `README.includes('')` is true of
+every README there has ever been.
+
 ## Testing
 
 Several layers, and they catch different things:
@@ -701,11 +772,20 @@ Several layers, and they catch different things:
 | Cloud API | `npm run test:cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
+| Compose files | `npm run docs:compose -- --check`, and the CI `compose` job | Docker, for the job |
 | Android | `cd android-native && ./gradlew testDebugUnitTest lintDebug` | JDK 21 + SDK |
 
 CI runs all of these on every pull request, plus both Docker builds. Publishing
 images to a registry is a separate job that skips itself when the credentials
 are absent — see `.github/workflows/README.md`.
+
+The `compose` job is the one exception to the docs-only skip, deliberately: it
+is the job that guards documentation, and a pull request that hand-edits a
+generated README block is exactly the change the `code == 'true'` filter calls
+docs and skips. It is also where `docker compose config` actually resolves
+`extends` — the unit test can only assert the files *say* the right thing, and
+whether the merge produced the right project is a question only Compose can
+answer.
 
 The round-trip suites export every backup format, import it back, and assert
 nothing changed. They found two real bugs on their first run, both in the CSV

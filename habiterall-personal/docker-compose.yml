@@ -1,63 +1,42 @@
-# Single-user edition. Run from this directory:
+# Single-user edition, built from this checkout. Run from this directory:
 #   docker compose up -d --build
 #
-# The build context is the repo root because the app depends on the `shared`
-# workspace, which lives outside this folder.
+# There is no environment block here, and that is the point. Everything except
+# the build is in ../examples/docker-compose.personal.yml — the file the README
+# prints and a reader downloads — and this EXTENDS it rather than copying it.
+# The two were maintained by hand: #54 added ten variables to this file, none
+# of them reached the example, and every test stayed green.
+#
+# `extends:`, not `include:`. They look interchangeable and are not: include
+# loads another file's services alongside this one's and "displays a warning if
+# resource names conflict and doesn't try to merge them", so declaring
+# `habiterall` in both would leave a container with a build and no environment
+# at all — which starts, and looks fine. `extends` is the merging one, and the
+# rules are the ones this file needs: a scalar here wins, a mapping is merged
+# key by key, and a sequence is concatenated.
+#
+# What `extends` does NOT carry is the top-level `volumes:` declaration — it
+# works at the service level only — so `habiterall-data` is named again below.
+# The service-level `volumes:`, the ports and the whole environment do come
+# across; the cloud file has the longer note on what has to be restated there.
+#
+# Needs Compose v2.20 or newer. To pin values without editing the shared file,
+# put them in a `docker-compose.override.yml` here; Compose loads one
+# automatically.
 
 services:
   habiterall:
+    extends:
+      file: ../examples/docker-compose.personal.yml
+      service: habiterall
+    # The only difference from the published file. The context is the repo root
+    # because the app depends on the `shared` workspace, which lives outside
+    # this folder; the local tag is so `--build` does not take over the name a
+    # `docker pull` of the published image would land under.
     build:
       context: ..
       dockerfile: habiterall-personal/Dockerfile
     image: habiterall:latest
-    container_name: habiterall
-    ports:
-      - "${APP_PORT:-3000}:3000"
-    volumes:
-      - habiterall-data:/data
-    environment:
-      - HABITERALL_DB=/data/habiterall.db
-      - PORT=3000
-      # Reminders sent by the server (a Discord webhook). Idle until a
-      # destination is configured in Settings → Notifications; set to `off` to
-      # disable the loop entirely. HABITERALL_PUBLIC_URL, if set, is what a
-      # Discord message links back to.
-      - HABITERALL_NOTIFY=${HABITERALL_NOTIFY:-on}
-      - HABITERALL_PUBLIC_URL=${HABITERALL_PUBLIC_URL:-}
-      # Set to get Yes / No / Skip buttons in Discord instead of plain text.
-      # See the README: create an application, copy the bot token, invite it.
-      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
-      # Sign-in. ON unless this is EXACTLY "off" — every other value, including
-      # "false" and "0" and every typo, leaves it on. That is deliberate: the
-      # mistake worth guarding is an instance reachable from the internet whose
-      # disable flag did not take, and whose only symptom is that it works for
-      # everyone. Leave it unset for anything public.
-      - HABITERALL_AUTH=${HABITERALL_AUTH:-}
-      # The single account. If neither is set, the first visitor to reach
-      # /auth/setup claims the instance — fine on a LAN, a race on the internet.
-      # A hash keeps the plaintext out of `docker inspect`; generate one with:
-      #   node -e "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" 'your password'
-      - HABITERALL_USERNAME=${HABITERALL_USERNAME:-}
-      - HABITERALL_PASSWORD=${HABITERALL_PASSWORD:-}
-      - HABITERALL_PASSWORD_HASH=${HABITERALL_PASSWORD_HASH:-}
-      # Set to keep sessions valid across a rebuild; generated and stored in the
-      # database when absent.
-      - HABITERALL_SESSION_SECRET=${HABITERALL_SESSION_SECRET:-}
-      # How many reverse proxies sit in front. ZERO by default: this edition is
-      # commonly run with nothing in front of it, and trusting a hop that is not
-      # there hands `X-Forwarded-For` — and with it the rate limiters' only key —
-      # to the caller. Set it to 1 behind a single TLS terminator, which you
-      # need anyway for the login form to be worth having.
-      - TRUST_PROXY=${TRUST_PROXY:-0}
-      # Set to "off" for a trusted LAN or a test run. Leave it alone otherwise:
-      # this edition's database is synchronous, so one client in a loop is all
-      # it takes to stop the event loop.
-      - HABITERALL_RATE_LIMIT=${HABITERALL_RATE_LIMIT:-}
-      # Set to "on" only if this instance is reached over https and nothing
-      # else. It makes browsers rewrite every http request to https, which
-      # breaks the plain-http LAN half of a box that answers on both.
-      - HABITERALL_UPGRADE_INSECURE=${HABITERALL_UPGRADE_INSECURE:-}
-    restart: unless-stopped
 
 volumes:
   habiterall-data:

@@ -1,7 +1,12 @@
 # habiterall, cloud edition — multi user, Postgres, your own OIDC provider.
 #
-# The copy in README.md is generated from this file, and a unit test fails if the
-# two drift, so edit this one.
+# This file is the ONE place the cloud edition's environment is described. The
+# copy in README.md is generated from it (`npm run docs:compose`), and
+# `habiterall-cloud/docker-compose.yml` EXTENDS it and adds only what a
+# checkout needs: `build:`, and the Authentik services. So a variable added
+# here reaches both. `shared/test/compose.test.js` fails if the server reads
+# one that is not below — including the copy in docker-compose.cloud-authentik.yml,
+# which has to stay standalone and therefore repeats it.
 #
 # Needs a .env beside it:
 #
@@ -65,8 +70,12 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:?from your provider}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
-      TRUST_PROXY: 1
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
+      TRUST_PROXY: ${TRUST_PROXY:-1}                       # TLS terminators in front
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}            # adds Yes / No / Skip buttons
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # The fallback clock: a container has no timezone, so it is UTC. Users can
       # override it for their own reminders in ⚙ → Notifications, but this is
       # what "the server's own timezone" means, and it is also the clock that

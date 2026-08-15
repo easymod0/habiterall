@@ -68,6 +68,7 @@ development.
 The published image needs no clone and no build. Save this as
 `docker-compose.yml` anywhere:
 
+<!-- generated from examples/docker-compose.personal.yml — edit that file, then `npm run docs:compose` -->
 ```yaml
 services:
   habiterall:
@@ -76,37 +77,32 @@ services:
     ports:
       - '${APP_PORT:-3000}:3000'
     volumes:
-      # Your entire database is one file in here. Back it up by copying it.
-      - habiterall-data:/data
+      - habiterall-data:/data        # your whole database is one file in here
     environment:
       HABITERALL_DB: /data/habiterall.db
-      # SET THIS. A container has no timezone, so it is UTC — and this decides
-      # both when an 08:00 reminder fires and which day a check-off lands on.
-      # Unset, an evening check-in west of UTC is filed under tomorrow.
-      TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
-      # The single account. Set BOTH before you expose this port: with neither,
-      # the first visitor to reach the app claims it — no token, no address
-      # check — which is fine on a LAN and a race on the internet.
-      HABITERALL_USERNAME: ''        # defaults to "admin"
-      HABITERALL_PASSWORD: ''        # at least 8 characters
-      # Sign-in is ON unless this is EXACTLY "off" — "false", "0" and every typo
-      # of "off" all leave it on, deliberately. Only set it for a machine nobody
-      # else can reach.
-      HABITERALL_AUTH: ''
-      # Set to 1 behind a reverse proxy (see "Put HTTPS in front" below), and
-      # leave it at 0 when this port is reached directly. It decides whose
-      # address the rate limiter counts, whether a Secure cookie can be issued,
-      # and which Host the cross-origin check compares.
-      TRUST_PROXY: 0
-      # Optional, and only for reminders the SERVER sends (a Discord channel).
-      # The Android app needs neither of these — it arms its own alarms.
-      HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
-      DISCORD_BOT_TOKEN: ''          # enables Yes / No / Skip buttons
+      TZ: ${TZ:-Etc/UTC}             # SET THIS — a container is UTC otherwise
+
+      # Set both before exposing this port, or the first visitor claims the app.
+      HABITERALL_USERNAME: ${HABITERALL_USERNAME:-}              # default "admin"
+      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}              # 8+ characters
+      HABITERALL_PASSWORD_HASH: ${HABITERALL_PASSWORD_HASH:-}    # or this instead
+      HABITERALL_AUTH: ${HABITERALL_AUTH:-}                      # exactly "off" disables sign-in
+      HABITERALL_SESSION_SECRET: ${HABITERALL_SESSION_SECRET:-}  # survives a redeploy
+
+      TRUST_PROXY: ${TRUST_PROXY:-0}                             # 1 behind a reverse proxy
+      HABITERALL_UPGRADE_INSECURE: ${HABITERALL_UPGRADE_INSECURE:-}  # "on" if https-only
+      HABITERALL_RATE_LIMIT: ${HABITERALL_RATE_LIMIT:-}          # "off" on a trusted LAN
+
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}                # reminders this server sends
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}          # https://habits.example.com
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
     restart: unless-stopped
 
 volumes:
   habiterall-data:
 ```
+<!-- /generated -->
 
 ```bash
 docker compose up -d
@@ -130,8 +126,11 @@ others alongside it.
 
 That file is also in the repository as
 [`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
-(and the two cloud ones beside it), with a test that fails if it drifts from
-what is printed here. To update:
+(and the two cloud ones beside it). What is printed above is *generated* from
+it, and it is the same file the repository's own
+`habiterall-personal/docker-compose.yml` extends — so the variables listed
+there are all of them, and a test fails if the server grows one that is
+missing. To update:
 
 ```bash
 docker compose pull && docker compose up -d
@@ -161,6 +160,7 @@ Multi user, so it needs a database and somewhere to sign in. This brings both:
 the published image, Postgres, and Authentik as the identity provider — nothing
 to build, and no source on the server. Save as `docker-compose.yml`:
 
+<!-- generated from examples/docker-compose.cloud-authentik.yml — edit that file, then `npm run docs:compose` -->
 ```yaml
 services:
   db:
@@ -336,8 +336,12 @@ services:
       # not values you collect, so there is no moment when empty is correct.
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
-      TRUST_PROXY: 1
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
+      TRUST_PROXY: ${TRUST_PROXY:-1}                       # TLS terminators in front
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}            # adds Yes / No / Skip buttons
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # The fallback clock: a container has no timezone, so it is UTC. Users can
       # override it for their own reminders in ⚙ → Notifications, but this is
       # what "the server's own timezone" means, and it is also the clock that
@@ -357,6 +361,7 @@ volumes:
   authentik-icons:
   authentik-images:
 ```
+<!-- /generated -->
 
 **Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
 `OIDC_ISSUER` is where Authentik does, and they must be different origins
@@ -463,8 +468,7 @@ Entra or Auth0, use
 <details>
 <summary><b>Show that file</b></summary>
 
-
-
+<!-- generated from examples/docker-compose.cloud.yml — edit that file, then `npm run docs:compose` -->
 ```yaml
 services:
   db:
@@ -510,8 +514,12 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:?from your provider}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
-      TRUST_PROXY: 1
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
+      TRUST_PROXY: ${TRUST_PROXY:-1}                       # TLS terminators in front
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}            # adds Yes / No / Skip buttons
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # The fallback clock: a container has no timezone, so it is UTC. Users can
       # override it for their own reminders in ⚙ → Notifications, but this is
       # what "the server's own timezone" means, and it is also the clock that
@@ -522,6 +530,7 @@ services:
 volumes:
   db-data:
 ```
+<!-- /generated -->
 
 Register `${PUBLIC_URL}/auth/callback` as the redirect URI with your provider.
 Users are provisioned the first time each one signs in.
@@ -551,12 +560,14 @@ load-bearing on it:
 [`examples/Caddyfile`](examples/Caddyfile) is the whole thing, certificate
 included:
 
+<!-- generated from examples/Caddyfile — edit that file, then `npm run docs:compose` -->
 ```caddyfile
 habits.example.com {
 	# Caddy gets and renews the certificate itself. Nothing else to configure.
 	reverse_proxy localhost:3000
 }
 ```
+<!-- /generated -->
 
 ```bash
 docker compose up -d      # habiterall on :3000
@@ -1082,19 +1093,48 @@ cut a release having configured nothing. Details in
 
 ### personal
 
+[`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
+carries these in place with a comment on each, and a test fails if the server
+reads one it does not. Two below are deliberately not in it: `PORT`, because
+the port *inside* the container is fixed by the image and the published
+mapping — `APP_PORT` is the host-side knob — and `MAX_UPLOAD_MB`, which is a
+limit rather than a deployment setting.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HABITERALL_DB` | `./data/habiterall.db` | SQLite file path |
 | `TZ` | the host's, **`UTC` in a container** | The clock reminders fire on, and which day a check-off belongs to |
+| `HABITERALL_AUTH` | on | Sign-in. Off only when set to **exactly** `off` |
+| `HABITERALL_USERNAME` | `admin` | The single account |
+| `HABITERALL_PASSWORD` | — | Its password, at least 8 characters. Set both before exposing the port, or the first visitor claims the instance |
+| `HABITERALL_PASSWORD_HASH` | — | The same thing pre-hashed, to keep the plaintext out of `docker inspect`. Wins if both are set |
+| `HABITERALL_SESSION_SECRET` | generated, stored in the database | Set it to keep people signed in across a redeploy |
+| `TRUST_PROXY` | `0` | Reverse-proxy hops in front. See [Put HTTPS in front](#put-https-in-front) — wrong in either direction is a bug |
+| `HABITERALL_RATE_LIMIT` | on | `off` removes the API limits. The one on *login attempts* is not included and cannot be switched off |
+| `HABITERALL_UPGRADE_INSECURE` | off | `on` tells browsers to rewrite http to https. Only for an instance reached over TLS and nothing else |
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
+| `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
+
+To set `HABITERALL_PASSWORD_HASH` and keep the plaintext out of your compose
+file and out of `docker inspect`:
+
+```bash
+docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
+  "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" \
+  'your password'
+```
 
 ### cloud
 
-See [`.env.example`](habiterall-cloud/.env.example). Beyond the database and
-OIDC credentials: `MAX_HABITS_PER_USER`, `MAX_ENTRIES_PER_IMPORT`,
-`MAX_UPLOAD_MB`, and `PORT`.
+See [`.env.example`](habiterall-cloud/.env.example), and
+[`examples/docker-compose.cloud.yml`](examples/docker-compose.cloud.yml) for
+the same list with comments. Beyond the database and OIDC credentials:
+`TRUST_PROXY`, `NOTIFY_MAX_ACCOUNTS`, `MAX_HABITS_PER_USER`,
+`MAX_HABITS_PER_IMPORT`, `MAX_ENTRIES_PER_IMPORT`, `MAX_UPLOAD_MB`,
+`PG_POOL_MAX`, `PGSSL`, `PORT`, and `ALLOW_INSECURE_OIDC` — which is for local
+HTTP testing and never a real deployment.
 
 ### Published images
 

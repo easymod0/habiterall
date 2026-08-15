@@ -1,12 +1,10 @@
 # habiterall, personal edition — single user, SQLite, one password.
 #
-# The copy in README.md is generated from this file, and a unit test fails if the
-# two drift, so edit this one.
+#   docker compose -f docker-compose.personal.yml up -d    # then localhost:3000
+#   docker compose pull && docker compose up -d            # to update
 #
-#   docker compose -f docker-compose.personal.yml up -d
-#   open http://localhost:3000
-#
-# To update: docker compose pull && docker compose up -d
+# Every variable below can be set here or in a .env beside this file. What each
+# one does: https://github.com/easymod0/habiterall#configuration
 
 services:
   habiterall:
@@ -15,32 +13,26 @@ services:
     ports:
       - '${APP_PORT:-3000}:3000'
     volumes:
-      # Your entire database is one file in here. Back it up by copying it.
-      - habiterall-data:/data
+      - habiterall-data:/data        # your whole database is one file in here
     environment:
       HABITERALL_DB: /data/habiterall.db
-      # SET THIS. A container has no timezone, so it is UTC — and this decides
-      # both when an 08:00 reminder fires and which day a check-off lands on.
-      # Unset, an evening check-in west of UTC is filed under tomorrow.
-      TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
-      # The single account. Set BOTH before you expose this port: with neither,
-      # the first visitor to reach the app claims it — no token, no address
-      # check — which is fine on a LAN and a race on the internet.
-      HABITERALL_USERNAME: ''        # defaults to "admin"
-      HABITERALL_PASSWORD: ''        # at least 8 characters
-      # Sign-in is ON unless this is EXACTLY "off" — "false", "0" and every typo
-      # of "off" all leave it on, deliberately. Only set it for a machine nobody
-      # else can reach.
-      HABITERALL_AUTH: ''
-      # Set to 1 behind a reverse proxy (see "Put HTTPS in front" below), and
-      # leave it at 0 when this port is reached directly. It decides whose
-      # address the rate limiter counts, whether a Secure cookie can be issued,
-      # and which Host the cross-origin check compares.
-      TRUST_PROXY: 0
-      # Optional, and only for reminders the SERVER sends (a Discord channel).
-      # The Android app needs neither of these — it arms its own alarms.
-      HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
-      DISCORD_BOT_TOKEN: ''          # enables Yes / No / Skip buttons
+      TZ: ${TZ:-Etc/UTC}             # SET THIS — a container is UTC otherwise
+
+      # Set both before exposing this port, or the first visitor claims the app.
+      HABITERALL_USERNAME: ${HABITERALL_USERNAME:-}              # default "admin"
+      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}              # 8+ characters
+      HABITERALL_PASSWORD_HASH: ${HABITERALL_PASSWORD_HASH:-}    # or this instead
+      HABITERALL_AUTH: ${HABITERALL_AUTH:-}                      # exactly "off" disables sign-in
+      HABITERALL_SESSION_SECRET: ${HABITERALL_SESSION_SECRET:-}  # survives a redeploy
+
+      TRUST_PROXY: ${TRUST_PROXY:-0}                             # 1 behind a reverse proxy
+      HABITERALL_UPGRADE_INSECURE: ${HABITERALL_UPGRADE_INSECURE:-}  # "on" if https-only
+      HABITERALL_RATE_LIMIT: ${HABITERALL_RATE_LIMIT:-}          # "off" on a trusted LAN
+
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}                # reminders this server sends
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}          # https://habits.example.com
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
     restart: unless-stopped
 
 volumes:
