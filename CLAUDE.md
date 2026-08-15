@@ -711,14 +711,33 @@ The published Authentik file is the exception and stays standalone, repeating
 whole point of `examples/`. `shared/test/compose.test.js` is what keeps that
 copy honest, and it is tied to the SOURCE rather than to the other file: it
 walks the module graph from each edition's entry points and fails when a
-variable something reads is documented in no compose file that ships it. Two
-wrinkles defeat the naive version, and both have their own test.
+variable something reads is documented in no compose file that ships it.
+
+**Three wrinkles defeat the naive version, and each has its own test.**
 `HABITERALL_USERNAME` and its two neighbours are read off an *injected* `env`
 object in `shared/src/password.js` and never as `process.env.…` — those are
-precisely the three #54 added, so a grep would have passed. And `shared/src` is
+precisely the three #54 added, so a grep would have passed. `shared/src` is
 shared, so attributing a read to an edition by file path is wrong: `password.js`
 is personal's and `notify-send.js` is both editions'. Which modules a server
 actually imports is the only honest answer, and it needs no list to maintain.
+
+And the one that cannot be read at all: **`process.env[name]` with a computed
+key.** `flag('AUTHENTIK_BRANDING')` in `bootstrap-authentik.mjs` reaches the
+environment a function call away, so the name is nowhere near the read — and
+self-service registration, its email-verification switch and the branding were
+invisible to the discovery while every test was green. A file that does this
+declares its own names in an **`@env NAME NAME`** marker, and a test fails when
+one does it without a marker, so the next helper of that shape is loud rather
+than silent. A marker is hand-kept and can go stale, so `flag`'s call sites —
+which do name their variable — are checked against what the discovery ended up
+with. That hole was found by a review, not by the suite: worth remembering when
+adding the fourth form of reading an environment variable.
+
+The **checkout compose files are in that manifest too**, listed rather than
+taken on trust. `extends` covers `db` / `migrate` / `app` only, so the Authentik
+services in `habiterall-cloud/docker-compose.yml` remain a hand-kept copy of the
+published Authentik file's — unified for the app, guarded for the rest. Leaving
+those files out would have reproduced #54 one service over.
 
 `ELSEWHERE` in that test is the decision of what an operator is expected to
 *tune* — the log settings, the limits, the pool — and each entry carries its

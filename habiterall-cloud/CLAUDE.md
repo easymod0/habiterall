@@ -122,6 +122,13 @@ on purpose: Authentik's database lives in the *same* Postgres server here,
 created by `scripts/init-authentik-db.sh`, which is a file a downloader of that
 example does not have.
 
+Which is why the `authentik-*` services here are still a hand-kept copy of that
+example's, rather than extended from it — unified for the app, guarded for the
+rest. Both files are in `compose.test.js`'s list, so a new switch in
+`bootstrap-authentik.mjs` has to reach both or one of them fails. If you add one
+through `flag()`, add it to the `@env` marker beside it as well: it reads
+`process.env[name]`, and nothing can see through that.
+
 ## Authentik is configured by a script that runs on every `up`
 
 `scripts/bootstrap-authentik.mjs` creates the OIDC provider and application,

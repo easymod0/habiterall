@@ -2,7 +2,7 @@
 #
 # This file is the ONE place the cloud edition's environment is described. The
 # copy in README.md is generated from it (`npm run docs:compose`), and
-# `habiterall-cloud/docker-compose.yml` includes it and adds only what a
+# `habiterall-cloud/docker-compose.yml` EXTENDS it and adds only what a
 # checkout needs: `build:`, and the Authentik services. So a variable added
 # here reaches both. `shared/test/compose.test.js` fails if the server reads
 # one that is not below — including the copy in docker-compose.cloud-authentik.yml,

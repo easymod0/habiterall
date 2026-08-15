@@ -35,6 +35,12 @@ if (isProd && !publicIsHttps) {
   });
 }
 
+// Read through a variable key, which is where the source walk in
+// `shared/test/compose.test.js` goes blind — hence the marker. All three are
+// read directly elsewhere in this file too, so nothing depends on it today;
+// it is here so that adding a fourth to the list cannot make it invisible.
+//
+// @env DATABASE_URL SESSION_SECRET PUBLIC_URL
 for (const required of ['DATABASE_URL', 'SESSION_SECRET', 'PUBLIC_URL']) {
   if (!process.env[required]) {
     log.error('config_missing', { variable: required });

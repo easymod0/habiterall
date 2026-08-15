@@ -81,33 +81,36 @@ services:
       # Your entire database is one file in here. Back it up by copying it.
       - habiterall-data:/data
     environment:
+      # The one path that is not yours to choose: it has to be inside the
+      # volume mounted above, or the database lives in the container's
+      # writable layer and a `docker compose down` takes it.
       HABITERALL_DB: /data/habiterall.db
       # SET THIS. A container has no timezone, so it is UTC — and this decides
       # both when an 08:00 reminder fires and which day a check-off lands on.
       # Unset, an evening check-in west of UTC is filed under tomorrow.
-      TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
+      TZ: ${TZ:-Etc/UTC}             # e.g. America/Toronto, Europe/Berlin
 
       # ---- signing in ----------------------------------------------------
       # The single account. Set BOTH before you expose this port: with neither,
       # the first visitor to reach the app claims it — no token, no address
       # check — which is fine on a LAN and a race on the internet.
-      HABITERALL_USERNAME: ''        # defaults to "admin"
-      HABITERALL_PASSWORD: ''        # at least 8 characters
+      HABITERALL_USERNAME: ${HABITERALL_USERNAME:-}    # defaults to "admin"
+      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}    # at least 8 characters
       # Or supply the hash instead, to keep the plaintext out of this file and
       # out of `docker inspect`. Generate one with:
       #   docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
       #     "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" 'your password'
       # Setting both is ambiguous and the HASH wins; the server says so at
       # startup rather than quietly ignoring the other one.
-      HABITERALL_PASSWORD_HASH: ''
+      HABITERALL_PASSWORD_HASH: ${HABITERALL_PASSWORD_HASH:-}
       # Sign-in is ON unless this is EXACTLY "off" — "false", "0" and every typo
       # of "off" all leave it on, deliberately. Only set it for a machine nobody
       # else can reach.
-      HABITERALL_AUTH: ''
+      HABITERALL_AUTH: ${HABITERALL_AUTH:-}
       # Set to keep people signed in across a redeploy. Left empty, one is
       # generated and stored in the database, which is fine — it only means the
       # cookies issued before a restore of a *different* database stop working.
-      HABITERALL_SESSION_SECRET: ''
+      HABITERALL_SESSION_SECRET: ${HABITERALL_SESSION_SECRET:-}
 
       # ---- what is in front ----------------------------------------------
       # Set to 1 behind a reverse proxy (see "Put HTTPS in front" below), and
@@ -115,25 +118,25 @@ services:
       # address the rate limiter counts, whether a Secure cookie can be issued,
       # and which Host the cross-origin check compares. Setting it to 1 while
       # the port is ALSO open on the LAN is worse than leaving it at 0.
-      TRUST_PROXY: 0
+      TRUST_PROXY: ${TRUST_PROXY:-0}
       # Set to "on" only if this instance is reached over https and nothing
       # else: it makes browsers rewrite every http request to https, which
       # breaks the plain-http LAN half of a box that answers on both. Browsers
       # exempt localhost, so a mistake here only ever shows up on a real address.
-      HABITERALL_UPGRADE_INSECURE: ''
+      HABITERALL_UPGRADE_INSECURE: ${HABITERALL_UPGRADE_INSECURE:-}
       # Set to "off" for a trusted LAN or a test run. Leave it alone otherwise:
       # this edition's database is synchronous, so one client in a loop is all
       # it takes to stop the event loop. The limit on *login attempts* is not
       # included and cannot be switched off.
-      HABITERALL_RATE_LIMIT: ''
+      HABITERALL_RATE_LIMIT: ${HABITERALL_RATE_LIMIT:-}
 
       # ---- reminders the SERVER sends -------------------------------------
       # Only for a Discord channel. The Android app needs none of these — it
       # arms its own alarms, and the phone works offline because of it.
-      HABITERALL_NOTIFY: 'on'        # "off" disables the loop entirely
-      HABITERALL_NOTIFY_INTERVAL_MS: 60000
-      HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
-      DISCORD_BOT_TOKEN: ''          # enables Yes / No / Skip buttons
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}    # "off" disables the loop
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}   # https://habits.example.com
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}      # Yes / No / Skip buttons
     restart: unless-stopped
 
 volumes:
@@ -1158,9 +1161,12 @@ cut a release having configured nothing. Details in
 
 ### personal
 
-Every one of these is in
 [`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
-with a comment, and a test fails if the server reads one that is not.
+carries these in place with a comment on each, and a test fails if the server
+reads one it does not. Two below are deliberately not in it: `PORT`, because
+the port *inside* the container is fixed by the image and the published
+mapping — `APP_PORT` is the host-side knob — and `MAX_UPLOAD_MB`, which is a
+limit rather than a deployment setting.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -1185,9 +1191,9 @@ See [`.env.example`](habiterall-cloud/.env.example), and
 [`examples/docker-compose.cloud.yml`](examples/docker-compose.cloud.yml) for
 the same list with comments. Beyond the database and OIDC credentials:
 `TRUST_PROXY`, `NOTIFY_MAX_ACCOUNTS`, `MAX_HABITS_PER_USER`,
-`MAX_ENTRIES_PER_IMPORT`, `MAX_UPLOAD_MB`, `PG_POOL_MAX`, `PGSSL`, `PORT`, and
-`ALLOW_INSECURE_OIDC` — which is for local HTTP testing and never a real
-deployment.
+`MAX_HABITS_PER_IMPORT`, `MAX_ENTRIES_PER_IMPORT`, `MAX_UPLOAD_MB`,
+`PG_POOL_MAX`, `PGSSL`, `PORT`, and `ALLOW_INSECURE_OIDC` — which is for local
+HTTP testing and never a real deployment.
 
 ### Published images
 

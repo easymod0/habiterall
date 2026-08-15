@@ -39,14 +39,29 @@ import { dirname, join } from 'node:path';
  */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+const CLOUD_APP = [
+  'habiterall-cloud/src/server.js',
+  'habiterall-cloud/src/db/migrate.js',
+];
+// The one process examples/docker-compose.cloud.yml does not run, and the
+// reason its AUTHENTIK_* variables are required in the other two cloud files.
+const BOOTSTRAP = 'habiterall-cloud/scripts/bootstrap-authentik.mjs';
+
 /**
- * The compose files that claim to describe a whole deployment, and the
+ * Every compose file that claims to describe a whole deployment, and the
  * processes each one starts.
  *
- * The two files under `habiterall-personal/` and `habiterall-cloud/` are
- * deliberately absent: they `include:` these, which
- * `each edition's compose file includes its published example` asserts, so
- * they inherit whatever is here.
+ * `also` is the file whose environment this one inherits through `extends`.
+ * The checkout files are listed rather than taken on trust, and that is not
+ * belt-and-braces: `extends` covers `db` / `migrate` / `app` only, so the
+ * Authentik services in `habiterall-cloud/docker-compose.yml` are a hand-kept
+ * copy of the ones in the published Authentik file. Leaving that file out
+ * would have reproduced #54 exactly, one service over — a new variable in
+ * `bootstrap-authentik.mjs` forced into the published copy and reaching the
+ * checkout only if someone remembered.
+ *
+ * `except` is what a particular deployment deliberately does not set, as
+ * distinct from ELSEWHERE's "no deployment needs to".
  */
 const COMPOSE = [
   {
@@ -54,21 +69,31 @@ const COMPOSE = [
     entries: ['habiterall-personal/src/server.js'],
   },
   {
+    file: 'habiterall-personal/docker-compose.yml',
+    also: 'examples/docker-compose.personal.yml',
+    entries: ['habiterall-personal/src/server.js'],
+  },
+  {
     file: 'examples/docker-compose.cloud.yml',
-    entries: [
-      'habiterall-cloud/src/server.js',
-      'habiterall-cloud/src/db/migrate.js',
-    ],
+    entries: CLOUD_APP,
   },
   {
     file: 'examples/docker-compose.cloud-authentik.yml',
-    entries: [
-      'habiterall-cloud/src/server.js',
-      'habiterall-cloud/src/db/migrate.js',
-      // The one process the other cloud file does not run, and the reason its
-      // AUTHENTIK_* variables are required here and nowhere else.
-      'habiterall-cloud/scripts/bootstrap-authentik.mjs',
-    ],
+    entries: [...CLOUD_APP, BOOTSTRAP],
+  },
+  {
+    file: 'habiterall-cloud/docker-compose.yml',
+    also: 'examples/docker-compose.cloud.yml',
+    entries: [...CLOUD_APP, BOOTSTRAP],
+    except: new Map([
+      // This stack bind-mounts the blueprints and the branding straight from
+      // the checkout, so the bootstrap has nothing to copy OUT of the image —
+      // which is the whole reason those three exist, and they are set in the
+      // published Authentik file that has no checkout to mount.
+      ['AUTHENTIK_BLUEPRINTS_OUT', 'bind-mounted from the checkout instead'],
+      ['AUTHENTIK_ICONS_OUT', 'bind-mounted from the checkout instead'],
+      ['AUTHENTIK_IMAGES_OUT', 'bind-mounted from the checkout instead'],
+    ]),
   },
 ];
 
@@ -162,13 +187,28 @@ function moduleGraph(entries) {
   return seen;
 }
 
+/** A `process.env[…]` whose key is not a literal, so no reader can see it. */
+const DYNAMIC = /\benv\[\s*[^'"\s\]]/;
+
+/** An `@env NAME NAME` marker, which is how such a file declares its own. */
+const MARKER = /@env\s+([A-Z][A-Z0-9_]*(?:[ ,]+[A-Z][A-Z0-9_]*)*)/g;
+
 /**
  * The environment variables read by a set of files.
  *
- * Three forms, because the code uses three: `process.env.X` and an injected
- * `env.X` (one pattern — `process.env` ends in `env`), a bracket lookup, and
- * destructuring, which is how `habiterall-cloud/src/auth.js` takes the OIDC
- * triple.
+ * Four forms, because the code uses four. `process.env.X` and an injected
+ * `env.X` are one pattern, since `process.env` ends in `env`. A bracket lookup
+ * with a literal key is the second, and destructuring the third — that is how
+ * `habiterall-cloud/src/auth.js` takes the OIDC triple.
+ *
+ * The fourth is a bracket lookup with a VARIABLE key, and it is the one that
+ * cannot be read at all: `flag('AUTHENTIK_BRANDING')` in
+ * `bootstrap-authentik.mjs` reaches `process.env[name]` a function call away,
+ * so the name is nowhere near the read. Three real switches were invisible
+ * here until an `@env` marker declared them, which is the same shape of hole
+ * as the injected `env` object one function up — and `a file that reads the
+ * environment dynamically declares what it reads` is what stops the next one
+ * being silent instead of merely undeclared.
  *
  * @param {Set<string>} files @returns {Set<string>}
  */
@@ -180,6 +220,9 @@ function envNames(files) {
     for (const [, n] of text.matchAll(/\benv\[\s*['"]([A-Z][A-Z0-9_]*)['"]\s*\]/g)) names.add(n);
     for (const [, block] of text.matchAll(/\{([^{}]*)\}\s*=\s*(?:process\.)?env\b/gs)) {
       for (const [n] of block.matchAll(/\b[A-Z][A-Z0-9_]*\b/g)) names.add(n);
+    }
+    for (const [, list] of text.matchAll(MARKER)) {
+      for (const [n] of list.matchAll(/[A-Z][A-Z0-9_]*/g)) names.add(n);
     }
   }
   return names;
@@ -201,36 +244,88 @@ function documented(text) {
   return names;
 }
 
-for (const { file, entries } of COMPOSE) {
+for (const { file, also, entries, except } of COMPOSE) {
   test(`${file} documents every variable its processes read`, () => {
     const read = envNames(moduleGraph(entries));
     assert.ok(read.size > 5, `only found ${read.size} variables — discovery is broken`);
 
-    const have = documented(readFileSync(join(ROOT, file), 'utf8'));
+    const sources = [file, ...(also ? [also] : [])];
+    const have = documented(sources.map((f) => readFileSync(join(ROOT, f), 'utf8')).join('\n'));
     const missing = [...read]
-      .filter((name) => !ELSEWHERE.has(name))
+      .filter((name) => !ELSEWHERE.has(name) && !except?.has(name))
       .filter((name) => !aliasesOf(name).some((a) => have.has(a)))
       .sort();
 
     assert.deepEqual(missing, [],
       `${file} never mentions ${missing.join(', ')}, which the server reads. ` +
-      'Add it there — the edition\'s own compose file includes that one, so ' +
-      'this is the only place it has to go. If it is not something an operator ' +
-      'should set, add it to ELSEWHERE in this file with the reason.');
+      (also
+        ? `It extends ${also}, so that is usually where it goes. `
+        : 'It is the file this edition is documented in, so this is where it goes. ') +
+      'If no deployment should set it, add it to ELSEWHERE with the reason; if ' +
+      'only this one should not, add it to that entry\'s `except`.');
   });
 }
 
 test('nothing is opted out that the server no longer reads', () => {
   // An opt-out is a decision about a real variable. Left behind after the
   // variable goes, it is a claim about the code that is no longer true, and
-  // the next person reads it as one.
+  // the next person reads it as one. Both kinds are checked: ELSEWHERE, and
+  // the per-deployment `except` lists.
   const read = new Set();
   for (const { entries } of COMPOSE) {
     for (const name of envNames(moduleGraph(entries))) read.add(name);
   }
-  const dead = [...ELSEWHERE.keys()].filter((name) => !read.has(name)).sort();
+
+  const opted = [
+    ...[...ELSEWHERE.keys()].map((name) => ({ name, where: 'ELSEWHERE' })),
+    ...COMPOSE.flatMap(({ file, except }) =>
+      [...(except?.keys() ?? [])].map((name) => ({ name, where: `${file}'s except` }))),
+  ];
+  const dead = opted.filter(({ name }) => !read.has(name))
+    .map(({ name, where }) => `${name} (${where})`).sort();
+
   assert.deepEqual(dead, [],
-    `ELSEWHERE opts out ${dead.join(', ')}, which nothing reads any more`);
+    `${dead.join(', ')} is opted out, and nothing reads it any more`);
+});
+
+test('a file that reads the environment dynamically declares what it reads', () => {
+  // `process.env[name]` cannot be followed to a name, so a file that does it
+  // has to say. Without this the three Authentik switches were read by the
+  // bootstrap, absent from the discovery, and therefore free to be missing
+  // from a compose file — the exact silence the whole test exists to end, and
+  // it took a review to notice because everything was green.
+  const files = new Set();
+  for (const { entries } of COMPOSE) {
+    for (const file of moduleGraph(entries)) files.add(file);
+  }
+
+  const undeclared = [...files]
+    .filter((file) => {
+      const text = readFileSync(file, 'utf8');
+      return DYNAMIC.test(text) && !new RegExp(MARKER.source).test(text);
+    })
+    .map((file) => file.slice(ROOT.length + 1))
+    .sort();
+
+  assert.deepEqual(undeclared, [],
+    `${undeclared.join(', ')} reads process.env with a computed key and has no ` +
+    '`@env NAME NAME` marker, so nothing can tell which variables those are.');
+});
+
+test('the marker covers every switch the bootstrap actually reads', () => {
+  // A marker is a hand-kept list, so it can go stale the moment a fourth
+  // `flag(...)` is added beside it. This is the one helper of that shape in
+  // the repository, and its call sites DO name their variable, so they can be
+  // checked against what the discovery ended up with.
+  const file = join(ROOT, 'habiterall-cloud/scripts/bootstrap-authentik.mjs');
+  const source = readFileSync(file, 'utf8');
+  const called = [...source.matchAll(/\bflag\(\s*'([A-Z][A-Z0-9_]*)'/g)].map(([, n]) => n);
+  assert.ok(called.length >= 3, `only found ${called.length} flag() call sites`);
+
+  const seen = envNames(moduleGraph([BOOTSTRAP]));
+  const missed = called.filter((name) => !seen.has(name)).sort();
+  assert.deepEqual(missed, [],
+    `flag() reads ${missed.join(', ')}, which the @env marker beside it omits`);
 });
 
 test('discovery sees a variable read off an injected env object', () => {
