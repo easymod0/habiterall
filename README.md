@@ -34,7 +34,7 @@ reconnect.
 - [Reminders and notifications](#reminders-and-notifications)
 - [Install on a phone](#install-on-a-phone)
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
-- [Backup and restore](#backup-and-restore)
+- [Backup and restore](#backup-and-restore) · [Upgrading](#upgrading) · [Releases](#releases)
 - [Configuration](#configuration) · [API](#api)
 - [Security](#security) · [Architecture](#architecture) · [Development](#development)
 
@@ -70,8 +70,20 @@ development.
 
 ### personal edition
 
-The published image needs no clone and no build. Save this as
-`docker-compose.yml` anywhere:
+One file, one command. Save this as `docker-compose.yml` anywhere — or
+download it:
+
+```bash
+curl -o docker-compose.yml \
+  https://raw.githubusercontent.com/easymod0/habiterall/master/examples/docker-compose.personal.yml
+docker compose up -d
+```
+
+Open **<http://localhost:3000>**. That is the whole install; everything below
+is what you can change.
+
+**The file**, with a comment on every variable
+([`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)):
 
 <!-- generated from examples/docker-compose.personal.yml — edit that file, then `npm run docs:compose` -->
 ```yaml
@@ -126,10 +138,9 @@ volumes:
 ```
 <!-- /generated -->
 
-Every variable it reads can be set in the file itself or in a `.env` beside it.
-[`examples/personal.env.example`](examples/personal.env.example) is that file
-with a comment on each, and everything in it has a working default — so an
-unedited copy starts:
+Set those in the file itself, or in a `.env` beside it —
+[`examples/personal.env.example`](examples/personal.env.example) is the
+template, and every line in it has a working default:
 
 <details>
 <summary><b>Show <code>personal.env.example</code></b></summary>
@@ -226,12 +237,6 @@ DISCORD_BOT_TOKEN=
 <!-- /generated -->
 </details>
 
-```bash
-docker compose up -d
-```
-
-Open **<http://localhost:3000>**.
-
 If you set `HABITERALL_USERNAME` and `HABITERALL_PASSWORD` above, sign in with
 them and that is the whole setup. If you left them blank you are asked to
 **create an account** on that first visit — and until somebody does, *anyone who
@@ -246,13 +251,8 @@ it. That is a real option for a machine only you can talk to — see
 [Turning the guards off](#turning-the-guards-off) for that setting and the
 others alongside it.
 
-That file is also in the repository as
-[`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
-(and the two cloud ones beside it). What is printed above is *generated* from
-it, and it is the same file the repository's own
-`habiterall-personal/docker-compose.yml` extends — so the variables listed
-there are all of them, and a test fails if the server grows one that is
-missing. To update:
+Between the two files above, every variable this edition reads is accounted
+for — a test fails if the server grows one neither mentions. To update:
 
 ```bash
 docker compose pull && docker compose up -d
@@ -265,7 +265,7 @@ Requires **Node 26+**, the major both Docker images ship. There is no build
 step — what runs is what is on disk.
 
 ```bash
-git clone <your-repo-url> habiterall
+git clone https://github.com/easymod0/habiterall.git
 cd habiterall
 npm install
 npm run start:personal
@@ -280,7 +280,20 @@ Also **<http://localhost:3000>**, with the database at
 
 Multi user, so it needs a database and somewhere to sign in. This brings both:
 the published image, Postgres, and Authentik as the identity provider — nothing
-to build, and no source on the server. Save as `docker-compose.yml`:
+to build, and no source on the server. Two files, then one command:
+
+```bash
+curl -o docker-compose.yml \
+  https://raw.githubusercontent.com/easymod0/habiterall/master/examples/docker-compose.cloud-authentik.yml
+curl -o .env \
+  https://raw.githubusercontent.com/easymod0/habiterall/master/examples/cloud.env.example
+```
+
+Fill in the `.env` — that is the only editing step, and it is covered next.
+Then `docker compose up -d`, and the stack configures itself.
+
+<details>
+<summary><b>Show <code>docker-compose.cloud-authentik.yml</code></b></summary>
 
 <!-- generated from examples/docker-compose.cloud-authentik.yml — edit that file, then `npm run docs:compose` -->
 ```yaml
@@ -485,6 +498,9 @@ volumes:
   authentik-images:
 ```
 <!-- /generated -->
+</details>
+
+#### Filling in the `.env`
 
 **Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
 `OIDC_ISSUER` is where Authentik does, and they must be different origins
@@ -496,19 +512,10 @@ proxy asks habiterall for Authentik's discovery document, the app is still
 starting — because it is waiting on that very document — and you get a 502
 that looks like a proxy fault rather than a configuration one.
 
-Alongside it, a `.env`. Take
-[`examples/cloud.env.example`](examples/cloud.env.example) — it describes every
-variable both cloud files read, and ships each secret as a `CHANGE_ME` line:
-
-```bash
-curl -O https://raw.githubusercontent.com/easymod0/habiterall/master/examples/cloud.env.example
-mv cloud.env.example .env
-```
-
-Then fill in every `CHANGE_ME` line. Hex for the two database passwords and
-the OIDC pair, because those go into a connection URL or an `Authorization`
-header and base64's `/` ends a URL's authority — about half of generated
-passwords contain one:
+Every secret ships as a `CHANGE_ME` line, and there are nine. Hex for the two
+database passwords and the OIDC pair, because those go into a connection URL or
+an `Authorization` header and base64's `/` ends a URL's authority — about half
+of generated passwords contain one:
 
 ```bash
 openssl rand -hex 32      # DB_OWNER_PASSWORD, APP_DB_PASSWORD,
@@ -522,6 +529,13 @@ The OIDC pair is yours to choose, not Authentik's to hand you: the stack
 configures the provider *with* them, so nothing is pasted back. Set
 `PUBLIC_URL`, `OIDC_ISSUER` and `AUTHENTIK_PUBLIC_URL` to your two hostnames,
 and `AUTHENTIK_BOOTSTRAP_PASSWORD` to the first admin's password.
+
+> **Just trying it on your laptop?** Leave those three URLs at their
+> `http://localhost` defaults and set **`ALLOW_INSECURE_OIDC=true`**. Without
+> it the app exits at startup with *"OIDC_ISSUER uses plaintext http"* —
+> `openid-client` refuses a plaintext issuer, and rightly. Set it back to
+> `false` the moment the stack is behind TLS; the
+> [production checklist](habiterall-cloud/SETUP.md) checks for it.
 
 <details>
 <summary><b>Show <code>cloud.env.example</code></b></summary>
@@ -565,6 +579,12 @@ TZ=Etc/UTC
 # Lets the app talk OIDC over plain http. LOCAL TESTING ONLY — never in a real
 # deployment. Both guards it lifts exist because plaintext issuers and
 # non-Secure cookies are how a session gets stolen.
+#
+# READ THIS IF YOU ARE JUST TRYING IT OUT. The URLs above ship as
+# http://localhost, and openid-client REFUSES a plaintext issuer — so on those
+# defaults the app container exits at startup with "OIDC_ISSUER uses plaintext
+# http". Set this to `true` for a local trial, and back to `false` the moment
+# you put the stack behind TLS.
 ALLOW_INSECURE_OIDC=false
 
 # ---- identity provider ------------------------------------------------------
@@ -696,8 +716,7 @@ docker compose up -d
 ```
 
 There is no second phase and nothing to click — the `authentik-bootstrap`
-service, commented at length in the file above, does the configuring. What it
-says it will do, it says here:
+service does the configuring. What it says it will do, it says here:
 
 ```bash
 docker compose logs authentik-bootstrap
@@ -738,7 +757,7 @@ images straight from the checkout, so editing one takes effect on the next
 request instead of on the next build.
 
 ```bash
-git clone <your-repo-url> habiterall
+git clone https://github.com/easymod0/habiterall.git
 cd habiterall/habiterall-cloud
 cp ../examples/cloud.env.example .env    # then fill in the CHANGE_ME lines
 docker compose up -d

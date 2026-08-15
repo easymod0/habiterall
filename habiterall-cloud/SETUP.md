@@ -46,6 +46,12 @@ Set `PUBLIC_URL` to the URL users will actually visit. In production this
 **must** be `https://` — the session cookie is only marked `Secure` when it is,
 and the app logs a warning otherwise.
 
+**For a local stack on plain http, also set `ALLOW_INSECURE_OIDC=true`.** The
+template's URLs ship as `http://localhost`, and `openid-client` refuses a
+plaintext issuer — so on those defaults the app container exits at startup with
+*"OIDC_ISSUER uses plaintext http"* rather than starting and misbehaving. The
+[production checklist](#production-checklist) below checks that it is off again.
+
 ## 2. Start it
 
 ```bash
