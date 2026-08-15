@@ -148,8 +148,12 @@ world in".
 
 Compose publishes the app on `${APP_PORT:-3100}` and Authentik on
 `${AUTHENTIK_PORT:-9000}`, and `BIND_ADDR` decides which interface they appear
-on. It defaults to `0.0.0.0` — every interface — because browsing the app
-directly from another machine is a perfectly ordinary way to run it.
+on. It is **empty** by default, which is Docker's own behaviour: every interface
+of both address families. Browsing the app directly from another machine is a
+perfectly ordinary way to run it.
+
+Leave it empty rather than writing `0.0.0.0`, which looks equivalent and is not
+— that is IPv4 only, and an IPv6 client is refused.
 
 That default is the wrong one the moment you put TLS in front. A reverse proxy
 on this host only needs loopback, and while the port is also on the LAN the

@@ -137,7 +137,7 @@ services:
       - authentik-icons:/web/dist/assets/icons/habiterall
       - authentik-images:/web/dist/assets/images/habiterall
     ports:
-      - '${BIND_ADDR:-0.0.0.0}:${AUTHENTIK_PORT:-9000}:9000'
+      - '${BIND_ADDR:-}:${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
 
   authentik-worker:
@@ -232,7 +232,7 @@ services:
       migrate: { condition: service_completed_successfully }
       authentik-bootstrap: { condition: service_completed_successfully }
     ports:
-      - '${BIND_ADDR:-0.0.0.0}:${APP_PORT:-3100}:3000'
+      - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten

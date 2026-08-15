@@ -59,7 +59,7 @@ services:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     ports:
-      - '${BIND_ADDR:-0.0.0.0}:${APP_PORT:-3100}:3000'
+      - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten

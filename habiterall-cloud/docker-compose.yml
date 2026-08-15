@@ -118,7 +118,7 @@ services:
       - ../shared/public/icons:/web/dist/assets/icons/habiterall:ro
       - ./branding:/web/dist/assets/images/habiterall:ro
     ports:
-      - '${BIND_ADDR:-0.0.0.0}:${AUTHENTIK_PORT:-9000}:9000'
+      - '${BIND_ADDR:-}:${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
 
   authentik-worker:

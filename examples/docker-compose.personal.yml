@@ -11,7 +11,7 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
-      - '${BIND_ADDR:-0.0.0.0}:${APP_PORT:-3000}:3000'
+      - '${BIND_ADDR:-}:${APP_PORT:-3000}:3000'
     volumes:
       - habiterall-data:/data        # your whole database is one file in here
     environment:
