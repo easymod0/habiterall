@@ -24,9 +24,30 @@ const scratch = (name) => {
 /* ---------- primitives ---------- */
 
 test('timestamps round-trip through Loop encoding', () => {
-  for (const iso of ['2026-01-01', '2026-06-15', '1998-03-10', '2027-12-31']) {
+  // The years below 1000 are the pair of bugs this list was widened for, and
+  // they are here together because each half hides the other. `Date.UTC`
+  // applied the legacy two-digit-year mapping, so the writer put `0050-03-15`
+  // in the file as 1950-03-15; the reader did not pad the year, so a correctly
+  // written `0100-01-01` came back as `100-01-01` and was thrown away as a bad
+  // date. Fix the writer alone and the reader starts silently dropping the
+  // early dates it now receives — the round trip is the only assertion that
+  // sees both.
+  for (const iso of [
+    '0001-01-01', '0050-03-15', '0099-12-31', '0100-01-01', '0999-12-31',
+    '1000-01-01', '1998-03-10', '2026-01-01', '2026-06-15', '2027-12-31',
+    '9999-12-31',
+  ]) {
     assert.equal(loopTimestampToISO(isoToLoopTimestamp(iso)), iso, iso);
   }
+});
+
+test('an early year is written as itself, not 1900 years later', () => {
+  // The round trip above would still pass if both halves agreed on a wrong
+  // number, so pin the wire format too: this is what Loop's own reader gets.
+  assert.equal(new Date(isoToLoopTimestamp('0050-03-15')).toISOString(),
+    '0050-03-15T00:00:00.000Z');
+  assert.equal(new Date(isoToLoopTimestamp('0099-12-31')).toISOString(),
+    '0099-12-31T00:00:00.000Z');
 });
 
 test('timestamps are UTC midnight', () => {

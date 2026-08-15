@@ -31,9 +31,55 @@ test('timestamps before 2000 floor correctly', () => {
   assert.equal(loopTimestampToISO(Date.UTC(1998, 2, 10)), '1998-03-10');
 });
 
+test('a year below 1000 keeps its leading zeros', () => {
+  // Not cosmetic: both editions' `applyImport` admit a date only through
+  // `^\d{4}-\d{2}-\d{2}$`, so an unpadded year made a perfectly good Loop
+  // timestamp arrive as `100-01-01` and the entry was dropped as malformed —
+  // with no error and no skipped-row report. The `boundedRange` note in the
+  // root CLAUDE.md cites an entry dated year 0100 as real data.
+  const at = (y, m, d) => {
+    const t = new Date(0);
+    t.setUTCFullYear(y, m - 1, d);
+    return t.getTime();
+  };
+  assert.equal(loopTimestampToISO(at(100, 1, 1)), '0100-01-01');
+  assert.equal(loopTimestampToISO(at(999, 12, 31)), '0999-12-31');
+  assert.equal(loopTimestampToISO(at(50, 3, 15)), '0050-03-15');
+  assert.equal(loopTimestampToISO(at(1, 1, 1)), '0001-01-01');
+});
+
 test('invalid timestamps are rejected', () => {
   assert.equal(loopTimestampToISO('nonsense'), null);
   assert.equal(loopTimestampToISO(undefined), null);
+});
+
+test('an absent timestamp is not a day in 1970', () => {
+  // `Number(null)`, `Number('')`, `Number([])` and `Number(false)` are all 0,
+  // and 0 IS a real timestamp — the epoch — so a value check cannot tell a
+  // missing column from a genuine 1970-01-01. Only `undefined` and `NaN` were
+  // being refused; everything else read back as a real date on a row that had
+  // none.
+  for (const absent of [null, '', ' ', [], {}, true, false]) {
+    assert.equal(loopTimestampToISO(absent), null, JSON.stringify(absent) ?? String(absent));
+  }
+  // ...while the epoch itself still reads as the day it is.
+  assert.equal(loopTimestampToISO(0), '1970-01-01');
+  // A numeric string is what a CAST(... AS TEXT) column hands back, and is real.
+  assert.equal(loopTimestampToISO(String(Date.UTC(1998, 2, 10))), '1998-03-10');
+});
+
+test('a timestamp outside years 1-9999 is no date at all', () => {
+  // Padding to four digits is what makes this worth stating: year 0 formats as
+  // `0000-01-01`, which the writers' date regex would have accepted as an
+  // ordinary date. Before the padding it was `0-01-01` and the regex caught
+  // it, so the guard has to arrive with the padding rather than after it.
+  assert.equal(loopTimestampToISO(-62_167_219_200_000), null, 'year 0');
+  assert.equal(loopTimestampToISO(-100_000_000_000_000), null, 'BCE');
+  // Beyond the ECMAScript date range the year is NaN; `275760-09-13` is the
+  // far end of it and is not four digits either.
+  assert.equal(loopTimestampToISO(8.64e15 + 1), null);
+  assert.equal(loopTimestampToISO(8.64e15), null, 'year 275760');
+  assert.equal(loopTimestampToISO(Infinity), null);
 });
 
 /* ---------- Loop value conversion ---------- */
