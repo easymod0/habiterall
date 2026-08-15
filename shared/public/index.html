@@ -61,14 +61,39 @@
     <button type="button" id="btn-sync" class="btn btn-sm">Retry</button>
   </div>
 
+  <!--
+    One sign-in view for every mode. The copy and which control shows are set
+    by auth-session.js from what the server reports, because the personal
+    edition decides at runtime whether it has auth at all — see that file.
+  -->
   <main id="view-signin" class="view" hidden>
     <div class="signin">
-      <h2 class="signin-title">Sign in to habiterall</h2>
-      <p class="signin-sub">
+      <h2 class="signin-title" id="signin-title">Sign in to habiterall</h2>
+      <p class="signin-sub" id="signin-sub">
         Your habits are private to your account. Sign in with your
         organisation account to continue.
       </p>
-      <a href="/auth/login" class="btn btn-primary btn-signin">Sign in</a>
+
+      <a href="/auth/login" class="btn btn-primary btn-signin" id="signin-oidc">Sign in</a>
+
+      <form id="signin-form" class="signin-form" hidden>
+        <label>Username
+          <input id="signin-user" name="username" autocomplete="username"
+                 autocapitalize="none" spellcheck="false" required>
+        </label>
+        <label>Password
+          <input id="signin-pass" name="password" type="password"
+                 autocomplete="current-password" required>
+        </label>
+        <label id="signin-confirm-row" hidden>Confirm password
+          <input id="signin-confirm" name="confirm" type="password"
+                 autocomplete="new-password">
+        </label>
+        <p id="signin-error" class="signin-error" role="alert" hidden></p>
+        <button type="submit" class="btn btn-primary btn-signin" id="signin-submit">
+          Sign in
+        </button>
+      </form>
     </div>
   </main>
 

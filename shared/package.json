@@ -16,6 +16,8 @@
     "./notify-send.js": "./src/notify-send.js",
     "./log.js": "./src/log.js",
     "./observe.js": "./src/observe.js",
+    "./security.js": "./src/security.js",
+    "./password.js": "./src/password.js",
     "./unzip.js": "./src/unzip.js",
     "./zip.js": "./src/zip.js",
     "./constants.js": "./src/constants.js",

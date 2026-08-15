@@ -27,6 +27,34 @@ services:
       # Set to get Yes / No / Skip buttons in Discord instead of plain text.
       # See the README: create an application, copy the bot token, invite it.
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      # Sign-in. ON unless this is EXACTLY "off" — every other value, including
+      # "false" and "0" and every typo, leaves it on. That is deliberate: the
+      # mistake worth guarding is an instance reachable from the internet whose
+      # disable flag did not take, and whose only symptom is that it works for
+      # everyone. Leave it unset for anything public.
+      - HABITERALL_AUTH=${HABITERALL_AUTH:-}
+      # The single account. If neither is set, the first visitor to reach
+      # /auth/setup claims the instance — fine on a LAN, a race on the internet.
+      # A hash keeps the plaintext out of `docker inspect`; generate one with:
+      #   node -e "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" 'your password'
+      - HABITERALL_USERNAME=${HABITERALL_USERNAME:-}
+      - HABITERALL_PASSWORD=${HABITERALL_PASSWORD:-}
+      - HABITERALL_PASSWORD_HASH=${HABITERALL_PASSWORD_HASH:-}
+      # Set to keep sessions valid across a rebuild; generated and stored in the
+      # database when absent.
+      - HABITERALL_SESSION_SECRET=${HABITERALL_SESSION_SECRET:-}
+      # How many reverse proxies sit in front. 1 by default, which is right
+      # behind a single TLS terminator; set 0 when exposed directly, or the
+      # rate limiters key every caller on the proxy's address.
+      - TRUST_PROXY=${TRUST_PROXY:-1}
+      # Set to "off" for a trusted LAN or a test run. Leave it alone otherwise:
+      # this edition's database is synchronous, so one client in a loop is all
+      # it takes to stop the event loop.
+      - HABITERALL_RATE_LIMIT=${HABITERALL_RATE_LIMIT:-}
+      # Set to "on" only if this instance is reached over https and nothing
+      # else. It makes browsers rewrite every http request to https, which
+      # breaks the plain-http LAN half of a box that answers on both.
+      - HABITERALL_UPGRADE_INSECURE=${HABITERALL_UPGRADE_INSECURE:-}
     restart: unless-stopped
 
 volumes:

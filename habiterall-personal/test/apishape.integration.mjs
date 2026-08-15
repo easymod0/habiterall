@@ -19,6 +19,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const workdir = mkdtempSync(join(tmpdir(), 'habiterall-shape-'));
+// These suites exercise the API, not sign-in or rate limiting, and auth now
+// defaults ON — see shared/src/password.js. Both are turned off explicitly here,
+// before the server module is imported, exactly as HABITERALL_DB must be: a
+// suite that writes a few hundred entries in a burst is what the 300/minute API
+// limit is meant to catch, and here that burst is the point.
+process.env.HABITERALL_AUTH = 'off';
+process.env.HABITERALL_RATE_LIMIT = 'off';
 process.env.HABITERALL_DB = join(workdir, 'shape.db');
 
 const { app } = await import('../src/server.js');

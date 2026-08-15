@@ -90,7 +90,7 @@ test('every browser module reachable from the entry point is precached', () => {
   // Both auth adapters are entry points: each edition's app-entry.js imports
   // one of them, and the two editions share this service worker.
   const seen = new Set();
-  const queue = ['app.js', 'auth-none.js', 'auth-oidc.js'];
+  const queue = ['app.js', 'auth-session.js'];
   while (queue.length) {
     const file = queue.pop();
     if (seen.has(file)) continue;

@@ -1,10 +1,11 @@
 /**
  * Entry point for the multi-user edition.
  *
- * The UI itself lives in shared/public/app.js; this only picks the auth
- * adapter, so a change to the interface applies to both editions at once.
+ * Both editions load the same adapter now: it asks the server which mode this
+ * instance is in, because the personal edition decides at runtime whether it
+ * has auth at all. See shared/public/auth-session.js.
  */
 import { start } from '/shared/app.js';
-import { auth } from '/shared/auth-oidc.js';
+import { auth } from '/shared/auth-session.js';
 
 start(auth);

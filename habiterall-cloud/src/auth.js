@@ -229,7 +229,10 @@ export function requireAuth(req, res, next) {
     // act on. Browser fetch() sends `Accept: */*`, so negotiating on the
     // header alone would wrongly redirect an XHR to the login page.
     if (req.path.startsWith('/api') || req.originalUrl.startsWith('/api')) {
-      return res.status(401).json({ error: 'authentication required' });
+      // `mode` rides the 401 because a signed-OUT client needs it to know
+      // whether to draw a form or a link, and this is the only response it can
+      // get. Constant here; the personal edition's varies.
+      return res.status(401).json({ error: 'authentication required', mode: 'oidc' });
     }
     return res.redirect('/auth/login');
   }

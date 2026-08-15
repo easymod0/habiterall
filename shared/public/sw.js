@@ -59,8 +59,7 @@ const SHELL = [
   // The UI, identical across editions. Both auth adapters are listed because
   // one service worker serves both editions and each imports a different one.
   '/shared/app.js',
-  '/shared/auth-none.js',
-  '/shared/auth-oidc.js',
+  '/shared/auth-session.js',
   '/shared/charts.js',
   '/shared/offline.js',
   '/shared/ui/api.js',

@@ -14,10 +14,15 @@
     "test:roundtrip": "node test/roundtrip.integration.mjs",
     "test:apishape": "node test/apishape.integration.mjs",
     "test:overview": "node test/overview.integration.mjs",
-    "test:notify": "node test/notify.integration.mjs"
+    "test:notify": "node test/notify.integration.mjs",
+    "test:auth": "node test/auth.integration.mjs",
+    "test:signin": "node test/signin.browser.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",
+    "express-rate-limit": "^8.6.2",
+    "express-session": "^1.18.1",
+    "helmet": "^8.0.0",
     "@habiterall/shared": "*"
   },
   "license": "GPL-3.0-or-later"

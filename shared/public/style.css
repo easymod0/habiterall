@@ -679,6 +679,45 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   font-size: 15px;
 }
 
+/*
+  The password form, shown instead of the sign-in link when the server reports
+  a `password` or `setup` mode. Left-aligned inside a centred card: labels above
+  inputs read as a column, and centring them makes a two-field form look like a
+  ransom note.
+
+  These mirror the `dialog label` / `dialog input` rules above rather than
+  reusing them, because the sign-in view is a <main>, not a <dialog> — it is the
+  one form in the app that has to render before there is a session.
+*/
+.signin-form { text-align: left; }
+.signin-form label {
+  display: block;
+  margin-bottom: 11px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.signin-form input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+.signin-form .btn-signin {
+  width: 100%;
+  margin-top: 6px;
+}
+.signin-error {
+  margin: 0 0 11px;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .user-chip {
   display: flex;
   align-items: center;

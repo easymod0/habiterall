@@ -12,7 +12,7 @@ shared/               EVERYTHING both editions have in common
   public/             the entire UI, plus the PWA (manifest, sw, offline queue)
   public/ui/          one module per view and dialog, over a shared store
   test/               unit tests + browser suites (test/browser/)
-habiterall-personal/  single user, SQLite, no auth   (src/ + one entry point)
+habiterall-personal/  single user, SQLite, optional password  (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)
 android-native/       native Kotlin client — notification actions, and habits
 ```
@@ -24,8 +24,8 @@ what runs is what's on disk.
 ### What belongs where
 
 - **`shared/`** — anything not coupled to storage or auth. The whole frontend
-  lives here; each edition ships only `public/app-entry.js`, which picks an
-  auth adapter and calls `start()`.
+  lives here; each edition ships only `public/app-entry.js`, which calls
+  `start()` with the one auth adapter.
 - **Per edition** — storage (`db.js` / `db/pool.js`), auth, the import
   *writer* (`apply-import.js`), the notifier's storage adapter
   (`notifier.js`), and the API routes.
@@ -560,6 +560,46 @@ server at import time, so nothing declared in it can be unit tested — and the
 failure mode here is silent in the worst direction, an `inflight` left set
 reporting the last good answer forever while Postgres is down.
 
+**One auth adapter, and the server says which mode it is in.**
+`shared/public/auth-session.js` covers all four states — `none`, `password`,
+`setup`, `oidc` — because with no build step there is nothing to pick a module
+at package time, so baking the edition into a file meant the personal edition
+could not make auth a runtime choice at all. `GET /api/me` carries `mode`, and
+so does its **401**: a signed-out client is the one that needs to know whether to
+draw a form or a link, and that response is all it gets. It replaced
+`auth-none.js` and `auth-oidc.js`, and both editions' `app-entry.js` are now the
+same three lines.
+
+**Sign-in belongs in the app, not in the reverse proxy** — because of the
+Android client. `android-native/.../data/Api.kt` talks to `/api` directly,
+outside the WebView, so a proxy's login form is one it cannot fill; exempting
+`/api` to fix that exempts everything worth guarding. The app also needs a `401`
+it can act on, and a proxy answers an expired session with `200` and an HTML
+login page, which the offline replay queue feeds straight to a JSON parser. Both
+editions therefore issue the same cookie (`SESSION_NAME`, `httpOnly`,
+`SameSite=Lax`), so one path in `Api.kt` can carry either.
+
+**The security config is shared; the limiter's key is not.**
+`shared/src/security.js` holds the CSP, the session cookie shape, the four rate
+limits and the `TRUST_PROXY` rule, because those describe `shared/public/` rather
+than an edition — two copies of a CSP is two chances to break the PWA in exactly
+one of them. What stays per edition is `keyGenerator`: cloud keys per
+authenticated user, personal keys on IP through `ipKeyGenerator`, which
+normalises IPv6 to its /64 (a bare `req.ip` gives one client 2^64 buckets to
+rotate through, and express-rate-limit v8 says so at startup rather than
+failing).
+
+**`upgrade-insecure-requests` is the caller's decision, not helmet's.**
+helmet adds it by default, which is right behind TLS and a trap on plain http:
+the browser rewrites every request to https, nothing is listening, and the app
+does not load. It goes unnoticed on `localhost`, which browsers exempt, so it
+only ever breaks on a real address. `cspDirectives(upgradeInsecure)` takes it as
+a parameter because the two editions want different answers — cloud ties it to
+its own scheme, personal makes it an explicit opt-in
+(`HABITERALL_UPGRADE_INSECURE=on`) and defaults to off, because a self-hosted box
+is commonly reachable over both schemes at once and deriving it would break the
+plain-http half.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —
@@ -573,7 +613,9 @@ Several layers, and they catch different things:
 |---|---|---|
 | Unit | `npm test` | nothing |
 | Types | `npm run typecheck` | nothing |
-| Browser | `npm run test:browser` | Chrome + a running server |
+| Browser | `npm run test:browser` | Chrome + a server with `HABITERALL_AUTH=off HABITERALL_RATE_LIMIT=off` |
+| Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
+| Sign-in view | `npm run test:signin -w habiterall-personal` | Chrome (starts its own server) |
 | Reminders | `npm run test:notify` | nothing |
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |

@@ -77,7 +77,7 @@ function registerServiceWorker() {
 
 /**
  * Boot the app with an edition-specific auth adapter.
- * @param adapter  see auth-none.js / auth-oidc.js
+ * @param adapter  see auth-session.js
  */
 export async function start(adapter) {
   setAuth(adapter);
