@@ -7,8 +7,11 @@ import { unlinkSync } from 'node:fs';
 
 const {
   writeLoopDatabase, colorToLoopIndex, isoToLoopTimestamp, toLoopEntry,
+  timeToLoopReminder,
 } = await import('../src/export-loop.js');
-const { parseLoopDatabase, loopTimestampToISO } = await import('../src/import.js');
+const {
+  parseLoopDatabase, loopTimestampToISO, loopReminderToTime,
+} = await import('../src/import.js');
 
 const YES = 2;
 
@@ -30,6 +33,44 @@ test('timestamps are UTC midnight', () => {
   const ts = isoToLoopTimestamp('2026-06-15');
   assert.equal(ts % 86_400_000, 0, 'must be aligned to a day boundary');
   assert.equal(new Date(ts).toISOString(), '2026-06-15T00:00:00.000Z');
+});
+
+test('reminders round-trip through Loop\'s two integer columns', () => {
+  for (const time of ['00:00', '07:05', '09:00', '12:00', '18:30', '23:59']) {
+    const [h, m] = timeToLoopReminder(time);
+    assert.equal(loopReminderToTime(h, m), time, time);
+  }
+});
+
+test('no reminder is NULL in both columns, and comes back blank', () => {
+  // Loop's own representation of "no reminder", and habiterall's is `''`. The
+  // pair has to survive both ways or a habit acquires a 00:00 notification it
+  // never had — the failure a falsiness check produces in either direction.
+  assert.deepEqual(timeToLoopReminder(''), [null, null]);
+  assert.deepEqual(timeToLoopReminder(undefined), [null, null]);
+  assert.equal(loopReminderToTime(null, null), '');
+  assert.equal(loopReminderToTime(undefined, undefined), '');
+
+  // Midnight is the case that separates "absent" from "zero".
+  assert.deepEqual(timeToLoopReminder('00:00'), [0, 0]);
+  assert.equal(loopReminderToTime(0, 0), '00:00');
+});
+
+test('a reminder Loop could not have written is no reminder', () => {
+  // A half-filled row is not a time, and inventing `:00` for it would put a
+  // notification on someone's phone that their Loop install never had.
+  assert.equal(loopReminderToTime(8, null), '');
+  assert.equal(loopReminderToTime(null, 30), '');
+  assert.equal(loopReminderToTime(24, 0), '');
+  assert.equal(loopReminderToTime(-1, 0), '');
+  assert.equal(loopReminderToTime(8, 60), '');
+  assert.equal(loopReminderToTime(8.5, 0), '');
+  assert.equal(loopReminderToTime('nonsense', 0), '');
+
+  // And the same on the way out, for a stored value that got past TIME_RE
+  // somehow. Both editions normalise before storing, so this is a backstop.
+  assert.deepEqual(timeToLoopReminder('25:00'), [null, null]);
+  assert.deepEqual(timeToLoopReminder('7:5'), [null, null]);
 });
 
 test('colors map to a palette index and back to something close', () => {
@@ -99,13 +140,19 @@ const HABITS = [
     id: 1, name: 'Meditate', description: 'Morning sit', type: 'boolean',
     unit: '', target_value: 0, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1, color: '#8b5cf6', archived: 0,
+    reminder_time: '07:05', reminder_message: 'Did you sit for ten minutes?',
   },
   {
     id: 2, name: 'Water', description: '', type: 'numerical',
     unit: 'glasses', target_value: 8, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1, color: '#0ea5e9', archived: 0,
+    // Midnight: both Loop columns are 0, so anything testing truthiness rather
+    // than presence reports this habit as having no reminder.
+    reminder_time: '00:00', reminder_message: '',
   },
   {
+    // No reminder fields at all, which is what a caller that predates them
+    // passes — and what a habit with no reminder looks like in storage.
     id: 3, name: 'Cigarettes', description: 'quitting', type: 'numerical',
     unit: 'cigs', target_value: 0, target_type: 'at_most',
     freq_numerator: 1, freq_denominator: 1, color: '#ef4444', archived: 0,
@@ -114,6 +161,7 @@ const HABITS = [
     id: 4, name: 'Gym', description: '', type: 'boolean',
     unit: '', target_value: 0, target_type: 'at_least',
     freq_numerator: 3, freq_denominator: 7, color: '#f59e0b', archived: 1,
+    reminder_time: '23:59', reminder_message: 'Gym today?',
   },
 ];
 
@@ -175,6 +223,32 @@ test('a full export re-imports with identical data', async () => {
   assert.equal(gym.archived, 1);
   assert.equal(gym.freq_numerator, 3);
   assert.equal(gym.freq_denominator, 7);
+
+  // Loop's reminder_hour / reminder_min and its `question`. These were a literal
+  // NULL, NULL and '' in the INSERT and absent from the import's SELECT, so a
+  // habit's reminder survived neither direction of this trip.
+  assert.equal(med.reminder_time, '07:05', 'a reminder time survives');
+  assert.equal(med.reminder_message, 'Did you sit for ten minutes?',
+    'the prompt survives as Loop\'s question');
+  assert.equal(water.reminder_time, '00:00',
+    'midnight is a reminder, not the absence of one');
+  assert.equal(cigs.reminder_time, '', 'no reminder stays no reminder');
+  assert.equal(cigs.reminder_message, '');
+  assert.equal(gym.reminder_time, '23:59');
+
+  // reminder_days is Loop's weekday mask, and is what the import gate reads.
+  // A habit with a reminder gets all seven bits; one without gets 0, which is
+  // what Loop's own writer stores. Read from the file, since nothing above
+  // surfaces it.
+  const { DatabaseSync } = await import('node:sqlite');
+  const raw = new DatabaseSync(path, { readOnly: true });
+  const days = Object.fromEntries(
+    raw.prepare(`SELECT name, reminder_days FROM Habits`).all()
+      .map((r) => [r.name, r.reminder_days])
+  );
+  raw.close();
+  assert.equal(days['Meditate'], 127, 'a reminder is an all-days one');
+  assert.equal(days['Cigarettes'], 0, 'no reminder, so no days — as Loop writes it');
 
   unlinkSync(path);
 });

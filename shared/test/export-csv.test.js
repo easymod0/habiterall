@@ -50,9 +50,13 @@ const HABITS = [
     id: 1, name: 'Water', description: 'Hydrate', type: 'numerical',
     unit: 'glasses', target_value: 8, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1, color: '#22c55e', archived: 0,
+    reminder_message: 'How many glasses so far?',
   },
   {
-    id: 2, name: 'Gym, early', description: '', type: 'boolean',
+    // A description and NO prompt. The description must not leak into the
+    // Question column — with both fields empty this habit could not tell the
+    // difference, and the assertion below silently tested nothing.
+    id: 2, name: 'Gym, early', description: 'Before work', type: 'boolean',
     unit: '', target_value: 0, target_type: 'at_least',
     freq_numerator: 3, freq_denominator: 7, color: '#f59e0b', archived: 0,
   },
@@ -88,6 +92,25 @@ test('Habits.csv is readable by our own Habits.csv parser', () => {
   assert.equal(gym.type, 'boolean');
   assert.equal(gym.freq_numerator, 3);
   assert.equal(gym.freq_denominator, 7);
+});
+
+test('Question and Description are two columns holding two fields', () => {
+  // The description was written into BOTH columns, and the importer read
+  // Question as a fallback FOR description — so a habiterall CSV round trip
+  // copied the description over the habit's reminder prompt, and the pair of
+  // bugs hid each other.
+  const meta = parseLoopHabitsCSV(buildHabitsCsv(HABITS));
+
+  const water = meta.get('Water');
+  assert.equal(water.reminder_message, 'How many glasses so far?');
+  assert.equal(water.description, 'Hydrate');
+
+  // A habit with no prompt writes an empty Question rather than a copy of its
+  // description — which is the actual old behaviour, and needs a habit whose
+  // description is non-empty to be visible at all.
+  const gym = meta.get('Gym, early');
+  assert.equal(gym.description, 'Before work');
+  assert.equal(gym.reminder_message, '');
 });
 
 test('a measurable 3 survives the CSV pair instead of becoming a skip', () => {

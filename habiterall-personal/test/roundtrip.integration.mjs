@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS,
 } from '@habiterall/shared/test/roundtrip-fixture.mjs';
 
 let fails = 0;
@@ -109,6 +109,8 @@ await seed();
 console.log('--- baseline ---');
 const baselineFull = await current();
 const baselineLoop = await current({ fields: LOOP_HABIT_FIELDS, notes: false });
+// The .db carries a reminder time as well; Habits.csv has no column for one.
+const baselineLoopDb = await current({ fields: LOOP_DB_HABIT_FIELDS, notes: false });
 
 ck('fixture seeded', baselineFull.length === FIXTURE.length,
   `${baselineFull.length} habits`);
@@ -191,15 +193,15 @@ ck('the Loop export is a SQLite file',
   loopDb.subarray(0, 15).toString());
 
 const loopResult = await restore(loopDb);
-const afterLoop = await current({ fields: LOOP_HABIT_FIELDS, notes: false });
+const afterLoop = await current({ fields: LOOP_DB_HABIT_FIELDS, notes: false });
 
 // Every entry, with no exception left: Loop's NO is a day habiterall can now
 // both hold and write, so a stated lapse survives whether or not a note came
 // with it. Notes themselves are still outside this comparison (`notes: false`),
 // which is what the CSV cannot carry.
 ck('Loop round-trip preserves habits and entries',
-  diff(baselineLoop, afterLoop) === null,
-  diff(baselineLoop, afterLoop) ?? '');
+  diff(baselineLoopDb, afterLoop) === null,
+  diff(baselineLoopDb, afterLoop) ?? '');
 
 const loopMeditate = afterLoop.find((h) => h.name === 'Meditate');
 ck('Loop: a stated lapse survives, with or without a note',
@@ -230,6 +232,18 @@ ck('Loop: a zero on an at_most habit survives',
 const loopReading = afterLoop.find((h) => h.name === 'Reading');
 ck('Loop: a fractional target survives',
   loopReading.target_value === 12.5, String(loopReading.target_value));
+
+// Loop's reminder_hour / reminder_min and its `question`, both of which were
+// written as literal NULL / '' on the way out and never read on the way in.
+ck('Loop: a reminder time survives',
+  loopMeditate.reminder_time === '07:30', String(loopMeditate.reminder_time));
+ck('Loop: a midnight reminder is a reminder, not a blank',
+  loopSnacks.reminder_time === '00:00', String(loopSnacks.reminder_time));
+ck('Loop: no reminder stays no reminder',
+  loopReading.reminder_time === '', JSON.stringify(loopReading.reminder_time));
+ck('Loop: the reminder prompt survives as question',
+  loopMeditate.reminder_message === 'Did you sit for ten minutes?',
+  String(loopMeditate.reminder_message));
 
 /* ---------- CSV ---------- */
 
@@ -286,6 +300,22 @@ const csvGym = afterCsv.find((h) => h.name === 'Gym');
 ck('CSV: a 3-per-7 frequency survives',
   csvGym.freq_numerator === 3 && csvGym.freq_denominator === 7,
   `${csvGym.freq_numerator}/${csvGym.freq_denominator}`);
+
+// Habits.csv wrote the description into Question as well as Description, and
+// the importer read Question as a fallback FOR description — so the duplication
+// was invisible and the prompt was lost. The two columns are two fields.
+ck('CSV: the reminder prompt survives, in the Question column',
+  csvMeditate.reminder_message === 'Did you sit for ten minutes?',
+  String(csvMeditate.reminder_message));
+ck('CSV: the description is not overwritten by the prompt',
+  (await current()).find((h) => h.name === 'Meditate').description === 'Ten minutes, morning',
+  (await current()).find((h) => h.name === 'Meditate').description);
+// Loop's CSV export has no reminder columns at all, so this one is expected to
+// be dropped — asserted rather than assumed, since it is the difference between
+// the two Loop formats and the reason there are two field lists.
+ck('CSV: a reminder time is dropped, as the format requires',
+  (await current()).find((h) => h.name === 'Meditate').reminder_time === '',
+  (await current()).find((h) => h.name === 'Meditate').reminder_time);
 
 /* ---------- a merge adds, and never deletes an answer ---------- */
 

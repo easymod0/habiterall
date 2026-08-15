@@ -23,6 +23,16 @@ export function esc(value) {
 /**
  * The metadata file. Column names match what `parseLoopHabitsCSV` looks for,
  * so our own export can be read back by our own importer.
+ *
+ * They are NOT Loop 2.x's header, which is
+ * `Position,Name,Type,Question,Description,FrequencyNumerator,FrequencyDenominator,Color,Unit,Target Type,Target Value,Archived?`
+ * — different order, spelled-out frequency columns, and `Archived?` with the
+ * question mark. This is habiterall's own dialect and always has been; the
+ * importer accepts both, and Loop has no Habits.csv importer at all, so nothing
+ * downstream depends on matching it. Worth knowing before "fixing" either side
+ * to agree with the other: `NumRepetitions` together with `Question` is a
+ * combination no Loop version ever wrote, which makes it a fingerprint for a
+ * habiterall file.
  */
 /**
  * Make every habit name unique for the duration of an export.
@@ -60,7 +70,11 @@ export function buildHabitsCsv(habits) {
     lines.push([
       i,
       esc(h.name),
-      esc(h.description ?? ''),
+      // Question and Description are two different Loop fields. This wrote the
+      // description into both, so a habiterall CSV round trip copied it over the
+      // habit's reminder prompt — and the importer read `question` as a fallback
+      // for `description`, which is what kept the duplication invisible.
+      esc(h.reminder_message ?? ''),
       esc(h.description ?? ''),
       Number(h.freq_numerator ?? 1),
       Number(h.freq_denominator ?? 1),
