@@ -205,12 +205,27 @@ export function parseHabiterallJSON(payload) {
     throw Object.assign(new Error('not a habiterall export: missing "habits" array'), { status: 400 });
   }
 
+  // The third reader, and it needs the same ceilings as the other two. Lower
+  // amplification than the zip route — this arrives uncompressed — but the
+  // 16MB body limit is not a bound on object count: `{"name":"a","entries":[]}`
+  // is 26 bytes, so the allowed body still describes several hundred thousand
+  // habits, and the array is materialised by `JSON.parse` before this function
+  // is even entered. Bounding here is therefore about what happens NEXT — the
+  // per-habit work in `applyImport`, which is a transaction — rather than about
+  // the parse itself, which is the one honest difference from the .db case.
+  if (data.habits.length > MAX_PARSE_HABITS) throw tooMuch(`${MAX_PARSE_HABITS} habits`);
+
+  let entryBudget = MAX_PARSE_ENTRIES;
   return data.habits
     .filter((h) => h && typeof h === 'object' && !Array.isArray(h))
-    .map((h) => ({
-      ...h,
-      entries: Array.isArray(h.entries) ? h.entries : [],
-    }));
+    .map((h) => {
+      const entries = Array.isArray(h.entries) ? h.entries : [];
+      // A total across the file, as everywhere else here: one habit with a
+      // million days costs the same as a million habits with one.
+      entryBudget -= entries.length;
+      if (entryBudget < 0) throw tooMuch(`${MAX_PARSE_ENTRIES} entries`);
+      return { ...h, entries };
+    });
 }
 
 /**
@@ -296,6 +311,17 @@ export const MAX_PARSE_HABITS = Number(process.env.MAX_PARSE_HABITS) || 10_000;
  * a small container survives; the unbounded read did not survive anything.
  */
 export const MAX_PARSE_ENTRIES = Number(process.env.MAX_PARSE_ENTRIES) || 250_000;
+
+/**
+ * One refusal for every parse path, because there is more than one and they
+ * were not all bounded. The `.db` reader got a ceiling first; the CSV reader
+ * had none, and it is the cheaper attack — a header is one line, so
+ * `Date,a,a,a,…` two million times deflates ~1000:1 and 8KB of zip aborted the
+ * process where 8KB of SQLite had been made to answer 400.
+ */
+const tooMuch = (what) => Object.assign(
+  new Error(`backup expands to too much data: more than ${what}`), { status: 400 }
+);
 
 /**
  * Read a Loop SQLite backup. `path` must point at a file on disk; node:sqlite
@@ -387,10 +413,6 @@ export async function parseLoopDatabase(path) {
     const notesCol = repCols.has('notes') ? 'notes' : `'' AS notes`;
     const reps = src.prepare(
       `SELECT habit, timestamp, value, ${notesCol} FROM Repetitions WHERE habit = ? ORDER BY timestamp LIMIT ?`
-    );
-
-    const tooMuch = (what) => Object.assign(
-      new Error(`backup expands to too much data: more than ${what}`), { status: 400 }
     );
 
     const habits = [];
@@ -570,7 +592,21 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
     .slice(1)
     .filter((c) => c.name !== '');
 
+  // The same ceiling the .db reader has, for the same reason and against a
+  // cheaper attack. One habit object per header column, and a header is one
+  // line: `Date,a,a,a,…` repeated two million times is 7.6MB of CSV that
+  // deflates to under 8KB, so the zip route bought a ~1000:1 amplification the
+  // .db could not. Measured before this line existed: that upload aborted a
+  // 512MB heap inside the map below, uncatchably, exactly as #79's .db bomb did.
+  if (columns.length > MAX_PARSE_HABITS) throw tooMuch(`${MAX_PARSE_HABITS} habits`);
+
   const habits = columns.map(({ name }) => habitFromCsvMeta(name, habitMeta.get(name)));
+
+  // Entries are bounded too, and as a TOTAL rather than per habit — `unzip.js`
+  // records why one attack over: a per-item cap is no defence when the number
+  // of items is also the attacker's to choose. Rows x columns is the product
+  // that matters here, and neither factor is bounded by the body limit alone.
+  let entryBudget = MAX_PARSE_ENTRIES;
 
   for (const row of rows.slice(1)) {
     const date = (row[0] ?? '').trim();
@@ -614,6 +650,7 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
           }
         }
       }
+      if (entryBudget-- <= 0) throw tooMuch(`${MAX_PARSE_ENTRIES} entries`);
       habit.entries.push({ date, value, status, notes: '' });
     });
   }
