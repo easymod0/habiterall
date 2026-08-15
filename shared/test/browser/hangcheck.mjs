@@ -126,11 +126,17 @@ try {
     return true;
   })()`);
 
-  // While it is in flight nothing is durable — the bounded half of this issue.
+  // The write is durable WHILE the fetch is in flight, which is the whole of
+  // the data-loss half. It used to be queued only in the `catch`, so for the
+  // length of the attempt — unbounded, before the timeout landed — a check-off
+  // existed only in a promise, and closing the tab lost it from the outbox and
+  // the server alike. It is staged before the socket opens now.
   await sleep(2000);
   const during = await look();
-  check('the write is still only a promise while the fetch is in flight',
-    during.outbox.length === 0, JSON.stringify(during));
+  check('the write is already durable while the fetch is still in flight',
+    during.outbox.length === 1, JSON.stringify(during));
+  check('and it is the check-off, not something else',
+    during.outbox[0]?.startsWith('PUT /api/habits/'), String(during.outbox[0]));
 
   await sleep(BOUND_MS + SLACK_MS - 2000);
   const after = await look();
@@ -146,6 +152,40 @@ try {
     after.badge && /1 change/.test(after.badgeText), JSON.stringify(after.badgeText));
   check('the request really was held, not refused',
     !!write, `held: ${held.map((r) => r.method + ' ' + new URL(r.url).pathname).join(', ')}`);
+
+  /* ---- 1b. the next tap does not pay the bound again ---- */
+  console.log('--- once it knows, it stops asking ---');
+
+  // Tap one is what discovers the outage and there is no cheaper way to learn
+  // it. Tap two should cost nothing: the app already believes it is offline, so
+  // the write goes straight to the outbox without a socket. Before the watcher
+  // was fed by a failed write this branch was unreachable — the app never came
+  // to believe anything — so this is the half of the old issue that only became
+  // real once the state did.
+  const t0 = Date.now();
+  await ev(`(()=>{
+    const cells = [...document.querySelectorAll('.habit-row:nth-child(2) .check')];
+    cells[cells.length - 1].click();
+    return true;
+  })()`);
+
+  // Generously under the bound: if the attempt were still being made this
+  // could not finish inside it.
+  let second = null;
+  for (let i = 0; i < 30; i++) {
+    await sleep(100);
+    second = await look();
+    if (second.outbox.length >= 2) break;
+  }
+  const took = Date.now() - t0;
+
+  check('the second tap is queued without waiting for a timeout',
+    second.outbox.length === 2, JSON.stringify(second.outbox));
+  check('and it took a fraction of the bound, not the whole of it',
+    took < BOUND_MS / 2, `${took}ms against a ${BOUND_MS}ms bound`);
+  check('nothing was sent for it — the socket was never opened',
+    held.filter((r) => r.method === 'PUT').length === 1,
+    `${held.filter((r) => r.method === 'PUT').length} PUT(s) held`);
 
   /* ---- 2. creating a habit is not abandoned ---- */
   console.log('--- POST /habits is exempt ---');

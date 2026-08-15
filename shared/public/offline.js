@@ -46,13 +46,24 @@ function tx(mode, fn) {
 
 /* ---------- queue operations ---------- */
 
-/** Persist a write for later. Returns the queue length. */
+/**
+ * Persist a write. Returns its `seq`, which is also its replay order.
+ *
+ * The seq is the return value because `api()` stages a write BEFORE attempting
+ * it and needs to take it back out again once the server has answered — see
+ * the enqueue-first note there. Nothing else uses it; `pendingCount()` is a
+ * call away for callers that want the length.
+ */
 export async function enqueue(entry) {
-  await tx('readwrite', (store) => store.add({
+  return tx('readwrite', (store) => store.add({
     ...entry,
     queuedAt: Date.now(),
   }));
-  return pendingCount();
+}
+
+/** Take a staged write back out, by the `seq` `enqueue` returned. */
+export function unstage(seq) {
+  return remove(seq);
 }
 
 export function pending() {
