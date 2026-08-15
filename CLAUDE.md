@@ -203,11 +203,17 @@ product limit applied to the parsed array; these bound what a file may *declare*
 before that array exists. One is a defence, the other a policy, and they are one
 word apart.
 
-What none of this bounds is CPU. The budget is spent by rows *returned*, so a
-`.db` whose `Repetitions` match no habit, with the index Loop's own schema has
-omitted, full-scans once per habit while spending nothing — 15.8MB answering 200
-after nearly four minutes of blocked event loop. Memory is bounded; time is not.
-See #92.
+And the entry read is **one pass over `Repetitions`, not one per habit**, which
+is the other half of the same problem. `WHERE habit = ?` inside the habit loop
+looks like the cheap shape and is the opposite: Loop's own schema indexes
+`habit`, an uploaded file need not, and then every execution is a full scan — so
+the cost is habits x rows, and the budget could not see it, because a budget
+spent by rows RETURNED is never spent by rows that match nothing. A 6.4MB file
+of 2,000 habits and 300,000 orphan rows took 13.5 seconds and yielded zero
+entries. Read once ordered by `habit, timestamp` and bucket into a Map: one scan
+whatever the file's indexes, the same per-habit ordering, and every row billed
+before it is looked up. That last clause is the whole correction and there is a
+test on it — bill after the Map miss and the free scan is back.
 
 **The score is a trailing-window ratio**, not per-day credit scaled by
 frequency. The earlier formula overshot for every non-daily habit and was
