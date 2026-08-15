@@ -831,6 +831,36 @@ WebView share. A Custom Tab could not do this: its cookies belong to the
 browser. `httpOnly` is untouched by any of it — that flag stops JavaScript
 reading a cookie, and this is the native API underneath.
 
+**Signing OUT of that is a page too, and for the same reason sign-in is.** The
+app's session is a cookie on this server; the identity provider holds one of
+its own, on its own origin, and `WebSession.clear` cannot reach it —
+deliberately, because emptying every site's cookies would sign the user out of
+everything that shares that provider. So the provider's session is ended by
+VISITING its end-session URL, which `POST /auth/logout` hands back and which
+nothing used to load: the local session went, the credential that silently
+recreates it stayed, and on a shared device that is the half that matters. An
+OkHttp call cannot stand in for the visit — its cookie jar is not where the
+provider's cookie lives — and neither can a hidden load, because a provider is
+entitled to ask something first and a confirmation nobody can reach is the same
+silent survival. `Auth.endSession` is the rule and `SignOutScreen` is where it
+is allowed to be a page.
+
+Two things about that rule read as edition-specific and are not. **The server's
+own root is nowhere to go** — the personal edition answers `/` and so does
+cloud when its provider has no end-session endpoint — which is what keeps this
+from guessing where a provider lives, since a self-hosted one commonly sits on
+the same host one port over. And the value is **checked before it is loaded**
+even though it came from the server we are authenticated to, because `loadUrl`
+executes a `javascript:` URL in the context of whatever the WebView is showing;
+resolving it as http(s) is the whole check and it costs one line.
+
+The other half of that sign-out is not in this app at all — Authentik ships two
+invalidation flows and the bootstrap named the one with no stages in it. See
+`habiterall-cloud/CLAUDE.md`; the point worth carrying here is that **every
+wrong version ends with the phone on its sign-in screen**, because the local
+session goes either way. Only asking the provider for a password again tells
+you which version you have.
+
 That is what makes a token endpoint unnecessary, and with it an OAuth client the
 operator would have to register. The cost is that `AuthMode` and `Auth.read` are
 a **mirror** of `shared/public/auth-session.js`, pinned by `AuthTest` for the

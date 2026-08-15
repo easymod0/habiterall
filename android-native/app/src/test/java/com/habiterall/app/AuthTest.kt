@@ -5,6 +5,7 @@ import com.habiterall.app.data.AuthMode
 import com.habiterall.app.data.Session
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -191,5 +192,89 @@ class AuthTest {
         for (mode in listOf(AuthMode.PASSWORD, AuthMode.SETUP, AuthMode.OIDC)) {
             assertTrue(mode.name, mode.needsSignIn)
         }
+    }
+
+    /* ------------------------------------------- the other end of a session */
+
+    private val server = "https://habits.example.com"
+
+    @Test
+    fun `a cloud sign-out carries the provider's end-session URL`() {
+        // The whole bug: this URL arrived and nothing visited it, so the app's
+        // cookie went and the provider's — on its own origin, unreachable to
+        // `WebSession.clear` — did not. Sign out, sign in, and you are straight
+        // back in with no prompt.
+        val logout = "https://id.example.com/application/o/end-session/" +
+            "?id_token_hint=abc&post_logout_redirect_uri=https%3A%2F%2Fhabits.example.com%2F"
+        assertEquals(logout, Auth.endSession(server, 200, body("redirect" to str(logout))))
+    }
+
+    @Test
+    fun `the server's own root is nowhere to go`() {
+        // The personal edition answers exactly this: it has no provider behind
+        // it, and so does cloud when its provider has no end-session endpoint.
+        // Both would otherwise put a sign-out screen in front of a page load
+        // that ends nothing.
+        for (redirect in listOf("/", server, "$server/")) {
+            assertNull(redirect, Auth.endSession(server, 200, body("redirect" to str(redirect))))
+        }
+    }
+
+    @Test
+    fun `a provider on this host one port over is somewhere to go`() {
+        // The rule is the ROOT and not the origin, deliberately. Self-hosting
+        // an identity provider beside the app is the ordinary case — it is what
+        // habiterall-cloud's own compose file does — and a same-origin test
+        // would decide there was nothing to visit.
+        val logout = "$server:9000/application/o/end-session/?id_token_hint=abc"
+        assertEquals(logout, Auth.endSession(server, 200, body("redirect" to str(logout))))
+    }
+
+    @Test
+    fun `nothing that is not an http URL is loaded`() {
+        // The value ends up in `loadUrl`, which EXECUTES a `javascript:` URL in
+        // the context of whatever the WebView is showing. It comes from the
+        // server this client is authenticated to and is still checked, because
+        // the cost of checking is this line.
+        for (redirect in listOf(
+            "javascript:alert(1)",
+            "intent://scan/#Intent;scheme=zxing;end",
+            "file:///data/data/com.habiterall.app/",
+            "",
+        )) {
+            assertNull(redirect, Auth.endSession(server, 200, body("redirect" to str(redirect))))
+        }
+    }
+
+    @Test
+    fun `an answer that is not this contract sends the app nowhere`() {
+        // Same reasoning as `read`: a captive portal or a proxy answers this
+        // route too, and a 200 of HTML says nothing. A body with no `redirect`
+        // is an older server, which also has nowhere for this to go.
+        assertNull(Auth.endSession(server, 200, "<html>Sign in to the hotel wifi</html>"))
+        assertNull(Auth.endSession(server, 200, "{}"))
+        assertNull(Auth.endSession(server, 200, "[]"))
+        assertNull(Auth.endSession(server, 502, body("redirect" to str("https://evil.example/"))))
+        assertNull(Auth.endSession(server, 0, ""))
+    }
+
+    @Test
+    fun `the trip is over when the provider sends us back to the server root`() {
+        // `post_logout_redirect_uri` is this server's root, which is what the
+        // screen watches for. A query on the landing is still the landing.
+        assertTrue(Auth.signOutReturned(server, "$server/"))
+        assertTrue(Auth.signOutReturned(server, "$server/?ok=1"))
+    }
+
+    @Test
+    fun `a page on the provider is not the end of the trip`() {
+        // Including one hosted on this very host, which is why the test is the
+        // root rather than the origin: matching an origin would end the screen
+        // on its own first page load, before anything had been signed out of.
+        assertFalse(Auth.signOutReturned(server, "$server:9000/application/o/end-session/"))
+        assertFalse(Auth.signOutReturned(server, "https://id.example.com/flow/logout/"))
+        assertFalse(Auth.signOutReturned(server, "$server/api/me"))
+        assertFalse(Auth.signOutReturned(server, "about:blank"))
+        assertFalse(Auth.signOutReturned(server, null))
     }
 }

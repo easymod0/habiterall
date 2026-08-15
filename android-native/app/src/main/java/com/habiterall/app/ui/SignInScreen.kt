@@ -23,12 +23,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.habiterall.app.data.Api
+import com.habiterall.app.data.Auth
 import com.habiterall.app.data.AuthMode
 import com.habiterall.app.data.Session
 import kotlinx.coroutines.launch
@@ -198,12 +200,8 @@ fun SignInScreen(
  * The server's own sign-in, in a WebView, for a session this app cannot ask for
  * directly.
  *
- * A WebView of its own rather than the activity's shared one. That one carries
- * a back-stack contract — see `WebBackStack`, where which entry a load lands on
- * is load bearing — and an OIDC round trip is several redirects through hosts
- * this app does not control, which is precisely the traffic that contract does
- * not describe. This one has no such contract: it is opened, it finishes, and
- * it goes away.
+ * A WebView of its own rather than the activity's shared one — see [AuthWebView],
+ * which is also where the other end of this trip lives.
  *
  * **Completion is asked, not inferred.** The obvious test is "did a cookie
  * appear", and it is wrong twice: a session cookie can exist before anybody has
@@ -212,7 +210,6 @@ fun SignInScreen(
  * authority on whether there is a session — the same question the app boots on.
  */
 @OptIn(ExperimentalMaterial3Api::class)
-@SuppressLint("SetJavaScriptEnabled")   // an identity provider's page needs it
 @Composable
 private fun BrowserSignIn(
     api: Api,
@@ -230,35 +227,120 @@ private fun BrowserSignIn(
             )
         },
     ) { pad ->
-        AndroidView(
+        AuthWebView(
+            url = api.signInUrl,
             modifier = Modifier.fillMaxSize().padding(pad),
-            // Cancelling or finishing swaps this branch out, which detaches the
-            // WebView without ending it — leaving an identity provider's page
-            // and its JavaScript running in a pocket. `WebHost.destroy` exists
-            // for exactly that on the other WebView in this app.
-            onRelease = { view ->
-                view.stopLoading()
-                view.loadUrl("about:blank")
-                view.destroy()
-            },
-            factory = { context ->
-                WebView(context).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            scope.launch {
-                                if (api.me() is Session.Active) onSignedIn()
-                            }
-                        }
-                    }
-                    loadUrl(api.signInUrl)
-                }
-            },
+            onSettled = { scope.launch { if (api.me() is Session.Active) onSignedIn() } },
         )
     }
+}
+
+/**
+ * The other end of the same trip: the identity provider's own sign-out.
+ *
+ * The app's session is already gone by the time this is on screen — `signOut`
+ * ends it locally whether or not anything else works, and this visit is what
+ * ends the provider's, on the provider's own origin where no cookie of ours
+ * lives and no OkHttp call of ours is sent. `Auth.endSession` is the whole
+ * reasoning; this screen is only where that URL is allowed to be a page.
+ *
+ * It is a page and not a hidden load, and that is the decision worth stating.
+ * Loading it out of sight would be tidier and would silently fail on any
+ * provider that asks something first — a "sign out of this device?" prompt is
+ * ordinary, and a confirmation nobody can reach is the same silent survival
+ * this exists to end.
+ *
+ * **Done is a real control, not a fallback.** Nothing here has a timeout: a
+ * provider that hangs or fails leaves its own page or error on screen, under a
+ * bar that says what is happening, which is more honest than a screen that
+ * dismisses itself and lets the user believe more happened than did. The app is
+ * signed out either way — that is the part this cannot get wrong — so the only
+ * thing at stake is whether the trip is finished, and the user can see it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SignOutScreen(
+    /** This server, which is what the return landing is recognised against. */
+    serverUrl: String,
+    /** The provider's end-session URL, from `Api.signOut`. */
+    endSessionUrl: String,
+    /** Signed out here and everywhere this app could reach. */
+    onDone: () -> Unit,
+) {
+    BackHandler(onBack = onDone)
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Signing out") },
+                actions = { TextButton(onClick = onDone) { Text("Done") } },
+            )
+        },
+    ) { pad ->
+        AuthWebView(
+            url = endSessionUrl,
+            modifier = Modifier.fillMaxSize().padding(pad),
+            onSettled = { landed -> if (Auth.signOutReturned(serverUrl, landed)) onDone() },
+        )
+    }
+}
+
+/**
+ * A WebView showing one of the server's own auth pages, and nothing else.
+ *
+ * A WebView of its own rather than the activity's shared one, for both screens
+ * above. That one carries a back-stack contract — see `WebBackStack`, where
+ * which entry a load lands on is load bearing — and an OIDC round trip is
+ * several redirects through hosts this app does not control, which is precisely
+ * the traffic that contract does not describe. This one has no such contract:
+ * it is opened, it finishes, and it goes away.
+ *
+ * @param onSettled called with each settled page's URL. Both screens decide
+ *   they are finished from this rather than from the presence of a cookie, and
+ *   for the same reason: a session cookie can exist before anybody has signed
+ *   in, and the URL a redirect chain ends on is one this app has no business
+ *   pattern-matching. Sign-in asks `/api/me`, the one authority on whether
+ *   there is a session; sign-out asks whether the provider has sent us back to
+ *   a page it was told to send us to.
+ */
+@SuppressLint("SetJavaScriptEnabled")   // an identity provider's page needs it
+@Composable
+private fun AuthWebView(
+    url: String,
+    modifier: Modifier,
+    onSettled: (String?) -> Unit,
+) {
+    // Read through a holder, so a recomposition with a new lambda does not need
+    // a new WebView — `factory` captures what it is given, and rebuilding the
+    // view mid-flow would restart the redirect chain.
+    val settled by rememberUpdatedState(onSettled)
+
+    AndroidView(
+        modifier = modifier,
+        // Cancelling or finishing swaps this branch out, which detaches the
+        // WebView without ending it — leaving an identity provider's page
+        // and its JavaScript running in a pocket. `WebHost.destroy` exists
+        // for exactly that on the other WebView in this app.
+        onRelease = { view ->
+            view.stopLoading()
+            view.loadUrl("about:blank")
+            view.destroy()
+        },
+        factory = { context ->
+            WebView(context).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        settled(url)
+                    }
+                }
+                loadUrl(url)
+            }
+        },
+    )
 }
