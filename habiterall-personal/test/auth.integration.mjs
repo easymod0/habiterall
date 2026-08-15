@@ -33,6 +33,9 @@ if (!MODE) {
       HABITERALL_USERNAME: 'mark', HABITERALL_PASSWORD: 'a-good-long-password',
       HABITERALL_RATE_LIMIT: 'off',
     }],
+    ['spoof', { HABITERALL_USERNAME: 'mark', HABITERALL_PASSWORD: 'a-good-long-password' }],
+    ['race', {}],
+    ['preauth', { HABITERALL_USERNAME: 'mark', HABITERALL_PASSWORD: 'a-good-long-password' }],
   ];
 
   let bad = 0;
@@ -171,6 +174,68 @@ if (MODE === 'bruteforce') {
   check('the login limiter survives HABITERALL_RATE_LIMIT=off',
     limited > 0, `${refused} refused, ${limited} rate-limited`);
   check('and it bites at the shared limit', refused === 20, `${refused} got through`);
+}
+
+if (MODE === 'spoof') {
+  // The limiters key on req.ip, and with `trust proxy` on that comes from a
+  // header the caller writes. Forty guesses went through a limit of twenty by
+  // rotating one. TRUST_PROXY is unset here, which is the shipped default.
+  let through = 0;
+  for (let i = 0; i < 40; i++) {
+    const r = await call('/auth/login', {
+      method: 'POST',
+      headers: { 'X-Forwarded-For': `203.0.113.${i}` },
+      body: JSON.stringify({ username: 'mark', password: `guess-${i}` }),
+    });
+    if (r.status === 401) through++;
+  }
+  check('a forged X-Forwarded-For cannot buy more login attempts',
+    through === 20, `${through} reached the password check`);
+}
+
+if (MODE === 'preauth') {
+  // The raw body parser used to sit above requireAuth, so an unauthenticated
+  // POST was buffered to its limit and only then refused — 413 rather than 401,
+  // with the whole body in memory and no limiter having run.
+  const big = 'a'.repeat(20 * 1024 * 1024);
+  const res = await fetch(`${base}/api/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: big,
+  });
+  check('an oversized unauthenticated import is refused, not buffered',
+    res.status === 401, `status=${res.status}`);
+}
+
+if (MODE === 'race') {
+  // Setup was a check-then-write with an upsert and ~30ms of scrypt in between,
+  // so two concurrent claims both wrote and the later one won — locking the
+  // legitimate owner out of their own instance.
+  const claim = (username, password) => fetch(`${base}/auth/setup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  }).then((r) => r.status);
+
+  const first = claim('owner', 'owner-good-password');
+  await new Promise((r) => setTimeout(r, 15));
+  const second = claim('attacker', 'attacker-password');
+  const [a, b] = await Promise.all([first, second]);
+
+  check('exactly one concurrent claim succeeds',
+    [a, b].filter((s) => s === 200).length === 1, `statuses ${a}/${b}`);
+  check('the loser is told the instance is taken',
+    [a, b].includes(409), `statuses ${a}/${b}`);
+
+  const login = (u, p) => fetch(`${base}/auth/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: u, password: p }),
+  }).then((r) => r.status);
+  const owner = await login('owner', 'owner-good-password');
+  const attacker = await login('attacker', 'attacker-password');
+  check('the winner owns the credential and the loser owns nothing',
+    [owner, attacker].filter((s) => s === 200).length === 1,
+    `owner=${owner} attacker=${attacker}`);
 }
 
 if (MODE === 'setup') {

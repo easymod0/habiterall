@@ -135,10 +135,11 @@ export function authFlagMisread(raw) {
  * barrier that pushes people toward no password at all — it is hashed on the
  * way in and the plaintext is never stored.
  *
- * Environment credentials WIN over anything in the database, and the caller
- * disables the change-password path when they are present. Two sources of
+ * Environment credentials WIN over anything in the database. Two sources of
  * truth for one credential is how an operator changes a password in the UI,
- * redeploys, and silently gets the old one back.
+ * redeploys, and silently gets the old one back — so any future
+ * change-password path has to refuse while these are set, and `/api/me`
+ * reports `managed` for that reason.
  *
  * @param {Record<string,string|undefined>} env
  * @returns {{username: string, hash: string|null, plain: string|null}|null}

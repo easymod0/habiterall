@@ -589,6 +589,17 @@ normalises IPv6 to its /64 (a bare `req.ip` gives one client 2^64 buckets to
 rotate through, and express-rate-limit v8 says so at startup rather than
 failing).
 
+**The absence of a field is not a statement.** `auth-session.js` resolves the
+mode from `/api/me`, and it used to read "no `mode` in the body" as an answer:
+`body.mode ?? (res.ok ? 'none' : 'oidc')`. Both guesses were wrong somewhere. A
+429 from the API limiter carries no mode — and the personal edition keys on IP,
+so one household behind one NAT shares the bucket — which replaced a working app
+with a sign-in screen whose only control 404s, on an instance with no auth at
+all. Offline was sharper still: the service worker answers an unreachable API
+with a *synthetic 503* rather than throwing, so the `catch` that existed for
+exactly this never ran. Only 200 and 401 say anything about how an instance
+authenticates; everything else is a fault and belongs on the error path.
+
 **A cookie session needs an origin check, and a missing `Origin` must pass.**
 Both editions authenticate with a cookie, which is what makes forgery possible:
 a form on another site POSTs here and the browser attaches the session.
@@ -638,6 +649,7 @@ Several layers, and they catch different things:
 | Types | `npm run typecheck` | nothing |
 | Browser | `npm run test:browser` | Chrome + a server with `HABITERALL_AUTH=off HABITERALL_RATE_LIMIT=off` |
 | Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
+| Credential change | `npm run test:credchange -w habiterall-personal` | nothing |
 | Sign-in view | `npm run test:signin -w habiterall-personal` | Chrome (starts its own server) |
 | Reminders | `npm run test:notify` | nothing |
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |

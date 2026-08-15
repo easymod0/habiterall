@@ -43,10 +43,12 @@ services:
       # Set to keep sessions valid across a rebuild; generated and stored in the
       # database when absent.
       - HABITERALL_SESSION_SECRET=${HABITERALL_SESSION_SECRET:-}
-      # How many reverse proxies sit in front. 1 by default, which is right
-      # behind a single TLS terminator; set 0 when exposed directly, or the
-      # rate limiters key every caller on the proxy's address.
-      - TRUST_PROXY=${TRUST_PROXY:-1}
+      # How many reverse proxies sit in front. ZERO by default: this edition is
+      # commonly run with nothing in front of it, and trusting a hop that is not
+      # there hands `X-Forwarded-For` — and with it the rate limiters' only key —
+      # to the caller. Set it to 1 behind a single TLS terminator, which you
+      # need anyway for the login form to be worth having.
+      - TRUST_PROXY=${TRUST_PROXY:-0}
       # Set to "off" for a trusted LAN or a test run. Leave it alone otherwise:
       # this edition's database is synchronous, so one client in a loop is all
       # it takes to stop the event loop.

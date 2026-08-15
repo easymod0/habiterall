@@ -82,14 +82,38 @@ export const auth = {
       res = await fetch('/api/me', { credentials: 'same-origin' });
       body = await res.json().catch(() => ({}));
     } catch {
-      // Offline. Say nothing about auth and let the caller's error path run;
-      // guessing a mode here would paint a sign-in form over cached data.
       this.mode = null;
       this.enabled = false;
       throw new Error('Could not reach the server');
     }
 
-    this.mode = body.mode ?? (res.ok ? 'none' : 'oidc');
+    // Only a session (200) or a refusal (401) says anything about how this
+    // instance authenticates. EVERYTHING else is a fault, and must reach the
+    // caller's error path rather than the sign-in view.
+    //
+    // This read the absence of a field as a positive statement — `body.mode ??
+    // (res.ok ? 'none' : 'oidc')` — and both defaults were wrong somewhere. A
+    // 429 from the API limiter carries no mode, so one burst (and this edition
+    // keys on IP, so one household behind one NAT shares the bucket) replaced a
+    // working app with "sign in with your organisation account" above a link
+    // that 404s — on an instance with no authentication at all. A 500 or a
+    // proxy's 502 did the same, permanently. The offline case is the sharper
+    // one: the service worker answers an unreachable API with a synthetic 503
+    // rather than throwing, so the `catch` above never ran and the comment that
+    // used to sit in it — "guessing a mode here would paint a sign-in form over
+    // cached data" — described exactly what happened.
+    if (!res.ok && res.status !== 401) {
+      this.mode = null;
+      this.enabled = false;
+      throw new Error(body.error || `The server answered ${res.status}.`);
+    }
+
+    // A missing mode from a server that DID answer one of those two is an older
+    // build, or an answer cached before this field existed. Assume there is
+    // auth: on an instance that has none nothing ever 401s, so the guess costs
+    // nothing, while the opposite guess disarms `onUnauthorized` on one that
+    // does and leaves an expired cloud session toasting errors forever.
+    this.mode = typeof body.mode === 'string' ? body.mode : 'oidc';
     this.enabled = this.mode !== 'none';
 
     return res.ok ? body : null;
@@ -101,14 +125,28 @@ export const auth = {
    *   null renders the signed-out state
    */
   render(user) {
-    // With auth off there is no user chip, no sign-in view, and nothing hidden:
-    // a 401 can only be a bug, and the whole UI is always available.
-    if (this.mode === 'none') return;
-
     const signin = $('#view-signin');
     const chip = $('#user-chip');
 
+    // With auth off there is no user chip and no sign-in view, and a 401 can
+    // only be a bug. The buttons still have to be turned ON, though: they start
+    // hidden in the markup so an authenticated instance does not paint its whole
+    // signed-in shell for one round trip before the sign-in view replaces it.
+    if (this.mode === 'none') {
+      show(signin, false);
+      for (const id of SIGNED_IN_ONLY) show($(`#${id}`), true);
+      return;
+    }
+
     if (!user) {
+      // An open <dialog> lives in the top layer and takes focus and clicks with
+      // it, so a session that expired while Settings was open left a sign-in
+      // form that could be seen and not typed into. The likeliest source of a
+      // 401 is that dialog's own save.
+      for (const el of document.querySelectorAll('dialog[open]')) {
+        /** @type {HTMLDialogElement} */ (el).close();
+      }
+
       this.renderSignin();
       show(signin, true);
       hideAll();
@@ -142,6 +180,11 @@ export const auth = {
     const submit = $('#signin-submit');
     if (submit) submit.textContent = copy.submit;
 
+    // A password manager should offer to GENERATE on setup and to FILL on
+    // sign-in; the markup can only state one, so the mode picks.
+    const pass = $('#signin-pass');
+    if (pass) pass.autocomplete = this.mode === 'setup' ? 'new-password' : 'current-password';
+
     show($('#signin-error'), false);
     if (isForm) this.bindForm();
   },
@@ -164,8 +207,12 @@ export const auth = {
       const submit = $('#signin-submit');
       const setError = (msg) => {
         if (!error) return;
+        // Unhide BEFORE writing: a role="alert" that is not rendered when its
+        // text changes is not reliably announced, and this is the one message a
+        // screen-reader user most needs to hear.
+        if (msg) error.hidden = false;
         error.textContent = msg;
-        error.hidden = !msg;
+        if (!msg) error.hidden = true;
       };
 
       const username = $('#signin-user')?.value ?? '';
@@ -192,7 +239,11 @@ export const auth = {
         // A full reload rather than re-entering start(): the app boots a lot of
         // state from the session, and replaying that in place is a second boot
         // path to keep correct for no gain on a once-per-session action.
-        window.location.assign('/');
+        //
+        // `reload`, not `assign('/')`, which dropped the fragment — so signing
+        // in from a deep link to one habit (the native client's ordinary way in)
+        // landed on the dashboard instead of the habit that was asked for.
+        window.location.reload();
       } catch {
         setError('Could not reach the server.');
       } finally {

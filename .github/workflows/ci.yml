@@ -164,6 +164,12 @@ jobs:
       - name: Auth modes
         run: npm run test:auth -w habiterall-personal
 
+      # Separate because it RESTARTS the server between assertions, which is the
+      # only way to see a session outliving the credential that raised it —
+      # every other auth check runs inside one process and cannot.
+      - name: Credential change evicts sessions
+        run: npm run test:credchange -w habiterall-personal
+
   types:
     name: Type check
     runs-on: ubuntu-latest

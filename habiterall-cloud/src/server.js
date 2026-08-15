@@ -51,7 +51,12 @@ app.use(requestLog(log));
 // How many reverse proxies sit in front of the app — see `trustProxy` in
 // shared/src/security.js for why getting this wrong is a security bug in both
 // directions.
-app.set('trust proxy', trustProxy(process.env.TRUST_PROXY));
+// Resolved once and held, because the startup log reports it: `trust_proxy` in
+// that line used to be a local number and is now an imported function, so the
+// log had been printing the function's source where an operator looks to check
+// the one setting that decides whose address the limiters key on.
+const trustProxyHops = trustProxy(process.env.TRUST_PROXY);
+app.set('trust proxy', trustProxyHops);
 
 app.use(helmet({
   contentSecurityPolicy: { directives: cspDirectives(publicIsHttps) },
@@ -94,9 +99,9 @@ app.use(sameOriginOnly({
 // one account, so keying on its id would put the legitimate user and an
 // attacker in the same bucket. Same limits there, different key.
 //
-// The fallback goes through `ipKeyGenerator`, which normalises IPv6 to its /64.
+// The fallback goes through `ipKeyGenerator`, which normalises IPv6 to its /56.
 // A bare `req.ip` makes every address in a residential prefix its own bucket —
-// 2^64 of them — and express-rate-limit v8 reports that as ERR_ERL_KEY_GEN_IPV6
+// 2^72 of them — and express-rate-limit v8 reports that as ERR_ERL_KEY_GEN_IPV6
 // at startup rather than failing. Unreachable here today, since `requireAuth`
 // runs before every limiter below and no unauthenticated request gets this far,
 // but it is one route ordering away from mattering.
@@ -251,7 +256,7 @@ async function start() {
       port: PORT,
       public_url: process.env.PUBLIC_URL,
       secure_cookies: publicIsHttps,
-      trust_proxy: trustProxy,
+      trust_proxy: trustProxyHops,
       // The number that decides how many replicas Postgres can carry:
       // max × replicas must stay under the server's max_connections.
       pg_pool_max: Number(process.env.PG_POOL_MAX) || 10,

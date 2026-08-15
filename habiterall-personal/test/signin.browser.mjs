@@ -69,12 +69,36 @@ try {
   await send('Page.enable', {}, sessionId);
   await send('Runtime.enable', {}, sessionId);
 
+  /**
+   * Is this selector actually PAINTED?
+   *
+   * Prefixed onto every evaluation rather than installed once, because
+   * `Page.navigate` and the reload after a successful sign-in both discard the
+   * JS context — install it once and it is gone by the second assertion.
+   * Assigned to `window` rather than declared, so re-running it in the same
+   * context is not a redeclaration.
+   */
+  const SHOWN = `window.__shown = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    // COMPUTED STYLE ONLY. Consulting el.hidden first — which the first version
+    // of this helper did — makes the whole thing equivalent to the assertion it
+    // replaced: the attribute is exactly what a stray \`display\` rule beats
+    // while leaving set. offsetParent covers an ancestor hiding it.
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    return el.offsetParent !== null || cs.position === 'fixed';
+  };`;
+
   const ev = async (e) => {
+    // The helper first, the caller's expression last: Runtime.evaluate returns
+    // the completion value of the script, which is still the caller's.
     const r = await send('Runtime.evaluate',
-      { expression: e, awaitPromise: true, returnByValue: true }, sessionId);
+      { expression: `${SHOWN}\n${e}`, awaitPromise: true, returnByValue: true }, sessionId);
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
     return r.result.value;
   };
+
   const go = async () => {
     await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/` }, sessionId);
     await sleep(1200);
@@ -84,14 +108,14 @@ try {
 
   await go();
   const setup = JSON.parse(await ev(`JSON.stringify({
-    signinShown: !document.getElementById('view-signin').hidden,
+    signinShown: __shown('#view-signin'),
     title: document.getElementById('signin-title').textContent.trim(),
-    formShown: !document.getElementById('signin-form').hidden,
-    linkShown: !document.getElementById('signin-oidc').hidden,
-    confirmShown: !document.getElementById('signin-confirm-row').hidden,
+    formShown: __shown('#signin-form'),
+    linkShown: __shown('#signin-oidc'),
+    confirmShown: __shown('#signin-confirm-row'),
     submit: document.getElementById('signin-submit').textContent.trim(),
-    listShown: !document.getElementById('view-list').hidden,
-    newBtn: !document.getElementById('btn-new').hidden
+    listShown: __shown('#view-list'),
+    newBtn: __shown('#btn-new')
   })`));
 
   ck('setup: the sign-in view is showing', setup.signinShown);
@@ -111,7 +135,7 @@ try {
     document.getElementById('signin-form').requestSubmit();
     await new Promise(r => setTimeout(r, 400));
     const e = document.getElementById('signin-error');
-    return JSON.stringify({ shown: !e.hidden, text: e.textContent.trim() });
+    return JSON.stringify({ shown: __shown('#signin-error'), text: e.textContent.trim() });
   })()`);
   const mm = JSON.parse(mismatch);
   ck('setup: mismatched passwords are caught in the page', mm.shown && /match/i.test(mm.text), mm.text);
@@ -123,9 +147,9 @@ try {
   await sleep(3000);
 
   const after = JSON.parse(await ev(`JSON.stringify({
-    signinShown: !document.getElementById('view-signin').hidden,
-    listShown: !document.getElementById('view-list').hidden,
-    newBtn: !document.getElementById('btn-new').hidden
+    signinShown: __shown('#view-signin'),
+    listShown: __shown('#view-list'),
+    newBtn: __shown('#btn-new')
   })`));
   ck('setup: creating the account signs in', !after.signinShown && after.listShown,
     JSON.stringify(after));
@@ -139,8 +163,8 @@ try {
 
   const pw = JSON.parse(await ev(`JSON.stringify({
     title: document.getElementById('signin-title').textContent.trim(),
-    formShown: !document.getElementById('signin-form').hidden,
-    confirmShown: !document.getElementById('signin-confirm-row').hidden,
+    formShown: __shown('#signin-form'),
+    confirmShown: __shown('#signin-confirm-row'),
     submit: document.getElementById('signin-submit').textContent.trim()
   })`));
   ck('password: the form is shown, not the setup copy', pw.formShown && /sign in/i.test(pw.title), pw.title);
@@ -154,7 +178,7 @@ try {
     document.getElementById('signin-form').requestSubmit();
     await new Promise(r => setTimeout(r, 800));
     const e = document.getElementById('signin-error');
-    return JSON.stringify({ shown: !e.hidden, text: e.textContent.trim() });
+    return JSON.stringify({ shown: __shown('#signin-error'), text: e.textContent.trim() });
   })()`);
   const w = JSON.parse(wrong);
   ck('password: a wrong password is reported in the form', w.shown && w.text.length > 0, w.text);
@@ -164,8 +188,8 @@ try {
   await sleep(3000);
 
   const signedIn = JSON.parse(await ev(`JSON.stringify({
-    signinShown: !document.getElementById('view-signin').hidden,
-    listShown: !document.getElementById('view-list').hidden,
+    signinShown: __shown('#view-signin'),
+    listShown: __shown('#view-list'),
     user: document.getElementById('user-name')?.textContent.trim()
   })`));
   ck('password: the right password signs in', !signedIn.signinShown && signedIn.listShown,

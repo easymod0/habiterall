@@ -16,7 +16,8 @@
     "test:overview": "node test/overview.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:auth": "node test/auth.integration.mjs",
-    "test:signin": "node test/signin.browser.mjs"
+    "test:signin": "node test/signin.browser.mjs",
+    "test:credchange": "node test/credential-change.integration.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",

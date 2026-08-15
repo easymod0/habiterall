@@ -178,7 +178,13 @@ export function sameOriginOnly({ allow = [], onReject } = {}) {
 
     const parsed = parseOrigin(origin);
     if (parsed) {
-      const host = req.headers?.['x-forwarded-host'] ?? req.headers?.host;
+      // `req.host` is Express's trust-proxy-aware answer: it consults
+      // `X-Forwarded-Host` only when the app is configured to trust a proxy,
+      // and includes the port. Reading the raw header instead — which is what
+      // this did — let any client that can set a header name its own origin and
+      // walk past the guard, and it did so most readily on a directly exposed
+      // instance, where no forwarded header should be believed at all.
+      const host = req.host ?? req.headers?.host;
       if (parsed.host === String(host)) return next();
       if (allowed.has(parsed.origin)) return next();
     }
@@ -221,11 +227,20 @@ function canonicalOrigin(value) {
  * Trusting one hop remains the default, because the documented deployment puts
  * TLS termination in front.
  *
+ * The DEFAULT is the caller's, because the two editions ship into different
+ * shapes. Cloud's documented deployment puts TLS termination in front, so one
+ * hop is right there. The personal edition's quickstart is `npm start` on a LAN
+ * with nothing in front of it — and defaulting to 1 there meant `req.ip` came
+ * from a client-supplied `X-Forwarded-For`, which is the rate limiters' only
+ * key. Forty guesses at the single shared password went through a limit of
+ * twenty, by adding one header.
+ *
  * @param {string|undefined} value raw `process.env.TRUST_PROXY`
+ * @param {number} fallback hops to trust when the variable is unset
  * @returns {number|false} ready for `app.set('trust proxy', ...)`
  */
-export function trustProxy(value) {
-  const hops = value === undefined ? 1 : Number(value);
+export function trustProxy(value, fallback = 1) {
+  const hops = value === undefined ? fallback : Number(value);
 
   if (!Number.isInteger(hops) || hops < 0) {
     throw new Error(`TRUST_PROXY must be a non-negative integer (got ${value})`);

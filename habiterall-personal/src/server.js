@@ -22,6 +22,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
+// What an import may weigh. Cloud has honoured MAX_UPLOAD_MB with a 16mb
+// default for a while; this edition hardcoded 64. Now that the body is only
+// buffered for an authenticated caller the number matters less, but four times
+// cloud's ceiling was never a decision anyone made.
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 16;
+
 // A `Secure` cookie is discarded by the browser over plaintext HTTP, which
 // would silently break login. Derive it from the scheme actually in use rather
 // than from NODE_ENV, so an http:// LAN instance still works while any https://
@@ -51,23 +57,20 @@ const app = express();
 // carries it back.
 app.use(requestLog(log));
 
-// How many reverse proxies sit in front of the app — see `trustProxy` in
-// shared/src/security.js for why getting this wrong is a security bug in both
-// directions. It matters more here than it looks: with one shared account the
-// rate limiters key on IP alone, so a wrong setting either collapses every
-// caller into one bucket or lets a header spoof the login limit away.
-app.set('trust proxy', trustProxy(process.env.TRUST_PROXY));
+// How many reverse proxies sit in front of the app. NONE by default, which is
+// the opposite of the cloud edition and deliberately so: this one's quickstart
+// is `npm start` on a LAN with nothing in front, and every limiter here keys on
+// `req.ip` alone. Trusting a hop that is not there makes `X-Forwarded-For` the
+// client's to choose, and the twenty-guesses-per-quarter-hour bound on a single
+// shared password becomes twenty per header value. An operator who puts a proxy
+// in front knows they did; nobody knows they accidentally trusted one.
+app.set('trust proxy', trustProxy(process.env.TRUST_PROXY, 0));
 
 app.use(helmet({
   contentSecurityPolicy: { directives: cspDirectives(upgradeInsecure) },
   hsts: isProd ? HSTS : false,
 }));
 
-// Imports arrive as raw bytes (JSON backup, SQLite file, or zip), so this must
-// be registered before the JSON parser to keep the body unparsed.
-app.use('/api/import', express.raw({ type: '*/*', limit: '64mb' }));
-
-app.use(express.json({ limit: '1mb' }));
 const SHARED_PUBLIC = join(__dirname, '..', '..', 'shared', 'public');
 
 // This edition's own files (just the entry point) take precedence, then the
@@ -91,9 +94,9 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 // One shared account, so there is no per-user key to fall back FROM: every
 // limiter here is keyed on the caller's address. `ipKeyGenerator` normalises
-// IPv6 to its /64 — without it each address in a residential prefix is its own
+// IPv6 to its /56 — without it each address in a residential prefix is its own
 // bucket, and a limit of 20 login attempts per 15 minutes is 20 per address
-// across 2^64 of them.
+// across 2^72 of them.
 const byIp = (req) => ipKeyGenerator(req.ip);
 
 /**
@@ -164,13 +167,25 @@ app.use(sameOriginOnly({
   onReject: (req, origin) => log.warn('csrf.refused', { path: req.path, origin }),
 }));
 
+// Imports arrive as raw bytes (JSON backup, SQLite file, or zip), so this must
+// be registered before the JSON parser to keep the body unparsed — and AFTER
+// `requireAuth`, which is the half that was wrong. With the parser mounted
+// first, an unauthenticated POST was buffered to its limit and only then
+// refused: a 70MB body answered 413 rather than 401, and eight concurrent ones
+// took the process from 116MB to 555MB. No credentials required, and
+// `importLimiter` never ran either, so nothing bounded the attempt rate. The
+// cloud edition already had this order; the port did not carry it across.
+app.use('/api/import', requireAuth, importLimiter,
+  express.raw({ type: '*/*', limit: `${MAX_UPLOAD_MB}mb` }));
+
+app.use(express.json({ limit: '1mb' }));
+
 mountAuth(app, apiLimiter);
 
 // Everything below needs a session — unless auth is off, in which case
 // `requireAuth` is a pass-through and this edition behaves exactly as it always
 // has. The limiters run after it, matching the cloud edition: an unauthenticated
 // caller is rejected before it can consume anyone's allowance.
-app.use('/api/import', requireAuth, importLimiter);
 app.use('/api/notify/test', requireAuth, notifyTestLimiter);
 app.use('/api', requireAuth, apiLimiter, api);
 

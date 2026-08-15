@@ -111,7 +111,36 @@ the browser, redeploys the container, and silently gets the old one back.
 the first visitor to `POST /auth/setup` claims the instance — no token, no
 source-address check. `initAuth` warns at every start while that window is open.
 Set `HABITERALL_USERNAME` and `HABITERALL_PASSWORD` to close it before exposing
-the port.
+the port. The claim itself is a single `INSERT ... ON CONFLICT DO NOTHING`, and
+that matters: it was a check, then thirty milliseconds of scrypt, then an
+*upsert*, so two concurrent claims both wrote and the second one won — locking
+the real owner out with a 200 in hand.
+
+**A session is only valid against the credential that raised it.** Sessions
+carry a fingerprint of the active credential, `requireAuth` compares it, and
+`initAuth` empties the `sessions` table when it changes across a restart.
+Without that, the remedy in the paragraph above did not work: setting the
+environment credentials refused the stranger's *password* while their *cookie*
+kept full read and write for another fourteen days, and taking those credentials
+away again brought an older database row — and every session raised against it —
+back to life. The fingerprint is over the credential's SOURCE (the supplied hash,
+or the supplied plaintext) rather than over the stored scrypt hash, because
+`HABITERALL_PASSWORD` is re-salted on every boot and fingerprinting that logged
+everybody out at each restart. It is an HMAC keyed with the session secret, so
+the plaintext branch does not put an unsalted hash of the password in the
+database.
+
+**Trust no proxy unless told to.** `TRUST_PROXY` defaults to **0** here and to 1
+in cloud, and the difference is the whole point: this edition's quickstart is
+`npm start` on a LAN with nothing in front, and every limiter keys on `req.ip`
+alone. Trusting a hop that is not there makes `X-Forwarded-For` the caller's to
+choose — forty guesses walked through a limit of twenty by rotating one header.
+
+**`/api/import` authenticates before it buffers.** The raw body parser sat above
+`requireAuth`, so an unauthenticated 70MB POST was read into memory and *then*
+refused — 413 rather than 401, with `importLimiter` never running to bound the
+attempt rate. Cloud always had the right order; the port did not carry it
+across.
 
 ## Running
 
@@ -122,7 +151,8 @@ npm run seed              # sample data (refuses if habits already exist)
 npm test                  # the CSS-guard test
 npm run test:notify       # reminder delivery, and that a send is not repeated
 npm run test:roundtrip    # export every format, re-import, assert no drift
-npm run test:auth         # the three modes, end to end (no browser needed)
+npm run test:auth         # the modes and their attacks, end to end (no browser)
+npm run test:credchange   # a session must not outlive its credential (restarts)
 npm run test:signin       # the sign-in view in Chrome; starts its own server
 docker compose up -d      # containerised
 ```

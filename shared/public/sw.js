@@ -30,6 +30,16 @@ const sw = self;
 // PWA holding the old single file alongside the new index.html would boot a
 // shell whose scripts no longer exist.
 //
+// v10: sign-in. index.html gained the form, style.css its rules, and the two
+// auth adapters became one — so a cached shell served `app-entry.js` importing
+// `/shared/auth-none.js`, which is deleted from disk but still resident in the
+// v9 cache. `activate` drops caches by NAME, so without a bump the old module
+// survives the upgrade: the no-auth adapter, whose `onUnauthorized()` returns
+// false, running against a server where auth now defaults ON. An empty
+// dashboard, an error toast, and no sign-in form to fix it with. The v9 DATA
+// cache also holds `/api/me` answers from before `mode` existed, which the
+// adapter would read as "this instance has no auth".
+//
 // v6: the habit dialog gained the reminder time picker and the "what the
 // reminder asks" field. index.html is a shell asset, so without a bump an
 // already-installed PWA would keep serving the old markup — and app.js, which
@@ -37,7 +47,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v9';
+const CACHE_VERSION = 'v10';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

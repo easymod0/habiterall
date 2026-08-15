@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { sameOriginOnly } from '../src/security.js';
 
 /** Drive the middleware without Express. */
-function run(guard, { method = 'POST', origin, host = 'habits.example.com', xfh } = {}) {
+function run(guard, { method = 'POST', origin, host = 'habits.example.com', xfh, reqHost } = {}) {
   const req = { method, path: '/api/habits', headers: {} };
   if (origin) req.headers.origin = origin;
   if (host) req.headers.host = host;
   if (xfh) req.headers['x-forwarded-host'] = xfh;
+  // What Express computes: the forwarded host ONLY when `trust proxy` says so,
+  // the socket's Host otherwise. The guard reads this, never the raw header.
+  if (reqHost !== undefined) req.host = reqHost;
 
   let result = null;
   const res = {
@@ -74,15 +77,32 @@ test('a scheme change on the same host still matches', () => {
   assert.equal(run(g, { origin: 'http://habits.example.com' }).passed, true);
 });
 
-test('the forwarded host wins behind a proxy', () => {
-  // The browser's Origin is the public name; the Host the app sees may be the
-  // proxy's. Comparing against the raw Host would refuse every real write.
+test('a proxy the app trusts is followed', () => {
+  // The browser's Origin is the public name; the Host the app sees is the
+  // proxy's. Express resolves that into `req.host` when `trust proxy` is set,
+  // and comparing against the socket's Host alone would refuse every real write.
   const g = sameOriginOnly();
   assert.equal(run(g, {
     origin: 'https://habits.example.com',
     host: 'app:3000',
-    xfh: 'habits.example.com',
+    reqHost: 'habits.example.com',   // what Express gives with trust proxy on
   }).passed, true);
+});
+
+test('a forwarded-host header the app does NOT trust is ignored', () => {
+  // The guard read `x-forwarded-host` straight from the headers, so any client
+  // able to set one named its own origin and walked past — and it did so most
+  // readily on a directly exposed instance, where `trust proxy` is off and no
+  // forwarded header should be believed at all. Express leaves `req.host` as the
+  // real Host there, which is what this asserts.
+  const g = sameOriginOnly();
+  const r = run(g, {
+    origin: 'https://evil.example.com',
+    host: 'habits.example.com',
+    xfh: 'evil.example.com',          // spoofed, and untrusted
+    reqHost: 'habits.example.com',
+  });
+  assert.equal(r.status, 403);
 });
 
 test('a rejection is reported to the caller-supplied hook', () => {
