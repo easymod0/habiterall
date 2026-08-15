@@ -8,6 +8,7 @@ import { unlinkSync } from 'node:fs';
 const {
   loopTimestampToISO, convertLoopValue, normalizeColor,
   parseCSV, parseLoopCheckmarksCSV, parseLoopHabitsCSV, parseLoopDatabase,
+  parseHabiterallJSON, MAX_PARSE_HABITS, MAX_PARSE_ENTRIES,
 } = await import('../src/import.js');
 
 const YES = 2, SKIP = 3;
@@ -653,6 +654,61 @@ async function parseInCappedChild(path) {
     return `DIED signal=${err.signal} code=${err.code}`;
   }
 }
+
+test('a hostile CSV is refused too, and it is the cheaper attack', async () => {
+  // The .db ceiling landed first and left this path open. A header is ONE LINE,
+  // so `Date,a,a,a,…` two million times is 7.6MB of CSV that deflates to under
+  // 8KB — a ~1000:1 amplification the SQLite route could not reach — and every
+  // column becomes a habit object. Measured before the ceiling: that upload
+  // aborted a 512MB heap, uncatchably, exactly as the .db bomb did.
+  const wide = 'Date' + ',a'.repeat(MAX_PARSE_HABITS + 1) + '\n2026-01-01' +
+    ',2'.repeat(MAX_PARSE_HABITS + 1) + '\n';
+  assert.throws(() => parseLoopCheckmarksCSV(wide), (e) =>
+    e.status === 400 && new RegExp(`more than ${MAX_PARSE_HABITS} habits`).test(e.message));
+
+  // And the other factor: few columns, but more cells than the budget allows.
+  // Bounded as a TOTAL, so neither factor can be traded against the other.
+  const cols = 10;
+  const rowsNeeded = Math.ceil((MAX_PARSE_ENTRIES + 1) / cols);
+  const tall = ['Date,' + Array.from({ length: cols }, (_, i) => 'h' + i).join(',')];
+  for (let d = 0; d < rowsNeeded; d++) {
+    tall.push(new Date(Date.UTC(2000, 0, 1) + d * 86_400_000).toISOString().slice(0, 10) +
+      ',YES'.repeat(cols));
+  }
+  assert.throws(() => parseLoopCheckmarksCSV(tall.join('\n') + '\n'), (e) =>
+    e.status === 400 && new RegExp(`more than ${MAX_PARSE_ENTRIES} entries`).test(e.message));
+});
+
+test('a hostile JSON backup is refused as well', () => {
+  // Lower amplification — it arrives uncompressed — but the body limit is no
+  // bound on object count: `{"name":"a","entries":[]}` is 26 bytes, so 16MB
+  // still describes several hundred thousand habits.
+  const many = { version: 1, app: 'habiterall',
+    habits: Array.from({ length: MAX_PARSE_HABITS + 1 }, (_, i) => ({ name: 'h' + i })) };
+  assert.throws(() => parseHabiterallJSON(many), (e) =>
+    e.status === 400 && new RegExp(`more than ${MAX_PARSE_HABITS} habits`).test(e.message));
+
+  const deep = { version: 1, app: 'habiterall',
+    habits: [{ name: 'one',
+      entries: Array.from({ length: MAX_PARSE_ENTRIES + 1 }, () => ({ date: '2026-01-01', value: 2 })) }] };
+  assert.throws(() => parseHabiterallJSON(deep), (e) =>
+    e.status === 400 && new RegExp(`more than ${MAX_PARSE_ENTRIES} entries`).test(e.message));
+});
+
+test('a real power user is nowhere near either ceiling', () => {
+  // The bound is on a hostile file, not a product limit, and a parser that
+  // refuses a legitimate backup is its own kind of data loss. 60 habits kept
+  // every day for five years is 109,500 entries.
+  const names = Array.from({ length: 60 }, (_, i) => 'h' + i);
+  const rows = ['Date,' + names.join(',')];
+  for (let d = 0; d < 1825; d++) {
+    rows.push(new Date(Date.UTC(2020, 0, 1) + d * 86_400_000).toISOString().slice(0, 10) +
+      ',YES'.repeat(60));
+  }
+  const habits = parseLoopCheckmarksCSV(rows.join('\n') + '\n');
+  assert.equal(habits.length, 60);
+  assert.equal(habits.reduce((n, h) => n + h.entries.length, 0), 109_500);
+});
 
 test('a hostile .db is refused rather than allowed to exhaust the heap', async () => {
   // 80,000 habit rows in 2.7MB and 400,000 entry rows in 7.2MB — both well

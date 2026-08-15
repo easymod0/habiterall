@@ -175,6 +175,40 @@ derived from *stored* data are attacker-controlled: one entry dated year 0100
 once made a single request block the event loop for 32 seconds. Never call
 `dateRange` on a start date that came from the database.
 
+**Every parse path has a row ceiling, and there are THREE of them.** An upload's
+size is not a bound on what it describes. A SQLite file's row count is
+*declared*, not stored, so `CREATE VIEW Habits AS WITH RECURSIVE …` makes 8KB
+claim five million rows; a CSV header is one line, so `Date,a,a,a,…` two million
+times is 7.6MB that deflates ~1000:1 and yields one habit object per column; and
+`{"name":"a","entries":[]}` is 26 bytes, so the 16MB body limit still describes
+several hundred thousand habits. All three aborted the process — and the abort
+is inside V8, so the `try`/`catch` that turns a bad upload into a 400 **cannot
+catch it**. That is the whole reason this needs a ceiling rather than an error
+path.
+
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` in `shared/src/import.js` bound all
+three, and three things about them are load bearing. The bound goes **where the
+rows are produced** — `.iterate()` plus `LIMIT` for SQLite, the header length
+for CSV — because anything that materialises the array first has already spent
+the memory. The entry budget is a **total** across the file, not per habit, for
+the reason `unzip.js` records one attack over: a per-item cap is no defence when
+the number of items is also the attacker's to choose. And they are **env-settable
+with generous defaults**, because personal's API caps neither habits nor entries
+— a fixed ceiling would make the importer refuse a file its own API would have
+accepted one habit at a time, which is the divergence `normaliseImportedHabit`
+exists to prevent.
+
+Note the name: `PARSE`, not `IMPORT`. Cloud's `MAX_HABITS_PER_IMPORT` is a
+product limit applied to the parsed array; these bound what a file may *declare*
+before that array exists. One is a defence, the other a policy, and they are one
+word apart.
+
+What none of this bounds is CPU. The budget is spent by rows *returned*, so a
+`.db` whose `Repetitions` match no habit, with the index Loop's own schema has
+omitted, full-scans once per habit while spending nothing — 15.8MB answering 200
+after nearly four minutes of blocked event loop. Memory is bounded; time is not.
+See #92.
+
 **The score is a trailing-window ratio**, not per-day credit scaled by
 frequency. The earlier formula overshot for every non-daily habit and was
 hidden by a clamp; a single checkmark on a 1×/365d habit reported 100%. The
