@@ -163,7 +163,12 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
  * @returns Express-shaped middleware
  */
 export function sameOriginOnly({ allow = [], onReject } = {}) {
-  const allowed = new Set(allow.filter(Boolean).map((o) => o.replace(/\/+$/, '')));
+  // Canonicalised through the URL parser rather than trimmed with a regex.
+  // `/\/+$/` against a header an attacker writes is a polynomial match on a
+  // string of slashes — a denial of service in the middleware whose whole job
+  // is to make requests safer. `URL.origin` is already normal form and carries
+  // no trailing slash, so there is nothing to strip.
+  const allowed = new Set(allow.map(canonicalOrigin).filter(Boolean));
 
   return function originGuard(req, res, next) {
     if (SAFE_METHODS.has(req.method)) return next();
@@ -171,19 +176,30 @@ export function sameOriginOnly({ allow = [], onReject } = {}) {
     const origin = req.headers?.origin;
     if (!origin) return next();          // not a browser — see above
 
-    const host = req.headers?.['x-forwarded-host'] ?? req.headers?.host;
-    let sameHost = false;
-    try {
-      sameHost = new URL(origin).host === String(host);
-    } catch {
-      sameHost = false;                  // unparseable Origin is not this one
+    const parsed = parseOrigin(origin);
+    if (parsed) {
+      const host = req.headers?.['x-forwarded-host'] ?? req.headers?.host;
+      if (parsed.host === String(host)) return next();
+      if (allowed.has(parsed.origin)) return next();
     }
-
-    if (sameHost || allowed.has(origin.replace(/\/+$/, ''))) return next();
 
     onReject?.(req, origin);
     return res.status(403).json({ error: 'cross-origin request refused' });
   };
+}
+
+/** @returns {URL|null} null for anything that is not a parseable absolute URL */
+function parseOrigin(value) {
+  try {
+    return new URL(String(value));
+  } catch {
+    return null;
+  }
+}
+
+/** @returns {string|null} the canonical `scheme://host[:port]`, or null */
+function canonicalOrigin(value) {
+  return parseOrigin(value)?.origin ?? null;
 }
 
 /**

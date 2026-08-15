@@ -22,11 +22,32 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { db } from './db.js';
 import { log } from '@habiterall/shared/log.js';
 import {
   authEnabled, authFlagMisread, envCredentials, hashPassword, verifyPassword,
 } from '@habiterall/shared/password.js';
+import { RATE_LIMITS } from '@habiterall/shared/security.js';
+
+/**
+ * The limiter on the credential routes, built HERE rather than handed in.
+ *
+ * It was a parameter, which made it invisible: the caller could pass anything,
+ * including the pass-through `HABITERALL_RATE_LIMIT=off` produces — and it did,
+ * so the one bound on guesses at a single shared password could be switched off
+ * by a variable named for throttling reads. CodeQL flagged the route as
+ * unlimited for the same reason a reader would miss it, which is the useful
+ * part: a limit you cannot see at the route it protects is a limit nobody can
+ * check.
+ *
+ * `ipKeyGenerator` normalises IPv6 to its /64. Without it a residential prefix
+ * is 2^64 buckets and twenty guesses each.
+ */
+const credentialLimiter = rateLimit({
+  ...RATE_LIMITS.login,
+  keyGenerator: (req) => ipKeyGenerator(req.ip),
+});
 
 /* ---------- session secret ---------- */
 
@@ -186,11 +207,10 @@ export function requireAuth(req, res, next) {
  * Mount the auth routes.
  *
  * @param {import('express').Express} app
- * @param {import('express').RequestHandler} limiter guards the credential paths
  * @param {import('express').RequestHandler} readLimiter guards /api/me, which
  *   is answerable without a session and reads the database to decide the mode
  */
-export function mountAuth(app, limiter, readLimiter) {
+export function mountAuth(app, readLimiter) {
   /**
    * Who am I, and what mode is this instance in?
    *
@@ -221,7 +241,7 @@ export function mountAuth(app, limiter, readLimiter) {
     });
   });
 
-  app.post('/auth/login', limiter, async (req, res, next) => {
+  app.post('/auth/login', credentialLimiter, async (req, res, next) => {
     try {
       if (!state.enabled) return res.status(404).json({ error: 'authentication is disabled' });
 
@@ -258,7 +278,7 @@ export function mountAuth(app, limiter, readLimiter) {
    * reaches it first owns the account. It closes the moment credentials exist,
    * and `initAuth` warns at every startup while it is open.
    */
-  app.post('/auth/setup', limiter, async (req, res, next) => {
+  app.post('/auth/setup', credentialLimiter, async (req, res, next) => {
     try {
       if (!state.enabled) return res.status(404).json({ error: 'authentication is disabled' });
       if (credentials()) {
