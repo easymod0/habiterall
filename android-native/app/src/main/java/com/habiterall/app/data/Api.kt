@@ -194,6 +194,16 @@ data class AppSettings(
     @SerialName("skipDays") val skipDays: Boolean? = null,
     @SerialName("questionMarks") val questionMarks: Boolean? = null,
     /**
+     * What a day with NO ROW counts as on a habit with an at-most target — the
+     * one kind where zero is *under* the goal, so silence reads as success.
+     *
+     * The phone neither computes nor mirrors the rule: every figure it draws
+     * for a habit is the server's arithmetic, so this is here to be SET, and
+     * the streak that comes back on the next fetch is already computed with it.
+     * `unansweredCounts` in shared/src/stats.js is the rule itself.
+     */
+    @SerialName("atMostUnlogged") val atMostUnlogged: String? = null,
+    /**
      * The rest of the account's display preferences, carried so the phone can
      * SET them as well as be governed by them.
      *
@@ -272,6 +282,9 @@ data class AppSettings(
     val scoreGranularityOrDefault: String
         get() = scoreGranularity ?: DEFAULT_SCORE_GRANULARITY
 
+    val atMostUnloggedOrDefault: String
+        get() = atMostUnlogged ?: DEFAULT_AT_MOST_UNLOGGED
+
     companion object {
         const val CHANNEL_ANDROID = "android"
 
@@ -297,6 +310,14 @@ data class AppSettings(
 
         /** `SETTINGS.scoreGranularity.default`. */
         const val DEFAULT_SCORE_GRANULARITY = "day"
+
+        /**
+         * `SETTINGS.atMostUnlogged.default` — and `UNLOGGED_DEFAULT` in
+         * shared/src/stats.js, which is what the score is actually computed
+         * with. A drift here would show one answer on this screen while the
+         * streaks on the list were computed with the other.
+         */
+        const val DEFAULT_AT_MOST_UNLOGGED = "miss"
     }
 }
 

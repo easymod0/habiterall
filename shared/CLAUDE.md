@@ -99,7 +99,16 @@ the earliest stored entry now has an earlier one to start at: a lapse extends th
 window, and the unknown days after it read as misses, which is how a habit with
 one marked miss acquires a lapse in `computeRecovery` where it had none. The
 figures are right; the window is older. See the root CLAUDE.md for the whole of
-it. What must never happen is a *reader* collapsing them:
+it. `stats.js` was the exception and did not know it: six of its passes wrote
+`entryMap.get(date) ?? UNSET`, which is harmless for an at-least habit and hands
+an at-most one a full success for a day nobody answered — a limit with no
+entries at all reported a 30-day streak. It reads the map directly now, and
+`normalizeEntry` answers `status: 'unknown'` for the absent day; what silence is
+worth there is `atMostUnlogged`, defaulting to `miss`. A row holding 0 is
+untouched by that and stays a success, which is the whole distinction finally
+being worth a number rather than only a question mark.
+
+What must never happen is a *reader* collapsing them:
 `habit.entries[date] ?? UNSET` reports every unanswered day as an answered "no",
 which starts the tap cycle in the wrong place and paints away the one difference
 the setting draws. Ask whether the map HOLDS the date (`Object.hasOwn`, or a null

@@ -96,6 +96,19 @@ class AppSettingsDefaultsTest {
     }
 
     @Test
+    fun `the unlogged-day default matches the registry`() {
+        // Named on its own because it is the one default here that decides an
+        // ARITHMETIC rather than a drawing. The others being wrong shows the
+        // wrong chart; this one being wrong would have the screen say a limit's
+        // unlogged days count as a miss while the streak beside it was computed
+        // as though they did not — and the streak is the server's, so the phone
+        // could not be corrected by looking at it.
+        assertEquals(default("atMostUnlogged"), AppSettings.DEFAULT_AT_MOST_UNLOGGED)
+        assertEquals("miss", AppSettings().atMostUnloggedOrDefault)
+        assertEquals("success", AppSettings(atMostUnlogged = "success").atMostUnloggedOrDefault)
+    }
+
+    @Test
     fun `the toggle defaults match the registry`() {
         // Read through the accessors, because those are what the app calls: a
         // right constant reached by a wrong `?:` is the same bug.

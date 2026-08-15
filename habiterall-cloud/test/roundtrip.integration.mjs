@@ -457,7 +457,7 @@ await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
 await withUser(alice, (db) => db.query(
   `UPDATE users SET settings = $1::jsonb WHERE id = $2`,
   [JSON.stringify({
-    skipDays: true, questionMarks: true,
+    skipDays: true, questionMarks: true, atMostUnlogged: 'success',
     discordWebhook: 'https://discord.com/api/webhooks/1/secret',
   }), alice]
 ));
@@ -467,7 +467,11 @@ const exported = portableSettings(await withUser(alice, (db) =>
     .then((r) => r.rows[0]?.settings ?? {})));
 
 ck('a backup carries the tracking settings',
-  exported.skipDays === true && exported.questionMarks === true,
+  exported.skipDays === true && exported.questionMarks === true &&
+  // The third of them, and the one that changes an arithmetic rather than a
+  // drawing: restore the rows without it and a limit's streaks come back
+  // different from the ones that were exported.
+  exported.atMostUnlogged === 'success',
   JSON.stringify(exported));
 ck('and no notification destination',
   !Object.keys(exported).some((k) => k.startsWith('discord') || k.startsWith('notify')),

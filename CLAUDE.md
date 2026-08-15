@@ -102,6 +102,44 @@ moment one day is marked as missed. One ancient Loop `NO` now extends a habit's
 history back to its own date, where before it was dropped on import. Nothing is
 miscounted; the window is simply older, and honest about it.
 
+**That paragraph was true of every habit but one, and the exception is the kind
+you want to STOP.** "Every caller treats a missing row as a miss" was a claim
+about the callers, and six of them made it by writing
+`entryMap.get(date) ?? UNSET` — the collapse `shared/CLAUDE.md` forbids of a
+reader, done in the one place nobody was reading it as a display decision. For
+an at-least habit the two spend identically, which is why it went unnoticed. For
+an **at-most** habit zero is *under* the limit, so the unanswered day was handed
+a full success: a limit nobody had ever logged reported an unbroken streak and a
+strength climbing toward 100%, both growing for as long as it was ignored.
+
+The fix is not a new concept, it is the fourth state reaching the rules that
+already know about it. `normalizeEntry` answers `status: 'unknown'` for a
+nullish entry, and `isCompleted` / `dayCredit` decide from that. Note what does
+NOT move with it: **a row holding 0 is still a success on an at-most habit**
+under either answer, because that is the user saying "none today", which is the
+thing being asked for. The distinction the whole four-state model exists to draw
+turns out to be worth a real number here, where before it was only worth a
+question mark.
+
+Which of the two an unanswered day should be is not decidable in `stats.js`:
+"I didn't smoke today" is worth a tap and is the whole reward, while "I had no
+soda" is not something anyone opens an app for. So it is the account's answer,
+`atMostUnlogged`, defaulting to `miss` — the other way round, every limit
+arrives with a perfect record on the day it was created. The setting is
+**portable** (it changes what the days with no row in the same backup are worth,
+so restoring the entries without it restores different streaks) and it is *not*
+Loop's: Loop has no such preference and its backup carries no preferences at
+all, so it travels in habiterall's own JSON and nowhere else. The entries
+themselves are untouched by any of this, so a Loop export is exactly as faithful
+as it was.
+
+Two consequences worth stating because they look like inconsistencies and are
+not. The **reminder still asks** about an unlogged day under either answer —
+`answeredIds` is about whether the day was ANSWERED, and under `success` the
+reminder is precisely how you record the exception. And both editions' SQL
+completion counts needed no change at all: they count rows, and a day with no
+row was never in them.
+
 **A merge may add an answer and must never delete one.** Now that a bare "not
 done" in a file reaches the writer, a plain upsert would overwrite a recorded
 completion with it — and a Loop backup is full of explicit `NO` rows, so merging a

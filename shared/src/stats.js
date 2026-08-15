@@ -70,6 +70,43 @@ export function boundedRange(start, end) {
 /* ---------- completion semantics ---------- */
 
 /**
+ * What a day nobody answered counts as. `'miss'` is the default and the answer
+ * every habit but one already gave; see `unansweredCounts`.
+ *
+ * Named rather than inlined because three files have to agree on it — this,
+ * the registry the dialog draws from, and the phone's own copy — and
+ * `shared/test/settings.test.js` plus `AppSettingsDefaultsTest` pin them to
+ * this one. A default that drifts shows a value the arithmetic is not using.
+ */
+export const UNLOGGED_DEFAULT = 'miss';
+
+/**
+ * Does a day with NO ROW count as having met the habit?
+ *
+ * For every habit but one the question does not arise: an unanswered day holds
+ * no value, and no value is short of an at-least target and is not `YES`. It
+ * arises for an **at-most** habit, where zero is *under* the limit — so the
+ * absence of an answer reads as a perfect one, and a habit nobody has ever
+ * logged reports an unbroken streak that grows for as long as it is ignored.
+ *
+ * Which of the two is right depends on the habit and cannot be decided here.
+ * "I didn't smoke today" is worth a tap and is the whole reward; "I had no
+ * soda" is not something anyone opens an app for, and the point of tracking it
+ * is to record the exception. So it is the account's answer — `atMostUnlogged`
+ * — and the default is `miss`, because the other way round every new limit
+ * looks perfect on the day it is created, having been kept for exactly no time.
+ *
+ * Note this is about the FOURTH state and not about zero. A row holding 0 is a
+ * stated lapse — "I had none today" — and for an at-most habit that is a real
+ * success under either answer. It is the difference between a day the user
+ * answered and a day nobody has, which is the whole of `questionMarks` and the
+ * reason `entryWrite` stopped deleting rows. See constants.js.
+ */
+function unansweredCounts(unlogged) {
+  return unlogged === 'success';
+}
+
+/**
  * Did this entry satisfy the habit on its day?
  * Skips are neither success nor failure — they are excluded from scoring
  * entirely, matching Loop's behaviour.
@@ -77,10 +114,18 @@ export function boundedRange(start, end) {
  * `entry` may be a bare number (legacy/boolean callers) or `{value, status}`.
  * Passing the status explicitly is what keeps a numerical habit's legitimate
  * value of 3 from being mistaken for the SKIP sentinel.
+ *
+ * **A nullish `entry` is a day with no row**, which is not the same as a row
+ * holding 0 — see `unansweredCounts`. Callers used to spell that `?? UNSET`,
+ * which is precisely the collapse `shared/CLAUDE.md` forbids of a reader.
+ *
+ * @param {*} [unlogged] `'miss'` | `'success'`, from the account's
+ *   `atMostUnlogged`. Read only for a day with no row.
  */
-export function isCompleted(habit, entry) {
+export function isCompleted(habit, entry, unlogged = UNLOGGED_DEFAULT) {
   const { value, status } = normalizeEntry(habit, entry);
   if (status === 'skip') return null; // "not applicable"
+  if (status === 'unknown' && !unansweredCounts(unlogged)) return false;
 
   if (habit.type === 'boolean') return value === YES;
   // numerical
@@ -99,6 +144,10 @@ function rawValue(entry) {
  * a skip for boolean habits, where it is an unambiguous sentinel.
  */
 function normalizeEntry(habit, entry) {
+  // No row at all — the fourth state, and the one a `?? UNSET` at the call site
+  // used to spend before it got here. `rawValue` still answers 0 for it, so a
+  // history bucket's numerical total is unchanged by any of this.
+  if (entry == null) return { value: UNSET, status: 'unknown' };
   if (entry && typeof entry === 'object') {
     return { value: Number(entry.value) || 0, status: entry.status ?? '' };
   }
@@ -112,9 +161,12 @@ function normalizeEntry(habit, entry) {
  * all-or-nothing; numerical habits get partial credit toward their target so
  * that 6 of 8 glasses of water still moves the needle.
  */
-function dayCredit(habit, entry) {
+function dayCredit(habit, entry, unlogged = UNLOGGED_DEFAULT) {
   const { value, status } = normalizeEntry(habit, entry);
   if (status === 'skip') return null;
+  // The same rule `isCompleted` states, and it has to be the same or the score
+  // and the streak disagree about the very same day.
+  if (status === 'unknown' && !unansweredCounts(unlogged)) return 0;
   if (habit.type === 'boolean') return value === YES ? 1 : 0;
 
   const target = habit.target_value;
@@ -156,7 +208,7 @@ function dayCredit(habit, entry) {
  * slowly (3x/week works out at ~20 days), so missing one of three weekly
  * sessions does not punish you as hard as missing a day of a daily habit.
  */
-export function computeScores(habit, entryMap, start, end) {
+export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
   const num = Math.max(1, habit.freq_numerator || 1);
   const den = Math.max(1, habit.freq_denominator || 1);
 
@@ -169,7 +221,7 @@ export function computeScores(habit, entryMap, start, end) {
 
   // Credit per day, with skips recorded as null so they can be excluded from
   // the window rather than counted as failures.
-  const credits = dates.map((date) => dayCredit(habit, entryMap.get(date) ?? UNSET));
+  const credits = dates.map((date) => dayCredit(habit, entryMap.get(date), unlogged));
 
   const out = [];
   let score = 0;
@@ -231,7 +283,7 @@ export function computeScores(habit, entryMap, start, end) {
  * @returns {{date: string, ok: boolean|null}[]} `null` on a skipped day, which
  *   is transparent: it neither starts, extends nor breaks a run.
  */
-function onPaceSeries(habit, entryMap, start, end) {
+function onPaceSeries(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
   const num = Math.max(1, Number(habit.freq_numerator) || 1);
   const den = Math.max(1, Number(habit.freq_denominator) || 1);
 
@@ -240,7 +292,7 @@ function onPaceSeries(habit, entryMap, start, end) {
   // through an import — would otherwise spin for hundreds of thousands of
   // iterations and block the event loop for every user of the process.
   const dates = boundedRange(start, end);
-  const done = dates.map((date) => isCompleted(habit, entryMap.get(date) ?? UNSET));
+  const done = dates.map((date) => isCompleted(habit, entryMap.get(date), unlogged));
 
   const out = [];
   let windowDone = 0;
@@ -287,12 +339,12 @@ function onPaceSeries(habit, entryMap, start, end) {
  * one. That is what people mean by "I have kept this up for a month", and it
  * keeps the number comparable with a daily habit's.
  */
-export function computeStreaks(habit, entryMap, start, end) {
+export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
   const streaks = [];
   let runStart = null;
   let runEnd = null;
 
-  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end)) {
+  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged)) {
     if (ok === null) continue; // skip: neither extends nor breaks
 
     if (ok) {
@@ -331,12 +383,12 @@ export function bestStreak(streaks) {
  * Skips are transparent here for the same reason they bridge a streak — a day
  * that "didn't happen" is not a failure to come back from.
  */
-export function computeMissRuns(habit, entryMap, start, end) {
+export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
   const runs = [];
   let runStart = null;
   let runEnd = null;
 
-  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end)) {
+  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged)) {
     if (ok === null) continue;
 
     if (!ok) {
@@ -489,14 +541,15 @@ export function computeSurvival(streaks, end, thresholds = SURVIVAL_THRESHOLDS) 
  * They answer one question that neither streaks nor the score curve does:
  * when this habit fails, what happens next?
  */
-export function computeResilience(habit, entryMap, streaks, start, end) {
+export function computeResilience(habit, entryMap, streaks, start, end,
+                                  unlogged = UNLOGGED_DEFAULT) {
   // This used to refuse to run for anything but a daily habit, because a miss
   // run meant "a day it was not done" and a 3×/week habit has four of those
   // every week — a perfectly-kept habit reported as lapsing continuously.
   // `onPaceSeries` fixed the premise rather than the symptom: a miss is now a
   // day the habit fell BELOW ITS RATE, which is a real failure for any
   // frequency, so there is nothing left to suppress.
-  const missRuns = computeMissRuns(habit, entryMap, start, end);
+  const missRuns = computeMissRuns(habit, entryMap, start, end, unlogged);
   return {
     // Retained: the response shape is public, and the detail view still guards
     // on it. Nothing sets it false any more.
@@ -551,7 +604,7 @@ const BUCKETERS = {
  * @param {'monday'|'sunday'} [weekStart]
  */
 export function computeHistory(habit, entryMap, start, end, granularity = 'day',
-                               weekStart = 'monday') {
+                               weekStart = 'monday', unlogged = UNLOGGED_DEFAULT) {
   // `Object.hasOwn`, because `granularity` is a query parameter and
   // `BUCKETERS['valueOf']` is an inherited function: truthy, so `??` never
   // reaches the default, and calling it unbound throws instead of bucketing
@@ -567,8 +620,8 @@ export function computeHistory(habit, entryMap, start, end, granularity = 'day',
       buckets.set(key, { bucket: key, completed: 0, total: 0, value: 0, skipped: 0 });
     }
     const b = buckets.get(key);
-    const value = entryMap.get(date) ?? UNSET;
-    const done = isCompleted(habit, value);
+    const value = entryMap.get(date);
+    const done = isCompleted(habit, value, unlogged);
 
     if (done === null) {
       b.skipped += 1;
@@ -598,12 +651,12 @@ export function computeHistory(habit, entryMap, start, end, granularity = 'day',
  * @returns {Array<{month: string, days: Array<{weekday: number, completed: number,
  *   total: number, rate: number}>}>}
  */
-export function computeWeekdayByMonth(habit, entryMap, start, end) {
+export function computeWeekdayByMonth(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
   const byMonth = new Map();
 
   for (const date of boundedRange(start, end)) {
-    const value = entryMap.get(date) ?? UNSET;
-    const done = isCompleted(habit, value);
+    const value = entryMap.get(date);
+    const done = isCompleted(habit, value, unlogged);
     // A skip is "this day didn't happen", so it must not count against the
     // weekday's rate — same rule as everywhere else.
     if (done === null) continue;
@@ -634,7 +687,7 @@ export function computeWeekdayByMonth(habit, entryMap, start, end) {
  * Success counts per day of week (0 = Sunday), for spotting which days
  * a habit reliably fails on.
  */
-export function computeWeekdays(habit, entryMap, start, end) {
+export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
   const days = Array.from({ length: 7 }, (_, i) => ({
     weekday: i,
     completed: 0,
@@ -643,8 +696,8 @@ export function computeWeekdays(habit, entryMap, start, end) {
   }));
 
   for (const date of boundedRange(start, end)) {
-    const value = entryMap.get(date) ?? UNSET;
-    const done = isCompleted(habit, value);
+    const value = entryMap.get(date);
+    const done = isCompleted(habit, value, unlogged);
     if (done === null) continue;
 
     const wd = fromISO(date).getDay();
@@ -668,12 +721,12 @@ export function computeWeekdays(habit, entryMap, start, end) {
  * @param {string} end
  * @param {'monday'|'sunday'} [weekStart]
  */
-export function computeFrequency(habit, entryMap, start, end, weekStart = 'monday') {
+export function computeFrequency(habit, entryMap, start, end, weekStart = 'monday',
+                                 unlogged = UNLOGGED_DEFAULT) {
   const weekTotals = new Map();
 
   for (const date of boundedRange(start, end)) {
-    const value = entryMap.get(date) ?? UNSET;
-    if (isCompleted(habit, value) !== true) continue;
+    if (isCompleted(habit, entryMap.get(date), unlogged) !== true) continue;
     const week = startOfWeek(date, weekStart);
     weekTotals.set(week, (weekTotals.get(week) ?? 0) + 1);
   }
@@ -694,12 +747,13 @@ export function computeFrequency(habit, entryMap, start, end, weekStart = 'monda
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, granularity?: string,
- *           weekStart?: 'monday'|'sunday'}} [opts]
+ *           weekStart?: 'monday'|'sunday', unlogged?: string}} [opts]
  * @returns {import('./types.js').Stats}
  */
 export function computeStats(habit, entries,
                              { start, end, granularity = 'day',
-                               weekStart = 'monday' } = {}) {
+                               weekStart = 'monday',
+                               unlogged = UNLOGGED_DEFAULT } = {}) {
   // Preserve `status` alongside the value so skips stay distinguishable from
   // a numerical habit legitimately recording the value 3.
   const entryMap = new Map(
@@ -717,8 +771,8 @@ export function computeStats(habit, entries,
   if (from < earliest) from = earliest;
   if (from > end) from = end;
 
-  const scores = computeScores(habit, entryMap, from, end);
-  const streaks = computeStreaks(habit, entryMap, from, end);
+  const scores = computeScores(habit, entryMap, from, end, unlogged);
+  const streaks = computeStreaks(habit, entryMap, from, end, unlogged);
 
   // Bounded to the same [from, end] window every other figure in this payload
   // uses. Filtering the whole map counted entries outside the range — a
@@ -736,10 +790,10 @@ export function computeStats(habit, entries,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),
     totalCompleted,
-    history: computeHistory(habit, entryMap, from, end, granularity, weekStart),
-    weekdays: computeWeekdays(habit, entryMap, from, end),
-    weekdayByMonth: computeWeekdayByMonth(habit, entryMap, from, end),
-    frequency: computeFrequency(habit, entryMap, from, end, weekStart),
-    resilience: computeResilience(habit, entryMap, streaks, from, end),
+    history: computeHistory(habit, entryMap, from, end, granularity, weekStart, unlogged),
+    weekdays: computeWeekdays(habit, entryMap, from, end, unlogged),
+    weekdayByMonth: computeWeekdayByMonth(habit, entryMap, from, end, unlogged),
+    frequency: computeFrequency(habit, entryMap, from, end, weekStart, unlogged),
+    resilience: computeResilience(habit, entryMap, streaks, from, end, unlogged),
   };
 }

@@ -13,10 +13,14 @@
  *   no       a row, value UNSET. A lapse the user stated.
  *   unknown  NO ROW AT ALL. Nothing is known about the day.
  *
- * `no` and `unknown` are both "not done" for every figure computed here —
- * `isCompleted` says `false` for the first and every caller treats a missing
- * row as a miss — so nothing about scores, streaks or resilience turns on the
- * difference. What turns on it is what the app can SAY: Loop's
+ * `no` and `unknown` are both "not done" for every figure computed here, with
+ * ONE exception that used to be a bug: on an **at-most** habit zero is under
+ * the limit, so a stated `no` is a genuine success and an unanswered day is not
+ * an answer at all. `atMostUnlogged` is the account's word on what silence is
+ * worth there, and `unansweredCounts` in stats.js is the rule. Everywhere else
+ * `isCompleted` says `false` for both and nothing about scores, streaks or
+ * resilience turns on the difference. What turns on it is what the app can SAY:
+ * Loop's
  * `pref_unknown_enabled` ("Show question marks for missing data") exists to
  * differentiate a day you marked as missed from a day you never answered, and
  * that distinction has to be storable before it can be shown. Which is why

@@ -9,11 +9,33 @@ const {
   SETTING_VALUES, ValidationError, entryWrite,
 } =
   await import('../src/validate.js');
-const { computeHistory } = await import('../src/stats.js');
+const { computeHistory, UNLOGGED_DEFAULT } = await import('../src/stats.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /* ---------- the two registries must agree ---------- */
+
+test('the registry default for atMostUnlogged is the one the arithmetic uses', () => {
+  // Three copies of one default — this registry, `UNLOGGED_DEFAULT` in
+  // stats.js, and `AppSettings` on the phone (pinned by its own
+  // AppSettingsDefaultsTest) — because `GET /settings` returns only the keys
+  // that have been stored, so every reader has to supply its own answer for a
+  // setting nobody has touched.
+  //
+  // The one that drifted before was `historyGranularity`, and it drifted the
+  // expensive way: a screen showing a value the charts were not using. Here it
+  // would be worse than cosmetic — the dialog would say a limit's unlogged
+  // days count as a miss while the streak was computed as though they did not.
+  const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
+  const block = ui.slice(ui.indexOf('\n  atMostUnlogged: {'));
+  const shown = /\n\s*default:\s*'([^']+)'/.exec(block.slice(0, block.indexOf('\n  },')));
+
+  assert.ok(shown, 'atMostUnlogged has no default in ui/settings.js');
+  assert.equal(shown[1], UNLOGGED_DEFAULT,
+    'the dialog would show a value the score is not computed with');
+  assert.ok(SETTING_VALUES.atMostUnlogged.includes(UNLOGGED_DEFAULT),
+    'the default is not a value the server would even accept');
+});
 
 test('every browser setting is enforced by the server', () => {
   // ui/settings.js declares what the dialog renders; validate.js declares

@@ -246,6 +246,14 @@ export const SETTING_VALUES = {
   // than as a plain miss — which is only meaningful because a lapse is now a
   // row of its own; see `entryWrite` above.
   questionMarks: [true, false],
+  // What a day with NO ROW is worth on a habit with an at-most target, which is
+  // the one kind where the question has two defensible answers: zero is under
+  // the limit, so silence reads as success. `'miss'` by default and the rule
+  // itself is `unansweredCounts` in stats.js — this list is only what may be
+  // stored. Not Loop's: Loop has no such preference, and no Loop file can set
+  // one (its backup carries no preferences at all), so this travels in
+  // habiterall's own JSON backup and nowhere else.
+  atMostUnlogged: ['miss', 'success'],
   // Resolution of the strength chart. Display only — the score is always
   // computed daily, since it is an EWMA and skipping days would change the
   // value rather than the resolution.
@@ -302,6 +310,11 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'scoreGranularity',
   'skipDays',
   'questionMarks',
+  // Portable for the reason the two above are, and more so: it does not change
+  // how a row is drawn, it changes what the DAYS WITH NO ROW in the same file
+  // count as. Restore the entries without it and the streaks and the strength
+  // come back different from the ones that were exported.
+  'atMostUnlogged',
 ]);
 
 /**

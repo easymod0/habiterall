@@ -524,3 +524,95 @@ test('isCompleted needs the whole row, not just the value', () => {
       `${label}: a skipped day is "not applicable", never a completion`);
   }
 });
+
+/* ---------- a day nobody answered, on a habit that is a limit ---------- */
+
+const UNLOGGED_DEFAULT = (await import('../src/stats.js')).UNLOGGED_DEFAULT;
+
+test('an unlogged day is not a success on an at-most habit', () => {
+  // The finding this section exists for. `entryMap.get(date) ?? UNSET` handed
+  // an unanswered day the value 0, and 0 is UNDER a limit — so a habit nobody
+  // had ever logged reported an unbroken streak and a strength climbing toward
+  // 100%, and both grew for as long as it was ignored. That is also the exact
+  // collapse `shared/CLAUDE.md` forbids of a reader: ask whether the map HOLDS
+  // the day, never what it holds.
+  const stats = computeStats(atMostHabit, [],
+    { start: '2026-07-01', end: '2026-07-30' });
+
+  assert.deepEqual(stats.streaks, [],
+    'a habit with no entries at all reported a streak');
+  assert.equal(stats.score, 0, 'and a strength it had not earned');
+  assert.equal(stats.totalCompleted, 0);
+});
+
+test('a stated zero IS a success on an at-most habit, under either answer', () => {
+  // The other half, and the reason this is about the fourth state rather than
+  // about zero. A row holding 0 is the user saying "none today", which for a
+  // limit is exactly the thing being asked for. Both must not move together:
+  // reading the unanswered day as a miss is right, and reading the answered
+  // one as a miss would make the setting unusable — there would be no way to
+  // record a clean day at all.
+  for (const unlogged of ['miss', 'success']) {
+    assert.equal(isCompleted(atMostHabit, { value: 0, status: '' }, unlogged), true,
+      `${unlogged}: a row holding 0 is under the limit`);
+    assert.equal(isCompleted(atMostHabit, undefined, unlogged), unlogged === 'success',
+      `${unlogged}: a day with no row follows the setting`);
+  }
+});
+
+test('the setting buys back the old reading, and only for the unanswered day', () => {
+  // "I had no soda" is not something anyone opens an app for; the point of
+  // tracking it is to record the exception. That account says so once and gets
+  // this, which is what the previous behaviour was — now chosen rather than
+  // fallen into.
+  const stats = computeStats(atMostHabit, [],
+    { start: '2026-07-01', end: '2026-07-30', unlogged: 'success' });
+
+  assert.equal(stats.streaks.length, 1);
+  assert.equal(stats.streaks[0].length, 30);
+  assert.ok(stats.score > 0.7, 'the EWMA should be climbing');
+});
+
+test('a slip breaks the run under either answer', () => {
+  // Whatever the silence means, an entry over the limit is a miss. Six on the
+  // 10th, on a habit that allows five.
+  for (const unlogged of ['miss', 'success']) {
+    const stats = computeStats(atMostHabit,
+      [{ date: '2026-07-10', value: 6, status: '' }],
+      { start: '2026-07-01', end: '2026-07-30', unlogged });
+    assert.ok(
+      stats.streaks.every((s) => !(s.start <= '2026-07-10' && '2026-07-10' <= s.end)),
+      `${unlogged}: the day over the limit was inside a streak`
+    );
+  }
+});
+
+test('nothing about an at-least habit turns on this at all', () => {
+  // The question only arises for a limit: for every other habit an unanswered
+  // day holds no value, and no value is short of an at-least target and is not
+  // YES. Pinned so a future change to the rule cannot quietly reach further
+  // than the one case it is for.
+  for (const habit of [boolHabit, numHabit]) {
+    for (const unlogged of ['miss', 'success']) {
+      assert.equal(isCompleted(habit, undefined, unlogged), false,
+        `${habit.type}/${unlogged}: an unanswered day is a miss, always`);
+    }
+  }
+});
+
+test('a skip still outranks the setting', () => {
+  // A skip is an answer — "this day did not happen" — and it is neither a
+  // success nor a failure whatever silence is taken to mean.
+  for (const unlogged of ['miss', 'success']) {
+    assert.equal(isCompleted(atMostHabit, { value: 0, status: 'skip' }, unlogged), null);
+  }
+});
+
+test('the default is the honest one', () => {
+  // A limit created today has been kept for exactly no time. Defaulting the
+  // other way hands every new one a perfect record on its first day, which is
+  // the same unearned progress this whole change removes.
+  assert.equal(UNLOGGED_DEFAULT, 'miss');
+  assert.equal(isCompleted(atMostHabit, undefined), false,
+    'the default reading of an unanswered day changed without this test noticing');
+});
