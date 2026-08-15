@@ -123,12 +123,14 @@ Without that, the remedy in the paragraph above did not work: setting the
 environment credentials refused the stranger's *password* while their *cookie*
 kept full read and write for another fourteen days, and taking those credentials
 away again brought an older database row — and every session raised against it —
-back to life. The fingerprint is over the credential's SOURCE (the supplied hash,
-or the supplied plaintext) rather than over the stored scrypt hash, because
-`HABITERALL_PASSWORD` is re-salted on every boot and fingerprinting that logged
-everybody out at each restart. It is an HMAC keyed with the session secret, so
-the plaintext branch does not put an unsalted hash of the password in the
-database.
+back to life. What a session carries is an opaque random **epoch**, not a
+digest of anything: the first version of this fingerprinted the credential's
+source material — for `HABITERALL_PASSWORD`, the plaintext — which put a fast,
+unsalted digest of a password in the database beside the key it was made with,
+the exact offline shortcut scrypt exists to deny. Detecting the change cannot be
+hash equality either, since a plaintext password is re-salted on every boot and
+that logged everybody out at each restart; `syncCredential` runs `verifyPassword`
+against the stored hash instead, once per start.
 
 **Trust no proxy unless told to.** `TRUST_PROXY` defaults to **0** here and to 1
 in cloud, and the difference is the whole point: this edition's quickstart is

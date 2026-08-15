@@ -21,7 +21,7 @@
  * for everyone.
  */
 
-import { createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { db } from './db.js';
 import { log } from '@habiterall/shared/log.js';
@@ -108,11 +108,14 @@ const claimRow = db.prepare(
 let fromEnv = null;
 
 /**
- * The stable material behind `fromEnv` — the supplied hash, or the supplied
- * plaintext. Never the freshly salted hash, which differs on every boot.
+ * The plaintext `HABITERALL_PASSWORD`, when one was supplied.
+ *
+ * Held only so `syncCredential` can ask scrypt whether it still matches the
+ * stored hash — a fresh hash of it differs on every boot, so string equality
+ * cannot answer that question.
  * @type {string|null}
  */
-let envHashMaterial = null;
+let envPlaintext = null;
 
 /** Whether auth is on at all, and whether the environment owns the password. */
 export const state = {
@@ -148,13 +151,13 @@ export async function initAuth() {
 
   const env = envCredentials(process.env);
   if (env) {
-    envHashMaterial = env.hash ?? env.plain;
+    envPlaintext = env.plain;
     fromEnv = {
       username: env.username,
       hash: env.hash ?? await hashPassword(env.plain),
     };
     state.managed = true;
-    evictStaleSessions();
+    await syncCredential();
     if (!env.hash) {
       // Worth one line: a plaintext password is visible to `docker inspect`
       // and to anything that dumps the environment.
@@ -165,7 +168,7 @@ export async function initAuth() {
     return;
   }
 
-  evictStaleSessions();
+  await syncCredential();
 
   if (!credentials()) {
     // Deliberately unguarded, at the operator's request: the first person to
@@ -180,89 +183,88 @@ export async function initAuth() {
 }
 
 /**
- * A short, stable fingerprint of whichever credential is currently active.
+ * A random token that changes whenever the active credential does.
  *
- * A session carries the fingerprint it was created under, and `initAuth` throws
- * away every session when the active credential stops matching what was last
- * seen. Without that, a session outlives the credential that authorised it —
- * and the documented remedy for the unguarded setup route ("set
- * HABITERALL_USERNAME and HABITERALL_PASSWORD to close it") did not evict the
- * stranger who had already claimed the instance: their password stopped working
- * while their cookie kept full read and write for another fourteen days.
+ * A session carries the epoch it was created under; `requireAuth` compares it,
+ * and `syncCredential` mints a new one — dropping every session — the moment the
+ * credential stops matching what was last seen. Without that, a session outlives
+ * the credential that authorised it: the documented remedy for the unguarded
+ * setup route ("set HABITERALL_USERNAME and HABITERALL_PASSWORD to close it")
+ * refused the stranger's PASSWORD while their COOKIE kept full read and write
+ * for another fourteen days.
  *
- * The hash, not the password, and truncated: this is an equality check, never a
- * credential. It goes in `server_secrets` rather than `settings` for the reason
- * everything else in that table does — settings are served to the browser and
- * copied into backups.
+ * An opaque random token rather than a digest of the credential, and that is the
+ * second attempt. The first fingerprinted the credential's source material,
+ * which for `HABITERALL_PASSWORD` is the plaintext — an unsalted, fast digest of
+ * a password sitting in the database beside the key it was made with, which is
+ * exactly the offline-guessing shortcut scrypt exists to deny. Nothing derived
+ * from the password appears here now.
  *
- * @returns {string|null} null when the instance has no credential at all
+ * @returns {string} '' before the first sync
  */
-function credentialFingerprint() {
-  if (!state.enabled) return null;
-
-  // Over the credential's SOURCE, not over the scrypt hash.
-  //
-  // A hash of `HABITERALL_PASSWORD` is salted afresh on every boot, so
-  // fingerprinting it made the value change every restart — which evicted every
-  // session each time the server came back, on an instance where nothing had
-  // changed at all. The material below is stable: an env hash is already stable,
-  // an env password is the plaintext the operator set, and a database row's hash
-  // only moves when setup writes it.
-  //
-  // HMAC rather than a bare digest, keyed with the session secret, because the
-  // plaintext branch would otherwise put an unsalted hash of the password in the
-  // database. Anyone who can read that key can already forge sessions outright,
-  // so this adds no exposure it does not already have.
-  const material = fromEnv
-    ? (envHashMaterial ?? '')
-    : (readRow.get()?.hash ?? null);
-  if (material === null) return null;
-
-  return createHmac('sha256', sessionSecret())
-    .update(`${activeUsername()}\u0000${material}`)
-    .digest('base64url')
-    .slice(0, 22);
-}
-
-/** The username currently in force, or '' when there is no credential. */
-function activeUsername() {
-  return credentials()?.username ?? '';
-}
-
-const readSeen = db.prepare("SELECT value FROM server_secrets WHERE key = 'credential'");
-const writeSeen = db.prepare(
-  `INSERT INTO server_secrets (key, value) VALUES ('credential', ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-);
-
-/** Record the active credential as the one sessions are now valid against. */
-function rememberCredential() {
-  writeSeen.run(credentialFingerprint() ?? '');
+function credentialEpoch() {
+  return String(readSecret(EPOCH_KEY) ?? '');
 }
 
 /**
- * Drop every session if the credential changed since last boot.
+ * Notice a changed credential, and evict every session when it has.
  *
- * Credentials only change across a restart (the environment) or once, at setup —
- * so this is the whole of it, and it is deliberately blunt: there is one account,
- * so "some sessions are still valid" is not a state worth preserving. It also
- * covers the case where environment credentials are REMOVED again and an older
- * database row becomes active a second time.
+ * The comparison cannot be `hash === storedHash` for a plaintext password: it is
+ * re-salted on every boot, so that reported a change at every restart and logged
+ * everybody out for nothing. `verifyPassword` against the stored hash is the
+ * right question — the same scrypt the login route runs, once per start.
+ *
+ * Credentials only change across a restart (the environment) or once, at setup,
+ * so this runs at exactly those two moments. It is deliberately blunt: there is
+ * one account here, so "some sessions survive" is not a state worth keeping.
  */
-function evictStaleSessions() {
-  const seen = readSeen.get()?.value ?? null;
-  const now = credentialFingerprint() ?? '';
-  if (seen === now) return;
+async function syncCredential() {
+  const active = credentials();
+  const stored = String(readSecret(CRED_KEY) ?? '');
+  const [storedUser, storedHash] = splitStored(stored);
+
+  let unchanged;
+  if (!active) {
+    unchanged = stored === '';
+  } else if (storedUser !== active.username || !storedHash) {
+    unchanged = false;
+  } else if (envPlaintext) {
+    unchanged = await verifyPassword(envPlaintext, storedHash);
+  } else {
+    unchanged = storedHash === active.hash;
+  }
+  if (unchanged) return;
+
+  writeSecret(CRED_KEY, active ? `${active.username}\u0000${active.hash}` : '');
+  writeSecret(EPOCH_KEY, randomBytes(16).toString('base64url'));
 
   const { changes } = db.prepare('DELETE FROM sessions').run();
-  writeSeen.run(now);
-  if (seen !== null && changes > 0) {
+  if (stored !== '' && changes > 0) {
     log.warn('auth.sessions_evicted', {
       reason: 'the active credential changed since the last start',
       sessions: changes,
     });
   }
 }
+
+/** `username\0hash` -> the two halves, or empty strings. */
+function splitStored(value) {
+  const at = value.indexOf('\u0000');
+  return at === -1 ? ['', ''] : [value.slice(0, at), value.slice(at + 1)];
+}
+
+const CRED_KEY = 'credential';
+const EPOCH_KEY = 'credential_epoch';
+
+const readSecretStmt = db.prepare('SELECT value FROM server_secrets WHERE key = ?');
+const writeSecretStmt = db.prepare(
+  `INSERT INTO server_secrets (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+);
+
+const readSecret = (key) => readSecretStmt.get(key)?.value ?? null;
+const writeSecret = (key, value) => writeSecretStmt.run(key, value);
+
 
 /** The active credentials, environment first. @returns {{username,hash}|null} */
 function credentials() {
@@ -304,7 +306,7 @@ export function requireAuth(req, res, next) {
     // `evictStaleSessions` already clears the store when that changes across a
     // restart; this is the same rule enforced per request, so a session cannot
     // outlive its credential inside one process either.
-    if (user.cred === credentialFingerprint()) return next();
+    if (user.cred === credentialEpoch()) return next();
     return req.session.destroy(() => res.status(401).json({
       error: 'authentication required', mode: mode(),
     }));
@@ -385,7 +387,7 @@ export function mountAuth(app, readLimiter) {
       // Prevent session fixation: a brand-new id for the authenticated session.
       req.session.regenerate((err) => {
         if (err) return next(err);
-        req.session.user = { username: creds.username, cred: credentialFingerprint() };
+        req.session.user = { username: creds.username, cred: credentialEpoch() };
         req.session.save((err2) => {
           if (err2) return next(err2);
           log.info('auth.login', { user: creds.username });
@@ -437,12 +439,12 @@ export function mountAuth(app, readLimiter) {
       if (claimed.changes === 0) {
         return res.status(409).json({ error: 'this instance already has an account' });
       }
-      rememberCredential();
+      await syncCredential();
       log.info('auth.setup_complete', { user: name });
 
       req.session.regenerate((err) => {
         if (err) return next(err);
-        req.session.user = { username: name, cred: credentialFingerprint() };
+        req.session.user = { username: name, cred: credentialEpoch() };
         req.session.save((err2) => (err2 ? next(err2) : res.json({ ok: true })));
       });
     } catch (e) { next(e); }
