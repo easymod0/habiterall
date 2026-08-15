@@ -22,6 +22,13 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v11: the offline strip gained `#offline-message`, because the queued-write
+// count stopped being a child of the banner. connectivity.js looks that element
+// up at module load and paints through it, so a cached v10 index.html would
+// hand it `null` and throw on the first render — on the write path, which is
+// where the app now says it is offline. index.html and style.css are both shell
+// assets; either one served stale is the v6 case again.
+//
 // v9: the day grid and the day editor started importing ui/toggle.js, which is
 // a new shell asset. An installed PWA holding the old shell would fetch it on
 // first use — and be offline exactly when a tap needs it.
@@ -47,7 +54,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -137,6 +144,16 @@ sw.addEventListener('fetch', (event) => {
   // session response would break login in confusing ways.
   if (url.pathname.startsWith('/auth/')) return;
 
+  // Neither may the connectivity probe be answered from here, and this one is
+  // worse than stale — it is a lie about the present. `/healthz` is not under
+  // `/api/`, so it fell to `shellFirst`, which cached the first 200 and then
+  // served it cache-first forever: measured with the server killed outright,
+  // `isReachable()` still answered true out of the shell cache. Every input
+  // the app has about connectivity runs through that call, so an installed PWA
+  // could not notice an outage at all, and could not notice the recovery
+  // either. Read once as "the probe is fine, the watcher is broken".
+  if (url.pathname === '/healthz') return;
+
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(networkFirst(request, url));
     return;
@@ -154,7 +171,17 @@ async function networkFirst(request, url) {
     // `cache: 'no-store'` keeps the browser's HTTP cache out of the way. Without
     // it a revalidated 304 can satisfy this fetch even with no connectivity, so
     // the offline branch never runs and the page cannot tell it has stale data.
-    const response = await fetch(request, { cache: 'no-store' });
+    //
+    // The bound is the same 10s the page uses (ui/api.js, from `Api.kt`), and
+    // it matters more here than there because the answer is already on the
+    // device: a server that accepts the connection and never replies left this
+    // waiting forever with a perfectly good cached dashboard three lines below.
+    // The PWA's cold boot runs two of these in sequence, so an unbounded hang
+    // here is an app that opens to nothing at all. Only GETs reach the worker,
+    // so there is nothing here that a retry could duplicate.
+    const response = await fetch(request, {
+      cache: 'no-store', signal: AbortSignal.timeout(10_000),
+    });
     if (response.ok && CACHEABLE_API.some((re) => re.test(url.pathname))) {
       const cache = await caches.open(DATA_CACHE);
       cache.put(request, response.clone());

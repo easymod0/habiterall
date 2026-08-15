@@ -1,6 +1,7 @@
 /**
  * The offline banner, the outbox badge, and the reconnect handling behind
- * them. Owns `#offline-bar`, `#pending-count` and `#btn-sync`.
+ * them. Owns `#offline-bar`, `#offline-message`, `#pending-count` and
+ * `#btn-sync`.
  *
  * Split from `api.js` on purpose: the API layer needs to *report* that a
  * request was served from cache or queued, but it has no business knowing
@@ -14,14 +15,33 @@ import { toast } from '/shared/ui/toast.js';
 const $ = (sel) => document.querySelector(sel);
 
 const bar = $('#offline-bar');
+const message = $('#offline-message');
 const badge = $('#pending-count');
 const retry = $('#btn-sync');
+
+/**
+ * Paint the strip from `state`.
+ *
+ * The strip has two independent reasons to exist and used to have one. Being
+ * offline is the obvious one; having writes waiting is the other, and the badge
+ * that says so was a CHILD of a bar shown only when offline — so the count of
+ * queued writes was hidden in exactly the situation that produces queued
+ * writes. Either reason shows it now, and the offline half hides itself when
+ * the only news is a queue: "2 changes waiting to sync" with a Retry beside it
+ * is true whether or not the app currently believes the server is gone.
+ */
+function render() {
+  const pending = state.pending > 0;
+  bar.hidden = !state.offline && !pending;
+  message.hidden = !state.offline;
+  badge.hidden = !pending;
+}
 
 /** Show or hide the offline banner. */
 export function setOffline(offline) {
   if (state.offline === offline) return;
   state.offline = offline;
-  bar.hidden = !offline;
+  render();
 }
 
 /** Reflect the number of queued writes in the banner. */
@@ -31,7 +51,34 @@ export async function refreshOfflineBadge() {
   badge.textContent = n
     ? `${n} change${n === 1 ? '' : 's'} waiting to sync`
     : '';
-  badge.hidden = n === 0;
+  render();
+}
+
+/** @type {(() => void) | null} the running watcher's offline entry point */
+let reportOffline = null;
+
+/**
+ * A request of ours could not reach the server.
+ *
+ * The write path is the only thing that ever finds this out first: the watcher
+ * makes no requests while it believes it is online, and no browser event fires
+ * when the interface is up and the route is dead. So a queued write is
+ * first-hand evidence — better than a probe, because it is the actual traffic —
+ * and it goes to `reportOffline` rather than `setOffline` because only the
+ * watcher can also start polling for the recovery. See offline.js.
+ *
+ * The FIRST failure is trusted, deliberately. Waiting for a second means the
+ * tap that started the outage still hangs with nothing on screen, which is the
+ * reported bug; and confirming with a `/healthz` probe is what that endpoint's
+ * notes forbid — four callers, self-feeding, one bucket per NAT. A blip that
+ * raises the banner for a moment costs nothing, because the backoff poll this
+ * arms takes it down again a second or two later.
+ */
+export function reportUnreachable() {
+  // Before `init()` — a write cannot get here first today, but a banner is
+  // still better than silence if the boot order ever changes.
+  if (reportOffline) reportOffline();
+  else setOffline(true);
 }
 
 /**
@@ -70,7 +117,7 @@ export function init() {
   });
 
   let wasOffline = false;
-  watchConnectivity(async (online) => {
+  ({ reportOffline } = watchConnectivity(async (online) => {
     setOffline(!online);
     await refreshOfflineBadge();
     if (!online) { wasOffline = true; return; }
@@ -84,7 +131,7 @@ export function init() {
       wasOffline = false;
       emit('reload');
     }
-  });
+  }));
 
   // Coming back to a backgrounded tab, independently of any connectivity
   // transition: the watcher's callback only fires when online/offline actually

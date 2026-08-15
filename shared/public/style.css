@@ -639,6 +639,10 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   top: 0;
   z-index: 9;
 }
+/* The dot lives inside the message now, so it disappears with it when the
+   strip is up only to report a queue. inline-flex, because a bare span gives
+   the dot no box to be 8px in. */
+.offline-message { display: inline-flex; align-items: center; gap: 9px; }
 .offline-dot {
   width: 8px;
   height: 8px;

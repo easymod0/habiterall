@@ -671,6 +671,47 @@ server at import time, so nothing declared in it can be unit tested — and the
 failure mode here is silent in the worst direction, an `inflight` left set
 reporting the last good answer forever while Postgres is down.
 
+**The connectivity state is an output of that probe, and a failed write is its
+one other input.** `watchConnectivity` polls only while it believes it is
+offline — deliberately, and the note above is why — so nothing asks the server
+anything while it believes it is online, and `online` / `offline` /
+`visibilitychange` none of them fire when the interface is up and only the route
+is dead. That is the shape of a stale tunnel or a container that has stopped
+answering, and through one the app went on looking connected for as long as the
+tab stayed open: no banner, and the queued-write count hidden inside it. So the
+app's own failed write reports in, through the watcher's `reportOffline` and not
+a bare `setOffline` — setting the state from outside leaves the watcher's `last`
+at `true`, so it neither polls nor ever reports the transition, and the banner
+sticks up until a `visibilitychange`. The FIRST failure is trusted: waiting for a
+second means the tap that started the outage still hangs, and confirming with a
+probe is exactly what the paragraph above forbids. A blip costs a banner for a
+second or two, because the backoff poll this arms is what takes it down again.
+
+Which only works because `/healthz` no longer goes through the service worker.
+It is not under `/api/`, so it fell to `shellFirst`, which cached the first 200
+and served it cache-first forever — measured with the server killed outright,
+`isReachable()` still answered `true` from the shell cache. Every input the app
+has about connectivity runs through that one call, so an installed PWA could not
+notice an outage, and could not notice a recovery either. It is excluded now, as
+`/auth/` already was.
+
+**A request the app makes is bounded; the one that creates a habit is not.**
+10s, in `ui/api.js` and in the worker's `networkFirst`, taken from `Api.kt`'s
+`connectTimeout` rather than invented — Chrome imposes no ceiling of its own on
+a response that never arrives (measured still pending at 300s), so before this
+a check-off could sit in a promise until the tab closed and be lost with it.
+The exemption is about REPLAYING, not latency: aborting does not recall a
+request the server has already begun, so everything bounded here has to be safe
+to arrive twice, and `POST /habits` is the one call on this path that is not —
+it yields a second habit. Import, export and the notify test bypass `api()`
+entirely, which is what makes a blanket bound safe for everything else.
+
+This is the bounded half of #87 and not the whole of it: the write is still
+attempted before it is durable, so the loss window is 10 seconds rather than
+unbounded. Closing it means enqueueing FIRST, which changes the outbox from
+"writes that failed" to "every write" and needs an idempotency key before it can
+be done — `flush()` would otherwise replay a create that had already landed.
+
 **One auth adapter, and the server says which mode it is in.**
 `shared/public/auth-session.js` covers all four states — `none`, `password`,
 `setup`, `oidc` — because with no build step there is nothing to pick a module
@@ -958,6 +999,15 @@ day and then asks the API what the row says, because the whole `questionMarks`
 distinction is between a row holding 0 and no row, and with the setting off both
 cells are the same empty square. A unit test can pin the cycle; only this can
 catch the grid and the database disagreeing about which of the two happened.
+
+`hangcheck.mjs` holds a request open with CDP `Fetch.requestPaused` and never
+continues it, because that is the only shape of "offline" that reproduces the
+one that matters — a server that accepts the connection and answers nothing.
+Devtools offline throttling is connection-refused, which rejects in about 3ms
+and passes against a build with none of this in it. The same warning applies to
+the unit half: the fake `AbortController` in `connectivity.test.js` used to have
+a no-op `abort()` against a `fetch` that ignored the signal, so a
+hang-and-assert-aborted test passed with no timeout in the code at all.
 
 `responsive.mjs` checks every major view at 360 / 390 / 768 / 1440px. It found
 the tablet bug above on its first run; most other suites only ever ran at

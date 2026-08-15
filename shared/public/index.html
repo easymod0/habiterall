@@ -54,9 +54,17 @@
     </div>
   </header>
 
+  <!--
+    Two reasons to show, and each one on its own is enough: the app believes it
+    is offline, or there are writes waiting. The count used to be a child shown
+    only inside the first, which hid it in the one situation that creates
+    queued writes. connectivity.js decides; see `render()` there.
+  -->
   <div id="offline-bar" class="offline-bar" role="status" aria-live="polite" hidden>
-    <span class="offline-dot" aria-hidden="true"></span>
-    <span>Offline — changes are saved on this device</span>
+    <span id="offline-message" class="offline-message" hidden>
+      <span class="offline-dot" aria-hidden="true"></span>
+      Offline — changes are saved on this device
+    </span>
     <span id="pending-count" class="pending-count" hidden></span>
     <button type="button" id="btn-sync" class="btn btn-sm">Retry</button>
   </div>
