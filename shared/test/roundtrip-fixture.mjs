@@ -86,7 +86,10 @@ export const FIXTURE = [
     freq_numerator: 1,
     freq_denominator: 1,
     color: '#ef4444',
-    reminder_time: '',
+    // Midnight, which is the hour every hand-rolled HH:MM converter gets wrong
+    // — and on the Loop side it is the reminder whose two columns are both 0,
+    // so a falsiness check anywhere reports it as "no reminder".
+    reminder_time: '00:00',
     archived: false,
     entries: [
       { date: '2026-01-05', value: 0, status: '', notes: '' },
@@ -153,19 +156,30 @@ export function entrySetWithNotes(entries) {
 }
 
 /**
- * Fields a Loop .db backup can carry. Notes, description and archived state
+ * Fields BOTH Loop formats can carry. Notes, description and archived state
  * have nowhere to live in Loop's schema, so they are excluded here rather
  * than being asserted and failing for a reason that is not a bug.
+ *
+ * `reminder_message` is Loop's `question` — the prompt a reminder asks, which
+ * is the same field under another name. The .db has the column and Habits.csv
+ * has the header, so both formats carry it.
  */
 export const LOOP_HABIT_FIELDS = [
   'name', 'type', 'unit', 'target_value', 'target_type',
-  'freq_numerator', 'freq_denominator',
+  'freq_numerator', 'freq_denominator', 'reminder_message',
 ];
+
+/**
+ * ...and what only the .db can carry. Loop stores a reminder as
+ * `reminder_hour` / `reminder_min` in the Habits *table* and exports neither to
+ * Habits.csv, so a reminder time survives one Loop format and not the other.
+ * That asymmetry is the format's, not a bug, which is why it is two lists.
+ */
+export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
 
 /** Fields the lossless JSON backup must preserve exactly. */
 export const JSON_HABIT_FIELDS = [
-  ...LOOP_HABIT_FIELDS, 'description', 'color', 'reminder_time',
-  'reminder_message', 'archived',
+  ...LOOP_DB_HABIT_FIELDS, 'description', 'color', 'archived',
 ];
 
 export function pick(obj, fields) {

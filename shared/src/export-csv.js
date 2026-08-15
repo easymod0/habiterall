@@ -60,7 +60,11 @@ export function buildHabitsCsv(habits) {
     lines.push([
       i,
       esc(h.name),
-      esc(h.description ?? ''),
+      // Question and Description are two different Loop fields. This wrote the
+      // description into both, so a habiterall CSV round trip copied it over the
+      // habit's reminder prompt — and the importer read `question` as a fallback
+      // for `description`, which is what kept the duplication invisible.
+      esc(h.reminder_message ?? ''),
       esc(h.description ?? ''),
       Number(h.freq_numerator ?? 1),
       Number(h.freq_denominator ?? 1),

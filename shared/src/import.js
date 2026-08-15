@@ -4,7 +4,8 @@
  *
  * Loop's on-disk format, confirmed against iSoron/uhabits @ dev:
  *   Habits      (id, name, description, question, freq_num, freq_den, color,
- *                position, archived, type, target_value, target_type, unit, uuid)
+ *                position, reminder_hour, reminder_min, reminder_days,
+ *                archived, type, target_value, target_type, unit, uuid)
  *   Repetitions (habit, timestamp, value, notes)
  *
  *   - timestamp is epoch MILLISECONDS aligned to UTC midnight
@@ -14,6 +15,8 @@
  *     any other value is a numerical amount scaled by 1000 (7.5 -> 7500)
  *   - habit type: 0 = boolean ("YES_NO"), 1 = numerical
  *   - target_type: 0 = at least, 1 = at most
+ *   - question is the prompt a reminder asks, i.e. habiterall's reminder_message
+ *   - a reminder is reminder_hour + reminder_min, and NULL for "none"
  */
 
 import { UNSET, YES, SKIP } from './constants.js';
@@ -94,6 +97,25 @@ export function convertLoopValue(raw, isNumerical) {
     default:
       return null;
   }
+}
+
+/**
+ * Loop stores a reminder as two integer columns and NULL for "no reminder";
+ * habiterall stores one `HH:MM` string and `''`. Anything that is not a whole
+ * hour 0..23 with a whole minute 0..59 is no reminder — a partial row (an hour
+ * with a NULL minute) is not a time, and inventing `:00` for it would put a
+ * notification on someone's phone that their Loop install never had.
+ *
+ * The inverse lives in export-loop.js as `timeToLoopReminder`, alongside the
+ * other half of every conversion in this file.
+ */
+export function loopReminderToTime(hour, min) {
+  if (hour === null || hour === undefined || min === null || min === undefined) return '';
+  const h = Number(hour);
+  const m = Number(min);
+  if (!Number.isInteger(h) || !Number.isInteger(m)) return '';
+  if (h < 0 || h > 23 || m < 0 || m > 59) return '';
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -212,6 +234,7 @@ export async function parseLoopDatabase(path) {
     const pick = (name, fallback) => (cols.has(name) ? name : `${fallback} AS ${name}`);
     const sql = `SELECT id, name,
                         ${pick('description', "''")},
+                        ${pick('question', "''")},
                         ${pick('freq_num', '1')},
                         ${pick('freq_den', '1')},
                         ${pick('color', '11')},
@@ -220,7 +243,9 @@ export async function parseLoopDatabase(path) {
                         ${pick('type', '0')},
                         ${pick('target_value', '0')},
                         ${pick('target_type', '0')},
-                        ${pick('unit', "''")}
+                        ${pick('unit', "''")},
+                        ${pick('reminder_hour', 'NULL')},
+                        ${pick('reminder_min', 'NULL')}
                  FROM Habits ORDER BY position, id`;
 
     const rows = src.prepare(sql).all();
@@ -263,6 +288,12 @@ export async function parseLoopDatabase(path) {
         freq_numerator: Math.max(1, Number(r.freq_num) || 1),
         freq_denominator: Math.max(1, Number(r.freq_den) || 1),
         color: normalizeColor(r.color),
+        // Loop's `question` is the prompt a reminder asks — "Did you meditate
+        // today?" rather than the habit's name — which is exactly what
+        // `reminder_message` holds. `normaliseImportedHabit` flattens and clamps
+        // it, so a Loop file cannot store a prompt the habit dialog could not.
+        reminder_message: String(r.question ?? ''),
+        reminder_time: loopReminderToTime(r.reminder_hour, r.reminder_min),
         archived: Number(r.archived) ? 1 : 0,
         entries,
       };
@@ -345,6 +376,7 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
     return {
       name,
       description: meta.description ?? '',
+      reminder_message: meta.reminder_message ?? '',
       type: meta.type ?? 'boolean',
       unit: meta.unit ?? '',
       target_value: meta.target_value ?? 0,
@@ -428,7 +460,15 @@ export function parseLoopHabitsCSV(text) {
   if (cName === -1) return new Map();
 
   const cType = idx('type');
-  const cDesc = idx('description', 'question');
+  // `question` and `description` are two different Loop fields and land in two
+  // different habiterall ones. This used to read `idx('description', 'question')`
+  // — question as a *fallback* for description — so a Loop backup with a prompt
+  // and no description imported the prompt as the habit's description, while the
+  // .db path dropped it entirely. Re-importing such a file now puts it where it
+  // belongs; the old copy in `description` is left alone, since nothing here can
+  // tell it from a description the user wrote.
+  const cDesc = idx('description');
+  const cQuestion = idx('question');
   // Loop's own Habits.csv labels these NumRepetitions/Interval; other exports
   // (and older versions) spell them out. Accept both, or a 3-times-a-week
   // habit silently comes back as daily.
@@ -456,6 +496,7 @@ export function parseLoopHabitsCSV(text) {
 
     out.set(name, {
       description: cDesc === -1 ? '' : (row[cDesc] ?? '').trim(),
+      reminder_message: cQuestion === -1 ? '' : (row[cQuestion] ?? '').trim(),
       type: isNumerical ? 'numerical' : 'boolean',
       unit: cUnit === -1 ? '' : (row[cUnit] ?? '').trim(),
       target_value: cTVal === -1 ? 0 : Number(row[cTVal]) || 0,

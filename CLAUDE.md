@@ -140,6 +140,36 @@ stated lapse and keeps its row while `UNKNOWN(-1)` has none, and identity is
 documented gap left — Loop's `.db` and the CSV pair can each carry all four
 states, so a lapse survives whether or not a note came with it.
 
+**The habit FIELDS are held to that standard too now, and two of them were not
+connected at all.** Loop's `question` is the prompt a reminder asks, which is
+`reminder_message` under another name; its `reminder_hour` / `reminder_min` are
+`reminder_time` in two integer columns. Both were dropped in both directions —
+`NULL, NULL` and `''` were literals in the export's INSERT, and none of the
+three columns appeared in the import's SELECT — so the one habit field a Loop
+file could carry and habiterall refused was the one with a picker on two
+clients. `loopReminderToTime` and `timeToLoopReminder` are the pair, and the
+case that decides them is **midnight**: `00:00` is both columns holding 0, so
+any check for a truthy hour reports a real reminder as none. Absent means
+absent, which is why a half-filled row (an hour with a NULL minute) is no
+reminder rather than `HH:00` — inventing that puts a notification on a phone
+that Loop never had.
+
+The CSV's version of this was a *pair* of bugs that concealed each other: the
+export wrote `description` into the `Question` column as well as its own, and
+the import read `idx('description', 'question')` — question as a fallback FOR
+description. So a habiterall round trip copied the description over the prompt,
+and a Loop backup with a question and no description imported the question as
+the habit's description. Both halves had to move together; fixing either alone
+looks like it works.
+
+That is why the fidelity rules are now two lists. `LOOP_HABIT_FIELDS` is what
+both Loop formats carry and `LOOP_DB_HABIT_FIELDS` adds `reminder_time`, because
+Loop's own `Habits.csv` has no reminder columns — an asymmetry of the format,
+asserted in both suites rather than assumed. Note the cloud suite seeds by
+writing columns by hand and had simply never written `reminder_message`, so
+every comparison of it held `''` against `''` and passed; the personal suite
+seeds through the API and never had the gap.
+
 **Loop's backup carries no preferences** — they live in Android's
 SharedPreferences, not the database — so nothing from a Loop file can set one,
 and `skipDays` / `questionMarks` arrive only in habiterall's own JSON backup.

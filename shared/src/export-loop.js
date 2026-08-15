@@ -59,6 +59,21 @@ export function colorToLoopIndex(hex) {
   return best;
 }
 
+/**
+ * 'HH:MM' -> Loop's two integer columns, and `[null, null]` for no reminder.
+ *
+ * The inverse of `loopReminderToTime` in import.js. Anything that is not the
+ * stored form is no reminder: `reminder_time` is already normalised against
+ * TIME_RE by both `parseHabit` and `normaliseImportedHabit`, so a value that
+ * fails here came from somewhere that had no business writing one.
+ */
+export function timeToLoopReminder(time) {
+  if (typeof time !== 'string') return [null, null];
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time.trim());
+  if (!m) return [null, null];
+  return [Number(m[1]), Number(m[2])];
+}
+
 /** 'YYYY-MM-DD' -> epoch millis at UTC midnight, matching Loop's storage. */
 export function isoToLoopTimestamp(iso) {
   const [y, m, d] = iso.split('-').map(Number);
@@ -162,7 +177,7 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
                           highlight, name, position, reminder_hour, reminder_min,
                           reminder_days, type, target_type, target_value, unit,
                           question, uuid)
-      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, NULL, 127, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 127, ?, ?, ?, ?, ?, ?)
     `);
     const insertRep = db.prepare(`
       INSERT INTO Repetitions (habit, timestamp, value, notes) VALUES (?, ?, ?, ?)
@@ -172,6 +187,10 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
 
     habits.forEach((h, position) => {
       const isNumerical = h.type === 'numerical';
+      // reminder_days stays the literal 127 (all seven bits) in the statement
+      // above: habiterall has no per-weekday reminder concept, so all-days is
+      // the only honest thing to tell Loop. When one lands, it is written here.
+      const [reminderHour, reminderMin] = timeToLoopReminder(h.reminder_time);
 
       insertHabit.run(
         h.id,
@@ -182,6 +201,8 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
         Math.max(1, Number(h.freq_numerator) || 1),
         h.name,
         position,
+        reminderHour,
+        reminderMin,
         isNumerical ? 1 : 0,
         h.target_type === 'at_most' ? 1 : 0,
         // Targets are stored UNSCALED in Loop's Habits table, unlike entry
@@ -189,7 +210,10 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
         // import back as 2000 in the Loop app.
         isNumerical ? Number(h.target_value ?? 0) : 0,
         h.unit ?? '',
-        '',                 // question: habiterall has no equivalent field
+        // question: Loop's prompt for the reminder, which is what
+        // reminder_message is. Written as '' here for years, with a comment
+        // saying there was no equivalent field — true when it was written.
+        h.reminder_message ?? '',
         randomUUID().replace(/-/g, '')
       );
 

@@ -30,7 +30,7 @@ const { unzip } = await import('@habiterall/shared/unzip.js');
 const { parseSettings, portableSettings } =
   await import('@habiterall/shared/validate.js');
 const {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, JSON_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, JSON_HABIT_FIELDS,
 } = await import('@habiterall/shared/test/roundtrip-fixture.mjs');
 
 const pg = (await import('pg')).default;
@@ -71,13 +71,17 @@ async function seed(userId) {
   await withUser(userId, async (db) => {
     for (const [i, h] of FIXTURE.entries()) {
       const { rows } = await db.query(
+        // reminder_message was absent here while the fixture carried one, so
+        // every comparison of it held '' against '' and passed. The personal
+        // suite seeds through the API and never had the gap; this one writes
+        // the columns by hand, which is the cost of not going through a route.
         `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                              target_type, freq_numerator, freq_denominator, color,
-                             reminder_time, position, archived)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+                             reminder_time, reminder_message, position, archived)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
         [userId, h.name, h.description, h.type, h.unit, h.target_value,
           h.target_type, h.freq_numerator, h.freq_denominator, h.color,
-          h.reminder_time ?? '', i, h.archived]
+          h.reminder_time ?? '', h.reminder_message ?? '', i, h.archived]
       );
       const habitId = rows[0].id;
 
@@ -113,6 +117,7 @@ async function read(userId) {
     return habits.map((h) => ({
       ...h,
       reminder_time: h.reminder_time ?? '',
+      reminder_message: h.reminder_message ?? '',
       entries: byHabit.get(h.id) ?? [],
     }));
   });
@@ -145,6 +150,8 @@ await seed(alice);
 const seeded = await read(alice);
 const baselineFull = snapshot(seeded, { fields: JSON_HABIT_FIELDS });
 const baselineLoop = snapshot(seeded, { fields: LOOP_HABIT_FIELDS, notes: false });
+// The .db carries a reminder time as well; Habits.csv has no column for one.
+const baselineLoopDb = snapshot(seeded, { fields: LOOP_DB_HABIT_FIELDS, notes: false });
 
 ck('fixture seeded', baselineFull.length === FIXTURE.length,
   `${baselineFull.length} habits`);
@@ -266,15 +273,15 @@ ck('the Loop export is a SQLite file',
 const loopHabits = await parseLoopDatabase(loopPath);
 await wipe(alice);
 const loopResult = await applyImport(alice, loopHabits, 'replace');
-const afterLoop = snapshot(await read(alice), { fields: LOOP_HABIT_FIELDS, notes: false });
+const afterLoop = snapshot(await read(alice), { fields: LOOP_DB_HABIT_FIELDS, notes: false });
 try { unlinkSync(loopPath); } catch { /* best effort */ }
 
 // Every entry, with no exception left: Loop's NO is a day habiterall can both
 // hold and write now, so a stated lapse survives whether or not a note came with
 // it. Notes are still outside this comparison (`notes: false`).
 ck('Loop round-trip preserves habits and entries',
-  diff(baselineLoop, afterLoop) === null,
-  diff(baselineLoop, afterLoop) ?? '');
+  diff(baselineLoopDb, afterLoop) === null,
+  diff(baselineLoopDb, afterLoop) ?? '');
 ck('Loop restore skipped nothing',
   loopResult.skipped.length === 0, loopResult.skipped.join('; '));
 
@@ -288,6 +295,20 @@ ck('Loop: numerical 3 stays 3, not a skip',
   loopWater.entries.includes('2026-01-06|3|'), loopWater.entries.join(' '));
 ck('Loop: target values are not scaled by 1000',
   loopWater.target_value === 8, String(loopWater.target_value));
+
+// Loop's reminder_hour / reminder_min and its `question`, both of which were
+// written as literal NULL / '' on the way out and never read on the way in.
+ck('Loop: a reminder time survives',
+  loopMeditate.reminder_time === '07:30', String(loopMeditate.reminder_time));
+ck('Loop: a midnight reminder is a reminder, not a blank',
+  afterLoop.find((h) => h.name === 'Snacks').reminder_time === '00:00',
+  String(afterLoop.find((h) => h.name === 'Snacks').reminder_time));
+ck('Loop: no reminder stays no reminder',
+  afterLoop.find((h) => h.name === 'Reading').reminder_time === '',
+  JSON.stringify(afterLoop.find((h) => h.name === 'Reading').reminder_time));
+ck('Loop: the reminder prompt survives as question',
+  loopMeditate.reminder_message === 'Did you sit for ten minutes?',
+  String(loopMeditate.reminder_message));
 
 /* ---------- CSV archive ---------- */
 
@@ -324,6 +345,22 @@ ck('CSV: a numerical 3 stays 3, not a skip',
 ck('CSV: large amounts are not dropped as unknown sentinels',
   csvWater.entries.includes('2026-01-05|8|') && csvWater.entries.includes('2026-01-07|10|'),
   csvWater.entries.join(' '));
+
+// Habits.csv wrote the description into Question as well as Description, and
+// the importer read Question as a fallback FOR description — so the duplication
+// was invisible and the prompt was lost. The two columns are two fields.
+const csvFull = snapshot(await read(alice), { fields: JSON_HABIT_FIELDS });
+const csvFullMeditate = csvFull.find((h) => h.name === 'Meditate');
+ck('CSV: the reminder prompt survives, in the Question column',
+  csvFullMeditate.reminder_message === 'Did you sit for ten minutes?',
+  String(csvFullMeditate.reminder_message));
+ck('CSV: the description is not overwritten by the prompt',
+  csvFullMeditate.description === 'Ten minutes, morning', csvFullMeditate.description);
+// Loop's CSV export has no reminder columns at all, so this one is expected to
+// be dropped — asserted rather than assumed, since it is the difference between
+// the two Loop formats and the reason there are two field lists.
+ck('CSV: a reminder time is dropped, as the format requires',
+  csvFullMeditate.reminder_time === '', JSON.stringify(csvFullMeditate.reminder_time));
 
 /* ---------- tenancy: a restore stays in its own account ---------- */
 
