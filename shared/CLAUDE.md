@@ -45,7 +45,7 @@ Postgres one.
 | `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, DOM-free, mirrored in Kotlin |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
 | `public/ui/values.js` | `UNSET` / `YES` / `SKIP` for the browser, mirroring `src/constants.js` |
-| `public/auth-none.js`, `auth-oidc.js` | the two auth adapters |
+| `public/auth-session.js` | the one auth adapter: `none` / `password` / `setup` / `oidc`, chosen by what the server reports |
 | `public/charts.js` | hand-rolled SVG charts |
 | `public/sw.js`, `offline.js` | PWA shell cache and the write outbox |
 
@@ -348,6 +348,14 @@ injected adapter (`load` / `render` / `signOut` / `onUnauthorized`) and hands it
 to `ui/api.js`, which needs it only to tell an expired session from a bug.
 Adding an `if (cloud)` branch anywhere here is how the frontends drifted apart
 the first time.
+
+There is now one adapter rather than one per edition, and the branch it used to
+be lives on the server: `load()` reads `mode` from `/api/me`, **and from its
+401** — a signed-out client is the one that has to decide between a form and a
+link, and that response is all it gets. `mode === 'none'` renders nothing at all
+and lets a 401 through as the bug it would be. With no build step nothing could
+pick a module at package time, which is exactly what stopped the personal
+edition making auth a runtime choice.
 
 ## Tests
 
