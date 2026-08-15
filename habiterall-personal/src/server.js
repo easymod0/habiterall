@@ -28,16 +28,10 @@ const isProd = process.env.NODE_ENV === 'production';
 // cloud's ceiling was never a decision anyone made.
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 16;
 
-// A `Secure` cookie is discarded by the browser over plaintext HTTP, which
-// would silently break login. Derive it from the scheme actually in use rather
-// than from NODE_ENV, so an http:// LAN instance still works while any https://
-// deployment gets Secure cookies automatically.
-//
 // Both names, in the order `notify-send.js` already reads them: this edition's
-// own variable is HABITERALL_PUBLIC_URL, and PUBLIC_URL is cloud's. Reading only
-// the latter here would mean an operator who set the documented one got a
-// non-Secure cookie behind TLS — which fails as "login does not work", with the
-// reason nowhere in sight.
+// own variable is HABITERALL_PUBLIC_URL, and PUBLIC_URL is cloud's. It names the
+// origin the app is reached at from outside, which is what the origin guard
+// below has to allow and what a Discord message links back to.
 const publicUrl = process.env.HABITERALL_PUBLIC_URL ?? process.env.PUBLIC_URL ?? '';
 const publicIsHttps = publicUrl.startsWith('https://');
 
@@ -152,18 +146,43 @@ const importLimiter = limit(RATE_LIMITS.import);
 // half-initialised auth state would be the worse trade.
 await initAuth();
 
+// A `Secure` cookie is discarded by the browser over plaintext HTTP, so
+// whatever decides this decides whether login works at all. It was
+// `publicIsHttps` — one answer for the whole process, from an environment
+// variable — and that is wrong for the deployment this edition is built around
+// and `HABITERALL_UPGRADE_INSECURE` is explicitly designed for: https from
+// outside, plain http from the LAN, same database. With PUBLIC_URL set to the
+// https name, a browser at http://192.168.1.5:3000 threw the cookie away, so
+// `POST /auth/login` answered 200, the page reloaded, and the app came back
+// signed out — forever, with no error on either side to say why.
+//
+// `'auto'` asks the REQUEST instead: express-session marks the cookie Secure
+// when `req.secure`, which is Express's trust-proxy-aware reading of the scheme
+// — the socket's own encryption, or `X-Forwarded-Proto` from a hop this app has
+// been told to trust. Each request then gets the flag that is right for it, and
+// the two ways in stop being one decision. This is also the behaviour the
+// README's nginx snippet has always described.
+if (publicIsHttps && !trustProxyHops) {
+  log.warn('insecure_cookies', {
+    reason: 'the public URL is https but no proxy is trusted, so this process only ever sees http',
+    consequence: 'session cookies cannot be marked Secure',
+    fix: 'set TRUST_PROXY to the number of proxies in front (usually 1), and make sure '
+      + 'the proxy sends X-Forwarded-Proto',
+  });
+}
+
 app.use(session({
   store: new SqliteStore(db),
   name: SESSION_NAME,
-  // A missing secret must not silently produce forgeable sessions, so this
-  // fails at startup rather than defaulting to something guessable.
+  // Generated and kept in the database when unset — unlike cloud, which demands
+  // its own and exits without one. See `sessionSecret`.
   secret: sessionSecret(),
   resave: false,
   saveUninitialized: false,
   rolling: true,
   cookie: {
     ...SESSION_COOKIE,
-    secure: publicIsHttps,           // set whenever the site is actually served over TLS
+    secure: 'auto',                  // per request, not per process — see above
   },
 }));
 

@@ -82,7 +82,8 @@ let flushing = false;
  * Stops at the first network failure so ordering is preserved — a later write
  * must never overtake an earlier one. A 4xx means the request will never
  * succeed (deleted habit, stale payload), so it is dropped and reported
- * rather than blocking the queue forever.
+ * rather than blocking the queue forever — with two exceptions the server can
+ * answer for reasons that have nothing to do with the write. See below.
  *
  * @returns {Promise<{sent:number, failed:Array, remaining:number}>}
  */
@@ -116,8 +117,16 @@ export async function flush() {
         continue;
       }
 
-      if (res.status === 401) {
-        // Session expired. Keep the queue and let the app prompt for login.
+      if (res.status === 401 || res.status === 403) {
+        // Neither of these is a verdict on the WRITE, so neither may discard
+        // one. 401 is an expired session: keep the queue and let the app prompt
+        // for login. 403 is the origin guard, and it is a statement about the
+        // deployment — a proxy rewriting Host with no hop trusted makes
+        // `req.host` disagree with the browser's Origin, and every write is
+        // refused while the misconfiguration lasts. Dropping on it meant the
+        // first flush after that silently destroyed every check-off in the
+        // outbox, which is the one thing this queue exists to prevent. Fixing
+        // the proxy (or TRUST_PROXY) then replays them.
         break;
       }
 

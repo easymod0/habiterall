@@ -10,10 +10,18 @@
  *
  * Both halves are checked here: the credential changing, and the credential
  * being REMOVED again, which used to bring an older database row — and every
- * session raised against it — back to life.
+ * session raised against it — back to life. The second half needs two rules to
+ * hold at once, which is why it is several checks rather than one: the stale
+ * row must not outlive the masking, and what replaces it must not be *nothing*,
+ * or dropping the variables reopens the setup window instead.
+ *
+ * The last mode covers the other direction — a restart that changes nothing
+ * must not evict anybody, including the ambiguous case where both password
+ * variables are set and only one of them is the credential.
  */
 
 import { spawn } from 'node:child_process';
+import { hashPassword } from '@habiterall/shared/password.js';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -104,6 +112,17 @@ try {
   const read = await withCookie(cookie, '/api/habits');
   check("the stranger's session no longer reads", read.status === 401, `status=${read.status}`);
 
+  // /api/me sits ABOVE the /api mount, so it is the one route that reads a
+  // session without `requireAuth` — and it used to check only that one existed.
+  // A revoked cookie got a 200 naming the account it no longer had, which is
+  // what `auth.load()` boots from: the app painted its whole signed-in shell
+  // and then threw it away on the first dashboard fetch.
+  const me = await withCookie(cookie, '/api/me');
+  check("nor does it satisfy /api/me", me.status === 401, `status=${me.status}`);
+  const meBody = await me.json().catch(() => ({}));
+  check("and /api/me does not hand back the revoked account's username",
+    meBody.name === undefined, JSON.stringify(meBody));
+
   const write = await withCookie(cookie, '/api/habits', {
     method: 'POST', body: JSON.stringify({ name: 'planted' }),
   });
@@ -129,14 +148,51 @@ try {
 
   /* ---------- 3. the environment credentials are taken away again ---------- */
 
+  // The half that made the documented remedy a suspension rather than a
+  // revocation. Environment credentials used only to MASK the database row, so
+  // the stranger's username and hash sat in `auth_credentials` untouched and
+  // the day the variables went away — a compose edit, a `docker run` without
+  // `--env-file`, the volume restored elsewhere — their password worked again.
+  // `adoptEnvCredential` writes the environment's credential into that row, so
+  // what is left behind is the operator's, not the stranger's.
   server = await boot({});
   const revived = await withCookie(cookie, '/api/habits');
   check("removing the env credentials does not revive the stranger's session",
     revived.status === 401, `status=${revived.status}`);
 
+  const strangerAgain = await fetch(`${base}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ username: 'stranger', password: 'stranger-password' }),
+  });
+  check("nor their password", strangerAgain.status === 401, `status=${strangerAgain.status}`);
+
+  // The instance must NOT fall back to having no account at all: that would
+  // reopen the unguarded setup window on an instance that has an owner, which
+  // is a worse failure than the one being fixed.
+  const stillOwned = await fetch(`${base}/auth/setup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ username: 'opportunist', password: 'a-good-long-password' }),
+  });
+  check('the instance cannot be claimed again', stillOwned.status === 409,
+    `status=${stillOwned.status}`);
+
+  // The credential did not change — the environment was only ever a copy of
+  // what is now in the row — so the operator's session is still good. That is a
+  // deliberate reversal of what this file used to assert, and the epoch is why
+  // it is safe: it moves when the credential does, and here it did not.
   const ownerAfter = await withCookie(ownerCookie, '/api/habits');
-  check("nor does it leave the operator's session valid against a different credential",
-    ownerAfter.status === 401, `status=${ownerAfter.status}`);
+  check("and the operator's own session is not collateral damage",
+    ownerAfter.status === 200, `status=${ownerAfter.status}`);
+
+  const ownerLoginAfter = await fetch(`${base}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ username: 'owner', password: 'a-good-long-password' }),
+  });
+  check("nor is the operator's password", ownerLoginAfter.status === 200,
+    `status=${ownerLoginAfter.status}`);
   await stop(server);
 
   /* ---------- 4. an unchanged credential must NOT log everyone out ---------- */
@@ -160,6 +216,45 @@ try {
   const survived = await withCookie(freshCookie, '/api/habits');
   check('a session survives a restart that changes nothing', survived.status === 200,
     `status=${survived.status}`);
+  await stop(server);
+
+  /* ---------- 5. …including when BOTH password variables are set ---------- */
+
+  // The hash wins and the plaintext is ignored, which is `envCredentials`'
+  // decision — but `syncCredential` was asking scrypt whether the ignored
+  // PLAINTEXT matched the stored hash. It never did, so every restart looked
+  // like a credential change: a new epoch, `DELETE FROM sessions`, and a warning
+  // about an eviction nothing had asked for. A deliberately unrelated plaintext
+  // here, because a matching one would pass either way.
+  const bothVars = {
+    HABITERALL_USERNAME: 'owner',
+    HABITERALL_PASSWORD: 'a-different-password-entirely',
+    HABITERALL_PASSWORD_HASH: await hashPassword('the-real-one'),
+  };
+
+  server = await boot(bothVars);
+  const byHash = await fetch(`${base}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ username: 'owner', password: 'the-real-one' }),
+  });
+  const hashCookie = (byHash.headers.getSetCookie?.() ?? [])[0]?.split(';')[0] ?? '';
+  check('the hash is the password when both are set', byHash.status === 200 && !!hashCookie,
+    `status=${byHash.status}`);
+
+  const byPlain = await fetch(`${base}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ username: 'owner', password: 'a-different-password-entirely' }),
+  });
+  check('and the losing plaintext is not a second one', byPlain.status === 401,
+    `status=${byPlain.status}`);
+  await stop(server);
+
+  server = await boot(bothVars);
+  const notEvicted = await withCookie(hashCookie, '/api/habits');
+  check('a restart with both variables set does not empty the session table',
+    notEvicted.status === 200, `status=${notEvicted.status}`);
   await stop(server);
 
   console.log(failures ? `\n${failures} check(s) failed` : '\nall credential-change checks passed');

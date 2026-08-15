@@ -87,6 +87,24 @@ test('a hash in the environment is preferred over plaintext', () => {
   });
   assert.equal(creds.username, 'mark');
   assert.equal(creds.hash, 'scrypt$16384$8$1$YQ==$Yg==');
+
+  // And the plaintext that lost is not handed on. `plain` means "the password
+  // behind `hash`", and the caller's use for it is asking scrypt whether a
+  // stored hash still matches — a question an unrelated string answers "no" to
+  // on every boot, which emptied the session table at every restart.
+  assert.equal(creds.plain, null);
+  assert.equal(creds.ambiguous, true);
+});
+
+test('a plaintext alone is carried, and is not ambiguous', () => {
+  const creds = envCredentials({ HABITERALL_PASSWORD: 'plain' });
+  assert.equal(creds.hash, null);
+  assert.equal(creds.plain, 'plain');
+  assert.equal(creds.ambiguous, false);
+
+  const hashed = envCredentials({ HABITERALL_PASSWORD_HASH: 'scrypt$16384$8$1$YQ==$Yg==' });
+  assert.equal(hashed.plain, null);
+  assert.equal(hashed.ambiguous, false);
 });
 
 test('a username defaults rather than arriving blank', () => {

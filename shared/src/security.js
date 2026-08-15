@@ -79,9 +79,11 @@ export function cspDirectives(upgradeInsecure) {
 export const HSTS = { maxAge: 31536000, includeSubDomains: true };
 
 /**
- * Session cookie shape, minus `secure` — which each edition derives from the
- * scheme actually in use, not from NODE_ENV, because a `Secure` cookie over
- * plaintext HTTP is dropped silently and login breaks with no error.
+ * Session cookie shape, minus `secure` — which each edition decides for itself,
+ * because a `Secure` cookie over plaintext HTTP is dropped silently and login
+ * then breaks with no error on either side. Cloud reads its one public URL;
+ * personal says `'auto'` and lets express-session answer per request, because
+ * that edition is commonly reachable over both schemes at once.
  *
  * The two editions match here on purpose. The Android client reads its session
  * out of the WebView's `CookieManager`, so one cookie name and one `sameSite`
@@ -239,8 +241,16 @@ export function warnOnUntrustedProxy({ trusted, warn }) {
       said = true;
       warn({
         reason: 'a request arrived with X-Forwarded-For but TRUST_PROXY is 0',
+        // Three sinks, not one. The limiters were the reason this warning was
+        // written, but `req.ip` is not the only trust-proxy-aware value the app
+        // reads: `sameOriginOnly` compares `req.host`, which ignores
+        // X-Forwarded-Host while nothing is trusted — so a proxy that rewrites
+        // Host refuses every write with a 403 — and the session cookie's
+        // `secure: 'auto'` reads `req.protocol`, which cannot see the TLS the
+        // proxy terminated.
         consequence: 'every caller keys on the proxy address, so one client can '
-          + 'exhaust the rate limits for everyone',
+          + 'exhaust the rate limits for everyone; writes may be refused as '
+          + 'cross-origin, and session cookies cannot be marked Secure',
         fix: 'set TRUST_PROXY to the number of proxies in front (usually 1)',
       });
     }

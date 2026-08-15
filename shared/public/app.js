@@ -22,8 +22,32 @@ import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
 import { initTheme, toggleTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
+import { showError } from '/shared/ui/views.js';
 
 const $ = (sel) => document.querySelector(sel);
+
+/**
+ * Boot could not get far enough to show anything. Say so, somewhere that stays.
+ *
+ * A toast was the whole handling here, and a toast clears itself after two and
+ * a half seconds. That was survivable while `#view-list` was visible from the
+ * markup; it stopped being so when the list became hidden until the session is
+ * known and `adapter.load()` started throwing for every answer that is neither
+ * 200 nor 401. A 500, a proxy's 502, or the service worker's synthetic 503 —
+ * which is what the first offline boot after a CACHE_VERSION bump gets, since
+ * the bump drops the data cache /api/me would have been served from — then
+ * left an entirely blank page.
+ */
+function showBootError(message) {
+  showError();
+  const text = $('#boot-error');
+  if (text) text.textContent = message;
+
+  const retry = $('#boot-retry');
+  // A reload rather than re-entering start(): the same reasoning the sign-in
+  // form uses after a successful login — one boot path is enough to keep right.
+  if (retry) retry.addEventListener('click', () => window.location.reload(), { once: true });
+}
 
 function initTopBar() {
   // The app title doubles as "home". Reloads rather than just switching views,
@@ -137,6 +161,16 @@ export async function start(adapter) {
     } else {
       await dashboard.load();
     }
+  } catch (e) {
+    // Everything above this line runs before anything is on screen, so there is
+    // no view left for a toast to sit under — see `showBootError`.
+    return showBootError(e.message);
+  }
+
+  // Outside the guard on purpose: by here the app has painted, so a failure is
+  // one action going wrong rather than a boot that did not happen, and
+  // replacing the dashboard with an error page would be the larger loss.
+  try {
     handleLaunchAction();
   } catch (e) {
     toast(e.message);

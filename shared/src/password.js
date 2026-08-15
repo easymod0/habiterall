@@ -141,8 +141,18 @@ export function authFlagMisread(raw) {
  * change-password path has to refuse while these are set, and `/api/me`
  * reports `managed` for that reason.
  *
+ * **`plain` is the plaintext BEHIND `hash`, or nothing.** When both variables
+ * are set the hash wins, and `plain` is then null rather than the unrelated
+ * password that lost: the caller uses it to ask scrypt whether the stored hash
+ * still matches, and answering that question with a plaintext the hash was not
+ * made from is false on every boot. That reported a credential change at every
+ * restart and emptied the session table each time, while the plaintext was also
+ * being silently ignored for login. `ambiguous` is how the server says so out
+ * loud instead of picking in silence.
+ *
  * @param {Record<string,string|undefined>} env
- * @returns {{username: string, hash: string|null, plain: string|null}|null}
+ * @returns {{username: string, hash: string|null, plain: string|null,
+ *            ambiguous: boolean}|null}
  */
 export function envCredentials(env) {
   const username = (env.HABITERALL_USERNAME ?? '').trim();
@@ -156,6 +166,8 @@ export function envCredentials(env) {
     // password managers expect a pair and because a blank field reads as broken.
     username: username || 'admin',
     hash: hash || null,
-    plain: plain || null,
+    // Only when it is the source of the credential — see above.
+    plain: hash ? null : (plain || null),
+    ambiguous: !!hash && !!plain,
   };
 }

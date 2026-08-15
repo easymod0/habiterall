@@ -570,6 +570,26 @@ draw a form or a link, and that response is all it gets. It replaced
 `auth-none.js` and `auth-oidc.js`, and both editions' `app-entry.js` are now the
 same three lines.
 
+Which makes `/api/me` the one route that reads a session **without**
+`requireAuth`, since it sits above the `/api` mount and has to answer a caller
+who has none. It therefore has to repeat by hand every question that middleware
+asks, and it did not: it checked that a session existed and not that it was still
+valid against the current credential, so a revoked cookie got a `200` naming the
+account it no longer had. That is the answer the whole boot is built on — the
+app painted its signed-in shell and threw it away on the first dashboard fetch —
+and it handed back the previous owner's username on the way.
+
+**Boot has to be able to fail visibly.** Everything `start()` does before the
+first paint now happens with every view hidden, so an error escaping it used to
+leave a completely blank page under a toast that cleared itself in 2.6 seconds.
+`#view-error` is that surface, and the case it exists for is not exotic: a
+`CACHE_VERSION` bump drops the data cache, so the first offline boot afterwards
+gets the service worker's synthetic 503 for `/api/me` — which `load()` correctly
+refuses to read a mode from. The split in `start()` is deliberate: anything up to
+and including the dashboard's first render goes to that view, and
+`handleLaunchAction` afterwards only toasts, because by then there is a painted
+app that replacing would be the larger loss.
+
 **Sign-in belongs in the app, not in the reverse proxy** — because of the
 Android client. `android-native/.../data/Api.kt` talks to `/api` directly,
 outside the WebView, so a proxy's login form is one it cannot fill; exempting
@@ -613,6 +633,29 @@ stop a request it cannot make. That is also why this is an origin check rather
 than a CSRF token: a token must be fetched, held and replayed by every client,
 and the point of both editions issuing the same cookie is that the phone needs
 no special path.
+
+Its refusal is a **403, and the outbox must not treat that as a verdict on the
+write.** The replay loop drops any 4xx other than 401 as permanently
+inapplicable, which is right for a deleted habit and wrong for this: `req.host`
+is trust-proxy-aware, so a proxy that rewrites `Host` with no hop trusted makes
+every write look cross-origin, and the first flush after that silently destroyed
+the entire queue. 403 now keeps its place in line, exactly as 401 does — the
+misconfiguration is fixable, and the writes replay when it is.
+
+**`req.host` is the third thing `TRUST_PROXY` decides**, after the limiters' key
+and — since the personal edition stopped deriving it from a URL — whether the
+session cookie can be `Secure` at all. All three fail quietly and in different
+directions, which is why `warnOnUntrustedProxy` names all three.
+
+**A `Secure` cookie is a per-REQUEST answer in the personal edition.** It was
+`PUBLIC_URL.startsWith('https://')` — one verdict for the process — which is
+exactly wrong for the deployment `HABITERALL_UPGRADE_INSECURE` is written for:
+https from outside, plain http from the LAN, same database. The browser at
+`http://192.168.1.5:3000` discarded the cookie, so login answered 200, the page
+reloaded, and the app came back signed out forever with no error at either end.
+`secure: 'auto'` asks `req.secure` instead, so each way in gets its own answer.
+Cloud keeps the URL-derived form: it has one public origin, demands `PUBLIC_URL`,
+and has no LAN half to serve.
 
 **The credential limiter is not switchable.** `HABITERALL_RATE_LIMIT=off` exists
 so a test run is not throttled on ordinary reads; it briefly reached

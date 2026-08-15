@@ -100,6 +100,16 @@ const claimRow = db.prepare(
 );
 
 /**
+ * The same row, written unconditionally. Only `adoptEnvCredential` may use it —
+ * an upsert reachable from a route is a password reset for whoever reaches it,
+ * which is the whole reason `claimRow` above says DO NOTHING.
+ */
+const writeRow = db.prepare(
+  `INSERT INTO auth_credentials (id, username, hash) VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET username = excluded.username, hash = excluded.hash`
+);
+
+/**
  * Credentials from the environment, hashed if they arrived as plaintext.
  * Resolved once: hashing on every login attempt would be pointless work, and
  * the value cannot change without a restart anyway.
@@ -151,12 +161,23 @@ export async function initAuth() {
 
   const env = envCredentials(process.env);
   if (env) {
+    // Both password variables set. The hash wins — see `envCredentials` — and
+    // that is worth a line, because the losing plaintext is the one an operator
+    // is more likely to have just edited.
+    if (env.ambiguous) {
+      log.warn('auth.env_password_ambiguous', {
+        reason: 'HABITERALL_PASSWORD and HABITERALL_PASSWORD_HASH are both set',
+        consequence: 'the HASH is the password; the plaintext is ignored entirely',
+        fix: 'unset whichever of the two is not the one you meant',
+      });
+    }
     envPlaintext = env.plain;
     fromEnv = {
       username: env.username,
       hash: env.hash ?? await hashPassword(env.plain),
     };
     state.managed = true;
+    await adoptEnvCredential();
     await syncCredential();
     if (!env.hash) {
       // Worth one line: a plaintext password is visible to `docker inspect`
@@ -178,6 +199,56 @@ export async function initAuth() {
       reason: 'no credentials in the environment or the database',
       consequence: 'ANYONE who can reach this server can claim the account at /auth/setup',
       fix: 'complete setup now, or set HABITERALL_USERNAME and HABITERALL_PASSWORD',
+    });
+  }
+}
+
+/**
+ * Write the environment's credential into the database row it masks.
+ *
+ * `credentials()` prefers the environment, which is enough to refuse a stale
+ * password *while the variables are set* — and that turned out to be the shorter
+ * half of the documented remedy. A stranger who claims an unguarded instance
+ * leaves their username and hash in `auth_credentials` forever; setting
+ * HABITERALL_USERNAME and HABITERALL_PASSWORD only masked it, so the day the
+ * variables went away — a compose edit, a `docker run` without `--env-file`, the
+ * volume restored somewhere else — `credentials()` fell back to the stranger's
+ * row and their password worked again. Silently, and with no control anywhere
+ * that could have removed it.
+ *
+ * So the environment OVERWRITES rather than shadows. Deleting the row instead
+ * would close the same hole and open a worse one: with no credential at all,
+ * dropping the variables reopens the unguarded setup window on an instance that
+ * had an account, and anyone who can reach the port claims it. Overwriting
+ * leaves the operator's own credential behind, which is the answer that costs
+ * nothing when the masking ends.
+ *
+ * Written only when it differs, or a plaintext password — re-salted on every
+ * boot — would rewrite the row at every start. That comparison is a second
+ * scrypt per boot beside `syncCredential`'s, about thirty milliseconds, once,
+ * before the server listens.
+ */
+async function adoptEnvCredential() {
+  if (!fromEnv) return;
+
+  const row = readRow.get();
+  const stored = row ? { username: String(row.username), hash: String(row.hash) } : null;
+
+  if (stored?.username === fromEnv.username) {
+    // For a plaintext, ask scrypt — string equality cannot answer it. For a
+    // supplied hash, the string IS the credential and equality is exact.
+    const same = envPlaintext
+      ? await verifyPassword(envPlaintext, stored.hash)
+      : stored.hash === fromEnv.hash;
+    if (same) return;
+  }
+
+  writeRow.run(fromEnv.username, fromEnv.hash);
+
+  if (stored) {
+    log.warn('auth.env_credential_adopted', {
+      reason: 'HABITERALL_USERNAME/HABITERALL_PASSWORD differ from the stored account',
+      consequence: `the database account "${stored.username}" was replaced and can no longer sign in`,
     });
   }
 }
@@ -343,12 +414,26 @@ export function mountAuth(app, readLimiter) {
       // The same implicit user the edition has always had.
       return res.json({ id: 0, name: '', email: '', mode: current });
     }
-    if (!req.session?.user) {
+    // The same two questions `requireAuth` asks, and for the same reason. This
+    // route sits ABOVE the /api mount, so it is the one place a session is read
+    // without that middleware — and it used to check only that one existed.
+    // A session revoked by a credential change therefore got a 200 here naming
+    // the account it no longer had, while every other route 401'd: `load()`
+    // returned a user, `start()` painted the signed-in shell, and the first
+    // dashboard fetch threw it away again. It also handed the previous
+    // account's username back to a cookie that had just been revoked.
+    const user = req.session?.user;
+    if (!user) {
       return res.status(401).json({ error: 'authentication required', mode: current });
+    }
+    if (user.cred !== credentialEpoch()) {
+      return req.session.destroy(() => res.status(401).json({
+        error: 'authentication required', mode: current,
+      }));
     }
     return res.json({
       id: 0,
-      name: req.session.user.username,
+      name: user.username,
       email: '',
       mode: current,
       // Whether the environment owns the credential. There is no

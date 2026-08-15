@@ -98,6 +98,24 @@
   </main>
 
   <!--
+    Boot failed before the session could be resolved — see `start()` in app.js.
+    It needs a view of its own because the alternative is nothing at all: every
+    other main is now hidden until something has data to put in it, so an error
+    thrown while resolving /api/me (a 500, a proxy's 502, or the service
+    worker's synthetic 503 on the first offline boot after a cache bump) left a
+    blank page under a toast that cleared itself two and a half seconds later.
+  -->
+  <main id="view-error" class="view" hidden>
+    <div class="empty">
+      <p class="empty-title">habiterall could not start</p>
+      <p id="boot-error" class="empty-sub"></p>
+      <div class="empty-actions">
+        <button type="button" id="boot-retry" class="btn btn-primary">Try again</button>
+      </div>
+    </div>
+  </main>
+
+  <!--
     Hidden until the session is known. Painted markup would otherwise show the
     whole signed-in shell — grid, New habit, the gear — for one round trip on
     every cold load of an authenticated instance, then replace it with the

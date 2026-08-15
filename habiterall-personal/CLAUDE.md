@@ -103,15 +103,43 @@ served to the browser by `GET /api/settings` and copied into every backup by
 `GET /api/export`, so `auth_credentials` and `server_secrets` are tables of their
 own — the same rule that keeps `DISCORD_BOT_TOKEN` out of settings.
 
-**Environment credentials win over the database**, and `state.managed` says so
-to the UI. Two sources of truth for one password is how an operator changes it in
-the browser, redeploys the container, and silently gets the old one back.
+**Environment credentials win over the database, and OVERWRITE it.**
+`state.managed` says which to the UI. Two sources of truth for one password is
+how an operator changes it in the browser, redeploys the container, and silently
+gets the old one back — but preferring one at read time only masks the other,
+and masking lasts exactly as long as the variables do. A stranger who claims an
+unguarded instance leaves their username and hash in `auth_credentials` forever;
+the documented remedy below therefore *suspended* their access rather than
+revoking it, and a compose edit, a `docker run` without `--env-file` or the
+volume restored elsewhere brought their password back. `adoptEnvCredential`
+writes the environment's credential into that row instead.
+
+Overwriting rather than *deleting* it, which would close the same hole and open a
+worse one: with no credential at all, dropping the variables reopens the
+unguarded setup window on an instance that has an owner. What is left behind is
+the operator's own credential, which costs nothing when the masking ends — and
+because it is the same credential, the epoch does not move and nobody is signed
+out. The row is written only when it differs, or a plaintext password would
+rewrite it at every boot; that comparison is a second `verifyPassword` beside
+`syncCredential`'s, before the server listens.
+
+**`HABITERALL_PASSWORD` and `HABITERALL_PASSWORD_HASH` together are ambiguous,
+and the hash wins.** `envCredentials` returns `plain` as the password *behind*
+`hash` or nothing at all, because its one consumer asks scrypt whether a stored
+hash still matches — a question an unrelated plaintext answers "no" to on every
+boot. That made every restart look like a credential change: a fresh epoch,
+`DELETE FROM sessions`, and a warning about an eviction nobody caused, while the
+plaintext was also being quietly ignored for login. It is a warning at startup
+now rather than a silent preference.
 
 **Setup is unguarded, deliberately.** With auth on and no credentials anywhere,
 the first visitor to `POST /auth/setup` claims the instance — no token, no
 source-address check. `initAuth` warns at every start while that window is open.
 Set `HABITERALL_USERNAME` and `HABITERALL_PASSWORD` to close it before exposing
-the port. The claim itself is a single `INSERT ... ON CONFLICT DO NOTHING`, and
+the port — that remedy revokes the stranger's session (the epoch), their password
+(the adopted row) and their next attempt, and each of those three is a separate
+mechanism that had to be argued for. The claim itself is a single
+`INSERT ... ON CONFLICT DO NOTHING`, and
 that matters: it was a check, then thirty milliseconds of scrypt, then an
 *upsert*, so two concurrent claims both wrote and the second one won — locking
 the real owner out with a 200 in hand.
@@ -121,9 +149,10 @@ carry a fingerprint of the active credential, `requireAuth` compares it, and
 `initAuth` empties the `sessions` table when it changes across a restart.
 Without that, the remedy in the paragraph above did not work: setting the
 environment credentials refused the stranger's *password* while their *cookie*
-kept full read and write for another fourteen days, and taking those credentials
-away again brought an older database row — and every session raised against it —
-back to life. What a session carries is an opaque random **epoch**, not a
+kept full read and write for another fourteen days. (Taking those credentials
+away again brought the older database row back to life, which is the half the
+epoch could not fix — see `adoptEnvCredential` above.) What a session carries is
+an opaque random **epoch**, not a
 digest of anything: the first version of this fingerprinted the credential's
 source material — for `HABITERALL_PASSWORD`, the plaintext — which put a fast,
 unsalted digest of a password in the database beside the key it was made with,
@@ -131,6 +160,23 @@ the exact offline shortcut scrypt exists to deny. Detecting the change cannot be
 hash equality either, since a plaintext password is re-salted on every boot and
 that logged everybody out at each restart; `syncCredential` runs `verifyPassword`
 against the stored hash instead, once per start.
+
+`requireAuth` is not the only place that comparison has to happen. **`/api/me`
+sits above the `/api` mount** — it has to answer a caller with no session, which
+is the whole point of it — so it repeats both questions by hand, and it used to
+ask only the first. A revoked cookie got a `200` there naming the account it no
+longer had, which is the one answer `auth.load()` boots the entire app from.
+
+**The session cookie's `Secure` flag is decided per request** (`secure: 'auto'`),
+not from `HABITERALL_PUBLIC_URL`. A process-wide answer is wrong for the same
+both-schemes-at-once box the paragraph above describes: with the public URL set
+to the https name, a browser on `http://192.168.1.5:3000` threw the cookie away,
+so `POST /auth/login` answered 200, the page reloaded, and the app came back
+signed out — in a loop, with nothing on either side saying why. `req.secure` is
+Express's trust-proxy-aware reading of the scheme, so this is one more thing
+`TRUST_PROXY` decides: behind TLS with no hop trusted, the cookie cannot be
+marked `Secure` at all, and the server warns at startup when the public URL says
+https and nothing is trusted.
 
 **Trust no proxy unless told to.** `TRUST_PROXY` defaults to **0** here and to 1
 in cloud, and the difference is the whole point: this edition's quickstart is
@@ -147,6 +193,15 @@ first time a request arrives carrying `X-Forwarded-For` while nothing is
 trusted. Once per process — a per-request warning is one nobody reads, and a
 client can forge the header to repeat it. **If you put this behind a reverse
 proxy, set `TRUST_PROXY=1`.**
+
+And then **the port must only be reachable through that proxy**, which is the
+half that gets skipped because both halves look like they work. Trust is granted
+to the immediate peer, not to a particular route in: leaving 3000 open on the LAN
+as a shortcut means anything on that LAN is the immediate peer and writes its own
+`X-Forwarded-For` — the twenty-guess bound gone by rotating a header, on the one
+password this edition has. `X-Forwarded-Host` walks past `sameOriginOnly` the
+same way. Publish the port to the proxy's network only, and reach the app by its
+proxied name from inside the house as well as outside.
 
 **`/api/import` authenticates before it buffers.** The raw body parser sat above
 `requireAuth`, so an unauthenticated 70MB POST was read into memory and *then*
