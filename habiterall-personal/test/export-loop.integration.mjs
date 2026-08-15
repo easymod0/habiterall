@@ -65,8 +65,11 @@ const put = (path, body) => fetch(`${base}/api${path}`, {
 
 const habit = await post('/habits', { name: 'Meditate', type: 'boolean' });
 
-// Two real days, recorded the way anyone would.
-await put(`/habits/${habit.id}/entries/2026-03-02`, { value: 2 });
+// Two real days, recorded the way anyone would. The notes are not decoration:
+// 2026-02-30 rolls over ONTO 2026-03-02, so without something telling the two
+// rows apart, a suite that checks only dates and counts cannot see which of
+// them survived — see the assertion below.
+await put(`/habits/${habit.id}/entries/2026-03-02`, { value: 2, notes: 'the real day' });
 await put(`/habits/${habit.id}/entries/2026-03-03`, { value: 2 });
 
 // And the row the API itself will not write. Confirm that first, because if
@@ -83,7 +86,7 @@ ck('the API still refuses an impossible date', refused.status === 400,
 
 db.prepare(
   `INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)`
-).run(habit.id, '2026-02-30', 2, '', '');
+).run(habit.id, '2026-02-30', 2, '', 'the impossible one');
 
 const stored = db.prepare(
   `SELECT date FROM entries WHERE habit_id = ? ORDER BY date`).all(habit.id);
@@ -123,6 +126,16 @@ ck('every real day survives', exported != null &&
 ck('and no day is invented for the row that was skipped',
   exported != null && exported.entries.length === 2,
   String(exported?.entries.length));
+
+// Which row won is the assertion that actually pins the encodability gate.
+// Take the gate away and the seen-set still stops the UNIQUE violation, still
+// reports one skipped row, and still exports two days called 2026-03-02 and
+// 2026-03-03 — but `2026-02-30` sorts first, so it claims that timestamp and
+// the REAL day is the one dropped. Every check above passes on that. Only the
+// note tells them apart.
+ck('and the day that survived is the real one, not the rolled-over ghost',
+  exported?.entries.find((e) => e.date === '2026-03-02')?.notes === 'the real day',
+  JSON.stringify(exported?.entries.find((e) => e.date === '2026-03-02')));
 
 /* ---------- a clean account is untouched by any of it ---------- */
 

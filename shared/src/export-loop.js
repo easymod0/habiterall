@@ -146,7 +146,12 @@ export function isoToLoopTimestamp(iso) {
  * and only the string says they are different days.
  */
 export function isLoopEncodableDate(iso) {
-  if (!DATE_RE.test(iso ?? '')) return false;
+  // `typeof` first: `DATE_RE.test()` string-coerces, so an array of one date
+  // passes the shape check and `iso.split` then throws — out of a guard whose
+  // entire job is to be the thing that does not. Unreachable from either
+  // edition's storage today, which is exactly why it is one line and not a test.
+  if (typeof iso !== 'string') return false;
+  if (!DATE_RE.test(iso)) return false;
   const [y, m, d] = iso.split('-').map(Number);
   const back = new Date(isoToLoopTimestamp(iso));
   return back.getUTCFullYear() === y

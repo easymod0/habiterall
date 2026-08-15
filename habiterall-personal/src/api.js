@@ -532,13 +532,20 @@ api.get('/export.csv', (req, res) => {
  * A row Loop cannot carry is left out rather than taking the request down with
  * it, and `writeLoopDatabase` says which. Both surfaces are here because
  * neither reaches everybody: the header is for a client that made the request
- * itself (`Api.kt`, curl, devtools), and the log is for the one that did not —
+ * itself — curl or devtools — and the log is for the one that did not, since
  * the browser downloads this through an `<a download>`, which reads no headers.
  *
- * This is also the edition where it happens. SQLite stores `2026-02-30` as the
- * string it was given, so an import writer that checked only the shape of a
- * date left the row sitting there; Postgres refuses it outright, which is why
- * cloud has the same code and no accounts that need it.
+ * Not `Api.kt`, despite the shape of that sentence: the Android client makes no
+ * export request at all, and its one response accessor keeps a status and a
+ * body and no headers. If it ever does export, this is where its surface has to
+ * be reconsidered rather than assumed.
+ *
+ * SQLite makes this edition the EASIER one to reach — `2026-02-30` is stored as
+ * the string it was given, so an import writer checking only the shape of a
+ * date left the row sitting there. But cloud is reachable too, which is why the
+ * same code is there and not merely for symmetry: Postgres accepts any year
+ * 1–99 as a DATE, `to_char` hands back `0050-03-15`, and that is a date this
+ * exporter cannot encode either.
  */
 api.get('/export-loop.db', (req, res, next) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
