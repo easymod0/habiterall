@@ -524,6 +524,154 @@ test('a Loop db missing later-version columns still imports', async () => {
   unlinkSync(path);
 });
 
+/* ---------- a hostile .db must not decide how much memory this costs ---------- */
+
+/**
+ * A Loop-shaped database of exactly `rows` rows in one table and a valid
+ * minimum in the other, so each ceiling can be pushed on its own.
+ *
+ * Every Repetitions row is Loop's UNKNOWN(-1), which the parser drops. That is
+ * deliberate: nothing survives into the result, so what the ceiling is being
+ * asked to bound is the READ, with no output to hide behind.
+ */
+async function makeOversizedDb(path, kind, rows) {
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, description TEXT, question TEXT,
+      freq_num INTEGER, freq_den INTEGER, color INTEGER, position INTEGER, archived INTEGER,
+      type INTEGER, target_value REAL, target_type INTEGER, unit TEXT,
+      reminder_hour INTEGER, reminder_min INTEGER, reminder_days INTEGER);
+    CREATE TABLE Repetitions (habit INTEGER, timestamp INTEGER, value INTEGER, notes TEXT);
+  `);
+  d.exec('BEGIN');
+  if (kind === 'habits') {
+    const ins = d.prepare(`INSERT INTO Habits VALUES (?,?,'','',1,1,11,?,0,0,0,0,'',NULL,NULL,127)`);
+    for (let i = 1; i <= rows; i++) ins.run(i, `h${i}`, i);
+  } else {
+    d.prepare(`INSERT INTO Habits VALUES (1,'one','','',1,1,11,0,0,0,0,0,'',NULL,NULL,127)`).run();
+    const ins = d.prepare(`INSERT INTO Repetitions VALUES (1,?,-1,'')`);
+    for (let i = 1; i <= rows; i++) ins.run(i * 86_400_000);
+  }
+  d.exec('COMMIT');
+  d.close();
+}
+
+/**
+ * Parse in a child process with a 64MB heap, and report how it went.
+ *
+ * A child because the failure this pins is not an exception: `.all()` aborts
+ * the whole process inside `node::sqlite::StatementExecutionHelper::All`, so
+ * before the fix this does not fail an assertion, it takes the test runner's
+ * subprocess down with SIGABRT and exit code 134. The heap cap is what keeps
+ * that fast and cheap — the ceilings hold ~20MB, and 64MB is comfortably above
+ * them and comfortably below what an unbounded read of these files needs.
+ */
+async function parseInCappedChild(path) {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const src = new URL('../src/import.js', import.meta.url).href;
+  const script = `
+    const { parseLoopDatabase } = await import(${JSON.stringify(src)});
+    try {
+      const habits = await parseLoopDatabase(${JSON.stringify(path)});
+      console.log('OK ' + habits.length);
+    } catch (err) {
+      console.log('THREW ' + err.status + ' ' + err.message);
+    }`;
+
+  try {
+    const { stdout } = await promisify(execFile)(
+      process.execPath, ['--max-old-space-size=64', '--input-type=module', '-e', script],
+      { maxBuffer: 1 << 20 }
+    );
+    return stdout.trim();
+  } catch (err) {
+    return `DIED signal=${err.signal} code=${err.code}`;
+  }
+}
+
+test('a hostile .db is refused rather than allowed to exhaust the heap', async () => {
+  // 80,000 habit rows in 2.7MB and 400,000 entry rows in 7.2MB — both well
+  // under the 16MB body limit, so neither is bounded by anything upstream.
+  // Before the ceilings, each of these aborted a 64MB child with SIGABRT.
+  for (const [kind, rows, expected] of [
+    ['habits', 80_000, /more than 10000 habits/],
+    ['entries', 400_000, /more than 250000 entries/],
+  ]) {
+    const path = join(tmpdir(), `loop-oversized-${kind}-${process.pid}.db`);
+    try { unlinkSync(path); } catch {}
+    await makeOversizedDb(path, kind, rows);
+
+    const result = await parseInCappedChild(path);
+    assert.match(result, /^THREW 400 /, `${kind}: expected a clean 400, got: ${result}`);
+    assert.match(result, expected, `${kind}: the error should name the ceiling`);
+
+    unlinkSync(path);
+  }
+});
+
+test('a Habits view is not a Habits table', async () => {
+  // The row count of a SQLite file is DECLARED, not stored, so a view over a
+  // recursive CTE makes 8KB of upload claim five million rows. Loop only ever
+  // writes tables. This is defence in depth — the ceilings above are the fix,
+  // and they hold for a plain table, which this check cannot help with.
+  const path = join(tmpdir(), `loop-view-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE VIEW Habits AS
+      WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id < 5000000)
+      SELECT id, 'h'||id AS name, '' AS description, '' AS question, 1 AS freq_num,
+             1 AS freq_den, 11 AS color, id AS position, 0 AS archived, 0 AS type,
+             0 AS target_value, 0 AS target_type, '' AS unit, NULL AS reminder_hour,
+             NULL AS reminder_min, 127 AS reminder_days
+      FROM c;
+    CREATE TABLE Repetitions (habit INTEGER, timestamp INTEGER, value INTEGER, notes TEXT);
+  `);
+  d.close();
+
+  await assert.rejects(() => parseLoopDatabase(path), /Habits is a view, not a table/);
+  unlinkSync(path);
+});
+
+test('a Repetitions view is refused too', async () => {
+  // Bounding only Habits leaves the same trick available one table over.
+  const path = join(tmpdir(), `loop-repview-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, description TEXT, question TEXT,
+      freq_num INTEGER, freq_den INTEGER, color INTEGER, position INTEGER, archived INTEGER,
+      type INTEGER, target_value REAL, target_type INTEGER, unit TEXT,
+      reminder_hour INTEGER, reminder_min INTEGER, reminder_days INTEGER);
+    INSERT INTO Habits VALUES (1,'one','','',1,1,11,0,0,0,0,0,'',NULL,NULL,127);
+    CREATE VIEW Repetitions AS
+      WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 5000000)
+      SELECT 1 AS habit, (n * 86400000) AS timestamp, 2 AS value, '' AS notes FROM c;
+  `);
+  d.close();
+
+  await assert.rejects(() => parseLoopDatabase(path), /Repetitions is a view, not a table/);
+  unlinkSync(path);
+});
+
+test('a backup that sits just under both ceilings still imports', async () => {
+  // The ceilings are a bound on a hostile file, not a product limit, and a
+  // parser that rejects a legitimate backup is its own kind of data loss.
+  const path = join(tmpdir(), `loop-under-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+  await makeOversizedDb(path, 'habits', 500);
+
+  const habits = await parseLoopDatabase(path);
+  assert.equal(habits.length, 500);
+  assert.equal(habits[0].name, 'h1');
+
+  unlinkSync(path);
+});
+
 test('a blank header column does not shift later habits\' data', () => {
   // `names` was filtered before use while the row was still read at `i + 1`,
   // so every habit after a blank column silently received its neighbour's

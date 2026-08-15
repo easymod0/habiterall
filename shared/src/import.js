@@ -220,6 +220,42 @@ export function backupSettings(buf) {
 /* ---------- Loop .db backup ---------- */
 
 /**
+ * Ceiling on how many habits one uploaded backup may produce.
+ *
+ * A SQLite file's row count is DECLARED, not stored — `Habits` can be a view
+ * over a recursive CTE, or simply a table with more rows than anyone has — so
+ * without a ceiling the *file* chooses how much memory this costs. An 8,192-byte
+ * upload expanded to 300,000 habits in 3.1s and 474MB here, and five million
+ * aborted the process inside `node::sqlite::StatementExecutionHelper::All`. That
+ * is a V8 OOM, not an exception: the `try` below never runs, so the one thing
+ * this path does well — turning a bad upload into a 400 — was unreachable.
+ *
+ * 10,000 is a sanity bound on a hostile file, not a product limit. Cloud's
+ * `MAX_HABITS_PER_IMPORT` (200) is the product limit, and it is applied to the
+ * parsed array, which is far too late to be a defence — this is the bound that
+ * has to hold before that array exists. Fifty times cloud's cap, so nothing real
+ * comes near it, and a file sitting exactly on it parses in 81ms for 20MB.
+ */
+export const MAX_IMPORT_HABITS = 10_000;
+
+/**
+ * Ceiling on entries, and it is a TOTAL across the import rather than per habit.
+ *
+ * `unzip.js` records why, one attack over: a per-member cap is not a defence
+ * when the number of members is also attacker-chosen, because each one stays
+ * legal and the product does not. Per-habit here would be
+ * `MAX_IMPORT_HABITS × the cap` rows — 10,000 legal habits multiplying out to
+ * something no ceiling was ever asked about.
+ *
+ * 250,000 is past what Loop could physically have produced: it shipped in 2016,
+ * so this is ~68 habits answered every single day since. Generous, and still
+ * bounded where it matters — a file sitting exactly on it parses in 410ms for
+ * 69MB, against 143MB at half a million. Both ceilings together are ~89MB, which
+ * a small container survives; the unbounded read did not survive anything.
+ */
+export const MAX_IMPORT_ENTRIES = 250_000;
+
+/**
  * Read a Loop SQLite backup. `path` must point at a file on disk; node:sqlite
  * cannot open a database from a buffer.
  */
@@ -237,14 +273,29 @@ export async function parseLoopDatabase(path) {
     // Loop's own validation: both tables must be present. A file with a valid
     // SQLite header but a corrupt body throws from here, so the whole read is
     // wrapped and re-tagged as a client error below.
-    const check = src
-      .prepare(`SELECT COUNT(*) AS n FROM SQLITE_MASTER WHERE name IN ('Habits','Repetitions')`)
-      .get();
-    if (check.n !== 2) {
+    const objects = new Map(
+      src.prepare(`SELECT name, type FROM SQLITE_MASTER WHERE name IN ('Habits','Repetitions')`)
+        .all().map((r) => [r.name, r.type])
+    );
+    if (objects.size !== 2) {
       throw Object.assign(
         new Error('not a Loop database: expected Habits and Repetitions tables'),
         { status: 400 }
       );
+    }
+    // And both must be TABLES. Loop only ever writes tables, so this costs a
+    // real backup nothing, and a view is how the row count stops being related
+    // to the file: `CREATE VIEW Habits AS WITH RECURSIVE …` is 8KB of upload
+    // declaring five million rows. This is defence in depth and not the fix —
+    // the ceilings below are, because a plain table under the body limit still
+    // holds several hundred thousand rows and amplifies perfectly well.
+    for (const name of ['Habits', 'Repetitions']) {
+      if (objects.get(name) !== 'table') {
+        throw Object.assign(
+          new Error(`not a Loop database: ${name} is a ${objects.get(name)}, not a table`),
+          { status: 400 }
+        );
+      }
     }
 
     const cols = new Set(
@@ -275,22 +326,42 @@ export async function parseLoopDatabase(path) {
                         ${pickInt('reminder_hour', 'NULL')},
                         ${pickInt('reminder_min', 'NULL')},
                         ${pickInt('reminder_days', `'${LOOP_ALL_DAYS}'`)}
-                 FROM Habits ORDER BY position, id`;
+                 FROM Habits ORDER BY position, id LIMIT ?`;
 
-    const rows = src.prepare(sql).all();
     const repCols = new Set(
       src.prepare(`PRAGMA table_info(Repetitions)`).all().map((c) => c.name)
     );
     const notesCol = repCols.has('notes') ? 'notes' : `'' AS notes`;
     const reps = src.prepare(
-      `SELECT habit, timestamp, value, ${notesCol} FROM Repetitions WHERE habit = ? ORDER BY timestamp`
+      `SELECT habit, timestamp, value, ${notesCol} FROM Repetitions WHERE habit = ? ORDER BY timestamp LIMIT ?`
     );
 
-    return rows.map((r) => {
+    const tooMuch = (what) => Object.assign(
+      new Error(`backup expands to too much data: more than ${what}`), { status: 400 }
+    );
+
+    const habits = [];
+    // The budget is spent by every row READ, not by every entry kept. A file of
+    // nothing but UNKNOWN rows is dropped on the floor a line later and still
+    // costs the read, which is the work being bounded.
+    let entryBudget = MAX_IMPORT_ENTRIES;
+
+    // `.iterate()`, not `.all()` — the ceiling has to apply where the rows are
+    // PRODUCED. `.all()` materialises the whole result inside node:sqlite before
+    // a single line of this function runs, so anything checked afterwards has
+    // already spent the memory it was meant to save, and on a big enough file
+    // never gets to run at all. The `LIMIT` is the other half: it is what keeps
+    // SQLite's own sorter bounded, since `ORDER BY` over an unindexed column
+    // would otherwise sort every row before yielding the first.
+    for (const r of src.prepare(sql).iterate(MAX_IMPORT_HABITS + 1)) {
+      if (habits.length >= MAX_IMPORT_HABITS) throw tooMuch(`${MAX_IMPORT_HABITS} habits`);
+
       const isNumerical = Number(r.type) === 1;
       const entries = [];
 
-      for (const rep of reps.all(r.id)) {
+      for (const rep of reps.iterate(r.id, entryBudget + 1)) {
+        if (entryBudget <= 0) throw tooMuch(`${MAX_IMPORT_ENTRIES} entries`);
+        entryBudget--;
         const date = loopTimestampToISO(rep.timestamp);
         if (!date) continue;
         const converted = convertLoopValue(rep.value, isNumerical);
@@ -303,7 +374,7 @@ export async function parseLoopDatabase(path) {
         });
       }
 
-      return {
+      habits.push({
         name: String(r.name ?? '').trim(),
         description: String(r.description ?? ''),
         type: isNumerical ? 'numerical' : 'boolean',
@@ -335,8 +406,10 @@ export async function parseLoopDatabase(path) {
           : '',
         archived: Number(r.archived) ? 1 : 0,
         entries,
-      };
-    });
+      });
+    }
+
+    return habits;
   } catch (err) {
     // Anything thrown while reading a file we already accepted as SQLite is a
     // problem with the upload, not with the server.
