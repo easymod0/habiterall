@@ -6,7 +6,7 @@ import { unlinkSync } from 'node:fs';
 
 
 const {
-  loopTimestampToISO, convertLoopValue, normalizeColor,
+  loopTimestampToISO, convertLoopValue, normalizeColor, entryValue,
   parseCSV, parseLoopCheckmarksCSV, parseLoopHabitsCSV, parseLoopDatabase,
   parseHabiterallJSON, MAX_PARSE_HABITS, MAX_PARSE_ENTRIES,
 } = await import('../src/import.js');
@@ -81,6 +81,44 @@ test('a timestamp outside years 1-9999 is no date at all', () => {
   assert.equal(loopTimestampToISO(8.64e15 + 1), null);
   assert.equal(loopTimestampToISO(8.64e15), null, 'year 275760');
   assert.equal(loopTimestampToISO(Infinity), null);
+});
+
+/* ---------- an entry's value ---------- */
+
+test('an entry with no value is not a stated lapse', () => {
+  // The same coercion as the timestamp above, with a sharper sink: `Number(null)`
+  // and `Number('')` are 0, and a row holding 0 is a STATED lapse — a day the
+  // user says they missed. So `{date, value: null}` was written as an answer
+  // while `{date}` with no value key at all was refused, which is two spellings
+  // of "the file said nothing" behaving differently.
+  for (const nothing of [null, undefined, '', ' ', [], {}, true, false, NaN]) {
+    assert.equal(entryValue(nothing), null, JSON.stringify(nothing) ?? String(nothing));
+  }
+  // ...while a stated zero still is one. This is the whole reason the check has
+  // to be about the type: 0 is a legitimate value and indistinguishable from
+  // `Number(null)` once the coercion has run.
+  assert.equal(entryValue(0), 0);
+});
+
+test('a value that was stated is read, in the forms people write', () => {
+  assert.equal(entryValue(8), 8);
+  assert.equal(entryValue(2.5), 2.5);
+  assert.equal(entryValue('8'), 8, 'a hand-written file quotes its numbers');
+  assert.equal(entryValue(' 6 '), 6);
+  assert.equal(entryValue('2.5'), 2.5);
+  // Number()'s generosity about the FORM goes with its generosity about
+  // nothing: neither is how anyone writes down a number of glasses of water.
+  assert.equal(entryValue('0x10'), null);
+  assert.equal(entryValue('1e3'), null);
+  assert.equal(entryValue('8 glasses'), null);
+  // Not finite, so not a value — the writers used to ask `Number.isFinite`
+  // separately and now get the answer from here.
+  assert.equal(entryValue(Infinity), null);
+  assert.equal(entryValue(-Infinity), null);
+  // Negative is a real number and rejected by the WRITERS, not here: `value < 0`
+  // is a storage rule (both editions' columns are `CHECK (value >= 0)`), where
+  // this function answers only "did the file state a number".
+  assert.equal(entryValue(-1), -1);
 });
 
 /* ---------- Loop value conversion ---------- */

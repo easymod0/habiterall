@@ -355,6 +355,99 @@ ck('a skip\'s note too, which took the other path out',
   (await dayOf('Meditate', '2026-01-14'))?.notes.length === LIMITS.notes,
   String((await dayOf('Meditate', '2026-01-14'))?.notes.length));
 
+/* ---------- "the file said nothing" has more than one spelling ---------- */
+
+console.log('\n--- an entry with no value is not a lapse ---');
+
+await wipe(alice);
+
+// `Number(null)` and `Number('')` are both 0, and 0 is a real answer here: a row
+// holding zero is a STATED lapse, one of the four day-states. So `{date, value:
+// null}` was written as a day the user said they had missed, while `{date}` with
+// no value key at all was correctly refused — two spellings of the same silence
+// behaving differently. REPLACE mode is where it costs something: a merge yields
+// a bare lapse to whatever the account holds, but a replace has nothing to yield
+// to, and an invented lapse extends the habit's history window back to its own
+// date and turns `recovery.rate === null` into a real lapse.
+//
+// The personal edition asserts the same file, day for day. Two writers that
+// disagree about what an absent value means is the drift the root CLAUDE.md
+// calls the worst kind of bug here.
+const nothings = await applyImport(alice, parseHabiterallJSON({
+  version: 1, app: 'habiterall',
+  habits: [
+    {
+      name: 'Meditate', type: 'boolean',
+      entries: [
+        { date: '2026-02-01', value: null },
+        { date: '2026-02-02' },
+        { date: '2026-02-03', value: '' },
+        { date: '2026-02-04', value: false },
+        { date: '2026-02-05', value: 0 },      // this one IS a stated lapse
+        { date: '2026-02-06', value: 2 },
+      ],
+    },
+    // The guard is about the type of "nothing", not about tightening what counts
+    // as a number: a quoted amount is an amount the file stated, and still lands.
+    {
+      name: 'Water', type: 'numerical',
+      entries: [{ date: '2026-02-07', value: '8' }],
+    },
+  ],
+}), 'replace');
+const answered = (await habitNamed('Meditate')).entries.map((e) => e.date);
+
+ck('null, absent, empty and false are all "the file said nothing"',
+  !answered.some((d) =>
+    ['2026-02-01', '2026-02-02', '2026-02-03', '2026-02-04'].includes(d)),
+  JSON.stringify(answered));
+ck('and each is reported rather than silently dropped',
+  nothings.skipped.filter((s) => s.startsWith('bad value')).length === 4,
+  JSON.stringify(nothings.skipped));
+ck('while a stated 0 is still a stated lapse',
+  Number((await dayOf('Meditate', '2026-02-05'))?.value) === 0 &&
+  Number((await dayOf('Meditate', '2026-02-06'))?.value) === 2,
+  JSON.stringify((await habitNamed('Meditate')).entries));
+ck('and a quoted amount is still an amount',
+  Number((await dayOf('Water', '2026-02-07'))?.value) === 8,
+  JSON.stringify(await dayOf('Water', '2026-02-07')));
+
+/* ---------- merging the same file twice adds nothing ---------- */
+
+console.log('\n--- merge idempotency, including past the name clamp ---');
+
+await wipe(alice);
+
+// Restoring twice is the normal way to check a backup is good — this writer's
+// own header says so, and the `willAdd` accounting above is built on it. The
+// lookup asked for the RAW name while the INSERT wrote the clamped one, so for
+// any name over LIMITS.name nothing ever matched: three merges of one file left
+// three habits carrying one identical visible name, and `willAdd` counted each
+// of them against MAX_HABITS_PER_USER as a fresh addition. No whitespace in it,
+// so the stored name is exactly the first LIMITS.name characters.
+const longName = 'Read-a-chapter-of-something-long-'.repeat(5)
+  .slice(0, LIMITS.name + 50);
+const longNameFile = {
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: longName, type: 'boolean',
+    entries: [{ date: '2026-01-05', value: 2, status: '', notes: '' }],
+  }],
+};
+
+const longMerges = [];
+for (let i = 0; i < 3; i++) {
+  longMerges.push(await applyImport(alice, parseHabiterallJSON(longNameFile), 'merge'));
+}
+const byLongName = (await read(alice))
+  .filter((h) => h.name === longName.slice(0, LIMITS.name));
+
+ck('a name past the clamp is created once and merged into thereafter',
+  longMerges[0].habitsCreated === 1 &&
+  longMerges[1].habitsCreated === 0 && longMerges[1].habitsMerged === 1 &&
+  longMerges[2].habitsCreated === 0 && byLongName.length === 1,
+  JSON.stringify(longMerges.map((r) => [r.habitsCreated, r.habitsMerged])));
+
 await wipe(alice);
 await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
 

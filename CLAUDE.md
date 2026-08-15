@@ -132,6 +132,34 @@ does not yield**. It is an answer — `isCompleted` returns `null` for it, not
 `false` — so a `SKIP` cell in a bare Checkmarks.csv does overwrite a recorded
 amount, where a bare lapse does not.
 
+**A habit is matched by the name it is STORED under, and an absent value is not
+an answer.** Two readings the import writers got wrong in the same shape — by
+reading the file's word for something instead of asking what it would mean here.
+`applyImport` looked an existing habit up by the RAW name while the INSERT wrote
+`clean.name`, which `normaliseImportedHabit` has clamped to `LIMITS.name`, so
+past 100 characters the lookup could never match a row: three merges of one
+backup left three habits carrying one identical visible name, and cloud's
+`willAdd` counted each as a fresh addition against `MAX_HABITS_PER_USER`. That
+defeats the workflow cloud's own comment names — *restoring twice is the normal
+way to check a backup is good*. Every reader of the name inside that loop moved
+together, or the file's habit and the account's habit become two habits in one
+iteration.
+
+The other is the coercion class this file already records twice, with a sharper
+sink than either. `entryValue` in `shared/src/import.js` is the rule, and it is
+about the TYPE, because `Number(null)` and `Number('')` are `0` and `0` is a
+legitimate value — a row holding zero is a **stated lapse**, one of the four day
+states above. So `{date, value: null}` was written as a day the user said they
+had missed while `{date}` with no `value` key at all was correctly refused: two
+spellings of "the file said nothing", behaving differently. Harmless on a merge,
+where a bare lapse yields; in **replace** mode there is nothing to yield to, and
+an invented lapse extends the habit's history window back to its own date and
+turns `recovery.rate === null` into a real lapse. Silence is therefore read as
+silence and reported in `skipped`. It costs no habiterall backup — `entries.value`
+is NOT NULL in both schemas, so nothing we export can carry one — and a quoted
+`"8"` is still a value that was stated. What goes with `Number()` is its
+generosity about the *form*: `'0x10'` and `'1e3'` were read as 16 and 1000.
+
 **Loop's two tracking settings are `skipDays` and `questionMarks`,** both
 defaulting off as Loop's own do, and both read from Loop's source rather than
 guessed (`pref_skip_enabled`, `pref_unknown_enabled`). The tap cycle is
