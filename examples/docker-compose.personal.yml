@@ -37,6 +37,19 @@ services:
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}          # https://habits.example.com
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
+
+      # Limits and logging. Empty means the default, so these are here to make
+      # the knob reachable from .env rather than to set anything — a variable
+      # this file does not name never reaches the container at all.
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}                          # 16
+      MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}                    # 10000
+      MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}                  # 250000
+      LOG_LEVEL: ${LOG_LEVEL:-}                                  # info; debug for reminders
+      LOG_FORMAT: ${LOG_FORMAT:-}                                # json, or pretty on a TTY
+      LOG_REQUESTS: ${LOG_REQUESTS:-}                            # true logs every request
+      LOG_SLOW_MS: ${LOG_SLOW_MS:-}                              # 1000
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                        # 60000
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                      # 200
     restart: unless-stopped
 
 volumes:

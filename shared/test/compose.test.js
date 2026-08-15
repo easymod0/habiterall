@@ -109,25 +109,46 @@ const ELSEWHERE = new Map([
     'port mapping; APP_PORT is the host-side knob and is in every file'],
   ['NODE_ENV', 'set to production by both Dockerfiles; the README documents ' +
     'leaving it unset, which is a `docker run` decision rather than a line here'],
-  ['LOG_LEVEL', 'README → Logs'],
-  ['LOG_FORMAT', 'README → Logs'],
-  ['LOG_REQUESTS', 'README → Logs'],
-  ['LOG_SLOW_MS', 'README → Logs'],
-  ['LOG_RUNTIME_MS', 'README → Logs'],
-  ['LOG_LAG_WARN_MS', 'README → Logs'],
-  ['MAX_UPLOAD_MB', 'a limit, not a deployment setting — README and .env.example'],
-  ['MAX_HABITS_PER_USER', 'a limit — README and .env.example'],
-  ['MAX_HABITS_PER_IMPORT', 'a limit — README and .env.example'],
-  ['MAX_ENTRIES_PER_IMPORT', 'a limit — README and .env.example'],
-  ['MAX_PARSE_HABITS', 'a bound on a hostile file rather than a deployment ' +
-    'setting, and the default is fifty times what any real account holds — ' +
-    'README → Limits'],
-  ['MAX_PARSE_ENTRIES', 'as MAX_PARSE_HABITS — README → Limits'],
-  ['PG_POOL_MAX', 'pool tuning; the default of 10 is what the health memo is ' +
-    'sized against, so raising it is a considered change, not a quickstart one'],
-  ['PGSSL', 'for a managed Postgres reached over TLS; every compose file here ' +
-    'puts the database on the same private network'],
 ]);
+
+/**
+ * The `.env` template each stack ships, and the compose files it serves.
+ *
+ * These exist because a compose file's `environment:` block is not somewhere an
+ * operator edits — the published ones are downloaded and run, and the checkout
+ * ones carry no environment at all. A `.env` beside them is the surface, and
+ * before this there was one for cloud and none for personal.
+ *
+ * What the test below asserts is the relationship that actually decides whether
+ * a line in `.env` does anything: **compose interpolation**. A `.env` file is
+ * read for `${NAME}` substitution and NOTHING else — no service here uses
+ * `env_file:`, deliberately, since that would put DB_OWNER_PASSWORD into the
+ * app container. So a variable the compose file does not NAME never reaches the
+ * process, however plainly the template sets it. The old
+ * `habiterall-cloud/.env.example` had four such lines: MAX_HABITS_PER_USER,
+ * MAX_HABITS_PER_IMPORT, MAX_ENTRIES_PER_IMPORT and MAX_UPLOAD_MB were set
+ * there, interpolated by no cloud compose file, and had been inert since they
+ * were written. Nothing failed, because both halves individually looked right.
+ *
+ * @type {Array<{ file: string, composes: string[] }>}
+ */
+const ENV_TEMPLATES = [
+  {
+    file: 'examples/personal.env.example',
+    composes: [
+      'examples/docker-compose.personal.yml',
+      'habiterall-personal/docker-compose.yml',
+    ],
+  },
+  {
+    file: 'examples/cloud.env.example',
+    composes: [
+      'examples/docker-compose.cloud.yml',
+      'examples/docker-compose.cloud-authentik.yml',
+      'habiterall-cloud/docker-compose.yml',
+    ],
+  },
+];
 
 /**
  * Names that mean the same thing, so documenting either satisfies both.
@@ -267,6 +288,60 @@ for (const { file, also, entries, except } of COMPOSE) {
         : 'It is the file this edition is documented in, so this is where it goes. ') +
       'If no deployment should set it, add it to ELSEWHERE with the reason; if ' +
       'only this one should not, add it to that entry\'s `except`.');
+  });
+}
+
+/**
+ * The variables an env template offers, commented-out ones included.
+ *
+ * `#LOG_LEVEL=info` IS documentation an operator can find and uncomment, which
+ * is the whole point of shipping the tuning block that way — so unlike
+ * `documented()` above, a leading `#` does not disqualify a line here.
+ *
+ * @param {string} text @returns {Set<string>}
+ */
+function offered(text) {
+  const names = new Set();
+  for (const [, n] of text.matchAll(/^\s*#?\s*([A-Z][A-Z0-9_]*)=/gm)) names.add(n);
+  return names;
+}
+
+/** Every `${NAME}` a compose file substitutes. @param {string} text */
+function interpolated(text) {
+  return new Set([...text.matchAll(/\$\{([A-Z][A-Z0-9_]*)/g)].map(([, n]) => n));
+}
+
+for (const { file, composes } of ENV_TEMPLATES) {
+  test(`${file} offers every variable its compose files interpolate`, () => {
+    const have = offered(readFileSync(join(ROOT, file), 'utf8'));
+    const wanted = new Set();
+    for (const c of composes) {
+      for (const n of interpolated(readFileSync(join(ROOT, c), 'utf8'))) wanted.add(n);
+    }
+    assert.ok(wanted.size > 5, `only found ${wanted.size} interpolations — the reader is broken`);
+
+    const missing = [...wanted].filter((n) => !have.has(n)).sort();
+    assert.deepEqual(missing, [],
+      `${file} never offers ${missing.join(', ')}, which ${composes.join(' / ')} ` +
+      'substitute. A variable a compose file names is one an operator can set ' +
+      'in .env, so it belongs in the template — commented out if it is tuning.');
+  });
+
+  test(`${file} offers nothing that would be inert`, () => {
+    // The failure the old habiterall-cloud/.env.example had. A line here that
+    // no compose file interpolates is not a setting: `.env` is read for
+    // substitution only, so it reaches no process and quietly does nothing.
+    const have = offered(readFileSync(join(ROOT, file), 'utf8'));
+    const wanted = new Set();
+    for (const c of composes) {
+      for (const n of interpolated(readFileSync(join(ROOT, c), 'utf8'))) wanted.add(n);
+    }
+
+    const inert = [...have].filter((n) => !wanted.has(n)).sort();
+    assert.deepEqual(inert, [],
+      `${file} offers ${inert.join(', ')}, which none of ${composes.join(' / ')} ` +
+      'interpolate — so setting one there does nothing at all. Either name it in ' +
+      'the compose file\'s environment block, or take the line out.');
   });
 }
 

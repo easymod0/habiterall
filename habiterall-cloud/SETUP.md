@@ -10,8 +10,12 @@ reverse proxy needs to face the internet.
 
 ```bash
 cd habiterall-cloud
-cp .env.example .env
+cp ../examples/cloud.env.example .env
 ```
+
+That template lives in `examples/` because it is the same one a downloader of
+`examples/docker-compose.cloud.yml` needs, and one copy is the point. It
+describes every variable the compose stack here reads.
 
 Generate a distinct value for every secret:
 
@@ -41,6 +45,12 @@ and nothing has to be pasted between them.
 Set `PUBLIC_URL` to the URL users will actually visit. In production this
 **must** be `https://` — the session cookie is only marked `Secure` when it is,
 and the app logs a warning otherwise.
+
+**For a local stack on plain http, also set `ALLOW_INSECURE_OIDC=true`.** The
+template's URLs ship as `http://localhost`, and `openid-client` refuses a
+plaintext issuer — so on those defaults the app container exits at startup with
+*"OIDC_ISSUER uses plaintext http"* rather than starting and misbehaving. The
+[production checklist](#production-checklist) below checks that it is off again.
 
 ## 2. Start it
 

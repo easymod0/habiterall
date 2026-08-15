@@ -1,35 +1,19 @@
 # habiterall, cloud edition — multi user, Postgres, your own OIDC provider.
 #
-# This file is the ONE place the cloud edition's environment is described. The
-# copy in README.md is generated from it (`npm run docs:compose`), and
-# `habiterall-cloud/docker-compose.yml` EXTENDS it and adds only what a
-# checkout needs: `build:`, and the Authentik services. So a variable added
-# here reaches both. `shared/test/compose.test.js` fails if the server reads
-# one that is not below — including the copy in docker-compose.cloud-authentik.yml,
-# which has to stay standalone and therefore repeats it.
+#   cp cloud.env.example .env                              # then fill it in
+#   docker compose -f docker-compose.cloud.yml up -d
 #
-# Needs a .env beside it:
-#
-#   DB_OWNER_PASSWORD=...      openssl rand -hex 32   (hex — see below)
-#   APP_DB_PASSWORD=...        openssl rand -hex 32
-#   SESSION_SECRET=...         openssl rand -base64 36
-#   PUBLIC_URL=https://habits.example.com
-#   OIDC_ISSUER=...            from your provider; must end in a slash
-#   OIDC_CLIENT_ID=...
-#   OIDC_CLIENT_SECRET=...
-#
-# Hex for the two database passwords, and not base64: both are interpolated
-# into a `postgres://user:PASSWORD@host` URL below, and base64 emits '+' and
-# '/' — which end the URL's authority. Node's parser then throws
-# ERR_INVALID_URL outright rather than connecting somewhere odd.
+# Every variable is described in `cloud.env.example` beside this file, and at
+# https://github.com/easymod0/habiterall#cloud
 #
 # Register ${PUBLIC_URL}/auth/callback as the redirect URI with your provider.
 #
-# Pin the image tag here rather than tracking `latest`: this edition runs
-# migrations on deploy, so `latest` means taking a schema change at a moment you
-# did not choose.
+# Already have an identity provider? This is the file for it. If you do not,
+# docker-compose.cloud-authentik.yml brings one.
 #
-#   docker compose -f docker-compose.cloud.yml up -d
+# Pin the image tag rather than tracking `latest`: this edition runs migrations
+# on deploy, so `latest` means taking a schema change at a moment you did not
+# choose.
 
 services:
   db:
@@ -81,11 +65,27 @@ services:
       HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
-      # The fallback clock: a container has no timezone, so it is UTC. Users can
-      # override it for their own reminders in ⚙ → Notifications, but this is
-      # what "the server's own timezone" means, and it is also the clock that
-      # decides which day a check-off with no explicit date belongs to.
+      # The fallback clock. A container has no timezone, so it is UTC; users
+      # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
+
+      # Limits, the pool, and logging. Empty means the default, so these are
+      # here to make the knob reachable from .env rather than to set anything
+      # — a variable this file does not name never reaches the container.
+      MAX_HABITS_PER_USER: ${MAX_HABITS_PER_USER:-}        # 200
+      MAX_HABITS_PER_IMPORT: ${MAX_HABITS_PER_IMPORT:-}    # 200
+      MAX_ENTRIES_PER_IMPORT: ${MAX_ENTRIES_PER_IMPORT:-}  # 50000
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}                    # 16
+      MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
+      MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
+      PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
+      PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
+      LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
+      LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
+      LOG_REQUESTS: ${LOG_REQUESTS:-}                      # true logs every request
+      LOG_SLOW_MS: ${LOG_SLOW_MS:-}                        # 1000
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
 
 volumes:

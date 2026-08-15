@@ -28,9 +28,9 @@ const COMPOSE = {
 test('every published placeholder the bootstrap could use is refused', () => {
   // The OIDC pair is written ONTO the provider, and the bootstrap token IS an
   // admin API token for `akadmin` — Authentik creates it from that env var on
-  // every boot. `.env.example` ships all three as CHANGE_ME lines, so an
-  // unedited file otherwise brings up a stack that reports success and accepts
-  // a credential whose value is in a public repository.
+  // every boot. `examples/cloud.env.example` ships all three as CHANGE_ME
+  // lines, so an unedited file otherwise brings up a stack that reports
+  // success and accepts a credential whose value is in a public repository.
   for (const name of ['OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'AUTHENTIK_BOOTSTRAP_TOKEN']) {
     assert.match(
       bootstrap,
@@ -38,7 +38,7 @@ test('every published placeholder the bootstrap could use is refused', () => {
       `${name} is not in the CHANGE_ME guard`,
     );
     assert.match(
-      read(CLOUD, '.env.example'),
+      read(REPO, 'examples', 'cloud.env.example'),
       new RegExp(`^${name}=CHANGE_ME`, 'm'),
       `${name} no longer ships as a placeholder — the guard above may be stale`,
     );

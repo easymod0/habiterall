@@ -34,7 +34,7 @@ reconnect.
 - [Reminders and notifications](#reminders-and-notifications)
 - [Install on a phone](#install-on-a-phone)
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
-- [Backup and restore](#backup-and-restore)
+- [Backup and restore](#backup-and-restore) · [Upgrading](#upgrading) · [Releases](#releases)
 - [Configuration](#configuration) · [API](#api)
 - [Security](#security) · [Architecture](#architecture) · [Development](#development)
 
@@ -70,8 +70,20 @@ development.
 
 ### personal edition
 
-The published image needs no clone and no build. Save this as
-`docker-compose.yml` anywhere:
+One file, one command. Save this as `docker-compose.yml` anywhere — or
+download it:
+
+```bash
+curl -o docker-compose.yml \
+  https://raw.githubusercontent.com/easymod0/habiterall/master/examples/docker-compose.personal.yml
+docker compose up -d
+```
+
+Open **<http://localhost:3000>**. That is the whole install; everything below
+is what you can change.
+
+**The file**, with a comment on every variable
+([`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)):
 
 <!-- generated from examples/docker-compose.personal.yml — edit that file, then `npm run docs:compose` -->
 ```yaml
@@ -106,6 +118,19 @@ services:
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}          # https://habits.example.com
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
+
+      # Limits and logging. Empty means the default, so these are here to make
+      # the knob reachable from .env rather than to set anything — a variable
+      # this file does not name never reaches the container at all.
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}                          # 16
+      MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}                    # 10000
+      MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}                  # 250000
+      LOG_LEVEL: ${LOG_LEVEL:-}                                  # info; debug for reminders
+      LOG_FORMAT: ${LOG_FORMAT:-}                                # json, or pretty on a TTY
+      LOG_REQUESTS: ${LOG_REQUESTS:-}                            # true logs every request
+      LOG_SLOW_MS: ${LOG_SLOW_MS:-}                              # 1000
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                        # 60000
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                      # 200
     restart: unless-stopped
 
 volumes:
@@ -113,11 +138,104 @@ volumes:
 ```
 <!-- /generated -->
 
-```bash
-docker compose up -d
-```
+Set those in the file itself, or in a `.env` beside it —
+[`examples/personal.env.example`](examples/personal.env.example) is the
+template, and every line in it has a working default:
 
-Open **<http://localhost:3000>**.
+<details>
+<summary><b>Show <code>personal.env.example</code></b></summary>
+
+<!-- generated from examples/personal.env.example — edit that file, then `npm run docs:compose` -->
+```ini
+# ---- where it listens -------------------------------------------------------
+APP_PORT=3000
+
+# Which interface the published port appears on. Empty is Docker's default:
+# every interface, both address families. Use 127.0.0.1 when a reverse proxy on
+# THIS host is the only thing that should reach it. Not 0.0.0.0 — IPv4 only.
+BIND_ADDR=
+
+# SET THIS. It decides when reminders fire and which day a check-off with no
+# explicit date belongs to; unset, a container is UTC.
+TZ=Etc/UTC
+
+# ---- sign-in ----------------------------------------------------------------
+# On unless set to EXACTLY `off`. Every other value — empty, false, 0, and
+# every typo of off — leaves it on, deliberately: leaving it on by accident
+# costs a login prompt, turning it off by accident costs the database.
+HABITERALL_AUTH=
+
+# The single account. Set both before exposing the port, or the first visitor
+# to reach the setup page claims the instance. Nothing checks the password's
+# length here — the 8-character minimum is on the in-app form only.
+HABITERALL_USERNAME=
+HABITERALL_PASSWORD=
+
+# The same password pre-hashed, to keep the plaintext out of `docker inspect`.
+# Wins if both are set. Generate one with:
+#   docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
+#     "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" \
+#     'your password'
+HABITERALL_PASSWORD_HASH=
+
+# Set it to keep people signed in across a redeploy. Left empty, one is
+# generated and stored in the database.  openssl rand -base64 36
+HABITERALL_SESSION_SECRET=
+
+# ---- behind a proxy ---------------------------------------------------------
+# Reverse-proxy hops in front, for correct client IPs. Wrong in either
+# direction is a bug: trust a hop that is not there and a caller writes its own
+# X-Forwarded-For, walking past the limit on this edition's one password. Set
+# it to 1 AND publish the port to the proxy only — not to the whole LAN.
+TRUST_PROXY=0
+
+# `on` tells browsers to rewrite every http request to https. Only for an
+# instance reached over TLS and nothing else — a box that is https from outside
+# and plain http from the LAN breaks on the LAN half.
+HABITERALL_UPGRADE_INSECURE=
+
+# `off` removes the API rate limits, for a trusted LAN. The limit on LOGIN
+# attempts is not included and cannot be switched off.
+HABITERALL_RATE_LIMIT=
+
+# ---- reminders --------------------------------------------------------------
+# Reminders pointed at a Discord webhook are sent by this process, once a
+# minute. `off` disables the loop entirely.
+HABITERALL_NOTIFY=on
+HABITERALL_NOTIFY_INTERVAL_MS=60000
+
+# This instance's address, so a Discord reminder can link back to it.
+HABITERALL_PUBLIC_URL=
+
+# Interactive Discord reminders — Yes / No / Skip buttons and an amount box.
+# Create it at https://discord.com/developers/applications → Bot → Reset Token,
+# then invite the bot with the `bot` scope and Send Messages. With it set the
+# app opens ONE outbound WebSocket to Discord; no inbound port is needed.
+# Without it, Discord reminders are webhook text.
+DISCORD_BOT_TOKEN=
+
+# ---- limits -----------------------------------------------------------------
+# Ceiling on a backup being restored.
+#MAX_UPLOAD_MB=16
+
+# What one uploaded file may DECLARE, before anything is built from it — a
+# bound on a hostile file rather than a product limit. A SQLite file's row
+# count is a claim, so a few kilobytes can assert millions. Raising them trades
+# memory for generosity: both defaults together cost roughly 90MB to parse.
+#MAX_PARSE_HABITS=10000
+#MAX_PARSE_ENTRIES=250000
+
+# ---- tuning -----------------------------------------------------------------
+# Uncommented only when you mean it. Defaults shown.
+#LOG_LEVEL=info                 # debug is the switch for "the reminder never came"
+#LOG_FORMAT=json                # pretty on a TTY, json otherwise
+#LOG_REQUESTS=false             # true logs every request, not just the slow ones
+#LOG_SLOW_MS=1000
+#LOG_RUNTIME_MS=60000
+#LOG_LAG_WARN_MS=200
+```
+<!-- /generated -->
+</details>
 
 If you set `HABITERALL_USERNAME` and `HABITERALL_PASSWORD` above, sign in with
 them and that is the whole setup. If you left them blank you are asked to
@@ -133,13 +251,8 @@ it. That is a real option for a machine only you can talk to — see
 [Turning the guards off](#turning-the-guards-off) for that setting and the
 others alongside it.
 
-That file is also in the repository as
-[`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
-(and the two cloud ones beside it). What is printed above is *generated* from
-it, and it is the same file the repository's own
-`habiterall-personal/docker-compose.yml` extends — so the variables listed
-there are all of them, and a test fails if the server grows one that is
-missing. To update:
+Between the two files above, every variable this edition reads is accounted
+for — a test fails if the server grows one neither mentions. To update:
 
 ```bash
 docker compose pull && docker compose up -d
@@ -152,7 +265,7 @@ Requires **Node 26+**, the major both Docker images ship. There is no build
 step — what runs is what is on disk.
 
 ```bash
-git clone <your-repo-url> habiterall
+git clone https://github.com/easymod0/habiterall.git
 cd habiterall
 npm install
 npm run start:personal
@@ -167,7 +280,20 @@ Also **<http://localhost:3000>**, with the database at
 
 Multi user, so it needs a database and somewhere to sign in. This brings both:
 the published image, Postgres, and Authentik as the identity provider — nothing
-to build, and no source on the server. Save as `docker-compose.yml`:
+to build, and no source on the server. Two files, then one command:
+
+```bash
+curl -o docker-compose.yml \
+  https://raw.githubusercontent.com/easymod0/habiterall/master/examples/docker-compose.cloud-authentik.yml
+curl -o .env \
+  https://raw.githubusercontent.com/easymod0/habiterall/master/examples/cloud.env.example
+```
+
+Fill in the `.env` — that is the only editing step, and it is covered next.
+Then `docker compose up -d`, and the stack configures itself.
+
+<details>
+<summary><b>Show <code>docker-compose.cloud-authentik.yml</code></b></summary>
 
 <!-- generated from examples/docker-compose.cloud-authentik.yml — edit that file, then `npm run docs:compose` -->
 ```yaml
@@ -264,20 +390,13 @@ services:
       - authentik-images:/web/dist/assets/images/habiterall
     restart: unless-stopped
 
-  # Configures Authentik from this file's .env: the OIDC provider and
-  # application, self-service registration, and the branding on the sign-in
-  # pages. Runs to completion on every `up`, and is idempotent — everything is
-  # looked up before it is written, so re-running it is how a changed .env
-  # takes effect.
+  # Configures Authentik from this file's .env — the OIDC provider and
+  # application, self-service registration, the sign-in branding — and copies
+  # the blueprints and images it needs out of the habiterall image into the
+  # volumes above. Idempotent, and runs to completion on every `up`.
   #
-  # It also copies the blueprints and the two images out of the habiterall
-  # image into the volumes above, which is the step that makes this file work
-  # without a checkout of the repository. That copy OVERWRITES, so pulling a
-  # newer image is what updates them.
-  #
-  # Without AUTHENTIK_BOOTSTRAP_TOKEN it does nothing and exits 0 — supported,
-  # and the reason `up` keeps working once you have removed the token. It says
-  # so, and names the switches that have no effect while it is gone.
+  # Without AUTHENTIK_BOOTSTRAP_TOKEN it does nothing and exits 0, which is
+  # what keeps `up` working once you have removed the token.
   authentik-bootstrap:
     image: ghcr.io/easymod0/habiterall-cloud:latest
     depends_on:
@@ -336,13 +455,8 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
       PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
       OIDC_ISSUER: ${OIDC_ISSUER:?from Authentik, ends in a slash}
-      # `:?` now, where this file once had `:-`. There used to be a phase where
-      # these were legitimately empty — the first of a two-phase start, whose
-      # purpose was to create the client they would hold — and compose
-      # interpolates the WHOLE file before it works out which services you
-      # asked for, so requiring them here would have failed that phase too.
-      # The bootstrap ends the two-phase start: these are values you generate,
-      # not values you collect, so there is no moment when empty is correct.
+      # Values you generate, not values you collect from Authentik — so there
+      # is no moment when empty is correct, and these are required.
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
       ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
@@ -351,26 +465,42 @@ services:
       HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
-      # The fallback clock: a container has no timezone, so it is UTC. Users can
-      # override it for their own reminders in ⚙ → Notifications, but this is
-      # what "the server's own timezone" means, and it is also the clock that
-      # decides which day a check-off with no explicit date belongs to.
+      # The fallback clock. A container has no timezone, so it is UTC; users
+      # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
+
+      # Limits, the pool, and logging. Empty means the default, so these are
+      # here to make the knob reachable from .env rather than to set anything
+      # — a variable this file does not name never reaches the container.
+      MAX_HABITS_PER_USER: ${MAX_HABITS_PER_USER:-}        # 200
+      MAX_HABITS_PER_IMPORT: ${MAX_HABITS_PER_IMPORT:-}    # 200
+      MAX_ENTRIES_PER_IMPORT: ${MAX_ENTRIES_PER_IMPORT:-}  # 50000
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}                    # 16
+      MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
+      MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
+      PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
+      PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
+      LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
+      LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
+      LOG_REQUESTS: ${LOG_REQUESTS:-}                      # true logs every request
+      LOG_SLOW_MS: ${LOG_SLOW_MS:-}                        # 1000
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
 
 volumes:
   db-data:
   authentik-db-data:
-  # Refilled from the habiterall image by authentik-bootstrap on every `up`,
-  # and read by Authentik. They mirror the image rather than holding config of
-  # your own: a file edited in here is overwritten on the next start, which is
-  # what makes an upgraded image's blueprints and branding take effect. Change
-  # them in an image you build.
+  # Refilled from the habiterall image on every `up`, so a file edited in here
+  # is overwritten on the next start. Change them in an image you build.
   authentik-blueprints:
   authentik-icons:
   authentik-images:
 ```
 <!-- /generated -->
+</details>
+
+#### Filling in the `.env`
 
 **Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
 `OIDC_ISSUER` is where Authentik does, and they must be different origins
@@ -382,28 +512,202 @@ proxy asks habiterall for Authentik's discovery document, the app is still
 starting — because it is waiting on that very document — and you get a 502
 that looks like a proxy fault rather than a configuration one.
 
-Alongside it, a `.env`:
+Every secret ships as a `CHANGE_ME` line, and there are nine. Hex for the two
+database passwords and the OIDC pair, because those go into a connection URL or
+an `Authorization` header and base64's `/` ends a URL's authority — about half
+of generated passwords contain one:
 
 ```bash
-# hex, not base64: these two go into a connection URL, and base64's '/' ends
-# the URL's authority — about half of generated passwords contain one.
-DB_OWNER_PASSWORD=$(openssl rand -hex 32)
-APP_DB_PASSWORD=$(openssl rand -hex 32)
-AUTHENTIK_DB_PASSWORD=$(openssl rand -base64 36)
-AUTHENTIK_SECRET_KEY=$(openssl rand -base64 60)
-AUTHENTIK_BOOTSTRAP_PASSWORD=       # the first admin's password
-AUTHENTIK_BOOTSTRAP_TOKEN=$(openssl rand -base64 36)
-SESSION_SECRET=$(openssl rand -base64 36)
-PUBLIC_URL=https://habits.example.com
-OIDC_ISSUER=https://auth.example.com/application/o/habiterall/
-AUTHENTIK_PUBLIC_URL=https://auth.example.com
-# Yours to choose, not Authentik's to hand you: the stack configures the
-# provider WITH these, so nothing is pasted back.
-OIDC_CLIENT_ID=$(openssl rand -hex 32)
-OIDC_CLIENT_SECRET=$(openssl rand -hex 32)
-APP_PORT=3100                       # optional — the host port the app answers on
-AUTHENTIK_PORT=9000                 # optional — the host port Authentik answers on
+openssl rand -hex 32      # DB_OWNER_PASSWORD, APP_DB_PASSWORD,
+                          # OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
+openssl rand -base64 36   # AUTHENTIK_DB_PASSWORD, SESSION_SECRET,
+                          # AUTHENTIK_BOOTSTRAP_TOKEN
+openssl rand -base64 60   # AUTHENTIK_SECRET_KEY
 ```
+
+The OIDC pair is yours to choose, not Authentik's to hand you: the stack
+configures the provider *with* them, so nothing is pasted back. Set
+`PUBLIC_URL`, `OIDC_ISSUER` and `AUTHENTIK_PUBLIC_URL` to your two hostnames,
+and `AUTHENTIK_BOOTSTRAP_PASSWORD` to the first admin's password.
+
+> **Just trying it on your laptop?** Leave those three URLs at their
+> `http://localhost` defaults and set **`ALLOW_INSECURE_OIDC=true`**. Without
+> it the app exits at startup with *"OIDC_ISSUER uses plaintext http"* —
+> `openid-client` refuses a plaintext issuer, and rightly. Set it back to
+> `false` the moment the stack is behind TLS; the
+> [production checklist](habiterall-cloud/SETUP.md) checks for it.
+
+<details>
+<summary><b>Show <code>cloud.env.example</code></b></summary>
+
+<!-- generated from examples/cloud.env.example — edit that file, then `npm run docs:compose` -->
+```ini
+# ---- database ---------------------------------------------------------------
+# HEX, not base64: these two are interpolated into a `postgres://user:PASSWORD@`
+# URL, and base64 emits '+' and '/', which end the URL's authority.
+#   openssl rand -hex 32
+DB_OWNER_PASSWORD=CHANGE_ME_owner
+APP_DB_PASSWORD=CHANGE_ME_app
+
+# Read by Authentik as a discrete setting, never through a URL, so base64 is
+# fine here.  openssl rand -base64 36
+AUTHENTIK_DB_PASSWORD=CHANGE_ME_authentik
+
+# ---- application ------------------------------------------------------------
+#   openssl rand -base64 36
+SESSION_SECRET=CHANGE_ME_session_secret_at_least_32_bytes
+
+# The address browsers use. Must match the redirect URI registered with your
+# provider, and must be https in production — the session cookie is Secure.
+PUBLIC_URL=http://localhost:3100
+
+APP_PORT=3100
+AUTHENTIK_PORT=9000
+
+# Which interface those ports are published on. Empty is Docker's default:
+# every interface, both address families. Use 127.0.0.1 when a reverse proxy on
+# THIS host is the only thing that should reach them. Not 0.0.0.0 — IPv4 only.
+BIND_ADDR=
+
+# Reverse-proxy hops in front, for correct client IPs. 0 if nothing proxies it.
+TRUST_PROXY=1
+
+# The container's clock. It decides when reminders fire and which day a
+# check-off with no explicit date belongs to; unset, a container is UTC.
+TZ=Etc/UTC
+
+# Lets the app talk OIDC over plain http. LOCAL TESTING ONLY — never in a real
+# deployment. Both guards it lifts exist because plaintext issuers and
+# non-Secure cookies are how a session gets stolen.
+#
+# READ THIS IF YOU ARE JUST TRYING IT OUT. The URLs above ship as
+# http://localhost, and openid-client REFUSES a plaintext issuer — so on those
+# defaults the app container exits at startup with "OIDC_ISSUER uses plaintext
+# http". Set this to `true` for a local trial, and back to `false` the moment
+# you put the stack behind TLS.
+ALLOW_INSECURE_OIDC=false
+
+# ---- identity provider ------------------------------------------------------
+# The OIDC application is created for you: compose runs
+# scripts/bootstrap-authentik.mjs on every `up`, and it CONFIGURES the provider
+# with the id and secret below rather than handing you a generated pair to
+# paste back. Generate both like any other secret:  openssl rand -hex 32
+#
+# They cannot be left empty — compose interpolates the whole file before it
+# starts anything. And unlike the other CHANGE_ME lines they are WRITTEN TO the
+# identity provider, so the bootstrap refuses a placeholder from a public repo.
+OIDC_CLIENT_ID=CHANGE_ME_oidc_client_id
+OIDC_CLIENT_SECRET=CHANGE_ME_oidc_client_secret
+
+# Authentik's URL as the BROWSER sees it, plus the application slug, ending in
+# a slash. Byte-identical for the browser and the app container, or token
+# validation fails on an issuer mismatch.
+OIDC_ISSUER=http://localhost:9000/application/o/habiterall/
+# The same URL without the application path. Only the bootstrap reads it.
+AUTHENTIK_PUBLIC_URL=http://localhost:9000
+
+# Checkout stack only. The issuer must resolve to the same string from the
+# browser and from inside the app container, so the hostname in OIDC_ISSUER is
+# aliased to the Authentik container. In a real deployment both sides use the
+# public https URL and this stays as it is.
+OIDC_HOST_ALIAS=localhost
+
+# ---- self-service registration ----------------------------------------------
+# `on` puts a "Sign up" link on the Authentik login page, and anyone who can
+# reach it can create an account. `off` removes the link AND the flow behind it.
+#
+# The link goes on the DEFAULT login flow, which every application on that
+# Authentik shares — so read SETUP.md first if it serves anything besides
+# habiterall. Accepted: on/true/yes/1/enabled and off/false/no/0/disabled.
+# Anything else stops the stack rather than being guessed at.
+AUTHENTIK_SELF_SIGNUP=off
+
+# Confirm the address before the account works. The user is created inactive
+# and the mailed link activates them, so this needs real SMTP settings below.
+AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL=off
+
+# ---- branding ---------------------------------------------------------------
+# habiterall's name, mark and colours on the sign-in and sign-up pages. `off`
+# stops these being managed; it does not restore Authentik's own branding.
+# The tab title, favicon and accent also reach Authentik's admin interface.
+AUTHENTIK_BRANDING=on
+
+# ---- outgoing mail ----------------------------------------------------------
+# Authentik's own setting names. Only the email verification above sends mail,
+# so these can stay as they are until you turn it on.
+#
+# Submission port and STARTTLS by default: the minimal edit is the host and the
+# credentials, and on port 25 with TLS off that edit puts an SMTP password and
+# an account-activation link on the wire in the clear.
+AUTHENTIK_EMAIL__HOST=localhost
+AUTHENTIK_EMAIL__PORT=587
+AUTHENTIK_EMAIL__USERNAME=
+AUTHENTIK_EMAIL__PASSWORD=
+AUTHENTIK_EMAIL__USE_TLS=true
+AUTHENTIK_EMAIL__USE_SSL=false
+AUTHENTIK_EMAIL__FROM=habiterall@example.com
+
+# ---- authentik bootstrap ----------------------------------------------------
+# The password and email create the first admin and are then dead weight. The
+# TOKEN is what keeps the OIDC application and the switches above in step with
+# this file on every `up` — delete it and both freeze as they are, which is a
+# supported way to run once you are done configuring.
+#
+# Authentik turns that line into a full admin API token for `akadmin`, so the
+# placeholder is refused for the same reason the OIDC pair is.
+#   openssl rand -base64 36  (the secret key too, base64 60)
+AUTHENTIK_SECRET_KEY=CHANGE_ME_authentik_secret_key
+AUTHENTIK_BOOTSTRAP_PASSWORD=CHANGE_ME_initial_admin_password
+AUTHENTIK_BOOTSTRAP_EMAIL=admin@example.com
+AUTHENTIK_BOOTSTRAP_TOKEN=CHANGE_ME_api_token_for_setup
+
+# ---- reminders --------------------------------------------------------------
+# Reminders pointed at a Discord webhook are sent by this process, once a
+# minute; users with only the on-device destination cost nothing here, because
+# the phone arms its own alarms. `off` disables the loop entirely.
+HABITERALL_NOTIFY=on
+HABITERALL_NOTIFY_INTERVAL_MS=60000
+# Accounts visited per tick. A tick is a minute and each account may cost a
+# webhook round trip, so this stops one pass overlapping the next.
+NOTIFY_MAX_ACCOUNTS=500
+
+# Interactive Discord reminders — Yes / No / Skip buttons and an amount box.
+# One bot for the whole instance; each user pastes their own channel id into
+# Settings. Deliberately NOT a per-user setting: this token can post to every
+# channel the bot is in, and GET /api/settings hands user settings to a browser.
+#
+# Create it at https://discord.com/developers/applications → Bot → Reset Token,
+# then invite the bot with the `bot` scope and Send Messages. With it set the
+# app opens ONE outbound WebSocket to Discord; no inbound port is needed.
+DISCORD_BOT_TOKEN=
+
+# ---- limits -----------------------------------------------------------------
+# Shown at their code defaults, so an unedited copy changes nothing.
+MAX_HABITS_PER_USER=200
+MAX_HABITS_PER_IMPORT=200
+MAX_ENTRIES_PER_IMPORT=50000
+MAX_UPLOAD_MB=16
+
+# What one uploaded file may DECLARE, before anything is built from it — a
+# bound on a hostile file rather than a product limit. A SQLite file's row
+# count is a claim, so a few kilobytes can assert millions. Raising them trades
+# memory for generosity: both defaults together cost roughly 90MB to parse.
+#MAX_PARSE_HABITS=10000
+#MAX_PARSE_ENTRIES=250000
+
+# ---- tuning -----------------------------------------------------------------
+# Uncommented only when you mean it. Defaults shown.
+#LOG_LEVEL=info                 # debug is the switch for "the reminder never came"
+#LOG_FORMAT=json                # pretty on a TTY, json otherwise
+#LOG_REQUESTS=false             # true logs every request, not just the slow ones
+#LOG_SLOW_MS=1000
+#LOG_RUNTIME_MS=60000
+#LOG_LAG_WARN_MS=200
+#PG_POOL_MAX=10                 # what the /healthz memo is sized against
+#PGSSL=                         # `require` for a managed Postgres reached over TLS
+```
+<!-- /generated -->
+</details>
 
 Then start it, once:
 
@@ -412,8 +716,7 @@ docker compose up -d
 ```
 
 There is no second phase and nothing to click — the `authentik-bootstrap`
-service, commented at length in the file above, does the configuring. What it
-says it will do, it says here:
+service does the configuring. What it says it will do, it says here:
 
 ```bash
 docker compose logs authentik-bootstrap
@@ -454,9 +757,9 @@ images straight from the checkout, so editing one takes effect on the next
 request instead of on the next build.
 
 ```bash
-git clone <your-repo-url> habiterall
+git clone https://github.com/easymod0/habiterall.git
 cd habiterall/habiterall-cloud
-cp .env.example .env          # then fill in the secrets it lists
+cp ../examples/cloud.env.example .env    # then fill in the CHANGE_ME lines
 docker compose up -d
 ```
 
@@ -525,11 +828,27 @@ services:
       HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
-      # The fallback clock: a container has no timezone, so it is UTC. Users can
-      # override it for their own reminders in ⚙ → Notifications, but this is
-      # what "the server's own timezone" means, and it is also the clock that
-      # decides which day a check-off with no explicit date belongs to.
+      # The fallback clock. A container has no timezone, so it is UTC; users
+      # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
+
+      # Limits, the pool, and logging. Empty means the default, so these are
+      # here to make the knob reachable from .env rather than to set anything
+      # — a variable this file does not name never reaches the container.
+      MAX_HABITS_PER_USER: ${MAX_HABITS_PER_USER:-}        # 200
+      MAX_HABITS_PER_IMPORT: ${MAX_HABITS_PER_IMPORT:-}    # 200
+      MAX_ENTRIES_PER_IMPORT: ${MAX_ENTRIES_PER_IMPORT:-}  # 50000
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}                    # 16
+      MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
+      MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
+      PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
+      PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
+      LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
+      LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
+      LOG_REQUESTS: ${LOG_REQUESTS:-}                      # true logs every request
+      LOG_SLOW_MS: ${LOG_SLOW_MS:-}                        # 1000
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
 
 volumes:
@@ -1090,11 +1409,14 @@ are absent, so a fork can cut a release having configured nothing. Details in
 ### personal
 
 [`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
-carries these in place with a comment on each, and a test fails if the server
-reads one it does not. Three below are deliberately not in it: `PORT`, because
-the port *inside* the container is fixed by the image and the published
-mapping — `APP_PORT` is the host-side knob; `MAX_UPLOAD_MB`, which is a limit
-rather than a deployment setting; and `NODE_ENV`, which the image already sets.
+carries these in place and
+[`examples/personal.env.example`](examples/personal.env.example) describes each
+one, with a test failing if the server reads one neither mentions. The limits
+and the six `LOG_*` settings ship **commented out** in the env template, since
+tuning those is a considered change rather than a deployment step. Two are in
+no file: `PORT`, because the port *inside* the container is fixed by the image
+and the published mapping — `APP_PORT` is the host-side knob — and `NODE_ENV`,
+which the image already sets.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -1128,19 +1450,20 @@ docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
 
 ### cloud
 
-The database and OIDC credentials are in
-[`.env.example`](habiterall-cloud/.env.example) and in
-[`examples/docker-compose.cloud.yml`](examples/docker-compose.cloud.yml), with a
-comment on each, alongside `TRUST_PROXY`, `NOTIFY_MAX_ACCOUNTS`,
-`MAX_HABITS_PER_USER`, `MAX_ENTRIES_PER_IMPORT`, `MAX_UPLOAD_MB` and
-`ALLOW_INSECURE_OIDC` — the last of which is for local HTTP testing and never a
-real deployment.
+[`examples/cloud.env.example`](examples/cloud.env.example) is the whole list,
+with a comment on each — the database and OIDC credentials, `TRUST_PROXY`,
+`TZ`, `NOTIFY_MAX_ACCOUNTS`, the four import limits, and
+`ALLOW_INSECURE_OIDC`, which is for local HTTP testing and never a real
+deployment. It is the file both cloud compose files read, and a test fails if
+the server grows a variable it does not mention.
 
-Six more are read but shipped in no quickstart, because tuning them is a
-considered change rather than a deployment step: `MAX_HABITS_PER_IMPORT`,
-`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` (see below), `PG_POOL_MAX` (10 — what the `/healthz` memo is sized against), `PGSSL`, and
-`PORT`, which is fixed inside the container by the image and the published
-mapping. `APP_PORT` is the host-side knob.
+The last block in it ships **commented out**, because tuning those is a
+considered change rather than a deployment step: `MAX_PARSE_HABITS` and
+`MAX_PARSE_ENTRIES` (see below), the six `LOG_*` settings, `PG_POOL_MAX` (10 —
+what the `/healthz` memo is sized against) and `PGSSL`.
+
+One variable is in no file at all: `PORT`, which is fixed inside the container
+by the image and the published mapping. `APP_PORT` is the host-side knob.
 
 ### Limits on an import
 

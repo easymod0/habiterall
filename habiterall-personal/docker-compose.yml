@@ -20,9 +20,13 @@
 # The service-level `volumes:`, the ports and the whole environment do come
 # across; the cloud file has the longer note on what has to be restated there.
 #
-# Needs Compose v2.20 or newer. To pin values without editing the shared file,
-# put them in a `docker-compose.override.yml` here; Compose loads one
+# To set anything, `cp ../examples/personal.env.example .env` here — that is
+# the template for every variable the extended file interpolates, and a
+# variable it does not name reaches no container. To change the file's own
+# shape instead, put it in a `docker-compose.override.yml`; Compose loads one
 # automatically.
+#
+# Needs Compose v2.20 or newer.
 
 services:
   habiterall:

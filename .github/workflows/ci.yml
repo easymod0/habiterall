@@ -432,7 +432,7 @@ jobs:
           echo "  habiterall-personal/docker-compose.yml"
           (cd habiterall-personal && docker compose config -q)
           echo "  habiterall-cloud/docker-compose.yml"
-          (cd habiterall-cloud && cp .env.example .env && docker compose config -q)
+          (cd habiterall-cloud && cp ../examples/cloud.env.example .env && docker compose config -q)
 
       # The point of the restructure is that the edition files inherit an
       # environment block they no longer carry. `config -q` above proves the
@@ -461,10 +461,10 @@ jobs:
           # `--build` does not take over the published image's name.
           check /tmp/personal.yml 'habiterall-personal/Dockerfile' 'image: habiterall:latest'
 
-          # The `:?` guards are answered by .env.example, not by the step
+          # The `:?` guards are answered by cloud.env.example, not by the step
           # above's environment — this step deliberately sets none, so what it
           # renders is what an operator following SETUP.md would get.
-          (cd habiterall-cloud && cp .env.example .env && docker compose config > /tmp/cloud.yml)
+          (cd habiterall-cloud && cp ../examples/cloud.env.example .env && docker compose config > /tmp/cloud.yml)
           check /tmp/cloud.yml HABITERALL_NOTIFY_INTERVAL_MS NOTIFY_MAX_ACCOUNTS \
             ALLOW_INSECURE_OIDC SESSION_SECRET DATABASE_URL_ADMIN TZ db-data \
             'habiterall-cloud/Dockerfile'

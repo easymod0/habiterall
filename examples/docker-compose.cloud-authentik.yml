@@ -1,80 +1,34 @@
 # habiterall, cloud edition — multi user, Postgres, with Authentik included.
 #
-# The copy in README.md is generated from this file (`npm run docs:compose`).
-#
-# It repeats docker-compose.cloud.yml's `db` / `migrate` / `app` rather than
-# including them, because downloading ONE file and running it is the whole
-# point of this directory. `shared/test/compose.test.js` is what keeps the two
-# copies honest: it fails if either omits a variable the server reads.
-#
-# Use this when you do NOT already run an identity provider. If you do — Authelia,
-# Keycloak, Google, an existing Authentik — use docker-compose.cloud.yml instead
-# and point it at that; nothing here is required.
-#
-# Needs a .env beside it:
-#
-#   DB_OWNER_PASSWORD=...          openssl rand -hex 32   (hex — see below)
-#   APP_DB_PASSWORD=...            openssl rand -hex 32
-#   AUTHENTIK_DB_PASSWORD=...      openssl rand -base64 36
-#   AUTHENTIK_SECRET_KEY=...       openssl rand -base64 60
-#   AUTHENTIK_BOOTSTRAP_PASSWORD=. the first admin's password — change it after
-#   SESSION_SECRET=...             openssl rand -base64 36
-#   AUTHENTIK_BOOTSTRAP_TOKEN=..   openssl rand -base64 36  (see below)
-#   PUBLIC_URL=https://habits.example.com
-#   OIDC_ISSUER=https://auth.example.com/application/o/habiterall/
-#   AUTHENTIK_PUBLIC_URL=https://auth.example.com
-#   OIDC_CLIENT_ID=...             openssl rand -hex 32   (yours to choose)
-#   OIDC_CLIENT_SECRET=...         openssl rand -hex 32   (yours to choose)
-#
-# One start:
-#
+#   cp cloud.env.example .env                                       # fill it in
 #   docker compose -f docker-compose.cloud-authentik.yml up -d
 #
+# Every variable is described in `cloud.env.example` beside this file, and at
+# https://github.com/easymod0/habiterall#cloud
+#
+# Use this when you do NOT already run an identity provider. If you do —
+# Authelia, Keycloak, Google, an existing Authentik — use
+# docker-compose.cloud.yml instead and point it at that.
+#
 # There is no phase where you click through Authentik's UI and paste values
-# back. The `authentik-bootstrap` service below runs the same image as the app
-# and creates the OIDC provider and application over Authentik's API, GIVING
-# it the client id and secret from .env — so both sides are configured from
-# the same two lines. It is idempotent and runs on every `up`, which is how a
-# changed .env takes effect. It needs AUTHENTIK_BOOTSTRAP_TOKEN, which becomes
-# an Authentik admin API token; drop it once you are done configuring and the
-# bootstrap will say it has nothing to do and leave everything as it stands.
+# back. `authentik-bootstrap` below runs the app's own image and creates the
+# OIDC provider over Authentik's API, GIVING it the client id and secret from
+# .env, so both sides are configured from the same two lines. It is idempotent
+# and runs on every `up`, which is how a changed .env takes effect. Drop
+# AUTHENTIK_BOOTSTRAP_TOKEN when you are done configuring and it will say it
+# has nothing to do and leave everything as it stands.
 #
-# Optional, and off unless set:
+# The blueprints and images it needs travel inside the habiterall image and are
+# copied into the volumes at the bottom on every `up` — which is why this file
+# needs no checkout to mount from, and why an upgraded image's versions land.
 #
-#   AUTHENTIK_SELF_SIGNUP=on              a "Sign up" link on the login page —
-#                                         anyone who can reach it gets an
-#                                         account, so read SETUP.md first
-#   AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL=on  confirm the address first; needs the
-#                                         AUTHENTIK_EMAIL__* settings below
-#   AUTHENTIK_BRANDING=off                keep Authentik's own name and logo on
-#                                         the sign-in pages (default: habiterall's)
+# Authentik gets its own Postgres rather than sharing habiterall's: it is how
+# upstream ships it, and it keeps one compromise from reaching the other's data.
 #
-# The blueprints and images those two need travel INSIDE the habiterall image
-# and are copied into the three volumes at the bottom on every `up`, which is
-# why this file needs no checkout of the repository to mount from — and why an
-# upgraded image's versions of them actually land.
-#
-# The two database passwords are hex rather than base64 because they are
-# substituted into a connection URL: base64 emits '/', which ends the URL's
-# authority and leaves no host, and `pg` only discovers that on its first query
-# — so the app boots, signs you in, and then fails every request with
-# "Invalid URL" from four libraries down. src/db/url.js now says so at startup.
-#
-# Authentik gets its own Postgres here rather than sharing habiterall's. It is
-# how upstream ships it, it keeps one compromise from reaching the other's data,
-# and it needs no init script mounted from a repo you do not have.
-#
-# Pin the image tag rather than tracking `latest`: this edition runs migrations
-# on deploy, so `latest` means taking a schema change at a moment you did not
-# choose.
-#
-# Authentik needs nothing but its Postgres. 2025.10 removed Redis from it
-# outright — caching, the embedded outpost and its WebSockets all moved into
-# Postgres, tasks having gone there in 2025.8 — so a redis service here would
-# start, pass its healthcheck and serve nobody. Its tag is an exact patch and
-# it is worth keeping that way: Authentik's upgrades may not skip a major
-# family (2026.5 → 2026.8 → 2026.11, never straight to the newest), and a
-# family tag that silently moves is how you find that out mid-migration.
+# Pin the image tags rather than tracking `latest`. This edition runs migrations
+# on deploy, and Authentik's upgrades may not skip a major family (2026.5 →
+# 2026.8 → 2026.11), which a tag that silently moves is how you find out
+# mid-migration.
 
 services:
   db:
@@ -169,20 +123,13 @@ services:
       - authentik-images:/web/dist/assets/images/habiterall
     restart: unless-stopped
 
-  # Configures Authentik from this file's .env: the OIDC provider and
-  # application, self-service registration, and the branding on the sign-in
-  # pages. Runs to completion on every `up`, and is idempotent — everything is
-  # looked up before it is written, so re-running it is how a changed .env
-  # takes effect.
+  # Configures Authentik from this file's .env — the OIDC provider and
+  # application, self-service registration, the sign-in branding — and copies
+  # the blueprints and images it needs out of the habiterall image into the
+  # volumes above. Idempotent, and runs to completion on every `up`.
   #
-  # It also copies the blueprints and the two images out of the habiterall
-  # image into the volumes above, which is the step that makes this file work
-  # without a checkout of the repository. That copy OVERWRITES, so pulling a
-  # newer image is what updates them.
-  #
-  # Without AUTHENTIK_BOOTSTRAP_TOKEN it does nothing and exits 0 — supported,
-  # and the reason `up` keeps working once you have removed the token. It says
-  # so, and names the switches that have no effect while it is gone.
+  # Without AUTHENTIK_BOOTSTRAP_TOKEN it does nothing and exits 0, which is
+  # what keeps `up` working once you have removed the token.
   authentik-bootstrap:
     image: ghcr.io/easymod0/habiterall-cloud:latest
     depends_on:
@@ -241,13 +188,8 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
       PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
       OIDC_ISSUER: ${OIDC_ISSUER:?from Authentik, ends in a slash}
-      # `:?` now, where this file once had `:-`. There used to be a phase where
-      # these were legitimately empty — the first of a two-phase start, whose
-      # purpose was to create the client they would hold — and compose
-      # interpolates the WHOLE file before it works out which services you
-      # asked for, so requiring them here would have failed that phase too.
-      # The bootstrap ends the two-phase start: these are values you generate,
-      # not values you collect, so there is no moment when empty is correct.
+      # Values you generate, not values you collect from Authentik — so there
+      # is no moment when empty is correct, and these are required.
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
       ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
@@ -256,21 +198,34 @@ services:
       HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
-      # The fallback clock: a container has no timezone, so it is UTC. Users can
-      # override it for their own reminders in ⚙ → Notifications, but this is
-      # what "the server's own timezone" means, and it is also the clock that
-      # decides which day a check-off with no explicit date belongs to.
+      # The fallback clock. A container has no timezone, so it is UTC; users
+      # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
+
+      # Limits, the pool, and logging. Empty means the default, so these are
+      # here to make the knob reachable from .env rather than to set anything
+      # — a variable this file does not name never reaches the container.
+      MAX_HABITS_PER_USER: ${MAX_HABITS_PER_USER:-}        # 200
+      MAX_HABITS_PER_IMPORT: ${MAX_HABITS_PER_IMPORT:-}    # 200
+      MAX_ENTRIES_PER_IMPORT: ${MAX_ENTRIES_PER_IMPORT:-}  # 50000
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}                    # 16
+      MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
+      MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
+      PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
+      PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
+      LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
+      LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
+      LOG_REQUESTS: ${LOG_REQUESTS:-}                      # true logs every request
+      LOG_SLOW_MS: ${LOG_SLOW_MS:-}                        # 1000
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
 
 volumes:
   db-data:
   authentik-db-data:
-  # Refilled from the habiterall image by authentik-bootstrap on every `up`,
-  # and read by Authentik. They mirror the image rather than holding config of
-  # your own: a file edited in here is overwritten on the next start, which is
-  # what makes an upgraded image's blueprints and branding take effect. Change
-  # them in an image you build.
+  # Refilled from the habiterall image on every `up`, so a file edited in here
+  # is overwritten on the next start. Change them in an image you build.
   authentik-blueprints:
   authentik-icons:
   authentik-images:

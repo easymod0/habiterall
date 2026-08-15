@@ -37,8 +37,10 @@ const README_PATH = join(ROOT, 'README.md');
  */
 export const PRINTED = [
   { file: 'docker-compose.personal.yml', lang: 'yaml' },
+  { file: 'personal.env.example', lang: 'ini' },
   { file: 'docker-compose.cloud-authentik.yml', lang: 'yaml' },
   { file: 'docker-compose.cloud.yml', lang: 'yaml' },
+  { file: 'cloud.env.example', lang: 'ini' },
   { file: 'Caddyfile', lang: 'caddyfile' },
 ];
 
