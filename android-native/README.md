@@ -120,6 +120,14 @@ A tapped notification does not need any of this to be up: alarms are local, and
 an answer given while the session has expired is queued and sent when you sign
 in again rather than being dropped.
 
+**Nothing blocks on a server you cannot reach.** A dropped signal is not a
+signed-out session, so the app carries on to screens that report their own
+network trouble and offer to retry — and if there was a session to ask for, the
+first request that gets through returns 401 and lands you here. What does stop
+the app is a server that *answers* something meaningless: a proxy's 502, a rate
+limit, a captive portal's login page. Those are reported rather than guessed at,
+because a sign-in form drawn over one has no control that can work.
+
 Sign out from the list's ⋮ menu. It is absent on a server with no sign-in.
 
 Plaintext HTTP is permitted only for private-range addresses

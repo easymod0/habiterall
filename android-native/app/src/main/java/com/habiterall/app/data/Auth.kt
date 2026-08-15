@@ -76,6 +76,24 @@ sealed interface Session {
      * This is an error to report, never a reason to draw a sign-in screen.
      */
     data class Unusable(val status: Int, val message: String) : Session
+
+    /**
+     * The server could not be reached at all.
+     *
+     * Kept apart from [Unusable] because a phone is the client this happens to,
+     * and the two want opposite treatment. A server that ANSWERED something
+     * useless — a proxy's 502, a rate limit, a captive portal — is a state the
+     * user has to be told about, because every screen behind it would fail the
+     * same way with a worse message.
+     *
+     * A server that answered nothing is just a tunnel. Blocking the whole app on
+     * it would put a dead-end error page in front of someone whose signal
+     * dropped for a moment, in place of screens that already report their own
+     * network trouble and offer to retry. And it costs nothing to be wrong: if
+     * there IS a session to ask for, the first request to get through 401s, and
+     * that is already what sends the app to the sign-in screen.
+     */
+    data class Unreachable(val message: String) : Session
 }
 
 object Auth {

@@ -425,14 +425,19 @@ class MainActivity : ComponentActivity() {
                     // later, which is the flash of the wrong screen that
                     // `start()` was rewritten in the web app to avoid.
                     session == null -> Loading()
-                    // The server answered something that says nothing about
+                    // The server ANSWERED something that says nothing about
                     // authentication — a 502 from a proxy, a captive portal, a
                     // rate limit. `Auth.read` refuses to guess a mode from it,
                     // and this is the error path that refusal exists to reach.
                     // Drawing a sign-in form here is exactly the bug the web
                     // adapter shipped: a form whose only control 404s, over an
                     // instance that was working.
-                    session is Session.Unusable -> ServerUnreachable(
+                    //
+                    // `Session.Unreachable` is deliberately NOT here: a server
+                    // that answered nothing is a tunnel, and the app carries on
+                    // to screens that report their own network trouble. See its
+                    // declaration.
+                    session is Session.Unusable -> ServerProblem(
                         why = (session as Session.Unusable).message,
                         onRetry = { authKey++ },
                         onChangeServer = { url = null },
@@ -628,11 +633,14 @@ class MainActivity : ComponentActivity() {
      * says nothing about how this instance signs people in, and drawing a form
      * over it puts a control in front of the user that cannot work. This says
      * what happened and offers the two things that can help.
+     *
+     * Not for a server that could not be REACHED — that one is a tunnel, and the
+     * app carries on past it. See `Session.Unreachable`.
      */
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    private fun ServerUnreachable(why: String, onRetry: () -> Unit, onChangeServer: () -> Unit) {
-        Scaffold(topBar = { TopAppBar(title = { Text("Cannot reach the server") }) }) { pad ->
+    private fun ServerProblem(why: String, onRetry: () -> Unit, onChangeServer: () -> Unit) {
+        Scaffold(topBar = { TopAppBar(title = { Text("The server answered oddly") }) }) { pad ->
             Column(
                 Modifier.padding(pad).padding(24.dp).fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(16.dp),

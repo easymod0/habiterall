@@ -93,6 +93,21 @@ class AuthTest {
     }
 
     @Test
+    fun `an unreachable server is a different state from an odd answer`() {
+        // `Auth.read` never produces it — it only ever sees an answer — but the
+        // distinction it guards is the one a phone meets most. A server that
+        // answered nothing says nothing about the session, and blocking the app
+        // on it would put a dead end in front of a dropped signal. A server that
+        // answered 502 has to be reported, because every screen behind it fails
+        // the same way with a worse message.
+        //
+        // Pinned here so the two cannot be merged back into one without the
+        // reasoning being read again.
+        assertTrue(Auth.read(502, "") is Session.Unusable)
+        assertFalse(Auth.read(502, "") is Session.Unreachable)
+    }
+
+    @Test
     fun `a 403 is an error to report, not a sign-in prompt`() {
         // A suspended cloud account. Sending that user to a sign-in screen would
         // loop them through a provider that will authenticate them perfectly
