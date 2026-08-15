@@ -51,6 +51,15 @@ object Outbox {
      * tap on the same day REPLACEd this work — not a failure, and reporting it
      * as one would put "could not be saved" on screen every time somebody
      * tapped a cell twice in quick succession.
+     *
+     * There is a fourth outcome and it is deliberately not one of the three:
+     * work that is RETRYING never reaches a terminal state, so this never
+     * returns and the caller's optimistic overlay stays up. That is the right
+     * answer for the case it has always covered — a write made offline, which
+     * lands when the signal does — and now also covers a session that has
+     * expired, which lands when the user signs in. The value on screen is one
+     * that WILL be stored; what is missing is any word to the user while it
+     * waits, and the same silence has always applied to the offline case.
      */
     suspend fun awaitWrite(context: Context, habitId: Long, date: String): WorkInfo.State {
         val manager = WorkManager.getInstance(context)

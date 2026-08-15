@@ -420,7 +420,18 @@ class Api(
         // Announced before it is thrown, so a caller that only catches to show a
         // message still sends the app back to sign-in. Every screen catches
         // something; not every screen would remember to ask about the status.
-        if (failure.isAuthFailure) onUnauthorized?.invoke()
+        //
+        // **401 only**, though `isAuthFailure` also covers 403, and the two are
+        // not interchangeable here. A 401 says "sign in again", which re-asking
+        // resolves. A 403 says the session is fine and this is refused anyway —
+        // a suspended cloud account, or `sameOriginOnly` behind a proxy that
+        // rewrites `Host` — and re-asking cannot help. Firing on it built a
+        // loop with no delay in it: `/api/me` answers 403, `Auth.read` calls
+        // that Unknown, the app carries on to the list, the list's fetch 403s,
+        // that bumps the key, and the session is asked for again. Twice per
+        // pass, since two requests fail. The screen's own error state is where a
+        // 403 belongs, and it says what the server said.
+        if (status == 401) onUnauthorized?.invoke()
         throw failure
     }
 
@@ -474,6 +485,15 @@ class Api(
     suspend fun me(): Session = try {
         val (status, body) = raw(Request.Builder().url(url("/api/me")).get().build())
         Auth.read(status, body)
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        // Cancellation is not a failure, and swallowing it here is not merely
+        // untidy: this runs in a `LaunchedEffect` keyed on the session, so a
+        // second bump cancels the first probe — and a cancelled probe that
+        // RETURNS goes on to assign its stale answer over the state the new
+        // effect has already reset. The list then composes against a session
+        // that is not the current one. The list's own fetch already rethrows for
+        // the same reason.
+        throw e
     } catch (e: Exception) {
         // Unreachable is not signed-out, and it is not fatal either — status 0
         // is [Session.Unknown]'s "no answer at all", which the app carries on
@@ -522,6 +542,14 @@ class Api(
      * Where the browser flow starts, for an instance whose sign-in this client
      * cannot draw. It is a normal page load: the server redirects to the
      * identity provider and the cookie is set on the way back.
+     *
+     * Cloud's route, and only cloud's. The personal edition mounts `/auth/login`
+     * as a POST and would answer a page load with "Cannot GET" — which matters
+     * because [AuthMode.of] sends an unrecognised mode down this path too. That
+     * is a dead end rather than a wrong session, and it is reachable only from a
+     * server newer than this app; the alternative, loading `/` and letting the
+     * web UI offer its own sign-in, costs the cloud path an extra tap on the one
+     * mode that is not hypothetical.
      */
     val signInUrl: String get() = url("/auth/login")
 

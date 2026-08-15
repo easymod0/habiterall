@@ -126,11 +126,26 @@ object Auth {
      * @param body the response body, which need not be JSON
      */
     fun read(status: Int, body: String): Session {
-        val json = runCatching { Json.parseToJsonElement(body).jsonObject }
-            .getOrElse { JsonObject(emptyMap()) }
+        val json = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrNull()
 
         if (status != 200 && status != 401) {
-            return Session.Unknown(status, json.str("error") ?: "The server answered $status.")
+            return Session.Unknown(status, json?.str("error") ?: "The server answered $status.")
+        }
+
+        // A 200 whose body is not an object did not come from this API — a
+        // captive portal's HTML is the one a phone actually meets. Reading it as
+        // a session is what the paragraph above says must not happen, and the
+        // first version of this did it anyway: it degraded a parse failure to an
+        // empty object and returned an ACTIVE session from it. The visible cost
+        // was on the configuration least able to afford it — an instance with no
+        // sign-in behind a hotel portal grew a "Sign out" item, because the mode
+        // fell back to one that has sign-in.
+        //
+        // An empty but VALID object is a different thing and still reads as a
+        // session: that is a server answering this contract without the field,
+        // which is the case [AuthMode.of] exists for.
+        if (json == null) {
+            return Session.Unknown(status, "The server did not answer with a session.")
         }
 
         val mode = AuthMode.of(json.str("mode"))
@@ -141,7 +156,7 @@ object Auth {
         return Session.Active(
             name = json.str("name").orEmpty(),
             mode = mode,
-            managed = json.bool("managed") ?: false,
+            managed = json.bool("managed") == true,
         )
     }
 

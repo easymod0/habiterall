@@ -78,6 +78,7 @@ fun SignInScreen(
     val scope = rememberCoroutineScope()
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
@@ -134,9 +135,30 @@ fun SignInScreen(
                     supportingText = { error?.let { Text(it) } },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                // Only when CREATING one, and `auth-session.js` shows the same
+                // field in the same mode. A typo signing in costs one more
+                // attempt; a typo here is stored as the only credential a
+                // personal instance has, invisibly, with no way back to it from
+                // this app — the operator has to go to the environment or the
+                // database.
+                if (claiming) {
+                    OutlinedTextField(
+                        value = confirm,
+                        onValueChange = { confirm = it; error = null },
+                        label = { Text("Confirm password") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 Button(
-                    enabled = !busy && username.isNotBlank() && password.isNotBlank(),
+                    enabled = !busy && username.isNotBlank() && password.isNotBlank() &&
+                        (!claiming || confirm.isNotBlank()),
                     onClick = {
+                        if (claiming && password != confirm) {
+                            error = "The two passwords do not match."
+                            return@Button
+                        }
                         busy = true
                         error = null
                         scope.launch {
@@ -210,6 +232,15 @@ private fun BrowserSignIn(
     ) { pad ->
         AndroidView(
             modifier = Modifier.fillMaxSize().padding(pad),
+            // Cancelling or finishing swaps this branch out, which detaches the
+            // WebView without ending it — leaving an identity provider's page
+            // and its JavaScript running in a pocket. `WebHost.destroy` exists
+            // for exactly that on the other WebView in this app.
+            onRelease = { view ->
+                view.stopLoading()
+                view.loadUrl("about:blank")
+                view.destroy()
+            },
             factory = { context ->
                 WebView(context).apply {
                     layoutParams = ViewGroup.LayoutParams(

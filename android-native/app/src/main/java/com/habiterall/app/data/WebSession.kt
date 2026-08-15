@@ -74,17 +74,15 @@ object WebSession {
             // `Cookie.toString()` re-emits the attributes, so the expiry and the
             // flags the server set are what get stored rather than a bare pair.
             cookies.forEach { store.setCookie(url.toString(), it.toString()) }
-            // Session cookies live in memory until this runs. Without it a
-            // check-off from a notification after a reboot finds no session and
-            // makes the user sign in again for no reason.
+            // `setCookie` writes through a store that persists lazily, so
+            // without this a process killed between here and the next idle
+            // moment loses the cookie — and a check-off from a notification
+            // after a reboot then finds no session and asks the user to sign in
+            // again for no reason. (The cookie itself is persistent: the server
+            // gives it a 14-day `maxAge`, not a session lifetime.)
             store.flush()
         }
     }
-
-    /** Whether a session cookie exists for this server. */
-    fun has(baseUrl: String): Boolean =
-        manager()?.getCookie(baseUrl)?.split(';')
-            ?.any { it.trimStart().startsWith("$COOKIE=") } == true
 
     /**
      * Forget the session for this server.

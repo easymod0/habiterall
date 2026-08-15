@@ -117,20 +117,40 @@ class AuthTest {
         // A suspended cloud account. Sending that user to a sign-in screen would
         // loop them through a provider that will authenticate them perfectly
         // well, back to the same refusal.
+        //
+        // It must not be re-asked about either, and that is a sharper rule than
+        // it sounds: cloud answers 403 on every route including this one, so an
+        // app that treats it as "ask again" spins — ask, carry on, fetch, 403,
+        // ask again, with no delay anywhere in it. `Api` fires its re-ask on 401
+        // alone for that reason.
         val session = Auth.read(403, body("error" to str("account suspended")))
         assertTrue(session is Session.Unknown)
+        assertFalse(session is Session.Absent)
         assertEquals("account suspended", (session as Session.Unknown).message)
     }
 
     @Test
     fun `a body that is not JSON is not read as a session`() {
         // A captive portal answering 200 with a login page is the case a phone
-        // meets and a browser does not. Reading that as "signed in" would leave
-        // the app in a state no retry escapes.
-        val session = Auth.read(200, "<html><body>Sign in to the hotel wifi</body></html>")
+        // meets and a browser does not. Reading it as a session put a "Sign out"
+        // item on an instance with no sign-in, because the absent mode fell back
+        // to one that has it.
+        for (body in listOf(
+            "<html><body>Sign in to the hotel wifi</body></html>",
+            "",
+            "[]",                       // JSON, but not an object
+        )) {
+            assertTrue(body, Auth.read(200, body) is Session.Unknown)
+        }
+    }
+
+    @Test
+    fun `an empty object is still a session, because it came from this API`() {
+        // The distinction the case above turns on. A server that answered this
+        // contract without the `mode` field is an older build; a server that
+        // answered HTML is not this server at all.
+        val session = Auth.read(200, "{}")
         assertTrue(session is Session.Active)
-        // Nothing was claimed about the account, and the mode falls back to the
-        // one that assumes there IS auth — see below.
         assertEquals("", (session as Session.Active).name)
         assertEquals(AuthMode.OIDC, session.mode)
     }

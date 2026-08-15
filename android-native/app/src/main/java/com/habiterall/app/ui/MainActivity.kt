@@ -303,12 +303,21 @@ class MainActivity : ComponentActivity() {
                 /** Bumped to re-ask, after a sign-in, a sign-out, or a 401. */
                 var authKey by remember { mutableIntStateOf(0) }
 
-                LaunchedEffect(url, authKey) {
-                    val at = url
+                /**
+                 * One client for asking about the session and ending it.
+                 *
+                 * `Api` builds an OkHttpClient with its own dispatcher and
+                 * connection pool, and this is asked again on every 401 from
+                 * anywhere — so building one per check is the cost the
+                 * management screens already take care to avoid.
+                 */
+                val authApi = remember(url) { url?.let { Api(it) } }
+
+                LaunchedEffect(authApi, authKey) {
                     // Null first, so the app is never on screen against a
                     // session belonging to the previous server.
                     session = null
-                    if (at != null) session = Api(at).me()
+                    session = authApi?.me()
                 }
 
                 /**
@@ -386,8 +395,17 @@ class MainActivity : ComponentActivity() {
                 // previous account's page to the next one — same habit id, same
                 // URL, nothing to tell it to reload. Closing it means the next
                 // open is a real load.
+                //
+                // `is Absent`, NOT `!is Active`, and the difference is a bug that
+                // shipped in the first version of this. `session` is plain
+                // `remember`, so it is null on every activity recreation, while
+                // `webUrl` is `rememberSaveable` precisely so that rotating while
+                // reading a habit's charts does not drop you back on the list —
+                // see its declaration. `!is Active` fires during that null phase
+                // and throws the restored value away, undoing the one thing
+                // saving it was for. It also fired on every silent re-check.
                 LaunchedEffect(session) {
-                    if (session !is Session.Active) webUrl = null
+                    if (session is Session.Absent) webUrl = null
                 }
 
                 /** Which management screen is over the list, if any. */
@@ -431,8 +449,8 @@ class MainActivity : ComponentActivity() {
                     // for the purpose — and an instance with NO sign-in must not
                     // acquire a way to fail at boot that it never had. See
                     // Session.Unknown for the whole argument.
-                    session is Session.Absent -> SignInScreen(
-                        api = remember(url) { Api(url!!) },
+                    session is Session.Absent && authApi != null -> SignInScreen(
+                        api = authApi,
                         mode = (session as Session.Absent).mode,
                         onSignedIn = { authKey++ },
                         onChangeServer = { url = null },
@@ -482,10 +500,10 @@ class MainActivity : ComponentActivity() {
                                 // Null when this instance has no sign-in, so the
                                 // personal edition with `HABITERALL_AUTH=off`
                                 // does not offer to sign out of nothing.
-                                onSignOut = if (canSignOut) {
+                                onSignOut = if (canSignOut && authApi != null) {
                                     {
                                         lifecycleScope.launch {
-                                            Api(url!!).signOut()
+                                            authApi.signOut()
                                             authKey++
                                         }
                                     }
