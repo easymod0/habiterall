@@ -167,7 +167,23 @@ Staging is limited to calls safe to arrive twice, because a concurrent `flush()`
 can send a staged write while the live attempt is still out: two identical
 upserts keyed on habit and date, and the second changes nothing.
 
-Two exclusions, both deliberate. A **GET** still goes to the network, because
+The predicate is `replayable()`, and it names one question — is this write safe
+to arrive twice? — because three rules turn on it: what may be staged, what may
+be pre-empted, and what may be queued on failure. All three end in a replay from
+the outbox, so all three need the same answer, and having them read one function
+is what stops the next change moving one and missing the others.
+
+`POST /habits` is the only write that answers no. It is **bounded but never
+queued**, which is not the obvious pairing and is the point: it used to be left
+unbounded on the reasoning that aborting a create the server had begun and then
+replaying it is two habits. The first half is true and is why it is not
+replayable — but not bounding it did not avoid the duplicate, it only made the
+dialog spin until the OS gave up while the create may or may not have landed.
+Abandoned, not replayed, and reported as *indeterminate* is the honest shape; the
+dialog closes and reloads the list on that error, so "check whether it was
+created" is something the user can see rather than a thing they are told to do.
+
+A GET still goes to the network, because
 the service worker may hold a cached copy and skipping the request throws that
 away — stale beats blank. And `POST /habits` is excluded **by the same
 `bounded()` predicate as the timeout**, not by a second opinion about the same

@@ -29,22 +29,41 @@ import { state } from '/shared/ui/store.js';
 const TIMEOUT_MS = 10_000;
 
 /**
- * Whether this request may be abandoned, and it is one question about
- * replaying rather than about latency.
+ * Whether this write is safe to arrive twice.
  *
- * Aborting does not recall a request the server has already begun, so anything
- * bounded here has to be safe to arrive twice: once from the attempt and again
- * from the outbox. Every call on this path is — an entry PUT is an upsert keyed
- * on habit and date, DELETE and PUT /habits and /settings all state a final
- * value — except `POST /habits`, which yields a second habit. It is also a
- * deliberate act in a dialog rather than a tap, so leaving it unbounded costs a
- * dialog that hangs, not a check-off that disappears.
+ * The one question three rules turn on: what may be STAGED before the attempt,
+ * what may be PRE-EMPTED when we already know we are offline, and what may be
+ * QUEUED when an attempt fails. All three end with the request being replayed
+ * from the outbox, so all three need the same answer.
+ *
+ * Every write on this path is replayable — an entry PUT is an upsert keyed on
+ * habit and date; DELETE, PUT /habits and PUT /settings all state a final value
+ * — except `POST /habits`, which yields a second habit.
  *
  * Import, export and the notify test do not come through here at all (raw
- * `fetch`, and a plain `<a download>`), so nothing legitimately long is at risk
- * of being cut off.
+ * `fetch`, and a plain `<a download>`), so nothing legitimately long is in
+ * scope.
  */
-const bounded = (method, path) => !(method === 'POST' && path === '/habits');
+const replayable = (method, path) =>
+  method !== 'GET' && !(method === 'POST' && path === '/habits');
+
+/**
+ * Every request is bounded, including the one that is not replayable.
+ *
+ * `POST /habits` used to be left unbounded, on the reasoning that aborting a
+ * create the server had already begun and then replaying it is two habits. The
+ * first half of that is still true and is why it is not `replayable` above —
+ * but the conclusion did not follow. Not bounding it did not avoid the
+ * duplicate, it just moved the cost: with no ceiling the dialog span until the
+ * OS gave up, showing nothing, while the create may or may not have landed.
+ *
+ * Bounded and NOT queued is the honest shape. The attempt is abandoned, nothing
+ * is replayed, and the user is told the server did not answer and that the
+ * habit may exist — which is a worse sentence than a silent recovery and a true
+ * one, unlike a spinner that never stops. `data-dialog`'s caller refreshes the
+ * list on that error so the answer is one glance away.
+ */
+const bounded = () => true;
 
 /**
  * Auth adapter, injected by the edition's entry point via `start()`. The API
@@ -107,14 +126,10 @@ export async function api(path, options = {}) {
   // hold a cached copy, and skipping the request would throw that away and
   // leave the app blank rather than stale.
   //
-  // `POST /habits` is exempt, by the same predicate as the timeout rather than
-  // a second opinion about the same call. Pre-empting it would in fact be safe
-  // — nothing is sent, so nothing can arrive twice — but the two rules would
-  // then disagree about which call is special, and the next person to change
-  // one would have to find the other. The call that is never abandoned
-  // mid-flight is also the one never pre-empted; offline it fails and reaches
-  // the outbox by the ordinary path, exactly as it did before this branch.
-  if (method !== 'GET' && bounded(method, path) && state.offline) {
+  // `POST /habits` is exempt because pre-empting means queueing, and queueing
+  // means replaying. Offline it takes the attempt, fails, and is reported as a
+  // create that did not happen — which it did not, since nothing was sent.
+  if (replayable(method, path) && state.offline) {
     throw await queueWrite(url, method, options);
   }
 
@@ -126,14 +141,11 @@ export async function api(path, options = {}) {
   // from the server alike. The bound above caps that window at 10s; staging
   // here closes it.
   //
-  // Only for calls safe to arrive twice, which is what `bounded()` already
-  // names. A staged write can be picked up by a concurrent `flush()` and sent
-  // while the live attempt is in flight — two identical upserts, keyed on habit
-  // and date, and the second changes nothing. `POST /habits` is the call that
-  // would become two habits, so it is not staged, exactly as it is not bounded
-  // and not pre-empted: one predicate, three uses, no way to change one and
-  // miss the others.
-  const staged = method !== 'GET' && bounded(method, path)
+  // Only for calls safe to arrive twice, which is what `replayable()` names. A
+  // staged write can be picked up by a concurrent `flush()` and sent while the
+  // live attempt is still out — two identical upserts, keyed on habit and date,
+  // and the second changes nothing.
+  const staged = replayable(method, path)
     ? await enqueue({ url, method, body: options.body ?? null })
     : null;
 
@@ -147,16 +159,31 @@ export async function api(path, options = {}) {
       // refused connection and needs no branch of its own: a request that
       // never answered and one that could not be made are the same news.
       signal: options.signal ??
-        (bounded(method, path) ? AbortSignal.timeout(TIMEOUT_MS) : undefined),
+        (bounded() ? AbortSignal.timeout(TIMEOUT_MS) : undefined),
     });
   } catch (networkError) {
-    // Offline. Queue writes for replay; reads have nothing to fall back on
-    // beyond whatever the service worker already cached.
-    if (method !== 'GET') {
-      // Already staged, unless this is the one call that is not. Either way it
-      // is in the queue now, so only the announcement is left to make.
-      if (staged === null) await enqueue({ url, method, body: options.body ?? null });
+    // Offline, or bounded out. Queue what can be replayed; reads have nothing
+    // to fall back on beyond whatever the service worker already cached.
+    if (replayable(method, path)) {
+      // Already staged above, so only the announcement is left to make.
       throw await announceQueued();
+    }
+
+    if (method !== 'GET') {
+      // The one write that cannot be replayed, and the reason it says something
+      // different. Aborting does not recall a create the server may already
+      // have committed, so a cheerful "saved offline, will sync" would be a
+      // promise to do it AGAIN — and the honest failure is not "it did not
+      // happen" either, because nobody here knows. Say what is true and make
+      // the answer reachable: the caller refreshes the list on this.
+      //
+      // Before this the call was simply unbounded, so the dialog span until the
+      // OS gave up. That was not safer, only quieter.
+      reportUnreachable();
+      throw Object.assign(
+        new Error('The server did not answer. Check whether the habit was created before trying again.'),
+        { indeterminate: true }
+      );
     }
     throw new Error('You are offline');
   }

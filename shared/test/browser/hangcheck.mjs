@@ -187,13 +187,17 @@ try {
     held.filter((r) => r.method === 'PUT').length === 1,
     `${held.filter((r) => r.method === 'PUT').length} PUT(s) held`);
 
-  /* ---- 2. creating a habit is not abandoned ---- */
-  console.log('--- POST /habits is exempt ---');
+  /* ---- 2. creating a habit fails honestly rather than hanging ---- */
+  console.log('--- POST /habits is bounded but never queued ---');
 
   // The one non-idempotent call on this path: aborting a create the server has
-  // already begun, then replaying it from the outbox, is two habits. It is
-  // driven through the app's own api() rather than a bare fetch, or the bound
-  // under test would not be in the way at all.
+  // already begun does not recall it, and replaying it from the outbox is two
+  // habits. It used to be left UNBOUNDED for that reason, which did not avoid
+  // the duplicate — it just made the dialog spin until the OS gave up while the
+  // create may or may not have landed. Bounded and not queued is the honest
+  // shape: abandoned, not replayed, and reported as indeterminate. Driven
+  // through the app's own api() rather than a bare fetch, or the bound under
+  // test would not be in the way at all.
   await ev(`(()=>{
     window.__create = 'pending';
     import('/shared/ui/api.js')
@@ -209,9 +213,12 @@ try {
   await sleep(BOUND_MS + SLACK_MS);
   const createState = await ev(`window.__create`);
   const afterCreate = await look();
-  check('a create is left in flight rather than abandoned at the bound',
-    createState === 'pending', String(createState));
-  check('and so cannot be replayed into a second habit',
+  check('a create is abandoned at the bound rather than hanging forever',
+    String(createState).startsWith('rejected:'), String(createState));
+  check('and it says the outcome is unknown, not that it was saved',
+    /did not answer/.test(String(createState)) &&
+    !/Saved offline/.test(String(createState)), String(createState));
+  check('and it is never queued, so it cannot be replayed into a second habit',
     !afterCreate.outbox.some((i) => i.startsWith('POST')),
     JSON.stringify(afterCreate.outbox));
 
