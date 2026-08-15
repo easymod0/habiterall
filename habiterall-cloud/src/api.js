@@ -507,7 +507,15 @@ api.get('/export', route(async (req, res) => {
     // possible between them.
     const { rows } = await db.query(`SELECT settings FROM users WHERE id = $1`, [uid(req)]);
     return {
-      data: habits.map((h) => ({ ...h, entries: byHabit.get(h.id) ?? [] })),
+      // `user_id` comes off `SELECT *` and has no business in a portable file:
+      // it is this deployment's tenancy key, it means nothing anywhere else,
+      // and the personal edition — which has no such column — writes a backup
+      // without it, so the two editions described the same account with two
+      // different shapes. Dropped here rather than by naming columns in the
+      // query, because a backup that silently omits a NEW column is the worse
+      // failure of the two: migration 009 added `reminder_message`, and a
+      // hand-kept SELECT list is exactly what would have left it behind.
+      data: habits.map(({ user_id, ...h }) => ({ ...h, entries: byHabit.get(h.id) ?? [] })),
       settings: rows[0]?.settings ?? {},
     };
   });

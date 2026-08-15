@@ -204,6 +204,29 @@ ck('the timestamp is ISO, as the personal edition also reports it',
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(status.channels[0].at ?? ''),
   status.channels[0].at);
 
+// The export is the third route that only tells the truth through the router:
+// the data layer returns rows, and what a backup FILE contains is decided
+// above it. `SELECT *` put this deployment's tenancy key on every habit in a
+// file people email to themselves, and the personal edition — which has no
+// such column — wrote the same account with a different shape.
+const backup = await fetch(`${overviewBase}/api/export`).then((r) => r.json());
+const exported = backup.habits.find((h) => h.id === habitId);
+ck('the JSON backup carries no user_id',
+  exported != null && !('user_id' in exported), Object.keys(exported ?? {}).join(','));
+
+// Read off the personal edition's own `/api/export`, so this fails when the
+// two stop describing a habit the same way. A new habit column reaching one
+// edition's backup and not the other's is the drift this is here to catch;
+// when both grow one, both this list and the shape change together.
+const PORTABLE_HABIT_KEYS = [
+  'archived', 'color', 'created_at', 'description', 'entries', 'freq_denominator',
+  'freq_numerator', 'id', 'name', 'position', 'reminder_message', 'reminder_time',
+  'target_type', 'target_value', 'type', 'unit',
+];
+ck('and describes a habit exactly as the personal edition does',
+  JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),
+  Object.keys(exported ?? {}).sort().join(','));
+
 overviewServer.close();
 // The rows above would otherwise be counted by the checks that follow.
 await withUser(alice, (db) =>
