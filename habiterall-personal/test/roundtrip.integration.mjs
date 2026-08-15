@@ -564,6 +564,61 @@ ck('a skip\'s note too, which took the other path out',
 
 await restore(jsonBackup, 'replace');
 
+/* ---------- "the file said nothing" has more than one spelling ---------- */
+
+console.log('\n--- an entry with no value is not a lapse ---');
+
+// `Number(null)` and `Number('')` are both 0, and 0 is a real answer here: a row
+// holding zero is a STATED lapse, one of the four day-states. So `{date, value:
+// null}` was written as a day the user said they had missed, while `{date}` with
+// no value key at all was correctly refused — two spellings of the same silence
+// behaving differently. Asserted in REPLACE mode because that is where it costs
+// something: a merge yields a bare lapse to whatever the account holds, but a
+// replace has nothing to yield to, and an invented lapse extends the habit's
+// history window back to its own date and turns `recovery.rate === null` —
+// "nothing has ever been missed" — into a real lapse.
+const saidNothing = JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [
+    {
+      name: 'Meditate', type: 'boolean',
+      entries: [
+        { date: '2026-02-01', value: null },
+        { date: '2026-02-02' },
+        { date: '2026-02-03', value: '' },
+        { date: '2026-02-04', value: false },
+        { date: '2026-02-05', value: 0 },      // this one IS a stated lapse
+        { date: '2026-02-06', value: 2 },
+      ],
+    },
+    // The guard is about the type of "nothing", not about tightening what counts
+    // as a number: a quoted amount is an amount the file stated, and still lands.
+    {
+      name: 'Water', type: 'numerical',
+      entries: [{ date: '2026-02-07', value: '8' }],
+    },
+  ],
+});
+const nothings = await restore(Buffer.from(saidNothing, 'utf8'), 'replace');
+const answered = (await entriesOf('Meditate')).map((e) => e.date);
+
+ck('null, absent, empty and false are all "the file said nothing"',
+  !answered.some((d) =>
+    ['2026-02-01', '2026-02-02', '2026-02-03', '2026-02-04'].includes(d)),
+  JSON.stringify(answered));
+ck('and each is reported rather than silently dropped',
+  nothings.skipped.filter((s) => s.startsWith('bad value')).length === 4,
+  JSON.stringify(nothings.skipped));
+ck('while a stated 0 is still a stated lapse',
+  (await dayOf('Meditate', '2026-02-05'))?.value === 0 &&
+  (await dayOf('Meditate', '2026-02-06'))?.value === 2,
+  JSON.stringify(await entriesOf('Meditate')));
+ck('and a quoted amount is still an amount',
+  (await dayOf('Water', '2026-02-07'))?.value === 8,
+  JSON.stringify(await dayOf('Water', '2026-02-07')));
+
+await restore(jsonBackup, 'replace');
+
 /* ---------- settings travel with the data ---------- */
 
 console.log('\n--- settings ---');
@@ -653,6 +708,35 @@ ck('merging an identical backup creates nothing',
 ck('merging an identical backup changes no data',
   diff(beforeMerge, afterMerge) === null,
   diff(beforeMerge, afterMerge) ?? '');
+
+// ...and the same claim about a name the clamp shortens, which is where it broke.
+// The lookup asked for the raw 150 characters while the INSERT wrote the first
+// LIMITS.name of them, so nothing ever matched: three merges of one file left
+// three habits carrying one identical visible name. Cloud's own writer calls
+// restoring twice "the normal way to check a backup is good", so this defeated
+// the workflow the idempotency is FOR. No whitespace anywhere in it, so the
+// stored name is exactly the first LIMITS.name characters and the assertion is
+// not really about `trim`.
+const longName = 'Read-a-chapter-of-something-long-'.repeat(5)
+  .slice(0, LIMITS.name + 50);
+const longNameFile = Buffer.from(JSON.stringify({
+  version: 1, app: 'habiterall',
+  habits: [{
+    name: longName, type: 'boolean',
+    entries: [{ date: '2026-01-05', value: 2, status: '', notes: '' }],
+  }],
+}), 'utf8');
+
+const longMerges = [];
+for (let i = 0; i < 3; i++) longMerges.push(await restore(longNameFile, 'merge'));
+const byLongName = (await (await api('/api/habits')).json())
+  .filter((h) => h.name === longName.slice(0, LIMITS.name));
+
+ck('a name past the clamp is created once and merged into thereafter',
+  longMerges[0].habitsCreated === 1 &&
+  longMerges[1].habitsCreated === 0 && longMerges[1].habitsMerged === 1 &&
+  longMerges[2].habitsCreated === 0 && byLongName.length === 1,
+  JSON.stringify(longMerges.map((r) => [r.habitsCreated, r.habitsMerged])));
 
 /* ---------- done ---------- */
 

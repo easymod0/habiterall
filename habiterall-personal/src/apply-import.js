@@ -8,7 +8,7 @@
 import { db, UNSET, YES, SKIP } from './db.js';
 // Loop stores colours as a palette index, so imported habits need the same
 // index -> hex mapping the parsers use.
-import { normaliseImportedHabit } from '@habiterall/shared/import.js';
+import { entryValue, normaliseImportedHabit } from '@habiterall/shared/import.js';
 import { assertDate, LIMITS } from '@habiterall/shared/validate.js';
 
 /* ---------- statements ---------- */
@@ -78,15 +78,24 @@ export function applyImport(habits, mode = 'merge') {
     let position = Number(maxPosition.get().p);
 
     for (const h of habits) {
-      const name = String(h.name ?? '').trim();
+      // Every field rule is in shared: the two editions' writers had drifted,
+      // and this one had no length clamps at all.
+      const clean = normaliseImportedHabit(h);
+      // The CLAMPED name, because that is the name a habit is stored under.
+      // Matching on the raw one is what broke merge idempotency for any name
+      // over LIMITS.name: the lookup asked for 150 characters, the INSERT wrote
+      // the first 100, so the next merge of the same file matched nothing and
+      // created a second habit — three imports, three habits, one visible name.
+      // Restoring twice is the normal way to check a backup is good, so this
+      // defeated the workflow it is most likely to be used in. Every other
+      // reader of the name follows it here, or the file's habit and the
+      // account's habit come to be two different habits inside one loop.
+      const name = clean.name;
       if (!name) {
         result.skipped.push('habit with empty name');
         continue;
       }
 
-      // Every field rule is in shared: the two editions' writers had drifted,
-      // and this one had no length clamps at all.
-      const clean = normaliseImportedHabit(h);
       // What the FILE says, which is how its values are encoded — a `3` is a
       // skip sentinel in a boolean column and three of something in a numerical
       // one. It is not a claim about what this account can store.
@@ -152,6 +161,11 @@ export function applyImport(habits, mode = 'merge') {
         // number is how the editions came to disagree about this one.
         const notes = String(e.notes ?? '').slice(0, LIMITS.notes);
 
+        // Read once, and by TYPE — `entryValue`, not `Number()`, which read
+        // `null` and `''` as the number 0 and so wrote a stated lapse out of a
+        // field the file left empty. Its own comment has the whole argument.
+        const value = entryValue(e.value);
+
         // An explicit status always wins. The legacy SKIP wire value is only
         // honoured for a boolean FILE, where 3 is unambiguously a sentinel — in
         // a numerical one 3 is a real amount and must stay one. That question is
@@ -165,15 +179,14 @@ export function applyImport(habits, mode = 'merge') {
         // Checkmarks.csv DOES overwrite a recorded eight glasses. Both editions
         // agree, and this is unchanged from before the yield was widened.
         const isSkip = e.status === 'skip' ||
-          (fileType === 'boolean' && Number(e.value) === SKIP);
+          (fileType === 'boolean' && value === SKIP);
         if (isSkip) {
           insertEntry.run(habitId, e.date, 0, 'skip', notes);
           result.entriesImported++;
           continue;
         }
 
-        const value = Number(e.value);
-        if (!Number.isFinite(value) || value < 0) {
+        if (value === null || value < 0) {
           result.skipped.push(`bad value on "${name}" at ${e.date}: ${e.value}`);
           continue;
         }

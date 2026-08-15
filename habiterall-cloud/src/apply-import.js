@@ -19,7 +19,7 @@
 
 import { withUser } from './db/pool.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
-import { normaliseImportedHabit } from '@habiterall/shared/import.js';
+import { entryValue, normaliseImportedHabit } from '@habiterall/shared/import.js';
 import { assertDate, LIMITS } from '@habiterall/shared/validate.js';
 
 /** Ceilings so one upload cannot exhaust the database on a shared host. */
@@ -70,6 +70,15 @@ export async function applyImport(userId, habits, mode = 'merge') {
     );
   }
 
+  // Every field rule is in shared, so an imported habit is clamped the same way
+  // in both editions — and to the same limits the API enforces. Done for the
+  // whole file up front, because the CLAMPED name is what the account stores and
+  // therefore the only name that can be matched, counted or looked up. It used
+  // to be computed inside the INSERT branch alone, so the two questions asked
+  // before it — "is this name new?" and "does a habit by this name exist?" —
+  // both asked about a name no row could ever hold.
+  const cleaned = habits.map((h) => normaliseImportedHabit(h));
+
   // One transaction: a failure part-way leaves the account untouched rather
   // than half-imported.
   await withUser(userId, async (db) => {
@@ -92,9 +101,12 @@ export async function applyImport(userId, habits, mode = 'merge') {
     // name. Counting every incoming name would refuse a re-import of the same
     // backup, which has to stay idempotent: restoring twice is the normal way
     // to check a backup is good.
-    const incoming = new Set(
-      habits.map((h) => String(h.name ?? '').trim()).filter(Boolean)
-    );
+    //
+    // Which is exactly what the RAW name broke. `existingNames` holds what is
+    // stored and storage holds the clamped name, so for any name over
+    // LIMITS.name nothing here ever matched: every re-import of the same backup
+    // was counted as an addition and, worse, went on to make one.
+    const incoming = new Set(cleaned.map((c) => c.name).filter(Boolean));
     let willAdd = 0;
     for (const name of incoming) if (!existingNames.has(name)) willAdd++;
 
@@ -113,8 +125,12 @@ export async function applyImport(userId, habits, mode = 'merge') {
     );
     let position = next;
 
-    for (const h of habits) {
-      const name = String(h.name ?? '').trim();
+    for (const [i, h] of habits.entries()) {
+      const clean = cleaned[i];
+      // The CLAMPED name, because that is the name a habit is stored under —
+      // see `cleaned` above, and the personal edition's writer, which had the
+      // identical bug for the identical reason.
+      const name = clean.name;
       if (!name) {
         result.skipped.push('habit with empty name');
         continue;
@@ -123,7 +139,7 @@ export async function applyImport(userId, habits, mode = 'merge') {
       // What the FILE says, which is how its values are encoded — a `3` is a
       // skip sentinel in a boolean column and three of something in a numerical
       // one. It is not a claim about what this account can store.
-      const fileType = h.type === 'numerical' ? 'numerical' : 'boolean';
+      const fileType = clean.type;
       // ...and on a merge the habit already exists, so its own type is the
       // authority for what may be WRITTEN. Taking the file's meant a file
       // claiming `numerical` could put an 8 on a boolean habit through import
@@ -146,10 +162,6 @@ export async function applyImport(userId, habits, mode = 'merge') {
       }
 
       if (habitId === null) {
-        // Every field rule is in shared, so an imported habit is clamped the
-        // same way in both editions — and to the same limits the API enforces.
-        const clean = normaliseImportedHabit(h);
-
         const { rows } = await db.query(
           `INSERT INTO habits (user_id, name, description, type, unit,
                                target_value, target_type, freq_numerator,
@@ -204,6 +216,11 @@ export async function applyImport(userId, habits, mode = 'merge') {
         // all — so a note this edition truncates was one that edition stored.
         const notes = String(e.notes ?? '').slice(0, LIMITS.notes);
 
+        // Read once, and by TYPE — `entryValue`, not `Number()`, which read
+        // `null` and `''` as the number 0 and so wrote a stated lapse out of a
+        // field the file left empty. Its own comment has the whole argument.
+        const value = entryValue(e.value);
+
         // An explicit status always wins. The legacy SKIP wire value is only
         // honoured for a boolean FILE, where 3 is unambiguously a sentinel — in
         // a numerical one 3 is a real amount and must stay one. That question is
@@ -217,7 +234,7 @@ export async function applyImport(userId, habits, mode = 'merge') {
         // Checkmarks.csv DOES overwrite a recorded eight glasses. Both editions
         // agree, and this is unchanged from before the yield was widened.
         const isSkip = e.status === 'skip' ||
-          (fileType === 'boolean' && Number(e.value) === SKIP);
+          (fileType === 'boolean' && value === SKIP);
 
         if (isSkip) {
           await upsert(db, userId, habitId, e.date, 0, 'skip', notes);
@@ -225,8 +242,7 @@ export async function applyImport(userId, habits, mode = 'merge') {
           continue;
         }
 
-        const value = Number(e.value);
-        if (!Number.isFinite(value) || value < 0) {
+        if (value === null || value < 0) {
           result.skipped.push(`bad value on "${name}" at ${e.date}: ${e.value}`);
           continue;
         }

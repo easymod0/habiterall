@@ -897,6 +897,46 @@ function parseZipExport(buf, fail) {
 }
 
 /**
+ * What a file's entry says the day held, read strictly. `null` means it said
+ * nothing usable, which the writers report in `skipped`.
+ *
+ * `Number()` alone cannot be the gate, for the reason `loopTimestampToISO` and
+ * `wholeNumber` above both record: the check has to be about the TYPE, because
+ * `Number(null)`, `Number('')`, `Number([])` and `Number(false)` are all `0` and
+ * `0` is a legitimate value here — a row holding zero is a **stated lapse**, one
+ * of the four day-states, and not the absence of an answer. So an entry of
+ * `{date, value: null}` was written as a day the user told us they had missed,
+ * while `{date}` with no `value` key at all was correctly refused as a bad value:
+ * two spellings of "the file said nothing" behaving differently, and the one that
+ * got through invents an answer nobody gave.
+ *
+ * On a merge that was harmless, because a bare lapse yields to whatever the
+ * account already holds. On a **replace** it is not: a lapse is a stored entry
+ * where there was none, so it extends the habit's history window back to its own
+ * date — every unknown day after it then reads as a miss — and it turns
+ * `recovery.rate === null`, "nothing has ever been missed", into a real lapse.
+ *
+ * `null` is therefore read as silence rather than as zero. That is the reading
+ * the missing key already got, it is what a serialiser writes for a field it has
+ * no value for, and it costs no habiterall backup: `entries.value` is NOT NULL in
+ * both editions' schemas, so nothing we export can carry one.
+ *
+ * A decimal string is still accepted, exactly as `Number()` accepted it — a file
+ * is often written by hand or by another application, and a quoted `"8"` is a
+ * value that was stated. What goes with it is `Number`'s generosity about the
+ * *form*: `'0x10'` and `'1e3'` were read as 16 and 1000, and neither is how
+ * anyone writes down a number of glasses of water.
+ *
+ * @param {unknown} raw
+ * @returns {number|null} a finite value, or null if the file did not state one
+ */
+export function entryValue(raw) {
+  const n = typeof raw === 'number' ? raw
+    : (typeof raw === 'string' && /^-?\d+(?:\.\d+)?$/.test(raw.trim()) ? Number(raw) : NaN);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
  * Repair one imported habit into something both editions will store.
  *
  * `parseHabit` in validate.js is the sibling of this function and the difference
