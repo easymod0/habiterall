@@ -201,6 +201,15 @@
         <label>Unit
           <input name="unit" maxlength="20" placeholder="glasses, km, pages" autocomplete="off">
         </label>
+        <!-- Only for a LIMIT: an at-least habit's unanswered day is a miss and
+             there is nothing to ask. See unansweredCounts in stats.js. -->
+        <label class="at-most-only" hidden>A day you never log
+          <select name="at_most_unlogged">
+            <option value="default">Use the account setting</option>
+            <option value="miss">Counts as a miss</option>
+            <option value="success">Counts as staying under</option>
+          </select>
+        </label>
       </div>
 
       <fieldset class="freq">

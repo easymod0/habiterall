@@ -104,7 +104,9 @@ it. `stats.js` was the exception and did not know it: six of its passes wrote
 an at-most one a full success for a day nobody answered — a limit with no
 entries at all reported a 30-day streak. It reads the map directly now, and
 `normalizeEntry` answers `status: 'unknown'` for the absent day; what silence is
-worth there is `atMostUnlogged`, defaulting to `miss`. A row holding 0 is
+worth there is the account's `atMostUnlogged` (default `miss`) unless the
+habit's own `at_most_unlogged` overrides it, which `unansweredCounts` resolves
+in the one place every caller already passes a habit through. A row holding 0 is
 untouched by that and stays a success, which is the whole distinction finally
 being worth a number rather than only a question mark.
 

@@ -223,9 +223,10 @@ ck('the JSON backup carries no user_id',
 // shape rather than forbidding extra keys, so it does not catch it either.
 // Closing that needs the list to live somewhere both editions assert against.
 const PORTABLE_HABIT_KEYS = [
-  'archived', 'color', 'created_at', 'description', 'entries', 'freq_denominator',
-  'freq_numerator', 'id', 'name', 'position', 'reminder_message', 'reminder_time',
-  'target_type', 'target_value', 'type', 'unit',
+  'archived', 'at_most_unlogged', 'color', 'created_at', 'description', 'entries',
+  'freq_denominator', 'freq_numerator', 'id', 'name', 'position',
+  'reminder_message', 'reminder_time', 'target_type', 'target_value', 'type',
+  'unit',
 ];
 ck('and describes a habit exactly as the personal edition does',
   JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),

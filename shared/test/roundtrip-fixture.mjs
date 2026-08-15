@@ -104,6 +104,12 @@ export const FIXTURE = [
     // — and on the Loop side it is the reminder whose two columns are both 0,
     // so a falsiness check anywhere reports it as "no reminder".
     reminder_time: '00:00',
+    // NOT 'default', deliberately. This is the only habit in the fixture that
+    // can carry it, so leaving it at the default would compare 'default'
+    // against 'default' everywhere and pass with the field dropped — which is
+    // exactly how `reminder_message` went unwatched in the cloud suite for as
+    // long as it did.
+    at_most_unlogged: 'success',
     archived: false,
     entries: [
       { date: '2026-01-05', value: 0, status: '', notes: '' },
@@ -219,8 +225,19 @@ export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
  */
 export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color'];
 
-/** Fields the lossless JSON backup must preserve exactly. */
-export const JSON_HABIT_FIELDS = [...LOOP_DB_HABIT_FIELDS, 'color'];
+/**
+ * Fields the lossless JSON backup must preserve exactly.
+ *
+ * `at_most_unlogged` is habiterall's own and belongs in NO Loop list: it is a
+ * preference about how to read the rows, and Loop's schema has nowhere to put
+ * one — its backup carries no preferences at all. So a Loop round trip
+ * correctly returns it to 'default', and only this list watches it. The
+ * paragraph above `LOOP_HABIT_FIELDS` is about the cost of a field in neither
+ * list; this is the case where exactly one is right.
+ */
+export const JSON_HABIT_FIELDS = [
+  ...LOOP_DB_HABIT_FIELDS, 'color', 'at_most_unlogged',
+];
 
 export function pick(obj, fields) {
   const out = {};

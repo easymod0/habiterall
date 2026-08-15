@@ -92,9 +92,19 @@ export const UNLOGGED_DEFAULT = 'miss';
  * Which of the two is right depends on the habit and cannot be decided here.
  * "I didn't smoke today" is worth a tap and is the whole reward; "I had no
  * soda" is not something anyone opens an app for, and the point of tracking it
- * is to record the exception. So it is the account's answer — `atMostUnlogged`
- * — and the default is `miss`, because the other way round every new limit
- * looks perfect on the day it is created, having been kept for exactly no time.
+ * is to record the exception. Both are ordinary and people keep both, so the
+ * answer is asked at two levels: the account's `atMostUnlogged` is what most
+ * habits follow, and a habit's own `at_most_unlogged` overrides it when it
+ * differs. `'default'` — and an absent value, which is every habit stored
+ * before this existed — means the account's.
+ *
+ * The default of the account setting is `miss`, because the other way round
+ * every new limit looks perfect on the day it is created, having been kept for
+ * exactly no time.
+ *
+ * Resolved HERE rather than at each entry point, because every caller already
+ * has the habit in hand and none of them should have to remember the
+ * precedence. Add a third level and this stays the only place that changes.
  *
  * Note this is about the FOURTH state and not about zero. A row holding 0 is a
  * stated lapse — "I had none today" — and for an at-most habit that is a real
@@ -102,8 +112,10 @@ export const UNLOGGED_DEFAULT = 'miss';
  * answered and a day nobody has, which is the whole of `questionMarks` and the
  * reason `entryWrite` stopped deleting rows. See constants.js.
  */
-function unansweredCounts(unlogged) {
-  return unlogged === 'success';
+function unansweredCounts(habit, unlogged) {
+  const own = habit?.at_most_unlogged;
+  const rule = own && own !== 'default' ? own : unlogged;
+  return rule === 'success';
 }
 
 /**
@@ -125,7 +137,7 @@ function unansweredCounts(unlogged) {
 export function isCompleted(habit, entry, unlogged = UNLOGGED_DEFAULT) {
   const { value, status } = normalizeEntry(habit, entry);
   if (status === 'skip') return null; // "not applicable"
-  if (status === 'unknown' && !unansweredCounts(unlogged)) return false;
+  if (status === 'unknown' && !unansweredCounts(habit, unlogged)) return false;
 
   if (habit.type === 'boolean') return value === YES;
   // numerical
@@ -166,7 +178,7 @@ function dayCredit(habit, entry, unlogged = UNLOGGED_DEFAULT) {
   if (status === 'skip') return null;
   // The same rule `isCompleted` states, and it has to be the same or the score
   // and the streak disagree about the very same day.
-  if (status === 'unknown' && !unansweredCounts(unlogged)) return 0;
+  if (status === 'unknown' && !unansweredCounts(habit, unlogged)) return 0;
   if (habit.type === 'boolean') return value === YES ? 1 : 0;
 
   const target = habit.target_value;

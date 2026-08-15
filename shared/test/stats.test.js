@@ -616,3 +616,43 @@ test('the default is the honest one', () => {
   assert.equal(isCompleted(atMostHabit, undefined), false,
     'the default reading of an unanswered day changed without this test noticing');
 });
+
+test('a habit overrides the account, in both directions', () => {
+  // Two levels because the two kinds of limit want opposite answers and people
+  // keep both. The account setting is what most habits follow; a habit that
+  // disagrees says so, and 'default' — which is every habit stored before the
+  // column existed — means the account's.
+  const window = { start: '2026-07-01', end: '2026-07-30' };
+  const streakOf = (own, account) => computeStats(
+    { ...atMostHabit, at_most_unlogged: own }, [], { ...window, unlogged: account }
+  ).streaks.length;
+
+  assert.equal(streakOf('default', 'miss'), 0, 'default must follow the account');
+  assert.equal(streakOf('success', 'miss'), 1, 'the habit must win over the account');
+  assert.equal(streakOf('default', 'success'), 1, 'default must follow the account');
+  assert.equal(streakOf('miss', 'success'), 0, 'the habit must win over the account');
+});
+
+test('a habit stored before the column existed follows the account', () => {
+  // Undefined, not 'default' — which is what every row read back from a
+  // database that has not been migrated looks like, and what a Loop file
+  // yields, since no Loop format has anywhere to carry a preference.
+  const legacy = { ...atMostHabit };
+  delete legacy.at_most_unlogged;
+
+  assert.equal(isCompleted(legacy, undefined, 'success'), true);
+  assert.equal(isCompleted(legacy, undefined, 'miss'), false);
+});
+
+test('an unrecognised override is read as the account, not as success', () => {
+  // The server clamps this to the enum on the way in, but a stats function is
+  // reachable from an import writer and from a database somebody has edited.
+  // Falling back to the account is the same answer 'default' gives; falling
+  // back to `success` would hand a limit a perfect record on a typo.
+  for (const junk of ['', 'yes', 'TRUE', null, 0]) {
+    assert.equal(
+      isCompleted({ ...atMostHabit, at_most_unlogged: junk }, undefined, 'miss'), false,
+      `${JSON.stringify(junk)} was read as something other than the account`
+    );
+  }
+});

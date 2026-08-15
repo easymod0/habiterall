@@ -21,6 +21,24 @@ test('a minimal habit is filled in with defaults', () => {
   assert.equal(h.freq_denominator, 1);
   assert.equal(h.color, DEFAULT_COLOR);
   assert.equal(h.archived, false);
+  // 'default' means "follow the account", which is the only value that changes
+  // nothing — an override has to be asked for.
+  assert.equal(h.at_most_unlogged, 'default');
+});
+
+test('the unlogged-day override is clamped to the three it may be', () => {
+  // A habit PUT REPLACES, so this field is written on every save from every
+  // client. Anything unrecognised has to land on 'default' rather than on
+  // `success`, or a typo hands a limit a record it has not earned.
+  assert.equal(parseHabit({ name: 'x', at_most_unlogged: 'success' }).at_most_unlogged,
+    'success');
+  assert.equal(parseHabit({ name: 'x', at_most_unlogged: 'miss' }).at_most_unlogged, 'miss');
+  for (const junk of ['SUCCESS', 'yes', '', null, 1, {}, ['success']]) {
+    assert.equal(
+      parseHabit({ name: 'x', at_most_unlogged: junk }).at_most_unlogged, 'default',
+      `${JSON.stringify(junk)} was not clamped`
+    );
+  }
 });
 
 test('name is required and trimmed', () => {

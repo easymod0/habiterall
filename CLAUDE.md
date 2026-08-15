@@ -123,15 +123,36 @@ question mark.
 
 Which of the two an unanswered day should be is not decidable in `stats.js`:
 "I didn't smoke today" is worth a tap and is the whole reward, while "I had no
-soda" is not something anyone opens an app for. So it is the account's answer,
-`atMostUnlogged`, defaulting to `miss` — the other way round, every limit
+soda" is not something anyone opens an app for. Both are ordinary and people
+keep both, so it is asked at **two levels** — the account's `atMostUnlogged`,
+which most habits follow, and the habit's own `at_most_unlogged`, which
+overrides it. `'default'` means the account's, and it is what an unmigrated row,
+a Loop import and an unrecognised value all land on: falling back to `success`
+would hand a limit a perfect record on a typo. The precedence is resolved in
+`unansweredCounts` and nowhere else, because every caller already has the habit
+in hand and none of them should have to remember it.
+
+The account default is `miss` — the other way round, every limit
 arrives with a perfect record on the day it was created. The setting is
 **portable** (it changes what the days with no row in the same backup are worth,
 so restoring the entries without it restores different streaks) and it is *not*
 Loop's: Loop has no such preference and its backup carries no preferences at
-all, so it travels in habiterall's own JSON and nowhere else. The entries
-themselves are untouched by any of this, so a Loop export is exactly as faithful
-as it was.
+all, so it travels in habiterall's own JSON and nowhere else. That is true of
+the habit's field as well as the account's, which is why `at_most_unlogged` is
+in `JSON_HABIT_FIELDS` and in neither Loop list — a Loop round trip correctly
+returns it to `'default'`. The fixture sets it to `success` on its one at-most
+habit for the reason `reminder_message` taught the cloud suite: a field that
+holds its default everywhere compares equal to itself and passes with the field
+dropped. The entries themselves are untouched by any of this, so a Loop export
+is exactly as faithful as it was.
+
+None of this is bad-habit support, and it is worth being clear about the join.
+A limit of zero is already how a bad habit is *expressible* — issue #64's option
+(b) — and `success` on that habit is what makes it usable: assume clean, record
+the exception. What is still missing is the interaction, which is the rest of
+that issue: you answer by typing a number rather than tapping yes/no, a filled
+cell paints as an achievement rather than a slip, and the tap cycle runs in the
+order a good habit wants.
 
 Two consequences worth stating because they look like inconsistencies and are
 not. The **reminder still asks** about an unlogged day under either answer —

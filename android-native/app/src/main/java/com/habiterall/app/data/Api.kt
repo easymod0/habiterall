@@ -56,6 +56,8 @@ data class Habit(
      * always used to show.
      */
     @SerialName("reminder_message") val reminderMessage: String = "",
+    /** See [HabitInput.atMostUnlogged]; this is the stored value coming back. */
+    @SerialName("at_most_unlogged") val atMostUnlogged: String = "default",
     val position: Int = 0,
     val archived: Boolean = false,
     // Present on /overview only.
@@ -155,6 +157,13 @@ data class HabitInput(
     val color: String = DEFAULT_HABIT_COLOR,
     @SerialName("reminder_time") val reminderTime: String = "",
     @SerialName("reminder_message") val reminderMessage: String = "",
+    /**
+     * What a day with NO ROW is worth on an at-most target — `"default"` to
+     * follow the account's `atMostUnlogged`. Carried here because a habit PUT
+     * REPLACES: omit it and the server's `parseHabit` supplies its own default,
+     * silently resetting an override set on another client.
+     */
+    @SerialName("at_most_unlogged") val atMostUnlogged: String = "default",
     val archived: Boolean = false,
 )
 

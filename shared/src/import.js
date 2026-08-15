@@ -40,7 +40,7 @@ const MILLIS_PER_DAY = 86_400_000;
 import { unzip } from './unzip.js';
 // The same limits the API enforces, so an import cannot store what a typed-in
 // habit could not.
-import { LIMITS } from './validate.js';
+import { LIMITS, AT_MOST_UNLOGGED } from './validate.js';
 import { TIME_RE } from './constants.js';
 
 /**
@@ -1035,6 +1035,11 @@ export function normaliseImportedHabit(h) {
     // sits in.
     reminder_message: String(h.reminder_message ?? '')
       .replace(/[\r\n]+/g, ' ').trim().slice(0, LIMITS.reminderMessage),
+    // habiterall's own JSON carries this; no Loop format has anywhere to put
+    // it, so a Loop file always yields 'default' — which is the account's
+    // answer, and the honest one for a file that said nothing.
+    at_most_unlogged: AT_MOST_UNLOGGED.has(h.at_most_unlogged)
+      ? h.at_most_unlogged : 'default',
     archived: !!h.archived,
   };
 }
