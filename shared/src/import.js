@@ -663,9 +663,25 @@ export async function parseUpload(buf) {
   const text = buf.toString('utf8').replace(/^﻿/, '');
   const head = text.trimStart();
 
-  if (head.startsWith('{') || head.startsWith('[')) {
-    return parseHabiterallJSON(head.startsWith('[') ? { habits: JSON.parse(head) } : text);
+  // A bare array is wrapped before `parseHabiterallJSON` sees it, so it is the
+  // one form that has to be parsed HERE — and the parse sat in the ARGUMENT to
+  // that call, outside the try that exists to turn bad JSON into a 400. So a
+  // truncated `[{"name":"a"},` escaped as a 500 with a full stack trace at error
+  // level, from an endpoint that needs no account on the personal edition, while
+  // the identical truncation after a `{` was correctly reported to the person
+  // who could fix the file. The sentence is the same one deliberately: the two
+  // brackets must not come to say different things about the same bad upload.
+  if (head.startsWith('[')) {
+    let habits;
+    try {
+      habits = JSON.parse(head);
+    } catch {
+      throw fail('file is not valid JSON');
+    }
+    return parseHabiterallJSON({ habits });
   }
+
+  if (head.startsWith('{')) return parseHabiterallJSON(text);
 
   if (/^"?date"?\s*,/i.test(head)) return parseLoopCheckmarksCSV(text);
 
@@ -741,14 +757,61 @@ function parseZipExport(buf, fail) {
  * Loop permits shapes our own validation does not (a numerator above the
  * denominator), so those are squared up rather than dropped.
  *
+ * A frequency too wide to store is repaired as a **rate**, not by parking the
+ * count at a cap it never agreed to: `500 / 1000` becomes `182 / 365` and not
+ * `365 / 365`, which would be a daily habit invented out of a lax one. The
+ * count rounds DOWN and the period UP throughout, so a repair never asks more
+ * of the user than the file did — that rule is what decides every edge here,
+ * including the fractional and the unbounded ones.
+ *
  * @param {Record<string, any>} h a habit from any parser
  * @returns {import('./types.js').Habit & {archived: boolean}}
  */
 export function normaliseImportedHabit(h) {
-  const num = Math.max(1, Number(h.freq_numerator) || 1);
-  let den = Math.max(1, Number(h.freq_denominator) || 1);
-  if (num > den) den = num;
-  den = Math.min(den, LIMITS.freqDenominator);
+  // The whole of parseHabit's frequency rule — integers with
+  // 1 <= num <= den <= freqDenominator — and not two thirds of it. The clamps
+  // ran in an order that undid themselves: squaring up raised the denominator
+  // to the numerator, the cap then lowered it again, and nothing ever bounded
+  // the numerator at all, so `1000 / 1` was stored as `1000 / 365` and `2.5 / 7`
+  // put a REAL in an INTEGER column. Cloud has
+  // `CHECK (freq_numerator <= freq_denominator)`, so the same file that personal
+  // stored as nonsense was a 23514 there — a 500 with the whole import rolled
+  // back, which is exactly the divergence this function exists to prevent.
+  const cap = LIMITS.freqDenominator;
+  // A file gives one of THREE answers here and they are not interchangeable:
+  // a usable number; nothing usable (NaN, null, a missing key), which means the
+  // file did not say and the default stands; and +Infinity, which means the file
+  // DID say — "effectively never" — and is a legal JSON literal, since `1e400`
+  // parses to it. Folding that third case into the default inverted it: a habit
+  // asking for two repetitions per 1e400 days came out as `2 / 2`, due every
+  // single day. That is a far larger invention than the `365 / 365` this
+  // function's own comment below was written to prevent.
+  const stated = (raw) => {
+    const n = Number(raw);
+    if (n === Infinity) return cap;      // the widest period there is
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  };
+  // Down for the count, up for the period. The columns are INTEGER and there is
+  // no honest fractional reading of either, so where the file cannot be
+  // expressed the repair asks no MORE of the user than the file did.
+  let num = Math.max(1, Math.floor(stated(h.freq_numerator)));
+  let den = Math.ceil(stated(h.freq_denominator));
+  if (num > den) den = num;          // Loop permits it; the most a rate can be is daily
+  if (den > cap) {
+    // The count moves with the period rather than being left behind at a cap it
+    // never agreed to. "500 times per 1000 days" clamped to `365 / 365` is not a
+    // lax habit stored honestly, it is a daily one invented — the same mistake
+    // as reading a Loop reminder mask of 0 as "every day".
+    //
+    // Take the RATE first and scale it, rather than scaling the count and then
+    // dividing. `(num * cap) / den` overflows to Infinity for a numerator above
+    // ~4.9e305, and `Math.min` then hands back `cap` — turning a one-in-ten-days
+    // habit into a daily one at the exact end of the range the clamp exists to
+    // handle. `(num / den) * cap` cannot overflow, because the rate is a ratio
+    // of two finite numbers, and it gives the same answer everywhere else.
+    num = Math.min(cap, Math.max(1, Math.floor((num / den) * cap)));
+    den = cap;
+  }
 
   const target = Number(h.target_value);
 

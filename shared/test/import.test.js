@@ -748,6 +748,26 @@ test('an unrecognised upload is a 400, not a 500', async () => {
   }
 });
 
+test('malformed JSON is a 400 whichever bracket it opens with', async () => {
+  // The `[` form is wrapped before parseHabiterallJSON sees it, and the parse
+  // that wrapped it sat in the ARGUMENT — outside that function's own try — so
+  // `[{"name":"a"},` was a 500 and a stack trace at error level while `{` on the
+  // same truncation was a 400 telling the user about their file. `err.status` is
+  // the honest unit: both editions' error middleware reads exactly this field
+  // (`err.status ?? 500`), so it is what decides the response the route sends.
+  for (const body of ['[{"name":"a"},', '[nope', '[', '[1,2', '{', '{"habits":']) {
+    await assert.rejects(
+      () => parseUpload(Buffer.from(body, 'utf8')),
+      (err) => {
+        assert.equal(err.status, 400, `${JSON.stringify(body)} must carry a client status`);
+        assert.match(err.message, /JSON/, 'and say what is wrong with the file');
+        return true;
+      },
+      `accepted ${JSON.stringify(body)}`
+    );
+  }
+});
+
 test('a zip without a Checkmarks.csv says so', async () => {
   // zip() takes {name, data}, not a pair — the CSV export is its only other
   // caller, so this is easy to get wrong from memory.
@@ -758,7 +778,7 @@ test('a zip without a Checkmarks.csv says so', async () => {
 /* ---------- repairing an imported habit ---------- */
 
 const { normaliseImportedHabit } = await import('../src/import.js');
-const { LIMITS } = await import('../src/validate.js');
+const { LIMITS, parseHabit } = await import('../src/validate.js');
 
 test('an imported habit is clamped to the limits the API enforces', () => {
   // The personal edition's writer applied NO length clamps, so it accepted
@@ -789,6 +809,84 @@ test('a frequency Loop permits but we do not is squared up, not dropped', () => 
     normaliseImportedHabit({ freq_numerator: 1, freq_denominator: 100000 }).freq_denominator,
     LIMITS.freqDenominator
   );
+});
+
+test('a repaired frequency is one the API would have accepted', () => {
+  // parseHabit is the oracle on purpose: this function exists so an import
+  // cannot store what a typed-in habit could not, and the clamps used to undo
+  // each other — squaring up raised the denominator, the cap lowered it again,
+  // and the numerator was never bounded at all. Cloud's
+  // `CHECK (freq_numerator <= freq_denominator)` then answered the file with a
+  // 23514, so the same backup was a 500 and a lost import there and silent
+  // nonsense in personal.
+  const shapes = [
+    [1000, 1], [400, 400], [2.5, 7], [1e30, 1], [9, 2], [1, 100000], [500, 1000],
+    [Infinity, 1], [1, Infinity], [NaN, NaN], ['x', 'y'], [-3, -9], [0, 0], [0.4, 0.4],
+    [1e308, 1e308], [undefined, undefined],
+  ];
+  for (const [n, d] of shapes) {
+    const clean = normaliseImportedHabit({ name: 'F', freq_numerator: n, freq_denominator: d });
+    assert.doesNotThrow(
+      () => parseHabit(clean),
+      `${n} / ${d} normalised to ${clean.freq_numerator} / ${clean.freq_denominator}, ` +
+      'which the API refuses'
+    );
+  }
+});
+
+test('a frequency too wide to state is still a rate, not a daily habit', () => {
+  // Acceptance by parseHabit is too weak an oracle on its own: `1 / 1` is
+  // accepted, so an unbounded period silently collapsing to "every day" passed
+  // the test above while being the largest invention this function can make.
+  // These assert the VALUE, which is the only thing that catches it.
+  const freq = (n, d) => {
+    const c = normaliseImportedHabit({ name: 'F', freq_numerator: n, freq_denominator: d });
+    return `${c.freq_numerator}/${c.freq_denominator}`;
+  };
+
+  // `1e400` is a legal JSON literal and parses to Infinity. The file said
+  // "effectively never"; reading that as the default said "every day".
+  assert.equal(freq(2, Infinity), '2/365', 'an unbounded period is the widest, not the narrowest');
+  assert.equal(freq(1, Infinity), '1/365');
+
+  // Scaling the rate rather than the count: `(num * cap) / den` overflows to
+  // Infinity above ~4.9e305 and handed back the cap, so the two identical rates
+  // below disagreed — 365/365 and 36/365 for the same one-in-ten-days habit.
+  assert.equal(freq(1e306, 1e307), '36/365');
+  assert.equal(freq(1e305, 1e306), '36/365', 'the same rate must give the same answer');
+
+  // And the ordinary clamp is unmoved.
+  assert.equal(freq(500, 1000), '182/365');
+  assert.equal(freq(1000, 1), '365/365', 'a rate above daily really is daily');
+  assert.equal(freq(9, 2), '9/9', 'the Loop shape still squares up');
+});
+
+test('a frequency too big to store is capped as a RATE, not as two numbers', () => {
+  const freq = (n, d) => {
+    const c = normaliseImportedHabit({ freq_numerator: n, freq_denominator: d });
+    return `${c.freq_numerator}/${c.freq_denominator}`;
+  };
+  // A rate above once a day cannot be stored at all, and is already squared up
+  // to daily; capping the period then has nothing left to take away.
+  assert.equal(freq(1000, 1), '365/365');
+  assert.equal(freq(400, 400), '365/365');
+  // But a habit kept every other day for 1000 days is a LAX one, and clamping
+  // the period while leaving the count behind turns it into a daily habit it
+  // never was — an invention, not a repair.
+  assert.equal(freq(500, 1000), '182/365');
+  // The columns are INTEGER: the count rounds down and the period up, so the
+  // repair asks no more than the file did.
+  assert.equal(freq(2.5, 7), '2/7');
+  // Infinity is a legal JSON number (`1e400` parses to it) and it means the
+  // file DID say something, unlike NaN which means it did not. Read as the
+  // default it used to give `1/1` — the same rate as the `365/365` two lines
+  // up, stored differently, which is one rate with two representations. As the
+  // widest bound it squares up like any other above-daily rate.
+  assert.equal(freq(Infinity, 1), '365/365');
+  // And the case that actually mattered: an unbounded PERIOD. `1/1` there is
+  // not a second spelling of anything — it is a habit due every day, invented
+  // out of one the file said was effectively never due.
+  assert.equal(freq(2, Infinity), '2/365');
 });
 
 test('a prompt from a file is flattened like one that was typed', () => {
