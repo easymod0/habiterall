@@ -691,6 +691,13 @@ function parseZipExport(buf, fail) {
  * Loop permits shapes our own validation does not (a numerator above the
  * denominator), so those are squared up rather than dropped.
  *
+ * A frequency too wide to store is repaired as a **rate**, not by parking the
+ * count at a cap it never agreed to: `500 / 1000` becomes `182 / 365` and not
+ * `365 / 365`, which would be a daily habit invented out of a lax one. The
+ * count rounds DOWN and the period UP throughout, so a repair never asks more
+ * of the user than the file did — that rule is what decides every edge here,
+ * including the fractional and the unbounded ones.
+ *
  * @param {Record<string, any>} h a habit from any parser
  * @returns {import('./types.js').Habit & {archived: boolean}}
  */
@@ -705,9 +712,19 @@ export function normaliseImportedHabit(h) {
   // stored as nonsense was a 23514 there — a 500 with the whole import rolled
   // back, which is exactly the divergence this function exists to prevent.
   const cap = LIMITS.freqDenominator;
-  // `Number(x) || 1` reads NaN as "the file said nothing" and is right to; it
-  // reads Infinity as a frequency, and Infinity survives every clamp below.
-  const stated = (raw) => { const n = Number(raw); return Number.isFinite(n) && n > 0 ? n : 1; };
+  // A file gives one of THREE answers here and they are not interchangeable:
+  // a usable number; nothing usable (NaN, null, a missing key), which means the
+  // file did not say and the default stands; and +Infinity, which means the file
+  // DID say — "effectively never" — and is a legal JSON literal, since `1e400`
+  // parses to it. Folding that third case into the default inverted it: a habit
+  // asking for two repetitions per 1e400 days came out as `2 / 2`, due every
+  // single day. That is a far larger invention than the `365 / 365` this
+  // function's own comment below was written to prevent.
+  const stated = (raw) => {
+    const n = Number(raw);
+    if (n === Infinity) return cap;      // the widest period there is
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  };
   // Down for the count, up for the period. The columns are INTEGER and there is
   // no honest fractional reading of either, so where the file cannot be
   // expressed the repair asks no MORE of the user than the file did.
@@ -718,9 +735,15 @@ export function normaliseImportedHabit(h) {
     // The count moves with the period rather than being left behind at a cap it
     // never agreed to. "500 times per 1000 days" clamped to `365 / 365` is not a
     // lax habit stored honestly, it is a daily one invented — the same mistake
-    // as reading a Loop reminder mask of 0 as "every day". Math.min catches the
-    // absurd end, where `num * cap` overflows to Infinity before it can divide.
-    num = Math.min(cap, Math.max(1, Math.floor((num * cap) / den)));
+    // as reading a Loop reminder mask of 0 as "every day".
+    //
+    // Take the RATE first and scale it, rather than scaling the count and then
+    // dividing. `(num * cap) / den` overflows to Infinity for a numerator above
+    // ~4.9e305, and `Math.min` then hands back `cap` — turning a one-in-ten-days
+    // habit into a daily one at the exact end of the range the clamp exists to
+    // handle. `(num / den) * cap` cannot overflow, because the rate is a ratio
+    // of two finite numbers, and it gives the same answer everywhere else.
+    num = Math.min(cap, Math.max(1, Math.floor((num / den) * cap)));
     den = cap;
   }
 

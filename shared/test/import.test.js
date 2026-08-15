@@ -697,6 +697,33 @@ test('a repaired frequency is one the API would have accepted', () => {
   }
 });
 
+test('a frequency too wide to state is still a rate, not a daily habit', () => {
+  // Acceptance by parseHabit is too weak an oracle on its own: `1 / 1` is
+  // accepted, so an unbounded period silently collapsing to "every day" passed
+  // the test above while being the largest invention this function can make.
+  // These assert the VALUE, which is the only thing that catches it.
+  const freq = (n, d) => {
+    const c = normaliseImportedHabit({ name: 'F', freq_numerator: n, freq_denominator: d });
+    return `${c.freq_numerator}/${c.freq_denominator}`;
+  };
+
+  // `1e400` is a legal JSON literal and parses to Infinity. The file said
+  // "effectively never"; reading that as the default said "every day".
+  assert.equal(freq(2, Infinity), '2/365', 'an unbounded period is the widest, not the narrowest');
+  assert.equal(freq(1, Infinity), '1/365');
+
+  // Scaling the rate rather than the count: `(num * cap) / den` overflows to
+  // Infinity above ~4.9e305 and handed back the cap, so the two identical rates
+  // below disagreed — 365/365 and 36/365 for the same one-in-ten-days habit.
+  assert.equal(freq(1e306, 1e307), '36/365');
+  assert.equal(freq(1e305, 1e306), '36/365', 'the same rate must give the same answer');
+
+  // And the ordinary clamp is unmoved.
+  assert.equal(freq(500, 1000), '182/365');
+  assert.equal(freq(1000, 1), '365/365', 'a rate above daily really is daily');
+  assert.equal(freq(9, 2), '9/9', 'the Loop shape still squares up');
+});
+
 test('a frequency too big to store is capped as a RATE, not as two numbers', () => {
   const freq = (n, d) => {
     const c = normaliseImportedHabit({ freq_numerator: n, freq_denominator: d });
@@ -713,9 +740,16 @@ test('a frequency too big to store is capped as a RATE, not as two numbers', () 
   // The columns are INTEGER: the count rounds down and the period up, so the
   // repair asks no more than the file did.
   assert.equal(freq(2.5, 7), '2/7');
-  // Infinity is not a frequency, and `Number(x) || 1` let it through where it
-  // reads NaN as "the file said nothing".
-  assert.equal(freq(Infinity, 1), '1/1');
+  // Infinity is a legal JSON number (`1e400` parses to it) and it means the
+  // file DID say something, unlike NaN which means it did not. Read as the
+  // default it used to give `1/1` — the same rate as the `365/365` two lines
+  // up, stored differently, which is one rate with two representations. As the
+  // widest bound it squares up like any other above-daily rate.
+  assert.equal(freq(Infinity, 1), '365/365');
+  // And the case that actually mattered: an unbounded PERIOD. `1/1` there is
+  // not a second spelling of anything — it is a habit due every day, invented
+  // out of one the file said was effectively never due.
+  assert.equal(freq(2, Infinity), '2/365');
 });
 
 test('a prompt from a file is flattened like one that was typed', () => {
