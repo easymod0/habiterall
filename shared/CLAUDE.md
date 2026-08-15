@@ -242,6 +242,14 @@ sentinel while `8` and `10` are dropped as unknown ones. That is why
 `/api/export.csv` returns a zip. `test/export-csv.test.js` pins the failure
 mode deliberately, so if the ambiguity ever goes away the test says so.
 
+**And `Habits.csv` is a SOURCE of habits, not only a lookup table.** It was read
+purely as metadata to decorate the columns of `Checkmarks.csv`, which meant the
+habits an account has were taken from the value grid alone — so an account whose
+habits have no entries exported a lone header line and restored as
+`400 no habits found in the uploaded file`. Its own habits, fully described in
+the other file, were parsed and thrown away. `parseZipExport` unions the two
+now, which also covers a habit named in one file and not the other.
+
 **The settings dialog holds a draft; nothing is written until Done.** It edits
 a copy taken when it opens, so Cancel — and Escape, which `<dialog>` handles
 itself — throws the whole thing away. Three consequences worth knowing before
