@@ -38,6 +38,9 @@ db.exec(`
     -- what the reminder asks ('Did you exercise today?'); '' = a sentence
     -- built from the habit's own name and goal
     reminder_message TEXT NOT NULL DEFAULT '',
+    -- what a day with NO ROW is worth on an at-most target: 'miss',
+    -- 'success', or 'default' to follow the account's atMostUnlogged
+    at_most_unlogged TEXT NOT NULL DEFAULT 'default',
     position      INTEGER NOT NULL DEFAULT 0,
     archived      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -171,6 +174,15 @@ if (!habitColumns.has('reminder_time')) {
 if (!habitColumns.has('reminder_message')) {
   db.exec(`ALTER TABLE habits ADD COLUMN reminder_message TEXT NOT NULL DEFAULT ''`);
   console.log('migrated habits: added reminder_message');
+}
+if (!habitColumns.has('at_most_unlogged')) {
+  // 'default' for everything that already exists, which is the one value that
+  // changes nothing: the account's answer is what those habits were being
+  // scored with a moment before the upgrade.
+  db.exec(
+    `ALTER TABLE habits ADD COLUMN at_most_unlogged TEXT NOT NULL DEFAULT 'default'`
+  );
+  console.log('migrated habits: added at_most_unlogged');
 }
 
 const entryColumns = new Set(

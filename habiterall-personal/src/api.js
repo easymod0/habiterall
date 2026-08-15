@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { db, UNSET, YES, SKIP } from './db.js';
 import {
-  computeStats, computeStreaks, bestStreak, isCompleted,
+  computeStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   today, addDays, daysBetween, MAX_RANGE_DAYS,
 } from '@habiterall/shared/stats.js';
 
@@ -46,15 +46,15 @@ const q = {
   insertHabit: db.prepare(`
     INSERT INTO habits (name, description, type, unit, target_value, target_type,
                         freq_numerator, freq_denominator, color, reminder_time,
-                        reminder_message, position)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        reminder_message, at_most_unlogged, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
   `),
   updateHabit: db.prepare(`
     UPDATE habits SET name = ?, description = ?, type = ?, unit = ?,
       target_value = ?, target_type = ?, freq_numerator = ?,
       freq_denominator = ?, color = ?, reminder_time = ?, reminder_message = ?,
-      archived = ?
+      at_most_unlogged = ?, archived = ?
     WHERE id = ?
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
@@ -167,7 +167,7 @@ api.post('/habits', (req, res) => {
   const info = q.insertHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value,
     h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message
+    h.reminder_message, h.at_most_unlogged
   );
   res.status(201).json(toApiHabit(q.habitById.get(info.lastInsertRowid)));
 });
@@ -186,7 +186,7 @@ api.put('/habits/:id', (req, res) => {
   q.updateHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
     h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.archived, id
+    h.reminder_message, h.at_most_unlogged, h.archived, id
   );
   res.json(toApiHabit(q.habitById.get(id)));
 });
@@ -297,7 +297,8 @@ api.get('/habits/:id/stats', (req, res) => {
   res.json({
     habit,
     ...computeStats(habit, entries,
-      { start, end, granularity, weekStart: storedWeekStart() }),
+      { start, end, granularity, weekStart: storedWeekStart(),
+        unlogged: storedUnlogged() }),
   });
 });
 
@@ -329,6 +330,11 @@ api.get('/overview', (req, res) => {
     ? q.allHabits.all(1)
     : q.allHabits.all(0));
   const rows = q.entriesInRange.all(start, end);
+
+  // Read once for the whole payload rather than per habit: it is one answer
+  // for the account, and this loop already runs once per habit on the
+  // dashboard's hot path.
+  const unlogged = storedUnlogged();
 
   // For the grid the frontend only needs something paintable, so skips are
   // flattened onto the SKIP wire value here. Scoring never uses this map.
@@ -368,7 +374,7 @@ api.get('/overview', (req, res) => {
       const windowed = /** @type {any} */ (
         q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
       );
-      const stats = computeStats(h, windowed, { end: summaryEnd });
+      const stats = computeStats(h, windowed, { end: summaryEnd, unlogged });
 
       // Counted in SQLite rather than by walking every row in JS. The
       // expression mirrors isCompleted exactly, including that a skip is
@@ -385,7 +391,8 @@ api.get('/overview', (req, res) => {
         h,
         new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
         entries.length ? entries[0].date : summaryEnd,
-        summaryEnd
+        summaryEnd,
+        unlogged
       );
 
       return {
@@ -401,15 +408,31 @@ api.get('/overview', (req, res) => {
   });
 });
 
+/** One stored setting, decoded, or null if it is absent or unreadable. */
+function storedSetting(key) {
+  const row = q.allSettings.all().find((r) => r.key === key);
+  try {
+    return row ? JSON.parse(String(row.value)) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The user's week-start preference, defaulting to ISO (Monday). */
 function storedWeekStart() {
-  const row = q.allSettings.all().find((r) => r.key === 'weekStart');
-  try {
-    const value = row ? JSON.parse(String(row.value)) : null;
-    return value === 'sunday' ? 'sunday' : 'monday';
-  } catch {
-    return 'monday';
-  }
+  return storedSetting('weekStart') === 'sunday' ? 'sunday' : 'monday';
+}
+
+/**
+ * What a day with no row counts as on an at-most habit.
+ *
+ * Read here and handed to `computeStats` rather than looked up inside it: the
+ * shared code takes no database, which is the whole reason it can serve both
+ * editions. Anything but the stored word is the default, exactly as
+ * `storedWeekStart` treats its own.
+ */
+function storedUnlogged() {
+  return storedSetting('atMostUnlogged') === 'success' ? 'success' : UNLOGGED_DEFAULT;
 }
 
 /* ---------- settings ---------- */

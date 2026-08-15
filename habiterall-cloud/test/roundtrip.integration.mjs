@@ -77,13 +77,22 @@ async function seed(userId) {
         // every comparison of it held '' against '' and passed. The personal
         // suite seeds through the API and never had the gap; this one writes
         // the columns by hand, which is the cost of not going through a route.
+        //
+        // `at_most_unlogged` walked into the same hole one field later, which
+        // is why this list is worth re-reading rather than appended to: the
+        // fixture sets it to 'success' precisely so a comparison is not two
+        // defaults agreeing, and a seed that omits it puts the default back and
+        // makes the assertion vacuous again. Every field the fixture carries
+        // has to be written HERE, or this suite watches it in name only.
         `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                              target_type, freq_numerator, freq_denominator, color,
-                             reminder_time, reminder_message, position, archived)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+                             reminder_time, reminder_message, at_most_unlogged,
+                             position, archived)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
         [userId, h.name, h.description, h.type, h.unit, h.target_value,
           h.target_type, h.freq_numerator, h.freq_denominator, h.color,
-          h.reminder_time ?? '', h.reminder_message ?? '', i, h.archived]
+          h.reminder_time ?? '', h.reminder_message ?? '',
+          h.at_most_unlogged ?? 'default', i, h.archived]
       );
       const habitId = rows[0].id;
 
@@ -457,7 +466,7 @@ await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
 await withUser(alice, (db) => db.query(
   `UPDATE users SET settings = $1::jsonb WHERE id = $2`,
   [JSON.stringify({
-    skipDays: true, questionMarks: true,
+    skipDays: true, questionMarks: true, atMostUnlogged: 'success',
     discordWebhook: 'https://discord.com/api/webhooks/1/secret',
   }), alice]
 ));
@@ -467,7 +476,11 @@ const exported = portableSettings(await withUser(alice, (db) =>
     .then((r) => r.rows[0]?.settings ?? {})));
 
 ck('a backup carries the tracking settings',
-  exported.skipDays === true && exported.questionMarks === true,
+  exported.skipDays === true && exported.questionMarks === true &&
+  // The third of them, and the one that changes an arithmetic rather than a
+  // drawing: restore the rows without it and a limit's streaks come back
+  // different from the ones that were exported.
+  exported.atMostUnlogged === 'success',
   JSON.stringify(exported));
 ck('and no notification destination',
   !Object.keys(exported).some((k) => k.startsWith('discord') || k.startsWith('notify')),

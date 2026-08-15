@@ -80,6 +80,7 @@ private data class Draft(
     val color: String = DEFAULT_HABIT_COLOR,
     val reminderTime: String = "",
     val reminderMessage: String = "",
+    val atMostUnlogged: String = "default",
     val archived: Boolean = false,
 )
 
@@ -96,6 +97,7 @@ private fun Habit.toDraft() = Draft(
     color = color,
     reminderTime = reminderTime,
     reminderMessage = reminderMessage,
+    atMostUnlogged = atMostUnlogged,
     archived = archived,
 )
 
@@ -146,6 +148,10 @@ private fun Draft.toInput() = HabitInput(
     // disabled for that, so the elvis is unreachable rather than lossy.
     reminderTime = ReminderTime.parse(reminderTime) ?: "",
     reminderMessage = reminderMessage.replace("\n", " ").trim().take(200),
+    // Sent whether or not the habit is a limit right now, and whether or not
+    // the control below is on screen: a habit PUT REPLACES, so an omitted
+    // field is reset rather than left alone.
+    atMostUnlogged = atMostUnlogged,
     archived = archived,
 )
 
@@ -344,6 +350,28 @@ fun HabitFormScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+
+                // Only for a limit. An at-least habit's unanswered day is a
+                // miss and there is nothing to ask; on a limit zero is UNDER
+                // the target, so silence has two defensible readings. The
+                // value is still submitted while this is hidden — see
+                // `Draft.toInput`.
+                if (draft.atMost) {
+                    SectionLabel("A day you never log")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            "default" to "Account setting",
+                            "miss" to "A miss",
+                            "success" to "Staying under",
+                        ).forEach { (value, label) ->
+                            FilterChip(
+                                selected = draft.atMostUnlogged == value,
+                                onClick = { draft = draft.copy(atMostUnlogged = value) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                }
             }
 
             /* ----------------------------------------------------- frequency */

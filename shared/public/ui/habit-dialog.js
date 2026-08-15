@@ -33,6 +33,7 @@ export function openDialog(habit = null) {
   f.unit.value = habit?.unit ?? '';
   f.target_value.value = habit?.target_value ?? 1;
   f.target_type.value = habit?.target_type ?? 'at_least';
+  f.at_most_unlogged.value = habit?.at_most_unlogged ?? 'default';
   f.freq_numerator.value = habit?.freq_numerator ?? 1;
   f.freq_denominator.value = habit?.freq_denominator ?? 1;
   f.color.value = habit?.color ?? '#3b82f6';
@@ -49,6 +50,12 @@ export function openDialog(habit = null) {
 function syncTypeFields() {
   const numerical = form.type.value === 'numerical';
   form.querySelector('.numerical-only').hidden = !numerical;
+  // Shown only for a limit, where a day nobody answered has two defensible
+  // readings because zero is under the target. Hidden is not cleared: the
+  // value is still submitted, so switching Goal back and forth in one sitting
+  // does not silently discard an answer the user already gave.
+  form.querySelector('.at-most-only').hidden =
+    !numerical || form.target_type.value !== 'at_most';
 }
 
 async function saveHabit(e) {
@@ -73,6 +80,7 @@ async function saveHabit(e) {
     unit: f.unit.value,
     target_value: Number(f.target_value.value) || 0,
     target_type: f.target_type.value,
+    at_most_unlogged: f.at_most_unlogged.value,
     freq_numerator: Number(f.freq_numerator.value) || 1,
     freq_denominator: Number(f.freq_denominator.value) || 1,
     color: f.color.value,
@@ -179,4 +187,8 @@ export function init() {
   del.addEventListener('click', deleteHabit);
   form.addEventListener('submit', saveHabit);
   form.type.addEventListener('change', syncTypeFields);
+  // The limit control's visibility depends on the Goal too, so both inputs
+  // have to re-ask. Without this, switching to "At most" left the question
+  // hidden until the dialog was reopened.
+  form.target_type.addEventListener('change', syncTypeFields);
 }

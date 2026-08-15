@@ -16,8 +16,8 @@ import { assertDate, LIMITS } from '@habiterall/shared/validate.js';
 const insertHabit = db.prepare(`
   INSERT INTO habits (name, description, type, unit, target_value, target_type,
                       freq_numerator, freq_denominator, color, reminder_time,
-                      reminder_message, position, archived)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      reminder_message, at_most_unlogged, position, archived)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const insertEntry = db.prepare(`
   INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)
@@ -126,6 +126,7 @@ export function applyImport(habits, mode = 'merge') {
           clean.color,
           clean.reminder_time,
           clean.reminder_message,
+          clean.at_most_unlogged,
           position++,
           // SQLite has no boolean.
           clean.archived ? 1 : 0

@@ -28,7 +28,7 @@ import {
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
-  computeStats, computeStreaks, bestStreak, isCompleted,
+  computeStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   today, addDays, daysBetween, MAX_RANGE_DAYS,
 } from '@habiterall/shared/stats.js';
 
@@ -97,13 +97,14 @@ api.post('/habits', route(async (req, res) => {
     const { rows } = await db.query(
       `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                            target_type, freq_numerator, freq_denominator, color,
-                           reminder_time, reminder_message, archived, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                           reminder_time, reminder_message, at_most_unlogged,
+                           archived, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
                COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
        RETURNING *`,
       [uid(req), h.name, h.description, h.type, h.unit, h.target_value,
        h.target_type, h.freq_numerator, h.freq_denominator, h.color,
-       h.reminder_time, h.reminder_message, h.archived]
+       h.reminder_time, h.reminder_message, h.at_most_unlogged, h.archived]
     );
     return rows[0];
   });
@@ -125,11 +126,11 @@ api.put('/habits/:id', route(async (req, res) => {
       `UPDATE habits SET name=$1, description=$2, type=$3, unit=$4,
               target_value=$5, target_type=$6, freq_numerator=$7,
               freq_denominator=$8, color=$9, reminder_time=$10,
-              reminder_message=$11, archived=$12
-       WHERE id = $13 RETURNING *`,
+              reminder_message=$11, at_most_unlogged=$12, archived=$13
+       WHERE id = $14 RETURNING *`,
       [h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
        h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-       h.reminder_message, h.archived, id]
+       h.reminder_message, h.at_most_unlogged, h.archived, id]
     );
     return rows[0];
   });
@@ -262,7 +263,7 @@ api.get('/habits/:id/stats', route(async (req, res) => {
     }
   }
 
-  const { entries, weekStart } = await withUser(uid(req), async (db) => {
+  const { entries, weekStart, unlogged } = await withUser(uid(req), async (db) => {
     const { rows } = await db.query(
       `SELECT to_char(date, 'YYYY-MM-DD') AS date, value, status, notes
        FROM entries WHERE habit_id = $1 ORDER BY date`,
@@ -271,18 +272,20 @@ api.get('/habits/:id/stats', route(async (req, res) => {
     // The week boundary is a user preference, so history and the
     // times-per-week chart must be bucketed the way they read their calendar.
     const { rows: [u] } = await db.query(
-      `SELECT settings ->> 'weekStart' AS week_start FROM users WHERE id = $1`,
+      `SELECT settings ->> 'weekStart'      AS week_start,
+              settings ->> 'atMostUnlogged' AS unlogged
+         FROM users WHERE id = $1`,
       [uid(req)]
     );
     const weekStart = /** @type {'monday'|'sunday'} */ (
       u?.week_start === 'sunday' ? 'sunday' : 'monday');
-    return { entries: rows, weekStart };
+    return { entries: rows, weekStart, unlogged: unloggedFrom(u) };
   });
 
   res.json({
     habit,
     ...computeStats(habit, entries, {
-      start, end, granularity: req.query.granularity ?? 'day', weekStart,
+      start, end, granularity: req.query.granularity ?? 'day', weekStart, unlogged,
     }),
   });
 }));
@@ -315,6 +318,14 @@ api.get('/overview', route(async (req, res) => {
     if (!habits.length) return { start, end, habits: [] };
 
     const ids = habits.map((h) => h.id);
+
+    // One answer for the account, read once for the whole payload — the map
+    // below runs per habit and this is not a per-habit question.
+    const { rows: [prefs] } = await db.query(
+      `SELECT settings ->> 'atMostUnlogged' AS unlogged FROM users WHERE id = $1`,
+      [uid(req)]
+    );
+    const unlogged = unloggedFrom(prefs);
 
     // One query for the grid window, one for the lifetime figures, rather
     // than two per habit.
@@ -382,7 +393,7 @@ api.get('/overview', route(async (req, res) => {
       habits: habits.map((h) => {
         const all = byHabit.get(h.id) ?? [];
         const recent = all.filter((e) => e.date >= cutoff);
-        const stats = computeStats(h, recent, { end: summaryEnd });
+        const stats = computeStats(h, recent, { end: summaryEnd, unlogged });
 
         const totalCompleted = totals.get(h.id) ?? 0;
 
@@ -390,7 +401,8 @@ api.get('/overview', route(async (req, res) => {
           h,
           new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
           all.length ? all[0].date : summaryEnd,
-          summaryEnd
+          summaryEnd,
+          unlogged
         );
 
         return {
@@ -408,6 +420,20 @@ api.get('/overview', route(async (req, res) => {
 
   res.json(payload);
 }));
+
+/**
+ * What a day with no row counts as on an at-most habit, from a `users` row.
+ *
+ * Read out of the settings JSONB and handed to `computeStats`, rather than
+ * looked up inside it: the shared code takes no database, which is the whole
+ * reason one copy of it serves both editions. Anything but the stored word is
+ * the default, exactly as the week start beside it is read.
+ *
+ * @param {{unlogged?: string|null}} [row]
+ */
+function unloggedFrom(row) {
+  return row?.unlogged === 'success' ? 'success' : UNLOGGED_DEFAULT;
+}
 
 /* ---------- settings ---------- */
 

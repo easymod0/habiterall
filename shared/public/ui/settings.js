@@ -154,6 +154,23 @@ export const SETTINGS = {
     type: 'toggle',
     default: false,
   },
+  atMostUnlogged: {
+    section: 'Tracking',
+    label: 'On an “at most” habit, a day you never logged',
+    help: 'A limit — at most 2 coffees, no smoking — is the one kind where ' +
+      'saying nothing could mean either thing: zero is under the limit. ' +
+      'Recording a clean day is one tap, and a day you did record as 0 ' +
+      'counts as staying under whichever you pick.',
+    type: 'select',
+    // `miss`, so a limit created today does not arrive with a perfect record
+    // it has not had time to earn. `test/settings.test.js` pins this against
+    // `UNLOGGED_DEFAULT` in stats.js, which is what actually decides.
+    default: 'miss',
+    options: [
+      { value: 'miss', label: 'Counts as a miss' },
+      { value: 'success', label: 'Counts as staying under' },
+    ],
+  },
   scoreGranularity: {
     section: 'Statistics',
     label: 'Strength chart resolution',

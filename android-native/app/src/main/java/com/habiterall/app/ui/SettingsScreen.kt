@@ -235,6 +235,31 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            /* ------------------------------------------------ habits that are limits */
+
+            Heading("Habits with a limit")
+            ChoiceRow(
+                title = "A day you never logged",
+                options = listOf(
+                    "miss" to "Counts as a miss",
+                    "success" to "Counts as staying under",
+                ),
+                selected = settings.atMostUnloggedOrDefault,
+                enabled = !busy,
+                onPick = { put("atMostUnlogged", "what an unlogged day counts as",
+                    JsonPrimitive(it)) },
+            )
+            Text(
+                "\"At most\" habits — at most 2 coffees, no smoking — are the one kind " +
+                    "where saying nothing could mean either thing, because zero is under " +
+                    "the limit. A day you did record as 0 counts as staying under either " +
+                    "way. Every other habit already treats an unlogged day as a miss.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            HorizontalDivider()
+
             /* ------------------------------------------------------- display */
 
             Heading("Display")

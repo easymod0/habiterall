@@ -19,6 +19,23 @@ import {
 export const HABIT_TYPES = new Set(['boolean', 'numerical']);
 export const TARGET_TYPES = new Set(['at_least', 'at_most']);
 
+/**
+ * What a day with NO ROW is worth on THIS habit, overriding the account's
+ * `atMostUnlogged`. Read only for an at-most target, where zero is under the
+ * limit and silence therefore has two defensible readings — see
+ * `unansweredCounts` in stats.js for the whole of it.
+ *
+ * `'default'` means "whatever the account says", and it is the default because
+ * an override has to be asked for: an account that has answered this once
+ * should not find one habit quietly disagreeing.
+ *
+ * Per habit and not only per account, because the two kinds of limit want
+ * opposite answers and people keep both. "I didn't smoke today" is worth a tap
+ * and is the whole reward; "I had no soda" is not something anyone opens an app
+ * for, and the point of tracking it is to record the exception.
+ */
+export const AT_MOST_UNLOGGED = new Set(['default', 'miss', 'success']);
+
 export const LIMITS = {
   name: 100,
   description: 500,
@@ -109,6 +126,11 @@ export function parseHabit(body = {}) {
     // newline here would corrupt the record it is stored in.
     reminder_message: String(body.reminder_message ?? '')
       .replace(/[\r\n]+/g, ' ').trim().slice(0, LIMITS.reminderMessage),
+    // Only meaningful on an at-most target; stored regardless, so that
+    // switching a habit's target type back and forth does not silently discard
+    // an answer the user gave. `AT_MOST_UNLOGGED` says why it exists.
+    at_most_unlogged: AT_MOST_UNLOGGED.has(body.at_most_unlogged)
+      ? body.at_most_unlogged : 'default',
     archived: !!body.archived,
   };
 }
@@ -246,6 +268,14 @@ export const SETTING_VALUES = {
   // than as a plain miss — which is only meaningful because a lapse is now a
   // row of its own; see `entryWrite` above.
   questionMarks: [true, false],
+  // What a day with NO ROW is worth on a habit with an at-most target, which is
+  // the one kind where the question has two defensible answers: zero is under
+  // the limit, so silence reads as success. `'miss'` by default and the rule
+  // itself is `unansweredCounts` in stats.js — this list is only what may be
+  // stored. Not Loop's: Loop has no such preference, and no Loop file can set
+  // one (its backup carries no preferences at all), so this travels in
+  // habiterall's own JSON backup and nowhere else.
+  atMostUnlogged: ['miss', 'success'],
   // Resolution of the strength chart. Display only — the score is always
   // computed daily, since it is an EWMA and skipping days would change the
   // value rather than the resolution.
@@ -302,6 +332,11 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'scoreGranularity',
   'skipDays',
   'questionMarks',
+  // Portable for the reason the two above are, and more so: it does not change
+  // how a row is drawn, it changes what the DAYS WITH NO ROW in the same file
+  // count as. Restore the entries without it and the streaks and the strength
+  // come back different from the ones that were exported.
+  'atMostUnlogged',
 ]);
 
 /**

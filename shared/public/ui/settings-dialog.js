@@ -16,7 +16,7 @@
 
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, set } from '/shared/ui/store.js';
+import { emit, set, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -328,6 +328,16 @@ function refreshDeliveryNotices() {
  * how the user learns it was rejected, instead of finding out at 08:00
  * tomorrow.
  */
+/**
+ * Settings the server's own figures are computed with.
+ *
+ * Named rather than inlined because the test for "did I remember to refetch?"
+ * is not one a reader can run: the dashboard shows a plausible number either
+ * way, just yesterday's. Anything added here that reaches `computeStats` on
+ * the server belongs in this list.
+ */
+const SERVER_COMPUTED = ['atMostUnlogged'];
+
 async function applyDraft() {
   applying = true;
   doneBtn.disabled = true;
@@ -377,6 +387,22 @@ async function applyDraft() {
     }
 
     set(overrides);   // merges the cleared overrides and repaints the open view
+
+    // A setting the SERVER computes with needs a refetch, not a repaint. Every
+    // other setting here either changes something the browser draws itself or
+    // only reaches the detail view, which refetches on 'change' — but
+    // `atMostUnlogged` moves `score`, `currentStreak` and `bestStreak`, and the
+    // dashboard renders those straight out of `state.habits` exactly as
+    // `/overview` computed them. Without this, changing it repaints the list
+    // with the old numbers and they stay wrong until a reload.
+    //
+    // Only when the dashboard is what is showing, and the same shape
+    // `habit-dialog` uses for the same reason: 'reload' goes to the dashboard,
+    // so emitting it over an open habit would navigate away from the page the
+    // user is on — and that page has already refetched on the 'change' above.
+    if (SERVER_COMPUTED.some((key) => key in changed) && state.openHabitId == null) {
+      emit('reload');
+    }
     return true;
   } finally {
     applying = false;
