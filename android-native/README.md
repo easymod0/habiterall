@@ -133,9 +133,13 @@ first request that gets through returns 401, and that is what brings you here.
 Sign out from the list's ⋮ menu. It is absent on a server with no sign-in.
 
 Plaintext HTTP is permitted only for private-range addresses
-(`10.x`, `192.168.x`, `172.16–31.x`) via a network security config — a
-public `http://` host is refused, because habit data should not cross the
-internet in the clear.
+(`10.x`, `192.168.x`, `172.16–31.x`) — a public `http://` host is refused,
+because habit data should not cross the internet in the clear. The rule is
+enforced in `ServerUrl.parse`, **not** in the network security config: Android's
+config matches literal hostnames and has no notion of CIDR, so it cannot express
+a whole private range and permits cleartext at the base level instead. Both
+layers are needed — that file cannot state the rule, and code cannot relax what
+it forbids.
 
 ## Reminders
 
@@ -185,9 +189,12 @@ when connectivity returns — the same guarantee the web app's outbox gives.
 CI builds the APK; see `.github/workflows/android-native.yml`. Nothing needs
 installing locally.
 
-- **Every PR touching `android-native/`**, and every push to `master`, runs the
-  unit tests and lint and uploads a debug APK as a build artifact. That
-  workflow never publishes.
+- **Every PR touching `android-native/`** runs the unit tests and lint and
+  uploads a debug APK as a build artifact, and so does a nightly scheduled run —
+  which builds unconditionally, because the failure it exists to catch is the
+  runner moving under a pinned toolchain rather than anything in the tree. There
+  is deliberately **no push trigger**: `master` is only reachable through a pull
+  request that already ran this. That workflow never publishes.
 - **Releases come from `release.yml`**, on a `vX.Y.Z` tag or a manual run: it
   builds the signed APK, stamps it with the version, and attaches it to the
   GitHub release. Merging does not ship.
@@ -209,7 +216,9 @@ set these repository secrets:
 
 ### Locally
 
-You need **JDK 21** and the Android SDK (platform 36, build-tools 36). The
+You need **JDK 21** and the Android SDK **platform 37** — `compileSdk` is 37
+even though `targetSdk` stays 36, so platform 36 alone will not build. Nothing
+pins `buildToolsVersion`; AGP resolves its own. The
 Gradle wrapper jar is not committed — it is a binary that cannot be reviewed in
 a diff — so generate it once with a system Gradle **9.7.0**:
 
@@ -284,6 +293,23 @@ with *Install unknown apps* enabled — no keystore needed to try it.
 - **`OutboxRetryTest`** — which refusals a queued check-off gives up on. 401 and
   403 are not among them: they are about the session rather than the write, and
   the answer is still true when it comes back.
+- **`AppSettingsDefaultsTest`** — the Kotlin half of `shared/test/settings.test.js`'s
+  job. `GET /settings` returns only the keys that have been *stored*, so every
+  client has to supply the same default or the two disagree about what the
+  account is set to. It reads the registry and fails on a drift; the one that
+  catches you is `historyGranularity`, whose default is `week` and is the only
+  default that is not the first option in its own list.
+- **`WebBackStackTest`** — the three ways a habit page can be reached and what
+  Back must then do. Note what it cannot prove: it pins arithmetic, and every
+  bug here has been in the *premise* — which entry the load lands on, and when.
+  Verify a change to it on an emulator, not against this suite.
+- **`HabitAmountTest`** — the box a target is typed into and the number that
+  goes over the wire. A target of `0` is a legal habit meaning "no target", so
+  text that fails to parse and falls back to zero stores cleanly, draws
+  normally, and can never be met.
+- **`HabitOrderTest`** — the reorder arithmetic, which fails invisibly: the
+  phone posts the whole order and each index becomes a `position`, so an
+  off-by-one stores a wrong order that the web app then faithfully agrees with.
 
 ## Roadmap
 

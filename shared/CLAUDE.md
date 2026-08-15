@@ -21,6 +21,11 @@ Postgres one.
 | `src/unzip.js` | minimal ZIP reader (Loop's CSV export) |
 | `src/zip.js` | minimal ZIP writer, for the CSV archive |
 | `src/constants.js` | `UNSET` / `YES` / `SKIP` wire values |
+| `src/security.js` | the CSP, the session cookie shape, the four rate limits, the `TRUST_PROXY` rule and `sameOriginOnly` — **data, not middleware**, so this package keeps its no-dependencies property |
+| `src/password.js` | hashing, verification, and the one answer to "is auth on?". Personal's half of the shared sign-in flow; cloud uses none of it |
+| `src/log.js` | structured logging: one event per line, one stream, and the redaction that keeps personal data out |
+| `src/observe.js` | `logStartup`, `requestLog` and `watchRuntime` — an Express-shaped middleware that never imports Express |
+| `src/types.js` | JSDoc typedefs, exporting nothing at runtime. The contract between three packages |
 | `public/app.js` | boot, the top bar, the PWA; `start(authAdapter)` is the entry |
 | `public/ui/store.js` | view state, and the `'change'` / `'reload'` channel views listen on |
 | `public/ui/dashboard.js` | the habit list: day grid, paging, empty state, reordering, checkbox taps |
@@ -72,7 +77,7 @@ editor. Written as direct calls those are circular imports; written as one
 element id may be reached for by two modules; `ui/views.js` exists because
 `#view-list` and `#view-detail` genuinely have three claimants. The same test
 walks the imports from the entry point and fails when `SHELL` in `sw.js` has
-fallen behind — with fourteen modules where there was one, a hand-maintained
+fallen behind — with twenty-three modules where there was one, a hand-maintained
 precache list drifts silently.
 
 ## Traps
@@ -136,9 +141,13 @@ lets one completion saturate the score.
 
 **Loop's encoding is not guessable.** It was read from the uhabits source:
 epoch-millis UTC-midnight timestamps, ×1000 numerical scaling, `YES_AUTO(1)`
-counts as done, `NO(0)`/`UNKNOWN(-1)` are dropped. `test/import.test.js` and
-`test/export-loop.test.js` pin all of it — if you change a conversion and
-those fail, the tests are right.
+counts as done, `NO(0)` is a stated lapse that **keeps its row**, and only
+`UNKNOWN(-1)` has none. Those last two used to be one thing — both dropped — and
+dropping `NO` discarded the only mark separating a day the user answered from a
+day nobody has, which on a backup from someone who does not use Loop's question
+marks is most of their history. See the root CLAUDE.md's four-state section.
+`test/import.test.js` and `test/export-loop.test.js` pin all of it — if you
+change a conversion and those fail, the tests are right.
 
 **A streak and a lapse are made of "on pace", not "done today".** `onPaceSeries`
 asks whether the trailing `denominator`-day window holds enough completions,

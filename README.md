@@ -6,7 +6,7 @@
 
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen)
+![Node](https://img.shields.io/badge/node-%E2%89%A526-brightgreen)
 
 </div>
 
@@ -36,7 +36,7 @@ reconnect.
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
 - [Backup and restore](#backup-and-restore)
 - [Configuration](#configuration) · [API](#api)
-- [Security](#security-cloud-edition) · [Architecture](#architecture) · [Development](#development)
+- [Security](#security) · [Architecture](#architecture) · [Development](#development)
 
 ---
 
@@ -45,14 +45,19 @@ reconnect.
 |  | **personal** | **cloud** |
 |---|---|---|
 | Users | one | many, each isolated |
-| Login | none | any OIDC provider |
+| Login | a username and password, on by default — or `HABITERALL_AUTH=off` | any OIDC provider |
 | Database | one SQLite file | Postgres |
 | Setup | one command | Docker Compose + an identity provider |
 | Runs on | `http://localhost:3000` | `http://localhost:3100` |
-| Best for | your own machine, or a home LAN | a server other people log in to |
+| Best for | one person, wherever it runs | several people, each with their own habits |
 
 **Start with personal.** It has no moving parts, and a JSON backup imports
 straight into cloud later if you outgrow it.
+
+The dividing line is **how many people**, not whether it faces the internet.
+The personal edition signs you in, so it is fine on a public address; what it
+does not do is keep two people's habits apart — everyone who signs in shares one
+set. That is what cloud is for.
 
 ---
 
@@ -75,7 +80,11 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
-      - '${APP_PORT:-3000}:3000'
+      # BIND_ADDR empty (the default) is every interface, both address
+      # families — Docker's own behaviour. Set it to 127.0.0.1 when a
+      # reverse proxy on this host is the only thing that should reach the
+      # port. Do not write 0.0.0.0: that is IPv4 only.
+      - '${BIND_ADDR:-}:${APP_PORT:-3000}:3000'
     volumes:
       - habiterall-data:/data        # your whole database is one file in here
     environment:
@@ -84,7 +93,7 @@ services:
 
       # Set both before exposing this port, or the first visitor claims the app.
       HABITERALL_USERNAME: ${HABITERALL_USERNAME:-}              # default "admin"
-      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}              # 8+ characters
+      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}              # unchecked here; use 8+
       HABITERALL_PASSWORD_HASH: ${HABITERALL_PASSWORD_HASH:-}    # or this instead
       HABITERALL_AUTH: ${HABITERALL_AUTH:-}                      # exactly "off" disables sign-in
       HABITERALL_SESSION_SECRET: ${HABITERALL_SESSION_SECRET:-}  # survives a redeploy
@@ -223,7 +232,7 @@ services:
       - authentik-icons:/web/dist/assets/icons/habiterall
       - authentik-images:/web/dist/assets/images/habiterall
     ports:
-      - '${AUTHENTIK_PORT:-9000}:9000'
+      - '${BIND_ADDR:-}:${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
 
   authentik-worker:
@@ -318,7 +327,7 @@ services:
       migrate: { condition: service_completed_successfully }
       authentik-bootstrap: { condition: service_completed_successfully }
     ports:
-      - '${APP_PORT:-3100}:3000'
+      - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -402,13 +411,9 @@ Then start it, once:
 docker compose up -d
 ```
 
-There is no second phase and nothing to click. The `authentik-bootstrap`
-service runs the same image as the app and creates the OIDC provider and
-application over Authentik's API, *giving* it the id and secret from `.env` —
-which is why those are values you generate rather than values you collect. It
-also copies the blueprints and images it needs out of that image, so this
-works on a server with no checkout of this repository. It runs to completion
-on every `up`, and re-running it is how a changed `.env` takes effect:
+There is no second phase and nothing to click — the `authentik-bootstrap`
+service, commented at length in the file above, does the configuring. What it
+says it will do, it says here:
 
 ```bash
 docker compose logs authentik-bootstrap
@@ -503,7 +508,7 @@ services:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     ports:
-      - '${APP_PORT:-3100}:3000'
+      - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -538,7 +543,7 @@ Users are provisioned the first time each one signs in.
 > **Pin the tag here.** `latest` is fine for the personal edition, where an
 > update is a new binary against the same file. The cloud edition runs
 > migrations on deploy, so pulling `latest` means taking a schema change at a
-> moment you did not choose. Use `:0.0.1` and bump it deliberately.
+> moment you did not choose. Pin the full `X.Y.Z` and bump it deliberately.
 </details>
 
 Full walkthrough, including HTTPS and the production checklist:
@@ -589,9 +594,11 @@ server {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
-        # The cloud edition's rate limiter keys on the client address, so
-        # without this every request appears to come from the proxy and one
-        # user's traffic throttles everybody.
+        # The personal edition's limiters key on the client address, so without
+        # this every request appears to come from the proxy and one user's
+        # traffic throttles everybody. Cloud keys most of its limits per
+        # signed-in user — but not the one on login attempts, which has no
+        # user yet and is the limit you least want collapsed into one bucket.
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         # And this is what tells the app the browser is on https, which is what
         # makes the session cookie Secure.
@@ -661,8 +668,11 @@ been told not to believe.
 One thing that follows and is easy to get wrong: **if you set `TRUST_PROXY=1`,
 the app's port must only be reachable through the proxy.** Leaving 3000 open on
 the LAN as a shortcut means anything on that LAN can send those headers itself.
-Publish the port only to the proxy's network, or firewall it, and reach the app
-by its proxied name from inside the house as well as outside.
+Set `BIND_ADDR=127.0.0.1` so the port is published to loopback only, or
+firewall it, and reach the app by its proxied name from inside the house as
+well as outside. If the proxy runs on a *different* host, leave `BIND_ADDR`
+empty and firewall to that host instead — loopback would put the app out of
+the proxy's reach too.
 
 ### Turning the guards off
 
@@ -676,7 +686,7 @@ For an instance only reachable over a VPN or a trusted network:
 | `HABITERALL_RATE_LIMIT=off` | Removes the limits on the API, imports and test notifications. The limit on *login attempts* is deliberately not included and cannot be switched off. |
 | `TRUST_PROXY=0` (the default) | Nothing in front is believed. Right for a direct port; see above. |
 | `HABITERALL_UPGRADE_INSECURE` unset (the default) | Browsers are **not** told to rewrite http to https. Leave it unset unless the instance is only ever reached over TLS — turning it on breaks a box that answers on both. |
-| `NODE_ENV` unset | No HSTS header. A browser that sees one on a plain-http stack pins that hostname to https for a year, and `localhost` is a hostname a lot of other things use too. |
+| `NODE_ENV` to anything but `production` | No HSTS header. A browser that sees one on a plain-http stack pins that hostname to https for a year, and `localhost` is a hostname a lot of other things use too. **Both published images bake in `NODE_ENV=production`**, so HSTS is *on* by default under Docker and unsetting it means saying so in the compose file; a clone started with `npm start` has it off already. |
 
 The session cookie needs nothing: it is marked `Secure` only on requests that
 actually arrived over TLS, so a plain-http LAN instance and an https one behind
@@ -885,9 +895,14 @@ Two settings that matter here:
 
 The server checks once a minute. A reminder the server slept through is still
 sent if it is less than half an hour late, and dropped if it is more — waking
-up after a day of downtime should not fire a day of reminders at once. If a
-webhook is deleted, delivery fails permanently and is not retried; the test
-button is how you find out.
+up after a day of downtime should not fire a day of reminders at once.
+
+**When a destination stops working, ⚙ → Notifications says so.** A deleted
+webhook, a bot kicked from its channel or a revoked token fails permanently and
+is not retried, and nothing else about the habit changes to show it — so the
+dialog carries the last outcome per destination and reports it in the sender's
+own words, without your having to press anything. The test button is how you
+confirm the fix.
 
 > The Android app needs no server involvement at all — it arms its own alarms
 > and fires them with the server unreachable. Unticking it there stops those
@@ -904,8 +919,10 @@ Two options, in increasing order of effort:
 | **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
 | **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline and a plain-http LAN address | Download the APK from [Releases](../../releases) |
 
-The native client talks to the **personal** edition today; signing in to cloud
-needs an OIDC flow it does not have yet.
+The native client works against **either edition**. It asks the server how it
+signs people in and shows whichever it reports: a username and password form for
+the personal edition, your identity provider's own page — in the app's own
+WebView, sharing one cookie store with the native API client — for cloud.
 
 The native APK is attached to every [release](../../releases), signed — a
 release that has no signing key fails rather than publishing an APK, because
@@ -949,9 +966,6 @@ the server's own UI inside the app, so there is one implementation of the
 statistics rather than two, and tapping a habit lands on *that* habit's page
 rather than the dashboard.
 
-> The native app talks to the **personal** edition. The cloud edition needs an
-> OIDC sign-in flow it does not implement yet.
->
 > Plain `http://` is accepted only for private addresses (`10.x`,
 > `192.168.x`, `172.16–31.x`) so a LAN server works without a certificate;
 > anything public must be `https://`.
@@ -968,7 +982,7 @@ Import a Loop backup and keep your history. Both editions accept:
 | **CSV export** (`.zip`) | Loop → Settings → Export as CSV |
 | A bare `Checkmarks.csv` | from that zip |
 
-Use ⚙ → **Backup & Restore**, or:
+Use ⚙ → **Backup & Restore**, or, on an instance with sign-in off:
 
 ```bash
 curl -X POST --data-binary @"Loop Habits Backup.db" localhost:3000/api/import
@@ -981,6 +995,13 @@ preserved. All four of Loop's day states survive — including `NO`, a day you t
 Loop you had missed, which is kept apart from a day you never answered. Backups
 predating Loop's `unit`, `target_type` or `notes` columns import fine.
 
+Reminders come across too, in both directions. Loop's question becomes *What the
+reminder asks*, in every format. The reminder **time** is `.db` only — Loop's own
+`Habits.csv` has no columns for it — and only for a reminder Loop had set on
+**all seven days**, since there is no weekday mask here to hold anything
+narrower, and inventing a daily one would put a notification on your phone that
+Loop never had.
+
 Loop keeps its *preferences* in Android, not in the backup, so nothing in the
 file can set yours — "Enable skip days" and "Show question marks" start off, as
 they do in Loop, and are yours to switch on under ⚙.
@@ -992,14 +1013,17 @@ database you can restore on Android. You are not locked in.
 
 ## Backup and restore
 
+Two kinds, and they are for different things.
+
+**A portable export** — for moving between editions, or leaving. Restore by
+importing the file back: `?mode=merge` (the default) adds and merges by habit
+name, `?mode=replace` clears first.
+
 | What | Where |
 |---|---|
 | Full JSON backup (round-trippable) | ⚙ → Backup & Restore, or `GET /api/export` |
 | CSV archive — `Habits.csv` + `Checkmarks.csv`, zipped | `GET /api/export.csv` |
 | Loop-compatible `.db` | `GET /api/export-loop.db` |
-
-Restore by importing the file back. `?mode=merge` (default) adds and merges by
-habit name; `?mode=replace` clears first.
 
 The JSON backup carries your **settings** as well as your habits, and only a
 `replace` applies them — that mode means "make this account look like the file",
@@ -1007,20 +1031,23 @@ while a merge is "add these habits to what I have" and leaves your preferences
 alone. It matters more than it sounds: *Show question marks* decides how the very
 rows in the same file are read.
 
-The personal edition's database is a single file — copying `data/habiterall.db`
-is a complete backup. For cloud:
+**The whole database** — for disaster recovery, and the one to automate:
 
-```bash
-docker compose exec -T db pg_dump -U habiterall_owner habiterall | gzip > backup.sql.gz
-```
+| | |
+|---|---|
+| personal | one file: `data/habiterall.db` from a clone, or the `habiterall-data` volume under Docker. Safely while running: `sqlite3 habiterall.db ".backup /tmp/backup.db"` |
+| cloud | `docker compose exec -T db pg_dump -U habiterall_owner habiterall \| gzip > backup.sql.gz` |
+
+> For the personal edition, copy **all three** files (`.db`, `.db-wal`,
+> `.db-shm`) or use `.backup`. The database runs in WAL mode, so a plain copy of
+> the `.db` alone can be missing recent writes — they are still in the
+> write-ahead log.
 
 Back up Authentik's database too, or you lose your user directory.
 
 ---
 
-## Upgrading, and getting your data out
-
-### Upgrading
+## Upgrading
 
 ```bash
 docker compose pull && docker compose up -d
@@ -1042,49 +1069,18 @@ docker compose pull && docker compose up -d   # runs migrate, then the app
 Migrations are numbered and recorded, so re-running is safe and applying twice
 does nothing.
 
-### Backups
-
-Two kinds, and they are for different things.
-
-**The whole database** — for disaster recovery, and the one to automate:
-
-| | |
-|---|---|
-| personal | `cp /var/lib/docker/volumes/…/habiterall.db` — or, safely while running: `sqlite3 habiterall.db ".backup /tmp/backup.db"` |
-| cloud | `pg_dump -U habiterall_owner habiterall` |
-
-> For the personal edition, copy **all three** files (`.db`, `.db-wal`,
-> `.db-shm`) or use `.backup`. The database runs in WAL mode, so a plain copy of
-> the `.db` alone can be missing recent writes — they are still in the
-> write-ahead log.
-
-**A portable export** — for moving between editions, or leaving:
-`GET /api/export` (or ⚙ → Backup & Restore) writes a JSON file that imports into either
-edition, and into a fresh install of anything you replace this with. See
-[Backup and restore](#backup-and-restore).
-
 ---
 
 ## Releases
 
-Versions are tagged, and a tag is what publishes:
+Every [release](../../releases) carries **Docker images** for both editions on
+GHCR, for `linux/amd64` and `linux/arm64`, the **native Android APK**, and notes
+listing every commit since the previous tag. See
+[Published images](#published-images) for the tag scheme.
 
-```bash
-git tag v1.4.0 && git push origin v1.4.0
-```
-
-Every [release](../../releases) carries:
-
-- **Docker images** for both editions on GHCR, tagged `1.4.0`, `1.4` and
-  `latest`, for `linux/amd64` and `linux/arm64`;
-- **the native Android APK**, attached to the release;
-- **notes** listing every commit since the previous tag, grouped by kind.
-
-Merging to `master` publishes nothing — it runs the tests and stops. A release is
-a decision, taken by tagging. The Android `versionCode` is derived from the
-version (`1.4.0` → `10400`), so it always increases; and signing and image
-pushing each skip themselves when their credentials are absent, so a fork can
-cut a release having configured nothing. Details in
+A release is a decision, taken by pushing a tag; merging to `master` publishes
+nothing. Signing and image pushing each skip themselves when their credentials
+are absent, so a fork can cut a release having configured nothing. Details in
 [`.github/workflows/README.md`](.github/workflows/README.md).
 
 ---
@@ -1095,10 +1091,10 @@ cut a release having configured nothing. Details in
 
 [`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
 carries these in place with a comment on each, and a test fails if the server
-reads one it does not. Two below are deliberately not in it: `PORT`, because
+reads one it does not. Three below are deliberately not in it: `PORT`, because
 the port *inside* the container is fixed by the image and the published
-mapping — `APP_PORT` is the host-side knob — and `MAX_UPLOAD_MB`, which is a
-limit rather than a deployment setting.
+mapping — `APP_PORT` is the host-side knob; `MAX_UPLOAD_MB`, which is a limit
+rather than a deployment setting; and `NODE_ENV`, which the image already sets.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -1107,7 +1103,7 @@ limit rather than a deployment setting.
 | `TZ` | the host's, **`UTC` in a container** | The clock reminders fire on, and which day a check-off belongs to |
 | `HABITERALL_AUTH` | on | Sign-in. Off only when set to **exactly** `off` |
 | `HABITERALL_USERNAME` | `admin` | The single account |
-| `HABITERALL_PASSWORD` | — | Its password, at least 8 characters. Set both before exposing the port, or the first visitor claims the instance |
+| `HABITERALL_PASSWORD` | — | Its password. Set both before exposing the port, or the first visitor claims the instance. Nothing checks its length here — the 8-character minimum is on the in-app setup form only, so this is yours to get right |
 | `HABITERALL_PASSWORD_HASH` | — | The same thing pre-hashed, to keep the plaintext out of `docker inspect`. Wins if both are set |
 | `HABITERALL_SESSION_SECRET` | generated, stored in the database | Set it to keep people signed in across a redeploy |
 | `TRUST_PROXY` | `0` | Reverse-proxy hops in front. See [Put HTTPS in front](#put-https-in-front) — wrong in either direction is a bug |
@@ -1116,6 +1112,8 @@ limit rather than a deployment setting.
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
+| `BIND_ADDR` | empty | Which interface the published port appears on. Empty is every interface; `127.0.0.1` restricts it to a reverse proxy on this host. Not `0.0.0.0`, which is IPv4 only |
+| `NODE_ENV` | `production` in both images | `production` turns on HSTS. See [Turning the guards off](#turning-the-guards-off) before unsetting it |
 | `MAX_PARSE_HABITS` | `10000` | Habits a single uploaded file may declare. A bound on a hostile file, not a product limit — see [Limits on an import](#limits-on-an-import) |
 | `MAX_PARSE_ENTRIES` | `250000` | Entries one file may declare, totalled across its habits |
 
@@ -1130,14 +1128,19 @@ docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
 
 ### cloud
 
-See [`.env.example`](habiterall-cloud/.env.example), and
-[`examples/docker-compose.cloud.yml`](examples/docker-compose.cloud.yml) for
-the same list with comments. Beyond the database and OIDC credentials:
-`TRUST_PROXY`, `NOTIFY_MAX_ACCOUNTS`, `MAX_HABITS_PER_USER`,
-`MAX_HABITS_PER_IMPORT`, `MAX_ENTRIES_PER_IMPORT`, `MAX_UPLOAD_MB`,
-`MAX_PARSE_HABITS`, `MAX_PARSE_ENTRIES`, `PG_POOL_MAX`, `PGSSL`, `PORT`, and
-`ALLOW_INSECURE_OIDC` — which is for local HTTP testing and never a real
-deployment.
+The database and OIDC credentials are in
+[`.env.example`](habiterall-cloud/.env.example) and in
+[`examples/docker-compose.cloud.yml`](examples/docker-compose.cloud.yml), with a
+comment on each, alongside `TRUST_PROXY`, `NOTIFY_MAX_ACCOUNTS`,
+`MAX_HABITS_PER_USER`, `MAX_ENTRIES_PER_IMPORT`, `MAX_UPLOAD_MB` and
+`ALLOW_INSECURE_OIDC` — the last of which is for local HTTP testing and never a
+real deployment.
+
+Six more are read but shipped in no quickstart, because tuning them is a
+considered change rather than a deployment step: `MAX_HABITS_PER_IMPORT`,
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` (see below), `PG_POOL_MAX` (10 — what the `/healthz` memo is sized against), `PGSSL`, and
+`PORT`, which is fixed inside the container by the image and the published
+mapping. `APP_PORT` is the host-side knob.
 
 ### Limits on an import
 
@@ -1156,7 +1159,6 @@ have created one habit at a time.
 
 Raising them trades memory for generosity: a file sitting on both defaults
 costs roughly 90MB to parse, and half a million entries alone costs 143MB.
-
 ### Published images
 
 Every release publishes both editions to GitHub Container Registry, for
@@ -1168,7 +1170,10 @@ docker pull ghcr.io/easymod0/habiterall-cloud:latest
 ```
 
 Tags are `X.Y.Z`, `X.Y` and `latest`, so a deployment can pin as tightly as it
-likes. Docker Hub is published to as well when its credentials are configured —
+likes — except below `1.0.0`, where the `X.Y` tag is dropped: a moving `1.4`
+promises that anything it points at is compatible with anything else it does,
+and 0.x carries no such guarantee. Docker Hub is published to as well when its
+credentials are configured —
 see [`.github/workflows/README.md`](.github/workflows/README.md).
 
 ### Both editions: the reminder scheduler
@@ -1315,30 +1320,49 @@ curl -X PUT localhost:3000/api/habits/1/entries/2026-08-12 \
   -H 'Content-Type: application/json' -d '{"value":2,"notes":"felt good"}'
 ```
 
-In the cloud edition every endpoint requires a session and is scoped to your
-own data.
+Every endpoint in that table requires a session in both editions — the `curl`
+examples above assume `HABITERALL_AUTH=off`, and otherwise want the session
+cookie. In cloud each one is additionally scoped to your own data.
+
+Outside that table: `GET /healthz` is unauthenticated in both, and `GET /api/me`
+reports which sign-in mode this instance is in — `none`, `password`, `setup` or
+`oidc`. A signed-out caller still gets that answer, because the `mode` rides the
+**401** as well as the 200; it is the one thing a client with no session has to
+know before it can draw anything. Sign-in itself differs: `POST /auth/login` and
+`POST /auth/setup` in personal, `GET /auth/login` → `GET /auth/callback` in
+cloud, with `POST /auth/logout` in both.
 </details>
 
 ---
 
-## Security (cloud edition)
+## Security
 
-Isolation is enforced by **Postgres row-level security**, not by application
-code — a query that forgets its `WHERE` clause returns nothing rather than
-leaking. The app connects as a role that is not the table owner, cannot bypass
-RLS, cannot run DDL, and cannot create or delete users.
+**Both editions.** Sign-in is in the app rather than in a reverse proxy, so the
+Android client — which talks to `/api` outside the WebView and cannot fill in a
+proxy's login form — gets a `401` it can act on instead of an HTML page. Both
+issue the same **opaque session cookie**, `httpOnly` + `SameSite=Lax`, stored
+server-side so it can be revoked instantly. `Secure` is decided **per request**
+in personal, so one instance can serve https from outside and plain http on the
+LAN; cloud derives it from its single `PUBLIC_URL`. Writes are
+additionally refused when the `Origin` is another site's, a request with no
+`Origin` being allowed through because that is the native client and not a
+forgery a browser can make. The session is regenerated on login. One shared CSP
+with no inline scripts; rate limits on login, the API and imports, and the
+**limit on login attempts cannot be switched off**. **Imports cannot escape the
+importer** — ids inside an uploaded backup are ignored entirely.
 
-- **No passwords stored.** Authentication is delegated to an OIDC provider,
-  which owns credentials, MFA and resets. Users are keyed on `(issuer, subject)`.
-- **Opaque session cookies**, `httpOnly` + `Secure` + `SameSite=Lax`, stored
-  server-side so they can be revoked instantly. Tokens never reach the browser.
-- **Imports cannot escape the importer** — ids inside an uploaded backup are
-  ignored entirely.
-- Session regeneration on login, PKCE + state + nonce on the OIDC flow, a CSP
-  with no inline scripts, and rate limits on login, API and import.
+**Cloud, additionally.** Isolation is enforced by **Postgres row-level
+security**, not by application code — a query that forgets its `WHERE` clause
+returns nothing rather than leaking. The app connects as a role that is not the
+table owner, cannot bypass RLS, cannot run DDL, and cannot create or delete
+users. **No passwords are stored**: authentication is delegated to an OIDC
+provider, which owns credentials, MFA and resets, users are keyed on
+`(issuer, subject)`, tokens never reach the browser, and the flow carries PKCE,
+state and a nonce.
 
 All of it is verified adversarially: the test suite tries to read, modify and
-delete another user's data, and to smuggle rows in through a crafted backup.
+delete another user's data, to smuggle rows in through a crafted backup, and to
+walk past each auth mode in turn.
 
 ---
 
@@ -1348,15 +1372,16 @@ delete another user's data, and to smuggle rows in through a crafted backup.
 shared/               everything both editions have in common
   src/                scoring, validation, Loop import/export — no DB, no HTTP
   public/             the entire UI, plus the PWA
-habiterall-personal/  single user, SQLite, no auth
+habiterall-personal/  single user, SQLite, optional password
 habiterall-cloud/     multi user, Postgres, OIDC
 android-native/       native Kotlin client, for notification actions
 ```
 
-One npm workspace, **no build step**, and one runtime dependency for the
-personal edition (Express). Each edition ships a three-line entry point that
-picks an auth adapter; everything else is shared, so a fix lands in both at
-once.
+One npm workspace and **no build step** — what runs is what is on disk. Each
+edition ships the same three-line entry point, calling `start()` with the one
+auth adapter that asks the server which mode it is in; everything else is
+shared, so a fix lands in both at once. The personal edition's database driver
+is `node:sqlite`, built into Node, so there is no native module to compile.
 
 The charts are hand-rolled SVG — no charting library, no bundler, no
 `node_modules` in the browser.
@@ -1374,9 +1399,9 @@ npm run test:roundtrip -w habiterall-personal   # backup fidelity, all formats
 npm run test:tenancy  # multi-tenant isolation attacks — needs Postgres
 ```
 
-Every one of these runs on each pull request, alongside both Docker builds and
-a backup round-trip check that exports every format, re-imports it, and asserts
-nothing changed.
+Those are the layers worth knowing about; `CLAUDE.md` has the full table,
+including the auth, sign-in, reminder and API-shape suites. Every one runs on
+each pull request, alongside both Docker builds.
 
 **The main suite needs no configuration** — fork it, push, and everything runs.
 The only secrets anything needs are the four Android signing ones, and only to
@@ -1398,5 +1423,5 @@ bug.
 [GNU General Public License v3.0 or later](LICENSE).
 
 Use it, modify it, run it as a service — but derivative works must also be
-GPLv3. All dependencies are permissive (MIT / ISC / BSD-3-Clause) and
+GPLv3. Every runtime dependency is permissive (MIT / ISC / BSD-3-Clause) and
 compatible.

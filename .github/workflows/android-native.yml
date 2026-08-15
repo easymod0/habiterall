@@ -41,7 +41,7 @@ on:
 
   # Nightly, an hour after ci.yml's, so a red morning reads in order rather than
   # as two unrelated failures. This client is the most exposed thing here to a
-  # runner moving under it: JDK 21, Android SDK 36 and the wrapper's Gradle are
+  # runner moving under it: JDK 21, Android SDK 37 and the wrapper's Gradle are
   # pinned against whatever `ubuntu-latest` ships, and the AGP-decides-the-
   # Gradle-version trap in the README is exactly that failure wearing a version
   # number. The schedule builds unconditionally — nothing in the repository

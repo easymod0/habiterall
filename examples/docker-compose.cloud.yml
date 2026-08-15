@@ -10,13 +10,18 @@
 #
 # Needs a .env beside it:
 #
-#   DB_OWNER_PASSWORD=...      openssl rand -base64 36
-#   APP_DB_PASSWORD=...        openssl rand -base64 36
+#   DB_OWNER_PASSWORD=...      openssl rand -hex 32   (hex — see below)
+#   APP_DB_PASSWORD=...        openssl rand -hex 32
 #   SESSION_SECRET=...         openssl rand -base64 36
 #   PUBLIC_URL=https://habits.example.com
 #   OIDC_ISSUER=...            from your provider; must end in a slash
 #   OIDC_CLIENT_ID=...
 #   OIDC_CLIENT_SECRET=...
+#
+# Hex for the two database passwords, and not base64: both are interpolated
+# into a `postgres://user:PASSWORD@host` URL below, and base64 emits '+' and
+# '/' — which end the URL's authority. Node's parser then throws
+# ERR_INVALID_URL outright rather than connecting somewhere odd.
 #
 # Register ${PUBLIC_URL}/auth/callback as the redirect URI with your provider.
 #
@@ -59,7 +64,7 @@ services:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     ports:
-      - '${APP_PORT:-3100}:3000'
+      - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
