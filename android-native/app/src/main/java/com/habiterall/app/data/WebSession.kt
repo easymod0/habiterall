@@ -92,6 +92,13 @@ object WebSession {
      * provider's, so signing out of habiterall would sign you out of everything
      * that shares it. Signing out here means signing out of this app.
      *
+     * Which is why this is not the whole of a cloud sign-out, and reading it as
+     * one is the bug it grew: the provider's session survives on its own origin
+     * and silently signs you back in. Ending that is a VISIT rather than a
+     * deletion — `Auth.endSession` and the screen that loads it — so the
+     * provider ends its own session and clears its own cookie, and this stays
+     * the narrow thing it says it is.
+     *
      * The server is asked first (`POST /auth/logout`) and this is the local
      * half; it runs even when that request fails, because a sign-out that
      * depends on the network is one that cannot be done on a lost phone's

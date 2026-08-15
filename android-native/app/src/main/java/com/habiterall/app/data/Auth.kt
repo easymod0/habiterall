@@ -5,6 +5,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * How an instance authenticates, and what `GET /api/me` is saying.
@@ -158,6 +160,76 @@ object Auth {
             mode = mode,
             managed = json.bool("managed") == true,
         )
+    }
+
+    /**
+     * Where a sign-out has to go NEXT, from the answer to `POST /auth/logout`.
+     *
+     * Ending the app's session is only half of a cloud sign-out. The session
+     * this app holds is a cookie on THIS server; the identity provider holds
+     * one of its own, on its own origin, set in the WebView during sign-in —
+     * and [WebSession.clear] cannot reach it, deliberately, because emptying
+     * every site's cookies would sign the user out of everything that shares
+     * that provider. So the provider's session is ended by VISITING its
+     * end-session endpoint, which is what the server hands back here. Skip it
+     * and the local session is gone while the credential that silently
+     * recreates it is not — on a shared device, that is the half that matters.
+     *
+     * Both editions answer the same shape and only one of them has anywhere to
+     * go, so the rule is about the ROOT rather than about the edition: the
+     * personal edition returns `/`, and so does cloud when its provider has no
+     * end-session endpoint at all. **The server's own root is nowhere to go.**
+     * Anything else is somewhere to visit, which keeps this from guessing at
+     * where an identity provider lives — a self-hosted one commonly sits on the
+     * same host as the app, one port over.
+     *
+     * The value is loaded in a WebView, so it is checked rather than trusted
+     * even though it came from the server we are authenticated to. `resolve`
+     * answers null for anything that is not http(s), and `javascript:` is the
+     * one that matters: `loadUrl` EXECUTES it, in the context of whatever the
+     * WebView is showing.
+     *
+     * A non-200 says nothing about anything. This is the route a captive portal
+     * or a proxy answers with HTML, and the reasoning is [read]'s.
+     *
+     * @param baseUrl this server, which relative answers resolve against
+     * @param status the HTTP status of the logout response
+     * @param body its body, which need not be JSON
+     */
+    fun endSession(baseUrl: String, status: Int, body: String): String? {
+        if (status != 200) return null
+        val json = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrNull()
+        val redirect = json?.str("redirect") ?: return null
+        val target = resolve(baseUrl, redirect) ?: return null
+        return if (isRoot(baseUrl, target)) null else target.toString()
+    }
+
+    /**
+     * Has that visit finished — is this the page the provider sends us back to?
+     *
+     * Cloud sets `post_logout_redirect_uri` to this server's root, so landing
+     * there is the end of the flow. The test is the ROOT and not merely this
+     * origin, because a provider hosted alongside the app would then match its
+     * own first page load and the screen would close before it had done
+     * anything. An end-session endpoint has a path; the landing does not.
+     *
+     * A URL this never matches costs nothing but a tap: the screen is dismissed
+     * by hand too, which is also what answers a provider that fails to load.
+     */
+    fun signOutReturned(baseUrl: String, url: String?): Boolean {
+        val here = resolve(baseUrl, url ?: return false) ?: return false
+        return isRoot(baseUrl, here)
+    }
+
+    /** [href] against [baseUrl], or null if either is not an http(s) URL. */
+    private fun resolve(baseUrl: String, href: String): HttpUrl? =
+        baseUrl.toHttpUrlOrNull()?.resolve(href)
+
+    /** Is [url] the bare root of [baseUrl]'s server? Query and fragment ignored. */
+    private fun isRoot(baseUrl: String, url: HttpUrl): Boolean {
+        val base = baseUrl.toHttpUrlOrNull() ?: return false
+        return url.scheme == base.scheme && url.host == base.host &&
+            url.port == base.port && url.encodedPath == "/"
     }
 
     private fun JsonObject.str(key: String): String? =

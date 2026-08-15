@@ -140,3 +140,26 @@ test('signing out is registered, and its two halves cannot ship apart', () => {
     'a redirect URI is interpolated: a trailing slash in PUBLIC_URL breaks it'
   );
 });
+
+test('the invalidation flow is chosen by what it does, not by what it is called', () => {
+  // Authentik ships two, and the one whose name says "provider" is the one
+  // with NO stages: it prints "Logged out of application" and redirects.
+  // `default-invalidation-flow` carries the `user_logout` stage, which is what
+  // ends the session. Preferring the first by slug meant every sign-out left
+  // the identity provider signed in and the next one went through with no
+  // prompt — on both clients, since the web app follows the same redirect.
+  //
+  // Pinned on the mechanism rather than on a slug: the fallback still names
+  // one, and asserting the absence of that name would fail the fix. What must
+  // not come back is CHOOSING by it.
+  assert.match(
+    bootstrap, /\/flows\/bindings\/\?target=/,
+    'the invalidation flow is picked without reading its stages, so a flow '
+    + 'that logs nobody out can be chosen by name'
+  );
+  assert.match(
+    bootstrap, /user-logout/,
+    'nothing looks for the user_logout stage: the flow that ends the session '
+    + 'is indistinguishable from the one that only says so'
+  );
+});

@@ -304,6 +304,19 @@ class MainActivity : ComponentActivity() {
                 var authKey by remember { mutableIntStateOf(0) }
 
                 /**
+                 * The identity provider's end-session URL, while the trip to it
+                 * is on screen. Null the rest of the time, which is always for
+                 * an edition or a provider with nowhere to go — see
+                 * `Auth.endSession`.
+                 *
+                 * Saveable, for the reason `webUrl` below is: rotating in the
+                 * middle of it would otherwise drop the visit and leave the
+                 * provider signed in, which is the bug this whole path exists
+                 * to fix, arrived at from a different direction.
+                 */
+                var endSession by rememberSaveable { mutableStateOf<String?>(null) }
+
+                /**
                  * One client for asking about the session and ending it.
                  *
                  * `Api` builds an OkHttpClient with its own dispatcher and
@@ -438,6 +451,18 @@ class MainActivity : ComponentActivity() {
                         url = it
                         Reminders.rescheduleAll(this@MainActivity)
                     })
+                    // Above the session branches, and both orderings matter.
+                    // `authKey++` nulls the session while it is re-asked, so
+                    // below `session == null` this would be a spinner over a
+                    // sign-out nobody can see; below `Absent` it would be the
+                    // sign-in screen offering to undo what was just asked for.
+                    // The trip is the last thing signing out does, so it is what
+                    // is on screen until it is finished.
+                    endSession != null -> SignOutScreen(
+                        serverUrl = url!!,
+                        endSessionUrl = endSession!!,
+                        onDone = { endSession = null },
+                    )
                     // Nothing is drawn against an unknown session. The
                     // alternative is showing the list and replacing it a request
                     // later, which is the flash of the wrong screen that
@@ -503,7 +528,16 @@ class MainActivity : ComponentActivity() {
                                 onSignOut = if (canSignOut && authApi != null) {
                                     {
                                         lifecycleScope.launch {
-                                            authApi.signOut()
+                                            // The local session ends here
+                                            // regardless; what comes back is
+                                            // the identity provider's own
+                                            // sign-out, which has to be a page
+                                            // rather than a request. Both
+                                            // happen: the app is signed out
+                                            // whether or not that trip works,
+                                            // and `authKey` is what takes the
+                                            // screens down.
+                                            endSession = authApi.signOut()
                                             authKey++
                                         }
                                     }

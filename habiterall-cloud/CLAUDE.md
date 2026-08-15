@@ -216,6 +216,31 @@ checks for a 401, which is what existed and what passed throughout. The
 redirect is the half only a real navigation can see —
 `test/browser/cloudlogin.mjs` follows it now.
 
+**And following it is still not signing out, because the flow it runs was the
+one that does nothing.** Authentik ships two invalidation flows and the
+end-session endpoint runs whichever the provider names.
+`default-provider-invalidation-flow` is called "Logged out of application" and
+has **no stages at all**: it shows that sentence and redirects.
+`default-invalidation-flow` is called "Logout" and carries the `user_logout`
+stage, which is the thing that ends the session. The bootstrap preferred the
+first — `slug.includes('provider')`, on the reasonable-looking ground that this
+is a provider — so every sign-out ended habiterall's session, left Authentik's,
+and the next sign-in went straight through with no prompt. Both clients, not
+just the phone: the web app follows the same `redirect`.
+
+So `pickLogoutFlow` asks what a flow DOES, reading its bindings, because the
+name is exactly what got this wrong and a flow with no stages cannot log
+anybody out whatever it is called. Verified on an emulator against a real
+Authentik rather than argued: sign out, tap Sign in, and the provider asks for
+a username. It is worth measuring that way, because every wrong version of this
+*also* ends with the app on its sign-in screen — the local session goes either
+way, and the whole bug is in the half the app cannot see.
+
+One trap in checking it: **Authentik's request log does not record the
+invalidation flow**, so "the end-session endpoint was never called" is a
+conclusion its logs will support when the call plainly happened. The WebView's
+console is where the flow is visible.
+
 **Registration and branding are blueprints, applied with a context this script
 chooses.** `blueprints/*.yaml` are mounted read-only into both Authentik
 containers and carry `instantiate: "false"`, so Authentik's own discovery never

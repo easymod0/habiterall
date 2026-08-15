@@ -559,12 +559,24 @@ class Api(
      * The local half runs whether or not the request does. A sign-out that
      * fails because the network did is one the user has every reason to believe
      * happened — and the cookie they wanted gone is still on the phone.
+     *
+     * @return the identity provider's end-session URL, which the caller has to
+     *   load **in a WebView** — see [Auth.endSession] for why there is one and
+     *   why an OkHttp call here would end nothing. Null when there is nowhere
+     *   to go, which covers the personal edition, a provider with no
+     *   end-session endpoint, and every way the request can fail: with no
+     *   answer there is no URL, and this client cannot invent one, since the
+     *   only address it knows is this server's. A sign-out done with no network
+     *   therefore ends the local session only, and the next one online ends the
+     *   rest.
      */
-    suspend fun signOut() {
-        runCatching {
-            raw(Request.Builder().url(url("/auth/logout")).post("{}".asBody()).build())
-        }
+    suspend fun signOut(): String? {
+        val next = runCatching {
+            val res = raw(Request.Builder().url(url("/auth/logout")).post("{}".asBody()).build())
+            Auth.endSession(baseUrl, res.status, res.body)
+        }.getOrNull()
         WebSession.clear(baseUrl)
+        return next
     }
 
     /** The `error` a failed auth response carries, if it carries one. */

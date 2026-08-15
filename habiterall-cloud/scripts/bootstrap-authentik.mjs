@@ -168,6 +168,33 @@ const ENROLLMENT_SLUG = 'habiterall-enrollment';
 const only = (list, field, value) => (list.results ?? []).find((o) => o[field] === value) ?? null;
 
 /**
+ * Which invalidation flow actually logs the user out.
+ *
+ * Answered from the flow's BINDINGS — the stages it runs — rather than from
+ * its slug, because the slug is what got this wrong. `user_logout` is the
+ * stage that ends the Authentik session; the component name is what the API
+ * reports for it, and it is checked with a `startsWith` because Authentik
+ * spells it `ak-stage-user-logout-form` while the endpoint underneath is
+ * `user_logout`.
+ *
+ * One request per candidate, and there are two on a default install. A flow
+ * whose bindings cannot be read is not disqualified by the failure — it simply
+ * loses to one that visibly logs out, and the fallback below is the old
+ * behaviour rather than an error, since a provider with a redirect-only flow
+ * is still a working sign-in.
+ */
+async function pickLogoutFlow(flows) {
+  for (const flow of flows) {
+    const bindings = await api(`/flows/bindings/?target=${flow.pk}`).catch(() => null);
+    const logsOut = (bindings?.results ?? []).some((b) =>
+      String(b.stage_obj?.component ?? '').includes('user-logout')
+    );
+    if (logsOut) return flow;
+  }
+  return flows.find((f) => f.slug.includes('provider')) ?? flows[0] ?? null;
+}
+
+/**
  * Everything the provider is assembled from, or an error saying which piece is
  * missing.
  *
@@ -193,9 +220,26 @@ async function findPrerequisites() {
     flows.results[0];
   if (!authFlow) throw new Error('no authorization flow yet');
 
+  // The flow the end-session endpoint runs, and the one lookup here that
+  // cannot be done by name — because the two candidates are named for what
+  // they are ABOUT rather than for what they do, and the one that reads right
+  // is the one that does nothing.
+  //
+  // `default-provider-invalidation-flow` is called "Logged out of application"
+  // and has **no stages at all**: it shows a page saying you have been logged
+  // out and redirects. `default-invalidation-flow` is called "Logout" and
+  // carries the `user_logout` stage, which is the thing that actually ends the
+  // session. Preferring the first — on the reasonable-looking ground that this
+  // is a provider — meant signing out ended habiterall's session and left
+  // Authentik's, so the next sign-in went straight through with no prompt, on
+  // both clients. On a shared device that is the half that matters: the local
+  // session is gone and the credential that recreates it is not.
+  //
+  // So the flow is chosen by asking what it DOES. A flow with no stages cannot
+  // log anybody out whatever it is called, and a deployment that has replaced
+  // these with its own gets the same question asked of those.
   const invFlows = await api('/flows/instances/?designation=invalidation');
-  const invalidationFlow =
-    invFlows.results.find((f) => f.slug.includes('provider')) ?? invFlows.results[0];
+  const invalidationFlow = await pickLogoutFlow(invFlows.results ?? []);
   if (!invalidationFlow) throw new Error('no invalidation flow yet');
 
   // The login flow, and the stage that carries the "Sign up" link. Waited for
