@@ -37,26 +37,42 @@ const MILLIS_PER_DAY = 86_400_000;
 
 /* ---------- shared helpers ---------- */
 
-/**
- * Loop timestamps are UTC-midnight-aligned epoch millis. Read them back with
- * UTC getters so a local timezone west of UTC doesn't shift every date back
- * by one day.
- */
 import { unzip } from './unzip.js';
 // The same limits the API enforces, so an import cannot store what a typed-in
 // habit could not.
 import { LIMITS } from './validate.js';
 import { TIME_RE } from './constants.js';
 
+/**
+ * Loop timestamps are UTC-midnight-aligned epoch millis. Read them back with
+ * UTC getters so a local timezone west of UTC doesn't shift every date back
+ * by one day.
+ *
+ * The year is padded to four digits exactly as the month and day are, and that
+ * is not cosmetic: a date reaches storage only through `^\d{4}-\d{2}-\d{2}$` in
+ * both editions' `applyImport`, so `0100-01-01` came back as `"100-01-01"` and
+ * the entry was silently discarded as a bad date — on a timestamp the export
+ * half had written correctly. The `boundedRange` note in the root CLAUDE.md
+ * cites an entry dated year 0100 as data that has actually turned up here.
+ *
+ * Anything outside years 1–9999 is `null`, which is what the caller already
+ * skips on. Padding alone would have turned year 0 into a plausible-looking
+ * `0000-01-01`; a negative year is BCE, which nothing downstream represents;
+ * and a timestamp past the ECMAScript range arrives as a NaN year. Refusing
+ * all three here rather than leaving them to a regex three files away is what
+ * keeps "this reader emits a real date or nothing" true of the function
+ * itself.
+ */
 export function loopTimestampToISO(millis) {
   const n = Number(millis);
   if (!Number.isFinite(n)) return null;
   const days = Math.floor(n / MILLIS_PER_DAY);
   const d = new Date(days * MILLIS_PER_DAY);
   const y = d.getUTCFullYear();
+  if (!(y >= 1 && y <= 9999)) return null;
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return `${String(y).padStart(4, '0')}-${m}-${day}`;
 }
 
 /**

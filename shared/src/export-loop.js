@@ -75,10 +75,22 @@ export function timeToLoopReminder(time) {
   return [Number(m[1]), Number(m[2])];
 }
 
-/** 'YYYY-MM-DD' -> epoch millis at UTC midnight, matching Loop's storage. */
+/**
+ * 'YYYY-MM-DD' -> epoch millis at UTC midnight, matching Loop's storage.
+ *
+ * Built through `setUTCFullYear` rather than `Date.UTC`, which applies the
+ * legacy two-digit-year mapping to a year argument of 0–99 and relocated every
+ * such date by 1900 years: `0050-03-15` was written into the backup as
+ * 1950-03-15, silently, with nothing in the skipped-row report. `setUTCFullYear`
+ * is the only constructor that takes a year literally. Everything else is
+ * unchanged — the month/day arguments normalise exactly as `Date.UTC`'s do, so
+ * an impossible date still rolls over rather than being rejected here.
+ */
 export function isoToLoopTimestamp(iso) {
   const [y, m, d] = iso.split('-').map(Number);
-  return Date.UTC(y, m - 1, d);
+  const t = new Date(0); // epoch, so every field below the year is already zero
+  t.setUTCFullYear(y, m - 1, d);
+  return t.getTime();
 }
 
 /**
