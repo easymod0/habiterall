@@ -58,9 +58,53 @@ export function setAuth(adapter) {
   auth = adapter;
 }
 
+/**
+ * Queue a write, say so, and hand the caller the one error shape it knows.
+ *
+ * Shared by the two ways a write ends up in the outbox — the attempt that
+ * failed, and the attempt not made at all — because a caller must not be able
+ * to tell them apart. Both are "saved on this device"; only the latency differs.
+ */
+async function queueWrite(url, method, options) {
+  await enqueue({ url, method, body: options.body ?? null });
+  // Nothing else can say it: the watcher makes no requests while it believes it
+  // is online, so before this the app went on looking connected through an
+  // entire outage, with the badge hidden inside the hidden banner.
+  reportUnreachable();
+  await refreshOfflineBadge();
+  return Object.assign(
+    new Error('Saved offline — will sync when you reconnect'),
+    { queued: true }
+  );
+}
+
 export async function api(path, options = {}) {
   const url = `/api${path}`;
   const method = (options.method ?? 'GET').toUpperCase();
+
+  // Already known to be offline: queue it without spending the timeout.
+  //
+  // This is the second tap onward. The first is what discovers the outage —
+  // there is no cheaper way to learn it, and probing `/healthz` on every write
+  // is what that endpoint's four callers make expensive — so tap one pays the
+  // bound and every tap after it is free. Before the watcher was fed by a
+  // failed write, this branch could never be reached: the app never came to
+  // believe it was offline, so "when it already believes" described no state.
+  //
+  // Writes only. A GET has somewhere to fall back to — the service worker may
+  // hold a cached copy, and skipping the request would throw that away and
+  // leave the app blank rather than stale.
+  //
+  // `POST /habits` is exempt, by the same predicate as the timeout rather than
+  // a second opinion about the same call. Pre-empting it would in fact be safe
+  // — nothing is sent, so nothing can arrive twice — but the two rules would
+  // then disagree about which call is special, and the next person to change
+  // one would have to find the other. The call that is never abandoned
+  // mid-flight is also the one never pre-empted; offline it fails and reaches
+  // the outbox by the ordinary path, exactly as it did before this branch.
+  if (method !== 'GET' && bounded(method, path) && state.offline) {
+    throw await queueWrite(url, method, options);
+  }
 
   let res;
   try {
@@ -77,19 +121,7 @@ export async function api(path, options = {}) {
   } catch (networkError) {
     // Offline. Queue writes for replay; reads have nothing to fall back on
     // beyond whatever the service worker already cached.
-    if (method !== 'GET') {
-      await enqueue({ url, method, body: options.body ?? null });
-      // Now say so. Nothing else can: the watcher makes no requests while it
-      // believes it is online, so before this the app went on looking connected
-      // through an entire outage and the badge — a child of the banner — was
-      // hidden along with it.
-      reportUnreachable();
-      await refreshOfflineBadge();
-      throw Object.assign(
-        new Error('Saved offline — will sync when you reconnect'),
-        { queued: true }
-      );
-    }
+    if (method !== 'GET') throw await queueWrite(url, method, options);
     throw new Error('You are offline');
   }
 

@@ -141,6 +141,23 @@ is the actual traffic — and it must come in through there rather than as a
 `setOffline` from outside, or the watcher's `last` stays `true` and it neither
 polls nor reports the transition. See the root CLAUDE.md.
 
+And once it HAS said so, `api()` stops asking: a write finds `state.offline`
+already true and goes to the outbox without opening a socket. Tap one is what
+discovers an outage and there is no cheaper way to learn it — probing `/healthz`
+per write is what that endpoint's four callers make expensive — so the first tap
+pays the 10s bound and every tap after it costs ~100ms. Note this branch was
+unreachable before the watcher grew that input: nothing set the state on the
+write path, so "when the app already believes it is offline" described no state
+the app could be in, and the obvious-looking fix would have done nothing.
+
+Two exclusions, both deliberate. A **GET** still goes to the network, because
+the service worker may hold a cached copy and skipping the request throws that
+away — stale beats blank. And `POST /habits` is excluded **by the same
+`bounded()` predicate as the timeout**, not by a second opinion about the same
+call: pre-empting it would in fact be safe, since nothing is sent and nothing
+can arrive twice, but two rules disagreeing about which call is special is how
+the next person changes one and not the other.
+
 **The score formula is deliberate.** It feeds a trailing-window adherence
 ratio (always `[0,1]`) into an EWMA. Do not "simplify" it back to scaling a
 day's credit by `1/frequency` — that overshoots for every non-daily habit and

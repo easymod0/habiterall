@@ -147,6 +147,40 @@ try {
   check('the request really was held, not refused',
     !!write, `held: ${held.map((r) => r.method + ' ' + new URL(r.url).pathname).join(', ')}`);
 
+  /* ---- 1b. the next tap does not pay the bound again ---- */
+  console.log('--- once it knows, it stops asking ---');
+
+  // Tap one is what discovers the outage and there is no cheaper way to learn
+  // it. Tap two should cost nothing: the app already believes it is offline, so
+  // the write goes straight to the outbox without a socket. Before the watcher
+  // was fed by a failed write this branch was unreachable — the app never came
+  // to believe anything — so this is the half of the old issue that only became
+  // real once the state did.
+  const t0 = Date.now();
+  await ev(`(()=>{
+    const cells = [...document.querySelectorAll('.habit-row:nth-child(2) .check')];
+    cells[cells.length - 1].click();
+    return true;
+  })()`);
+
+  // Generously under the bound: if the attempt were still being made this
+  // could not finish inside it.
+  let second = null;
+  for (let i = 0; i < 30; i++) {
+    await sleep(100);
+    second = await look();
+    if (second.outbox.length >= 2) break;
+  }
+  const took = Date.now() - t0;
+
+  check('the second tap is queued without waiting for a timeout',
+    second.outbox.length === 2, JSON.stringify(second.outbox));
+  check('and it took a fraction of the bound, not the whole of it',
+    took < BOUND_MS / 2, `${took}ms against a ${BOUND_MS}ms bound`);
+  check('nothing was sent for it — the socket was never opened',
+    held.filter((r) => r.method === 'PUT').length === 1,
+    `${held.filter((r) => r.method === 'PUT').length} PUT(s) held`);
+
   /* ---- 2. creating a habit is not abandoned ---- */
   console.log('--- POST /habits is exempt ---');
 
