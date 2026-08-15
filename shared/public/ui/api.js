@@ -16,7 +16,7 @@ import { state } from '/shared/ui/store.js';
  */
 let auth = null;
 
-/** @param adapter see auth-none.js / auth-oidc.js */
+/** @param adapter see auth-session.js */
 export function setAuth(adapter) {
   auth = adapter;
 }

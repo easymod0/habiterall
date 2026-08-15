@@ -111,8 +111,48 @@ db.exec(`
     at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
   );
 
+  -- The single account's credentials, when this instance has auth on and is
+  -- not configured from the environment.
+  --
+  -- Deliberately NOT a row in 'settings'. That table is handed to the browser
+  -- wholesale by GET /api/settings, and it is also captured by the backup that
+  -- GET /api/export produces — so a password hash there would travel in every
+  -- exported file and be one filter away from being served to a client. This
+  -- is the same rule that keeps DISCORD_BOT_TOKEN out of settings (CLAUDE.md).
+  --
+  -- One row, enforced by the CHECK: there is one user in this edition.
+  CREATE TABLE IF NOT EXISTS auth_credentials (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    username   TEXT NOT NULL,
+    -- scrypt, formatted by shared/src/password.js — never plaintext
+    hash       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Secrets the server generates for itself, when the operator has not supplied
+  -- one. Currently just the session-signing key.
+  --
+  -- A table of its own for the same reason auth_credentials is: 'settings' is
+  -- served to the browser by GET /api/settings and copied into every backup by
+  -- GET /api/export. A session secret in a backup file signs cookies for the
+  -- instance that restores it.
+  CREATE TABLE IF NOT EXISTS server_secrets (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  -- Server-side sessions, so signing out can actually revoke one. See
+  -- src/session-store.js for why this is not connect-sqlite3.
+  CREATE TABLE IF NOT EXISTS sessions (
+    sid        TEXT    PRIMARY KEY,
+    data       TEXT    NOT NULL,
+    -- epoch ms, so expiry is a comparison and not a date parse on every read
+    expires_at INTEGER NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
   CREATE INDEX IF NOT EXISTS idx_habits_pos  ON habits(position, id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at);
 `);
 
 /**

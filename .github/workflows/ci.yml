@@ -158,6 +158,18 @@ jobs:
       - run: npm ci
       - run: npm test
 
+      # The three auth modes end to end, against the real server. In this job
+      # rather than a browser one because it needs no browser and no services —
+      # it re-execs itself per mode, since auth resolves once at startup.
+      - name: Auth modes
+        run: npm run test:auth -w habiterall-personal
+
+      # Separate because it RESTARTS the server between assertions, which is the
+      # only way to see a session outliving the credential that raised it —
+      # every other auth check runs inside one process and cannot.
+      - name: Credential change evicts sessions
+        run: npm run test:credchange -w habiterall-personal
+
   types:
     name: Type check
     runs-on: ubuntu-latest
@@ -188,10 +200,17 @@ jobs:
       - run: npm ci
 
       - name: Start the personal edition
+        # Both switches off on purpose. These suites drive the app, not the
+        # login: with auth on they would meet the setup screen instead of a
+        # dashboard, and twenty-two suites resetting fixtures from one address
+        # pass the 300/minute API limit long before they find a bug. The
+        # sign-in flow and the limits are covered by the two jobs below, which
+        # start their own servers configured the other way.
         run: |
           mkdir -p habiterall-personal/data
           (cd habiterall-personal && \
-            PORT=3000 HABITERALL_DB=./data/ci.db node src/server.js &)
+            PORT=3000 HABITERALL_DB=./data/ci.db \
+            HABITERALL_AUTH=off HABITERALL_RATE_LIMIT=off node src/server.js &)
           for i in $(seq 1 60); do
             curl -sf http://localhost:3000/healthz >/dev/null && break
             sleep 1
@@ -205,6 +224,14 @@ jobs:
           BASE: http://localhost:3000
           CHROME_PATH: /usr/bin/google-chrome
         run: npm run test:browser
+
+      - name: Run the sign-in view suite
+        # Starts and stops its own server, because it needs auth ON and, for
+        # its first half, no account yet — the one configuration the shared
+        # runner's single instance cannot be in.
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: npm run test:signin -w habiterall-personal
 
   tenancy:
     name: Multi-tenant isolation

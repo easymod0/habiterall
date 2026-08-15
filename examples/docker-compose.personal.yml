@@ -1,4 +1,4 @@
-# habiterall, personal edition — single user, SQLite, no login.
+# habiterall, personal edition — single user, SQLite, one password.
 #
 # The copy in README.md is generated from this file, and a unit test fails if the
 # two drift, so edit this one.
@@ -23,6 +23,20 @@ services:
       # both when an 08:00 reminder fires and which day a check-off lands on.
       # Unset, an evening check-in west of UTC is filed under tomorrow.
       TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
+      # The single account. Set BOTH before you expose this port: with neither,
+      # the first visitor to reach the app claims it — no token, no address
+      # check — which is fine on a LAN and a race on the internet.
+      HABITERALL_USERNAME: ''        # defaults to "admin"
+      HABITERALL_PASSWORD: ''        # at least 8 characters
+      # Sign-in is ON unless this is EXACTLY "off" — "false", "0" and every typo
+      # of "off" all leave it on, deliberately. Only set it for a machine nobody
+      # else can reach.
+      HABITERALL_AUTH: ''
+      # Set to 1 behind a reverse proxy (see "Put HTTPS in front" below), and
+      # leave it at 0 when this port is reached directly. It decides whose
+      # address the rate limiter counts, whether a Secure cookie can be issued,
+      # and which Host the cross-origin check compares.
+      TRUST_PROXY: 0
       # Optional, and only for reminders the SERVER sends (a Discord channel).
       # The Android app needs neither of these — it arms its own alarms.
       HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com

@@ -20,6 +20,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const workdir = mkdtempSync(join(tmpdir(), 'habiterall-overview-'));
+// This suite exercises the API, not sign-in or rate limiting, and auth now
+// defaults ON — see shared/src/password.js. Both are turned off explicitly here,
+// before the server module is imported, exactly as HABITERALL_DB must be.
+process.env.HABITERALL_AUTH = 'off';
+process.env.HABITERALL_RATE_LIMIT = 'off';
 process.env.HABITERALL_DB = join(workdir, 'overview.db');
 
 const { app } = await import('../src/server.js');

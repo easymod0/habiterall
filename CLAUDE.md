@@ -12,7 +12,7 @@ shared/               EVERYTHING both editions have in common
   public/             the entire UI, plus the PWA (manifest, sw, offline queue)
   public/ui/          one module per view and dialog, over a shared store
   test/               unit tests + browser suites (test/browser/)
-habiterall-personal/  single user, SQLite, no auth   (src/ + one entry point)
+habiterall-personal/  single user, SQLite, optional password  (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)
 android-native/       native Kotlin client — notification actions, and habits
 ```
@@ -24,8 +24,8 @@ what runs is what's on disk.
 ### What belongs where
 
 - **`shared/`** — anything not coupled to storage or auth. The whole frontend
-  lives here; each edition ships only `public/app-entry.js`, which picks an
-  auth adapter and calls `start()`.
+  lives here; each edition ships only `public/app-entry.js`, which calls
+  `start()` with the one auth adapter.
 - **Per edition** — storage (`db.js` / `db/pool.js`), auth, the import
   *writer* (`apply-import.js`), the notifier's storage adapter
   (`notifier.js`), and the API routes.
@@ -560,6 +560,123 @@ server at import time, so nothing declared in it can be unit tested — and the
 failure mode here is silent in the worst direction, an `inflight` left set
 reporting the last good answer forever while Postgres is down.
 
+**One auth adapter, and the server says which mode it is in.**
+`shared/public/auth-session.js` covers all four states — `none`, `password`,
+`setup`, `oidc` — because with no build step there is nothing to pick a module
+at package time, so baking the edition into a file meant the personal edition
+could not make auth a runtime choice at all. `GET /api/me` carries `mode`, and
+so does its **401**: a signed-out client is the one that needs to know whether to
+draw a form or a link, and that response is all it gets. It replaced
+`auth-none.js` and `auth-oidc.js`, and both editions' `app-entry.js` are now the
+same three lines.
+
+Which makes `/api/me` the one route that reads a session **without**
+`requireAuth`, since it sits above the `/api` mount and has to answer a caller
+who has none. It therefore has to repeat by hand every question that middleware
+asks, and it did not: it checked that a session existed and not that it was still
+valid against the current credential, so a revoked cookie got a `200` naming the
+account it no longer had. That is the answer the whole boot is built on — the
+app painted its signed-in shell and threw it away on the first dashboard fetch —
+and it handed back the previous owner's username on the way.
+
+**Boot has to be able to fail visibly.** Everything `start()` does before the
+first paint now happens with every view hidden, so an error escaping it used to
+leave a completely blank page under a toast that cleared itself in 2.6 seconds.
+`#view-error` is that surface, and the case it exists for is not exotic: a
+`CACHE_VERSION` bump drops the data cache, so the first offline boot afterwards
+gets the service worker's synthetic 503 for `/api/me` — which `load()` correctly
+refuses to read a mode from. The split in `start()` is deliberate: anything up to
+and including the dashboard's first render goes to that view, and
+`handleLaunchAction` afterwards only toasts, because by then there is a painted
+app that replacing would be the larger loss.
+
+**Sign-in belongs in the app, not in the reverse proxy** — because of the
+Android client. `android-native/.../data/Api.kt` talks to `/api` directly,
+outside the WebView, so a proxy's login form is one it cannot fill; exempting
+`/api` to fix that exempts everything worth guarding. The app also needs a `401`
+it can act on, and a proxy answers an expired session with `200` and an HTML
+login page, which the offline replay queue feeds straight to a JSON parser. Both
+editions therefore issue the same cookie (`SESSION_NAME`, `httpOnly`,
+`SameSite=Lax`), so one path in `Api.kt` can carry either.
+
+**The security config is shared; the limiter's key is not.**
+`shared/src/security.js` holds the CSP, the session cookie shape, the four rate
+limits and the `TRUST_PROXY` rule, because those describe `shared/public/` rather
+than an edition — two copies of a CSP is two chances to break the PWA in exactly
+one of them. What stays per edition is `keyGenerator`: cloud keys per
+authenticated user, personal keys on IP through `ipKeyGenerator`, which
+normalises IPv6 to its /64 (a bare `req.ip` gives one client 2^64 buckets to
+rotate through, and express-rate-limit v8 says so at startup rather than
+failing).
+
+**The absence of a field is not a statement.** `auth-session.js` resolves the
+mode from `/api/me`, and it used to read "no `mode` in the body" as an answer:
+`body.mode ?? (res.ok ? 'none' : 'oidc')`. Both guesses were wrong somewhere. A
+429 from the API limiter carries no mode — and the personal edition keys on IP,
+so one household behind one NAT shares the bucket — which replaced a working app
+with a sign-in screen whose only control 404s, on an instance with no auth at
+all. Offline was sharper still: the service worker answers an unreachable API
+with a *synthetic 503* rather than throwing, so the `catch` that existed for
+exactly this never ran. Only 200 and 401 say anything about how an instance
+authenticates; everything else is a fault and belongs on the error path.
+
+**A cookie session needs an origin check, and a missing `Origin` must pass.**
+Both editions authenticate with a cookie, which is what makes forgery possible:
+a form on another site POSTs here and the browser attaches the session.
+`SameSite=Lax` stops that in every current browser and is why the cookie is set
+that way — but it is a defence written in one attribute, invisible at the routes
+it protects. `sameOriginOnly` states the other half where the requests are.
+Browsers always send `Origin` on a state-changing request, so a mismatch is
+forgery and nothing else. What has no `Origin` is a *native* client — `Api.kt`
+answering a notification — and refusing those would break the Android client to
+stop a request it cannot make. That is also why this is an origin check rather
+than a CSRF token: a token must be fetched, held and replayed by every client,
+and the point of both editions issuing the same cookie is that the phone needs
+no special path.
+
+Its refusal is a **403, and the outbox must not treat that as a verdict on the
+write.** The replay loop drops any 4xx other than 401 as permanently
+inapplicable, which is right for a deleted habit and wrong for this: `req.host`
+is trust-proxy-aware, so a proxy that rewrites `Host` with no hop trusted makes
+every write look cross-origin, and the first flush after that silently destroyed
+the entire queue. 403 now keeps its place in line, exactly as 401 does — the
+misconfiguration is fixable, and the writes replay when it is.
+
+**`req.host` is the third thing `TRUST_PROXY` decides**, after the limiters' key
+and — since the personal edition stopped deriving it from a URL — whether the
+session cookie can be `Secure` at all. All three fail quietly and in different
+directions, which is why `warnOnUntrustedProxy` names all three.
+
+**A `Secure` cookie is a per-REQUEST answer in the personal edition.** It was
+`PUBLIC_URL.startsWith('https://')` — one verdict for the process — which is
+exactly wrong for the deployment `HABITERALL_UPGRADE_INSECURE` is written for:
+https from outside, plain http from the LAN, same database. The browser at
+`http://192.168.1.5:3000` discarded the cookie, so login answered 200, the page
+reloaded, and the app came back signed out forever with no error at either end.
+`secure: 'auto'` asks `req.secure` instead, so each way in gets its own answer.
+Cloud keeps the URL-derived form: it has one public origin, demands `PUBLIC_URL`,
+and has no LAN half to serve.
+
+**The credential limiter is not switchable.** `HABITERALL_RATE_LIMIT=off` exists
+so a test run is not throttled on ordinary reads; it briefly reached
+`/auth/login` too, which turned it into "also remove the only bound on guesses at
+a single shared password" — something no amount of trusting your own network
+justifies, and which the name does not hint at. CodeQL found it, because routing
+the limiter through a helper that might return a pass-through is also how a
+static analyser stops being able to see it. The auth suite now counts the
+attempts that get through.
+
+**`upgrade-insecure-requests` is the caller's decision, not helmet's.**
+helmet adds it by default, which is right behind TLS and a trap on plain http:
+the browser rewrites every request to https, nothing is listening, and the app
+does not load. It goes unnoticed on `localhost`, which browsers exempt, so it
+only ever breaks on a real address. `cspDirectives(upgradeInsecure)` takes it as
+a parameter because the two editions want different answers — cloud ties it to
+its own scheme, personal makes it an explicit opt-in
+(`HABITERALL_UPGRADE_INSECURE=on`) and defaults to off, because a self-hosted box
+is commonly reachable over both schemes at once and deriving it would break the
+plain-http half.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —
@@ -573,7 +690,10 @@ Several layers, and they catch different things:
 |---|---|---|
 | Unit | `npm test` | nothing |
 | Types | `npm run typecheck` | nothing |
-| Browser | `npm run test:browser` | Chrome + a running server |
+| Browser | `npm run test:browser` | Chrome + a server with `HABITERALL_AUTH=off HABITERALL_RATE_LIMIT=off` |
+| Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
+| Credential change | `npm run test:credchange -w habiterall-personal` | nothing |
+| Sign-in view | `npm run test:signin -w habiterall-personal` | Chrome (starts its own server) |
 | Reminders | `npm run test:notify` | nothing |
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |

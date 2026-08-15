@@ -36,7 +36,7 @@
               title="Back to your habits">habiterall</button>
     </h1>
     <div class="topbar-actions">
-      <button id="btn-new" class="btn btn-primary">New habit</button>
+      <button id="btn-new" class="btn btn-primary" hidden>New habit</button>
       <!--
         Backup lives at the foot of the settings dialog, not here. Four
         buttons plus the brand did not fit a 360px phone, and of the four this
@@ -44,7 +44,7 @@
         that is not a habit lives. The empty state still offers "Import a
         backup" directly, which is where a new account needs it.
       -->
-      <button id="btn-settings" class="btn btn-icon" title="Settings" aria-label="Settings">⚙</button>
+      <button id="btn-settings" class="btn btn-icon" title="Settings" aria-label="Settings" hidden>⚙</button>
       <button id="btn-theme" class="btn btn-icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
       <!-- Multi-user edition only; the no-auth adapter never reveals it. -->
       <span id="user-chip" class="user-chip" hidden>
@@ -61,18 +61,75 @@
     <button type="button" id="btn-sync" class="btn btn-sm">Retry</button>
   </div>
 
+  <!--
+    One sign-in view for every mode. The copy and which control shows are set
+    by auth-session.js from what the server reports, because the personal
+    edition decides at runtime whether it has auth at all — see that file.
+  -->
   <main id="view-signin" class="view" hidden>
     <div class="signin">
-      <h2 class="signin-title">Sign in to habiterall</h2>
-      <p class="signin-sub">
+      <h2 class="signin-title" id="signin-title">Sign in to habiterall</h2>
+      <p class="signin-sub" id="signin-sub">
         Your habits are private to your account. Sign in with your
         organisation account to continue.
       </p>
-      <a href="/auth/login" class="btn btn-primary btn-signin">Sign in</a>
+
+      <a href="/auth/login" class="btn btn-primary btn-signin" id="signin-oidc">Sign in</a>
+
+      <form id="signin-form" class="signin-form" hidden>
+        <label>Username
+          <input id="signin-user" name="username" autocomplete="username"
+                 autocapitalize="none" spellcheck="false" required>
+        </label>
+        <label>Password
+          <input id="signin-pass" name="password" type="password"
+                 autocomplete="current-password" required>
+        </label>
+        <label id="signin-confirm-row" hidden>Confirm password
+          <input id="signin-confirm" name="confirm" type="password"
+                 autocomplete="new-password">
+        </label>
+        <p id="signin-error" class="signin-error" role="alert" hidden></p>
+        <button type="submit" class="btn btn-primary btn-signin" id="signin-submit">
+          Sign in
+        </button>
+      </form>
     </div>
   </main>
 
-  <main id="view-list" class="view">
+  <!--
+    Boot failed before the session could be resolved — see `start()` in app.js.
+    It needs a view of its own because the alternative is nothing at all: every
+    other main is now hidden until something has data to put in it, so an error
+    thrown while resolving /api/me (a 500, a proxy's 502, or the service
+    worker's synthetic 503 on the first offline boot after a cache bump) left a
+    blank page under a toast that cleared itself two and a half seconds later.
+  -->
+  <main id="view-error" class="view" hidden>
+    <!--
+      Its own class names, sharing the empty state's rules rather than its
+      classes. The dashboard's empty panel is reached by CLASS from the browser
+      suites (`document.querySelector('.empty-title')`), which have no `#empty`
+      to scope to, so a second `.empty-title` earlier in the document answers
+      those queries instead — hidden or not.
+    -->
+    <div class="boot-error">
+      <p class="boot-error-title">habiterall could not start</p>
+      <p id="boot-error" class="boot-error-sub"></p>
+      <div class="boot-error-actions">
+        <button type="button" id="boot-retry" class="btn btn-primary">Try again</button>
+      </div>
+    </div>
+  </main>
+
+  <!--
+    Hidden until the session is known. Painted markup would otherwise show the
+    whole signed-in shell — grid, New habit, the gear — for one round trip on
+    every cold load of an authenticated instance, then replace it with the
+    sign-in view. `dashboard.paint()` calls `views.showList()`, so the signed-in
+    path unhides it as soon as there is anything to put in it.
+  -->
+  <main id="view-list" class="view" hidden>
     <div id="list-head" hidden>
       <button type="button" id="toggle-archived" class="btn btn-sm" aria-pressed="false">
         Show archived

@@ -2,7 +2,7 @@ import express from 'express';
 import session from 'express-session';
 import connectPgSimple from 'connect-pg-simple';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -13,6 +13,10 @@ import { api } from './api.js';
 import { start as startNotifier } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
+import {
+  cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
+  sameOriginOnly, warnOnUntrustedProxy,
+} from '@habiterall/shared/security.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -44,68 +48,41 @@ const app = express();
 // carries an id and still gets counted.
 app.use(requestLog(log));
 
-/**
- * How many reverse proxies sit in front of the app.
- *
- * This was hardcoded to 1 while `.env.example` and docker-compose both
- * advertised a `TRUST_PROXY` variable — so an operator running the app
- * directly exposed, and setting `TRUST_PROXY=0` exactly as documented, still
- * got proxy trust. That matters: with it on, a client-supplied
- * `X-Forwarded-For` becomes `req.ip`, and `req.ip` is the rate limiter's key
- * for unauthenticated requests. The login limiter (20 per 15 minutes) is then
- * bypassable by rotating a header.
- *
- * Trusting one hop remains the default, because the documented deployment
- * puts TLS termination in front.
- */
-const trustProxy = process.env.TRUST_PROXY === undefined
-  ? 1
-  : Number(process.env.TRUST_PROXY);
+// How many reverse proxies sit in front of the app — see `trustProxy` in
+// shared/src/security.js for why getting this wrong is a security bug in both
+// directions.
+// Resolved once and held, because the startup log reports it: `trust_proxy` in
+// that line used to be a local number and is now an imported function, so the
+// log had been printing the function's source where an operator looks to check
+// the one setting that decides whose address the limiters key on.
+const trustProxyHops = trustProxy(process.env.TRUST_PROXY);
+app.set('trust proxy', trustProxyHops);
 
-if (!Number.isInteger(trustProxy) || trustProxy < 0) {
-  throw new Error(
-    `TRUST_PROXY must be a non-negative integer (got ${process.env.TRUST_PROXY})`
-  );
-}
-// `false` rather than 0: Express treats the number 0 as "trust nothing" too,
-// but false is the documented form and reads unambiguously.
-app.set('trust proxy', trustProxy === 0 ? false : trustProxy);
+// Rarely fires here, since this edition defaults to trusting one hop — but an
+// operator who set TRUST_PROXY=0 behind the documented compose stack lands in
+// exactly the same silent hole.
+app.use(warnOnUntrustedProxy({
+  trusted: trustProxyHops,
+  warn: (fields) => log.warn('proxy_untrusted', fields),
+}));
 
 app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],      // no inline scripts: the frontend is plain modules
-      styleSrc: ["'self'"],
-      imgSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'"],
-      // Stated explicitly rather than inherited from default-src, so the PWA
-      // keeps working if default-src is ever tightened.
-      workerSrc: ["'self'"],      // the service worker
-      manifestSrc: ["'self'"],    // the web app manifest
-      frameAncestors: ["'none'"],
-      objectSrc: ["'none'"],
-      baseUri: ["'self'"],
-      formAction: ["'self'"],
-    },
-  },
-  hsts: isProd ? { maxAge: 31536000, includeSubDomains: true } : false,
+  contentSecurityPolicy: { directives: cspDirectives(publicIsHttps) },
+  hsts: isProd ? HSTS : false,
 }));
 
 const PgStore = connectPgSimple(session);
 
 app.use(session({
   store: new PgStore({ pool, tableName: 'session', createTableIfMissing: false }),
-  name: 'habiterall.sid',
+  name: SESSION_NAME,
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   rolling: true,
   cookie: {
-    httpOnly: true,                  // unreadable from JS, so XSS cannot steal it
+    ...SESSION_COOKIE,
     secure: publicIsHttps,           // set whenever the site is actually served over TLS
-    sameSite: 'lax',                 // blocks cross-site POSTs while allowing the OIDC return
-    maxAge: 1000 * 60 * 60 * 24 * 14,
   },
 }));
 
@@ -115,34 +92,38 @@ app.use(session({
 // is down with the static files.
 const healthProbe = createHealthProbe(() => pool.query('SELECT 1'));
 
+// Cross-site forgery, stated at the routes rather than left to the cookie's
+// SameSite attribute alone — same middleware the personal edition mounts.
+// PUBLIC_URL is allowed explicitly because the OIDC round trip returns to it.
+app.use(sameOriginOnly({
+  allow: [new URL(process.env.PUBLIC_URL).origin],
+  onReject: (req, origin) => log.warn('csrf.refused', { path: req.path, origin }),
+}));
+
 /* ---------- rate limits ---------- */
 
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, limit: 20,
-  standardHeaders: true, legacyHeaders: false,
-  message: { error: 'too many login attempts, try again later' },
-});
+// Limit per authenticated user where possible, falling back to IP. This is the
+// half of a limiter that does NOT belong in shared/: the personal edition has
+// one account, so keying on its id would put the legitimate user and an
+// attacker in the same bucket. Same limits there, different key.
+//
+// The fallback goes through `ipKeyGenerator`, which normalises IPv6 to its /56.
+// A bare `req.ip` makes every address in a residential prefix its own bucket —
+// 2^72 of them — and express-rate-limit v8 reports that as ERR_ERL_KEY_GEN_IPV6
+// at startup rather than failing. Unreachable here today, since `requireAuth`
+// runs before every limiter below and no unauthenticated request gets this far,
+// but it is one route ordering away from mattering.
+const perUser = (req) =>
+  (req.session?.user?.id ? `u:${req.session.user.id}` : ipKeyGenerator(req.ip));
 
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000, limit: 300,
-  standardHeaders: true, legacyHeaders: false,
-  // Limit per authenticated user where possible, falling back to IP.
-  keyGenerator: (req) => (req.session?.user?.id ? `u:${req.session.user.id}` : req.ip),
-  message: { error: 'rate limit exceeded' },
-});
+const loginLimiter = rateLimit(RATE_LIMITS.login);
+const apiLimiter = rateLimit({ ...RATE_LIMITS.api, keyGenerator: perUser });
+const notifyTestLimiter = rateLimit({ ...RATE_LIMITS.notifyTest, keyGenerator: perUser });
+const importLimiter = rateLimit({ ...RATE_LIMITS.import, keyGenerator: perUser });
 
-/**
- * The test-notification endpoint makes the server perform an OUTBOUND request,
- * which the general 300-per-minute API limit is far too loose for: it would
- * let one account push 300 posts a minute at its Discord channel and get the
- * server rate-limited (or the webhook deleted) on their behalf.
- */
-const notifyTestLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, limit: 10,
-  keyGenerator: (req) => (req.session?.user?.id ? `u:${req.session.user.id}` : req.ip),
-  message: { error: 'too many test notifications, try again in a few minutes' },
-});
-
+// Not from RATE_LIMITS: this one is inseparable from this edition. It answers
+// from the health memo rather than refusing, and skips the container's own
+// interface — neither of which the personal edition has.
 /**
  * `/healthz` is the only unauthenticated route that touches Postgres, but the
  * pool is not what this limit protects — the memo in health.js is, and a per-IP
@@ -173,12 +154,6 @@ const healthLimiter = rateLimit({
   standardHeaders: true, legacyHeaders: false,
   skip: (req) => LOCAL_IPS.test(req.ip ?? ''),
   handler: async (req, res) => sendHealth(res, healthProbe.cached() ?? await healthProbe()),
-});
-
-const importLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, limit: 20,
-  keyGenerator: (req) => (req.session?.user?.id ? `u:${req.session.user.id}` : req.ip),
-  message: { error: 'too many imports, try again later' },
 });
 
 /* ---------- auth routes ---------- */
@@ -216,7 +191,10 @@ app.post('/auth/logout', (req, res) => {
 
 app.get('/api/me', requireAuth, (req, res) => {
   const { id, email, name } = req.session.user;
-  res.json({ id, email, name });
+  // `mode` tells the shared frontend which sign-in control to draw. This
+  // edition is always 'oidc'; the personal edition answers 'none', 'password'
+  // or 'setup' here. See shared/public/auth-session.js.
+  res.json({ id, email, name, mode: 'oidc' });
 });
 
 /* ---------- api ---------- */
@@ -286,7 +264,7 @@ async function start() {
       port: PORT,
       public_url: process.env.PUBLIC_URL,
       secure_cookies: publicIsHttps,
-      trust_proxy: trustProxy,
+      trust_proxy: trustProxyHops,
       // The number that decides how many replicas Postgres can carry:
       // max × replicas must stay under the server's max_connections.
       pg_pool_max: Number(process.env.PG_POOL_MAX) || 10,

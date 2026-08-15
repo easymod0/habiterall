@@ -84,6 +84,20 @@ services:
       # both when an 08:00 reminder fires and which day a check-off lands on.
       # Unset, an evening check-in west of UTC is filed under tomorrow.
       TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
+      # The single account. Set BOTH before you expose this port: with neither,
+      # the first visitor to reach the app claims it — no token, no address
+      # check — which is fine on a LAN and a race on the internet.
+      HABITERALL_USERNAME: ''        # defaults to "admin"
+      HABITERALL_PASSWORD: ''        # at least 8 characters
+      # Sign-in is ON unless this is EXACTLY "off" — "false", "0" and every typo
+      # of "off" all leave it on, deliberately. Only set it for a machine nobody
+      # else can reach.
+      HABITERALL_AUTH: ''
+      # Set to 1 behind a reverse proxy (see "Put HTTPS in front" below), and
+      # leave it at 0 when this port is reached directly. It decides whose
+      # address the rate limiter counts, whether a Secure cookie can be issued,
+      # and which Host the cross-origin check compares.
+      TRUST_PROXY: 0
       # Optional, and only for reminders the SERVER sends (a Discord channel).
       # The Android app needs neither of these — it arms its own alarms.
       HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
@@ -98,8 +112,21 @@ volumes:
 docker compose up -d
 ```
 
-Open **<http://localhost:3000>**. That is the whole setup — no login, no
-configuration.
+Open **<http://localhost:3000>**.
+
+If you set `HABITERALL_USERNAME` and `HABITERALL_PASSWORD` above, sign in with
+them and that is the whole setup. If you left them blank you are asked to
+**create an account** on that first visit — and until somebody does, *anyone who
+can reach the port* can be that somebody. On a laptop or a home LAN that is
+exactly what you want and takes ten seconds. Anywhere reachable from the
+internet, fill the two variables in first, so there is no window to walk
+through.
+
+Sign-in can be turned off entirely with `HABITERALL_AUTH=off`, which restores
+what this edition did before it had any: every route open to whoever can reach
+it. That is a real option for a machine only you can talk to — see
+[Turning the guards off](#turning-the-guards-off) for that setting and the
+others alongside it.
 
 That file is also in the repository as
 [`examples/docker-compose.personal.yml`](examples/docker-compose.personal.yml)
@@ -605,10 +632,54 @@ volumes:
 Then *Forward Hostname* is `habiterall` and *Forward Port* is `3000`.
 </details>
 
-Whichever you use: with one proxy in front, leave `TRUST_PROXY=1` (the default).
-Set it to the number of proxies if there are more, or `0` if the app is exposed
-directly — getting this wrong either breaks the rate limiter's keying or lets a
-client spoof its own address with a header.
+Whichever you use: with one proxy in front, set **`TRUST_PROXY=1`**. Use the
+number of proxies if there are more, and `0` when the app is reached directly.
+The two editions default differently on purpose — cloud to `1`, because its
+documented deployment has TLS in front, and personal to `0`, because its
+quickstart is a port on a LAN with nothing in front at all.
+
+Getting it wrong is a bug in both directions. Too low and every caller looks
+like the proxy, so one client spends everyone's rate limit, the session cookie
+cannot be marked `Secure`, and a proxy that rewrites `Host` makes every write
+look cross-origin and get refused. Too high and `X-Forwarded-For` becomes the
+caller's to choose, which is the rate limiter's only key — forty guesses at the
+password walk through a limit of twenty by rotating one header. The server logs
+`trust_proxy` at startup and warns when a forwarded header arrives that it has
+been told not to believe.
+
+One thing that follows and is easy to get wrong: **if you set `TRUST_PROXY=1`,
+the app's port must only be reachable through the proxy.** Leaving 3000 open on
+the LAN as a shortcut means anything on that LAN can send those headers itself.
+Publish the port only to the proxy's network, or firewall it, and reach the app
+by its proxied name from inside the house as well as outside.
+
+### Turning the guards off
+
+The personal edition is meant to be run on a laptop, a NAS or a LAN as readily
+as on the internet, so most of the hardening is a setting rather than a fact.
+For an instance only reachable over a VPN or a trusted network:
+
+| Set | Effect |
+|---|---|
+| `HABITERALL_AUTH=off` | No sign-in at all. Every route is open to whoever can reach the port, exactly as this edition behaved before it had auth. The value must be **exactly** `off` — `false`, `0` and every typo leave it on, and the server says so at startup. |
+| `HABITERALL_RATE_LIMIT=off` | Removes the limits on the API, imports and test notifications. The limit on *login attempts* is deliberately not included and cannot be switched off. |
+| `TRUST_PROXY=0` (the default) | Nothing in front is believed. Right for a direct port; see above. |
+| `HABITERALL_UPGRADE_INSECURE` unset (the default) | Browsers are **not** told to rewrite http to https. Leave it unset unless the instance is only ever reached over TLS — turning it on breaks a box that answers on both. |
+| `NODE_ENV` unset | No HSTS header. A browser that sees one on a plain-http stack pins that hostname to https for a year, and `localhost` is a hostname a lot of other things use too. |
+
+The session cookie needs nothing: it is marked `Secure` only on requests that
+actually arrived over TLS, so a plain-http LAN instance and an https one behind
+a proxy both work, including when they are the same instance.
+
+Two things have no switch, and both are load bearing rather than decorative.
+The **Content-Security-Policy** is what makes the frontend's design true —
+`connect-src 'self'` is the reason the browser cannot post to a Discord webhook
+and the server keeps time for reminders instead — so relaxing it changes the
+architecture, not a header. And the **cross-origin check** on writes costs a
+same-origin client nothing: browsers send `Origin` on every state-changing
+request, a request without one is allowed through (that is how the Android
+client posts), and what it refuses is a page on another site using your logged-in
+browser as a lever. Neither of those gets safer on a VPN.
 
 ---
 
