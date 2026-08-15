@@ -106,10 +106,17 @@
     blank page under a toast that cleared itself two and a half seconds later.
   -->
   <main id="view-error" class="view" hidden>
-    <div class="empty">
-      <p class="empty-title">habiterall could not start</p>
-      <p id="boot-error" class="empty-sub"></p>
-      <div class="empty-actions">
+    <!--
+      Its own class names, sharing the empty state's rules rather than its
+      classes. The dashboard's empty panel is reached by CLASS from the browser
+      suites (`document.querySelector('.empty-title')`), which have no `#empty`
+      to scope to, so a second `.empty-title` earlier in the document answers
+      those queries instead — hidden or not.
+    -->
+    <div class="boot-error">
+      <p class="boot-error-title">habiterall could not start</p>
+      <p id="boot-error" class="boot-error-sub"></p>
+      <div class="boot-error-actions">
         <button type="button" id="boot-retry" class="btn btn-primary">Try again</button>
       </div>
     </div>
