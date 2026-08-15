@@ -632,7 +632,12 @@ test('a Habits view is not a Habits table', async () => {
   `);
   d.close();
 
-  await assert.rejects(() => parseLoopDatabase(path), /Habits is a view, not a table/);
+  // In the capped child for the same reason the ceiling test is: if the view
+  // check ever stops working, this file's 5,000,000-row declaration goes to
+  // `.all()` and aborts the RUNNER, which reports as a crashed test file at
+  // 1:1 and silently abandons every test after it. A named failure is what a
+  // regression here should look like.
+  assert.match(await parseInCappedChild(path), /THREW 400 .*Habits is a view, not a table/);
   unlinkSync(path);
 });
 
@@ -654,7 +659,7 @@ test('a Repetitions view is refused too', async () => {
   `);
   d.close();
 
-  await assert.rejects(() => parseLoopDatabase(path), /Repetitions is a view, not a table/);
+  assert.match(await parseInCappedChild(path), /THREW 400 .*Repetitions is a view, not a table/);
   unlinkSync(path);
 });
 

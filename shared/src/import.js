@@ -273,9 +273,15 @@ export async function parseLoopDatabase(path) {
     // Loop's own validation: both tables must be present. A file with a valid
     // SQLite header but a corrupt body throws from here, so the whole read is
     // wrapped and re-tagged as a client error below.
+    // `type IN ('table','view')` because a TRIGGER may share a table's name in
+    // SQLite, and keying a Map on name alone let the trigger's row win — so a
+    // perfectly good backup carrying one was refused as "Habits is a trigger,
+    // not a table". Indexes have the same shape of collision.
     const objects = new Map(
-      src.prepare(`SELECT name, type FROM SQLITE_MASTER WHERE name IN ('Habits','Repetitions')`)
-        .all().map((r) => [r.name, r.type])
+      src.prepare(
+        `SELECT name, type FROM SQLITE_MASTER
+          WHERE name IN ('Habits','Repetitions') AND type IN ('table','view')`
+      ).all().map((r) => [r.name, r.type])
     );
     if (objects.size !== 2) {
       throw Object.assign(
@@ -289,6 +295,11 @@ export async function parseLoopDatabase(path) {
     // declaring five million rows. This is defence in depth and not the fix —
     // the ceilings below are, because a plain table under the body limit still
     // holds several hundred thousand rows and amplifies perfectly well.
+    //
+    // Note it is not a type gate either: `CREATE VIRTUAL TABLE Habits USING
+    // fts5(…)` reports `type = 'table'` and walks straight past. That is fine
+    // and deliberate — whatever it produces meets the ceiling like anything
+    // else — but do not read this check as deciding what a table may contain.
     for (const name of ['Habits', 'Repetitions']) {
       if (objects.get(name) !== 'table') {
         throw Object.assign(
