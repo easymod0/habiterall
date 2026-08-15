@@ -187,15 +187,20 @@ export function requireAuth(req, res, next) {
  *
  * @param {import('express').Express} app
  * @param {import('express').RequestHandler} limiter guards the credential paths
+ * @param {import('express').RequestHandler} readLimiter guards /api/me, which
+ *   is answerable without a session and reads the database to decide the mode
  */
-export function mountAuth(app, limiter) {
+export function mountAuth(app, limiter, readLimiter) {
   /**
    * Who am I, and what mode is this instance in?
    *
    * Answers WITHOUT a session when auth is off — that is the whole point of the
    * endpoint, and it is what lets one frontend adapter serve every mode.
    */
-  app.get('/api/me', (req, res) => {
+  // `readLimiter` because this route sits ABOVE the /api mount and would
+  // otherwise be the one API path with no limit at all — answerable with no
+  // session, and reading the credentials table on every call to decide the mode.
+  app.get('/api/me', readLimiter, (req, res) => {
     const current = mode();
     if (current === 'none') {
       // The same implicit user the edition has always had.

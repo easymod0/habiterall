@@ -128,6 +128,64 @@ export const RATE_LIMITS = {
   },
 };
 
+/** Methods that cannot change state, and so need no origin check. */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Refuse a state-changing request that a browser says came from somewhere else.
+ *
+ * Both editions authenticate with a cookie, which is what makes cross-site
+ * request forgery possible at all: a form on another site can POST here and the
+ * browser attaches the session. `SameSite=Lax` already stops that in every
+ * current browser — it is why the cookie is set that way — but it is a defence
+ * written down in one attribute, invisible at the routes it protects, and it
+ * fails open on anything that does not implement it.
+ *
+ * This is the second half, stated where the requests are. Browsers send `Origin`
+ * on every state-changing request, so a mismatch is forgery and nothing else.
+ *
+ * **A missing `Origin` is allowed, deliberately.** That is not a hole: the
+ * attack needs a browser, and browsers always send it here. What lacks one is a
+ * native client — `Api.kt` posting a check-off from a notification — and
+ * refusing those would break the Android client to defend against a request it
+ * cannot make. This is also why the defence is an origin check rather than a
+ * CSRF token: a token has to be fetched, held and replayed by every client, and
+ * the whole point of both editions issuing the same cookie is that the phone
+ * needs no special path.
+ *
+ * The comparison is against the Host the request arrived with, so it follows a
+ * reverse proxy without being told the public name — but `trust proxy` decides
+ * whether that Host is the client's or the proxy's, which is one more reason
+ * `trustProxy` above has to be right. Extra origins can be allowed for a
+ * deployment served under more than one name.
+ *
+ * @param {{allow?: string[], onReject?: (req: any, origin: string) => void}} [options]
+ * @returns Express-shaped middleware
+ */
+export function sameOriginOnly({ allow = [], onReject } = {}) {
+  const allowed = new Set(allow.filter(Boolean).map((o) => o.replace(/\/+$/, '')));
+
+  return function originGuard(req, res, next) {
+    if (SAFE_METHODS.has(req.method)) return next();
+
+    const origin = req.headers?.origin;
+    if (!origin) return next();          // not a browser — see above
+
+    const host = req.headers?.['x-forwarded-host'] ?? req.headers?.host;
+    let sameHost = false;
+    try {
+      sameHost = new URL(origin).host === String(host);
+    } catch {
+      sameHost = false;                  // unparseable Origin is not this one
+    }
+
+    if (sameHost || allowed.has(origin.replace(/\/+$/, ''))) return next();
+
+    onReject?.(req, origin);
+    return res.status(403).json({ error: 'cross-origin request refused' });
+  };
+}
+
 /**
  * How many reverse proxies sit in front of the app, as Express wants it.
  *

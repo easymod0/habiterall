@@ -29,6 +29,10 @@ if (!MODE) {
     ['env', { HABITERALL_USERNAME: 'mark', HABITERALL_PASSWORD: 'a-good-long-password' }],
     ['setup', {}],
     ['misread', { HABITERALL_AUTH: 'false', HABITERALL_USERNAME: 'm', HABITERALL_PASSWORD: 'a-good-long-password' }],
+    ['bruteforce', {
+      HABITERALL_USERNAME: 'mark', HABITERALL_PASSWORD: 'a-good-long-password',
+      HABITERALL_RATE_LIMIT: 'off',
+    }],
   ];
 
   let bad = 0;
@@ -130,9 +134,43 @@ if (MODE === 'env' || MODE === 'misread') {
   const setup = await call('/auth/setup', { method: 'POST', body: JSON.stringify({ username: 'attacker', password: 'aaaaaaaaaa' }) });
   check('setup is closed once an account exists', setup.status === 409, `status=${setup.status}`);
 
+  // Cross-site forgery: the session is a cookie, so a form on another site
+  // could otherwise POST here and have the browser attach it.
+  const forged = await call('/api/habits', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'planted' }),
+    headers: { Origin: 'https://evil.example.com' },
+  });
+  check('a cross-origin write is refused', forged.status === 403, `status=${forged.status}`);
+
+  const sameSite = await call('/api/habits', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'from the app' }),
+    headers: { Origin: base },
+  });
+  check('a same-origin write is not', sameSite.status < 400, `status=${sameSite.status}`);
+
   await call('/auth/logout', { method: 'POST' });
   const after = await call('/api/habits');
   check('signing out revokes the session', after.status === 401, `status=${after.status}`);
+}
+
+if (MODE === 'bruteforce') {
+  // HABITERALL_RATE_LIMIT=off must NOT reach the credential limiter: it exists
+  // so tests are not throttled on reads, not to remove the only thing bounding
+  // guesses at a single shared password.
+  let limited = 0, refused = 0;
+  for (let i = 0; i < 40; i++) {
+    const r = await call('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'mark', password: `guess-${i}` }),
+    });
+    if (r.status === 429) limited++;
+    if (r.status === 401) refused++;
+  }
+  check('the login limiter survives HABITERALL_RATE_LIMIT=off',
+    limited > 0, `${refused} refused, ${limited} rate-limited`);
+  check('and it bites at the shared limit', refused === 20, `${refused} got through`);
 }
 
 if (MODE === 'setup') {

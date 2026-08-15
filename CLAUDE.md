@@ -589,6 +589,29 @@ normalises IPv6 to its /64 (a bare `req.ip` gives one client 2^64 buckets to
 rotate through, and express-rate-limit v8 says so at startup rather than
 failing).
 
+**A cookie session needs an origin check, and a missing `Origin` must pass.**
+Both editions authenticate with a cookie, which is what makes forgery possible:
+a form on another site POSTs here and the browser attaches the session.
+`SameSite=Lax` stops that in every current browser and is why the cookie is set
+that way — but it is a defence written in one attribute, invisible at the routes
+it protects. `sameOriginOnly` states the other half where the requests are.
+Browsers always send `Origin` on a state-changing request, so a mismatch is
+forgery and nothing else. What has no `Origin` is a *native* client — `Api.kt`
+answering a notification — and refusing those would break the Android client to
+stop a request it cannot make. That is also why this is an origin check rather
+than a CSRF token: a token must be fetched, held and replayed by every client,
+and the point of both editions issuing the same cookie is that the phone needs
+no special path.
+
+**The credential limiter is not switchable.** `HABITERALL_RATE_LIMIT=off` exists
+so a test run is not throttled on ordinary reads; it briefly reached
+`/auth/login` too, which turned it into "also remove the only bound on guesses at
+a single shared password" — something no amount of trusting your own network
+justifies, and which the name does not hint at. CodeQL found it, because routing
+the limiter through a helper that might return a pass-through is also how a
+static analyser stops being able to see it. The auth suite now counts the
+attempts that get through.
+
 **`upgrade-insecure-requests` is the caller's decision, not helmet's.**
 helmet adds it by default, which is right behind TLS and a trap on plain http:
 the browser rewrites every request to https, nothing is listening, and the app

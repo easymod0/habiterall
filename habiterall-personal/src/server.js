@@ -15,6 +15,7 @@ import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
+  sameOriginOnly,
 } from '@habiterall/shared/security.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -124,7 +125,18 @@ if (rateLimitsOff) {
 const limit = (options) =>
   (rateLimitsOff ? (req, res, next) => next() : rateLimit({ ...options, keyGenerator: byIp }));
 
-const credentialLimiter = limit(RATE_LIMITS.login);
+/**
+ * The credential limiter is NOT switchable, and that is the whole point of it.
+ *
+ * `HABITERALL_RATE_LIMIT=off` exists so a test run or a trusted LAN is not
+ * throttled on ordinary reads. Letting it reach this one turned it into "and
+ * also remove the only thing standing between a stranger and an unlimited guess
+ * rate at a single shared password" — which no amount of trusting your own
+ * network makes reasonable, and which nothing in the name suggests. The browser
+ * suites never touch /auth/login, so there is nothing to trade away either.
+ */
+const credentialLimiter = rateLimit({ ...RATE_LIMITS.login, keyGenerator: byIp });
+
 const apiLimiter = limit(RATE_LIMITS.api);
 const notifyTestLimiter = limit(RATE_LIMITS.notifyTest);
 const importLimiter = limit(RATE_LIMITS.import);
@@ -153,7 +165,16 @@ app.use(session({
   },
 }));
 
-mountAuth(app, credentialLimiter);
+// Cross-site forgery, stated at the routes rather than left to the cookie's
+// SameSite attribute alone. Mounted after the session so a refusal is about a
+// request that would otherwise have carried one, and before every route that
+// can write. See `sameOriginOnly` for why a missing Origin is allowed.
+app.use(sameOriginOnly({
+  allow: publicUrl ? [new URL(publicUrl).origin] : [],
+  onReject: (req, origin) => log.warn('csrf.refused', { path: req.path, origin }),
+}));
+
+mountAuth(app, credentialLimiter, apiLimiter);
 
 // Everything below needs a session — unless auth is off, in which case
 // `requireAuth` is a pass-through and this edition behaves exactly as it always

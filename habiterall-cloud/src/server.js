@@ -15,6 +15,7 @@ import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
+  sameOriginOnly,
 } from '@habiterall/shared/security.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,6 +78,14 @@ app.use(session({
 // Declared up here because `healthLimiter` answers from it; the route itself
 // is down with the static files.
 const healthProbe = createHealthProbe(() => pool.query('SELECT 1'));
+
+// Cross-site forgery, stated at the routes rather than left to the cookie's
+// SameSite attribute alone — same middleware the personal edition mounts.
+// PUBLIC_URL is allowed explicitly because the OIDC round trip returns to it.
+app.use(sameOriginOnly({
+  allow: [new URL(process.env.PUBLIC_URL).origin],
+  onReject: (req, origin) => log.warn('csrf.refused', { path: req.path, origin }),
+}));
 
 /* ---------- rate limits ---------- */
 
