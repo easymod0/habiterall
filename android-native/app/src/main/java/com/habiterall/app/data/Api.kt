@@ -115,6 +115,12 @@ data class Habit(
         color = color,
         reminderTime = reminderTime,
         reminderMessage = reminderMessage,
+        // Every field, and this is the bridge that has to carry them: a habit
+        // PUT REPLACES, so a field dropped here is a field RESET on the server
+        // by the two callers that flip one thing about a habit they fetched —
+        // unarchiving, and setting a reminder from the list. `HabitApiTest`
+        // compares the two encodings rather than restating this list.
+        atMostUnlogged = atMostUnlogged,
         archived = archived,
     )
 }

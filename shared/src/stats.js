@@ -113,7 +113,20 @@ export const UNLOGGED_DEFAULT = 'miss';
  * reason `entryWrite` stopped deleting rows. See constants.js.
  */
 function unansweredCounts(habit, unlogged) {
-  const own = habit?.at_most_unlogged;
+  // Gated on the case this exists for, and the gate is load bearing rather
+  // than tidy. Ungated, `success` fell through to the ordinary predicate for
+  // EVERY habit — and on an at-least habit with a target of 0, `0 >= 0` is
+  // true while `dayCredit`'s matching branch (`target <= 0`) answers 0. One
+  // response then reported a 30-day streak and 100% history beside a strength
+  // of 0: the score and the streak disagreeing about the same day, which is
+  // the thing the comment in `dayCredit` is written to prevent. A target of 0
+  // is reachable — `parseHabit` accepts it, the form's `min` is 0, and the
+  // Loop CSV path defaults one — and `parseHabit` deliberately KEEPS
+  // `at_most_unlogged` when a habit's goal is switched from At most to At
+  // least, so a habit-level 'success' outlives the target type it was set for.
+  if (habit?.type === 'boolean' || habit?.target_type !== 'at_most') return false;
+
+  const own = habit.at_most_unlogged;
   const rule = own && own !== 'default' ? own : unlogged;
   return rule === 'success';
 }

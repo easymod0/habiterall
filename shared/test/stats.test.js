@@ -656,3 +656,64 @@ test('an unrecognised override is read as the account, not as success', () => {
     );
   }
 });
+
+test('the rule reaches at-most habits and nothing else', () => {
+  // The gate, and it is not tidiness. Ungated, `success` fell through to the
+  // ordinary predicate for every habit — and on an at-least habit with a
+  // target of 0, `0 >= 0` is true while dayCredit's `target <= 0` branch
+  // answers 0. One response then reported a 30-day streak and 100% history
+  // beside a strength of 0.
+  //
+  // A target of 0 is reachable (parseHabit accepts it, the form's min is 0,
+  // the Loop CSV path defaults one) and `at_most_unlogged` deliberately
+  // OUTLIVES a switch from At most to At least, so a habit carrying 'success'
+  // can arrive here as an at-least habit.
+  const cases = [
+    ['at_least target 0', { type: 'numerical', target_type: 'at_least', target_value: 0 }],
+    ['at_least target 8', { type: 'numerical', target_type: 'at_least', target_value: 8 }],
+    ['boolean', { type: 'boolean', target_type: 'at_most', target_value: 0 }],
+  ];
+  for (const [label, base] of cases) {
+    const habit = { ...base, freq_numerator: 1, freq_denominator: 1 };
+    for (const unlogged of ['miss', 'success']) {
+      assert.equal(isCompleted(habit, undefined, unlogged), false,
+        `${label} / account ${unlogged}: an unanswered day must be a miss`);
+      assert.equal(
+        isCompleted({ ...habit, at_most_unlogged: 'success' }, undefined, unlogged), false,
+        `${label} / habit success: the override must not reach a non-limit`
+      );
+    }
+  }
+});
+
+test('the score and the streak never disagree about an unanswered day', () => {
+  // The invariant the bug above broke, stated directly rather than through one
+  // example: for every habit shape and every answer, a full-credit day must be
+  // a completed day and a zero-credit day must not be.
+  const shapes = [
+    { type: 'boolean', target_type: 'at_least', target_value: 0 },
+    { type: 'numerical', target_type: 'at_least', target_value: 0 },
+    { type: 'numerical', target_type: 'at_least', target_value: 8 },
+    { type: 'numerical', target_type: 'at_most', target_value: 0 },
+    { type: 'numerical', target_type: 'at_most', target_value: 2 },
+  ];
+  for (const shape of shapes) {
+    for (const own of ['default', 'miss', 'success']) {
+      for (const account of ['miss', 'success']) {
+        const habit = { ...shape, freq_numerator: 1, freq_denominator: 1, at_most_unlogged: own };
+        const label = `${shape.type}/${shape.target_type}/${shape.target_value} ${own}/${account}`;
+
+        // One unanswered day, scored both ways. `computeScores` reaches
+        // dayCredit and `onPaceSeries` reaches isCompleted, so a disagreement
+        // shows up as a streak without a score or the reverse.
+        const window = { start: '2026-07-01', end: '2026-07-01', unlogged: account };
+        const stats = computeStats(habit, [], window);
+        const kept = stats.streaks.length === 1;
+        assert.equal(kept, stats.score > 0,
+          `${label}: streak says ${kept} and the score says ${stats.score}`);
+        assert.equal(kept, stats.history[0].completed === 1,
+          `${label}: the history disagrees with the streak`);
+      }
+    }
+  }
+});

@@ -154,12 +154,30 @@ that issue: you answer by typing a number rather than tapping yes/no, a filled
 cell paints as an achievement rather than a slip, and the tap cycle runs in the
 order a good habit wants.
 
-Two consequences worth stating because they look like inconsistencies and are
+Three consequences worth stating because they look like inconsistencies and are
 not. The **reminder still asks** about an unlogged day under either answer —
 `answeredIds` is about whether the day was ANSWERED, and under `success` the
-reminder is precisely how you record the exception. And both editions' SQL
+reminder is precisely how you record the exception. Both editions' SQL
 completion counts needed no change at all: they count rows, and a day with no
-row was never in them.
+row was never in them. And that is the third — under `success`,
+**`totalCompleted` counts ANSWERS while the window-derived figures count DAYS**,
+so a limit kept by saying nothing shows a streak, a strength and a full history
+bar beside a "total done" of zero. Both are right about their own question and
+neither can be made to answer the other's cheaply: the count is lifetime and
+computed in SQL, while the rest are a window walked day by day. It is the same
+split the paragraph on stated lapses opens with, arriving from the other side.
+
+**The rule is gated to at-most habits, and the gate is load bearing.** Ungated,
+`success` fell through to the ordinary predicate for every habit — and on an
+at-least habit with a target of **0**, `0 >= 0` is true while `dayCredit`'s
+`target <= 0` branch answers 0. One response then reported a 30-day streak and
+100% history beside a strength of 0, which is the score and the streak
+disagreeing about the same day. A target of 0 is reachable (`parseHabit` accepts
+it, the form's `min` is 0, the Loop CSV path defaults one), and
+`at_most_unlogged` deliberately **outlives** a switch from At most to At least —
+so a habit carrying `success` does arrive here as an at-least habit. The test
+that pins it asks the invariant directly rather than by example: across every
+habit shape and both answers, a full-credit day must be a completed day.
 
 **A merge may add an answer and must never delete one.** Now that a bare "not
 done" in a file reaches the writer, a plain upsert would overwrite a recorded
