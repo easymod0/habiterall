@@ -21,6 +21,40 @@ export function esc(value) {
 }
 
 /**
+ * A number as plain decimal digits, never JS exponent notation.
+ *
+ * `String(1e-7)` is `1e-7` and `String(1e21)` is `1e+21`, and both are what a
+ * cell used to hold — the API accepts any finite non-negative amount, so both
+ * are reachable by writing one. Our own importer survives them because it
+ * parses with `Number()`, but this is Loop's format and other tools read it;
+ * a reader that expects a decimal sees text.
+ *
+ * The rewrite is an exact expansion, not a rounding, and it only ever runs on
+ * a value whose shortest representation HAS an exponent — an ordinary 8 or 0.5
+ * comes back byte for byte. That restraint is the point: silently restating
+ * the precision of every amount in the file would be a worse bug than the one
+ * this fixes. The price is paid at the extremes instead, where the cell gets
+ * long (5e-324 is 326 characters), which is what not changing the number costs.
+ */
+export function csvNumber(value) {
+  const n = Number(value);
+  const s = String(n);
+  const m = /^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(s);
+  if (!m) return s;
+
+  const [, sign, int, frac = '', exp] = m;
+  const digits = int + frac;
+  // Where the point falls in `digits`. Placing it rather than computing is what
+  // makes this lossless: the digits are the shortest ones that round-trip, and
+  // they are copied, not arithmetic.
+  const point = digits.length + Number(exp) - frac.length;
+  if (point >= digits.length) return sign + digits + '0'.repeat(point - digits.length);
+  return point > 0
+    ? sign + digits.slice(0, point) + '.' + digits.slice(point)
+    : sign + '0.' + '0'.repeat(-point) + digits;
+}
+
+/**
  * The metadata file. Column names match what `parseLoopHabitsCSV` looks for,
  * so our own export can be read back by our own importer.
  *
@@ -76,13 +110,13 @@ export function buildHabitsCsv(habits) {
       // for `description`, which is what kept the duplication invisible.
       esc(h.reminder_message ?? ''),
       esc(h.description ?? ''),
-      Number(h.freq_numerator ?? 1),
-      Number(h.freq_denominator ?? 1),
+      csvNumber(h.freq_numerator ?? 1),
+      csvNumber(h.freq_denominator ?? 1),
       esc(h.color ?? ''),
       // The enum name Loop writes, which the parser matches on.
       h.type === 'numerical' ? 'NUMERICAL' : 'YES_NO',
       esc(h.unit ?? ''),
-      Number(h.target_value ?? 0),
+      csvNumber(h.target_value ?? 0),
       h.target_type === 'at_most' ? 'AT_MOST' : 'AT_LEAST',
       h.archived ? 'true' : 'false',
     ].join(','));
@@ -119,7 +153,7 @@ export function buildCheckmarksCsv(habits, entriesFor) {
       else if (e.status === 'skip') row.push('SKIP');
       else if (b.habit.type === 'boolean') {
         row.push(Number(e.value) === YES ? 'YES_MANUAL' : 'NO');
-      } else row.push(String(e.value));
+      } else row.push(csvNumber(e.value));
     }
     lines.push(row.join(','));
   }
