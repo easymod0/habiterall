@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -237,7 +238,22 @@ fun HabitFormScreen(
         }
     ) { pad ->
         Column(
-            Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState())
+                // `imePadding()`, because nothing else shrinks anything above the
+                // keyboard: `enableEdgeToEdge()` lays the window out behind the
+                // system bars, which stops the manifest's `adjustResize` doing the
+                // work its presence suggests, and on Android 15+ that is enforced
+                // regardless of the manifest. `Scaffold`'s content padding does not
+                // include the IME inset either.
+                //
+                // Measured on a 1080x2400 emulator before this line: the last field
+                // sat at y2265-2400 against an IME starting at y1517, and the form
+                // could not be scrolled far enough to free it because the scrollable
+                // ran the full height of the window. The inset itself was never the
+                // problem — a probe at four levels showed `WindowInsets.ime` arriving
+                // intact as 883px all the way into this Scaffold's content. Nothing
+                // was consuming it; nothing was asking for it.
+            Modifier.padding(pad).fillMaxSize().imePadding()
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
