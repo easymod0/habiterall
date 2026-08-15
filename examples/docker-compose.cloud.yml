@@ -1,7 +1,12 @@
 # habiterall, cloud edition — multi user, Postgres, your own OIDC provider.
 #
-# The copy in README.md is generated from this file, and a unit test fails if the
-# two drift, so edit this one.
+# This file is the ONE place the cloud edition's environment is described. The
+# copy in README.md is generated from it (`npm run docs:compose`), and
+# `habiterall-cloud/docker-compose.yml` includes it and adds only what a
+# checkout needs: `build:`, and the Authentik services. So a variable added
+# here reaches both. `shared/test/compose.test.js` fails if the server reads
+# one that is not below — including the copy in docker-compose.cloud-authentik.yml,
+# which has to stay standalone and therefore repeats it.
 #
 # Needs a .env beside it:
 #
@@ -65,8 +70,26 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:?from your provider}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
-      TRUST_PROXY: 1
+      # Local HTTP testing only, and never in a real deployment: it lets the
+      # app accept a plaintext OIDC issuer, which puts tokens on the wire in
+      # the clear. It logs a warning for as long as it is set.
+      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}
+      # One TLS terminator in front, which is this edition's documented
+      # deployment. Raise it if there are more, and set 0 only if browsers
+      # reach this port directly — see "Put HTTPS in front" in the README, and
+      # note that trusting a hop that is not there hands the rate limiter's
+      # only key to the caller.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      # Reminders this process sends (a Discord channel). It costs nothing
+      # until a user configures one: with none, the tick queries and stops.
+      # On-device reminders never involve this process at all.
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      # Accounts visited per tick. A tick is a minute and each account may cost
+      # a webhook round trip, so this bounds the work rather than letting one
+      # pass overlap the next.
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}
       # The fallback clock: a container has no timezone, so it is UTC. Users can
       # override it for their own reminders in ⚙ → Notifications, but this is
       # what "the server's own timezone" means, and it is also the clock that

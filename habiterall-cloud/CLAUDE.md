@@ -108,6 +108,20 @@ to date".
 migrations, the bootstrap and the app. The app listens on **:3100**;
 Authentik's admin UI is on **:9000**. See `SETUP.md`.
 
+`db`, `migrate` and `app` carry no environment block here: they `extends` the
+ones in `examples/docker-compose.cloud.yml` and add the build. That file is the
+one place this edition's variables are written down, and the root CLAUDE.md has
+the whole argument. Two things are restated by hand there rather than
+inherited — the top-level `volumes:` declarations, which `extends` does not
+carry, and `depends_on`, which it may or may not (v1 never did; the current
+documentation says neither way) and whose absence looks like the app racing an
+unmigrated schema.
+
+The topology still differs from `examples/docker-compose.cloud-authentik.yml`
+on purpose: Authentik's database lives in the *same* Postgres server here,
+created by `scripts/init-authentik-db.sh`, which is a file a downloader of that
+example does not have.
+
 ## Authentik is configured by a script that runs on every `up`
 
 `scripts/bootstrap-authentik.mjs` creates the OIDC provider and application,

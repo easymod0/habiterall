@@ -1,16 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { PRINTED, exampleFiles, render } from '../../scripts/sync-compose-docs.mjs';
 
 /**
- * The compose examples in README.md must match the files in examples/.
+ * What the README shows about `examples/`, and what those files must contain.
  *
- * They exist twice on purpose: a reader wants to see the file without following
- * a link, and an operator wants a file they can run. What is not acceptable is
- * the two drifting — a README snippet that no longer works is worse than no
- * snippet, because it is tried before it is doubted.
+ * The copies exist twice on purpose: a reader wants to see the file without
+ * following a link, and an operator wants a file they can run. What is not
+ * acceptable is the two drifting — a README snippet that no longer works is
+ * worse than no snippet, because it is tried before it is doubted.
+ *
+ * This used to compare them. It now runs the GENERATOR and asserts it would
+ * change nothing, which is the same check with the copy-and-paste job removed:
+ * a failure here is fixed by `npm run docs:compose`, not by hand.
+ *
+ * What the compose files must SAY — every variable the server reads — is
+ * `compose.test.js`, because that question is about the source rather than
+ * about the README.
  *
  * This lives in `shared/test` for the dull reason that `npm test` only reaches
  * workspaces, and there is precedent: settings.test.js reads a file by path to
@@ -20,30 +29,23 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 const README = readFileSync(join(root, 'README.md'), 'utf8');
 
-/** An example file, minus its leading comment header. */
-function exampleBody(name) {
-  const text = readFileSync(join(root, 'examples', name), 'utf8');
-  const lines = text.split('\n');
-  // Drop the header: every line up to and including the first blank one.
-  const start = lines.findIndex((line) => line.trim() === '');
-  return lines.slice(start + 1).join('\n');
-}
+test('the README blocks are what the example files say', () => {
+  const { changed } = render();
+  assert.deepEqual(changed, [],
+    'README.md has drifted from ' + changed.map((f) => `examples/${f}`).join(', ') +
+    '. Run `npm run docs:compose` and commit the result.');
+});
 
-test('every file in examples/ appears verbatim in the README', () => {
-  // Checked by containment rather than by position, because the README also
-  // carries snippets that are NOT example files (the Nginx Proxy Manager
-  // fragment, for one). What matters is that no shipped example has drifted
-  // from the copy a reader is shown.
-  const files = readdirSync(join(root, 'examples')).sort();
-  assert.ok(files.length >= 3, 'expected the two compose examples and the Caddyfile');
-
-  for (const name of files) {
-    assert.ok(
-      README.includes(exampleBody(name).trim()),
-      `README.md has drifted from examples/${name}. Edit the file, then copy it ` +
-      'into the README — not the other way round.'
-    );
-  }
+test('every file in examples/ is printed in the README', () => {
+  // The generator works from an explicit list, so a new example file would
+  // otherwise be shipped with nothing showing it — the same silence this whole
+  // check exists to end, one level up.
+  const printed = new Set(PRINTED.map((p) => p.file));
+  const unprinted = exampleFiles().filter((f) => !printed.has(f));
+  assert.deepEqual(unprinted, [],
+    `examples/${unprinted.join(', ')} is in the repository but in no README block. ` +
+    'Add it to PRINTED in scripts/sync-compose-docs.mjs, with a marker pair in ' +
+    'README.md.');
 });
 
 test('the examples pull the published images, not a local build', () => {

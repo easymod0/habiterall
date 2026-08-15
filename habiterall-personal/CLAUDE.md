@@ -34,6 +34,9 @@ Only what is coupled to storage:
 - `src/session-store.js` — express-session over `node:sqlite`, written rather
   than installed so this edition keeps its no-native-module property
 - `public/app-entry.js` — three lines: `start()` with the shared adapter
+- `docker-compose.yml` — a build and nothing else. The environment block is in
+  `examples/docker-compose.personal.yml`, which this file `extends`; see the
+  root CLAUDE.md for why, and do not write one back in here
 
 The entire UI is in `shared/public/` and served by the static mounts in
 `src/server.js`. Do not copy `app.js`, `style.css`, or `index.html` back here.

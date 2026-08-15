@@ -7,11 +7,15 @@
 #   types    JSDoc type checking via tsc --noEmit
 #   browser  the real-browser UI suites against a running personal instance
 #   tenancy  the adversarial multi-tenant isolation attacks, against Postgres
+#   compose  every compose file resolves, and the README matches them
 #   docker   both images actually build
 #
 # The browser and tenancy jobs exist because they catch classes of bug the
 # unit tests structurally cannot: a CSS rule silently defeating the `hidden`
-# attribute, and a cross-user data leak.
+# attribute, and a cross-user data leak. `compose` is the same argument for a
+# third: each edition's compose file now `extends:` the published example
+# instead of repeating it, and whether that merge produced the right project is
+# a question only Compose itself can answer.
 
 name: CI
 
@@ -378,6 +382,88 @@ jobs:
       - name: Reminder delivery and its watermark
         working-directory: habiterall-personal
         run: node test/notify.integration.mjs
+
+  compose:
+    name: Compose files
+    runs-on: ubuntu-latest
+    # Deliberately NOT gated on `changes`. This is the job that guards
+    # documentation, so a documentation-only pull request is exactly when it
+    # has to run — the README's compose blocks are generated, and a hand edit
+    # to one is a change the `code == 'true'` filter calls docs and skips.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+
+      - name: The README blocks are what the example files say
+        run: npm run docs:compose -- --check
+
+      # `config` interpolates, resolves every `extends:`, and validates the
+      # result. The values below are throwaway: nothing is started, and the
+      # `:?` guards only need something non-empty.
+      - name: Every compose file resolves
+        env:
+          DB_OWNER_PASSWORD: ci
+          APP_DB_PASSWORD: ci
+          AUTHENTIK_DB_PASSWORD: ci
+          AUTHENTIK_SECRET_KEY: ci
+          SESSION_SECRET: ci
+          PUBLIC_URL: http://localhost:3100
+          OIDC_ISSUER: http://localhost:9000/application/o/habiterall/
+          OIDC_CLIENT_ID: ci
+          OIDC_CLIENT_SECRET: ci
+        run: |
+          set -euo pipefail
+          for f in examples/docker-compose.*.yml; do
+            echo "  $f"
+            docker compose -f "$f" config -q
+          done
+          echo "  habiterall-personal/docker-compose.yml"
+          (cd habiterall-personal && docker compose config -q)
+          echo "  habiterall-cloud/docker-compose.yml"
+          (cd habiterall-cloud && cp .env.example .env && docker compose config -q)
+
+      # The point of the restructure is that the edition files inherit an
+      # environment block they no longer carry. `config -q` above proves the
+      # merge is VALID; this proves it produced what `extends` was for. Getting
+      # it wrong is silent in the worst direction — a container that starts
+      # with half its configuration missing looks exactly like one that does
+      # not, which is precisely what `include:` would have done here.
+      - name: extends actually carried the environment across
+        run: |
+          set -euo pipefail
+
+          check() {  # file, then the names that must appear in it
+            local rendered=$1; shift
+            for v in "$@"; do
+              grep -q -- "$v" "$rendered" \
+                || { echo "MISSING $v"; cat "$rendered"; exit 1; }
+            done
+          }
+
+          (cd habiterall-personal && docker compose config > /tmp/personal.yml)
+          # From the extended example, not from this file.
+          check /tmp/personal.yml HABITERALL_SESSION_SECRET HABITERALL_RATE_LIMIT \
+            HABITERALL_AUTH HABITERALL_UPGRADE_INSECURE HABITERALL_NOTIFY \
+            HABITERALL_DB HABITERALL_PASSWORD_HASH TZ habiterall-data
+          # And this file's own two lines won: built here, tagged locally, so
+          # `--build` does not take over the published image's name.
+          check /tmp/personal.yml 'habiterall-personal/Dockerfile' 'image: habiterall:latest'
+
+          # The `:?` guards are answered by .env.example, not by the step
+          # above's environment — this step deliberately sets none, so what it
+          # renders is what an operator following SETUP.md would get.
+          (cd habiterall-cloud && cp .env.example .env && docker compose config > /tmp/cloud.yml)
+          check /tmp/cloud.yml HABITERALL_NOTIFY_INTERVAL_MS NOTIFY_MAX_ACCOUNTS \
+            ALLOW_INSECURE_OIDC SESSION_SECRET DATABASE_URL_ADMIN TZ db-data \
+            'habiterall-cloud/Dockerfile'
+          # The ordering the schema depends on. It is restated in that file
+          # rather than relied on, and a missing one only shows up as the app
+          # racing an unmigrated database.
+          grep -q 'service_completed_successfully' /tmp/cloud.yml
 
   docker:
     name: Docker images

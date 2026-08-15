@@ -1,33 +1,57 @@
-# Full self-hosted stack: habiterall-cloud, its Postgres, and an Authentik
-# identity provider (server + worker).
+# Full self-hosted stack built from this checkout: habiterall-cloud, its
+# Postgres, and an Authentik identity provider (server + worker).
 #
 #   cp .env.example .env    # then fill in the secrets
 #   docker compose up -d
 #
-# First run: see SETUP.md for creating the Authentik admin and the OIDC
-# application. Nothing but the reverse proxy needs to be internet-facing.
+# The app, the database and the migration step carry no environment block here.
+# It is in ../examples/docker-compose.cloud.yml — the file the README prints
+# and a reader downloads — and the three services below EXTEND those rather
+# than copying them, so it exists once for this edition. The two were
+# maintained by hand and had drifted in both directions: six variables here
+# that the example never mentioned, and a `TZ` there that this file did not set.
+#
+# What is added below is exactly what a checkout is for and a published file
+# cannot have: `build:` in place of `image:`, and the identity provider. Note
+# the topology differs from examples/docker-compose.cloud-authentik.yml on
+# purpose — Authentik's database lives in the same Postgres server here,
+# created by an init script this checkout has and a downloader does not.
+#
+# `extends:`, not `include:`. They look interchangeable and are not: include
+# loads another file's services alongside this one's and "displays a warning if
+# resource names conflict and doesn't try to merge them", so declaring `app` in
+# both would leave a container with a build and no environment at all — which
+# starts, and looks fine. `extends` is the merging one: a scalar here wins, a
+# mapping is merged key by key, and a sequence is concatenated.
+#
+# Two things are restated below rather than inherited. The top-level `volumes:`
+# declarations, because `extends` works at the service level and genuinely does
+# not carry them. And `depends_on`: Compose v1 never shared it between
+# extending services and the current documentation says neither way, so it is
+# written out here — a mapping merges key by key, which makes restating it free
+# if it would have been inherited and correct if it would not. What is at stake
+# is the app starting against a schema that has not been migrated yet.
+#
+# Needs Compose v2.20 or newer (2023).
+#
+# First run: see SETUP.md. Nothing but the reverse proxy needs to be
+# internet-facing.
 
 services:
   # ---------------------------------------------------------------- database
+  # One Postgres server for both databases, which is what the init script
+  # below is for. The published Authentik example runs a second server
+  # instead: it has no checkout to mount a script from.
   db:
-    image: postgres:17-alpine
+    extends:
+      file: ../examples/docker-compose.cloud.yml
+      service: db
     container_name: habiterall-db
     environment:
-      POSTGRES_DB: habiterall
-      POSTGRES_USER: habiterall_owner
-      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?set DB_OWNER_PASSWORD in .env}
       # Consumed by the init script that provisions Authentik's own database.
       AUTHENTIK_DB_PASSWORD: ${AUTHENTIK_DB_PASSWORD:?set AUTHENTIK_DB_PASSWORD}
     volumes:
-      - db-data:/var/lib/postgresql/data
-      # Authentik keeps its own database in the same server, created on boot.
       - ./scripts/init-authentik-db.sh:/docker-entrypoint-initdb.d/10-authentik.sh:ro
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U habiterall_owner -d habiterall']
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    restart: unless-stopped
 
   # ------------------------------------------------------------- authentik
   # Postgres is the only dependency: 2025.10 removed Redis from Authentik
@@ -138,10 +162,17 @@ services:
   #
   # Without AUTHENTIK_BOOTSTRAP_TOKEN it exits 0 having done nothing, which is
   # what keeps `up` working after the production checklist has you delete it.
+  #
+  # It reads the blueprints and the branding straight from the checkout, which
+  # the bind mounts above put in front of Authentik — so editing one takes
+  # effect on the next request. The published example has no checkout and
+  # copies them out of the image into volumes instead, which is what
+  # AUTHENTIK_BLUEPRINTS_OUT and its two siblings are for there.
   authentik-bootstrap:
     build:
       context: ..
       dockerfile: habiterall-cloud/Dockerfile
+    image: habiterall-cloud:latest
     container_name: habiterall-authentik-bootstrap
     depends_on:
       authentik-server: { condition: service_started }
@@ -168,59 +199,51 @@ services:
     restart: 'no'
 
   # ------------------------------------------------------------ application
+  # Both of these are the published file's services with the image built rather
+  # than pulled. One `image:` tag for all three build sites, so Compose builds
+  # it once — and a local name, so `--build` does not take over the one a
+  # `docker pull` of the published image would land under.
   migrate:
+    extends:
+      file: ../examples/docker-compose.cloud.yml
+      service: migrate
     build:
       context: ..
       dockerfile: habiterall-cloud/Dockerfile
+    image: habiterall-cloud:latest
     container_name: habiterall-migrate
+    # Restated rather than relied on — see the header. Without it this runs
+    # against a Postgres that may not be accepting connections yet.
     depends_on:
       db: { condition: service_healthy }
-    environment:
-      DATABASE_URL_ADMIN: postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
-    command: ['node', 'src/db/migrate.js']
-    restart: 'no'
 
   app:
+    extends:
+      file: ../examples/docker-compose.cloud.yml
+      service: app
     build:
       context: ..
       dockerfile: habiterall-cloud/Dockerfile
+    image: habiterall-cloud:latest
     container_name: habiterall-cloud
+    # The first two are the published file's, restated for the reason in the
+    # header; the third is this stack's own, because the identity provider it
+    # signs people in against is configured by a container here.
     depends_on:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
       authentik-bootstrap: { condition: service_completed_successfully }
-    environment:
-      NODE_ENV: production
-      PORT: 3000
-      # The app connects as the restricted, RLS-bound role — never the owner.
-      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
-      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
-      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
-      OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
-      TRUST_PROXY: ${TRUST_PROXY:-1}
-      # Server-sent reminders (a Discord webhook). Costs nothing until a user
-      # configures one; on-device reminders never involve this process.
-      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}
-      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
-      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}
-      # Set to enable Discord buttons. Opens one outbound WebSocket; needs no
-      # inbound port.
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
-      # Local HTTP testing only; never set this in a real deployment.
-      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}
-    ports:
-      - '${APP_PORT:-3100}:3000'
     # The OIDC issuer string must be byte-identical for the browser and for
     # this container, or token validation fails on an issuer mismatch. In a
     # real deployment both use the public https URL; for a local stack we
     # alias the browser-facing host to the Authentik container.
     extra_hosts:
       - '${OIDC_HOST_ALIAS:-localhost}:host-gateway'
-    restart: unless-stopped
 
+# Named again here: `extends` works at the service level, so a top-level
+# declaration in the file being extended is not carried across. `db-data` is
+# the published file's; the three below belong to the identity provider, which
+# only this stack runs.
 volumes:
   db-data:
   authentik-data:

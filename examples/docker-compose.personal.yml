@@ -1,7 +1,11 @@
 # habiterall, personal edition — single user, SQLite, one password.
 #
-# The copy in README.md is generated from this file, and a unit test fails if the
-# two drift, so edit this one.
+# This file is the ONE place the personal edition's environment is described.
+# The copy in README.md is generated from it (`npm run docs:compose`), and
+# `habiterall-personal/docker-compose.yml` includes it and adds nothing but a
+# `build:` — so a variable added here reaches every place that documents one.
+# `shared/test/compose.test.js` fails if the server reads a variable that is
+# not below.
 #
 #   docker compose -f docker-compose.personal.yml up -d
 #   open http://localhost:3000
@@ -13,6 +17,7 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
+      # The port inside the container is fixed at 3000. This is the host side.
       - '${APP_PORT:-3000}:3000'
     volumes:
       # Your entire database is one file in here. Back it up by copying it.
@@ -23,22 +28,52 @@ services:
       # both when an 08:00 reminder fires and which day a check-off lands on.
       # Unset, an evening check-in west of UTC is filed under tomorrow.
       TZ: Etc/UTC                    # e.g. America/Toronto, Europe/Berlin
+
+      # ---- signing in ----------------------------------------------------
       # The single account. Set BOTH before you expose this port: with neither,
       # the first visitor to reach the app claims it — no token, no address
       # check — which is fine on a LAN and a race on the internet.
       HABITERALL_USERNAME: ''        # defaults to "admin"
       HABITERALL_PASSWORD: ''        # at least 8 characters
+      # Or supply the hash instead, to keep the plaintext out of this file and
+      # out of `docker inspect`. Generate one with:
+      #   docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
+      #     "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" 'your password'
+      # Setting both is ambiguous and the HASH wins; the server says so at
+      # startup rather than quietly ignoring the other one.
+      HABITERALL_PASSWORD_HASH: ''
       # Sign-in is ON unless this is EXACTLY "off" — "false", "0" and every typo
       # of "off" all leave it on, deliberately. Only set it for a machine nobody
       # else can reach.
       HABITERALL_AUTH: ''
+      # Set to keep people signed in across a redeploy. Left empty, one is
+      # generated and stored in the database, which is fine — it only means the
+      # cookies issued before a restore of a *different* database stop working.
+      HABITERALL_SESSION_SECRET: ''
+
+      # ---- what is in front ----------------------------------------------
       # Set to 1 behind a reverse proxy (see "Put HTTPS in front" below), and
       # leave it at 0 when this port is reached directly. It decides whose
       # address the rate limiter counts, whether a Secure cookie can be issued,
-      # and which Host the cross-origin check compares.
+      # and which Host the cross-origin check compares. Setting it to 1 while
+      # the port is ALSO open on the LAN is worse than leaving it at 0.
       TRUST_PROXY: 0
-      # Optional, and only for reminders the SERVER sends (a Discord channel).
-      # The Android app needs neither of these — it arms its own alarms.
+      # Set to "on" only if this instance is reached over https and nothing
+      # else: it makes browsers rewrite every http request to https, which
+      # breaks the plain-http LAN half of a box that answers on both. Browsers
+      # exempt localhost, so a mistake here only ever shows up on a real address.
+      HABITERALL_UPGRADE_INSECURE: ''
+      # Set to "off" for a trusted LAN or a test run. Leave it alone otherwise:
+      # this edition's database is synchronous, so one client in a loop is all
+      # it takes to stop the event loop. The limit on *login attempts* is not
+      # included and cannot be switched off.
+      HABITERALL_RATE_LIMIT: ''
+
+      # ---- reminders the SERVER sends -------------------------------------
+      # Only for a Discord channel. The Android app needs none of these — it
+      # arms its own alarms, and the phone works offline because of it.
+      HABITERALL_NOTIFY: 'on'        # "off" disables the loop entirely
+      HABITERALL_NOTIFY_INTERVAL_MS: 60000
       HABITERALL_PUBLIC_URL: ''      # e.g. https://habits.example.com
       DISCORD_BOT_TOKEN: ''          # enables Yes / No / Skip buttons
     restart: unless-stopped
