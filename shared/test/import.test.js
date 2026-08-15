@@ -655,6 +655,75 @@ async function parseInCappedChild(path) {
   }
 }
 
+test('rows belonging to no habit are billed, not scanned for free', async () => {
+  // The ceilings bounded memory and not time. `WHERE habit = ?` inside the
+  // habit loop is one full table scan per habit on a file that omits the index
+  // Loop's own schema has — and the budget could not see it, because a budget
+  // spent by rows RETURNED is never spent by rows that match nothing. Measured
+  // before the fix: 2,000 habits x 300,000 unmatched rows in a 6.4MB file took
+  // 13.5 seconds and returned zero entries. Now it is one pass, every row is
+  // billed, and this file is refused in a fraction of a second.
+  const path = join(tmpdir(), `loop-scan-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, freq_num INTEGER, freq_den INTEGER);
+    CREATE TABLE Repetitions (id INTEGER PRIMARY KEY, habit INTEGER, timestamp INTEGER, value INTEGER);
+  `);
+  d.exec('BEGIN');
+  const h = d.prepare(`INSERT INTO Habits (id,name,freq_num,freq_den) VALUES (?,?,1,1)`);
+  for (let i = 1; i <= 20; i++) h.run(i, 'h' + i);
+  // Every row points at a habit that does not exist.
+  const r = d.prepare(`INSERT INTO Repetitions (habit,timestamp,value) VALUES (?,?,?)`);
+  for (let i = 0; i <= MAX_PARSE_ENTRIES; i++) r.run(999999, 1767225600000 + i * 86_400_000, 2);
+  d.exec('COMMIT');
+  d.close();
+
+  await assert.rejects(() => parseLoopDatabase(path), (e) =>
+    e.status === 400 && new RegExp(`more than ${MAX_PARSE_ENTRIES} entries`).test(e.message));
+
+  unlinkSync(path);
+});
+
+test('one pass still puts every entry on its own habit, in order', async () => {
+  // Reading Repetitions once and bucketing is only correct if the buckets are
+  // right: the old query filtered per habit and sorted per habit, and this has
+  // to do both from a single `ORDER BY habit, timestamp`.
+  const path = join(tmpdir(), `loop-buckets-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, freq_num INTEGER, freq_den INTEGER, type INTEGER);
+    CREATE TABLE Repetitions (id INTEGER PRIMARY KEY, habit INTEGER, timestamp INTEGER, value INTEGER, notes TEXT);
+  `);
+  d.prepare(`INSERT INTO Habits VALUES (1,'A',1,1,0)`).run();
+  d.prepare(`INSERT INTO Habits VALUES (2,'B',1,1,1)`).run();
+  // Interleaved and out of order on purpose, and habit 3 does not exist.
+  const r = d.prepare(`INSERT INTO Repetitions (habit,timestamp,value,notes) VALUES (?,?,?,?)`);
+  r.run(2, Date.UTC(2026, 0, 3), 7000, '');
+  r.run(1, Date.UTC(2026, 0, 2), 2, 'second');
+  r.run(3, Date.UTC(2026, 0, 9), 2, 'orphan');
+  r.run(2, Date.UTC(2026, 0, 1), 5000, '');
+  r.run(1, Date.UTC(2026, 0, 1), 2, 'first');
+  d.close();
+
+  const byName = Object.fromEntries(
+    (await parseLoopDatabase(path)).map((x) => [x.name, x])
+  );
+  assert.deepEqual(byName.A.entries.map((e) => e.date), ['2026-01-01', '2026-01-02'],
+    'sorted within the habit, not merely in file order');
+  assert.equal(byName.A.entries[0].notes, 'first');
+  assert.deepEqual(byName.B.entries.map((e) => e.value), [5, 7],
+    'the numerical habit keeps its own rows, unscaled by its own type');
+  assert.equal(Object.keys(byName).length, 2, 'the orphan row invented no habit');
+
+  unlinkSync(path);
+});
+
 test('a hostile CSV is refused too, and it is the cheaper attack', async () => {
   // The .db ceiling landed first and left this path open. A header is ONE LINE,
   // so `Date,a,a,a,…` two million times is 7.6MB of CSV that deflates to under
