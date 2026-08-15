@@ -150,6 +150,23 @@ unreachable before the watcher grew that input: nothing set the state on the
 write path, so "when the app already believes it is offline" described no state
 the app could be in, and the obvious-looking fix would have done nothing.
 
+And the write is staged BEFORE the attempt, not after it. `enqueue` returns its
+`seq`, `api()` holds it for the length of the fetch and `unstage`s it the moment
+any answer arrives. That closes the window the bound only shortened: the queue
+used to hold writes that had already failed, so between the tap and the fetch
+settling a check-off existed solely in a promise and closing the tab lost it
+from the outbox and the server alike.
+
+It is removed on ANY response, not just a good one. Leaving it staged on a 5xx
+would turn every failed write into a silent retry, which is a bigger change than
+this and not obviously wanted — the caller is told and the caller decides. What
+the staging covers is precisely the in-flight window, which is precisely what
+was lossy.
+
+Staging is limited to calls safe to arrive twice, because a concurrent `flush()`
+can send a staged write while the live attempt is still out: two identical
+upserts keyed on habit and date, and the second changes nothing.
+
 Two exclusions, both deliberate. A **GET** still goes to the network, because
 the service worker may hold a cached copy and skipping the request throws that
 away — stale beats blank. And `POST /habits` is excluded **by the same

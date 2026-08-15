@@ -126,11 +126,17 @@ try {
     return true;
   })()`);
 
-  // While it is in flight nothing is durable — the bounded half of this issue.
+  // The write is durable WHILE the fetch is in flight, which is the whole of
+  // the data-loss half. It used to be queued only in the `catch`, so for the
+  // length of the attempt — unbounded, before the timeout landed — a check-off
+  // existed only in a promise, and closing the tab lost it from the outbox and
+  // the server alike. It is staged before the socket opens now.
   await sleep(2000);
   const during = await look();
-  check('the write is still only a promise while the fetch is in flight',
-    during.outbox.length === 0, JSON.stringify(during));
+  check('the write is already durable while the fetch is still in flight',
+    during.outbox.length === 1, JSON.stringify(during));
+  check('and it is the check-off, not something else',
+    during.outbox[0]?.startsWith('PUT /api/habits/'), String(during.outbox[0]));
 
   await sleep(BOUND_MS + SLACK_MS - 2000);
   const after = await look();

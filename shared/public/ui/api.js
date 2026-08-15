@@ -5,7 +5,7 @@
  * than touching the banner themselves.
  */
 
-import { enqueue } from '/shared/offline.js';
+import { enqueue, unstage } from '/shared/offline.js';
 import {
   refreshOfflineBadge, reportUnreachable, setOffline,
 } from '/shared/ui/connectivity.js';
@@ -67,6 +67,18 @@ export function setAuth(adapter) {
  */
 async function queueWrite(url, method, options) {
   await enqueue({ url, method, body: options.body ?? null });
+  return announceQueued();
+}
+
+/**
+ * Say a write is queued, and hand back the error the caller expects.
+ *
+ * Separate from the enqueue because with staging the write is often ALREADY in
+ * the queue by the time we get here — the announcement is the only part left.
+ * Callers must not be able to tell the three routes in apart: pre-empted
+ * because we knew, staged and then failed, or failed and queued on the spot.
+ */
+async function announceQueued() {
   // Nothing else can say it: the watcher makes no requests while it believes it
   // is online, so before this the app went on looking connected through an
   // entire outage, with the badge hidden inside the hidden banner.
@@ -106,6 +118,25 @@ export async function api(path, options = {}) {
     throw await queueWrite(url, method, options);
   }
 
+  // Durable BEFORE the attempt, not after it.
+  //
+  // The queue used to hold writes that had already failed, which meant that
+  // between the tap and the fetch settling a check-off existed only in a
+  // promise: close the tab in that window and it was gone, from the outbox and
+  // from the server alike. The bound above caps that window at 10s; staging
+  // here closes it.
+  //
+  // Only for calls safe to arrive twice, which is what `bounded()` already
+  // names. A staged write can be picked up by a concurrent `flush()` and sent
+  // while the live attempt is in flight — two identical upserts, keyed on habit
+  // and date, and the second changes nothing. `POST /habits` is the call that
+  // would become two habits, so it is not staged, exactly as it is not bounded
+  // and not pre-empted: one predicate, three uses, no way to change one and
+  // miss the others.
+  const staged = method !== 'GET' && bounded(method, path)
+    ? await enqueue({ url, method, body: options.body ?? null })
+    : null;
+
   let res;
   try {
     res = await fetch(url, {
@@ -121,9 +152,21 @@ export async function api(path, options = {}) {
   } catch (networkError) {
     // Offline. Queue writes for replay; reads have nothing to fall back on
     // beyond whatever the service worker already cached.
-    if (method !== 'GET') throw await queueWrite(url, method, options);
+    if (method !== 'GET') {
+      // Already staged, unless this is the one call that is not. Either way it
+      // is in the queue now, so only the announcement is left to make.
+      if (staged === null) await enqueue({ url, method, body: options.body ?? null });
+      throw await announceQueued();
+    }
     throw new Error('You are offline');
   }
+
+  // An answer arrived — any answer. The tab-close window is over, so the staged
+  // copy has done its job and comes back out before the status is even looked
+  // at. Leaving it in on a 5xx would turn every failed write into a silent
+  // retry, which is a larger change than this one and not obviously wanted:
+  // the caller is told, and the caller decides.
+  if (staged !== null) await unstage(staged);
 
   // The service worker marks responses it served from its cache.
   if (res.headers.get('X-Habiterall-Offline') === '1') setOffline(true);
