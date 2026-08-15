@@ -40,8 +40,16 @@ function dosDateTime(date) {
  * reader could not: `unzip.js` decodes UTF-8 whatever the flag says.
  *
  * So this is not a new capability, it is the declaration of one that was
- * already there. Set only when the name needs it — as `zipfile` itself does —
- * so every archive this project produces today is byte for byte what it was.
+ * already there. Set only when the name needs it, so every archive this project
+ * produces today is byte for byte what it was.
+ *
+ * "Needs it" here is any byte outside printable ASCII, which is slightly WIDER
+ * than Python's `zipfile`, which flags only non-ASCII: a tab or a DEL in a name
+ * gets the bit from us and not from it. That is deliberate rather than an
+ * oversight — CP437 maps 0x01–0x1F to glyphs, so a control byte really does
+ * decode differently under the two readings — but do not read this predicate as
+ * a copy of `zipfile`'s. No archive habiterall writes is affected either way;
+ * both names are plain ASCII.
  */
 const UTF8_NAME_FLAG = 0x0800;
 

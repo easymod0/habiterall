@@ -214,10 +214,14 @@ const exported = backup.habits.find((h) => h.id === habitId);
 ck('the JSON backup carries no user_id',
   exported != null && !('user_id' in exported), Object.keys(exported ?? {}).join(','));
 
-// Read off the personal edition's own `/api/export`, so this fails when the
-// two stop describing a habit the same way. A new habit column reaching one
-// edition's backup and not the other's is the drift this is here to catch;
-// when both grow one, both this list and the shape change together.
+// Read off the personal edition's own `/api/export`, so a habit column reaching
+// CLOUD's backup and not personal's fails here.
+//
+// Be clear about the half it does not cover: this is a hardcoded snapshot in
+// cloud's suite, so drift in the other direction — personal growing a column
+// cloud does not have — still passes. `apishape.integration.mjs` pins personal's
+// shape rather than forbidding extra keys, so it does not catch it either.
+// Closing that needs the list to live somewhere both editions assert against.
 const PORTABLE_HABIT_KEYS = [
   'archived', 'color', 'created_at', 'description', 'entries', 'freq_denominator',
   'freq_numerator', 'id', 'name', 'position', 'reminder_message', 'reminder_time',
