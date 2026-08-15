@@ -30,7 +30,7 @@ const { unzip } = await import('@habiterall/shared/unzip.js');
 const { parseSettings, portableSettings } =
   await import('@habiterall/shared/validate.js');
 const {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, JSON_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS, JSON_HABIT_FIELDS,
 } = await import('@habiterall/shared/test/roundtrip-fixture.mjs');
 
 const pg = (await import('pg')).default;
@@ -150,6 +150,8 @@ await seed(alice);
 const seeded = await read(alice);
 const baselineFull = snapshot(seeded, { fields: JSON_HABIT_FIELDS });
 const baselineLoop = snapshot(seeded, { fields: LOOP_HABIT_FIELDS, notes: false });
+// The CSV keeps the colour exactly, where the .db snaps it to a palette index.
+const baselineCsv = snapshot(seeded, { fields: CSV_HABIT_FIELDS, notes: false });
 // The .db carries a reminder time as well, and per-day notes, which is why this
 // one is not `notes: false`. Habits.csv has no column for either.
 const baselineLoopDb = snapshot(seeded, { fields: LOOP_DB_HABIT_FIELDS });
@@ -348,11 +350,11 @@ const csvHabits = parseLoopCheckmarksCSV(members.get('Checkmarks.csv').toString(
 
 await wipe(alice);
 const csvResult = await applyImport(alice, csvHabits, 'replace');
-const afterCsv = snapshot(await read(alice), { fields: LOOP_HABIT_FIELDS, notes: false });
+const afterCsv = snapshot(await read(alice), { fields: CSV_HABIT_FIELDS, notes: false });
 
 ck('CSV round-trip preserves habits and entries',
-  diff(baselineLoop, afterCsv) === null,
-  diff(baselineLoop, afterCsv) ?? '');
+  diff(baselineCsv, afterCsv) === null,
+  diff(baselineCsv, afterCsv) ?? '');
 ck('CSV restore skipped nothing',
   csvResult.skipped.length === 0, csvResult.skipped.join('; '));
 

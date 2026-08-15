@@ -7,9 +7,14 @@
  * a test that asserts nothing:
  *
  *   JSON  — habiterall's own backup. Lossless. Everything must survive.
- *   Loop .db — Loop's schema, and the only thing it loses is the colour.
- *   CSV   — Loop's Habits.csv + Checkmarks.csv. Everything the .db carries
- *           except a reminder time, and no per-day notes.
+ *   Loop .db — Loop's schema. Carries every habit field but the colour, which
+ *           it stores as a palette index and therefore snaps.
+ *   CSV   — Loop's Habits.csv + Checkmarks.csv. Loses a reminder time and the
+ *           per-day notes, and is the ONLY Loop format that keeps the colour
+ *           exactly, because Habits.csv writes the hex.
+ *
+ * So the two Loop formats are not nested: each carries something the other
+ * does not, which is why there are three lists below and not two.
  *
  * That reads nothing like what stood here, which claimed the .db had "nowhere
  * to put per-day notes, our description text, or archived state" and excluded
@@ -179,10 +184,14 @@ export function entrySetWithNotes(entries) {
  * `color` is the one habit field that stays out, and it belongs in NEITHER
  * list rather than in one of them: the .db stores Loop's palette *index*, so
  * `colorToLoopIndex` snaps `#123456` to `#475569` on the way out, while
- * Habits.csv writes the hex verbatim and keeps it. The fixture's colours all
- * happen to be palette entries, so asserting it here would pin a property of
- * the fixture and not of the format — which is how the excluded fields above
- * got excluded in the first place.
+ * Habits.csv writes the hex verbatim and keeps it. So it is not a field the
+ * two Loop formats share — it goes in `CSV_HABIT_FIELDS` below, and nowhere
+ * near the .db.
+ *
+ * Leaving it out of BOTH was the state this file was in, and it cost exactly
+ * what the excluded fields above cost: rewriting `esc(h.color)` to a constant
+ * in `buildHabitsCsv` — every habit's colour destroyed on export — passed both
+ * suites.
  */
 export const LOOP_HABIT_FIELDS = [
   'name', 'type', 'unit', 'target_value', 'target_type',
@@ -194,7 +203,7 @@ export const LOOP_HABIT_FIELDS = [
  * ...and what only the .db can carry. Loop stores a reminder as
  * `reminder_hour` / `reminder_min` in the Habits *table* and exports neither to
  * Habits.csv, so a reminder time survives one Loop format and not the other.
- * That asymmetry is the format's, not a bug, which is why it is two lists.
+ * That asymmetry is the format's, not a bug, which is why it is three lists.
  *
  * Per-day notes are the .db's other exclusive, and they are not a field on the
  * habit — they ride on `Repetitions.notes`, so they are the `notes` flag to
@@ -203,6 +212,12 @@ export const LOOP_HABIT_FIELDS = [
  * and the .db comparisons no longer do.
  */
 export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
+
+/**
+ * ...and what only the CSV pair can carry. Just the colour, for the reason
+ * given above — Habits.csv writes the hex and the .db cannot.
+ */
+export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color'];
 
 /** Fields the lossless JSON backup must preserve exactly. */
 export const JSON_HABIT_FIELDS = [...LOOP_DB_HABIT_FIELDS, 'color'];

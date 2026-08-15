@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS,
 } from '@habiterall/shared/test/roundtrip-fixture.mjs';
 
 let fails = 0;
@@ -109,6 +109,8 @@ await seed();
 console.log('--- baseline ---');
 const baselineFull = await current();
 const baselineLoop = await current({ fields: LOOP_HABIT_FIELDS, notes: false });
+// The CSV keeps the colour exactly, where the .db snaps it to a palette index.
+const baselineCsv = await current({ fields: CSV_HABIT_FIELDS, notes: false });
 // The .db carries a reminder time as well, and per-day notes, which is why this
 // one is not `notes: false`. Habits.csv has no column for either.
 const baselineLoopDb = await current({ fields: LOOP_DB_HABIT_FIELDS });
@@ -283,7 +285,7 @@ ck('the archive contains both CSVs',
   [...members.keys()].join(', '));
 
 const csvResult = await restore(csvZip);
-const afterCsv = await current({ fields: LOOP_HABIT_FIELDS, notes: false });
+const afterCsv = await current({ fields: CSV_HABIT_FIELDS, notes: false });
 
 ck('CSV restore skipped nothing',
   (csvResult.skipped ?? []).length === 0,
@@ -292,8 +294,8 @@ ck('CSV restore skipped nothing',
 // The CSV pair carries the same information the Loop .db does, so it is held to
 // the same standard: every entry, notes aside.
 ck('CSV round-trip preserves habits and entries',
-  diff(baselineLoop, afterCsv) === null,
-  diff(baselineLoop, afterCsv) ?? '');
+  diff(baselineCsv, afterCsv) === null,
+  diff(baselineCsv, afterCsv) ?? '');
 
 const csvMeditate = afterCsv.find((h) => h.name === 'Meditate');
 ck('CSV: a stated lapse survives as a NO cell',
