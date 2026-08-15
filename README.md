@@ -80,7 +80,7 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
-      - '${APP_PORT:-3000}:3000'
+      - '${BIND_ADDR:-0.0.0.0}:${APP_PORT:-3000}:3000'
     volumes:
       - habiterall-data:/data        # your whole database is one file in here
     environment:
@@ -228,7 +228,7 @@ services:
       - authentik-icons:/web/dist/assets/icons/habiterall
       - authentik-images:/web/dist/assets/images/habiterall
     ports:
-      - '${AUTHENTIK_PORT:-9000}:9000'
+      - '${BIND_ADDR:-0.0.0.0}:${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
 
   authentik-worker:
@@ -323,7 +323,7 @@ services:
       migrate: { condition: service_completed_successfully }
       authentik-bootstrap: { condition: service_completed_successfully }
     ports:
-      - '${APP_PORT:-3100}:3000'
+      - '${BIND_ADDR:-0.0.0.0}:${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -504,7 +504,7 @@ services:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     ports:
-      - '${APP_PORT:-3100}:3000'
+      - '${BIND_ADDR:-0.0.0.0}:${APP_PORT:-3100}:3000'
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten

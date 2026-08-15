@@ -147,10 +147,25 @@ world in".
 ## 4. Put TLS in front
 
 Compose publishes the app on `${APP_PORT:-3100}` and Authentik on
-`${AUTHENTIK_PORT:-9000}`, and a published port binds to **all** interfaces —
-not to loopback, whatever the proxy config below suggests. Firewall both, or
-prefix the mappings with `127.0.0.1:`, or the TLS you are about to put in front
-is something callers can simply step around. With Caddy:
+`${AUTHENTIK_PORT:-9000}`, and `BIND_ADDR` decides which interface they appear
+on. It defaults to `0.0.0.0` — every interface — because browsing the app
+directly from another machine is a perfectly ordinary way to run it.
+
+That default is the wrong one the moment you put TLS in front. A reverse proxy
+on this host only needs loopback, and while the port is also on the LAN the
+proxy is something callers can step around by asking for `:3100` directly —
+plain HTTP, no HSTS, and on cloud a session cookie that will not be marked
+`Secure`. So for the deployment below, set:
+
+```
+BIND_ADDR=127.0.0.1
+```
+
+If the proxy runs on a *different* host, leave the default and firewall the two
+ports to that host instead — binding to loopback would put the app out of the
+proxy's reach as well as everyone else's.
+
+With Caddy:
 
 ```
 habits.example.com {
