@@ -26,10 +26,24 @@ RUN npm ci --omit=dev \
 
 COPY habiterall-cloud/src ./habiterall-cloud/src
 COPY habiterall-cloud/public ./habiterall-cloud/public
-# The same image runs the app, the migrations and the Authentik bootstrap.
+# The same image runs the app, the migrations and the Authentik bootstrap —
+# and carries what that bootstrap has to hand to Authentik. Without the last
+# two, configuring Authentik would need a checkout of this repository on the
+# server to bind-mount from, and the published image would be a strictly
+# lesser way to run this.
 COPY habiterall-cloud/scripts ./habiterall-cloud/scripts
+COPY habiterall-cloud/blueprints ./habiterall-cloud/blueprints
+COPY habiterall-cloud/branding ./habiterall-cloud/branding
 
 WORKDIR /app/habiterall-cloud
+
+# Where the published-image path mounts the volumes Authentik shares, and the
+# reason they are created HERE rather than left to compose: Docker seeds an
+# empty named volume from whatever is at that path in the image, ownership
+# included, and a path the image does not have becomes root-owned — which this
+# container, running as `node`, then cannot write. The failure is an EACCES
+# from the copy, on a first run only, on the published path only.
+RUN mkdir -p /out/blueprints /out/icons /out/images && chown -R node:node /out
 
 USER node
 EXPOSE 3000

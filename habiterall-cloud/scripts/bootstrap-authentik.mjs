@@ -33,6 +33,28 @@ const SIGNUP_BLUEPRINT = 'custom/self-signup.yaml';
 const BRANDING_BLUEPRINT = 'custom/branding.yaml';
 
 /**
+ * Where to put the files Authentik reads, when it is this container's job to
+ * put them there.
+ *
+ * Two ways in, and they are for two different people. From a checkout,
+ * compose bind-mounts the directories straight into the Authentik containers
+ * and these are unset — editing a blueprint or an image then takes effect on
+ * the next request, which is what you want while working on one. From the
+ * PUBLISHED image there is no checkout to mount, so the files ride inside the
+ * image and are copied into volumes the Authentik containers share; that is
+ * what makes `docker compose up -d` on a bare server a complete install
+ * rather than the first half of one.
+ *
+ * Either way Authentik sees the same paths, so the blueprints and their asset
+ * URLs do not know which of the two happened.
+ */
+const COPY_TARGETS = [
+  ['../blueprints', process.env.AUTHENTIK_BLUEPRINTS_OUT],
+  ['../../shared/public/icons', process.env.AUTHENTIK_ICONS_OUT],
+  ['../branding', process.env.AUTHENTIK_IMAGES_OUT],
+];
+
+/**
  * A yes/no from the environment, or an error. Deliberately strict: this
  * decides whether strangers can create accounts, and the blueprint it feeds
  * tests plain truthiness — so a typo silently reading as ON is the one
@@ -178,6 +200,29 @@ async function findPrerequisites() {
 
   return { authFlow, invalidationFlow, identification, signingKey, scopeIds };
 }
+
+/**
+ * Put the blueprints and the brand's images where Authentik will look, before
+ * anything asks it to read them. A no-op unless the destinations are set.
+ *
+ * `force: false` so an operator who has edited a file in the volume keeps it:
+ * this is a first-run install step, not a sync. Delete the volume to take the
+ * image's copies again.
+ */
+async function publishFiles() {
+  const { cp } = await import('node:fs/promises');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+
+  for (const [from, to] of COPY_TARGETS) {
+    if (!to) continue;
+    await cp(join(here, from), to, { recursive: true, force: false, errorOnExist: false });
+    console.log(`published ${from.replace(/^\.\.\//, '')} -> ${to}`);
+  }
+}
+
+await publishFiles();
 
 console.log(`waiting for Authentik at ${BASE} ...`);
 let ready = null;

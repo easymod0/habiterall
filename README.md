@@ -178,6 +178,23 @@ services:
       # Only needed to create the first admin; harmless to leave set.
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      # Only self-service registration with email verification sends mail.
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-true}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-habiterall@example.com}
+    # Filled by authentik-bootstrap out of the habiterall image. The two asset
+    # volumes land under directories Authentik already serves at
+    # /static/dist/assets/, which is one of the two forms its brand settings
+    # accept without an upload.
+    volumes:
+      - authentik-blueprints:/blueprints/custom
+      - authentik-icons:/web/dist/assets/icons/habiterall
+      - authentik-images:/web/dist/assets/images/habiterall
     ports:
       - '${AUTHENTIK_PORT:-9000}:9000'
     restart: unless-stopped
@@ -195,7 +212,64 @@ services:
       AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
       AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@example.com}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-localhost}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-true}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-false}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-habiterall@example.com}
+    # The worker is what lists the blueprint directory for the endpoint that
+    # applies one, and what sends the mail. It needs the same files.
+    volumes:
+      - authentik-blueprints:/blueprints/custom
+      - authentik-icons:/web/dist/assets/icons/habiterall
+      - authentik-images:/web/dist/assets/images/habiterall
     restart: unless-stopped
+
+  # Configures Authentik from this file's .env: the OIDC provider and
+  # application, self-service registration, and the branding on the sign-in
+  # pages. Runs to completion on every `up`, and is idempotent — everything is
+  # looked up before it is written, so re-running it is how a changed .env
+  # takes effect.
+  #
+  # It also copies the blueprints and the two images out of the habiterall
+  # image into the volumes above, which is the step that makes this file work
+  # without a checkout of the repository.
+  #
+  # Without AUTHENTIK_BOOTSTRAP_TOKEN it does nothing and exits 0 — supported,
+  # and the reason `up` keeps working once you have removed the token. It
+  # warns if you had asked for a change it could not make.
+  authentik-bootstrap:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      authentik-server: { condition: service_started }
+      authentik-worker: { condition: service_started }
+    environment:
+      AUTHENTIK_URL: http://authentik-server:9000
+      # The API is reached over this network; the ISSUER has to be the string a
+      # browser sees, and they are not the same host.
+      AUTHENTIK_PUBLIC_URL: ${AUTHENTIK_PUBLIC_URL:-http://localhost:${AUTHENTIK_PORT:-9000}}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
+      AUTHENTIK_SELF_SIGNUP: ${AUTHENTIK_SELF_SIGNUP:-off}
+      AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL: ${AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL:-off}
+      AUTHENTIK_BRANDING: ${AUTHENTIK_BRANDING:-on}
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-}
+      # Set only here: this is the container with the files to copy.
+      AUTHENTIK_BLUEPRINTS_OUT: /out/blueprints
+      AUTHENTIK_ICONS_OUT: /out/icons
+      AUTHENTIK_IMAGES_OUT: /out/images
+    volumes:
+      - authentik-blueprints:/out/blueprints
+      - authentik-icons:/out/icons
+      - authentik-images:/out/images
+    command: ['node', 'scripts/bootstrap-authentik.mjs']
+    restart: 'no'
 
   # Runs once per deploy, as a SEPARATE credential the app never holds — it is
   # the only thing allowed to change the schema. `up -d` waits for it to finish.
@@ -214,7 +288,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
-      authentik-server: { condition: service_started }
+      authentik-bootstrap: { condition: service_completed_successfully }
     ports:
       - '${APP_PORT:-3100}:3000'
     environment:
@@ -225,14 +299,15 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
       PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
       OIDC_ISSUER: ${OIDC_ISSUER:?from Authentik, ends in a slash}
-      # Not `:?` like the rest, and that is load bearing: compose interpolates
-      # the WHOLE file before it works out which services you asked for, so a
-      # required-and-empty value here fails `up authentik-server` too — the
-      # first half of a two-phase start, whose entire purpose is to create the
-      # client these will hold. The app checks them itself at boot and says
-      # exactly this if they are missing (habiterall-cloud/src/auth.js).
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      # `:?` now, where this file once had `:-`. There used to be a phase where
+      # these were legitimately empty — the first of a two-phase start, whose
+      # purpose was to create the client they would hold — and compose
+      # interpolates the WHOLE file before it works out which services you
+      # asked for, so requiring them here would have failed that phase too.
+      # The bootstrap ends the two-phase start: these are values you generate,
+      # not values you collect, so there is no moment when empty is correct.
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
       TRUST_PROXY: 1
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       # The fallback clock: a container has no timezone, so it is UTC. Users can
@@ -245,6 +320,12 @@ services:
 volumes:
   db-data:
   authentik-db-data:
+  # Written once by authentik-bootstrap, read by Authentik. Delete one to take
+  # the image's copies again on the next `up`; edit a file inside it and the
+  # bootstrap will leave your version alone.
+  authentik-blueprints:
+  authentik-icons:
+  authentik-images:
 ```
 
 **Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
@@ -267,54 +348,39 @@ APP_DB_PASSWORD=$(openssl rand -hex 32)
 AUTHENTIK_DB_PASSWORD=$(openssl rand -base64 36)
 AUTHENTIK_SECRET_KEY=$(openssl rand -base64 60)
 AUTHENTIK_BOOTSTRAP_PASSWORD=       # the first admin's password
+AUTHENTIK_BOOTSTRAP_TOKEN=$(openssl rand -base64 36)
 SESSION_SECRET=$(openssl rand -base64 36)
 PUBLIC_URL=https://habits.example.com
 OIDC_ISSUER=https://auth.example.com/application/o/habiterall/
-OIDC_CLIENT_ID=                     # filled in below
-OIDC_CLIENT_SECRET=                 # filled in below
+AUTHENTIK_PUBLIC_URL=https://auth.example.com
+# Yours to choose, not Authentik's to hand you: the stack configures the
+# provider WITH these, so nothing is pasted back.
+OIDC_CLIENT_ID=$(openssl rand -hex 32)
+OIDC_CLIENT_SECRET=$(openssl rand -hex 32)
 APP_PORT=3100                       # optional — the host port the app answers on
 AUTHENTIK_PORT=9000                 # optional — the host port Authentik answers on
 ```
 
-Then start it in two goes, because the OIDC client cannot exist before the
-provider that issues it:
-
-```bash
-docker compose up -d authentik-db authentik-server authentik-worker
-```
-
-If you brought the whole stack up instead, `app` will be restarting in a loop
-until the two values below exist — that check lives in the app rather than in
-compose, so the failure is a log line rather than a refusal to start:
-
-```bash
-docker compose logs app --tail=20
-#   OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set
-```
-
-That is expected between the two phases, and it clears on the next `up -d`.
-
-Sign in to Authentik at **<http://localhost:9000>** as `akadmin`, and create an
-**OAuth2/OIDC provider** named `habiterall`, then an application pointing at it:
-
-| Field | Value |
-|---|---|
-| Authorization flow | `default-provider-authorization-**implicit**-consent` — habiterall is a first-party app, so approving it on every sign-in is a click and no security |
-| Invalidation flow | `default-provider-invalidation-flow` — what makes signing out here end the Authentik session too |
-| Client type | Confidential |
-| Redirect URI | `${PUBLIC_URL}/auth/callback`, exactly |
-| Scopes | `openid`, `profile`, `email` |
-| Signing key | any certificate in the list; Authentik ships one |
-
-Watch the flow name: the *explicit* one is `...authorization-explicit-consent`,
-and "explicit" contains "implicit" as a substring — matching on the shorter word
-picks the wrong flow, which is a mistake this repo has already made once in
-code.
-
-Put the client id and secret in `.env` and bring up the rest:
+Then start it, once:
 
 ```bash
 docker compose up -d
+```
+
+There is no second phase and nothing to click. The `authentik-bootstrap`
+service runs the same image as the app and creates the OIDC provider and
+application over Authentik's API, *giving* it the id and secret from `.env` —
+which is why those are values you generate rather than values you collect. It
+also copies the blueprints and images it needs out of that image, so this
+works on a server with no checkout of this repository. It runs to completion
+on every `up`, and re-running it is how a changed `.env` takes effect:
+
+```bash
+docker compose logs authentik-bootstrap
+#   created provider
+#   created application
+#   branding: habiterall
+#   self-service registration: OFF
 ```
 
 | | |
@@ -325,28 +391,37 @@ docker compose up -d
 Create users in Authentik under *Directory → Users*; a habiterall account is
 provisioned the first time each one signs in.
 
-<details>
-<summary><b>Or from a clone, which can create the OIDC client for you</b></summary>
+**Or let people create their own.** `AUTHENTIK_SELF_SIGNUP=on` in `.env`, then
+`docker compose up -d`, and the login page grows a **Sign up** link — anyone
+who can reach that page can then create an account, which on a public instance
+is everyone. `AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL=on` makes them confirm the
+address first, and needs a real SMTP server in the `AUTHENTIK_EMAIL__*`
+settings. `off` removes the link *and* the sign-up page behind it. The sign-in
+pages carry habiterall's name and colours unless you set
+`AUTHENTIK_BRANDING=off`. Read
+[`habiterall-cloud/SETUP.md`](habiterall-cloud/SETUP.md) before opening
+registration on an Authentik that serves anything else — the link goes on the
+instance-wide login flow, so what a stranger creates is an Authentik account.
 
-The compose file in the repository builds from source and mounts an init script,
-so it needs the checkout — but it also gets you
-`habiterall-cloud/scripts/bootstrap-authentik.mjs`, which creates the provider
-and application over Authentik's API and prints the client id and secret. That
-script is not in the published image, which ships `src/` and `public/` only.
+<details>
+<summary><b>Or from a clone, which is the same stack built from source</b></summary>
+
+The compose file in the repository builds the image instead of pulling it, and
+puts Authentik's database in the same Postgres server as habiterall's rather
+than running a second one. Everything else is the same file: the bootstrap
+configures Authentik identically, except that it reads the blueprints and
+images straight from the checkout, so editing one takes effect on the next
+request instead of on the next build.
 
 ```bash
 git clone <your-repo-url> habiterall
 cd habiterall/habiterall-cloud
 cp .env.example .env          # then fill in the secrets it lists
-docker compose up -d db authentik-server authentik-worker
-
-# create the OIDC client (waits for Authentik to finish booting)
-export $(grep AUTHENTIK_BOOTSTRAP_TOKEN .env | xargs)
-node scripts/bootstrap-authentik.mjs   # paste its output into .env
-
-docker compose run --rm migrate
-docker compose up -d app
+docker compose up -d
 ```
+
+`habiterall-cloud/SETUP.md` is the longer version, including TLS, backups and
+what to check before a real deployment.
 </details>
 
 **Already run an identity provider?** The stack above brings its own Authentik,
