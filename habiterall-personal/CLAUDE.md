@@ -221,6 +221,7 @@ npm run seed              # sample data (refuses if habits already exist)
 npm test                  # the CSS-guard test
 npm run test:notify       # reminder delivery, and that a send is not repeated
 npm run test:roundtrip    # export every format, re-import, assert no drift
+npm run test:exportloop   # the Loop export survives a date that is not a day
 npm run test:auth         # the modes and their attacks, end to end (no browser)
 npm run test:credchange   # a session must not outlive its credential (restarts)
 npm run test:signin       # the sign-in view in Chrome; starts its own server

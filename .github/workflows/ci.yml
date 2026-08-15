@@ -375,6 +375,14 @@ jobs:
         working-directory: habiterall-personal
         run: node test/overview.integration.mjs
 
+      # One entry filed under a day that does not exist used to make the Loop
+      # export answer 500 for good. The writer's half is unit-tested; only the
+      # real route can show that the request now comes back with a file on it
+      # and says on the way past which row did not make it.
+      - name: The Loop export survives a date that is not a day
+        working-directory: habiterall-personal
+        run: node test/export-loop.integration.mjs
+
       # Server-sent reminders, against a real database. The scheduling rules
       # are unit-tested; what this covers is the watermark surviving a round
       # trip, which is the difference between one reminder and one a minute for

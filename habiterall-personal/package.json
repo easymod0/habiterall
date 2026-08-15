@@ -14,6 +14,7 @@
     "test:roundtrip": "node test/roundtrip.integration.mjs",
     "test:apishape": "node test/apishape.integration.mjs",
     "test:overview": "node test/overview.integration.mjs",
+    "test:exportloop": "node test/export-loop.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:auth": "node test/auth.integration.mjs",
     "test:signin": "node test/signin.browser.mjs",

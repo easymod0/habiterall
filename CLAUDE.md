@@ -121,6 +121,31 @@ answer reads `skipDays` — both grids, both day editors, the Discord buttons
 (`reminderComponents`) and the Android notification, which reads it from a local
 mirror because an alarm fires whether or not the phone has a network.
 
+**An export reports what it could not carry; it does not fail on it.**
+`isoToLoopTimestamp` is `Date.UTC`, which rolls a date over rather than refusing
+one, so `2026-02-30` left as 2026-03-02 — and if that day held a real row, the
+Loop file's UNIQUE index on (habit, timestamp) rejected the insert and
+`/api/export-loop.db` answered **500 for as long as the row existed**, naming
+neither the habit nor the date. Restoring your own backup is how such a row gets
+in. `isLoopEncodableDate` is the gate, and it asks the exporter's question
+rather than the calendar's — *does the timestamp read back as the day it came
+from* — which is narrower than `assertDate` on purpose: that one also rejects
+years 1-99, as a side effect of the same legacy two-digit mapping, and #81 is
+teaching the encoder to carry them. This gate weakens by itself as the encoder
+improves, with nothing here to remember to update.
+
+The collision is only the loud half. With no real row on the day it rolled onto,
+the export SUCCEEDED and filed the entry under a day the user never recorded, so
+catching the UNIQUE violation alone would have left the silent corruption in
+place and called it fixed. Two surfaces report the skips because neither reaches
+everybody: `X-Habiterall-Export-Skipped` carries the count for a client that
+made the request itself, and `export.rows_skipped` carries the rows at warn for
+the browser, which downloads through an `<a download>` and reads no headers.
+The count-only header is not timidity — a habit name is free text and a `\r\n`
+in one would throw inside the route, which is the 500 all over again. For the
+same reason the report is `{habit, date, reason}` rather than `applyImport`'s
+sentence: its reader is a log, where names never go.
+
 **Every date range is clamped** (`boundedRange`, `MAX_RANGE_DAYS`). Ranges
 derived from *stored* data are attacker-controlled: one entry dated year 0100
 once made a single request block the event loop for 32 seconds. Never call
@@ -871,6 +896,7 @@ Several layers, and they catch different things:
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
+| Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
