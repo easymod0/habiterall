@@ -178,7 +178,17 @@ fields; "Powered by authentik" is appended unconditionally by `ak-brand-links`
 in the shipped bundle, so it is hidden with the brand's custom CSS, which
 Authentik adopts into the flow's shadow roots. The logo's `alt` is still
 "authentik Logo" and stays that way: it is hardcoded in the same bundle, and
-the alternative is patching a file inside the image on every upgrade.
+the alternative is patching a file inside the image on every upgrade. The
+confirmation email's subject is the EMAIL STAGE's field, not the brand's — the
+template is never handed a brand, and the stage's default is the bare word
+"authentik".
+
+**Brand-level settings are not scoped to the sign-in pages.** Only the flow's
+own title and background are. `base/skeleton.html` renders `branding_title`,
+`branding_favicon` and `branding_custom_css` into the admin and user
+interfaces too, so those three follow you in there. Worth knowing before
+writing a CSS rule general enough to restyle Authentik's admin — the accent on
+`.pf-c-button.pf-m-primary` already does.
 
 Two guards deliberately refuse to run insecurely and must be overridden for a
 local HTTP stack (`ALLOW_INSECURE_OIDC=true`), both logging loud warnings:

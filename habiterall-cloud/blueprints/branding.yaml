@@ -5,9 +5,15 @@
 # AUTHENTIK_BRANDING is on — turning it off stops this from being managed,
 # which is not the same as putting Authentik's own branding back.
 #
-# The admin interface is deliberately left alone. It is Authentik's, the
-# people who see it know that, and following its wording into the admin UI
-# would mean fighting a moving target for no user's benefit.
+# The FLOW-level settings below (titles, backdrop) are scoped to the sign-in
+# and sign-up pages. The brand-level ones are not, and saying otherwise would
+# be a nice-sounding lie: `base/skeleton.html` renders `branding_title`,
+# `branding_favicon` and `branding_custom_css` into the admin and user
+# interfaces too, so those three follow you in there — a habiterall tab title,
+# a habiterall favicon, and the accent on Authentik's own primary buttons.
+# That is cosmetic and, for an Authentik that exists to log people into
+# habiterall, not wrong. Nothing here rewords the admin UI, which is
+# Authentik's and whose readers know it.
 #
 # What a signed-out user actually sees was read off the rendered page rather
 # than guessed, and it is four things: the tab title (brand title), the mark
@@ -55,8 +61,8 @@ entries:
     identifiers:
       domain: authentik-default
     attrs:
-      # Also the subject line of the confirmation email, which is otherwise
-      # the single word "authentik".
+      # The tab title's suffix, everywhere. NOT the confirmation email's
+      # subject, which comes from the email stage — see self-signup.yaml.
       branding_title: habiterall
       branding_logo: /static/dist/assets/icons/habiterall/logo.svg
       branding_favicon: /static/dist/assets/icons/habiterall/logo.svg
@@ -69,8 +75,9 @@ entries:
            The footer's other items are links; this one is the only
            data-kind="text", so operator-configured links survive. */
         ak-brand-links li[data-kind='text'] { display: none !important; }
-        /* Authentik's own logo is a wordmark and this one is a square app
-           icon, so it arrives 400px tall and fills the card. */
+        /* Authentik's own logo is a wordmark and this one is a square 512px
+           app icon, so unconstrained it scales to the card's width and fills
+           it — measured at 402px tall. */
         img.branding-logo {
           max-height: 4.5rem;
           width: auto;
@@ -97,7 +104,16 @@ entries:
   # is what the fallback needs to find a brand — without it the fallback is a
   # hardcoded path to Authentik's own photograph. The brand field is left set
   # regardless, for the surfaces that do consult it.
+  #
+  # Guarded on existence for the same reason as the enrollment flow below, and
+  # this one is the sharper case: Authentik's API answers before its default
+  # blueprints have all landed, and an unguarded `present` here would try to
+  # CREATE `default-authentication-flow` from a slug, a title and a background.
+  # The serializer refuses that (`name` and `designation` are required), so the
+  # whole apply fails — on the one boot where it matters.
   - model: authentik_flows.flow
+    conditions:
+      - !Find [authentik_flows.flow, [slug, default-authentication-flow]]
     identifiers:
       slug: default-authentication-flow
     attrs:

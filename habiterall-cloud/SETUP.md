@@ -44,9 +44,10 @@ and the app logs a warning otherwise.
 docker compose up -d
 ```
 
-That is the whole of it. In order, compose runs the database, Authentik
-(a minute or two on a first boot, while it migrates its own database), the
-schema migrations, the bootstrap, and then the app.
+That is the whole of it. Compose starts the database, then Authentik and the
+schema migrations alongside each other, then the bootstrap once Authentik is
+answering, and the app once both one-shots have finished. A first boot takes a
+minute or two while Authentik migrates its own database.
 
 The bootstrap is `scripts/bootstrap-authentik.mjs`, and it creates the OIDC
 provider and application, applies the self-registration setting, and applies
@@ -60,9 +61,12 @@ OIDC_ISSUER=http://localhost:9000/application/o/habiterall/
 OIDC_CLIENT_ID=…
 ```
 
-Read it with `docker compose logs authentik-bootstrap`. If you left the two
-`OIDC_*` values empty, Authentik generated a pair and this is where to find
-them — put them in `.env` and run `docker compose up -d app`.
+Read it with `docker compose logs authentik-bootstrap`.
+
+The app will not start until the bootstrap has succeeded, which is the trade
+for having it configure everything: an Authentik that never comes up, or a
+`.env` the bootstrap refuses, stops `up` rather than leaving an app running
+that can log nobody in. Already-running containers are unaffected.
 
 `OIDC_ISSUER` must be reachable **and identical** from two places: the user's
 browser and the app container. In production both use the same public https
@@ -95,6 +99,21 @@ anyone who can reach it can create an account — on an instance exposed to the
 internet, that is the internet. `off` removes the link *and* the sign-up page
 behind it, so there is nothing to reach directly either.
 
+**If this Authentik serves anything besides habiterall, read on.** The link
+goes on the default login flow, which is the one every application on the
+instance uses, and what a stranger creates is an *Authentik* account. It
+reaches habiterall because habiterall admits anyone who signs in — and it
+would reach any other application that admits any authenticated user. Bind a
+group policy to those applications, or leave this off. The enrollment flow
+also has no password policy and no CAPTCHA (Authentik's own example flows have
+neither); *Customisation → Policies*, bound to the sign-up prompt stage, is
+where those go.
+
+Nothing is applied without `AUTHENTIK_BOOTSTRAP_TOKEN`. If you removed it per
+the production checklist, a later `AUTHENTIK_SELF_SIGNUP=off` changes nothing
+— the bootstrap says so in a warning rather than failing, and registration
+stays open until you put the token back and run `up -d` again.
+
 To make people prove the address first:
 
 ```ini
@@ -112,9 +131,10 @@ it on — so **this needs a working SMTP server**. Without one, sign-ups stall a
 "check your inbox" and never become accounts; the bootstrap warns when the
 setting is on and no mail host is configured.
 
-Both switches take `on`/`off` (`true`/`false`, `yes`/`no`, `1`/`0`). Anything
-else stops the bootstrap rather than being guessed at, because the guess that
-matters would be reading a typo as "let the world in".
+Both switches take `on`/`off` (`true`/`false`, `yes`/`no`, `1`/`0`,
+`enabled`/`disabled`). Anything else stops the bootstrap rather than being
+guessed at, because the guess that matters would be reading a typo as "let the
+world in".
 
 ## 4. Put TLS in front
 
@@ -137,11 +157,15 @@ Then set `PUBLIC_URL=https://habits.example.com`,
 ## 5. Branding (optional)
 
 The sign-in and sign-up pages carry habiterall's name, mark and colours out of
-the box; `AUTHENTIK_BRANDING=off` stops that being managed. The admin
-interface is Authentik's own and is left alone either way. The two images are
-`../shared/public/icons/logo.svg` and `branding/auth-background.svg`, mounted
-into the Authentik containers and served by it — replace either file and
-restart Authentik.
+the box; `AUTHENTIK_BRANDING=off` stops that being managed. The page headings
+and the backdrop are scoped to those pages, but the tab title, the favicon and
+the accent colour are brand-wide settings and also reach Authentik's own admin
+and user interfaces — cosmetic, and worth knowing before you meet it.
+
+The two images are `../shared/public/icons/logo.svg` and
+`branding/auth-background.svg`, mounted into the Authentik containers and
+served by it. They are mounted as directories precisely so that replacing a
+file takes effect on the next request, with nothing to restart.
 
 ---
 
@@ -188,7 +212,13 @@ image: `docker compose build migrate`.
 **A changed `.env` did nothing** — the bootstrap only runs as part of `docker
 compose up -d`, and only while `AUTHENTIK_BOOTSTRAP_TOKEN` is set. Check
 `docker compose logs authentik-bootstrap`: with no token it says so and exits
-0, leaving Authentik exactly as it was.
+0, leaving Authentik exactly as it was — and warns if you had asked for a
+change, since "unchanged" is the wrong answer to switching registration off.
+
+**The app will not start** — look at `docker compose logs authentik-bootstrap`
+first. `app` waits for it to succeed, so a refused `.env` value (a placeholder
+client secret, a switch set to something that is not yes or no) or an Authentik
+that never becomes ready stops the app too.
 
 **Sign-ups stop at "check your inbox"** — email verification is on and mail is
 not being delivered. The bootstrap warns about a missing `AUTHENTIK_EMAIL__HOST`;

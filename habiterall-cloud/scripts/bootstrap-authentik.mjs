@@ -10,10 +10,12 @@
  *
  *   node scripts/bootstrap-authentik.mjs
  *
- * With OIDC_CLIENT_ID / OIDC_CLIENT_SECRET set, those are the credentials the
- * provider is given — the app and the IdP read the same two lines of .env and
- * nothing has to be pasted between them. Left empty, Authentik generates a
- * pair and this prints it.
+ * OIDC_CLIENT_ID / OIDC_CLIENT_SECRET are the credentials the provider is
+ * GIVEN — the app and the IdP read the same two lines of .env and nothing has
+ * to be pasted between them. There is no leave-them-empty path: compose
+ * interpolates the whole file before it starts anything, and `app` declares
+ * both `:?`, so an empty value fails `docker compose up` outright rather than
+ * reaching this script.
  */
 
 const BASE = process.env.AUTHENTIK_URL ?? 'http://localhost:9000';
@@ -58,8 +60,34 @@ if (!TOKEN) {
   // Not an error: SETUP.md has you delete this token once the stack is up,
   // and compose runs this service on every `up`. Nothing to do without it,
   // and what was configured last time stands.
-  console.log('AUTHENTIK_BOOTSTRAP_TOKEN is not set — leaving Authentik as it is.');
+  //
+  // Loudly, though, if a switch is set — because "what was configured last
+  // time stands" is the wrong answer to `AUTHENTIK_SELF_SIGNUP=off`. That
+  // edit is someone closing registration, and reporting success while the
+  // sign-up link stays up is the one silence here worth breaking.
+  const asked = ['AUTHENTIK_SELF_SIGNUP', 'AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL', 'AUTHENTIK_BRANDING']
+    .filter((name) => (process.env[name] ?? '').trim() !== '');
+  if (asked.length) {
+    console.warn(
+      `WARNING: ${asked.join(', ')} ${asked.length > 1 ? 'are' : 'is'} set, but ` +
+        'AUTHENTIK_BOOTSTRAP_TOKEN is not — so nothing was applied and Authentik is ' +
+        'unchanged. Restore the token and `docker compose up -d` to make these take effect.'
+    );
+  } else {
+    console.log('AUTHENTIK_BOOTSTRAP_TOKEN is not set — leaving Authentik as it is.');
+  }
   process.exit(0);
+}
+
+// A published placeholder is not a secret. `.env.example` ships CHANGE_ME
+// values like every other line in it, and unlike the rest these are now
+// PUSHED onto the provider — so an unedited file would hand out a client
+// secret that is in the repository. Refused here rather than in compose,
+// because this is the process that would set it.
+for (const name of ['OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET']) {
+  if ((process.env[name] ?? '').startsWith('CHANGE_ME')) {
+    throw new Error(`${name} is still the placeholder from .env.example — generate one (openssl rand -hex 32)`);
+  }
 }
 
 const api = async (path, options = {}) => {
@@ -97,9 +125,9 @@ async function findPrerequisites() {
   // Prefer implicit consent: this is a first-party application, so making the
   // user approve it on every sign-in adds a click and no security.
   //
-  // Match on 'implicit-consent', NOT `includes('implicit')` — the *explicit*
-  // flow is named "...authorization-explicit-consent", which contains
-  // "implicit" as a substring of "explicit" and silently matched first.
+  // Named explicitly rather than taken as `results[0]`, because the viewset
+  // orders by slug and "...authorization-explicit-consent" sorts BEFORE
+  // "...-implicit-consent" — so the first result is the flow that asks.
   const authFlow =
     flows.results.find((f) => f.slug.includes('implicit-consent')) ??
     flows.results[0];
@@ -110,20 +138,45 @@ async function findPrerequisites() {
     invFlows.results.find((f) => f.slug.includes('provider')) ?? invFlows.results[0];
   if (!invalidationFlow) throw new Error('no invalidation flow yet');
 
+  // The login flow, and the stage that carries the "Sign up" link. Waited for
+  // here rather than assumed later: linkSignupFlow() is the first thing to
+  // need it and has no retry of its own, and Authentik's default blueprints
+  // land in no particular order.
+  const idStages = await api(
+    '/stages/identification/?name=default-authentication-identification'
+  );
+  const identification = idStages.results[0];
+  if (!identification) throw new Error('no default identification stage yet');
+
   /* ---- a signing key ---- */
+  //
+  // By NAME, not `results[0]`. That list is ordered by name and holds every
+  // keypair the operator has ever imported, so a certificate called
+  // `auth.example.com` — an ordinary thing to add for a reverse proxy — sorts
+  // first and would silently become the key every id_token is signed with, on
+  // an `up` that changed nothing else. Authentik's own generated keypair is
+  // the one meant for this.
   const keys = await api('/crypto/certificatekeypairs/?has_key=true');
-  const signingKey = keys.results[0];
+  const signingKey =
+    keys.results.find((k) => k.name.startsWith('authentik Self-signed')) ?? keys.results[0];
   if (!signingKey) throw new Error('no signing keypair yet');
 
   /* ---- scopes: openid, profile, email ---- */
-  const scopes = await api('/propertymappings/provider/scope/');
+  //
+  // Asked for one at a time. An unfiltered list is one page of 20 by default,
+  // ordered by scope name, so an instance with its own scope mappings can
+  // push these off the end — and this is a startup dependency, so failing to
+  // find them stops the app from starting at all.
   const wanted = ['openid', 'profile', 'email'];
-  const scopeIds = scopes.results
-    .filter((s) => wanted.includes(s.scope_name))
-    .map((s) => s.pk);
-  if (scopeIds.length !== wanted.length) throw new Error('the OIDC scopes are not all there yet');
+  const scopeIds = [];
+  for (const scope of wanted) {
+    const found = await api(`/propertymappings/provider/scope/?scope_name=${scope}`);
+    const mapping = found.results.find((s) => s.scope_name === scope);
+    if (!mapping) throw new Error(`the "${scope}" scope mapping is not there yet`);
+    scopeIds.push(mapping.pk);
+  }
 
-  return { authFlow, invalidationFlow, signingKey, scopeIds };
+  return { authFlow, invalidationFlow, identification, signingKey, scopeIds };
 }
 
 console.log(`waiting for Authentik at ${BASE} ...`);
@@ -138,6 +191,7 @@ for (let attempt = 1; !ready; attempt++) {
   }
 }
 const { authFlow, invalidationFlow, signingKey, scopeIds } = ready;
+console.log(`signing key: ${signingKey.name}`);
 console.log(`Authentik is up; using authorization flow: ${authFlow.slug}`);
 
 /* ---- provider ---- */
@@ -279,15 +333,32 @@ async function linkSignupFlow() {
   );
   const stage = stages.results[0];
   if (!stage) throw new Error('the default identification stage is missing');
+  const current = stage.enrollment_flow ?? null;
 
-  let flowPk = null;
-  if (selfSignup) {
-    const found = await api('/flows/instances/?slug=habiterall-enrollment');
-    flowPk = found.results[0]?.pk ?? null;
-    if (!flowPk) throw new Error('the enrollment flow was not created');
+  if (!selfSignup) {
+    // Clear the link only if it is OURS. This stage is shared with everything
+    // else on the instance, and an operator may have pointed it at an
+    // enrollment flow of their own — unlinking that on every `up`, silently,
+    // is not what "self-signup off" asked for. Our own flow is deleted by the
+    // blueprint anyway, and `enrollment_flow` is `on_delete=SET_DEFAULT`, so
+    // by the time this runs the field is usually already null.
+    if (current === null) return;
+    const ours = await api('/flows/instances/?slug=habiterall-enrollment');
+    if (current !== (ours.results[0]?.pk ?? null)) {
+      console.log('leaving the sign-up link alone: it points at another flow');
+      return;
+    }
+    await api(`/stages/identification/${stage.pk}/`, {
+      method: 'PUT',
+      body: JSON.stringify({ ...stage, enrollment_flow: null }),
+    });
+    return;
   }
 
-  if ((stage.enrollment_flow ?? null) === flowPk) return;
+  const found = await api('/flows/instances/?slug=habiterall-enrollment');
+  const flowPk = found.results[0]?.pk ?? null;
+  if (!flowPk) throw new Error('the enrollment flow was not created');
+  if (current === flowPk) return;
   await api(`/stages/identification/${stage.pk}/`, {
     method: 'PUT',
     body: JSON.stringify({ ...stage, enrollment_flow: flowPk }),

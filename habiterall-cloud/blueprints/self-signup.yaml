@@ -177,6 +177,11 @@ entries:
       use_global_settings: true
       template: email/account_confirmation.html
       activate_user_on_success: true
+      # The subject is the STAGE's, not the brand's: `EmailStage.subject`
+      # defaults to the literal word "authentik" and the confirmation template
+      # is never handed a brand, so without this line the one message a new
+      # user gets arrives titled after software they have not heard of.
+      subject: Confirm your habiterall account
 
   - id: stage-user-login
     model: authentik_stages_user_login.userloginstage

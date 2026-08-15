@@ -10,9 +10,11 @@
   origin) gets a broken image. Doing it this way also means the sign-in page
   still looks like itself while the app is down.
 
-  Vector and four stops, so it costs under a kilobyte and cannot pixelate: it
-  is painted onto `body::before` at `background-size: cover`, over whatever
-  the viewport is.
+  Three gradients and no bitmap, so it is about a kilobyte on the wire and
+  cannot pixelate: it is painted onto `body::before` at
+  `background-size: cover`, over whatever the viewport is. (Authentik hides
+  that layer below 35rem wide, so a phone gets the card on a flat background —
+  its choice, not ours.)
 
   The colours are deliberately louder than the app's own dark theme. The first
   version used the theme's own background (#0f1216) with a 28%-opacity accent

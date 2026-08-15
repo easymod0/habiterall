@@ -18,24 +18,52 @@ const REPO = join(CLOUD, '..');
 const read = (...parts) => readFileSync(join(...parts), 'utf8');
 const branding = read(CLOUD, 'blueprints', 'branding.yaml');
 const compose = read(CLOUD, 'docker-compose.yml');
+const bootstrap = read(CLOUD, 'scripts', 'bootstrap-authentik.mjs');
 
 /**
- * `/static/dist/assets/<kind>/<dir>/<file>` is served by Authentik from
+ * The read-only mounts a compose service declares, as `target -> source`.
+ *
+ * Per service, not per file, and that is the point: the server is what serves
+ * `/static/…` and the worker is what lists the blueprint directory, so a mount
+ * present on one and missing from the other breaks half of this with
+ * everything still looking mounted.
+ */
+const mountsOf = (service) => {
+  const lines = compose.split('\n');
+  const start = lines.findIndex((line) => line.trim() === `${service}:`);
+  assert.notEqual(start, -1, `docker-compose.yml has no ${service} service`);
+  const indent = lines[start].search(/\S/);
+
+  const mounts = new Map();
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() && line.search(/\S/) <= indent) break;
+    const m = line.trim().match(/^-\s*(\S+):(\S+?):ro$/);
+    if (m) mounts.set(m[2], m[1]);
+  }
+  return mounts;
+};
+
+const AUTHENTIK_SERVICES = ['authentik-server', 'authentik-worker'];
+
+/**
+ * `/static/dist/assets/<kind>/<dir>/<file>` is served by Authentik out of
  * `/web/dist/assets/<kind>/<dir>/<file>` in its container, and compose is what
- * puts our directory there. Resolve the URL back to a path on this disk.
+ * puts our directory there. Resolve the URL back to a path on this disk,
+ * insisting that every Authentik container has it.
  */
 const sourceFor = (url) => {
   const target = url.replace('/static/dist/', '/web/dist/');
   const dir = target.slice(0, target.lastIndexOf('/'));
   const file = target.slice(target.lastIndexOf('/') + 1);
 
-  const mount = compose
-    .split('\n')
-    .map((line) => line.trim().match(/^-\s*(\S+):(\S+?):ro$/))
-    .find((m) => m && m[2] === dir);
-  assert.ok(mount, `docker-compose.yml mounts nothing at ${dir} (for ${url})`);
+  const sources = AUTHENTIK_SERVICES.map((service) => {
+    const source = mountsOf(service).get(dir);
+    assert.ok(source, `${service} mounts nothing at ${dir} (for ${url})`);
+    return source;
+  });
+  assert.equal(new Set(sources).size, 1, `${dir} is mounted from different places`);
 
-  return join(CLOUD, mount[1], file);
+  return join(CLOUD, sources[0], file);
 };
 
 /**
@@ -82,6 +110,29 @@ test('the SVGs parse — no double hyphen inside an XML comment', () => {
       );
     }
     assert.match(svg, /<svg[\s>]/, `${url} does not look like an SVG`);
+  }
+});
+
+// The other silent mismatch this change rests on. The script names blueprints
+// by the path Authentik reports them under, which is their path relative to
+// /blueprints — so it is the compose mount that decides whether
+// 'custom/self-signup.yaml' resolves to anything at all, and a rename on
+// either side fails only at runtime, on the endpoint that validates the path.
+test('the blueprint paths the bootstrap asks for are the paths compose mounts', () => {
+  const asked = [...bootstrap.matchAll(/'(custom\/[a-z-]+\.yaml)'/g)].map((m) => m[1]);
+  assert.ok(asked.length >= 2, 'expected the self-signup and branding blueprints');
+
+  for (const service of AUTHENTIK_SERVICES) {
+    const mounts = mountsOf(service);
+    for (const path of asked) {
+      const [dir, file] = [path.slice(0, path.indexOf('/')), path.slice(path.indexOf('/') + 1)];
+      const source = mounts.get(`/blueprints/${dir}`);
+      assert.ok(source, `${service} mounts nothing at /blueprints/${dir} (for ${path})`);
+      assert.ok(
+        existsSync(join(CLOUD, source, file)),
+        `${path} would resolve to ${join(source, file)}, which does not exist`,
+      );
+    }
   }
 });
 
