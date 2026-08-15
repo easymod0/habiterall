@@ -91,7 +91,8 @@ it claims. Two more consequences, and the first is easy to state too strongly.
 window-derived figures can.** `isCompleted` is `false` for a 0 row and every
 caller treats a missing row as a miss, so for the same window in, the same
 numbers come out: `computeStats` is identical for a 0 row and no row, and both
-editions' `countCompleted` still keys on `value = 2`. But some ranges *start* at
+editions still count a completion as `value = 2` — personal in `countCompleted`,
+cloud in an inline `COUNT(*) FILTER`. But some ranges *start* at
 the earliest stored entry (`from = start ?? firstEntry` in `computeScores`, and
 the history and weekday aggregations behind it), and a lapse is a stored entry
 where there was none. Every unknown day between it and the next row then reads as
@@ -202,11 +203,13 @@ seeds through the API and never had the gap.
 **Loop's backup carries no preferences** — they live in Android's
 SharedPreferences, not the database — so nothing from a Loop file can set one,
 and `skipDays` / `questionMarks` arrive only in habiterall's own JSON backup.
-That backup does carry settings now (it silently did not, while
-`habiterall-personal/CLAUDE.md` claimed otherwise), because two of them decide
-what the rows in the same file MEAN. A **replace** applies them and a **merge**
-does not: "make this account look like the file" versus "add these habits to what
-I have".
+That backup does carry settings now — it silently did not for a while — because
+two of them decide what the rows in the same file MEAN. Not all of them, though:
+`PORTABLE_SETTINGS` is the allowlist and `UNPORTABLE_SETTINGS` says what is held
+back, the notification keys, because a backup is a file people email to
+themselves and `discordWebhook` is a bearer capability for a channel. A
+**replace** applies what does travel and a **merge** does not: "make this account
+look like the file" versus "add these habits to what I have".
 
 **Only entry values scale by ×1000 — habit targets do not.** `Repetitions.value`
 of `2000` means 2, but `Habits.target_value` of `2` means 2. Scaling the target
@@ -238,7 +241,7 @@ the route and `computeStats` was always doing exactly as it was told.
 zero width. 7 / 10 / 14 columns by width.
 
 **One rule decides what writing an entry does to storage**, and it lives in
-`entryWrite` (shared/validate.js) because three callers need it: both editions'
+`entryWrite` (shared/src/validate.js) because three callers need it: both editions'
 PUT routes and the Discord button handler. It had been inline in the two routes,
 and a third copy in the interaction handler is how "not done" would start meaning
 something different depending on where you answered from.
@@ -867,6 +870,7 @@ Several layers, and they catch different things:
 | Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
 | Credential change | `npm run test:credchange -w habiterall-personal` | nothing |
 | Sign-in view | `npm run test:signin -w habiterall-personal` | Chrome (starts its own server) |
+| Habit JSON shape | `npm run test:apishape -w habiterall-personal` | nothing |
 | Reminders | `npm run test:notify` | nothing |
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
@@ -891,9 +895,13 @@ answer.
 
 The round-trip suites export every backup format, import it back, and assert
 nothing changed. They found two real bugs on their first run, both in the CSV
-path. Two offline suites (`atmost.mjs`, `rendercheck.mjs`) drive `charts.js`
-against a ~15-line fake DOM, so anything reaching for a browser API there
-crashes them outright rather than failing a check.
+path. Three suites build a ~15-line fake DOM instead of a browser —
+`atmost.mjs` and `rendercheck.mjs` drive `charts.js`, `daydialog.mjs` replays
+`openDayDialog` — so anything reaching for a browser API there crashes them
+outright rather than failing a check. Note `OFFLINE_SUITES` in `run.mjs`, the
+set the runner will start without a server, lists only `rendercheck` and
+`daydialog`: `atmost` needs no server either but is not in it, so a full run
+demands one on its behalf.
 
 `unknowncheck.mjs` is where a tap is followed all the way to storage: it taps a
 day and then asks the API what the row says, because the whole `questionMarks`

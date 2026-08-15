@@ -20,7 +20,7 @@ services:
 
       # Set both before exposing this port, or the first visitor claims the app.
       HABITERALL_USERNAME: ${HABITERALL_USERNAME:-}              # default "admin"
-      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}              # 8+ characters
+      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}              # unchecked here; use 8+
       HABITERALL_PASSWORD_HASH: ${HABITERALL_PASSWORD_HASH:-}    # or this instead
       HABITERALL_AUTH: ${HABITERALL_AUTH:-}                      # exactly "off" disables sign-in
       HABITERALL_SESSION_SECRET: ${HABITERALL_SESSION_SECRET:-}  # survives a redeploy

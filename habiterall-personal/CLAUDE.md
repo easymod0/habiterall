@@ -102,9 +102,17 @@ break the LAN half of that setup, and `localhost` is exempt in browsers so the
 breakage only ever shows up on a real address.
 
 **The password hash and the session secret are not settings.** `settings` is
-served to the browser by `GET /api/settings` and copied into every backup by
-`GET /api/export`, so `auth_credentials` and `server_secrets` are tables of their
-own — the same rule that keeps `DISCORD_BOT_TOKEN` out of settings.
+served to the browser by `GET /api/settings`, so `auth_credentials` and
+`server_secrets` are tables of their own — the same rule that keeps
+`DISCORD_BOT_TOKEN` out of settings.
+
+A backup is the second reason and it draws its own line: `GET /api/export`
+carries `portableSettings(...)`, the `PORTABLE_SETTINGS` allowlist, and **not**
+the whole table. `UNPORTABLE_SETTINGS` names what is held back and why — a
+backup is a file people email to themselves, and `discordWebhook` is a bearer
+capability for a channel. What is left is how the app is displayed plus
+`skipDays` and `questionMarks`, which is the point: those two decide what the
+rows in the same file MEAN.
 
 **Environment credentials win over the database, and OVERWRITE it.**
 `state.managed` says which to the UI. Two sources of truth for one password is

@@ -22,8 +22,12 @@ for k in DB_OWNER_PASSWORD APP_DB_PASSWORD AUTHENTIK_DB_PASSWORD \
   # hex for the DB passwords, and for the OIDC pair: those go into a
   # connection URL or an Authorization header, and base64 emits '/', which
   # ends a URL's authority. The rest may be base64.
+  #
+  # DB_OWNER_PASSWORD is named separately because it does NOT match
+  # *DB_PASSWORD — it ends in OWNER_PASSWORD — and it is interpolated into
+  # DATABASE_URL_ADMIN, so it is the one that most needs to be hex.
   case "$k" in
-    *DB_PASSWORD|OIDC_*) echo "$k=$(openssl rand -hex 32)" ;;
+    DB_OWNER_PASSWORD|*DB_PASSWORD|OIDC_*) echo "$k=$(openssl rand -hex 32)" ;;
     *) echo "$k=$(openssl rand -base64 36 | tr -d '\n')" ;;
   esac
 done
@@ -45,9 +49,11 @@ docker compose up -d
 ```
 
 That is the whole of it. Compose starts the database, then Authentik and the
-schema migrations alongside each other, then the bootstrap once Authentik is
-answering, and the app once both one-shots have finished. A first boot takes a
-minute or two while Authentik migrates its own database.
+schema migrations alongside each other, then the bootstrap once Authentik's
+containers have *started* — `condition: service_started`, not a healthcheck, so
+the bootstrap script polls for readiness itself — and the app once both
+one-shots have finished. A first boot takes a minute or two while Authentik
+migrates its own database.
 
 The bootstrap is `scripts/bootstrap-authentik.mjs`, and it creates the OIDC
 provider and application, applies the self-registration setting, and applies
@@ -140,7 +146,11 @@ world in".
 
 ## 4. Put TLS in front
 
-The app binds to `127.0.0.1:3100`. With Caddy:
+Compose publishes the app on `${APP_PORT:-3100}` and Authentik on
+`${AUTHENTIK_PORT:-9000}`, and a published port binds to **all** interfaces —
+not to loopback, whatever the proxy config below suggests. Firewall both, or
+prefix the mappings with `127.0.0.1:`, or the TLS you are about to put in front
+is something callers can simply step around. With Caddy:
 
 ```
 habits.example.com {
