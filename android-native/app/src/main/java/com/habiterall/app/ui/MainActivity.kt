@@ -488,7 +488,6 @@ class MainActivity : ComponentActivity() {
                                             Api(url!!).signOut()
                                             authKey++
                                         }
-                                        Unit
                                     }
                                 } else {
                                     null
