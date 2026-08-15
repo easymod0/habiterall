@@ -114,9 +114,15 @@ object Outbox {
                 }
                 Result.success()
             } catch (e: ApiException) {
-                // A 4xx will fail identically forever — retrying only burns
-                // battery. 5xx and transport errors are worth another go.
-                if (e.status in 400..499) Result.failure() else Result.retry()
+                // `isPermanent` is the whole rule, and it lives on the exception
+                // so it can be tested without Android — see it for why 401 and
+                // 403 are not in it. This worker did not have to tell a refused
+                // SESSION from a refused WRITE until the app could be signed out
+                // at all: a 401 dropped here loses an answer the user actually
+                // gave, silently, which is the one failure an outbox exists to
+                // prevent. Both come back when they sign in again, and
+                // WorkManager's exponential backoff is what keeps the wait cheap.
+                if (e.isPermanent) Result.failure() else Result.retry()
             } catch (e: Exception) {
                 Result.retry()
             }

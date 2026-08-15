@@ -287,6 +287,55 @@ class MainActivity : ComponentActivity() {
                     checked = true
                 }
 
+                /**
+                 * What the server says about this client's session, and null
+                 * while nothing has asked yet.
+                 *
+                 * Asked once per server rather than per screen. `/api/me` is the
+                 * only route that answers a caller with no session, so it is
+                 * both how the app learns it is signed out and how it learns
+                 * which sign-in this instance HAS — a personal server with a
+                 * password and a cloud one behind an identity provider need
+                 * different screens, and only the server knows which it is.
+                 */
+                var session by remember { mutableStateOf<Session?>(null) }
+
+                /** Bumped to re-ask, after a sign-in, a sign-out, or a 401. */
+                var authKey by remember { mutableIntStateOf(0) }
+
+                LaunchedEffect(url, authKey) {
+                    val at = url
+                    // Null first, so the app is never on screen against a
+                    // session belonging to the previous server.
+                    session = null
+                    if (at != null) session = Api(at).me()
+                }
+
+                /**
+                 * A refused session, from anywhere, sends the whole app back to
+                 * the sign-in screen.
+                 *
+                 * One handler rather than one per screen: every screen already
+                 * catches something to show a message, and not every one of them
+                 * would remember to ask what the status was. Hopped onto the
+                 * main thread because this is called from OkHttp's.
+                 *
+                 * Remembered, and that is not tidiness: the screens below key
+                 * their `Api` on it, and a lambda rebuilt every recomposition
+                 * would rebuild the client — and its connection pool — with it.
+                 */
+                val onUnauthorized: () -> Unit = remember { { runOnUiThread { authKey++ } } }
+
+                /**
+                 * Whether there is a session to end.
+                 *
+                 * False on an instance with `HABITERALL_AUTH=off`, where the
+                 * menu item would offer to sign out of something that does not
+                 * exist — and raise the question of why signing in is not on
+                 * offer either.
+                 */
+                val canSignOut = (session as? Session.Active)?.mode?.needsSignIn == true
+
                 // The web UI is a screen of this app, not a trip to a
                 // browser. See WebScreen for why that matters.
                 //
@@ -331,6 +380,16 @@ class MainActivity : ComponentActivity() {
                     if (target == null) webHost.warm() else webHost.show(target)
                 }
 
+                // A web screen belongs to the session that opened it. `show()`
+                // declines to navigate when the WebView is already on the target
+                // URL, so leaving one open across a sign-out would re-show the
+                // previous account's page to the next one — same habit id, same
+                // URL, nothing to tell it to reload. Closing it means the next
+                // open is a real load.
+                LaunchedEffect(session) {
+                    if (session !is Session.Active) webUrl = null
+                }
+
                 /** Which management screen is over the list, if any. */
                 var manage by remember { mutableStateOf<Manage?>(null) }
                 /** Bumped when one of them writes something the list must refetch. */
@@ -361,6 +420,29 @@ class MainActivity : ComponentActivity() {
                         url = it
                         Reminders.rescheduleAll(this@MainActivity)
                     })
+                    // Nothing is drawn against an unknown session. The
+                    // alternative is showing the list and replacing it a request
+                    // later, which is the flash of the wrong screen that
+                    // `start()` was rewritten in the web app to avoid.
+                    session == null -> Loading()
+                    // The server answered something that says nothing about
+                    // authentication — a 502 from a proxy, a captive portal, a
+                    // rate limit. `Auth.read` refuses to guess a mode from it,
+                    // and this is the error path that refusal exists to reach.
+                    // Drawing a sign-in form here is exactly the bug the web
+                    // adapter shipped: a form whose only control 404s, over an
+                    // instance that was working.
+                    session is Session.Unusable -> ServerUnreachable(
+                        why = (session as Session.Unusable).message,
+                        onRetry = { authKey++ },
+                        onChangeServer = { url = null },
+                    )
+                    session is Session.Absent -> SignInScreen(
+                        api = remember(url) { Api(url!!) },
+                        mode = (session as Session.Absent).mode,
+                        onSignedIn = { authKey++ },
+                        onChangeServer = { url = null },
+                    )
                     // The list stays composed underneath rather than being
                     // swapped out. Swapping discarded everything it remembers —
                     // so scrolling back to March, opening that habit's chart and
@@ -371,7 +453,7 @@ class MainActivity : ComponentActivity() {
                         // per opening: `Api` builds an OkHttpClient, and a screen
                         // that can be opened and closed all afternoon should not
                         // leave a connection pool behind each time.
-                        val manageApi = remember(url) { Api(url!!) }
+                        val manageApi = remember(url) { Api(url!!, onUnauthorized) }
 
                         Box(
                             Modifier.fillMaxSize().then(
@@ -403,6 +485,21 @@ class MainActivity : ComponentActivity() {
                                     webTitle = habit.name
                                 },
                                 onChangeServer = { url = null },
+                                // Null when this instance has no sign-in, so the
+                                // personal edition with `HABITERALL_AUTH=off`
+                                // does not offer to sign out of nothing.
+                                onSignOut = if (canSignOut) {
+                                    {
+                                        lifecycleScope.launch {
+                                            Api(url!!).signOut()
+                                            authKey++
+                                        }
+                                        Unit
+                                    }
+                                } else {
+                                    null
+                                },
+                                onUnauthorized = onUnauthorized,
                                 refreshKey = refreshKey,
                                 onNewHabit = { manage = Manage.NewHabit },
                                 onEditHabit = { manage = Manage.EditHabit(it) },
@@ -523,6 +620,34 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The server answered, but not with anything about authentication.
+     *
+     * Its own screen rather than the sign-in one, and that is the whole point of
+     * `Auth.read` refusing to guess: a 429, a proxy's 502 or a captive portal
+     * says nothing about how this instance signs people in, and drawing a form
+     * over it puts a control in front of the user that cannot work. This says
+     * what happened and offers the two things that can help.
+     */
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun ServerUnreachable(why: String, onRetry: () -> Unit, onChangeServer: () -> Unit) {
+        Scaffold(topBar = { TopAppBar(title = { Text("Cannot reach the server") }) }) { pad ->
+            Column(
+                Modifier.padding(pad).padding(24.dp).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Text(why, color = MaterialTheme.colorScheme.error)
+                Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
+                    Text("Try again")
+                }
+                TextButton(onClick = onChangeServer, modifier = Modifier.fillMaxWidth()) {
+                    Text("Use a different server")
+                }
+            }
+        }
+    }
+
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun SetupScreen(onSaved: (String) -> Unit) {
@@ -594,6 +719,14 @@ class MainActivity : ComponentActivity() {
         onOpenStats: () -> Unit,
         onOpenHabit: (Habit) -> Unit,
         onChangeServer: () -> Unit,
+        /**
+         * End the session and go back to the sign-in screen. Absent — as a
+         * disabled menu item — on an instance with no sign-in, where there is
+         * nothing to end and the control would only raise the question.
+         */
+        onSignOut: (() -> Unit)?,
+        /** Hands a refused session up to the activity; see its declaration. */
+        onUnauthorized: () -> Unit,
         /**
          * Bumped by the caller when a screen it owns has changed the data.
          *
@@ -715,7 +848,7 @@ class MainActivity : ComponentActivity() {
          * reminder that wakes you at 8am is exactly the path that gets there.
          */
         var today by remember { mutableStateOf(LocalDate.now().toString()) }
-        val api = remember(serverUrl) { Api(serverUrl) }
+        val api = remember(serverUrl, onUnauthorized) { Api(serverUrl, onUnauthorized) }
 
         LaunchedEffect(reload, serverUrl, windowDays, refreshKey) {
             // Read and cleared in one go: `quiet` describes THIS fetch only,
@@ -1055,6 +1188,12 @@ class MainActivity : ComponentActivity() {
                                 text = { Text("Settings") },
                                 onClick = { menuOpen = false; onOpenSettings() },
                             )
+                            onSignOut?.let { signOut ->
+                                DropdownMenuItem(
+                                    text = { Text("Sign out") },
+                                    onClick = { menuOpen = false; signOut() },
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("Change server") },
                                 onClick = { menuOpen = false; onChangeServer() },
