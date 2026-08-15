@@ -110,9 +110,11 @@ neither); *Customisation → Policies*, bound to the sign-up prompt stage, is
 where those go.
 
 Nothing is applied without `AUTHENTIK_BOOTSTRAP_TOKEN`. If you removed it per
-the production checklist, a later `AUTHENTIK_SELF_SIGNUP=off` changes nothing
-— the bootstrap says so in a warning rather than failing, and registration
-stays open until you put the token back and run `up -d` again.
+the production checklist, a later `AUTHENTIK_SELF_SIGNUP=off` changes nothing:
+registration stays open until you put the token back and run `up -d` again.
+The bootstrap says which switches are inert every time it runs without the
+token — it cannot tell you whether one of them now disagrees with Authentik,
+because reading that back is what the token is for.
 
 To make people prove the address first:
 
@@ -211,14 +213,14 @@ image: `docker compose build migrate`.
 
 **A changed `.env` did nothing** — the bootstrap only runs as part of `docker
 compose up -d`, and only while `AUTHENTIK_BOOTSTRAP_TOKEN` is set. Check
-`docker compose logs authentik-bootstrap`: with no token it says so and exits
-0, leaving Authentik exactly as it was — and warns if you had asked for a
-change, since "unchanged" is the wrong answer to switching registration off.
+`docker compose logs authentik-bootstrap`: with no token it names the switches
+it cannot apply and exits 0, leaving Authentik exactly as it was.
 
 **The app will not start** — look at `docker compose logs authentik-bootstrap`
 first. `app` waits for it to succeed, so a refused `.env` value (a placeholder
-client secret, a switch set to something that is not yes or no) or an Authentik
-that never becomes ready stops the app too.
+client secret, a placeholder bootstrap token, a switch set to something that is
+not yes or no) or an Authentik that never becomes ready stops the app too. The
+failure is one line ending in the API status Authentik answered with.
 
 **Sign-ups stop at "check your inbox"** — email verification is on and mail is
 not being delivered. The bootstrap warns about a missing `AUTHENTIK_EMAIL__HOST`;

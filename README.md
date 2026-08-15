@@ -236,11 +236,12 @@ services:
   #
   # It also copies the blueprints and the two images out of the habiterall
   # image into the volumes above, which is the step that makes this file work
-  # without a checkout of the repository.
+  # without a checkout of the repository. That copy OVERWRITES, so pulling a
+  # newer image is what updates them.
   #
   # Without AUTHENTIK_BOOTSTRAP_TOKEN it does nothing and exits 0 — supported,
-  # and the reason `up` keeps working once you have removed the token. It
-  # warns if you had asked for a change it could not make.
+  # and the reason `up` keeps working once you have removed the token. It says
+  # so, and names the switches that have no effect while it is gone.
   authentik-bootstrap:
     image: ghcr.io/easymod0/habiterall-cloud:latest
     depends_on:
@@ -320,9 +321,11 @@ services:
 volumes:
   db-data:
   authentik-db-data:
-  # Written once by authentik-bootstrap, read by Authentik. Delete one to take
-  # the image's copies again on the next `up`; edit a file inside it and the
-  # bootstrap will leave your version alone.
+  # Refilled from the habiterall image by authentik-bootstrap on every `up`,
+  # and read by Authentik. They mirror the image rather than holding config of
+  # your own: a file edited in here is overwritten on the next start, which is
+  # what makes an upgraded image's blueprints and branding take effect. Change
+  # them in an image you build.
   authentik-blueprints:
   authentik-icons:
   authentik-images:

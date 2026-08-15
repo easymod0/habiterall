@@ -83,32 +83,41 @@ if (!TOKEN) {
   // and compose runs this service on every `up`. Nothing to do without it,
   // and what was configured last time stands.
   //
-  // Loudly, though, if a switch is set — because "what was configured last
-  // time stands" is the wrong answer to `AUTHENTIK_SELF_SIGNUP=off`. That
-  // edit is someone closing registration, and reporting success while the
-  // sign-up link stays up is the one silence here worth breaking.
-  const asked = ['AUTHENTIK_SELF_SIGNUP', 'AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL', 'AUTHENTIK_BRANDING']
-    .filter((name) => (process.env[name] ?? '').trim() !== '');
-  if (asked.length) {
-    console.warn(
-      `WARNING: ${asked.join(', ')} ${asked.length > 1 ? 'are' : 'is'} set, but ` +
-        'AUTHENTIK_BOOTSTRAP_TOKEN is not — so nothing was applied and Authentik is ' +
-        'unchanged. Restore the token and `docker compose up -d` to make these take effect.'
-    );
-  } else {
-    console.log('AUTHENTIK_BOOTSTRAP_TOKEN is not set — leaving Authentik as it is.');
-  }
+  // Said plainly, and said every time. There WAS a warning here for the case
+  // that matters — `AUTHENTIK_SELF_SIGNUP=off` reaching a bootstrap that
+  // cannot apply it, so registration stays open — but it fired on every boot
+  // instead: it tested whether the three switches were set, and both compose
+  // files give all three a default, so they always are. Whether they still
+  // describe Authentik is not knowable from here, because the only way to
+  // read back what was applied is the API this token opens. A WARNING on
+  // every `up` is one nobody reads by the time it means something, so this
+  // states the fact and leaves the alarm to the operator's own memory —
+  // which is what the production checklist is for.
+  console.log(
+    'AUTHENTIK_BOOTSTRAP_TOKEN is not set — Authentik keeps the configuration it ' +
+      'already has. AUTHENTIK_SELF_SIGNUP, AUTHENTIK_SELF_SIGNUP_VERIFY_EMAIL and ' +
+      'AUTHENTIK_BRANDING have no effect until the token is restored.'
+  );
   process.exit(0);
 }
 
 // A published placeholder is not a secret. `.env.example` ships CHANGE_ME
-// values like every other line in it, and unlike the rest these are now
-// PUSHED onto the provider — so an unedited file would hand out a client
-// secret that is in the repository. Refused here rather than in compose,
-// because this is the process that would set it.
-for (const name of ['OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET']) {
+// values like every other line in it, and unlike the rest these three are
+// PUSHED onto the identity provider or ARE the credential that drives it — so
+// an unedited file would hand out a client secret that is in the repository,
+// and Authentik would turn the token line into a working admin API token for
+// `akadmin` on every boot. Refused here rather than in compose, because this
+// is the process that would use them. The token is checked after the block
+// above deliberately: a deleted token is a supported way to run, a published
+// one is not.
+const PLACEHOLDERS = {
+  OIDC_CLIENT_ID: 'openssl rand -hex 32',
+  OIDC_CLIENT_SECRET: 'openssl rand -hex 32',
+  AUTHENTIK_BOOTSTRAP_TOKEN: 'openssl rand -base64 36',
+};
+for (const [name, how] of Object.entries(PLACEHOLDERS)) {
   if ((process.env[name] ?? '').startsWith('CHANGE_ME')) {
-    throw new Error(`${name} is still the placeholder from .env.example — generate one (openssl rand -hex 32)`);
+    throw new Error(`${name} is still the placeholder from .env.example — generate one (${how})`);
   }
 }
 
@@ -122,12 +131,32 @@ const api = async (path, options = {}) => {
     },
   });
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  // Status first, body second. An error is not always JSON — a first boot, or
+  // anything behind a reverse proxy, answers with an HTML 502 or 503 — and
+  // parsing it first threw `SyntaxError: Unexpected token '<'` in place of the
+  // line below, losing the status entirely. That line is the whole diagnostic
+  // for the writes further down, and it is where SETUP.md's "the app will not
+  // start" sends the operator.
   if (!res.ok) {
     throw new Error(`${options.method ?? 'GET'} ${path} -> ${res.status} ${text}`);
   }
-  return body;
+  return text ? JSON.parse(text) : null;
 };
+
+const ID_STAGE = 'default-authentication-identification';
+const ENROLLMENT_SLUG = 'habiterall-enrollment';
+
+/**
+ * The one object a filtered list was asked for, or null.
+ *
+ * Every lookup here re-checks the field it filtered on rather than taking
+ * `results[0]`, because a server-side filter that stops filtering — a
+ * filterset that loses a field across an Authentik upgrade, a name that no
+ * longer matches — returns the whole list instead of nothing, and the first
+ * row of it looks like an answer. The objects on the other end of these are
+ * instance-wide and shared with every other application on it.
+ */
+const only = (list, field, value) => (list.results ?? []).find((o) => o[field] === value) ?? null;
 
 /**
  * Everything the provider is assembled from, or an error saying which piece is
@@ -164,10 +193,9 @@ async function findPrerequisites() {
   // here rather than assumed later: linkSignupFlow() is the first thing to
   // need it and has no retry of its own, and Authentik's default blueprints
   // land in no particular order.
-  const idStages = await api(
-    '/stages/identification/?name=default-authentication-identification'
+  const identification = only(
+    await api(`/stages/identification/?name=${ID_STAGE}`), 'name', ID_STAGE
   );
-  const identification = idStages.results[0];
   if (!identification) throw new Error('no default identification stage yet');
 
   /* ---- a signing key ---- */
@@ -205,9 +233,15 @@ async function findPrerequisites() {
  * Put the blueprints and the brand's images where Authentik will look, before
  * anything asks it to read them. A no-op unless the destinations are set.
  *
- * `force: false` so an operator who has edited a file in the volume keeps it:
- * this is a first-run install step, not a sync. Delete the volume to take the
- * image's copies again.
+ * Every run overwrites what is there, because these are versioned artifacts
+ * that ship INSIDE the image rather than configuration. With `force: false`
+ * the first run's copies were the last ones: upgrading the image to a release
+ * whose `self-signup.yaml` had gained a stage left the old file in the volume,
+ * and this went on logging that it had published the blueprints while
+ * `applyBlueprint` applied the previous release's forever. The copy cannot
+ * tell an operator's edit from an older image's file, so it does not try — a
+ * local change belongs in a bind mount, which is exactly what the compose
+ * file in the repository does, or in a rebuilt image.
  */
 async function publishFiles() {
   const { cp } = await import('node:fs/promises');
@@ -217,7 +251,7 @@ async function publishFiles() {
 
   for (const [from, to] of COPY_TARGETS) {
     if (!to) continue;
-    await cp(join(here, from), to, { recursive: true, force: false, errorOnExist: false });
+    await cp(join(here, from), to, { recursive: true, force: true });
     console.log(`published ${from.replace(/^\.\.\//, '')} -> ${to}`);
   }
 }
@@ -373,10 +407,9 @@ async function applyWithRetry(path, context) {
  * field changed is what keeps a customised login form customised.
  */
 async function linkSignupFlow() {
-  const stages = await api(
-    '/stages/identification/?name=default-authentication-identification'
+  const stage = only(
+    await api(`/stages/identification/?name=${ID_STAGE}`), 'name', ID_STAGE
   );
-  const stage = stages.results[0];
   if (!stage) throw new Error('the default identification stage is missing');
   const current = stage.enrollment_flow ?? null;
 
@@ -388,8 +421,10 @@ async function linkSignupFlow() {
     // blueprint anyway, and `enrollment_flow` is `on_delete=SET_DEFAULT`, so
     // by the time this runs the field is usually already null.
     if (current === null) return;
-    const ours = await api('/flows/instances/?slug=habiterall-enrollment');
-    if (current !== (ours.results[0]?.pk ?? null)) {
+    const ours = only(
+      await api(`/flows/instances/?slug=${ENROLLMENT_SLUG}`), 'slug', ENROLLMENT_SLUG
+    );
+    if (current !== (ours?.pk ?? null)) {
       console.log('leaving the sign-up link alone: it points at another flow');
       return;
     }
@@ -400,8 +435,10 @@ async function linkSignupFlow() {
     return;
   }
 
-  const found = await api('/flows/instances/?slug=habiterall-enrollment');
-  const flowPk = found.results[0]?.pk ?? null;
+  const found = only(
+    await api(`/flows/instances/?slug=${ENROLLMENT_SLUG}`), 'slug', ENROLLMENT_SLUG
+  );
+  const flowPk = found?.pk ?? null;
   if (!flowPk) throw new Error('the enrollment flow was not created');
   if (current === flowPk) return;
   await api(`/stages/identification/${stage.pk}/`, {

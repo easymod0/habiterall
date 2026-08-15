@@ -125,6 +125,32 @@ the IdP are configured from the same two lines. Left empty, Authentik
 generates a pair and the script prints it — the old paste-it-back flow, still
 supported, no longer the path.
 
+**A `CHANGE_ME` value from `.env.example` is refused, and the bootstrap token
+is one of them.** The three the guard covers are the three that are worth
+something to a stranger holding a public repository: the OIDC pair, because it
+is written *onto* the provider, and `AUTHENTIK_BOOTSTRAP_TOKEN`, because
+Authentik turns that line into a full admin API token for `akadmin` on every
+boot. An unedited file otherwise reaches a stack that starts, reports
+everything configured, and accepts an admin token whose value is published.
+
+**Without the token the script states what is frozen; it does not warn.** It
+used to warn when one of the three switches was set, which read as "your edit
+did not take effect" — but both compose files default all three, so the
+condition was true on every boot and the alarm fired at an operator who had
+changed nothing. Whether `AUTHENTIK_SELF_SIGNUP=off` still disagrees with
+Authentik cannot be known here at all: reading back what was applied needs the
+API, which needs the token. So the no-token path prints one line naming the
+switches that have no effect, and the production checklist carries the warning.
+
+**The published-image path OVERWRITES the volumes it fills.** `publishFiles`
+copies the blueprints and the branding assets out of the image on every run,
+because they are versioned artifacts that ship inside it. `force: false` made
+the first run's copies permanent: an upgraded image applied the previous
+release's blueprint forever, while still logging that it had published them.
+Nothing can tell an operator's edit in that volume from an older image's file,
+so nothing tries — the checkout compose bind-mounts the directories for exactly
+that case.
+
 **`grant_types` must be sent explicitly.** The field defaults to an empty list
 and an empty list permits nothing: a provider created without it looks correct
 in the admin UI and rejects every sign-in with "Invalid grant\_type for
