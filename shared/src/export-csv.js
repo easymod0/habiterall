@@ -87,14 +87,36 @@ export function csvNumber(value) {
  * Nothing stops duplicate names existing — the validator does not require
  * uniqueness — so the export has to disambiguate. A suffix is visible and
  * reversible by hand; silently losing a habit's history is not.
+ *
+ * The suffix has to be checked against the OTHER habits, not just counted per
+ * name. `Run`, `Run`, `Run (2)` used to produce the header
+ * `Date,Run,Run (2),Run (2)` — the exact collision this function exists to
+ * prevent, re-created by the fix for it, and every consequence above then
+ * followed for a user who had simply named a habit `Run (2)` by hand.
+ *
+ * Two rules make the answer independent of the order the duplicates arrive in.
+ * A name is claimed by the FIRST habit that carries it, so a suffix never
+ * displaces a habit that was named that way on purpose. And the candidate is
+ * tested against every original name as well as the ones already handed out,
+ * because the habit that owns the plain `Run (2)` may not have been reached
+ * yet — checking only what has been assigned so far would rename it instead,
+ * which is the same collision one habit further along.
  */
-function uniqueNames(habits) {
-  const seen = new Map();
+export function uniqueNames(habits) {
+  const original = new Set(habits.map((h) => String(h.name ?? '')));
+  const assigned = new Set();
   return habits.map((h) => {
     const name = String(h.name ?? '');
-    const n = (seen.get(name) ?? 0) + 1;
-    seen.set(name, n);
-    return n === 1 ? h : { ...h, name: `${name} (${n})` };
+    if (!assigned.has(name)) {
+      assigned.add(name);
+      return h;
+    }
+    // `original` is finite, so this terminates: at worst it walks past every
+    // name in the export.
+    let n = 2;
+    while (original.has(`${name} (${n})`) || assigned.has(`${name} (${n})`)) n++;
+    assigned.add(`${name} (${n})`);
+    return { ...h, name: `${name} (${n})` };
   });
 }
 

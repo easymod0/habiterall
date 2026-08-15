@@ -1116,6 +1116,8 @@ limit rather than a deployment setting.
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
+| `MAX_PARSE_HABITS` | `10000` | Habits a single uploaded file may declare. A bound on a hostile file, not a product limit — see [Limits on an import](#limits-on-an-import) |
+| `MAX_PARSE_ENTRIES` | `250000` | Entries one file may declare, totalled across its habits |
 
 To set `HABITERALL_PASSWORD_HASH` and keep the plaintext out of your compose
 file and out of `docker inspect`:
@@ -1133,8 +1135,27 @@ See [`.env.example`](habiterall-cloud/.env.example), and
 the same list with comments. Beyond the database and OIDC credentials:
 `TRUST_PROXY`, `NOTIFY_MAX_ACCOUNTS`, `MAX_HABITS_PER_USER`,
 `MAX_HABITS_PER_IMPORT`, `MAX_ENTRIES_PER_IMPORT`, `MAX_UPLOAD_MB`,
-`PG_POOL_MAX`, `PGSSL`, `PORT`, and `ALLOW_INSECURE_OIDC` — which is for local
-HTTP testing and never a real deployment.
+`MAX_PARSE_HABITS`, `MAX_PARSE_ENTRIES`, `PG_POOL_MAX`, `PGSSL`, `PORT`, and
+`ALLOW_INSECURE_OIDC` — which is for local HTTP testing and never a real
+deployment.
+
+### Limits on an import
+
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` bound what a single uploaded file
+may *declare*, before anything is built from it. They exist because the row
+count of a SQLite file is a claim rather than a measurement: a few kilobytes
+can assert millions of rows, and reading them all takes the process out of
+service in a way no `try`/`catch` can answer.
+
+They are not a product limit, and the defaults are far above any real account
+— 10,000 habits is fifty times cloud's own per-account cap, and 250,000 entries
+is roughly 68 habits answered every day since Loop shipped in 2016. They are
+settable because the personal edition has no other cap on either, so a fixed
+ceiling here would leave its importer refusing files its own API would happily
+have created one habit at a time.
+
+Raising them trades memory for generosity: a file sitting on both defaults
+costs roughly 90MB to parse, and half a million entries alone costs 143MB.
 
 ### Published images
 
@@ -1215,6 +1236,7 @@ The ones worth a dashboard or an alert:
 | `notify.tick` | info / debug | Per tick: sent, failed, and a count per reason nothing was sent. Debug when it had nothing to do |
 | `notify.skip` | debug | **Why one habit was skipped**, with the clock it judged against |
 | `notify.tick_slow` | warn | A tick is overrunning its interval, so the next one is skipped and the last accounts are starved |
+| `export.rows_skipped` | warn | A backup left rows out rather than failing. `rows` names each one as `habit@date=reason` — `bad_date` is an entry filed under a day that does not exist, which no API here can write but an older import could. The export is otherwise complete, and the response carries the count in `X-Habiterall-Export-Skipped` |
 | `auth.login` / `auth.suspended` | info / warn | Cloud: who signed in (id and issuer, never the subject or the email), and who was turned away |
 | `pg.client_error` | error | Cloud: a pooled connection failed |
 

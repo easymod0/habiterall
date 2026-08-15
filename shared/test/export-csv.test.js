@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { zip } from '../src/zip.js';
 import { unzip } from '../src/unzip.js';
 import {
-  buildHabitsCsv, buildCheckmarksCsv, buildCsvArchive, esc, csvNumber,
+  buildHabitsCsv, buildCheckmarksCsv, buildCsvArchive, esc, uniqueNames, csvNumber,
 } from '../src/export-csv.js';
 import { parseLoopHabitsCSV, parseLoopCheckmarksCSV } from '../src/import.js';
 
@@ -216,6 +216,95 @@ test('buildCsvArchive contains both files', () => {
   assert.deepEqual([...members.keys()].sort(), ['Checkmarks.csv', 'Habits.csv']);
   assert.match(members.get('Habits.csv').toString(), /^Position,Name,/);
   assert.match(members.get('Checkmarks.csv').toString(), /^Date,Water,/);
+});
+
+/* ---------- duplicate habit names ---------- */
+
+test('uniqueNames leaves distinct names alone', () => {
+  const habits = [{ name: 'Run' }, { name: 'Swim' }];
+  assert.deepEqual(uniqueNames(habits).map((h) => h.name), ['Run', 'Swim']);
+  assert.equal(uniqueNames(habits)[0], habits[0],
+    'an untouched habit is passed through, not copied');
+});
+
+test('uniqueNames suffixes past a name a real habit already has', () => {
+  // The bug: the nth "Run" became "Run (n)" with no check on whether anything
+  // else was called that, so a user who had named a habit "Run (2)" by hand got
+  // the collision this function exists to prevent.
+  assert.deepEqual(
+    uniqueNames([{ name: 'Run' }, { name: 'Run' }, { name: 'Run (2)' }])
+      .map((h) => h.name),
+    ['Run', 'Run (3)', 'Run (2)']
+  );
+});
+
+test('uniqueNames does not depend on which habit comes first', () => {
+  // The habit that owns the plain "Run (2)" may not have been reached yet, so
+  // the candidate is checked against every ORIGINAL name and not only against
+  // what has been handed out. Move it to the front and the answer is the same
+  // set of names.
+  assert.deepEqual(
+    uniqueNames([{ name: 'Run (2)' }, { name: 'Run' }, { name: 'Run' }])
+      .map((h) => h.name),
+    ['Run (2)', 'Run', 'Run (3)']
+  );
+});
+
+test('uniqueNames keeps suffixing until the name is genuinely free', () => {
+  assert.deepEqual(
+    uniqueNames([
+      { name: 'Run' }, { name: 'Run' }, { name: 'Run' },
+      { name: 'Run (2)' }, { name: 'Run (3)' },
+    ]).map((h) => h.name),
+    ['Run', 'Run (4)', 'Run (5)', 'Run (2)', 'Run (3)']
+  );
+
+  // A name that is itself already suffixed is disambiguated the same way.
+  assert.deepEqual(
+    uniqueNames([{ name: 'Run (2)' }, { name: 'Run (2)' }]).map((h) => h.name),
+    ['Run (2)', 'Run (2) (2)']
+  );
+});
+
+test('duplicate names do not cost a habit its type and its history', () => {
+  // The whole point of the suffix: both CSV files identify a habit by name and
+  // `parseLoopHabitsCSV` is a Map, so two columns sharing one name is last-wins.
+  // The numerical Run inherited the boolean one's metadata, its 8 km and 10 km
+  // days were DROPPED (convertLoopValue(8, false) is null) and its 3 km day
+  // became a skip — a bridged streak on data the user never entered.
+  const runners = [
+    { id: 1, name: 'Run', type: 'boolean', unit: '', target_value: 0 },
+    { id: 2, name: 'Run', type: 'numerical', unit: 'km', target_value: 5 },
+    { id: 3, name: 'Run (2)', type: 'boolean', unit: '', target_value: 0 },
+  ];
+  const runs = {
+    1: [{ date: '2026-01-01', value: 2, status: '' }],
+    2: [
+      { date: '2026-01-01', value: 8, status: '' },
+      { date: '2026-01-02', value: 10, status: '' },
+      { date: '2026-01-03', value: 3, status: '' },
+    ],
+    3: [{ date: '2026-01-01', value: 2, status: '' }],
+  };
+
+  const members = unzip(buildCsvArchive(runners, (id) => runs[id]));
+  const header = members.get('Checkmarks.csv').toString('utf8').split('\n')[0];
+  assert.equal(header, 'Date,Run,Run (3),Run (2)',
+    'three habits, three distinct columns');
+
+  const parsed = parseLoopCheckmarksCSV(
+    members.get('Checkmarks.csv').toString('utf8'),
+    parseLoopHabitsCSV(members.get('Habits.csv').toString('utf8'))
+  );
+
+  const measured = parsed.find((h) => h.name === 'Run (3)');
+  assert.equal(measured.type, 'numerical', 'the metadata reached the right column');
+  assert.equal(measured.unit, 'km');
+  assert.deepEqual(
+    measured.entries.map((e) => [e.value, e.status]),
+    [[8, ''], [10, ''], [3, '']],
+    'every amount survives, and 3 km is 3 km rather than a skip'
+  );
 });
 
 test('boolean columns use Loop\'s symbolic names', () => {

@@ -37,26 +37,57 @@ const MILLIS_PER_DAY = 86_400_000;
 
 /* ---------- shared helpers ---------- */
 
-/**
- * Loop timestamps are UTC-midnight-aligned epoch millis. Read them back with
- * UTC getters so a local timezone west of UTC doesn't shift every date back
- * by one day.
- */
 import { unzip } from './unzip.js';
 // The same limits the API enforces, so an import cannot store what a typed-in
 // habit could not.
 import { LIMITS } from './validate.js';
 import { TIME_RE } from './constants.js';
 
+/**
+ * Loop timestamps are UTC-midnight-aligned epoch millis. Read them back with
+ * UTC getters so a local timezone west of UTC doesn't shift every date back
+ * by one day.
+ *
+ * The year is padded to four digits exactly as the month and day are, and that
+ * is not cosmetic: a date reaches storage only through `^\d{4}-\d{2}-\d{2}$` in
+ * both editions' `applyImport`, so `0100-01-01` came back as `"100-01-01"` and
+ * the entry was silently discarded as a bad date — on a timestamp the export
+ * half had written correctly. The `boundedRange` note in the root CLAUDE.md
+ * cites an entry dated year 0100 as data that has actually turned up here.
+ *
+ * Anything outside years 1–9999 is `null`, which is what the caller already
+ * skips on. Padding alone would have turned year 0 into a plausible-looking
+ * `0000-01-01`; a negative year is BCE, which nothing downstream represents;
+ * and a timestamp past the ECMAScript range arrives as a NaN year. Refusing
+ * all three here rather than leaving them to a regex three files away is what
+ * keeps "this reader emits a real date or nothing" true of the function itself.
+ *
+ * That sentence is only true because the guard below is about the TYPE and not
+ * the value. `Number(null)`, `Number('')`, `Number([])` and `Number(false)` are
+ * all `0` — and 0 is a perfectly real timestamp, the epoch — so a `Number()`
+ * check let an absent column read back as 1970-01-01 while `undefined` and
+ * `NaN` were correctly refused. A missing timestamp is not a day in 1970.
+ *
+ * One cost, and it is the reason this is written down. A row this refuses is
+ * dropped by `parseLoopDatabase`'s `if (!date) continue` with no report, where
+ * before it reached `applyImport` and came back as `bad date on "X": 0-01-01`.
+ * The parser has no `skipped` channel of its own to say it in. That is a real
+ * loss of visibility, paid for by the years 1–999 this now RESCUES — those used
+ * to be reported-and-discarded and are now imported. Give the parser a report
+ * and this trade goes away.
+ */
 export function loopTimestampToISO(millis) {
-  const n = Number(millis);
+  const n = typeof millis === 'number'
+    ? millis
+    : (typeof millis === 'string' && /^-?\d+$/.test(millis.trim()) ? Number(millis) : NaN);
   if (!Number.isFinite(n)) return null;
   const days = Math.floor(n / MILLIS_PER_DAY);
   const d = new Date(days * MILLIS_PER_DAY);
   const y = d.getUTCFullYear();
+  if (!(y >= 1 && y <= 9999)) return null;
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return `${String(y).padStart(4, '0')}-${m}-${day}`;
 }
 
 /**
@@ -220,6 +251,53 @@ export function backupSettings(buf) {
 /* ---------- Loop .db backup ---------- */
 
 /**
+ * Ceiling on how many habits one uploaded backup may produce.
+ *
+ * A SQLite file's row count is DECLARED, not stored — `Habits` can be a view
+ * over a recursive CTE, or simply a table with more rows than anyone has — so
+ * without a ceiling the *file* chooses how much memory this costs. An 8,192-byte
+ * upload expanded to 300,000 habits in 3.1s and 474MB here, and five million
+ * aborted the process inside `node::sqlite::StatementExecutionHelper::All`. That
+ * is a V8 OOM, not an exception: the `try` below never runs, so the one thing
+ * this path does well — turning a bad upload into a 400 — was unreachable.
+ *
+ * 10,000 is a sanity bound on a hostile file, not a product limit. Cloud's
+ * `MAX_HABITS_PER_IMPORT` (200) is the product limit, and it is applied to the
+ * parsed array, which is far too late to be a defence — this is the bound that
+ * has to hold before that array exists. Fifty times cloud's cap, so nothing real
+ * comes near it, and a file sitting exactly on it parses in 81ms for 20MB.
+ *
+ * `PARSE` and not `IMPORT` in the name for exactly that distinction, and to keep
+ * a reader from reaching for cloud's similarly-spelled `MAX_HABITS_PER_IMPORT`
+ * when they mean this one.
+ *
+ * Tunable because otherwise it is the personal edition's first cap on anything:
+ * that API will create habits all day, so a fixed ceiling here would make the
+ * importer stricter than the API it exists to agree with, with no way out for
+ * someone who genuinely has more. Cloud's own limits are all env-settable for
+ * the same reason. Lowering it is a legitimate hardening choice; raising it
+ * trades memory for generosity and the figures above are what to trade against.
+ */
+export const MAX_PARSE_HABITS = Number(process.env.MAX_PARSE_HABITS) || 10_000;
+
+/**
+ * Ceiling on entries, and it is a TOTAL across the import rather than per habit.
+ *
+ * `unzip.js` records why, one attack over: a per-member cap is not a defence
+ * when the number of members is also attacker-chosen, because each one stays
+ * legal and the product does not. Per-habit here would be
+ * `MAX_PARSE_HABITS × the cap` rows — 10,000 legal habits multiplying out to
+ * something no ceiling was ever asked about.
+ *
+ * 250,000 is past what Loop could physically have produced: it shipped in 2016,
+ * so this is ~68 habits answered every single day since. Generous, and still
+ * bounded where it matters — a file sitting exactly on it parses in 410ms for
+ * 69MB, against 143MB at half a million. Both ceilings together are ~89MB, which
+ * a small container survives; the unbounded read did not survive anything.
+ */
+export const MAX_PARSE_ENTRIES = Number(process.env.MAX_PARSE_ENTRIES) || 250_000;
+
+/**
  * Read a Loop SQLite backup. `path` must point at a file on disk; node:sqlite
  * cannot open a database from a buffer.
  */
@@ -237,14 +315,40 @@ export async function parseLoopDatabase(path) {
     // Loop's own validation: both tables must be present. A file with a valid
     // SQLite header but a corrupt body throws from here, so the whole read is
     // wrapped and re-tagged as a client error below.
-    const check = src
-      .prepare(`SELECT COUNT(*) AS n FROM SQLITE_MASTER WHERE name IN ('Habits','Repetitions')`)
-      .get();
-    if (check.n !== 2) {
+    // `type IN ('table','view')` because a TRIGGER may share a table's name in
+    // SQLite, and keying a Map on name alone let the trigger's row win — so a
+    // perfectly good backup carrying one was refused as "Habits is a trigger,
+    // not a table". Indexes have the same shape of collision.
+    const objects = new Map(
+      src.prepare(
+        `SELECT name, type FROM SQLITE_MASTER
+          WHERE name IN ('Habits','Repetitions') AND type IN ('table','view')`
+      ).all().map((r) => [r.name, r.type])
+    );
+    if (objects.size !== 2) {
       throw Object.assign(
         new Error('not a Loop database: expected Habits and Repetitions tables'),
         { status: 400 }
       );
+    }
+    // And both must be TABLES. Loop only ever writes tables, so this costs a
+    // real backup nothing, and a view is how the row count stops being related
+    // to the file: `CREATE VIEW Habits AS WITH RECURSIVE …` is 8KB of upload
+    // declaring five million rows. This is defence in depth and not the fix —
+    // the ceilings below are, because a plain table under the body limit still
+    // holds several hundred thousand rows and amplifies perfectly well.
+    //
+    // Note it is not a type gate either: `CREATE VIRTUAL TABLE Habits USING
+    // fts5(…)` reports `type = 'table'` and walks straight past. That is fine
+    // and deliberate — whatever it produces meets the ceiling like anything
+    // else — but do not read this check as deciding what a table may contain.
+    for (const name of ['Habits', 'Repetitions']) {
+      if (objects.get(name) !== 'table') {
+        throw Object.assign(
+          new Error(`not a Loop database: ${name} is a ${objects.get(name)}, not a table`),
+          { status: 400 }
+        );
+      }
     }
 
     const cols = new Set(
@@ -275,22 +379,42 @@ export async function parseLoopDatabase(path) {
                         ${pickInt('reminder_hour', 'NULL')},
                         ${pickInt('reminder_min', 'NULL')},
                         ${pickInt('reminder_days', `'${LOOP_ALL_DAYS}'`)}
-                 FROM Habits ORDER BY position, id`;
+                 FROM Habits ORDER BY position, id LIMIT ?`;
 
-    const rows = src.prepare(sql).all();
     const repCols = new Set(
       src.prepare(`PRAGMA table_info(Repetitions)`).all().map((c) => c.name)
     );
     const notesCol = repCols.has('notes') ? 'notes' : `'' AS notes`;
     const reps = src.prepare(
-      `SELECT habit, timestamp, value, ${notesCol} FROM Repetitions WHERE habit = ? ORDER BY timestamp`
+      `SELECT habit, timestamp, value, ${notesCol} FROM Repetitions WHERE habit = ? ORDER BY timestamp LIMIT ?`
     );
 
-    return rows.map((r) => {
+    const tooMuch = (what) => Object.assign(
+      new Error(`backup expands to too much data: more than ${what}`), { status: 400 }
+    );
+
+    const habits = [];
+    // The budget is spent by every row READ, not by every entry kept. A file of
+    // nothing but UNKNOWN rows is dropped on the floor a line later and still
+    // costs the read, which is the work being bounded.
+    let entryBudget = MAX_PARSE_ENTRIES;
+
+    // `.iterate()`, not `.all()` — the ceiling has to apply where the rows are
+    // PRODUCED. `.all()` materialises the whole result inside node:sqlite before
+    // a single line of this function runs, so anything checked afterwards has
+    // already spent the memory it was meant to save, and on a big enough file
+    // never gets to run at all. The `LIMIT` is the other half: it is what keeps
+    // SQLite's own sorter bounded, since `ORDER BY` over an unindexed column
+    // would otherwise sort every row before yielding the first.
+    for (const r of src.prepare(sql).iterate(MAX_PARSE_HABITS + 1)) {
+      if (habits.length >= MAX_PARSE_HABITS) throw tooMuch(`${MAX_PARSE_HABITS} habits`);
+
       const isNumerical = Number(r.type) === 1;
       const entries = [];
 
-      for (const rep of reps.all(r.id)) {
+      for (const rep of reps.iterate(r.id, entryBudget + 1)) {
+        if (entryBudget <= 0) throw tooMuch(`${MAX_PARSE_ENTRIES} entries`);
+        entryBudget--;
         const date = loopTimestampToISO(rep.timestamp);
         if (!date) continue;
         const converted = convertLoopValue(rep.value, isNumerical);
@@ -303,7 +427,7 @@ export async function parseLoopDatabase(path) {
         });
       }
 
-      return {
+      habits.push({
         name: String(r.name ?? '').trim(),
         description: String(r.description ?? ''),
         type: isNumerical ? 'numerical' : 'boolean',
@@ -335,8 +459,10 @@ export async function parseLoopDatabase(path) {
           : '',
         archived: Number(r.archived) ? 1 : 0,
         entries,
-      };
-    });
+      });
+    }
+
+    return habits;
   } catch (err) {
     // Anything thrown while reading a file we already accepted as SQLite is a
     // problem with the upload, not with the server.
@@ -381,16 +507,50 @@ export function parseCSV(text) {
 }
 
 /**
+ * One habit as the CSV pair describes it, with no entries on it yet.
+ *
+ * Both readers of the pair need this exact shape and neither may guess at it:
+ * `parseLoopCheckmarksCSV` builds a habit field by field from the metadata map,
+ * so a field missing from THIS list is dropped however well Habits.csv parsed
+ * it, and `parseZipExport` fills the same shape for a habit Checkmarks.csv
+ * never mentioned. Two copies of the list is one place for the next field to be
+ * added and one place for it to be forgotten.
+ */
+function habitFromCsvMeta(name, meta = {}) {
+  return {
+    name,
+    description: meta.description ?? '',
+    reminder_message: meta.reminder_message ?? '',
+    type: meta.type ?? 'boolean',
+    unit: meta.unit ?? '',
+    target_value: meta.target_value ?? 0,
+    target_type: meta.target_type ?? 'at_least',
+    freq_numerator: meta.freq_numerator ?? 1,
+    freq_denominator: meta.freq_denominator ?? 1,
+    color: meta.color ?? '#3b82f6',
+    archived: meta.archived ?? 0,
+    entries: [],
+  };
+}
+
+/**
  * Parse Loop's Checkmarks.csv, whose shape is:
  *   Date,Habit A,Habit B,...
  *   2026-01-01,YES_MANUAL,3,...
  *
  * `habitMeta` optionally supplies type/target info parsed from Habits.csv so
  * numerical columns are interpreted correctly.
+ *
+ * The habits come from the HEADER, and a file with nothing under it still has
+ * one. This used to bail on `rows.length < 2` — one row means no entries, which
+ * was read as no habits — so an account that backed itself up before recording
+ * anything exported two fully described habits and restored none of them, with
+ * the API's "no habits found in the uploaded file" 400 on top. The row count
+ * says how many days have been answered; only the header says what exists.
  */
 export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
   const rows = parseCSV(text);
-  if (rows.length < 2) return [];
+  if (!rows.length) return [];
 
   const header = rows[0].map((h) => h.trim());
   if (!/^date$/i.test(header[0])) {
@@ -410,23 +570,7 @@ export function parseLoopCheckmarksCSV(text, habitMeta = new Map()) {
     .slice(1)
     .filter((c) => c.name !== '');
 
-  const habits = columns.map(({ name }) => {
-    const meta = habitMeta.get(name) ?? {};
-    return {
-      name,
-      description: meta.description ?? '',
-      reminder_message: meta.reminder_message ?? '',
-      type: meta.type ?? 'boolean',
-      unit: meta.unit ?? '',
-      target_value: meta.target_value ?? 0,
-      target_type: meta.target_type ?? 'at_least',
-      freq_numerator: meta.freq_numerator ?? 1,
-      freq_denominator: meta.freq_denominator ?? 1,
-      color: meta.color ?? '#3b82f6',
-      archived: meta.archived ?? 0,
-      entries: [],
-    };
-  });
+  const habits = columns.map(({ name }) => habitFromCsvMeta(name, habitMeta.get(name)));
 
   for (const row of rows.slice(1)) {
     const date = (row[0] ?? '').trim();
@@ -614,9 +758,25 @@ export async function parseUpload(buf) {
   const text = buf.toString('utf8').replace(/^﻿/, '');
   const head = text.trimStart();
 
-  if (head.startsWith('{') || head.startsWith('[')) {
-    return parseHabiterallJSON(head.startsWith('[') ? { habits: JSON.parse(head) } : text);
+  // A bare array is wrapped before `parseHabiterallJSON` sees it, so it is the
+  // one form that has to be parsed HERE — and the parse sat in the ARGUMENT to
+  // that call, outside the try that exists to turn bad JSON into a 400. So a
+  // truncated `[{"name":"a"},` escaped as a 500 with a full stack trace at error
+  // level, from an endpoint that needs no account on the personal edition, while
+  // the identical truncation after a `{` was correctly reported to the person
+  // who could fix the file. The sentence is the same one deliberately: the two
+  // brackets must not come to say different things about the same bad upload.
+  if (head.startsWith('[')) {
+    let habits;
+    try {
+      habits = JSON.parse(head);
+    } catch {
+      throw fail('file is not valid JSON');
+    }
+    return parseHabiterallJSON({ habits });
   }
+
+  if (head.startsWith('{')) return parseHabiterallJSON(text);
 
   if (/^"?date"?\s*,/i.test(head)) return parseLoopCheckmarksCSV(text);
 
@@ -632,6 +792,14 @@ export async function parseUpload(buf) {
  * Both are needed. Checkmarks.csv has one column per habit and nothing saying
  * what a habit IS, so parsed alone every column defaults to boolean — and a
  * measurable habit's 3 is then read as Loop's SKIP sentinel.
+ *
+ * Which is why Habits.csv is a source of habits here and not only a lookup
+ * table: it names every habit the archive describes, and a habit it names is
+ * one the file HAS whether or not a column for it survived. Reading the
+ * checkmarks header rather than its rows already covers the case that motivated
+ * this — an account with no entries at all — so this union is what the mixed
+ * cases need, and what keeps "no habits found in the uploaded file" an honest
+ * thing to say about the pair rather than about one of the two files.
  */
 function parseZipExport(buf, fail) {
   const files = unzip(buf);
@@ -648,7 +816,16 @@ function parseZipExport(buf, fail) {
 
   const habitsCsv = find('habits.csv');
   const meta = habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map();
-  return parseLoopCheckmarksCSV(checkmarksCsv, meta);
+  const habits = parseLoopCheckmarksCSV(checkmarksCsv, meta);
+
+  // Checkmarks order first, then Habits.csv order for the rest — both are the
+  // order those files were written in, so the same archive always restores the
+  // same way round.
+  const columns = new Set(habits.map((h) => h.name));
+  for (const [name, habitMeta] of meta) {
+    if (!columns.has(name)) habits.push(habitFromCsvMeta(name, habitMeta));
+  }
+  return habits;
 }
 
 /**
@@ -675,14 +852,61 @@ function parseZipExport(buf, fail) {
  * Loop permits shapes our own validation does not (a numerator above the
  * denominator), so those are squared up rather than dropped.
  *
+ * A frequency too wide to store is repaired as a **rate**, not by parking the
+ * count at a cap it never agreed to: `500 / 1000` becomes `182 / 365` and not
+ * `365 / 365`, which would be a daily habit invented out of a lax one. The
+ * count rounds DOWN and the period UP throughout, so a repair never asks more
+ * of the user than the file did — that rule is what decides every edge here,
+ * including the fractional and the unbounded ones.
+ *
  * @param {Record<string, any>} h a habit from any parser
  * @returns {import('./types.js').Habit & {archived: boolean}}
  */
 export function normaliseImportedHabit(h) {
-  const num = Math.max(1, Number(h.freq_numerator) || 1);
-  let den = Math.max(1, Number(h.freq_denominator) || 1);
-  if (num > den) den = num;
-  den = Math.min(den, LIMITS.freqDenominator);
+  // The whole of parseHabit's frequency rule — integers with
+  // 1 <= num <= den <= freqDenominator — and not two thirds of it. The clamps
+  // ran in an order that undid themselves: squaring up raised the denominator
+  // to the numerator, the cap then lowered it again, and nothing ever bounded
+  // the numerator at all, so `1000 / 1` was stored as `1000 / 365` and `2.5 / 7`
+  // put a REAL in an INTEGER column. Cloud has
+  // `CHECK (freq_numerator <= freq_denominator)`, so the same file that personal
+  // stored as nonsense was a 23514 there — a 500 with the whole import rolled
+  // back, which is exactly the divergence this function exists to prevent.
+  const cap = LIMITS.freqDenominator;
+  // A file gives one of THREE answers here and they are not interchangeable:
+  // a usable number; nothing usable (NaN, null, a missing key), which means the
+  // file did not say and the default stands; and +Infinity, which means the file
+  // DID say — "effectively never" — and is a legal JSON literal, since `1e400`
+  // parses to it. Folding that third case into the default inverted it: a habit
+  // asking for two repetitions per 1e400 days came out as `2 / 2`, due every
+  // single day. That is a far larger invention than the `365 / 365` this
+  // function's own comment below was written to prevent.
+  const stated = (raw) => {
+    const n = Number(raw);
+    if (n === Infinity) return cap;      // the widest period there is
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  };
+  // Down for the count, up for the period. The columns are INTEGER and there is
+  // no honest fractional reading of either, so where the file cannot be
+  // expressed the repair asks no MORE of the user than the file did.
+  let num = Math.max(1, Math.floor(stated(h.freq_numerator)));
+  let den = Math.ceil(stated(h.freq_denominator));
+  if (num > den) den = num;          // Loop permits it; the most a rate can be is daily
+  if (den > cap) {
+    // The count moves with the period rather than being left behind at a cap it
+    // never agreed to. "500 times per 1000 days" clamped to `365 / 365` is not a
+    // lax habit stored honestly, it is a daily one invented — the same mistake
+    // as reading a Loop reminder mask of 0 as "every day".
+    //
+    // Take the RATE first and scale it, rather than scaling the count and then
+    // dividing. `(num * cap) / den` overflows to Infinity for a numerator above
+    // ~4.9e305, and `Math.min` then hands back `cap` — turning a one-in-ten-days
+    // habit into a daily one at the exact end of the range the clamp exists to
+    // handle. `(num / den) * cap` cannot overflow, because the rate is a ratio
+    // of two finite numbers, and it gives the same answer everywhere else.
+    num = Math.min(cap, Math.max(1, Math.floor((num / den) * cap)));
+    den = cap;
+  }
 
   const target = Number(h.target_value);
 

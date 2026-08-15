@@ -31,9 +31,55 @@ test('timestamps before 2000 floor correctly', () => {
   assert.equal(loopTimestampToISO(Date.UTC(1998, 2, 10)), '1998-03-10');
 });
 
+test('a year below 1000 keeps its leading zeros', () => {
+  // Not cosmetic: both editions' `applyImport` admit a date only through
+  // `^\d{4}-\d{2}-\d{2}$`, so an unpadded year made a perfectly good Loop
+  // timestamp arrive as `100-01-01` and the entry was dropped as malformed —
+  // with no error and no skipped-row report. The `boundedRange` note in the
+  // root CLAUDE.md cites an entry dated year 0100 as real data.
+  const at = (y, m, d) => {
+    const t = new Date(0);
+    t.setUTCFullYear(y, m - 1, d);
+    return t.getTime();
+  };
+  assert.equal(loopTimestampToISO(at(100, 1, 1)), '0100-01-01');
+  assert.equal(loopTimestampToISO(at(999, 12, 31)), '0999-12-31');
+  assert.equal(loopTimestampToISO(at(50, 3, 15)), '0050-03-15');
+  assert.equal(loopTimestampToISO(at(1, 1, 1)), '0001-01-01');
+});
+
 test('invalid timestamps are rejected', () => {
   assert.equal(loopTimestampToISO('nonsense'), null);
   assert.equal(loopTimestampToISO(undefined), null);
+});
+
+test('an absent timestamp is not a day in 1970', () => {
+  // `Number(null)`, `Number('')`, `Number([])` and `Number(false)` are all 0,
+  // and 0 IS a real timestamp — the epoch — so a value check cannot tell a
+  // missing column from a genuine 1970-01-01. Only `undefined` and `NaN` were
+  // being refused; everything else read back as a real date on a row that had
+  // none.
+  for (const absent of [null, '', ' ', [], {}, true, false]) {
+    assert.equal(loopTimestampToISO(absent), null, JSON.stringify(absent) ?? String(absent));
+  }
+  // ...while the epoch itself still reads as the day it is.
+  assert.equal(loopTimestampToISO(0), '1970-01-01');
+  // A numeric string is what a CAST(... AS TEXT) column hands back, and is real.
+  assert.equal(loopTimestampToISO(String(Date.UTC(1998, 2, 10))), '1998-03-10');
+});
+
+test('a timestamp outside years 1-9999 is no date at all', () => {
+  // Padding to four digits is what makes this worth stating: year 0 formats as
+  // `0000-01-01`, which the writers' date regex would have accepted as an
+  // ordinary date. Before the padding it was `0-01-01` and the regex caught
+  // it, so the guard has to arrive with the padding rather than after it.
+  assert.equal(loopTimestampToISO(-62_167_219_200_000), null, 'year 0');
+  assert.equal(loopTimestampToISO(-100_000_000_000_000), null, 'BCE');
+  // Beyond the ECMAScript date range the year is NaN; `275760-09-13` is the
+  // far end of it and is not four digits either.
+  assert.equal(loopTimestampToISO(8.64e15 + 1), null);
+  assert.equal(loopTimestampToISO(8.64e15), null, 'year 275760');
+  assert.equal(loopTimestampToISO(Infinity), null);
 });
 
 /* ---------- Loop value conversion ---------- */
@@ -222,6 +268,23 @@ test('Habits.csv at-most targets and archived flag are read', () => {
 
 test('Checkmarks.csv rejects a file with no Date column', () => {
   assert.throws(() => parseLoopCheckmarksCSV('Foo,Bar\n1,2\n'), /Date/);
+});
+
+test('a Checkmarks.csv with no rows under it still names its habits', () => {
+  // The row count says how many days have been answered; only the header says
+  // what exists. Bailing on `rows.length < 2` read "no entries" as "no habits",
+  // which is what an account that backs itself up on its first day exports.
+  const habits = parseLoopCheckmarksCSV('Date,Alpha,Beta\n');
+  assert.deepEqual(habits.map((h) => h.name), ['Alpha', 'Beta']);
+  assert.deepEqual(habits.map((h) => h.entries.length), [0, 0]);
+});
+
+test('a header-only Checkmarks.csv still has to be a Checkmarks.csv', () => {
+  // Reading the header rather than the rows must not turn the Date check into
+  // something only a file with data has to pass.
+  assert.throws(() => parseLoopCheckmarksCSV('Foo,Bar\n'), /Date/);
+  assert.deepEqual(parseLoopCheckmarksCSV(''), [],
+    'an empty file describes nothing, and the API answers 400 for that');
 });
 
 /* ---------- Loop .db backup ---------- */
@@ -524,6 +587,159 @@ test('a Loop db missing later-version columns still imports', async () => {
   unlinkSync(path);
 });
 
+/* ---------- a hostile .db must not decide how much memory this costs ---------- */
+
+/**
+ * A Loop-shaped database of exactly `rows` rows in one table and a valid
+ * minimum in the other, so each ceiling can be pushed on its own.
+ *
+ * Every Repetitions row is Loop's UNKNOWN(-1), which the parser drops. That is
+ * deliberate: nothing survives into the result, so what the ceiling is being
+ * asked to bound is the READ, with no output to hide behind.
+ */
+async function makeOversizedDb(path, kind, rows) {
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, description TEXT, question TEXT,
+      freq_num INTEGER, freq_den INTEGER, color INTEGER, position INTEGER, archived INTEGER,
+      type INTEGER, target_value REAL, target_type INTEGER, unit TEXT,
+      reminder_hour INTEGER, reminder_min INTEGER, reminder_days INTEGER);
+    CREATE TABLE Repetitions (habit INTEGER, timestamp INTEGER, value INTEGER, notes TEXT);
+  `);
+  d.exec('BEGIN');
+  if (kind === 'habits') {
+    const ins = d.prepare(`INSERT INTO Habits VALUES (?,?,'','',1,1,11,?,0,0,0,0,'',NULL,NULL,127)`);
+    for (let i = 1; i <= rows; i++) ins.run(i, `h${i}`, i);
+  } else {
+    d.prepare(`INSERT INTO Habits VALUES (1,'one','','',1,1,11,0,0,0,0,0,'',NULL,NULL,127)`).run();
+    const ins = d.prepare(`INSERT INTO Repetitions VALUES (1,?,-1,'')`);
+    for (let i = 1; i <= rows; i++) ins.run(i * 86_400_000);
+  }
+  d.exec('COMMIT');
+  d.close();
+}
+
+/**
+ * Parse in a child process with a 64MB heap, and report how it went.
+ *
+ * A child because the failure this pins is not an exception: `.all()` aborts
+ * the whole process inside `node::sqlite::StatementExecutionHelper::All`, so
+ * before the fix this does not fail an assertion, it takes the test runner's
+ * subprocess down with SIGABRT and exit code 134. The heap cap is what keeps
+ * that fast and cheap — the ceilings hold ~20MB, and 64MB is comfortably above
+ * them and comfortably below what an unbounded read of these files needs.
+ */
+async function parseInCappedChild(path) {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const src = new URL('../src/import.js', import.meta.url).href;
+  const script = `
+    const { parseLoopDatabase } = await import(${JSON.stringify(src)});
+    try {
+      const habits = await parseLoopDatabase(${JSON.stringify(path)});
+      console.log('OK ' + habits.length);
+    } catch (err) {
+      console.log('THREW ' + err.status + ' ' + err.message);
+    }`;
+
+  try {
+    const { stdout } = await promisify(execFile)(
+      process.execPath, ['--max-old-space-size=64', '--input-type=module', '-e', script],
+      { maxBuffer: 1 << 20 }
+    );
+    return stdout.trim();
+  } catch (err) {
+    return `DIED signal=${err.signal} code=${err.code}`;
+  }
+}
+
+test('a hostile .db is refused rather than allowed to exhaust the heap', async () => {
+  // 80,000 habit rows in 2.7MB and 400,000 entry rows in 7.2MB — both well
+  // under the 16MB body limit, so neither is bounded by anything upstream.
+  // Before the ceilings, each of these aborted a 64MB child with SIGABRT.
+  for (const [kind, rows, expected] of [
+    ['habits', 80_000, /more than 10000 habits/],
+    ['entries', 400_000, /more than 250000 entries/],
+  ]) {
+    const path = join(tmpdir(), `loop-oversized-${kind}-${process.pid}.db`);
+    try { unlinkSync(path); } catch {}
+    await makeOversizedDb(path, kind, rows);
+
+    const result = await parseInCappedChild(path);
+    assert.match(result, /^THREW 400 /, `${kind}: expected a clean 400, got: ${result}`);
+    assert.match(result, expected, `${kind}: the error should name the ceiling`);
+
+    unlinkSync(path);
+  }
+});
+
+test('a Habits view is not a Habits table', async () => {
+  // The row count of a SQLite file is DECLARED, not stored, so a view over a
+  // recursive CTE makes 8KB of upload claim five million rows. Loop only ever
+  // writes tables. This is defence in depth — the ceilings above are the fix,
+  // and they hold for a plain table, which this check cannot help with.
+  const path = join(tmpdir(), `loop-view-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE VIEW Habits AS
+      WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id < 5000000)
+      SELECT id, 'h'||id AS name, '' AS description, '' AS question, 1 AS freq_num,
+             1 AS freq_den, 11 AS color, id AS position, 0 AS archived, 0 AS type,
+             0 AS target_value, 0 AS target_type, '' AS unit, NULL AS reminder_hour,
+             NULL AS reminder_min, 127 AS reminder_days
+      FROM c;
+    CREATE TABLE Repetitions (habit INTEGER, timestamp INTEGER, value INTEGER, notes TEXT);
+  `);
+  d.close();
+
+  // In the capped child for the same reason the ceiling test is: if the view
+  // check ever stops working, this file's 5,000,000-row declaration goes to
+  // `.all()` and aborts the RUNNER, which reports as a crashed test file at
+  // 1:1 and silently abandons every test after it. A named failure is what a
+  // regression here should look like.
+  assert.match(await parseInCappedChild(path), /THREW 400 .*Habits is a view, not a table/);
+  unlinkSync(path);
+});
+
+test('a Repetitions view is refused too', async () => {
+  // Bounding only Habits leaves the same trick available one table over.
+  const path = join(tmpdir(), `loop-repview-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, description TEXT, question TEXT,
+      freq_num INTEGER, freq_den INTEGER, color INTEGER, position INTEGER, archived INTEGER,
+      type INTEGER, target_value REAL, target_type INTEGER, unit TEXT,
+      reminder_hour INTEGER, reminder_min INTEGER, reminder_days INTEGER);
+    INSERT INTO Habits VALUES (1,'one','','',1,1,11,0,0,0,0,0,'',NULL,NULL,127);
+    CREATE VIEW Repetitions AS
+      WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 5000000)
+      SELECT 1 AS habit, (n * 86400000) AS timestamp, 2 AS value, '' AS notes FROM c;
+  `);
+  d.close();
+
+  assert.match(await parseInCappedChild(path), /THREW 400 .*Repetitions is a view, not a table/);
+  unlinkSync(path);
+});
+
+test('a backup that sits just under both ceilings still imports', async () => {
+  // The ceilings are a bound on a hostile file, not a product limit, and a
+  // parser that rejects a legitimate backup is its own kind of data loss.
+  const path = join(tmpdir(), `loop-under-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+  await makeOversizedDb(path, 'habits', 500);
+
+  const habits = await parseLoopDatabase(path);
+  assert.equal(habits.length, 500);
+  assert.equal(habits[0].name, 'h1');
+
+  unlinkSync(path);
+});
+
 test('a blank header column does not shift later habits\' data', () => {
   // `names` was filtered before use while the row was still read at `i + 1`,
   // so every habit after a blank column silently received its neighbour's
@@ -559,6 +775,7 @@ test('several blank columns keep every habit aligned', () => {
 
 const { parseUpload } = await import('../src/import.js');
 const { buildCsvArchive } = await import('../src/export-csv.js');
+const { zip } = await import('../src/zip.js');
 
 test('a habiterall JSON backup is recognised from its bytes', async () => {
   const backup = JSON.stringify({
@@ -597,6 +814,80 @@ test('a Loop CSV zip is recognised, and needs its Habits.csv', async () => {
   assert.equal(parsed[0].entries[0].value, 3);
 });
 
+test('a CSV archive of an account with no entries restores its habits', async () => {
+  // A new account that backs itself up before recording anything. Habits.csv
+  // described both habits in full and Checkmarks.csv was the lone header
+  // `Date,Alpha,Beta` — which restored as nothing at all, with the API's
+  // "no habits found in the uploaded file" 400 on top. The .db format has
+  // always handled the same account correctly.
+  const habits = [
+    {
+      id: 1, name: 'Alpha', type: 'boolean', unit: '', target_value: 0,
+      target_type: 'at_least', freq_numerator: 1, freq_denominator: 1,
+      color: '#22c55e', description: 'Nothing recorded yet', archived: 0,
+    },
+    {
+      id: 2, name: 'Beta', type: 'numerical', unit: 'km', target_value: 5,
+      target_type: 'at_least', freq_numerator: 3, freq_denominator: 7,
+      color: '#f59e0b', description: '', archived: 0,
+    },
+  ];
+
+  const parsed = await parseUpload(buildCsvArchive(habits, () => []));
+  assert.deepEqual(parsed.map((h) => h.name), ['Alpha', 'Beta']);
+  assert.equal(parsed[0].description, 'Nothing recorded yet');
+  assert.equal(parsed[1].type, 'numerical',
+    'the metadata is read for a habit that has no column data to interpret');
+  assert.equal(parsed[1].unit, 'km');
+  assert.equal(parsed[1].freq_denominator, 7);
+
+  // The mixed case: one habit with entries and one without, in one archive.
+  const mixed = await parseUpload(buildCsvArchive(habits, (id) =>
+    (id === 1 ? [{ date: '2026-01-05', value: 2, status: '', notes: '' }] : [])));
+  assert.deepEqual(mixed.map((h) => [h.name, h.entries.length]),
+    [['Alpha', 1], ['Beta', 0]]);
+});
+
+test('a habit only Habits.csv knows about is still restored', async () => {
+  // Habits.csv names every habit the archive describes, so it is a source of
+  // habits and not only a lookup table. A column lost from Checkmarks.csv
+  // otherwise takes the whole habit with it, metadata and all.
+  const archive = zip([
+    {
+      name: 'Habits.csv',
+      data: [
+        'Position,Name,Type,Question,Description,FrequencyNumerator,FrequencyDenominator,Color,Unit,Target Type,Target Value,Archived?',
+        '001,Water,NUMERICAL,,Stay hydrated,1,1,10,glasses,AT_LEAST,8.0,false',
+        '002,Ghost,YES_NO,,Never checked off,1,1,11,,,,false',
+      ].join('\n') + '\n',
+    },
+    { name: 'Checkmarks.csv', data: 'Date,Water\n2026-01-05,6\n' },
+  ]);
+
+  const parsed = await parseUpload(archive);
+  assert.deepEqual(parsed.map((h) => h.name), ['Water', 'Ghost'],
+    'checkmarks order first, then Habits.csv order for the rest');
+  assert.equal(parsed[0].entries.length, 1);
+  assert.deepEqual(parsed[1].entries, []);
+  assert.equal(parsed[1].description, 'Never checked off');
+});
+
+test('an archive describing no habits at all is still empty', async () => {
+  // The guard the API turns into a 400 has to keep working: reading the header
+  // must not make every unusable upload look like a successful empty import.
+  assert.deepEqual(
+    await parseUpload(zip([{ name: 'Checkmarks.csv', data: 'Date\n' }])), [],
+    'a Date column and nothing else names no habits');
+
+  // A zero-byte member reads as an ABSENT one, because `find` returns its
+  // contents and '' is falsy. Pinned as it stands: the answer is a 400 either
+  // way, and which of the two sentences it is belongs with the "oversized
+  // member reported as a missing one" note in #80 rather than here.
+  await assert.rejects(
+    () => parseUpload(zip([{ name: 'Checkmarks.csv', data: '' }])),
+    /Checkmarks\.csv/);
+});
+
 test('an unrecognised upload is a 400, not a 500', async () => {
   for (const body of ['not a backup at all', '<html></html>', '']) {
     await assert.rejects(
@@ -610,8 +901,27 @@ test('an unrecognised upload is a 400, not a 500', async () => {
   }
 });
 
+test('malformed JSON is a 400 whichever bracket it opens with', async () => {
+  // The `[` form is wrapped before parseHabiterallJSON sees it, and the parse
+  // that wrapped it sat in the ARGUMENT — outside that function's own try — so
+  // `[{"name":"a"},` was a 500 and a stack trace at error level while `{` on the
+  // same truncation was a 400 telling the user about their file. `err.status` is
+  // the honest unit: both editions' error middleware reads exactly this field
+  // (`err.status ?? 500`), so it is what decides the response the route sends.
+  for (const body of ['[{"name":"a"},', '[nope', '[', '[1,2', '{', '{"habits":']) {
+    await assert.rejects(
+      () => parseUpload(Buffer.from(body, 'utf8')),
+      (err) => {
+        assert.equal(err.status, 400, `${JSON.stringify(body)} must carry a client status`);
+        assert.match(err.message, /JSON/, 'and say what is wrong with the file');
+        return true;
+      },
+      `accepted ${JSON.stringify(body)}`
+    );
+  }
+});
+
 test('a zip without a Checkmarks.csv says so', async () => {
-  const { zip } = await import('../src/zip.js');
   // zip() takes {name, data}, not a pair — the CSV export is its only other
   // caller, so this is easy to get wrong from memory.
   const bogus = zip([{ name: 'Habits.csv', data: 'Name\nMeditate\n' }]);
@@ -621,7 +931,7 @@ test('a zip without a Checkmarks.csv says so', async () => {
 /* ---------- repairing an imported habit ---------- */
 
 const { normaliseImportedHabit } = await import('../src/import.js');
-const { LIMITS } = await import('../src/validate.js');
+const { LIMITS, parseHabit } = await import('../src/validate.js');
 
 test('an imported habit is clamped to the limits the API enforces', () => {
   // The personal edition's writer applied NO length clamps, so it accepted
@@ -652,6 +962,84 @@ test('a frequency Loop permits but we do not is squared up, not dropped', () => 
     normaliseImportedHabit({ freq_numerator: 1, freq_denominator: 100000 }).freq_denominator,
     LIMITS.freqDenominator
   );
+});
+
+test('a repaired frequency is one the API would have accepted', () => {
+  // parseHabit is the oracle on purpose: this function exists so an import
+  // cannot store what a typed-in habit could not, and the clamps used to undo
+  // each other — squaring up raised the denominator, the cap lowered it again,
+  // and the numerator was never bounded at all. Cloud's
+  // `CHECK (freq_numerator <= freq_denominator)` then answered the file with a
+  // 23514, so the same backup was a 500 and a lost import there and silent
+  // nonsense in personal.
+  const shapes = [
+    [1000, 1], [400, 400], [2.5, 7], [1e30, 1], [9, 2], [1, 100000], [500, 1000],
+    [Infinity, 1], [1, Infinity], [NaN, NaN], ['x', 'y'], [-3, -9], [0, 0], [0.4, 0.4],
+    [1e308, 1e308], [undefined, undefined],
+  ];
+  for (const [n, d] of shapes) {
+    const clean = normaliseImportedHabit({ name: 'F', freq_numerator: n, freq_denominator: d });
+    assert.doesNotThrow(
+      () => parseHabit(clean),
+      `${n} / ${d} normalised to ${clean.freq_numerator} / ${clean.freq_denominator}, ` +
+      'which the API refuses'
+    );
+  }
+});
+
+test('a frequency too wide to state is still a rate, not a daily habit', () => {
+  // Acceptance by parseHabit is too weak an oracle on its own: `1 / 1` is
+  // accepted, so an unbounded period silently collapsing to "every day" passed
+  // the test above while being the largest invention this function can make.
+  // These assert the VALUE, which is the only thing that catches it.
+  const freq = (n, d) => {
+    const c = normaliseImportedHabit({ name: 'F', freq_numerator: n, freq_denominator: d });
+    return `${c.freq_numerator}/${c.freq_denominator}`;
+  };
+
+  // `1e400` is a legal JSON literal and parses to Infinity. The file said
+  // "effectively never"; reading that as the default said "every day".
+  assert.equal(freq(2, Infinity), '2/365', 'an unbounded period is the widest, not the narrowest');
+  assert.equal(freq(1, Infinity), '1/365');
+
+  // Scaling the rate rather than the count: `(num * cap) / den` overflows to
+  // Infinity above ~4.9e305 and handed back the cap, so the two identical rates
+  // below disagreed — 365/365 and 36/365 for the same one-in-ten-days habit.
+  assert.equal(freq(1e306, 1e307), '36/365');
+  assert.equal(freq(1e305, 1e306), '36/365', 'the same rate must give the same answer');
+
+  // And the ordinary clamp is unmoved.
+  assert.equal(freq(500, 1000), '182/365');
+  assert.equal(freq(1000, 1), '365/365', 'a rate above daily really is daily');
+  assert.equal(freq(9, 2), '9/9', 'the Loop shape still squares up');
+});
+
+test('a frequency too big to store is capped as a RATE, not as two numbers', () => {
+  const freq = (n, d) => {
+    const c = normaliseImportedHabit({ freq_numerator: n, freq_denominator: d });
+    return `${c.freq_numerator}/${c.freq_denominator}`;
+  };
+  // A rate above once a day cannot be stored at all, and is already squared up
+  // to daily; capping the period then has nothing left to take away.
+  assert.equal(freq(1000, 1), '365/365');
+  assert.equal(freq(400, 400), '365/365');
+  // But a habit kept every other day for 1000 days is a LAX one, and clamping
+  // the period while leaving the count behind turns it into a daily habit it
+  // never was — an invention, not a repair.
+  assert.equal(freq(500, 1000), '182/365');
+  // The columns are INTEGER: the count rounds down and the period up, so the
+  // repair asks no more than the file did.
+  assert.equal(freq(2.5, 7), '2/7');
+  // Infinity is a legal JSON number (`1e400` parses to it) and it means the
+  // file DID say something, unlike NaN which means it did not. Read as the
+  // default it used to give `1/1` — the same rate as the `365/365` two lines
+  // up, stored differently, which is one rate with two representations. As the
+  // widest bound it squares up like any other above-daily rate.
+  assert.equal(freq(Infinity, 1), '365/365');
+  // And the case that actually mattered: an unbounded PERIOD. `1/1` there is
+  // not a second spelling of anything — it is a habit due every day, invented
+  // out of one the file said was effectively never due.
+  assert.equal(freq(2, Infinity), '2/365');
 });
 
 test('a prompt from a file is flattened like one that was typed', () => {

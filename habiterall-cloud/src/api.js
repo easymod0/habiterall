@@ -13,8 +13,11 @@ import { randomUUID } from 'node:crypto';
 import { withUser } from './db/pool.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
-import { writeLoopDatabase } from '@habiterall/shared/export-loop.js';
+import {
+  writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
+} from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
+import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
 import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
@@ -558,7 +561,16 @@ api.get('/export.csv', route(async (req, res) => {
   res.send(body);
 }));
 
-/** A Loop Habit Tracker .db backup of this user's data. */
+/**
+ * A Loop Habit Tracker .db backup of this user's data.
+ *
+ * The skip report is here as well as in the personal edition even though
+ * Postgres' `DATE` column has never let an impossible date in, because what
+ * `writeLoopDatabase` refuses is not "an invalid date" but "a date Loop's
+ * encoding cannot carry back unchanged" — a question about the exporter, which
+ * both editions run the same copy of. A route that answered it in only one of
+ * them is the drift this project keeps paying for.
+ */
 api.get('/export-loop.db', route(async (req, res) => {
   const { habits, byHabit } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
@@ -573,10 +585,18 @@ api.get('/export-loop.db', route(async (req, res) => {
 
   const path = join(tmpdir(), `habiterall-loop-${randomUUID()}.db`);
   try {
-    await writeLoopDatabase(path, habits, (id) => byHabit.get(id) ?? []);
+    const { skipped } = await writeLoopDatabase(path, habits, (id) => byHabit.get(id) ?? []);
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition',
       `attachment; filename="Loop Habits Backup ${today()}.db"`);
+    if (skipped.length) {
+      res.setHeader(EXPORT_SKIPPED_HEADER, String(skipped.length));
+      // Ids and dates only — see the README's rule on what a log may hold.
+      (req.log ?? log).warn('export.rows_skipped', {
+        user: uid(req), format: 'loop_db',
+        skipped: skipped.length, rows: skipsForLog(skipped),
+      });
+    }
     res.send(readFileSync(path));
   } finally {
     try { unlinkSync(path); } catch { /* best effort */ }
