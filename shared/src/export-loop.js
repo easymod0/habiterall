@@ -19,6 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { LOOP_ALL_DAYS } from './import.js';
+import { DATE_RE } from './validate.js';
 
 const MILLIS_PER_DAY = 86_400_000;
 const LOOP_NUMERIC_SCALE = 1000;
@@ -29,6 +30,44 @@ const LOOP_SKIP = 3;
 
 /** Loop's database version, written into user_version / the Metadata table. */
 const LOOP_DB_VERSION = 25;
+
+/**
+ * How many rows the export left out, on the response that carries the file.
+ *
+ * A COUNT and nothing else. The obvious improvement is to name the rows here
+ * too, and it is a header-injection primitive: a habit name is free text, a
+ * `\r\n` in one splits the response, and Node's rejection of the invalid
+ * header would throw inside the route — re-creating the 500 this whole change
+ * exists to remove. The detail belongs in the log, which has an encoder.
+ *
+ * Declared here rather than in each edition's routes so the two cannot drift;
+ * both editions send it, and `0` is never sent, so its presence is the signal.
+ */
+export const EXPORT_SKIPPED_HEADER = 'X-Habiterall-Export-Skipped';
+
+/** How many skipped rows one log line names before it stops listing them. */
+const MAX_LOGGED_SKIPS = 20;
+
+/**
+ * The skip report as a single log FIELD: `7@2026-02-30=bad_date`.
+ *
+ * Handing `log.warn` the array itself renders as `[1 items]` — `log.js` does
+ * that to every array on purpose, so a stray payload cannot turn one event into
+ * ten thousand lines — which says that something was dropped and not what, and
+ * *what* is the only part the user could act on. So it is flattened here, once,
+ * rather than in each edition's route.
+ *
+ * Only ids, dates and reasons, which is the whole of what the README permits a
+ * log to hold; the habit's name is deliberately not in the structure to begin
+ * with. The tail is counted rather than left to `MAX_FIELD`, whose truncation
+ * would land mid-token and read as a date.
+ */
+export function skipsForLog(skipped) {
+  const head = skipped.slice(0, MAX_LOGGED_SKIPS)
+    .map((s) => `${s.habit}@${s.date}=${s.reason}`).join(' ');
+  const rest = skipped.length - MAX_LOGGED_SKIPS;
+  return rest > 0 ? `${head} +${rest} more` : head;
+}
 
 /**
  * The palette habiterall maps Loop colour indices onto when importing.
@@ -94,6 +133,45 @@ export function isoToLoopTimestamp(iso) {
 }
 
 /**
+ * Does this date survive the trip into Loop's encoding and back as itself?
+ *
+ * `Date.UTC` rolls over rather than refusing, so `isoToLoopTimestamp` answers
+ * for dates that do not exist: `2026-02-30` comes back as 2026-03-02 and
+ * `2026-13-45` as 2027-02-14. The API has never accepted either — `assertDate`
+ * refuses both — but an import writer checking only `DATE_RE` let them into
+ * storage, and from there the export had no good answer. It wrote the rolled-over
+ * day, filing an entry under a date the user never chose; and when the day it
+ * rolled onto was a REAL row, the UNIQUE index on (habit, timestamp) rejected
+ * the insert and the whole request became a 500. Permanently, for as long as the
+ * row existed, naming neither the habit nor the date at fault.
+ *
+ * The question asked here is the EXPORTER's, not the calendar's: is the
+ * timestamp about to be written one that reads back as the day it came from?
+ * That is deliberately narrower than `assertDate`, which also rejects years
+ * 1-99 as a side effect of the same legacy two-digit mapping it exists to
+ * catch. And it is self-correcting — the day `isoToLoopTimestamp` learns to
+ * encode a date faithfully, this stops objecting to it, with nothing here to
+ * remember to update.
+ *
+ * The shape check is `DATE_RE` rather than a third opinion about what a date
+ * looks like, because `2026-1-1` encodes to the same instant as `2026-01-01`
+ * and only the string says they are different days.
+ */
+export function isLoopEncodableDate(iso) {
+  // `typeof` first: `DATE_RE.test()` string-coerces, so an array of one date
+  // passes the shape check and `iso.split` then throws — out of a guard whose
+  // entire job is to be the thing that does not. Unreachable from either
+  // edition's storage today, which is exactly why it is one line and not a test.
+  if (typeof iso !== 'string') return false;
+  if (!DATE_RE.test(iso)) return false;
+  const [y, m, d] = iso.split('-').map(Number);
+  const back = new Date(isoToLoopTimestamp(iso));
+  return back.getUTCFullYear() === y
+    && back.getUTCMonth() === m - 1
+    && back.getUTCDate() === d;
+}
+
+/**
  * Loop's sentinel band: NO(0), YES_AUTO(1), YES_MANUAL(2), SKIP(3).
  *
  * On a numerical habit these are ALSO valid scaled amounts — 3 means both
@@ -137,9 +215,22 @@ export function toLoopEntry(habit, entry) {
 /**
  * Build a Loop-compatible SQLite database at `path`.
  *
+ * A row Loop cannot be told about is left out and NAMED, never dropped
+ * quietly — that is the same news `applyImport` reports as `skipped` on the way
+ * in, and the reason this returns it rather than throwing.
+ *
+ * It is `{habit, date, reason}` rather than `applyImport`'s sentence, and the
+ * difference is the consumer. That report is rendered into the import dialog,
+ * so it can say `bad date on "Water"`; this one's only reader is a server log,
+ * where the README's rule is that habit names, notes and values never appear —
+ * `habit=7 date=2026-02-30` is the whole of what may be written down. Structured
+ * also survives a UI later formatting its own sentence, which a string does not.
+ *
  * @param {string} path            destination file (must not already exist)
  * @param {Array}  habits          habiterall habit rows
  * @param {Function} entriesFor    (habitId) => [{date, value, status, notes}]
+ * @returns {Promise<{habits: number, entries: number,
+ *                    skipped: Array<{habit: any, date: string, reason: string}>}>}
  */
 export async function writeLoopDatabase(path, habits, entriesFor) {
   const { DatabaseSync } = await import('node:sqlite');
@@ -197,6 +288,7 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
     `);
 
     let written = 0;
+    const skipped = [];
 
     habits.forEach((h, position) => {
       const isNumerical = h.type === 'numerical';
@@ -235,15 +327,38 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
         randomUUID().replace(/-/g, '')
       );
 
+      // One habit's worth, because the UNIQUE index is on (habit, timestamp).
+      const claimed = new Set();
+
       for (const e of entriesFor(h.id)) {
         const value = toLoopEntry(h, e);
         if (value === null) continue;
-        insertRep.run(h.id, isoToLoopTimestamp(e.date), value, e.notes ?? '');
+
+        if (!isLoopEncodableDate(e.date)) {
+          skipped.push({ habit: h.id, date: String(e.date), reason: 'bad_date' });
+          continue;
+        }
+
+        const ts = isoToLoopTimestamp(e.date);
+
+        // A backstop, and it should never fire: distinct encodable dates give
+        // distinct UTC midnights, and neither edition can store two rows for
+        // one habit and day. But `entriesFor` is a callback this module cannot
+        // audit, and the cost of being wrong about that was the whole export —
+        // one insert throwing takes every habit down with it, and the caller is
+        // handed a 500 with nothing to act on. A named skip is the smaller loss.
+        if (claimed.has(ts)) {
+          skipped.push({ habit: h.id, date: String(e.date), reason: 'duplicate_day' });
+          continue;
+        }
+        claimed.add(ts);
+
+        insertRep.run(h.id, ts, value, e.notes ?? '');
         written++;
       }
     });
 
-    return { habits: habits.length, entries: written };
+    return { habits: habits.length, entries: written, skipped };
   } finally {
     db.close();
   }
