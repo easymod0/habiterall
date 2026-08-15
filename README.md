@@ -75,68 +75,28 @@ services:
     image: ghcr.io/easymod0/habiterall-personal:latest
     container_name: habiterall
     ports:
-      # The port inside the container is fixed at 3000. This is the host side.
       - '${APP_PORT:-3000}:3000'
     volumes:
-      # Your entire database is one file in here. Back it up by copying it.
-      - habiterall-data:/data
+      - habiterall-data:/data        # your whole database is one file in here
     environment:
-      # The one path that is not yours to choose: it has to be inside the
-      # volume mounted above, or the database lives in the container's
-      # writable layer and a `docker compose down` takes it.
       HABITERALL_DB: /data/habiterall.db
-      # SET THIS. A container has no timezone, so it is UTC — and this decides
-      # both when an 08:00 reminder fires and which day a check-off lands on.
-      # Unset, an evening check-in west of UTC is filed under tomorrow.
-      TZ: ${TZ:-Etc/UTC}             # e.g. America/Toronto, Europe/Berlin
+      TZ: ${TZ:-Etc/UTC}             # SET THIS — a container is UTC otherwise
 
-      # ---- signing in ----------------------------------------------------
-      # The single account. Set BOTH before you expose this port: with neither,
-      # the first visitor to reach the app claims it — no token, no address
-      # check — which is fine on a LAN and a race on the internet.
-      HABITERALL_USERNAME: ${HABITERALL_USERNAME:-}    # defaults to "admin"
-      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}    # at least 8 characters
-      # Or supply the hash instead, to keep the plaintext out of this file and
-      # out of `docker inspect`. Generate one with:
-      #   docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
-      #     "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" 'your password'
-      # Setting both is ambiguous and the HASH wins; the server says so at
-      # startup rather than quietly ignoring the other one.
-      HABITERALL_PASSWORD_HASH: ${HABITERALL_PASSWORD_HASH:-}
-      # Sign-in is ON unless this is EXACTLY "off" — "false", "0" and every typo
-      # of "off" all leave it on, deliberately. Only set it for a machine nobody
-      # else can reach.
-      HABITERALL_AUTH: ${HABITERALL_AUTH:-}
-      # Set to keep people signed in across a redeploy. Left empty, one is
-      # generated and stored in the database, which is fine — it only means the
-      # cookies issued before a restore of a *different* database stop working.
-      HABITERALL_SESSION_SECRET: ${HABITERALL_SESSION_SECRET:-}
+      # Set both before exposing this port, or the first visitor claims the app.
+      HABITERALL_USERNAME: ${HABITERALL_USERNAME:-}              # default "admin"
+      HABITERALL_PASSWORD: ${HABITERALL_PASSWORD:-}              # 8+ characters
+      HABITERALL_PASSWORD_HASH: ${HABITERALL_PASSWORD_HASH:-}    # or this instead
+      HABITERALL_AUTH: ${HABITERALL_AUTH:-}                      # exactly "off" disables sign-in
+      HABITERALL_SESSION_SECRET: ${HABITERALL_SESSION_SECRET:-}  # survives a redeploy
 
-      # ---- what is in front ----------------------------------------------
-      # Set to 1 behind a reverse proxy (see "Put HTTPS in front" below), and
-      # leave it at 0 when this port is reached directly. It decides whose
-      # address the rate limiter counts, whether a Secure cookie can be issued,
-      # and which Host the cross-origin check compares. Setting it to 1 while
-      # the port is ALSO open on the LAN is worse than leaving it at 0.
-      TRUST_PROXY: ${TRUST_PROXY:-0}
-      # Set to "on" only if this instance is reached over https and nothing
-      # else: it makes browsers rewrite every http request to https, which
-      # breaks the plain-http LAN half of a box that answers on both. Browsers
-      # exempt localhost, so a mistake here only ever shows up on a real address.
-      HABITERALL_UPGRADE_INSECURE: ${HABITERALL_UPGRADE_INSECURE:-}
-      # Set to "off" for a trusted LAN or a test run. Leave it alone otherwise:
-      # this edition's database is synchronous, so one client in a loop is all
-      # it takes to stop the event loop. The limit on *login attempts* is not
-      # included and cannot be switched off.
-      HABITERALL_RATE_LIMIT: ${HABITERALL_RATE_LIMIT:-}
+      TRUST_PROXY: ${TRUST_PROXY:-0}                             # 1 behind a reverse proxy
+      HABITERALL_UPGRADE_INSECURE: ${HABITERALL_UPGRADE_INSECURE:-}  # "on" if https-only
+      HABITERALL_RATE_LIMIT: ${HABITERALL_RATE_LIMIT:-}          # "off" on a trusted LAN
 
-      # ---- reminders the SERVER sends -------------------------------------
-      # Only for a Discord channel. The Android app needs none of these — it
-      # arms its own alarms, and the phone works offline because of it.
-      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}    # "off" disables the loop
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}                # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
-      HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}   # https://habits.example.com
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}      # Yes / No / Skip buttons
+      HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}          # https://habits.example.com
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
     restart: unless-stopped
 
 volumes:
@@ -376,26 +336,12 @@ services:
       # not values you collect, so there is no moment when empty is correct.
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?openssl rand -hex 32}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
-      # Local HTTP testing only, and never in a real deployment: it lets the
-      # app accept a plaintext OIDC issuer, which puts tokens on the wire in
-      # the clear. It logs a warning for as long as it is set.
-      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}
-      # One TLS terminator in front, which is this edition's documented
-      # deployment. Raise it if there are more, and set 0 only if browsers
-      # reach this port directly — see "Put HTTPS in front" in the README, and
-      # note that trusting a hop that is not there hands the rate limiter's
-      # only key to the caller.
-      TRUST_PROXY: ${TRUST_PROXY:-1}
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
-      # Reminders this process sends (a Discord channel). It costs nothing
-      # until a user configures one: with none, the tick queries and stops.
-      # On-device reminders never involve this process at all.
-      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}
+      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
+      TRUST_PROXY: ${TRUST_PROXY:-1}                       # TLS terminators in front
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}            # adds Yes / No / Skip buttons
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
-      # Accounts visited per tick. A tick is a minute and each account may cost
-      # a webhook round trip, so this bounds the work rather than letting one
-      # pass overlap the next.
-      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # The fallback clock: a container has no timezone, so it is UTC. Users can
       # override it for their own reminders in ⚙ → Notifications, but this is
       # what "the server's own timezone" means, and it is also the clock that
@@ -568,26 +514,12 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:?from your provider}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
-      # Local HTTP testing only, and never in a real deployment: it lets the
-      # app accept a plaintext OIDC issuer, which puts tokens on the wire in
-      # the clear. It logs a warning for as long as it is set.
-      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}
-      # One TLS terminator in front, which is this edition's documented
-      # deployment. Raise it if there are more, and set 0 only if browsers
-      # reach this port directly — see "Put HTTPS in front" in the README, and
-      # note that trusting a hop that is not there hands the rate limiter's
-      # only key to the caller.
-      TRUST_PROXY: ${TRUST_PROXY:-1}
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
-      # Reminders this process sends (a Discord channel). It costs nothing
-      # until a user configures one: with none, the tick queries and stops.
-      # On-device reminders never involve this process at all.
-      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}
+      ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
+      TRUST_PROXY: ${TRUST_PROXY:-1}                       # TLS terminators in front
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}            # adds Yes / No / Skip buttons
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
-      # Accounts visited per tick. A tick is a minute and each account may cost
-      # a webhook round trip, so this bounds the work rather than letting one
-      # pass overlap the next.
-      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # The fallback clock: a container has no timezone, so it is UTC. Users can
       # override it for their own reminders in ⚙ → Notifications, but this is
       # what "the server's own timezone" means, and it is also the clock that
@@ -1184,6 +1116,15 @@ limit rather than a deployment setting.
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
+
+To set `HABITERALL_PASSWORD_HASH` and keep the plaintext out of your compose
+file and out of `docker inspect`:
+
+```bash
+docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
+  "import('@habiterall/shared/password.js').then(m=>m.hashPassword(process.argv[1]).then(console.log))" \
+  'your password'
+```
 
 ### cloud
 
