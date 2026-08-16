@@ -29,6 +29,16 @@ const API = 'https://discord.com/api/v10';
 export const INTERACTION = { PING: 1, COMMAND: 2, COMPONENT: 3, AUTOCOMPLETE: 4, MODAL: 5 };
 
 /** Interaction callback types, likewise. */
+/**
+ * The statuses `discordRequest` words in terms of a CHANNEL.
+ *
+ * Shared with `handleInteraction`'s `why()`, which overrides exactly this set:
+ * on an interaction endpoint a 404 is a token, not a channel the bot was not
+ * invited to. Two copies of the list 240 lines apart is how a fourth
+ * channel-worded status gets added here and silently passed through there.
+ */
+const CHANNEL_WORDED = [401, 403, 404];
+
 export const CALLBACK = {
   MESSAGE: 4,
   DEFER: 5,
@@ -96,7 +106,11 @@ export async function discordRequest(req, deps = {}) {
     // 401 is the token, 403 is the bot's permissions in that channel, 404 is a
     // channel that does not exist or that the bot cannot see. None of the three
     // fixes itself, and retrying every minute helps nobody.
-    if ([401, 403, 404].includes(res.status)) {
+    //
+    // These three are also the ONLY statuses this function words in terms of a
+    // channel, which is what `why()` in `handleInteraction` overrides — hence
+    // the shared constant. Word a fourth here and that one has to know.
+    if (CHANNEL_WORDED.includes(res.status)) {
       return {
         ok: false,
         status: res.status,
@@ -333,8 +347,8 @@ export async function handleInteraction(interaction, adapter) {
    * everything else, which is where it is accurate (a 429, a 5xx, a network
    * error).
    */
-  const why = (r) => ([401, 403, 404].includes(r?.status)
-    ? `Discord returned ${r.status} — the interaction token is expired, unacknowledged or not ours`
+  const why = (r) => (CHANNEL_WORDED.includes(r?.status)
+    ? `Discord returned ${r.status} — the interaction token is expired or not ours`
     : (r?.error ?? `status ${r?.status}`));
 
   const send = async (response) => {
