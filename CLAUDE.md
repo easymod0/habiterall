@@ -146,7 +146,51 @@ holds its default everywhere compares equal to itself and passes with the field
 dropped. The entries themselves are untouched by any of this, so a Loop export
 is exactly as faithful as it was.
 
-None of this is bad-habit support, and it is worth being clear about the join.
+**A habit you are trying not to do is stored as what it is, and SHOWN the other
+way up.** `show_as` is `'amount'` or `'avoid'`, per habit, and it decides the
+rendering and nothing else — which is the whole reason it can exist. Issue #64's
+other option was a flag inverting the JUDGEMENT, and Loop's schema has nowhere
+to carry one: losing it on a round trip would flip every verdict in the file.
+Losing this loses a display preference and the rows go on meaning what they
+meant, so it sits in `JSON_HABIT_FIELDS` and in neither Loop list, exactly as
+`at_most_unlogged` does. `YES` still means the thing occurred, `isCompleted`
+still comes from the target, and the export is untouched.
+
+The storage is an at-most target, which needs no new column and round-trips
+perfectly. What was missing was the interaction, and the surprise is how little
+it cost: **the tap cycle did not change**. An avoided habit walks the same four
+states in the same order — a clean day is `done`, a slip is `no` — so
+`nextDayState` and its Kotlin mirror `Grid.nextState` were untouched. Only the
+ENCODING differs, and it is one function per client (`valueForState`), mirrored
+for the reason the cycle is: it runs when a tap is made with no network.
+
+| state | normal habit | avoided habit |
+|---|---|---|
+| `done` | `YES` | **0** — none today, which is the goal |
+| `no` | `0` | **target + 1** — the smallest amount that fails |
+
+`target + 1` rather than a fixed 1, so a limit of two coffees records three: the
+least the app can claim on someone's behalf. The day editor still takes the
+exact number, which is why it keeps the amount box beside the two buttons.
+
+Three surfaces invert with it and one deliberately does not. The grid paints a
+clean day in the habit's colour and a slip in red, because filling a slip with
+the habit's own colour — right for a habit read as an amount, where a bigger
+number is more done — reads as having done well. The day editor's buttons read
+Clean day / Slipped. The Android notification's read Clean / Slipped and carry
+the encoded value in the intent, since `ActionReceiver` has only an id and a
+date and a DataStore read inside a broadcast receiver's ten seconds is not
+available — the value is decided where the habit is in hand. What does NOT
+invert is the ACTIONS: `ACTION_YES` is still the good answer. Inverting those
+would have meant every stored notification and every outbox entry changing
+meaning with a setting.
+
+The offline reminder cache gained two fields, appended and read with
+`getOrNull`, because the notification's buttons are built with no network and
+a cache written by an older build must still arm its alarms.
+
+None of this is bad-habit support of the other kind, and it is worth being clear
+about the join.
 A limit of zero is already how a bad habit is *expressible* — issue #64's option
 (b) — and `success` on that habit is what makes it usable: assume clean, record
 the exception. What is still missing is the interaction, which is the rest of

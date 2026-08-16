@@ -46,6 +46,9 @@
  * @property {string} [at_most_unlogged] what a day with NO ROW is worth on an
  *   at-most target: 'miss', 'success', or 'default' to follow the account's
  *   `atMostUnlogged`. See `unansweredCounts` in stats.js
+ * @property {string} [show_as]        'amount' or 'avoid' — how the habit is
+ *   RENDERED. Presentation only; the verdict still comes from `target_type`
+ *   and `target_value`. See SHOW_AS in validate.js
  * @property {number} [position]       display order
  * @property {boolean|0|1} archived    boolean in Postgres, 0/1 in SQLite
  */

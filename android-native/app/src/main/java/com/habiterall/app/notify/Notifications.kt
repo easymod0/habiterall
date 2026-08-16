@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.habiterall.app.R
+import com.habiterall.app.data.Grid
 import com.habiterall.app.data.Habit
 import com.habiterall.app.ui.CountEntryActivity
 import com.habiterall.app.ui.MainActivity
@@ -39,6 +40,18 @@ object Notifications {
     const val EXTRA_HABIT_ID = "habit_id"
     const val EXTRA_HABIT_NAME = "habit_name"
     const val EXTRA_DATE = "date"
+
+    /**
+     * What the tapped action records, decided where the habit is in hand.
+     *
+     * [ActionReceiver] gets an id and a date and nothing else; loading the
+     * habit there would mean a DataStore read inside a broadcast receiver's ten
+     * seconds, for an answer this side already has.
+     */
+    const val EXTRA_VALUE = "value"
+
+    /** Whether the habit is shown as something to avoid — for the toast only. */
+    const val EXTRA_AVOIDED = "avoided"
     const val EXTRA_UNIT = "unit"
     const val EXTRA_TARGET = "target"
 
@@ -70,6 +83,23 @@ object Notifications {
             this.action = action
             putExtra(EXTRA_HABIT_ID, habit.id)
             putExtra(EXTRA_DATE, date)
+            // The VALUE travels with the action, because the receiver has only
+            // an id and a date — and reading the habit back would mean a
+            // DataStore read inside a BroadcastReceiver's ten seconds. Here the
+            // habit is in hand, so `Grid.valueForState` answers once: a clean
+            // day on an avoided habit is 0 and a slip is the smallest amount
+            // over, where a yes/no habit is YES and UNSET as before.
+            //
+            // Safe to attach because `filterEquals` ignores extras BUT the data
+            // URI above already separates the three actions and the flags below
+            // include FLAG_UPDATE_CURRENT — without that this would post a
+            // notification carrying the previous habit's numbers.
+            when (action) {
+                ACTION_YES -> putExtra(EXTRA_VALUE, Grid.valueForState(habit, Grid.DayState.DONE))
+                ACTION_NO -> putExtra(EXTRA_VALUE, Grid.valueForState(habit, Grid.DayState.NO))
+                else -> {}
+            }
+            putExtra(EXTRA_AVOIDED, habit.isAvoided)
             // Distinct data keeps the three actions from collapsing into one
             // PendingIntent — filterEquals ignores extras.
             data = android.net.Uri.parse("habiterall://${habit.id}/$date/$action")
@@ -152,7 +182,12 @@ object Notifications {
             // notification, was a dead spot on two thirds of the shade.
             .setContentIntent(openIntent(context, habit, date))
 
-        if (habit.isNumerical) {
+        // A habit shown as something to avoid is answered yes-or-no even
+        // though it is stored as a measurable one — offering a number pad for
+        // "did you smoke?" is the friction the rendering exists to remove, and
+        // the buttons below already say Yes / No / Skip. `isAvoided` reads the
+        // cached fields, because this notification is built with no network.
+        if (habit.isNumerical && !habit.isAvoided) {
             val target = formatTarget(habit)
             builder.setContentText(
                 if (prompt.isEmpty()) {
@@ -169,18 +204,24 @@ object Notifications {
                 countIntent(context, habit, date),
             )
         } else {
+            val avoided = habit.isAvoided
             builder.setContentText(
-                if (prompt.isEmpty()) context.getString(R.string.reminder_boolean)
-                else habit.name
+                if (prompt.isNotEmpty()) habit.name
+                else if (avoided) context.getString(R.string.reminder_avoid)
+                else context.getString(R.string.reminder_boolean)
             )
+            // "Yes" on "did you smoke?" records the opposite of what it looks
+            // like, so the labels invert with the rendering. The ACTIONS do not
+            // — YES is still the good answer and NO the bad one, and what each
+            // records is decided once, above.
             builder.addAction(
                 0,
-                context.getString(R.string.action_yes),
+                context.getString(if (avoided) R.string.action_clean else R.string.action_yes),
                 actionIntent(context, ACTION_YES, habit, date),
             )
             builder.addAction(
                 0,
-                context.getString(R.string.action_no),
+                context.getString(if (avoided) R.string.action_slipped else R.string.action_no),
                 actionIntent(context, ACTION_NO, habit, date),
             )
         }

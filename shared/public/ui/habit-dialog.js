@@ -34,6 +34,7 @@ export function openDialog(habit = null) {
   f.target_value.value = habit?.target_value ?? 1;
   f.target_type.value = habit?.target_type ?? 'at_least';
   f.at_most_unlogged.value = habit?.at_most_unlogged ?? 'default';
+  f.show_as.value = habit?.show_as ?? 'amount';
   f.freq_numerator.value = habit?.freq_numerator ?? 1;
   f.freq_denominator.value = habit?.freq_denominator ?? 1;
   f.color.value = habit?.color ?? '#3b82f6';
@@ -54,8 +55,11 @@ function syncTypeFields() {
   // readings because zero is under the target. Hidden is not cleared: the
   // value is still submitted, so switching Goal back and forth in one sitting
   // does not silently discard an answer the user already gave.
-  form.querySelector('.at-most-only').hidden =
-    !numerical || form.target_type.value !== 'at_most';
+  // Both at-most controls, not one — `querySelector` found only the first, so
+  // adding the second left it permanently hidden.
+  for (const el of form.querySelectorAll('.at-most-only')) {
+    el.hidden = !numerical || form.target_type.value !== 'at_most';
+  }
 }
 
 async function saveHabit(e) {
@@ -81,6 +85,7 @@ async function saveHabit(e) {
     target_value: Number(f.target_value.value) || 0,
     target_type: f.target_type.value,
     at_most_unlogged: f.at_most_unlogged.value,
+    show_as: f.show_as.value,
     freq_numerator: Number(f.freq_numerator.value) || 1,
     freq_denominator: Number(f.freq_denominator.value) || 1,
     color: f.color.value,

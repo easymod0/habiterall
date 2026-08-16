@@ -12,6 +12,7 @@ import { dayCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
+import { DAY, isAvoided, valueForState } from '/shared/ui/toggle.js';
 import { UNSET, YES } from '/shared/ui/values.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -34,12 +35,24 @@ const save = $('#day-save');
  * @param noteText the note attached to the day, if any
  */
 export function openDayDialog(habit, date, value, isSkip, noteText = '') {
-  state.dayEdit = { habitId: habit.id, date, type: habit.type };
+  // The encoding fields travel with the edit rather than the habit object, for
+  // the reason the grid's own dialog holds an id: a refetch replaces every
+  // habit in `state.habits` and can do it while a modal is open.
+  state.dayEdit = {
+    habitId: habit.id, date, type: habit.type,
+    show_as: habit.show_as, target_type: habit.target_type,
+    target_value: habit.target_value,
+  };
   notes.value = noteText ?? '';
 
   // A measurable habit gets a number field; a yes/no habit gets exactly two
   // buttons. Only one of the two controls is ever present.
   const numeric = habit.type === 'numerical';
+  // Shown as something to avoid: the two buttons are the fast answer — a clean
+  // day is one tap, which is the whole reward — and the amount box stays,
+  // because "three coffees" is a thing someone may want to record exactly and
+  // a limit of two has no other way to say it.
+  const avoided = isAvoided(habit);
   title.textContent = habit.name;
 
   const [y, m, d] = date.split('-').map(Number);
@@ -54,27 +67,43 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
     : '';
   sub.textContent = goal ? `${pretty} · target ${goal}` : pretty;
 
-  booleanBlock.hidden = numeric;
+  booleanBlock.hidden = numeric && !avoided;
   numericBlock.hidden = !numeric;
   save.hidden = !numeric; // boolean saves happen on the choice buttons
+
+  // The same two buttons, saying what they mean here. "Done" on a habit you
+  // are trying not to do reads as the opposite of what pressing it records.
+  for (const b of booleanBlock.querySelectorAll('.day-choice')) {
+    const isDone = b.dataset.action === 'done';
+    b.textContent = avoided
+      ? (isDone ? '✓ Clean day' : '✗ Slipped')
+      : (isDone ? '✓ Done' : '✕ Not done');
+  }
 
   if (numeric) {
     // A skipped day has no amount to prefill: for a measurable habit the SKIP
     // wire value is a legitimate amount, so the skip is what says the day has
     // no number rather than the value doing it.
     dayCountField.set(habit, isSkip ? null : value);
-  } else {
+  }
+  if (!numeric || avoided) {
     // Highlight whichever state the day is currently in. With question marks on,
     // a day with no row is in NEITHER state — that is the state the setting
     // exists to show — so "Not done" must stop claiming it. With them off the
     // two are one thing and it goes on claiming it, as it always has.
     const unanswered = value == null;
+    const limit = Number(habit.target_value) || 0;
     for (const b of booleanBlock.querySelectorAll('.day-choice')) {
       const isDone = b.dataset.action === 'done';
-      const active = !isSkip && (isDone
-        ? value === YES
-        : value === UNSET || (unanswered && !settings.get('questionMarks')));
-      b.setAttribute('aria-pressed', String(active));
+      // What "done" looks like differs: `YES` for a yes/no habit, and being at
+      // or under the limit for one being avoided, where 0 is the goal. A day
+      // over the limit is the second button, whatever the number is.
+      const isClean = avoided ? value <= limit : value === YES;
+      const isMiss = avoided ? value > limit : value === UNSET;
+      const active = !isSkip && !unanswered && (isDone ? isClean : isMiss);
+      b.setAttribute('aria-pressed', String(
+        active || (!isDone && unanswered && !isSkip && !settings.get('questionMarks'))
+      ));
     }
   }
 
@@ -146,7 +175,14 @@ export function init() {
       // Both buttons write a row. "Not done" used to delete one unless a note
       // came with it, which made the note the only way to state a lapse; it is
       // an answer either way, and Clear is what means "nothing is known".
-      const value = b.dataset.action === 'done' ? YES : UNSET;
+      //
+      // The VALUE comes from ui/toggle.js, which is the one place that knows a
+      // clean day on an avoided habit is 0 and a slip is the smallest amount
+      // over the limit. The grid's tap reads the same function.
+      const value = valueForState(
+        state.dayEdit ?? {},
+        b.dataset.action === 'done' ? DAY.DONE : DAY.NO
+      );
       saveDay({ value });
     });
   }

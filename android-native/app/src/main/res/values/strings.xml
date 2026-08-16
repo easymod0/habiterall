@@ -9,16 +9,23 @@
     </string>
 
     <string name="reminder_boolean">Did you do it today?</string>
+    <string name="reminder_avoid">Did you stay clear of it today?</string>
     <!-- %1$s is the target, e.g. "8 glasses". -->
     <string name="reminder_measurable">Target: %1$s</string>
 
     <string name="action_yes">Yes</string>
     <string name="action_no">No</string>
+    <!-- The same two buttons on a habit shown as something to avoid. "Yes" on
+         "did you smoke?" records the opposite of what it looks like. -->
+    <string name="action_clean">Clean</string>
+    <string name="action_slipped">Slipped</string>
     <string name="action_skip">Skip</string>
     <string name="action_enter_count">Enter count</string>
 
     <string name="recorded_yes">Recorded</string>
     <string name="recorded_no">Marked not done</string>
+    <string name="recorded_clean">Marked clean</string>
+    <string name="recorded_slipped">Marked as a slip</string>
     <string name="recorded_skip">Skipped</string>
     <string name="invalid_amount">Enter a number of zero or more</string>
 

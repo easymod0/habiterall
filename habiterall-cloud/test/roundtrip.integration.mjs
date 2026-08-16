@@ -87,12 +87,12 @@ async function seed(userId) {
         `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                              target_type, freq_numerator, freq_denominator, color,
                              reminder_time, reminder_message, at_most_unlogged,
-                             position, archived)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+                             show_as, position, archived)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
         [userId, h.name, h.description, h.type, h.unit, h.target_value,
           h.target_type, h.freq_numerator, h.freq_denominator, h.color,
           h.reminder_time ?? '', h.reminder_message ?? '',
-          h.at_most_unlogged ?? 'default', i, h.archived]
+          h.at_most_unlogged ?? 'default', h.show_as ?? 'amount', i, h.archived]
       );
       const habitId = rows[0].id;
 

@@ -1156,7 +1156,12 @@ class MainActivity : ComponentActivity() {
 
         /** What a tap does: the web grid's cycle, or the number dialog. */
         fun tapDay(habit: Habit, date: String) {
-            if (habit.isNumerical) {
+            // A habit shown as something to avoid CYCLES rather than asking for
+            // a number, which is the whole of what that rendering buys: the
+            // answer is yes-or-no, and typing an amount to say "none today" is
+            // the friction it removes. A long press still opens the dialog for
+            // an exact count.
+            if (habit.isNumerical && !habit.isAvoided) {
                 editing = habit to date
                 return
             }
@@ -1168,13 +1173,14 @@ class MainActivity : ComponentActivity() {
                 isSkip = habit.isSkipped(date),
                 done = habit.isMet(habit.valueOn(date), false) == true,
             )
-            when (Grid.nextState(current, skipDays, questionMarks)) {
-                Grid.DayState.DONE -> record(habit, date, Sentinels.YES, false)
+            when (val next = Grid.nextState(current, skipDays, questionMarks)) {
                 Grid.DayState.SKIPPED -> record(habit, date, null, true)
-                // A stated lapse is a row holding 0; only UNKNOWN clears the day,
-                // which the outbox turns into a DELETE.
-                Grid.DayState.NO -> record(habit, date, Sentinels.UNSET, false)
                 Grid.DayState.UNKNOWN -> record(habit, date, null, false)
+                // The VALUE comes from `Grid.valueForState`, the one place that
+                // knows a clean day on an avoided habit is 0 and a slip is the
+                // smallest amount over. A stated lapse is a row holding 0; only
+                // UNKNOWN clears the day, which the outbox turns into a DELETE.
+                else -> record(habit, date, Grid.valueForState(habit, next), false)
             }
         }
 
@@ -1453,6 +1459,12 @@ class MainActivity : ComponentActivity() {
                         when {
                             skipped -> "Skipped"
                             !answered -> "No entry"
+                            // A habit shown as something to avoid reads as what
+                            // the day WAS, not as an amount against a goal:
+                            // "0 / 0 " is a true sentence nobody wants.
+                            habit.isAvoided ->
+                                if (habit.isMet(value, false) == true) "Clean"
+                                else "Slipped (${trim(value ?: 0.0)})"
                             habit.isNumerical && value != null ->
                                 "${trim(value)} / ${trim(habit.targetValue)} ${habit.unit}".trim()
                             habit.isMet(value, false) == true -> "Done"
@@ -1464,24 +1476,49 @@ class MainActivity : ComponentActivity() {
                     HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
                     val option = Modifier.fillMaxWidth()
-                    if (habit.isNumerical) {
+                    // Both answers go through `Grid.valueForState`, the one place
+                    // that knows a clean day on an avoided habit is 0 and a slip
+                    // is the smallest amount over. Writing the sentinels raw here
+                    // is what made "Not done" record a CLEAN day on such a habit
+                    // — the button labelled with the bad outcome storing the good
+                    // one, and contradicting the tap cycle three lines away.
+                    if (habit.isNumerical && !habit.isAvoided) {
                         TextButton(onClick = onEnterAmount, modifier = option) {
                             Text("Enter an amount", Modifier.fillMaxWidth())
                         }
                     } else {
                         TextButton(
-                            onClick = { onPick(Sentinels.YES, false) },
+                            onClick = { onPick(Grid.valueForState(habit, Grid.DayState.DONE), false) },
                             modifier = option,
-                        ) { Text("Done", Modifier.fillMaxWidth()) }
+                        ) {
+                            Text(
+                                if (habit.isAvoided) "Clean day" else "Done",
+                                Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                     // A stated lapse: a row holding 0, not the absence of one. It
                     // used to pass `null`, which cleared the day — the same
                     // conflation the web dialog had, and the reason "Clear" is
                     // now its own row rather than this one wearing two hats.
                     TextButton(
-                        onClick = { onPick(Sentinels.UNSET, false) },
+                        onClick = { onPick(Grid.valueForState(habit, Grid.DayState.NO), false) },
                         modifier = option,
-                    ) { Text("Not done", Modifier.fillMaxWidth()) }
+                    ) {
+                        Text(
+                            if (habit.isAvoided) "Slipped" else "Not done",
+                            Modifier.fillMaxWidth(),
+                        )
+                    }
+                    // An avoided habit is still measurable underneath, so the
+                    // exact count stays reachable — "three coffees" is a thing
+                    // someone may want to record, and the two buttons above are
+                    // the fast answer rather than the only one.
+                    if (habit.isAvoided) {
+                        TextButton(onClick = onEnterAmount, modifier = option) {
+                            Text("Enter an amount", Modifier.fillMaxWidth())
+                        }
+                    }
                     // Hidden when the account does not use skips — but never on a
                     // day that already is one, or an imported Loop skip could not
                     // be undone from here at all.
@@ -1541,7 +1578,9 @@ class MainActivity : ComponentActivity() {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         "A notification with " +
-                            (if (habit.isNumerical) "a count field" else "Yes / No buttons") +
+                            (if (habit.isNumerical && !habit.isAvoided) "a count field"
+                         else if (habit.isAvoided) "Clean / Slipped buttons"
+                         else "Yes / No buttons") +
                             " appears at this time, so you can answer without opening the app.",
                         style = MaterialTheme.typography.bodySmall,
                     )

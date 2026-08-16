@@ -225,8 +225,8 @@ ck('the JSON backup carries no user_id',
 const PORTABLE_HABIT_KEYS = [
   'archived', 'at_most_unlogged', 'color', 'created_at', 'description', 'entries',
   'freq_denominator', 'freq_numerator', 'id', 'name', 'position',
-  'reminder_message', 'reminder_time', 'target_type', 'target_value', 'type',
-  'unit',
+  'reminder_message', 'reminder_time', 'show_as', 'target_type', 'target_value',
+  'type', 'unit',
 ];
 ck('and describes a habit exactly as the personal edition does',
   JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),

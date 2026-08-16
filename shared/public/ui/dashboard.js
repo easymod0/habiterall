@@ -16,7 +16,9 @@ import * as routes from '/shared/ui/routes.js';
 import { gridCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { on, state } from '/shared/ui/store.js';
-import { DAY, dayStateOf, nextDayState } from '/shared/ui/toggle.js';
+import {
+  DAY, dayStateOf, isAvoided, nextDayState, valueForState,
+} from '/shared/ui/toggle.js';
 import { toast } from '/shared/ui/toast.js';
 import { SKIP, UNSET, YES } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
@@ -550,6 +552,28 @@ function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
     return;
   }
 
+  // Shown as something to avoid: a clean day is the achievement and a slip is
+  // the thing to see, so the colours are the other way round. Painting a slip
+  // in the habit's own colour — which is what the at-most branch below does,
+  // correctly, for a habit read as an amount — reads as having done well.
+  if (isAvoided(habit)) {
+    const target = Number(habit.target_value) || 0;
+    if (value <= target) {
+      box.style.background = habit.color;
+      box.textContent = '✓';
+    } else {
+      // The count, because how far over matters on a limit of two coffees and
+      // is the whole answer on a limit of none.
+      box.style.background = 'var(--danger)';
+      box.style.color = '#fff';
+      box.textContent = target === 0 && value === 1
+        ? '✗'
+        : (value % 1 === 0 ? String(value) : value.toFixed(1));
+      box.style.fontSize = '9.5px';
+    }
+    return;
+  }
+
   // numerical: shade by progress toward target, show the raw number.
   // For an "at most" habit a low number is the good outcome, so 0 is a full
   // success and must be painted, not left blank.
@@ -717,7 +741,12 @@ async function saveCount() {
 async function onCheckClick(habit, date) {
   try {
     let next;
-    if (habit.type === 'boolean') {
+    // A habit shown as something to avoid CYCLES rather than asking for a
+    // number, which is the whole of what the rendering buys: the answer is
+    // yes-or-no, and typing an amount to say "none today" is the friction it
+    // exists to remove. `valueForState` is what makes the same four states
+    // record different values — see ui/toggle.js.
+    if (habit.type === 'boolean' || isAvoided(habit)) {
       // Loop's cycle, and both of its switches — `ui/toggle.js` owns it and the
       // native client mirrors it. Note what is read here: whether the map HOLDS
       // the date, not what it holds. `habit.entries[date] ?? UNSET` was fine
@@ -727,8 +756,11 @@ async function onCheckClick(habit, date) {
       const cur = habit.entries[date];
       const current = dayStateOf({
         value: Object.hasOwn(habit.entries, date) ? cur : undefined,
-        isSkip: (habit.skips?.includes(date) ?? false) || cur === SKIP,
-        done: cur === YES,
+        isSkip: (habit.skips?.includes(date) ?? false) ||
+          (habit.type === 'boolean' && cur === SKIP),
+        // What counts as done differs: `YES` for a yes/no habit, and being at
+        // or under the limit for one being avoided, where 0 is the goal.
+        done: isAvoided(habit) ? cur <= (Number(habit.target_value) || 0) : cur === YES,
       });
       const to = nextDayState(current, {
         skipDays: settings.get('skipDays'),
@@ -736,7 +768,12 @@ async function onCheckClick(habit, date) {
       });
 
       if (to === DAY.UNKNOWN) return await clearDay(habit, date);
-      next = to === DAY.DONE ? YES : to === DAY.SKIP ? SKIP : UNSET;
+      // A skip is the status column, never a value. Writing the SKIP sentinel
+      // works for a yes/no habit — `parseEntry` reads 3 as a skip there — and
+      // silently stores three of the thing on a measurable one, which is what
+      // an avoided habit is underneath.
+      if (to === DAY.SKIP) return await recordSkip(habit, date);
+      next = valueForState(habit, to);
     } else {
       // A measurable day is asked for rather than cycled to, and the answer
       // comes back through `saveCount` into the very same `recordValue`.
@@ -747,6 +784,39 @@ async function onCheckClick(habit, date) {
   } catch (e) {
     toast(e.message);
   }
+}
+
+/**
+ * Mark a day as skipped, on the same optimistic path as `recordValue`.
+ *
+ * `{status: 'skip'}` rather than a value, which is what the day editor has
+ * always sent and what the Android client sends. The grid paints a skip from
+ * `habit.skips`, and `entries[date]` is set to the SKIP sentinel alongside it
+ * because that is the shape `/overview` returns — so the optimistic paint and
+ * the refetch agree.
+ */
+async function recordSkip(habit, date) {
+  const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
+  habit.entries[date] = SKIP;
+  const wasSkip = setSkip(habit, date, true);
+  paint();
+
+  try {
+    await api(`/habits/${habit.id}/entries/${date}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status: 'skip' }),
+    });
+  } catch (e) {
+    if (!e.queued) {
+      if (previous === undefined) delete habit.entries[date];
+      else habit.entries[date] = previous;
+      setSkip(habit, date, wasSkip);
+      paint();
+    }
+    throw e;
+  }
+
+  await load();
 }
 
 /**
@@ -770,10 +840,15 @@ async function recordValue(habit, date, next) {
   // key here would paint the cell as unknown while the server holds an
   // answer, which with question marks on is a visible lie until the refetch.
   habit.entries[date] = next;
-  // `skips` is what the cell is painted from, so it moves with the value.
-  // Only a boolean habit can reach SKIP from here; a measurable one is
-  // recording an amount, which by definition ends any skip on that day.
-  const wasSkip = setSkip(habit, date, next === SKIP && habit.type === 'boolean');
+  // `skips` is what the cell is painted from, so it clears with the value: any
+  // amount recorded on a day ends a skip that was on it.
+  //
+  // Never SETS one. Skips come through `recordSkip` now, which writes the
+  // status; the condition here used to be `next === SKIP && type === 'boolean'`
+  // and became unsatisfiable when `valueForState` stopped answering for a skip
+  // at all. A dead branch is harmless, but a comment claiming a boolean habit
+  // "can reach SKIP from here" is the line a future skip change would read.
+  const wasSkip = setSkip(habit, date, false);
   paint();
 
   try {

@@ -23,11 +23,20 @@ class ActionReceiver : BroadcastReceiver() {
         val date = intent.getStringExtra(Notifications.EXTRA_DATE) ?: return
         if (habitId < 0) return
 
+        // The value was decided when the notification was built, where the
+        // habit was in hand — a habit shown as something to avoid records 0 for
+        // a clean day and the smallest amount over for a slip, and this
+        // receiver has only an id and a date. The defaults are what every
+        // notification posted before this existed carries, so one already in
+        // the shade across an upgrade still records what it always did.
+        val stated = intent.getDoubleExtra(Notifications.EXTRA_VALUE, Double.NaN)
         val (value, skip) = when (intent.action) {
-            Notifications.ACTION_YES -> Sentinels.YES to false
+            Notifications.ACTION_YES ->
+                (if (stated.isNaN()) Sentinels.YES else stated) to false
             // "No" is an explicit zero, not an absence: it must overwrite any
             // earlier value for the day rather than leave it standing.
-            Notifications.ACTION_NO -> Sentinels.UNSET to false
+            Notifications.ACTION_NO ->
+                (if (stated.isNaN()) Sentinels.UNSET else stated) to false
             Notifications.ACTION_SKIP -> null to true
             else -> return
         }
@@ -35,10 +44,12 @@ class ActionReceiver : BroadcastReceiver() {
         Outbox.enqueue(context, habitId, date, value, skip)
         Notifications.cancel(context, Notifications.notificationId(habitId))
 
+        val avoided = intent.getBooleanExtra(Notifications.EXTRA_AVOIDED, false)
         val message = when (intent.action) {
             Notifications.ACTION_SKIP -> R.string.recorded_skip
-            Notifications.ACTION_NO -> R.string.recorded_no
-            else -> R.string.recorded_yes
+            Notifications.ACTION_NO ->
+                if (avoided) R.string.recorded_slipped else R.string.recorded_no
+            else -> if (avoided) R.string.recorded_clean else R.string.recorded_yes
         }
         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
     }

@@ -203,6 +203,12 @@
         </label>
         <!-- Only for a LIMIT: an at-least habit's unanswered day is a miss and
              there is nothing to ask. See unansweredCounts in stats.js. -->
+        <label class="at-most-only" hidden>Show this habit as
+          <select name="show_as">
+            <option value="amount">An amount to keep under</option>
+            <option value="avoid">Something to avoid</option>
+          </select>
+        </label>
         <label class="at-most-only" hidden>A day you never log
           <select name="at_most_unlogged">
             <option value="default">Use the account setting</option>

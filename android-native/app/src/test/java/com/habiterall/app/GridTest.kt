@@ -2,8 +2,11 @@ package com.habiterall.app
 
 import com.habiterall.app.data.Grid
 import com.habiterall.app.data.Grid.DayState
+import com.habiterall.app.data.Habit
+import com.habiterall.app.data.Sentinels
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
@@ -178,5 +181,91 @@ class GridTest {
         for (newestLeft in listOf(true, false)) {
             assertEquals(500, Grid.scrollAfterGrowth(500, 0, 100, newestLeft))
         }
+    }
+
+    /* ---------- a habit shown as something to avoid ---------- */
+
+    private val avoid = Habit(
+        id = 1, name = "Smoking", type = "numerical",
+        targetType = "at_most", targetValue = 0.0, showAs = "avoid",
+    )
+
+    @Test
+    fun `the cycle is untouched by the rendering`() {
+        // The whole reason this feature is small. A habit you are trying not to
+        // do walks the same four states in the same order — a clean day is
+        // DONE, a slip is NO — so `nextState`, the mirror of `nextDayState` in
+        // shared/public/ui/toggle.js, did not have to learn anything about it.
+        assertEquals(Grid.DayState.DONE, Grid.nextState(Grid.DayState.UNKNOWN))
+        assertEquals(Grid.DayState.NO, Grid.nextState(Grid.DayState.DONE))
+    }
+
+    @Test
+    fun `what a tap records is what differs`() {
+        // Mirrors `valueForState` in shared/public/ui/toggle.js, pinned to the
+        // same examples for the reason the cycle beside it is: this runs when a
+        // tap is made with no network.
+        assertEquals(0.0, Grid.valueForState(avoid, Grid.DayState.DONE), 0.0)
+        assertEquals(1.0, Grid.valueForState(avoid, Grid.DayState.NO), 0.0)
+
+        val normal = Habit(id = 2, name = "Meditate", type = "boolean")
+        assertEquals(Sentinels.YES, Grid.valueForState(normal, Grid.DayState.DONE), 0.0)
+        assertEquals(Sentinels.UNSET, Grid.valueForState(normal, Grid.DayState.NO), 0.0)
+    }
+
+    @Test
+    fun `a slip is the smallest amount that fails, not always one`() {
+        // "At most 2 coffees" shown as a limit: a slip is three, the smallest
+        // count that is over. It is the least the app can claim on someone's
+        // behalf, and the day editor still takes the exact number.
+        val limit = avoid.copy(targetValue = 2.0)
+        assertEquals(3.0, Grid.valueForState(limit, Grid.DayState.NO), 0.0)
+        assertEquals(0.0, Grid.valueForState(limit, Grid.DayState.DONE), 0.0)
+    }
+
+    @Test
+    fun `a yes-no habit is never avoided, whatever show_as says`() {
+        // Reachable from the form in one sitting: pick Measurable + At most +
+        // avoid, then switch to Yes / no and save. `show_as` is sent regardless
+        // so that switching back does not lose it. Asking only two of the three
+        // questions encoded a tap meaning DONE as 0, which `isMet` reads as NOT
+        // done for a yes/no habit — the cell painted red and no sequence of taps
+        // could reach a done day.
+        val trap = avoid.copy(type = "boolean")
+        assertFalse(trap.isAvoided)
+        assertEquals(Sentinels.YES, Grid.valueForState(trap, Grid.DayState.DONE), 0.0)
+        assertEquals(Sentinels.UNSET, Grid.valueForState(trap, Grid.DayState.NO), 0.0)
+    }
+
+    @Test
+    fun `asking for a skip's value is a programming error, not an encoding`() {
+        // A skip is the status column: `record` takes a flag for it and every
+        // caller routes SKIPPED there first. The web mirror briefly answered
+        // the SKIP sentinel here, which stored a measurable habit's skip as
+        // THREE OF THE THING — three cigarettes on an avoided habit, counted as
+        // a real miss — because the server reads 3 as a skip only for a yes/no
+        // habit. Both sides refuse now.
+        assertThrows(IllegalStateException::class.java) {
+            Grid.valueForState(avoid, Grid.DayState.SKIPPED)
+        }
+        assertThrows(IllegalStateException::class.java) {
+            Grid.valueForState(Habit(id = 9, name = "x", type = "boolean"), Grid.DayState.SKIPPED)
+        }
+    }
+
+    @Test
+    fun `the rendering only applies where there is something to avoid`() {
+        // `show_as` is kept when a habit's goal is switched to At least, so
+        // switching back does not lose it — which means the predicate, not the
+        // stored value, is what stops it applying in between.
+        assertTrue(avoid.isAvoided)
+        assertFalse(avoid.copy(targetType = "at_least").isAvoided)
+        assertFalse(avoid.copy(showAs = "amount").isAvoided)
+        // And an at-least habit records the ordinary way.
+        assertEquals(
+            Sentinels.YES,
+            Grid.valueForState(avoid.copy(targetType = "at_least"), Grid.DayState.DONE),
+            0.0,
+        )
     }
 }

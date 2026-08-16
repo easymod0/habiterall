@@ -65,6 +65,46 @@ object Grid {
         else -> DayState.NO
     }
 
+    /**
+     * What a tap records, for this habit and this state.
+     *
+     * The cycle above is untouched by a habit shown as something to avoid, and
+     * that is the point: it walks the same four states in the same order — a
+     * clean day is DONE, a slip is NO — so the mirror everything else in this
+     * object exists to protect did not have to learn anything. What differs is
+     * only the ENCODING:
+     *
+     *   state   normal habit        avoided habit
+     *   DONE    YES                 0            "none today", which is the goal
+     *   NO      UNSET (0)           target + 1   the smallest amount that fails
+     *
+     * `target + 1` rather than a fixed 1, so a limit of two coffees records
+     * three — the least the app can claim on the user's behalf. The day editor
+     * still takes the exact number.
+     *
+     * Mirrors `valueForState` in shared/public/ui/toggle.js, and it is a mirror
+     * for the reason the cycle beside it is: this runs when a tap is made with
+     * no network, and two clients encoding one tap differently is worse than
+     * either encoding being wrong.
+     *
+     * SKIPPED and UNKNOWN are absent because neither is a value — a skip is the
+     * status column and an unknown day is the absence of a row.
+     */
+    fun valueForState(habit: Habit, state: DayState): Double = when {
+        // A skip is the status column and never a value — `record` takes a
+        // `skip` flag for it, and every caller routes SKIPPED there before
+        // reaching this. The web mirror briefly answered the SKIP sentinel
+        // here, which stored a measurable habit's skip as three of the thing;
+        // it throws now, and so does this. Loud rather than silent, because a
+        // caller that gets here has a bug the grid cannot show.
+        state == DayState.SKIPPED ->
+            error("a skip is the status column, not a value")
+        habit.isAvoided ->
+            if (state == DayState.DONE) Sentinels.UNSET else habit.targetValue + 1
+        else ->
+            if (state == DayState.DONE) Sentinels.YES else Sentinels.UNSET
+    }
+
     fun nextState(
         current: DayState,
         skipDays: Boolean = false,
