@@ -113,9 +113,63 @@ internal fun formatAmount(v: Double): String =
  * refusal into a silent target of 0 that no entry could ever meet. Half-typed
  * text still returns null; [HabitFormScreen] disables Save for it rather than
  * guessing, which is the same treatment the reminder time already gets.
+ *
+ * **A thousands group is refused, not guessed at.** A blanket comma-to-dot
+ * replace read "10,000" as TEN, so a habit created with a goal of ten thousand
+ * steps stored one of ten — a goal every day meets, on a habit that then looks
+ * permanently complete and says nothing about it. The server cannot catch it
+ * either: `parseHabit` coerces with `Number()` and bounds nothing above, so ten
+ * is a perfectly valid target. It is genuinely ambiguous — "1,500" is fifteen
+ * hundred to one reader and one and a half to another — and refusing is loud,
+ * where guessing is silent and sometimes wrong by a factor of a thousand. A
+ * non-zero integer part is required, so it fires on "10,000" and not on "0,255"
+ * or ",255", where there are no thousands to separate.
+ *
+ * `toDoubleOrNull` is generous in other ways nobody types into a goal box:
+ * "1e3" is a thousand, "0x10" is sixteen, "Infinity" and "NaN" both parse, and
+ * "-5" is negative. Digits, at most one separator, nothing else.
+ *
+ * Note what this is NOT. `shared/public/ui/amount.js` reads a day's AMOUNT in
+ * the web app and this reads a habit's TARGET here; they are not mirrors and
+ * the root CLAUDE.md says why — a client mirrors a rule only if it must work
+ * offline, and creating a habit is server-authoritative. What is shared is the
+ * refusal, because the ambiguity is the same and so is the cost of getting it
+ * wrong. The same ambiguity spelled with a DOT is open in both — "10.000" is
+ * ten — and closing that needs a locale rather than a rule; see issue #108.
  */
-internal fun parseAmount(text: String): Double? =
-    text.trim().replace(',', '.').toDoubleOrNull()
+internal fun parseAmount(text: String): Double? {
+    val trimmed = text.trim()
+    // A comma group that reads as a thousands separator.
+    if (THOUSANDS.containsMatchIn(trimmed)) return null
+
+    val decimal = trimmed.replace(',', '.')
+    // Digits with at most one separator, and nothing else — no sign, no
+    // exponent, no hex, no word.
+    if (!DECIMAL.matches(decimal)) return null
+
+    return decimal.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }
+}
+
+/** "10,000" and "1,500", but not "0,255" or ",255". See [parseAmount]. */
+private val THOUSANDS = Regex("[1-9]\\d*,\\d{3}(?!\\d)")
+
+/**
+ * Why [parseAmount] refused, for someone looking at the box.
+ *
+ * "Not a number" is true of "eight" and unhelpful for "10,000", which IS a
+ * number and a perfectly reasonable thing to type — it is refused because it
+ * is ambiguous, not because it is nonsense. A refusal the user cannot act on
+ * is only half better than the silent ten it replaced.
+ */
+internal fun amountComplaint(text: String): String =
+    if (THOUSANDS.containsMatchIn(text.trim())) {
+        "Type it without the thousands separator — 10000, not 10,000."
+    } else {
+        "Not a number"
+    }
+
+/** Digits and at most one separator. */
+private val DECIMAL = Regex("^(\\d+(\\.\\d*)?|\\.\\d+)$")
 
 /**
  * The draft as the server accepts it.
@@ -316,7 +370,12 @@ fun HabitFormScreen(
                         singleLine = true,
                         isError = !targetOk,
                         supportingText = if (targetOk) null else {
-                            { Text("Not a number", color = MaterialTheme.colorScheme.error) }
+                            {
+                                Text(
+                                    amountComplaint(draft.target),
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.weight(1f),
