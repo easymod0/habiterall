@@ -85,9 +85,24 @@ function legacyChoice() {
  */
 let serverAnswered = false;
 
+/**
+ * Whether the user has pressed the control this session.
+ *
+ * A press retires the legacy key's authority immediately, and that is a
+ * correctness rule rather than tidiness. Without it, a session whose settings
+ * read failed — an offline boot, a 429 from the IP-keyed read limiter, a stale
+ * tunnel — left `choice()` preferring the legacy value, so the applier repainted
+ * it straight after every press: the button changed nothing on screen while
+ * quietly writing the OPPOSITE of the user's stored choice to the account, and
+ * the next clean boot adopted that and deleted the key. Silent, irreversible,
+ * and reached by pressing a button that looks broken — which is exactly what
+ * invites the extra presses.
+ */
+let userChose = false;
+
 /** The setting's value, with the pre-setting answer standing in for it. */
 function choice() {
-  if (!serverAnswered) {
+  if (!serverAnswered && !userChose) {
     const legacy = legacyChoice();
     if (legacy) return legacy;
   }
@@ -171,15 +186,13 @@ export async function migrateTheme() {
   }
   if (typeof stored !== 'object' || stored === null) return;
 
-  // ONLY here, once the server has actually answered. Setting it above meant
-  // every early return — offline, a 429 from the read limiter, a proxy's 502 —
-  // left the flag true with the legacy key still on disk and nothing stored on
-  // the account. `choice()` then answered 'system' while the page was painted
-  // dark, so the next unrelated `writeCache` — an in-place calendar zoom, say —
-  // flipped the theme mid-session, silently, and reverted on reload. It also
-  // resurrected the dead press this branch's other commit removed. Measured
-  // both ways with the read blocked and with it answering 429.
-  serverAnswered = true;
+
+
+  // The user got there first — their press is a more recent answer than a key
+  // left over from a previous version, and it has already been saved. Bailing
+  // here is what stops the migration overwriting it: the read above is a round
+  // trip, and the button is enabled throughout boot.
+  if (userChose) return;
 
   if (!Object.hasOwn(stored, 'theme')) {
     const result = await save('theme', legacy);
@@ -193,17 +206,44 @@ export async function migrateTheme() {
     // the weaker "not deleted while it is only in localStorage".
     if (!result?.ok) return;
   }
+  // ONLY once something IS stored — not merely once the read came back. An
+  // earlier version set it above the read's failure returns; this one set it
+  // above the WRITE's, which is the same bug on the other branch: with the GET
+  // succeeding and the PUT answering 429, the flag went true with the legacy
+  // key correctly kept and nothing on the account, so `choice()` answered
+  // 'system' over a page painted dark and the next unrelated cache write
+  // flipped it mid-session.
+  serverAnswered = true;
   try {
     localStorage.removeItem(LEGACY_KEY);
   } catch { /* nothing to clean up */ }
   apply(choice());
 }
 
-/** Walk to the next of the three and remember it. */
-export function toggleTheme() {
+/**
+ * Walk to the next of the three and remember it.
+ *
+ * @returns {Promise<{ok: boolean, error?: string}>} so the caller can say when
+ *   it did not stick. `save` queues on a network error but DROPS a 429, a 500
+ *   or a 403 — and the button used to write localStorage and could not fail at
+ *   all, so silently reverting at some arbitrary later cache write is new.
+ */
+export async function toggleTheme() {
   const next = nextChoice();
+  // The press is the user's answer, so the pre-setting key stops speaking for
+  // this device from here — before the paint, or `apply` reads it again.
+  userChose = true;
+  try {
+    localStorage.removeItem(LEGACY_KEY);
+  } catch { /* private browsing; `userChose` covers it either way */ }
+
   // Paint first: `save` waits for the server and queues when offline, and a
   // press that does nothing for a second reads as broken.
   apply(next);
-  return save('theme', next);
+
+  const result = await save('theme', next);
+  // Put the screen back to what is actually stored rather than leaving it
+  // showing a value the server refused.
+  if (!result?.ok) apply(choice());
+  return result;
 }

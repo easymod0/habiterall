@@ -59,7 +59,11 @@ function initTopBar() {
   // which made a colour change cost two requests and, when they did not land,
   // leave the old theme's colours on screen. The charts now name the CSS
   // variables instead, so the cascade does this.
-  $('#btn-theme').addEventListener('click', () => toggleTheme());
+  $('#btn-theme').addEventListener('click', () => {
+    // Reported, not discarded: `save` drops a 429, a 500 or a 403, and the
+    // button used to write localStorage and could not fail at all.
+    toggleTheme().then((r) => { if (!r?.ok) toast(r?.error ?? 'Could not save the theme'); });
+  });
 }
 
 /**

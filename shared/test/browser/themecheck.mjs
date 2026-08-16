@@ -319,7 +319,85 @@ try {
   ck('the legacy key is kept, so the next boot can still migrate it',
     refused.legacy === 'dark', JSON.stringify(refused));
 
+  // ...and a PRESS in that state must not destroy the choice it is painting.
+  //
+  // This is the loss the migration exists to prevent, reached through the door
+  // it left open. `choice()` preferred the legacy key while the server had not
+  // answered — right for painting — and `nextChoice()` and the applier read the
+  // same thing, so a press wrote the OPPOSITE of the stored choice to the
+  // account and then repainted the legacy value over it. The button appeared
+  // dead, which invites more presses, and the next clean boot adopted the
+  // account's value and deleted the key. Silent and irreversible.
+  const pressed = await ev(`(async()=>{
+    const { toggleTheme } = await import('/shared/ui/theme.js');
+    // Deleting the key is one of the two things a press does; this makes it
+    // fail, as private browsing and a full quota do, so the OTHER one — the
+    // press retiring the key's authority in memory — is what is under test.
+    const realRemove = localStorage.removeItem.bind(localStorage);
+    localStorage.removeItem = (k) => {
+      if (k === 'habiterall-theme') throw new Error('quota');
+      return realRemove(k);
+    };
+    const before = document.documentElement.dataset.theme;
+    await toggleTheme();
+    await new Promise((r) => setTimeout(r, 400));
+    const out = { before, painted: document.documentElement.dataset.theme,
+                  legacy: localStorage.getItem('habiterall-theme') };
+    localStorage.removeItem = realRemove;
+    localStorage.removeItem('habiterall-theme');
+    return out;
+  })()`);
+  ck('a press during a failed read actually changes the theme',
+    pressed.painted !== pressed.before, JSON.stringify(pressed));
+  ck('even when the key itself cannot be deleted',
+    pressed.legacy === 'dark' && pressed.painted !== 'dark', JSON.stringify(pressed));
+
   await send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId);
+
+  /* ---------- a boot whose settings WRITE fails ---------- */
+  //
+  // The other branch of the same function. An earlier fix moved
+  // `serverAnswered` below the read's failure returns and left it above the
+  // write's, so with the GET succeeding and the PUT refused the flag went true
+  // with the legacy key correctly kept and nothing stored — and `choice()` then
+  // answered 'system' over a page painted dark.
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  const putStub = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (url.includes('/api/settings') && (init?.method ?? 'GET') !== 'GET') {
+          return Promise.resolve(new Response('{}', { status: 429 }));
+        }
+        return real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(3000);
+
+  const refusedWrite = await ev(`(async()=>{
+    const painted = document.documentElement.dataset.theme;
+    const { set } = await import('/shared/ui/settings.js');
+    set('calendarZoom', 'close');
+    await new Promise((r) => setTimeout(r, 400));
+    return { painted, after: document.documentElement.dataset.theme,
+             legacy: localStorage.getItem('habiterall-theme') };
+  })()`);
+  ck('a refused WRITE keeps the pre-setting key', refusedWrite.legacy === 'dark',
+    JSON.stringify(refusedWrite));
+  ck('and does not flip the theme out from under the user',
+    refusedWrite.painted === 'dark' && refusedWrite.after === 'dark',
+    JSON.stringify(refusedWrite));
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: putStub.identifier }, sessionId);
 
   console.log(fails === 0 ? '\nALL THEME CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
