@@ -121,8 +121,7 @@ export async function flush() {
         break; // still offline; keep this and everything after it
       }
 
-      if (res.ok || res.status === 404) {
-        // 404: the target is gone, so the write can never apply. Drop it.
+      if (res.ok) {
         await remove(item.seq);
         sent.push(item);
         continue;
@@ -142,6 +141,11 @@ export async function flush() {
       }
 
       if (res.status >= 400 && res.status < 500) {
+        // Including 404, which used to be counted as SENT — "the target is
+        // gone, so the write can never apply" is true, and dropping it is
+        // right, but it is a discarded answer and reporting it as a synced one
+        // tells the user the opposite of what happened. `Api.kt`'s
+        // `isPermanent` has always put 404 on this side of the line.
         await remove(item.seq);
         failed.push({ item, status: res.status });
         continue;
