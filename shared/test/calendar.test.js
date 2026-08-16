@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 import {
   calendarWindow, weekdayIndex, zoomLevel, weeksForWidth, calendarWidth,
@@ -262,4 +265,37 @@ test('weekdayIndex is how far into ITS week a day falls', () => {
   assert.equal(weekdayIndex(sunday, 'monday'), 6, 'Sunday closes a Monday week');
   assert.equal(weekdayIndex(monday, 'monday'), 0);
   assert.equal(weekdayIndex(monday, 'sunday'), 1);
+});
+
+test('the week-start defaults are the registry\'s, not a third answer', () => {
+  // Six parameters default to a week start, and a caller that forgets one gets
+  // whatever they say. That has to be the app's OWN default or it is a third
+  // answer nobody chose — which is how the range label came to name a date the
+  // calendar does not start on, for a DEFAULT account.
+  //
+  // Read out of the registry and the source, the way `AppSettingsDefaultsTest`
+  // reads the same registry for the phone: a literal restated here would be
+  // restated by whoever got it wrong.
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const registry = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
+  const block = registry.slice(registry.indexOf('\n  weekStart: {'));
+  const shown = /\n\s*default:\s*'([^']+)'/.exec(block.slice(0, block.indexOf('\n  },')));
+  assert.ok(shown, 'weekStart has no default in the registry');
+
+  for (const file of ['ui/calendar.js', 'charts.js']) {
+    const src = readFileSync(join(root, 'public', file), 'utf8');
+    const defaults = [...src.matchAll(/weekStart = '([a-z]+)'/g)].map((m) => m[1]);
+    assert.ok(defaults.length > 0, `${file} declares no weekStart default`);
+    for (const value of defaults) {
+      assert.equal(value, shown[1],
+        `${file} defaults weekStart to '${value}' while the registry says '${shown[1]}'`);
+    }
+  }
+});
+
+test('the default is the one a forgetful caller actually gets', () => {
+  // Exercised, which after the explicit-'sunday' edits above nothing else does:
+  // every other call site in this file now names its week, so the parameter
+  // whose wrong value WAS the bug had stopped being covered at all.
+  assert.deepEqual(calendarWindow('2026-08-12', 4), calendarWindow('2026-08-12', 4, 'monday'));
 });

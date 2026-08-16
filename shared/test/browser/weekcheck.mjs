@@ -125,6 +125,22 @@ for (const weekStart of ['sunday', 'monday']) {
   });
   check(`${weekStart}: each row carries ITS OWN weekday's number`, ok,
     titles.join(' | '));
+
+  // The DRAWN captions as well as the tooltips. They come from a different
+  // array — the axis uses SHORT, the tooltip FULL — so checking the tooltips
+  // alone leaves the visible labels free to sit beside the wrong rows, which is
+  // the exact failure this file exists to catch and the first version of it
+  // missed.
+  const axis = collect(svg)
+    .filter((n) => n.name === 'text' && /^(Su|Mo|Tu|We|Th|Fr|Sa)$/.test(n.text ?? ''))
+    .map((n) => ({ y: Number(n.attrs.y), label: n.text }))
+    .sort((a, b) => a.y - b.y)
+    .map((n) => n.label);
+  const SHORT = { Sunday: 'Su', Monday: 'Mo', Tuesday: 'Tu', Wednesday: 'We',
+    Thursday: 'Th', Friday: 'Fr', Saturday: 'Sa' };
+  check(`${weekStart}: the drawn row captions match the rows' own data`,
+    axis.join(',') === order.map((n) => SHORT[n]).join(','),
+    `${axis.join(',')} (want ${order.map((n) => SHORT[n]).join(',')})`);
 }
 
 /* ---------- the calendar's own agreement ---------- */

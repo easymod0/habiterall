@@ -119,8 +119,17 @@ unrotated, Home/End back on `getDay()`, the month grid reading rows by index —
 and the whole unit suite and every browser suite still passed. The arithmetic
 was covered; nothing looked at a rendered chart. The failure that matters is not
 "the wrong day is first", it is a caption and a datum moving independently,
-which reads as deliberate. Each check there ties one to the other, and the four
-mutations each fail it.
+which reads as deliberate.
+
+Note where each half is pinned, because the split is forced rather than chosen.
+`weekcheck.mjs` is OFFLINE and covers the labels and the pairing. **Home/End is
+in `feat4.mjs`, in a real browser**, because the handler is reached through a
+`keydown` listener that only exists when the calendar is interactive and it
+reads `dataset`, which the offline fake DOM does not have — a first version of
+`weekcheck` claimed to cover it and did not, and the `getDay()` mutation passed
+every suite in the repo. The month chart needs BOTH its tooltip and its drawn
+caption asserted: they are built from different arrays, so checking one leaves
+the other free to move.
 
 **`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
 still works for boolean habits (where `3` is unambiguously a skip) but is

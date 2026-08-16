@@ -205,7 +205,71 @@ try {
   check('ArrowDown returns to the start', nav.back === nav.from, JSON.stringify(nav));
   check('ArrowLeft moves back one week', dayDiff(nav.left, nav.from) === 7, JSON.stringify(nav));
 
+  // Home and End go to the ends of the WEEK AS DRAWN, which depends on the
+  // account's `weekStart`. They read `getDay()` once — Sunday-based — so on a
+  // Monday-start grid Home jumped to the Sunday in the PREVIOUS column, where
+  // `byDate` finds nothing and the key silently does nothing at all.
+  //
+  // Checked in a real browser because it is the only place it can be: the
+  // handler is reached through a `keydown` listener attached only when the
+  // calendar is interactive, and it reads `dataset`, which the offline fake DOM
+  // in weekcheck.mjs does not have. That suite covers the labels and the data
+  // pairing; this covers the keys.
+  for (const weekStart of ['monday', 'sunday']) {
+    await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ weekStart: ${JSON.stringify(weekStart)} }) }); })()`);
+    // The same route into the calendar this section already uses: `reload()`
+    // waits for the dashboard, and the habit is opened by name rather than by
+    // position, because a filter or a reorder would move it.
+    await reload();
+    await ev(`(()=>{
+      const rows=[...document.querySelectorAll('#grid .habit-row')];
+      const i=rows.findIndex(r=>r.querySelector('.habit-name').textContent.includes('Meditate'));
+      rows[i].querySelector('.habit-meta').click();})()`);
+    for (let i = 0; i < 60; i++) {
+      if (await ev(`!!document.querySelector('rect[role="gridcell"]')`)) break;
+      await sleep(200);
+    }
+
+    const ends = await ev(`(()=>{
+      const cells=[...document.querySelectorAll('rect[role="gridcell"]')];
+      // Deliberately MIDWEEK, so Home and End both have somewhere to go. Taking
+      // the middle of the list picked the week's opening day for one of the two
+      // settings, where Home correctly does nothing — and "did nothing" is the
+      // symptom being tested for, so the cell has to be chosen rather than
+      // happened upon.
+      const opens = ${JSON.stringify(weekStart === 'monday' ? 1 : 0)};
+      const midweek = cells.filter(c => {
+        const d = new Date(c.dataset.date + 'T00:00:00').getDay();
+        return d === (opens + 3) % 7;
+      });
+      const start = midweek[Math.floor(midweek.length / 2)];
+      start.focus();
+      const key=k=>document.activeElement.dispatchEvent(
+        new KeyboardEvent('keydown',{key:k,bubbles:true}));
+      const from=document.activeElement.dataset.date;
+      key('Home'); const home=document.activeElement.dataset.date;
+      start.focus();
+      key('End');  const end=document.activeElement.dataset.date;
+      return {from, home, end};})()`);
+
+    // getDay(): 0 is Sunday. The week's first day is Monday (1) or Sunday (0).
+    const dow = (iso) => new Date(iso + 'T00:00:00').getDay();
+    check(`${weekStart}: Home lands on the day the week opens`,
+      dow(ends.home) === (weekStart === 'monday' ? 1 : 0), JSON.stringify(ends));
+    check(`${weekStart}: End lands on the day it closes`,
+      dow(ends.end) === (weekStart === 'monday' ? 0 : 6), JSON.stringify(ends));
+    // And neither walked off the grid — a cell that does not exist leaves focus
+    // where it was, which is how this failed silently.
+    check(`${weekStart}: Home actually moved`, ends.home !== ends.from, JSON.stringify(ends));
+  }
+  await ev(`(async()=>{ await fetch('/api/settings', { method:'DELETE' }); })()`);
+
   const opened = await ev(`(()=>{
+    const c=document.querySelector('rect[role="gridcell"][tabindex="0"]')
+      ?? document.querySelector('rect[role="gridcell"]');
+    c.focus();
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
     return document.getElementById('day-dialog').open;})()`);
   check('Enter opens the day editor', opened === true);
