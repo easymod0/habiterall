@@ -318,6 +318,25 @@ export async function handleInteraction(interaction, adapter) {
   // Whether the three-second callback has been spent, which is all `respond`
   // needs to know to pick an endpoint.
   let acknowledged = false;
+
+  /**
+   * What to say about a failed response to an INTERACTION.
+   *
+   * Not `result.error`, for 401/403/404. That prose is `discordRequest`'s and it
+   * is written for `postReminder` — the bot posting into a channel — so on the
+   * interaction endpoints it names the wrong fault: a 404 from
+   * `/webhooks/{app}/{token}` is an expired or never-acknowledged token, and a
+   * 401 is the application id, neither of which is "check the id, and that the
+   * bot was invited". An operator reading that re-invites a bot that is fine.
+   *
+   * The status leads for those three and the sender's own sentence stands for
+   * everything else, which is where it is accurate (a 429, a 5xx, a network
+   * error).
+   */
+  const why = (r) => ([401, 403, 404].includes(r?.status)
+    ? `Discord returned ${r.status} — the interaction token is expired, unacknowledged or not ours`
+    : (r?.error ?? `status ${r?.status}`));
+
   const send = async (response) => {
     const result = await respond(interaction, response, { acknowledged });
     // `respondInteraction` RETURNS its failures rather than throwing — every
@@ -326,8 +345,7 @@ export async function handleInteraction(interaction, adapter) {
     // press wrote its entry, the reminder was left unchanged with its buttons
     // still live, and no log line said why.
     if (result && result.ok === false) {
-      log.error?.('discord: answering an interaction failed:',
-        result.error ?? `status ${result.status}`);
+      log.error?.('discord: answering an interaction failed:', why(result));
     }
     return response;
   };
@@ -389,8 +407,7 @@ export async function handleInteraction(interaction, adapter) {
       // callback endpoint answering 204 amounts to.
       acknowledged = !(ack && ack.ok === false);
       if (!acknowledged) {
-        log.error?.('discord: acknowledging an interaction failed:',
-          ack.error ?? `status ${ack.status}`);
+        log.error?.('discord: acknowledging an interaction failed:', why(ack));
       }
     } catch (err) {
       // A defer that fails leaves the interaction lost either way, and the

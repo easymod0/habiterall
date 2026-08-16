@@ -379,23 +379,37 @@ test('a defer that FAILED is not an acknowledgement', async () => {
   assert.ok(errors.some((e) => /acknowledg/i.test(e)), errors.join(' | '));
 });
 
-test('an answer that could not be delivered says so', async () => {
+test('an answer that could not be delivered says so, and names the right fault', async () => {
   // Same shape one step later: `send()` discarded `respond`'s result, so a
   // failed FINAL answer after a good defer was equally silent.
+  //
+  // The failure is built by the REAL `discordRequest` rather than by a string
+  // this code path could never produce — which is what hid the second half of
+  // this. Its 401/403/404 prose is written for `postReminder`, the bot posting
+  // into a channel, and on the interaction webhook a 404 is an expired or
+  // unacknowledged token. An operator told to check "that the bot was invited"
+  // re-invites a bot that is fine.
+  const permanent404 = await discordRequest({ token: 't', path: '/x' },
+    { fetch: fakeFetch([{ status: 404 }]) });
+  assert.match(permanent404.error, /invited/,
+    'the sender still says the channel thing — that is right for postReminder');
+
   const errors = [];
   const a = adapter({
     respond: async (_i, response) => {
       a.sent.push(response);
-      return response.type === CALLBACK.DEFER_UPDATE
-        ? { ok: true }
-        : { ok: false, status: 404, error: 'Unknown Webhook' };
+      return response.type === CALLBACK.DEFER_UPDATE ? { ok: true } : permanent404;
     },
     log: { warn: () => {}, error: (...args) => errors.push(args.join(' ')) },
   });
 
   await handleInteraction(click(), a);
   assert.equal(a.recorded.length, 1);
-  assert.ok(errors.some((e) => /Unknown Webhook/.test(e)), errors.join(' | '));
+  const said = errors.join(' | ');
+  assert.ok(/answering an interaction failed/.test(said), said);
+  assert.ok(/404/.test(said), said);
+  assert.ok(!/invited/.test(said),
+    `an interaction 404 is not about the bot's invite: ${said}`);
 });
 
 test('a deferred answer edits the reminder; an undeferred one uses the callback', async () => {
