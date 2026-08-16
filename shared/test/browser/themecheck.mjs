@@ -220,6 +220,40 @@ try {
   ck('and "follow this device" resolves against the device',
     followed.painted === followed.expected, JSON.stringify(followed));
 
+  /* ---------- the upgrade path ---------- */
+  //
+  // The half with no test, and the one that matters most: everyone using the
+  // app today has their theme in `localStorage['habiterall-theme']` and nowhere
+  // else. An earlier version of `migrateTheme` asked `settings.get('theme')`
+  // whether the account had one — which cannot answer, because `ui/settings.js`
+  // fills gaps from `defaults()` — so it never saved and deleted the key anyway.
+  // Every user who had pressed the old toggle lost their choice on the first
+  // load after upgrading, silently.
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(3000);
+
+  const migrated = await ev(`(async()=>{
+    const stored = await (await fetch('/api/settings',
+      { credentials: 'same-origin' })).json();
+    return {
+      serverTheme: stored.theme ?? null,
+      legacyKey: localStorage.getItem('habiterall-theme'),
+      painted: document.documentElement.dataset.theme,
+    };
+  })()`);
+  ck('the pre-setting choice is carried up to the account',
+    migrated.serverTheme === 'dark', JSON.stringify(migrated));
+  ck('the old key is cleared only once it has been', migrated.legacyKey === null,
+    JSON.stringify(migrated));
+  ck('and the page is painted with it, not with the default',
+    migrated.painted === 'dark', JSON.stringify(migrated));
+
   console.log(fails === 0 ? '\nALL THEME CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

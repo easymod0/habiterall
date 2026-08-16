@@ -72,9 +72,26 @@ function legacyChoice() {
   }
 }
 
+/**
+ * Whether the server has answered yet — which is the only thing that can tell a
+ * stored `theme` from the default one.
+ *
+ * `ui/settings.js` deliberately cannot: `load()` goes through `sanitise`, which
+ * starts from `defaults()`, so `get('theme')` is `'system'` for an account that
+ * has never had one AND for an account set to follow the device. Before the
+ * answer, the legacy key is the better guess about this device; after it, the
+ * account wins even if this device still holds a stale one — another device may
+ * have migrated already, and that is the more recent decision.
+ */
+let serverAnswered = false;
+
 /** The setting's value, with the pre-setting answer standing in for it. */
 function choice() {
-  return get('theme') ?? legacyChoice() ?? 'system';
+  if (!serverAnswered) {
+    const legacy = legacyChoice();
+    if (legacy) return legacy;
+  }
+  return get('theme') ?? 'system';
 }
 
 /**
@@ -110,7 +127,7 @@ function apply(value) {
  */
 export function initTheme({ onLabel } = {}) {
   if (onLabel) announce = onLabel;
-  onApply((values) => apply(values.theme ?? legacyChoice() ?? 'system'));
+  onApply(() => apply(choice()));
 
   // `system` means live, not "whatever it was at boot". Without this, a laptop
   // that switches at sunset needs a reload to catch up — which is most of what
@@ -132,13 +149,39 @@ export function initTheme({ onLabel } = {}) {
  */
 export async function migrateTheme() {
   const legacy = legacyChoice();
+  // From here on the account is authoritative, whatever happens below.
+  serverAnswered = true;
   if (!legacy) return;
-  // Only if the account has never had one. Somebody else's device already
-  // deciding is the more recent answer.
-  if (get('theme') === undefined) await save('theme', legacy);
+
+  // `GET /api/settings` and not `get('theme')`, and this is the whole of it:
+  // `ui/settings.js` fills gaps from `defaults()`, so `get('theme')` answers
+  // `'system'` for an account that has never had one — a guard written against
+  // it can never fire. The route returns only the keys that have been STORED,
+  // which is the one place the difference exists. An earlier version of this
+  // asked the cache, so it never saved and deleted the key anyway: every user
+  // who had pressed the old toggle lost their choice on the first load after
+  // upgrading, silently.
+  let stored;
+  try {
+    const res = await fetch('/api/settings', { credentials: 'same-origin' });
+    if (!res.ok) return;                       // try again next boot
+    stored = await res.json();
+  } catch {
+    return;                                    // offline: the key stays put
+  }
+  if (typeof stored !== 'object' || stored === null) return;
+
+  if (!Object.hasOwn(stored, 'theme')) {
+    const result = await save('theme', legacy);
+    // Nothing is deleted that was not stored. `save` queues when offline and
+    // reports `{ok: false}` when the server refuses, and either way the local
+    // key is the only copy of the answer left.
+    if (!result?.ok) return;
+  }
   try {
     localStorage.removeItem(LEGACY_KEY);
   } catch { /* nothing to clean up */ }
+  apply(choice());
 }
 
 /** Walk to the next of the three and remember it. */
