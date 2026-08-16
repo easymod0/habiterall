@@ -270,8 +270,16 @@ function render(stats, entries) {
   const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
   const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
   // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
-  // says "Completion calendar" reads as a serial number, and this was the last
-  // place in the app still showing one.
+  // says "Completion calendar" reads as a serial number.
+  //
+  // It is NOT the last one, which an earlier version of this comment claimed
+  // and a review disproved. `windowedChart` builds its own range readout with
+  // the same `.cal-range` class (ui/components.js), and all four callers hand
+  // `labelOf` a raw storage string — so the strength card's HEADER still says
+  // `2026-07-03 → 2026-08-16` above an axis that now says `Jul 3, 2026`. One
+  // card, two conventions. Converting `labelOf`'s four call sites is the rest
+  // of this and is left out on purpose: each one is a different unit (a day, a
+  // bucket, a month) and picking a format for each is a separate decision.
   navLabel.textContent =
     `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
     `${formatDateShort(fromISOLocal(calLast))}`;

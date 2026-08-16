@@ -124,8 +124,14 @@ export function monthLabels() {
 /**
  * A date written out in full, for a dialog that is about to change it.
  *
- * The wordiest of the three deliberately: this is the day editor and the amount
- * dialog, where picking the wrong row is the risk worth spending words on.
+ * The wordiest of the three deliberately: the day editor and the amount dialog
+ * are where picking the wrong row is the risk worth spending words on.
+ *
+ * Both of them still build this formatter inline, per open, with byte-identical
+ * options (`ui/day-dialog.js` and `ui/dashboard.js`) — so this is the shape they
+ * should adopt rather than a description of what they do. Converting them is a
+ * two-line follow-up and it is the per-call cost the memo above argues against;
+ * it is out of this change only because nothing else here touches those files.
  * @param {Date} d
  */
 export const formatDateLong = (d) => longDate().format(d);
@@ -134,9 +140,9 @@ export const formatDateLong = (d) => longDate().format(d);
  * A date for a label beside a chart — short, and not a serial number.
  *
  * This is what replaced the raw ISO on the calendar's range label and the
- * strength chart's axis: `2026-08-03 → 2026-09-14` under a heading that already
- * says what it is reads as machine output, and it was the only place in the app
- * still showing one.
+ * strength chart's axis. Not the only ISO left in the app, which an earlier
+ * version of this said: `windowedChart`'s own range readout still shows one,
+ * and `ui/detail.js` records why that is a separate change.
  * @param {Date} d
  */
 export const formatDateShort = (d) => mediumDate().format(d);
