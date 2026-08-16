@@ -11,6 +11,9 @@ import {
   DEFAULT_ZOOM,
 } from './ui/calendar.js';
 import { SKIP, YES } from './ui/values.js';
+// Dependency-free by design, so this module still loads under the offline
+// render suites' fake DOM. See the header of ui/toggle.js.
+import { isAvoided } from './ui/toggle.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
@@ -310,6 +313,26 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         } else if (habit.type === 'boolean') {
           if (value === YES) { fill = shade(color, 1); label = `${date}: done`; }
           else label = `${date}: not done`;
+        } else if (isAvoided(habit)) {
+          // Shown as something to avoid, so the colours are the other way up —
+          // the same inversion `dashboard.js` makes, and for the same reason it
+          // gives: filling a slip with a dimmer shade of the habit's own colour
+          // is right for a habit read as an AMOUNT, where a bigger number is
+          // more done, and reads as having done well on a limit.
+          //
+          // This branch was missing, so the two grids over one dataset read
+          // opposite verdicts: the dashboard painted a cigarette red with an ✗
+          // while the calendar three inches away painted it in the habit's own
+          // green.
+          const target = Number(habit.target_value) || 0;
+          const amount = `${value}${habit.unit ? ' ' + habit.unit : ''}`;
+          if (value <= target) {
+            fill = shade(color, 1);
+            label = target > 0 ? `${date}: clean — ${amount}` : `${date}: clean`;
+          } else {
+            fill = themed('--danger');
+            label = `${date}: slipped — ${amount}`;
+          }
         } else {
           // For an "at most" habit a low number is the good outcome, so 0 is a
           // full-strength success and must not render as an empty cell.

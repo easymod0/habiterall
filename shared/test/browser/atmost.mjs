@@ -55,5 +55,33 @@ const c3=paint({[d0]:2,[d1]:0},'#8b5cf6',bool);
 check('boolean: done is full colour', c3[d0]==='#8b5cf6', c3[d0]);
 check('boolean: not-done stays blank', c3[d1]===empty, c3[d1]);
 
+// A habit SHOWN as something to avoid. Same rows, opposite reading: the whole
+// point of `show_as` is that a slip must not be painted in the habit's own
+// colour, because on a limit that reads as having done well. `dashboard.js`
+// inverted; `calendarChart` did not, so the two grids over one dataset gave
+// opposite verdicts about the same cigarette — red with an ✗ on the dashboard,
+// the habit's own green on the detail view three inches away.
+const smoking={type:'numerical',target_value:0,target_type:'at_most',
+               show_as:'avoid',unit:'cigarettes'};
+const c4=paint({[d0]:0,[d1]:1,[d2]:3},'#10b981',smoking);
+check('avoid: a clean day is the habit colour', c4[d0]==='#10b981', c4[d0]);
+check('avoid: a slip is NOT derived from the habit colour',
+  !String(c4[d1]).includes('#10b981'), `1 cigarette = ${c4[d1]}`);
+check('avoid: a worse slip is not derived from it either',
+  !String(c4[d2]).includes('#10b981'), `3 cigarettes = ${c4[d2]}`);
+check('avoid: a slip reads as a failure', c4[d1]==='var(--danger)', c4[d1]);
+
+// The gate is all THREE questions, so a habit that is at_most and numerical but
+// still shown as an amount keeps the old shading — and one that is `avoid` on a
+// boolean or an at_least habit is not reachable as an inversion either.
+const c5=paint({[d0]:0,[d1]:2},'#10b981',
+  {...smoking,target_value:2,show_as:'amount'});
+check('at_most shown as an amount is unchanged', c5[d1]==='#10b981', c5[d1]);
+
+// A limit of two: one is still under it, so it is a clean day.
+const c6=paint({[d0]:1,[d1]:3},'#10b981',{...smoking,target_value:2});
+check('avoid: under the limit is clean', c6[d0]==='#10b981', c6[d0]);
+check('avoid: over the limit is a slip', c6[d1]==='var(--danger)', c6[d1]);
+
 console.log(fails===0?'\nALL AT-MOST CHECKS PASSED':`\n${fails} FAILED`);
 process.exit(fails===0?0:1);
