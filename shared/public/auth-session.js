@@ -31,6 +31,14 @@ const $ = (sel) => document.querySelector(sel);
  */
 const SIGNED_IN_ONLY = ['btn-new', 'btn-settings'];
 
+/**
+ * The four modes the server can report. Anything else is an unknown build or a
+ * response that is not ours, and resolves to `oidc` — the same answer
+ * `AuthMode.of` gives on the phone, and the safe one: it leaves
+ * `onUnauthorized` armed.
+ */
+const MODES = new Set(['none', 'password', 'setup', 'oidc']);
+
 /** Copy per mode, so the one form can introduce itself correctly. */
 const COPY = {
   password: {
@@ -77,10 +85,10 @@ export const auth = {
    * @returns {Promise<object|null>} null means "show the sign-in screen"
    */
   async load() {
-    let res, body = {};
+    let res, body = null;
     try {
       res = await fetch('/api/me', { credentials: 'same-origin' });
-      body = await res.json().catch(() => ({}));
+      body = await res.json().catch(() => null);
     } catch {
       this.mode = null;
       this.enabled = false;
@@ -105,7 +113,29 @@ export const auth = {
     if (!res.ok && res.status !== 401) {
       this.mode = null;
       this.enabled = false;
-      throw new Error(body.error || `The server answered ${res.status}.`);
+      throw new Error(body?.error || `The server answered ${res.status}.`);
+    }
+
+    // A body that is not a JSON object is not an answer to this question, and
+    // degrading it to `{}` is how a 200 full of HTML became a SESSION. A
+    // reverse proxy with an SPA fallback (`try_files $uri /index.html`) and a
+    // captive portal both do exactly that, and `{}` is truthy: `render()` took
+    // the signed-in branch, the chip read "Signed in", New habit and Settings
+    // appeared, and — because the absent `mode` falls back to `oidc` below — an
+    // instance with no sign-in at all grew a Sign out control.
+    //
+    // An empty but VALID `{}` is a different thing and must still read as a
+    // session: that is a server answering this contract without the field,
+    // which is what the `mode` fallback below exists for. So the test is
+    // whether it PARSED, not whether it holds anything.
+    //
+    // `Auth.read` in the Kotlin client already had this guard, with the bug it
+    // was written for named in its comment. Two clients boot the whole app on
+    // this one answer, so the reading of it cannot differ between them.
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      this.mode = null;
+      this.enabled = false;
+      throw new Error('The server did not answer with a session.');
     }
 
     // A missing mode from a server that DID answer one of those two is an older
@@ -113,7 +143,15 @@ export const auth = {
     // auth: on an instance that has none nothing ever 401s, so the guess costs
     // nothing, while the opposite guess disarms `onUnauthorized` on one that
     // does and leaves an expired cloud session toasting errors forever.
-    this.mode = typeof body.mode === 'string' ? body.mode : 'oidc';
+    //
+    // An UNRECOGNISED one lands in the same place, which is what `AuthMode.of`
+    // does on the phone. It also has to, rather than being passed through: the
+    // sign-in copy is `COPY[this.mode]`, and a key lookup from a value off the
+    // wire is the case the root CLAUDE.md keeps for `Object.hasOwn` —
+    // `COPY['__proto__']` resolves to `Object.prototype`, which is truthy, so
+    // the `?? COPY.oidc` fallback never fires and the form renders `undefined`
+    // as its own title.
+    this.mode = MODES.has(body.mode) ? body.mode : 'oidc';
     this.enabled = this.mode !== 'none';
 
     return res.ok ? body : null;

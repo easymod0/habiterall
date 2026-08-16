@@ -196,6 +196,63 @@ try {
     JSON.stringify(signedIn));
   ck('password: the chip shows who is signed in', signedIn.user === 'mark', signedIn.user);
 
+  /* ---------- a 200 that is not a session ---------- */
+  //
+  // The whole app boots on `/api/me`, and `load()` degraded a body it could not
+  // parse to `{}` — which is truthy, so a reverse proxy with an SPA fallback
+  // (`try_files $uri /index.html`) or a captive portal answering 200 with HTML
+  // produced a signed-IN shell: the chip, New habit, Settings, and — because
+  // an absent `mode` falls back to `oidc` — a Sign out control on an instance
+  // that may have no sign-in at all. `Auth.read` on the phone has had this
+  // guard since it shipped the same bug; the web never got it.
+  //
+  // Only a browser can show this: the app's boot is what turns the answer into
+  // a painted shell, and `[hidden]` versus a computed style is exactly what
+  // `__shown` exists for.
+  // The service worker first, or there is nothing to intercept: `/api/me` goes
+  // through `networkFirst`, and a fetch the WORKER makes is not paused by the
+  // page's Fetch domain. Without this the app simply gets the real 200 and the
+  // suite passes against the unfixed code, which is the trap this whole file
+  // exists to avoid.
+  await ev(`(async()=>{
+    const rs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(rs.map(r => r.unregister()));
+    for (const k of await caches.keys()) await caches.delete(k);
+    return rs.length;
+  })()`);
+
+  await send('Fetch.enable', {
+    patterns: [{ urlPattern: '*/api/me', requestStage: 'Request' }],
+  }, sessionId);
+  const onPaused = (m) => {
+    if (m.method !== 'Fetch.requestPaused' || m.sessionId !== sessionId) return;
+    send('Fetch.fulfillRequest', {
+      requestId: m.params.requestId,
+      responseCode: 200,
+      responseHeaders: [{ name: 'Content-Type', value: 'text/html' }],
+      body: Buffer.from('<!doctype html><title>Wi-Fi login</title>').toString('base64'),
+    }, sessionId).catch(() => {});
+  };
+  const priorOnMessage = ws.onmessage;
+  ws.onmessage = (ev) => { onPaused(JSON.parse(ev.data)); priorOnMessage(ev); };
+
+  await go();
+  await sleep(1500);
+
+  const portal = JSON.parse(await ev(`JSON.stringify({
+    errorShown: __shown('#view-error'),
+    listShown: __shown('#view-list'),
+    signinShown: __shown('#view-signin'),
+    newBtn: __shown('#btn-new'),
+    settingsBtn: __shown('#btn-settings')
+  })`));
+  ck('a 200 that is not a session does not paint a signed-in app',
+    !portal.listShown && !portal.newBtn && !portal.settingsBtn, JSON.stringify(portal));
+  ck('it reaches the boot-error view instead', portal.errorShown, JSON.stringify(portal));
+
+  ws.onmessage = priorOnMessage;
+  await send('Fetch.disable', {}, sessionId);
+
   console.log(fails ? `\n${fails} check(s) failed` : '\nALL SIGN-IN CHECKS PASSED');
 } finally {
   try { ws?.close(); } catch { /* already gone */ }
