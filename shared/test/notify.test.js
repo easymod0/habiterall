@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
-  answeredIds, channelConfigured, discordPayload, dueReminders, enabledChannels,
+  answeredIds, callerDay, channelConfigured, discordPayload, dueReminders, enabledChannels,
   minutesOfDay, needsServerDelivery, parseChannelList, parseDiscordWebhook,
   parseTimeZone, reminderMessage, reportedZone, resolveTimeZone, serverChannels,
   zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
@@ -16,6 +16,8 @@ const { deliverAccount, postWebhook, resetSaid, runTick, sendToChannel, warnUnre
   await import('../src/notify-send.js');
 
 const { parseSettings } = await import('../src/validate.js');
+
+const { daysBetween } = await import('../src/stats.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -186,6 +188,40 @@ test('which clock a reminder is on: named beats device beats server', () => {
   assert.equal(resolveTimeZone({}, 'Moon/Base'), '');
   assert.equal(resolveTimeZone({}, AUTO_ZONE), '',
     'a client echoing the setting back is an account asking itself');
+});
+
+test("the day a route judges by is the CALLER's, not the process's", () => {
+  // A fixed instant, so this says something about the rule rather than about
+  // the day it happens to be run on.
+  const instant = Date.UTC(2026, 7, 16, 10, 0);
+
+  assert.equal(callerDay('Pacific/Kiritimati', instant), '2026-08-17',
+    'UTC+14 has already started the next day');
+  assert.equal(callerDay('Etc/GMT+12', instant), '2026-08-15',
+    'UTC-12 has not yet finished the previous one');
+
+  // TWO calendar days apart, at one instant, between two real zone names —
+  // and the same holds for inhabited ones (Pacific/Niue at UTC-11 against
+  // Kiritimati at UTC+14 is 25 hours). This is why the fix is not "allow
+  // tomorrow": a `today + 1` rule is still wrong at the edges, and it is
+  // wrong in the permissive direction for every caller on Earth in between.
+  assert.equal(
+    daysBetween(callerDay('Etc/GMT+12', instant),
+      callerDay('Pacific/Kiritimati', instant)), 2);
+  assert.equal(
+    daysBetween(callerDay('Pacific/Niue', instant),
+      callerDay('Pacific/Kiritimati', instant)), 2);
+
+  // A caller that reports nothing is one we cannot place, so it gets the
+  // server's own clock — which is exactly what it got before this existed, so
+  // adding the rule moves no caller's day. Anything unusable is the same
+  // answer by the same reasoning, and `auto` is unusable here for the reason
+  // `reportedZone` gives: it is the setting's word for "ask the device".
+  const host = zonedClock(instant, '').date;
+  for (const nothing of ['', undefined, null, 'auto', 'Moon/Base', 42]) {
+    assert.equal(callerDay(nothing, instant), host,
+      `placed a caller by ${JSON.stringify(nothing)}`);
+  }
 });
 
 test('a reported zone is a header value, and is treated as one', () => {

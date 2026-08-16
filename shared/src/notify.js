@@ -201,6 +201,38 @@ export function reportedZone(raw) {
 }
 
 /**
+ * The calendar day the CALLING DEVICE is on, from the zone it reported.
+ *
+ * This is a different question from `resolveTimeZone`'s, and answering both
+ * with one rule breaks one of them. That one asks where an ACCOUNT is,
+ * generally, so that a reminder nobody is present for still goes out at the
+ * right hour — an account-level fact, which is why it prefers the zone the
+ * user NAMED and falls back to the last zone any device reported. This one
+ * asks what day it is for the client making this request right now, and only
+ * that client can answer it:
+ *
+ *   - The grid draws its last column from the browser's own clock
+ *     (`ui/api.js` reads `Intl.DateTimeFormat().resolvedOptions().timeZone`),
+ *     never from a setting. So judging its tap against a NAMED zone re-breaks
+ *     the write for exactly the person who set one — somebody who keeps
+ *     reminders on home time and then travels.
+ *   - The stored zone is the last one ANY device reported, so a desktop in
+ *     Berlin would have its day decided by the phone that checked in from
+ *     Tokyo an hour ago.
+ *
+ * A caller that reports nothing is one we cannot place, and the server's own
+ * clock is the honest answer for it — which is also what it got before this
+ * existed, so no caller's day moves by adding it.
+ *
+ * @param {unknown} reported the `DEVICE_ZONE_HEADER` value, if any
+ * @param {Date|number} [instant]
+ * @returns {string} 'YYYY-MM-DD'
+ */
+export function callerDay(reported, instant = Date.now()) {
+  return zonedClock(instant, reportedZone(reported)).date;
+}
+
+/**
  * Which clock a server-sent reminder is on, for one account.
  *
  * Three tiers, two of which the user sees:

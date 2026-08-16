@@ -723,6 +723,67 @@ clients already make — `ui/api.js`'s single `fetch` and an OkHttp interceptor 
 account writes here never. This is not a mirrored RULE: the client reports a
 fact and the server decides what it means, so there is nothing to drift.
 
+**That header answers a SECOND question, and it is deliberately not the same
+question.** Every route that asks "is this today?" was asking it of the process:
+`assertNotFuture(date, today())` guarded the entry write, and the same date
+clamped `/overview`'s `summaryEnd` and `/stats`'s `end`. `today()` is the
+container's calendar day, which is UTC in both compose files and therefore right
+for almost nobody — so a user east of the server had the current column of their
+own grid **refused as a future date**, for as many hours a day as the offset.
+Thirteen of them in Auckland, nine in Tokyo, two in Berlin. The message said
+`cannot record entries in the future` about a day the user was standing in, and
+`recordValue` rolled the paint back, so the tap looked like it had failed at
+random.
+
+The refusal is the loud half. The read anchors are the quiet one: a day that was
+recorded was scored as of the server's yesterday, so ticking today left the
+streak sitting still — the same "paging back restates the summary" defect
+`test/overview.integration.mjs` exists for, arriving from the clock instead of
+from a query parameter. Fixing only the write leaves that, which is why
+`callerToday` is applied to all three.
+
+`callerDay` (shared/src/notify.js) is the rule, and it reads the HEADER and
+nothing else — not `resolveTimeZone`, though that is one call away and was the
+obvious reuse. Two questions, two answers, and folding them together breaks
+whichever one loses:
+
+- `resolveTimeZone` asks where an ACCOUNT is, so that a reminder nobody is
+  present for still goes out at the right hour. Its first tier is the zone the
+  user NAMED, which is how somebody abroad keeps reminders on home time.
+- `callerDay` asks what day it is for the client making THIS request. The grid
+  draws its last column from the browser's own clock and never from a setting,
+  so judging its tap against a named zone re-breaks the write for exactly the
+  person who set one. And the stored zone is the last one ANY device reported,
+  so a desktop in Berlin would have its day decided by the phone that checked in
+  from Tokyo an hour ago.
+
+A caller that reports no zone gets the server's clock, which is what it got
+before this existed — so adding the rule moves no caller's day, and the fallback
+is pinned by a test rather than left to drift into something wider.
+
+The Discord button handler keeps `resolveTimeZone` (`adapter.today`) and is not
+an exception to any of this: a press arrives from Discord, so there is no device
+making the request and no header to read — the account is the only thing there
+is to ask. What it fixes is that the two paths now AGREE in the ordinary case,
+where they did not. Pressing Yes on Monday's reminder wrote the row while
+tapping Monday's cell in the browser answered 400, on the same account, the same
+day and the same storage, because one path resolved a zone and the other did
+not.
+
+**What this is NOT is one day of slack**, which is the shape the issue proposed
+and the arithmetic does not support. The spread is UTC−12 to UTC+14, and 26
+hours is wide enough for **two** calendar days at once: at 10:00 UTC,
+`Pacific/Kiritimati` is on the 17th while `Etc/GMT+12` is still on the 15th —
+and `Pacific/Niue` against Kiritimati, both inhabited, is the same two days. So
+`today + 1` is both too narrow at the edges and too wide everywhere else, since
+it accepts a genuinely future date from every caller on Earth to fix the ones it
+can reach. The guard stays exact; it is the day it is exact ABOUT that moved.
+`shared/test/notify.test.js` asserts the two-day gap directly, so the reasoning
+is checked rather than recorded.
+
+The export filenames still stamp the server's day, deliberately: nothing reads
+them back, and a `Content-Disposition` is not a claim about anybody's calendar.
+
 Two traps, both of which bit while this was written. `deliverAccount` used to
 re-derive the zone from `settings.notifyTimezone` for `dueReminders`, which was a
 SECOND place the clock was decided — and the two answers diverged the moment
@@ -1278,6 +1339,7 @@ Several layers, and they catch different things:
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
+| Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
 | Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |

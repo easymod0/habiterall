@@ -32,7 +32,9 @@ import {
   writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
 } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
-import { DEVICE_ZONE_HEADER, reportedZone } from '@habiterall/shared/notify.js';
+import {
+  DEVICE_ZONE_HEADER, callerDay, reportedZone,
+} from '@habiterall/shared/notify.js';
 import { log } from '@habiterall/shared/log.js';
 
 export const api = express.Router();
@@ -65,6 +67,22 @@ api.use((req, _res, next) => {
   }
   next();
 });
+
+/**
+ * What day it is for the client making this request.
+ *
+ * Every route that asks "is this today?" asks it of the CALLER, not of the
+ * process. `today()` is the container's calendar day, which is UTC in both
+ * compose files and therefore right for almost nobody: a user east of the
+ * server had the current column of their own grid refused as a future date
+ * for as many hours a day as the offset, and — because the same date clamps
+ * the summary anchor — a day they did record was scored as of the server's
+ * yesterday, so the streak sat still.
+ *
+ * Read from the header rather than from the stored zone, for the reason
+ * `callerDay` states: this is a fact about one device, not about the account.
+ */
+const callerToday = (req) => callerDay(req.get(DEVICE_ZONE_HEADER));
 
 /* ---------- statements ---------- */
 
@@ -281,7 +299,7 @@ api.put('/habits/:id/entries/:date', (req, res) => {
 
   if (!habit) throw httpError(404, 'habit not found');
   assertDate(date);
-  assertNotFuture(date, today());
+  assertNotFuture(date, callerToday(req));
 
   const parsed = parseEntry(habit, req.body, { UNSET, YES, SKIP });
 
@@ -316,8 +334,9 @@ api.get('/habits/:id/stats', (req, res) => {
   // Never compute past today, and never span more than MAX_RANGE_DAYS: the
   // stats passes allocate one element per day, so an unbounded range is a
   // trivial denial of service.
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : today();
-  const end = requestedEnd > today() ? today() : requestedEnd;
+  const now = callerToday(req);
+  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const end = requestedEnd > now ? now : requestedEnd;
 
   let start = DATE_RE.test(req.query.start ?? '') ? req.query.start : undefined;
   if (start) {
@@ -348,7 +367,7 @@ api.get('/overview', (req, res) => {
   // The dashboard can page back through history, so it asks for the window it
   // is actually showing. Without this the grid rendered empty cells for any
   // day outside the most recent fortnight — the entries were never fetched.
-  const now = today();
+  const now = callerToday(req);
   const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
   const end = requestedEnd > now ? now : requestedEnd;
   const start = addDays(end, -(days - 1));

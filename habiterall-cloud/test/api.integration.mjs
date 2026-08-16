@@ -122,6 +122,10 @@ const express = (await import('express')).default;
 const { api } = await import('../src/api.js');
 
 const overviewApp = express();
+// As the real server mounts it. This block was read-only until the caller's-day
+// checks below, and a PUT without it reaches `parseEntry` with no body at all —
+// which fails as a validation error and looks like a rule under test.
+overviewApp.use(express.json());
 // Enough of a session for `uid(req)`. The OIDC flow is browser-tested; what is
 // under test here is arithmetic behind the route.
 overviewApp.use((req, _res, next) => { req.session = { user: { id: alice } }; next(); });
@@ -278,6 +282,56 @@ ck('and junk is refused rather than stored', await zoneOf(alice) === 'Europe/Ber
 // it directly, and this asserts the ordinary path never strays.
 ck('one account\'s device says nothing about another\'s',
   await zoneOf(bob) === '', JSON.stringify(await zoneOf(bob)));
+
+/* ---------- and which day that device is ON ---------- */
+
+// The header decides more than where a reminder lands: every route that asks
+// "is this today?" asks it of the CALLER. `today()` is the container's day,
+// which is UTC in both compose files, so a user east of it had the current
+// column of their own grid refused as a future date — and, since the same date
+// clamps the summary anchor, a day they DID record scored as of the server's
+// yesterday. Personal's test/callerday.integration.mjs drives this against a
+// process pinned west; a cloud suite cannot move the process clock out from
+// under the rest of itself, so it asks the question that is true at every
+// instant on every machine instead: two callers, two answers.
+//
+// Etc/GMT+12 and Pacific/Kiritimati are 26 hours apart — the whole spread of
+// the Earth — so their calendar days ALWAYS differ, whatever the server's is.
+const WEST = 'Etc/GMT+12';
+const EAST = 'Pacific/Kiritimati';
+const dayIn = (zone) => new Intl.DateTimeFormat('en-CA', {
+  timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+}).format(new Date());
+
+ck('the two ends of the Earth are never on the same day',
+  dayIn(EAST) > dayIn(WEST), `${dayIn(EAST)} vs ${dayIn(WEST)}`);
+
+const asZone = (zone) => (path, init = {}) => fetch(`${overviewBase}${path}`, {
+  ...init,
+  headers: { 'Content-Type': 'application/json', 'X-Habiterall-Timezone': zone,
+    ...(init.headers ?? {}) },
+});
+const fromEast = asZone(EAST);
+const fromWest = asZone(WEST);
+
+const eastView = await fromEast('/api/overview?days=7').then((r) => r.json());
+const westView = await fromWest('/api/overview?days=7').then((r) => r.json());
+ck('the grid window ends on the day the CALLER is on',
+  eastView.end === dayIn(EAST) && westView.end === dayIn(WEST),
+  `east ${eastView.end}, west ${westView.end}`);
+
+// The write guard, from both sides of one date. The east caller's today is the
+// west caller's tomorrow, so one date is simultaneously recordable and
+// refusable depending on who asks — which is the whole claim.
+const eastToday = dayIn(EAST);
+const ownDay = await fromEast(`/api/habits/${habitId}/entries/${eastToday}`,
+  { method: 'PUT', body: JSON.stringify({ value: 9 }) });
+const unreached = await fromWest(`/api/habits/${habitId}/entries/${eastToday}`,
+  { method: 'PUT', body: JSON.stringify({ value: 9 }) });
+ck('a caller may record the day it is on', ownDay.status === 200,
+  `HTTP ${ownDay.status} for ${eastToday}`);
+ck('...and may not record a day it has not reached', unreached.status === 400,
+  `HTTP ${unreached.status} for ${eastToday}`);
 
 overviewServer.close();
 // The rows above would otherwise be counted by the checks that follow.
