@@ -494,7 +494,20 @@ function writeCache(values) {
   }
   // After the store, and outside its try: a setting the browser APPLIES to
   // itself has to follow the value whether or not localStorage would take it.
-  for (const fn of appliers) fn(values);
+  //
+  // Each one guarded, for the reason `adopt`'s listener loop gives two
+  // functions down — "a listener must not break a save". This loop sits on the
+  // chokepoint EVERY write goes through, so without it an applier that threw
+  // turned a successful server write into a rejected `save()` or `set()`,
+  // and `app.js`'s theme handler has no `.catch()`, so it would be an
+  // unhandled rejection with no toast.
+  for (const fn of appliers) {
+    try {
+      fn(values);
+    } catch {
+      /* an applier must not break a save either */
+    }
+  }
 }
 
 /** @type {((values: Record<string, any>) => void)[]} */
@@ -516,7 +529,14 @@ const appliers = [];
  */
 export function onApply(fn) {
   appliers.push(fn);
-  fn(load());
+  // Guarded like the loop in `writeCache`, and for the same reason: this is a
+  // registration made during boot, so a throw here escapes `start()` and takes
+  // the whole app to the error view over a preference that failed to paint.
+  try {
+    fn(load());
+  } catch {
+    /* an applier must not break the boot either */
+  }
 }
 
 /**

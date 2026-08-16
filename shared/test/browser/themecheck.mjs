@@ -399,6 +399,122 @@ try {
   await send('Page.removeScriptToEvaluateOnNewDocument',
     { identifier: putStub.identifier }, sessionId);
 
+  /* ---------- a press while the migration is still writing ---------- */
+  //
+  // The window a guard could not close: `migrateTheme` checks `userChose` and
+  // then issues its OWN `save`, so a press landing inside that await was a
+  // second writer on one key. Measured both ways before this — the press
+  // landing in the account while the screen and the settings cache still held
+  // the old value, and the press discarded outright — and `toggleTheme`
+  // answered `{ok: true}` for both, so nothing was said.
+  //
+  // The fix is not a fourth flag: `toggleTheme` awaits the migration's promise,
+  // so there is one writer at a time. The press still paints immediately.
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  const slowPut = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      // Only the FIRST write is held — the migration's. Delaying both equally
+      // made the test unable to discriminate: the press's own PUT was slowed by
+      // the same 2s, so it landed last and the account read correctly whether
+      // or not toggleTheme waited for anything. (No backticks: template literal.)
+      let held = false;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (url.includes('/api/settings') && (init?.method ?? 'GET') !== 'GET' && !held) {
+          held = true;
+          return new Promise((r) => setTimeout(() => r(real(input, init)), 2000));
+        }
+        return real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);        // inside the migration's held PUT
+
+  const raced = await ev(`(async()=>{
+    const { toggleTheme } = await import('/shared/ui/theme.js');
+    const before = document.documentElement.dataset.theme;
+    const painted = [];
+    const r = await toggleTheme();
+    painted.push(document.documentElement.dataset.theme);
+    await new Promise((res) => setTimeout(res, 2500));   // let the migration land
+    const stored = await (await fetch('/api/settings',
+      { credentials: 'same-origin' })).json();
+    return { before, result: r, afterPress: painted[0],
+             settled: document.documentElement.dataset.theme,
+             account: stored.theme ?? null };
+  })()`);
+  ck('a press during the migration\'s write is the one that wins',
+    raced.account === raced.settled && raced.account !== 'dark',
+    JSON.stringify(raced));
+  ck('and the screen agrees with the account afterwards',
+    raced.settled === raced.account, JSON.stringify(raced));
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: slowPut.identifier }, sessionId);
+
+  /* ---------- a press that only reached the outbox keeps the key ---------- */
+  //
+  // `save` answers `{ok: true, offline: true}` having written the settings
+  // cache and queued the PUT — which is NOT two durable homes for the answer:
+  // the cache is replaced wholesale by the next `init()`, and the outbox drops
+  // a replayed 4xx other than 401/403, which includes a 429 from the write
+  // limiter. So deleting the key on an offline save can lose the pre-setting
+  // choice for good, through two ordinary failures in sequence.
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  // The read is refused too, so the migration bails and the key is still there
+  // to be protected — otherwise it has already migrated legitimately and there
+  // is nothing left for the press to lose, which is how a first version of this
+  // check tested nothing.
+  const offlineStub = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (!url.includes('/api/settings')) return real(input, init);
+        return (init?.method ?? 'GET') === 'GET'
+          ? Promise.resolve(new Response('{}', { status: 429 }))
+          : Promise.reject(new TypeError('Failed to fetch'));
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+
+  const offlinePress = await ev(`(async()=>{
+    const { toggleTheme } = await import('/shared/ui/theme.js');
+    const before = localStorage.getItem('habiterall-theme');
+    const r = await toggleTheme();
+    return { before, result: r, legacy: localStorage.getItem('habiterall-theme') };
+  })()`);
+  ck('a press that only reached the outbox keeps the pre-setting key',
+    offlinePress.before === 'dark' && offlinePress.legacy === 'dark',
+    JSON.stringify(offlinePress));
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: offlineStub.identifier }, sessionId);
+
+  /* ---------- an applier that throws must not break a save ---------- */
+  const applierThrew = await ev(`(async()=>{
+    const s = await import('/shared/ui/settings.js');
+    s.onApply(() => { throw new Error('applier boom'); });
+    const r = await s.save('dayOrder', 'newest-right').catch((e) => ({ threw: e.message }));
+    return r;
+  })()`);
+  ck('a throwing applier does not reject the write it followed',
+    applierThrew?.threw === undefined, JSON.stringify(applierThrew));
+
   console.log(fails === 0 ? '\nALL THEME CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

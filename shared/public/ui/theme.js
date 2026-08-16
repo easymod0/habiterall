@@ -162,7 +162,28 @@ export function initTheme({ onLabel } = {}) {
  * dialog showing "Follow this device" over a page the user had set to dark,
  * which is the `historyGranularity` trap in another costume.
  */
-export async function migrateTheme() {
+export function migrateTheme() {
+  migrating = runMigration();
+  return migrating;
+}
+
+/**
+ * The migration's own promise, so a press can WAIT for it instead of racing it.
+ *
+ * This is the structural half of the fix, and it replaces a fourth boolean.
+ * `userChose` closed the window between the read and the guard; it could not
+ * close the one between the guard and the migration's own `await save(...)`,
+ * because that is a second writer already in flight. Measured, a press landing
+ * there either left the account holding the press while the screen and the
+ * settings cache held the old value, or was discarded outright — and
+ * `toggleTheme` answered `{ok: true}` both times, so nothing was said.
+ *
+ * One writer at a time is the rule. The press still PAINTS immediately; only
+ * its write queues behind the migration's.
+ */
+let migrating = null;
+
+async function runMigration() {
   const legacy = legacyChoice();
   // No legacy key means there is nothing this device can say that the account
   // cannot; the flag is moot and the read below is not worth making.
@@ -189,22 +210,15 @@ export async function migrateTheme() {
 
 
   // The user got there first — their press is a more recent answer than a key
-  // left over from a previous version, and it has already been saved. Bailing
-  // here is what stops the migration overwriting it: the read above is a round
-  // trip, and the button is enabled throughout boot.
+  // left over from a previous version. Checked immediately before the write
+  // rather than only after the read, so the migration never becomes the second
+  // writer: `toggleTheme` awaits this promise, so if the press has been
+  // registered at all, this must not issue a PUT of its own.
   if (userChose) return;
 
   if (!Object.hasOwn(stored, 'theme')) {
     const result = await save('theme', legacy);
-    // A refusal keeps the key, so nothing is deleted that was refused.
-    //
-    // Offline is NOT a refusal and is deliberately allowed through: `save`'s
-    // offline branch answers `{ok: true, offline: true}` having written the
-    // settings cache and queued the PUT, so the answer is held in two places
-    // that both outlive this page. An earlier comment here claimed `save`
-    // reports `{ok: false}` when offline — it does not, and the invariant is
-    // the weaker "not deleted while it is only in localStorage".
-    if (!result?.ok) return;
+    if (!stored$ok(result)) return;
   }
   // ONLY once something IS stored — not merely once the read came back. An
   // earlier version set it above the read's failure returns; this one set it
@@ -217,7 +231,29 @@ export async function migrateTheme() {
   try {
     localStorage.removeItem(LEGACY_KEY);
   } catch { /* nothing to clean up */ }
-  apply(choice());
+  // Not if the user pressed while this was in flight — `save`'s own cache
+  // adoption has already repainted their choice, and this would paint over it.
+  if (!userChose) apply(choice());
+}
+
+/**
+ * Did a write actually reach the server?
+ *
+ * NOT `result.ok`, which is also what `save` answers offline — `{ok: true,
+ * offline: true}`, having written the settings cache and queued the PUT. An
+ * earlier comment here called that two homes for the answer. It is not: the
+ * cache is replaced wholesale by the next `init()` (`settings.js`'s
+ * `cache = sanitise(await res.json())`), and the outbox drops a replayed 4xx
+ * other than 401/403 — which includes a 429 from the write limiter. So the
+ * chain "PUT fails at the network layer, key deleted, replay gets a 429,
+ * next boot overwrites the cache" loses the pre-setting choice for good, which
+ * is the one thing this whole function exists to prevent.
+ *
+ * The key is cheap to keep and it is the only durable copy, so it stays until
+ * the server has it.
+ */
+function stored$ok(result) {
+  return Boolean(result?.ok) && !result?.offline;
 }
 
 /**
@@ -229,21 +265,37 @@ export async function migrateTheme() {
  *   all, so silently reverting at some arbitrary later cache write is new.
  */
 export async function toggleTheme() {
+  // Computed before `userChose` is set, so the step is relative to what is on
+  // SCREEN — which, before the migration lands, is the legacy value.
   const next = nextChoice();
   // The press is the user's answer, so the pre-setting key stops speaking for
-  // this device from here — before the paint, or `apply` reads it again.
+  // this device from here. In memory only: the key itself is the sole durable
+  // copy until the server has the value, and `removeItem` can throw in private
+  // browsing, which is why the flag is the half that has to hold.
   userChose = true;
-  try {
-    localStorage.removeItem(LEGACY_KEY);
-  } catch { /* private browsing; `userChose` covers it either way */ }
 
-  // Paint first: `save` waits for the server and queues when offline, and a
-  // press that does nothing for a second reads as broken.
+  // Paint first: everything below waits on the network, and a press that does
+  // nothing for a second reads as broken.
   apply(next);
 
+  // Behind the migration, never beside it. It may already have issued a PUT
+  // for the legacy value; two writers on one key is how a press ended up
+  // discarded, or landed while the cache still held the old value.
+  if (migrating) {
+    try {
+      await migrating;
+    } catch { /* its failure is its own business; the press still stands */ }
+  }
+
   const result = await save('theme', next);
-  // Put the screen back to what is actually stored rather than leaving it
-  // showing a value the server refused.
-  if (!result?.ok) apply(choice());
+  if (stored$ok(result)) {
+    try {
+      localStorage.removeItem(LEGACY_KEY);
+    } catch { /* nothing to clean up */ }
+  } else if (!result?.ok) {
+    // Put the screen back to what is actually stored rather than leaving it
+    // showing a value the server refused.
+    apply(choice());
+  }
   return result;
 }
