@@ -210,5 +210,23 @@ class AppSettingsDefaultsTest {
             .find(kotlin!!)?.groupValues?.get(1)
 
         assertEquals(declared, mine)
+
+        // ...and that it is actually SENT. The constant alone passing was the
+        // gap: deleting the whole `addInterceptor` block left the header
+        // unspelled on every request and this test green, so the phone would
+        // silently stop reporting and an account following its device would
+        // quietly go back to the server's clock.
+        //
+        // Read from the source because the interceptor is built into a private
+        // OkHttpClient at construction; standing an HTTP server up in a unit
+        // test to observe one header is a lot of machinery for a line.
+        assertTrue(
+            "Api.kt declares DEVICE_ZONE_HEADER but no interceptor sends it",
+            Regex("""addInterceptor[\s\S]{0,900}?DEVICE_ZONE_HEADER""").containsMatchIn(kotlin),
+        )
+        assertTrue(
+            "the interceptor should read the phone's own zone",
+            Regex("""TimeZone\.getDefault\(\)\.id""").containsMatchIn(kotlin),
+        )
     }
 }

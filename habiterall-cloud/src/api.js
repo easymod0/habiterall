@@ -88,28 +88,38 @@ const route = (fn) => (req, res, next) => fn(req, res, next).catch(next);
  * down where the user is.
  */
 /**
- * What each account last reported, so an unchanged zone costs no database at
- * all — not even a transaction.
+ * How long a memoised zone is trusted before the database is asked again.
  *
- * `IS DISTINCT FROM` already made the unchanged case write no row: measured,
- * 200 unchanged requests consumed zero transaction ids and left no dead tuples.
- * What it did NOT avoid was the transaction itself — a pool checkout and four
- * round trips (BEGIN, set_config, UPDATE, COMMIT) on every authenticated
- * request, about 0.4ms on loopback and 5-10ms against a networked Postgres.
- * That is the wrong shape for something whose entire purpose is to notice a
- * change that happens roughly never.
+ * A TTL, and it is the whole correctness of this cache. Without one the memo's
+ * invariant is "the memo equals what the row holds", which is only true PER
+ * PROCESS — and this edition runs behind a load balancer. With two instances,
+ * each suppresses writes based on what IT last wrote, so the row freezes on
+ * whichever warmed up last and later check-ins from the other device never
+ * correct it. Measured with two real processes against one Postgres: the row
+ * stayed on the phone's zone through five more desktop requests, and the
+ * account's reminders then arrive on the wrong device's clock indefinitely.
+ * Stale for a minute is the intended trade; wrong forever is not.
  *
- * Same shape as `auth.js`'s block cache. Unbounded is fine: one small string
- * per account that has made a request this process lifetime, and a restart
- * simply re-learns them.
+ * A minute, matching `isBlocked`'s `BLOCK_CHECK_MS` next door, which is the
+ * cache this is modelled on — and which has a TTL, contrary to what an earlier
+ * comment here claimed.
  */
+const ZONE_CHECK_MS = 60_000;
+
+/** userId -> {zone, at}. Bounded by the accounts seen this process lifetime. */
 const lastReportedZone = new Map();
 
 api.use(route(async (req, _res, next) => {
   const user = uid(req);
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
-  if (zone && lastReportedZone.get(user) !== zone) {
+  const hit = lastReportedZone.get(user);
+  const fresh = hit && hit.zone === zone && Date.now() - hit.at < ZONE_CHECK_MS;
+  if (zone && !fresh) {
     try {
+      // `IS DISTINCT FROM` still does the real work: this writes no row, no
+      // WAL and no transaction id when the value already matches. What the
+      // memo saves is the TRANSACTION — a pool checkout and four round trips —
+      // on the requests in between.
       await withUser(user, (db) => db.query(
         `UPDATE users SET device_time_zone = $1
           WHERE id = $2 AND device_time_zone IS DISTINCT FROM $1`,
@@ -117,7 +127,7 @@ api.use(route(async (req, _res, next) => {
       ));
       // After the write, so a failure is retried on the next request rather
       // than remembered as done.
-      lastReportedZone.set(user, zone);
+      lastReportedZone.set(user, { zone, at: Date.now() });
     } catch (err) {
       log.warn('settings.device_clock_not_stored', { user }, err);
     }

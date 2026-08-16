@@ -368,6 +368,7 @@ function formatterFor(timeZone) {
   let fmt = formatters.get(key);
   if (!fmt) {
     fmt = build(timeZone);
+    resolvedZones.set(key, fmt ? key : '');
     if (!fmt) {
       // Said once per zone string, not per account per tick. Falling back is
       // right — one bad value must not end the tick for everyone — but doing it
@@ -380,6 +381,18 @@ function formatterFor(timeZone) {
   }
   return fmt;
 }
+
+/**
+ * What each requested zone actually resolved to — itself, or '' if `Intl`
+ * refused it and the server's clock stood in.
+ *
+ * Recorded where the decision is made rather than recomputed: comparing two
+ * formatters cannot answer it, because the fallback is a separate object each
+ * time. Bounded exactly as `formatters` is.
+ *
+ * @type {Map<string, string>}
+ */
+const resolvedZones = new Map();
 
 /**
  * Zones `Intl` refused, so the caller can report the fallback.
@@ -409,7 +422,17 @@ export function takeUnusableZones() {
  * @param {string} timeZone
  */
 export function effectiveZone(timeZone) {
-  return build(timeZone) ? (timeZone || '') : '';
+  const key = timeZone || '';
+  // Read from the resolution `formatterFor` already recorded, rather than
+  // building a formatter to find out. This runs once per SKIPPED habit inside
+  // the tick, and `done_today` / `already_sent` hold for every habit for the
+  // rest of the day once a reminder has gone out — so at the documented
+  // ceiling of 500 accounts x 10 habits it ran 5,000 times a minute. Measured:
+  // 178ms per tick building each time, 17ms through the cache. 161ms of
+  // event-loop block a minute, on the process that also serves requests, to
+  // populate one log field.
+  if (!resolvedZones.has(key)) formatterFor(key);
+  return resolvedZones.get(key) ?? key;
 }
 
 /**

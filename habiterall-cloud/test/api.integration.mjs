@@ -232,6 +232,53 @@ ck('and describes a habit exactly as the personal edition does',
   JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),
   Object.keys(exported ?? {}).sort().join(','));
 
+/* ---------- the device-clock middleware ---------- */
+//
+// The whole reporting half of `notifyTimezone: 'auto'` — and until this, every
+// piece of it was deletable with the suite green: the middleware, the web
+// client's header and the phone's interceptor. Only the server RULE was
+// covered, which is the half that was never wrong.
+//
+// It runs on this app because the middleware sits at the top of the same
+// router, and `uid(req)` is satisfied by the fake session above.
+
+const zoneOf = (id) => withUser(id, (db) =>
+  db.query(`SELECT device_time_zone FROM users WHERE id = $1`, [id])
+    .then((r) => r.rows[0]?.device_time_zone ?? null));
+
+await fetch(`${overviewBase}/api/habits`, {
+  headers: { 'X-Habiterall-Timezone': 'Asia/Tokyo' },
+});
+ck('a header on an ordinary request records the device clock',
+  await zoneOf(alice) === 'Asia/Tokyo', JSON.stringify(await zoneOf(alice)));
+
+// It is stored on `users`, NOT in the settings blob — the distinction the
+// whole design rests on, because it is what keeps `auto` reversible and keeps
+// a device's zone out of a backup.
+const settingsBlob = await withUser(alice, (db) =>
+  db.query(`SELECT settings FROM users WHERE id = $1`, [alice])
+    .then((r) => JSON.stringify(r.rows[0]?.settings ?? {})));
+ck('and not in the settings blob, which is what a backup carries',
+  !settingsBlob.includes('Asia/Tokyo'), settingsBlob);
+
+await fetch(`${overviewBase}/api/habits`, {
+  headers: { 'X-Habiterall-Timezone': 'Europe/Berlin' },
+});
+ck('a device that moves is followed', await zoneOf(alice) === 'Europe/Berlin',
+  JSON.stringify(await zoneOf(alice)));
+
+for (const junk of ['auto', 'Moon/Base', 'x'.repeat(200), "'; DROP TABLE users;--"]) {
+  await fetch(`${overviewBase}/api/habits`, { headers: { 'X-Habiterall-Timezone': junk } });
+}
+ck('and junk is refused rather than stored', await zoneOf(alice) === 'Europe/Berlin',
+  JSON.stringify(await zoneOf(alice)));
+
+// Bob's row must be untouched by anything Alice's device says. The write runs
+// under `withUser`, so RLS is what guarantees this; the tenancy suite attacks
+// it directly, and this asserts the ordinary path never strays.
+ck('one account\'s device says nothing about another\'s',
+  await zoneOf(bob) === '', JSON.stringify(await zoneOf(bob)));
+
 overviewServer.close();
 // The rows above would otherwise be counted by the checks that follow.
 await withUser(alice, (db) =>

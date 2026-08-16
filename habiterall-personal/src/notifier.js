@@ -75,7 +75,9 @@ function deviceZone() {
   try {
     return String(q.deviceClock.get()?.time_zone ?? '');
   } catch {
-    return '';                 // an older database, before the table existed
+    // Defensive only: `db.js` creates the table at import and `db.prepare` runs
+    // at module load, so a missing table would have thrown long before this.
+    return '';
   }
 }
 
