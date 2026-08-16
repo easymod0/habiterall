@@ -273,9 +273,10 @@ function render(stats, entries) {
   // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
   // says "Completion calendar" reads as a serial number.
   //
-  // Every other range readout in the app goes through `formatStamp`, including
-  // `windowedChart`'s — which used to show the raw bucket key, so this card's
-  // sibling read `2026-07-03 → 2026-08-16` above an axis saying `Jul 3, 2026`.
+  // Written, not ISO. Every range readout goes through one of the two
+  // formatters now, including `windowedChart`'s — which used to show the raw
+  // bucket key, so a card's header read `2026-07-03 → 2026-08-16` above an axis
+  // saying `Jul 3, 2026`.
   navLabel.textContent =
     `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
     `${formatDateShort(fromISOLocal(calLast))}`;

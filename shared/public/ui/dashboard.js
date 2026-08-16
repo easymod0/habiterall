@@ -57,7 +57,6 @@ const GRID_DAYS_MEDIUM = 10;  // tablets, where 14 would crush the habit name
 // whatever the browser was set to, in an app whose amount dialog already used
 // the browser's own locale.
 
-
 /**
  * How many day columns fit without squeezing the habit name out of existence.
  *

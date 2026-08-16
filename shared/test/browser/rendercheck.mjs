@@ -119,7 +119,11 @@ check('height fits 5 rows', Number(svg.attrs.height) === 6 + 5*30 + 6, svg.attrs
 const titles = [];
 svg.walk(n => { if (n.name === 'title') titles.push(n.text); });
 check('every bar has a tooltip', titles.length === 5, String(titles.length));
-check('tooltip names dates', /\d{4}-\d{2}-\d{2}/.test(titles[0] ?? ''), titles[0] ?? '');
+// The dates are written, not ISO — the row beside them is too, and one card
+// showing both conventions is what this change exists to end. Asserted as "it
+// names two dates and a length" rather than by matching a locale's format.
+check('tooltip names a length and two dates',
+  /\d+ days: .+ to .+/.test(titles[0] ?? ''), titles[0] ?? '');
 
 /* --- edge cases --- */
 const empty = streakChart([], '#8b5cf6', { limit: 5 });

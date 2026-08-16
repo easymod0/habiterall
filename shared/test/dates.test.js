@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const {
-  formatDateLong, formatDateShort, formatStamp, fromISOLocal, iso, monthLabels,
-  weekdayLetters, weekdayNames,
+  estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
+  iso, monthLabels, weekdayLetters, weekdayNames,
 } = await import('../public/ui/dates.js');
 
 /**
@@ -86,9 +86,36 @@ test('every weekday width is indexed the same way, and narrow is one character',
   }
   assert.deepEqual(weekdayLetters(), weekdayNames('narrow'),
     'the letters ARE the narrow names — one list, not two');
-  for (const letter of weekdayNames('narrow')) {
-    assert.equal([...letter].length, 1, `narrow "${letter}" is not one character`);
+
+  // NOT "narrow is one character". It is in en, de, fr, ru, pl, fi, ja and id,
+  // and it is NOT in fil-PH (`Lin Lun Mar`), ca-ES (`dg. dl.`), vi-VN (`CN T2`)
+  // or hu-HU (`Sz`) — so an earlier version of this assertion failed outright
+  // on those developers' machines while passing in CI, which is the same
+  // English-runtime blindness this file exists to remove.
+  //
+  // What is actually true, and what the layouts rely on, is that narrow is
+  // never WIDER than short. The seven-column grid header is measured rather
+  // than assumed: `responsive.mjs` covers it at 360px.
+  const narrow = weekdayNames('narrow');
+  const short = weekdayNames('short');
+  for (let i = 0; i < 7; i++) {
+    assert.ok([...narrow[i]].length <= [...short[i]].length,
+      `narrow "${narrow[i]}" is wider than short "${short[i]}"`);
   }
+});
+
+test('a label width is estimated generously, never meanly', () => {
+  // There is no text metric without a DOM and two suites drive charts.js with
+  // a fake one, so a chart reserving room for a label has to estimate. Being
+  // over costs a few pixels of gutter; being under costs a clipped word —
+  // measured, `domingo` and `Jumamosi` ran off the month grid before this.
+  assert.ok(estimateTextWidth('Mon', 10.5) > 0);
+  assert.ok(estimateTextWidth('Jumamosi', 10.5) > estimateTextWidth('Mon', 10.5));
+  // Scripts wider than Latin per character, which is the class that was
+  // under-counted: a square CJK glyph and a broad Arabic one.
+  assert.ok(estimateTextWidth('月', 10.5) > estimateTextWidth('M', 10.5));
+  assert.ok(estimateTextWidth('أ', 10.5) > estimateTextWidth('a', 10.5));
+  assert.equal(estimateTextWidth('', 10.5), 0);
 });
 
 test('a bucket key is written for a human, and an unknown one is not invented', () => {
@@ -123,30 +150,49 @@ test('the formatters are built once, not per call', () => {
 test('no module hardcodes a weekday or month list any more', () => {
   // The check `weekcheck.mjs` cannot make. It reads its expected captions from
   // this module now, so it is locale-agnostic — and therefore blind to a
-  // hardcoded ENGLISH array when the suite itself runs in English, which is
+  // hardcoded array when the suite itself runs in the same locale, which is
   // every CI run. Reading the source is the only thing that catches a
-  // reintroduction, and it is the pattern `toggle.test.js` already uses to pin
-  // `values.js` against `toggle.js`'s own declaration.
+  // reintroduction; it is the pattern `toggle.test.js` uses to pin `values.js`.
   //
-  // There were five: two in `ui/dashboard.js`, three in `charts.js`, all
-  // silently English whatever the browser was set to.
-  const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
-  const suspects = [
-    ['charts.js', readFileSync(join(root, 'charts.js'), 'utf8')],
-    ['ui/dashboard.js', readFileSync(join(root, 'ui', 'dashboard.js'), 'utf8')],
-    ['ui/detail.js', readFileSync(join(root, 'ui', 'detail.js'), 'utf8')],
-  ];
+  // Shaped by LENGTH, not by English words. A first version looked for two
+  // adjacent quoted English day names and a review walked straight past it:
+  // `['S','M','T','W','T','F','S']` — the exact array this change deleted from
+  // `charts.js` — has no such pair, and neither would a translated one. Seven
+  // or twelve short quoted strings in an array literal is what a weekday or
+  // month list IS, whatever language it is in.
+  const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
+  const files = readdirSync(dir, { recursive: true })
+    .filter((f) => String(f).endsWith('.js'))
+    .map((f) => join(dir, String(f)))
+    .filter((f) => statSync(f).isFile() && !f.endsWith(join('ui', 'dates.js')));
+  assert.ok(files.length > 10, `only found ${files.length} modules to scan`);
 
-  // Two adjacent quoted English day or month names is an array; one on its own
-  // is prose, a settings option, or a `weekStart` value.
-  const DAYS = 'Sun|Mon|Tue|Wed|Thu|Fri|Sat|Su|Mo|Tu|We|Th|Fr|Sa'
-    + '|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
-  const MONTHS = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
-  const pattern = new RegExp(`'(${DAYS}|${MONTHS})'\\s*,\\s*'(${DAYS}|${MONTHS})'`);
+  // 7 or 12 elements, each a quoted string short enough to be a label.
+  //
+  // A quote CLASS, not a backreference. `\1` was the first version and it
+  // silently failed on the twelve-item branch: the group is written twice in
+  // the pattern, so the second copy is group 3 and `\1` pointed at the wrong
+  // one — the month array went straight through. Matching `'x"` too is a
+  // non-issue here; this is a detector, not a parser.
+  const item = String.raw`['"][^'"\n]{1,12}['"]`;
+  const list = new RegExp(
+    String.raw`\[\s*(?:${item}\s*,\s*){6}${item}\s*,?\s*\]`      // seven
+    + '|'
+    + String.raw`\[\s*(?:${item}\s*,\s*){11}${item}\s*,?\s*\]`, // twelve
+    's');
 
-  for (const [name, src] of suspects) {
-    const hit = pattern.exec(src);
+  // Comments stripped first, which fixes a miss and a false positive at once:
+  // a `// sunday` between two elements defeated the separator, and a sentence
+  // like "two ambiguous 'Jan', 'Jan' columns" in prose matched when it should
+  // not. Crude is fine — this is a detector, not a parser.
+  const code = (src) => src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  for (const file of files) {
+    const hit = list.exec(code(readFileSync(file, 'utf8')));
     assert.equal(hit, null,
-      `${name} names weekdays or months itself (${hit?.[0]}) — use ui/dates.js`);
+      `${file.slice(dir.length + 1)} has a 7- or 12-item label list `
+      + `(${hit?.[0].replace(/\s+/g, ' ').slice(0, 60)}) — use ui/dates.js`);
   }
 });

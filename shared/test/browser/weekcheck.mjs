@@ -37,9 +37,11 @@ globalThis.document = {
   createElement: (name) => new FakeNode(name),
 };
 
-const { weekdayChart, weekdayMonthChart } = await import(sharedPublic('charts.js'));
+const { frequencyChart, historyChart, weekdayChart, weekdayMonthChart } =
+  await import(sharedPublic('charts.js'));
 const { calendarWindow, weekdayIndex } = await import(sharedPublic('ui/calendar.js'));
-const { weekdayNames } = await import(sharedPublic('ui/dates.js'));
+const { estimateTextWidth, formatStamp, weekdayNames } =
+  await import(sharedPublic('ui/dates.js'));
 
 let fails = 0;
 const check = (label, cond, extra = '') => {
@@ -62,8 +64,14 @@ for (const weekStart of ['sunday', 'monday']) {
   const svg = weekdayChart(days, '#3b82f6', { width: 700, weekStart });
   const nodes = collect(svg);
 
-  // The captions, left to right.
-  const labels = nodes.filter((n) => n.name === 'text' && /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/.test(n.text ?? ''))
+  // The captions, left to right. Matched against the runtime's OWN short
+  // names rather than an English list: `charts.js` emits `Intl` strings now, so
+  // an English regex here made this whole suite fail on a non-English machine
+  // while passing in CI — the opposite of what reading from `ui/dates.js` was
+  // supposed to achieve.
+  const shortNames = weekdayNames('short');
+  const longNames = weekdayNames('long');
+  const labels = nodes.filter((n) => n.name === 'text' && shortNames.includes(n.text ?? ''))
     .map((n) => ({ x: Number(n.attrs.x), label: n.text }))
     .sort((a, b) => a.x - b.x);
 
@@ -72,23 +80,20 @@ for (const weekStart of ['sunday', 'monday']) {
   const titles = nodes.filter((n) => n.name === 'title')
     .map((n) => n.text);
 
-  const expected = weekStart === 'monday'
-    ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-    : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  // The ORDER is the oracle and is restated on purpose — it is the thing under
+  // test. The NAMES are derived, because they are not.
+  const order = weekStart === 'monday' ? [1, 2, 3, 4, 5, 6, 0] : [0, 1, 2, 3, 4, 5, 6];
+  const expected = order.map((wd) => shortNames[wd]);
 
   check(`${weekStart}: the captions run in the account's week order`,
     labels.map((l) => l.label).join(',') === expected.join(','),
     labels.map((l) => l.label).join(','));
 
-  // Sunday's bar carries 0 completions, Monday's 1, and so on. If the labels
-  // rotated and the bars did not, this is where it shows.
-  const FULL = { Sun: 'Sunday', Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday',
-    Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
-  const N = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
-  const paired = expected.every((short, i) => {
-    const full = FULL[short];
-    return titles[i] === `${full}: ${N[full]}/6`;
-  });
+  // Sunday's bar carries 0 completions, Monday's 1, and so on — the fixture
+  // sets `completed = weekday`, so the COUNT is the weekday and a mispaired bar
+  // is arithmetic rather than a name lookup. If the labels rotated and the bars
+  // did not, this is where it shows.
+  const paired = order.every((wd, i) => titles[i] === `${longNames[wd]}: ${wd}/6`);
   check(`${weekStart}: each bar carries ITS OWN weekday's count`, paired,
     titles.join(' | '));
 }
@@ -107,21 +112,23 @@ for (const weekStart of ['sunday', 'monday']) {
   const svg = weekdayMonthChart(months, '#3b82f6', { width: 700, weekStart });
   const titles = collect(svg).filter((n) => n.name === 'title').map((n) => n.text);
 
-  const order = weekStart === 'monday'
-    ? ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-    : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const shortNames = weekdayNames('short');
+  const longNames = weekdayNames('long');
+  const order = weekStart === 'monday' ? [1, 2, 3, 4, 5, 6, 0] : [0, 1, 2, 3, 4, 5, 6];
 
   // The NAME and the NUMBER together. Checking the name alone passes when the
   // rows keep their captions and read their data positionally — which is one
   // of the mutations this suite exists to catch, and it slipped through the
   // first version of this check.
-  const N = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
-  const ok = order.every((name, r) => {
-    const n = N[name];
+  // The month is written the way the chart writes it — `formatStamp`, the same
+  // call the card's range readout uses — so this cannot pin one locale either.
+  const when = formatStamp('2026-08');
+  const ok = order.every((wd, r) => {
+    const name = longNames[wd];
     // A rate of 0 draws the empty ring, whose title carries no percentage.
-    const want = n === 0
-      ? `2026-08 ${name}: 0 of 6`
-      : `2026-08 ${name}: ${n} of 6 (${Math.round((n / 6) * 100)}%)`;
+    const want = wd === 0
+      ? `${when} ${name}: 0 of 6`
+      : `${when} ${name}: ${wd} of 6 (${Math.round((wd / 6) * 100)}%)`;
     return titles[r] === want;
   });
   check(`${weekStart}: each row carries ITS OWN weekday's number`, ok,
@@ -137,19 +144,20 @@ for (const weekStart of ['sunday', 'monday']) {
   // anywhere else — and restating what the code says is how a mirror test comes
   // to agree with itself. The two lists are indexed by `getDay()`, which is
   // what lets a full name be turned into the caption that should sit beside it.
-  const shortNames = weekdayNames('short');
-  const longNames = weekdayNames('long');
-  const SHORT = Object.fromEntries(
-    longNames.map((full, i) => [full, shortNames[i]]));
-
   const axis = collect(svg)
     .filter((n) => n.name === 'text' && shortNames.includes(n.text ?? ''))
     .map((n) => ({ y: Number(n.attrs.y), label: n.text }))
     .sort((a, b) => a.y - b.y)
     .map((n) => n.label);
+  // `order` is weekday NUMBERS, so the caption for row r is simply the short
+  // name of the weekday that row is supposed to be. An earlier version kept a
+  // long-name-to-short-name map and looked it up with a hardcoded English list,
+  // so every lookup was `undefined` and the check compared '' with '' — passing
+  // in English and failing everywhere else, for the wrong reason.
+  const want = order.map((wd) => shortNames[wd]);
   check(`${weekStart}: the drawn row captions match the rows' own data`,
-    axis.join(',') === order.map((n) => SHORT[n]).join(','),
-    `${axis.join(',')} (want ${order.map((n) => SHORT[n]).join(',')})`);
+    axis.join(',') === want.join(','),
+    `${axis.join(',')} (want ${want.join(',')})`);
 }
 
 /* ---------- the calendar's own agreement ---------- */
@@ -176,18 +184,70 @@ for (const weekStart of ['sunday', 'monday']) {
 // and nothing else in the suite would notice.
 const { calendarChart } = await import(sharedPublic('charts.js'));
 
-for (const [weekStart, want] of [['sunday', ['S', 'T']], ['monday', ['M', 'W']]]) {
+// Derived, not the English `['S','T']` / `['M','W']` that stood here: the
+// captions are `Intl`'s narrow names now, so a literal pair failed on any
+// non-English machine — and narrow is not even one character everywhere
+// (fil-PH gives `Lin`, hu-HU `Sz`), which the filter below also has to allow.
+// The ROWS are still the oracle: rows 0 and 2 of the account's week.
+const narrowNames = weekdayNames('narrow');
+for (const [weekStart, rows] of [['sunday', [0, 2]], ['monday', [1, 3]]]) {
+  const want = rows.map((wd) => narrowNames[wd]);
   const svg = calendarChart({}, '#3b82f6',
     { type: 'boolean', target_type: 'at_least', target_value: 0 },
     { weeks: 4, endDate: '2026-08-12', weekStart });
 
-  // The row captions are the only single-letter texts at x=0.
+  // The row captions are the texts at x=0, and they are whatever `narrow` is
+  // in this locale — not necessarily one character.
   const labels = collect(svg)
-    .filter((n) => n.name === 'text' && n.attrs.x === '0' && (n.text ?? '').length === 1)
+    .filter((n) => n.name === 'text' && n.attrs.x === '0'
+      && narrowNames.includes(n.text ?? ''))
     .map((n) => n.text);
 
   check(`${weekStart}: the calendar's row labels name the rows drawn`,
     labels.join(',') === want.join(','), `${labels.join(',')} (want ${want.join(',')})`);
+}
+
+/* ---------- a label is written for a person, and fits where it is drawn ---------- */
+
+// Two properties a browser measurement caught and no test did.
+//
+// The FIRST is that an axis must not show a storage key. `detail.js` formats a
+// card's range readout, and these draw the same values — so leaving one raw put
+// the header and the axis of ONE card into two conventions, which is the
+// specific defect this whole change exists to remove.
+//
+// The SECOND is that the label has to fit. `Intl`'s short weekday is `Mon` in
+// English, `domingo` in pt-PT and `Jumamosi` in sw-KE, and a fixed gutter
+// clipped the last two mid-word — measured in Chrome, pt-PT rendered `omingo`.
+// The charts size their gutter with `estimateTextWidth`, and the invariant is
+// simply that the estimate fits: a right-anchored label at `x` needs `x` pixels
+// of room to its left.
+const RAW_KEY = /^\d{4}(-\d{2}){1,2}$/;
+
+const axisTexts = (svg) => collect(svg)
+  .filter((n) => n.name === 'text' && (n.text ?? '').trim())
+  .map((n) => ({ text: String(n.text), x: Number(n.attrs.x), anchor: n.attrs['text-anchor'] }));
+
+const buckets = ['2026-06', '2026-07', '2026-08'].map((bucket) => ({
+  bucket, completed: 2, total: 4, value: 0, skipped: 0,
+}));
+
+for (const [name, svg] of [
+  ['history', historyChart(buckets, '#3b82f6', { width: 700 })],
+  ['times per week', frequencyChart(
+    buckets.map((b) => ({ month: b.bucket, counts: { 3: 2 } })), '#3b82f6', { width: 700 })],
+  ['weekday by month', weekdayMonthChart(months, '#3b82f6', { width: 700, weekStart: 'monday' })],
+]) {
+  const texts = axisTexts(svg);
+  const raw = texts.filter((t) => RAW_KEY.test(t.text)).map((t) => t.text);
+  check(`${name}: no axis label is a raw storage key`, raw.length === 0, raw.join(','));
+
+  // Right-anchored labels are the row gutters; `x` is where they END.
+  const tight = texts
+    .filter((t) => t.anchor === 'end' && t.x > 0)
+    .filter((t) => estimateTextWidth(t.text, 10.5) > t.x)
+    .map((t) => `${t.text} needs ${Math.ceil(estimateTextWidth(t.text, 10.5))}px, has ${t.x}`);
+  check(`${name}: every row label fits its gutter`, tight.length === 0, tight.join(' | '));
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL WEEK CHECKS PASSED');

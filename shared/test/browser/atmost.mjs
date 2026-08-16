@@ -27,9 +27,13 @@ const d0=ago(7), d1=ago(8), d2=ago(9);   // safely inside a 4-week grid
 const paint=(entries,color,habit)=>{
   const svg=calendarChart(entries,color,habit,{weeks:4,skips:new Set()});
   const out={};
+  // Keyed on `data-date`, which is the cell's stable ISO key, NOT on the
+  // <title>'s first colon-separated field. The title is human copy — it reads
+  // "Aug 9, 2026: clean" now — and parsing it made this suite depend on the
+  // wording and on the runner's locale.
   svg.walk(n=>{ if(n.name!=='rect')return;
-    const t=n.children.find(c=>c.name==='title');
-    if(t&&t.text) out[String(t.text).split(':')[0]]=n.attrs.fill; });
+    const d=n.attrs['data-date'];
+    if(d) out[d]=n.attrs.fill; });
   return out;
 };
 

@@ -46,9 +46,10 @@ const BINDINGS = [
 // grid drift about what a habit shown as "avoid" even is.
 const { isAvoided } = await import('../../public/ui/toggle.js');
 // The harness evals the function's SOURCE, so every free identifier it names
-// has to be handed in. These two are the real implementations rather than
-// stubs: the dialog's heading is a date the user is about to change, and
-// getting it wrong is the risk that heading exists to reduce.
+// has to be handed in — a miss is a loud ReferenceError from `new Function`,
+// not a silent pass. The real implementations rather than stubs, though note
+// nothing here ASSERTS the formatted heading: a stub returning '' would pass
+// these checks identically.
 const { formatDateLong, fromISOLocal } = await import('../../public/ui/dates.js');
 
 /**

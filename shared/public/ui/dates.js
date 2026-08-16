@@ -107,21 +107,28 @@ const mediumDate = fmt({ year: 'numeric', month: 'short', day: 'numeric' });
 const WEEK_SAMPLE = [4, 5, 6, 7, 8, 9, 10].map((d) => new Date(2026, 0, d));
 const MONTH_SAMPLE = Array.from({ length: 12 }, (_, m) => new Date(2026, m, 15));
 
+// `Object.create(null)`, so a style of `__proto__` cannot resolve to
+// `Object.prototype` — the trap the root CLAUDE.md records for `SETTING_VALUES`.
+// Unreachable from the four literal call sites; it costs nothing to close.
 /** @type {Record<string, readonly string[]>} */
-const weekdayCache = {};
+const weekdayCache = Object.create(null);
 let monthCache = null;
 
 /**
  * Weekday names in one of `Intl`'s three widths, indexed by `getDay()`.
  *
- * `narrow` is one character in every locale checked (en, de, fr, ru, pl, fi,
- * ja, id), which is what makes it safe for a seven-column header; `short` and
- * `long` are not bounded and their callers have room.
+ * `narrow` is one character in most locales but NOT all — fil-PH gives
+ * `Lin Lun Mar`, ca-ES `dg. dl.`, vi-VN `CN T2`, hu-HU `Sz`. It is never wider
+ * than `short`, which is the property the layouts actually rely on; the
+ * seven-column grid header is measured at 360px by `responsive.mjs` rather
+ * than assumed from a character count.
  *
  * There is no two-letter width, which is what `charts.js` used to hardcode for
- * the month grid's rows. Those read `narrow` now — the same letters the
- * calendar heatmap beside them already uses, so the two agree where before one
- * said `Su` and the other `S`.
+ * the month grid's rows. Those read `short`, not `narrow`: that axis is the
+ * whole point of its chart and one letter makes S/S and T/T ambiguous — the
+ * reason the hardcoded version wrote `Su`/`Mo`. `short` is unbounded in width,
+ * so the chart sizes its gutter with `estimateTextWidth` instead of choosing a
+ * label that fits a fixed one.
  *
  * @param {'narrow'|'short'|'long'} [style]
  * @returns {readonly string[]}
@@ -158,11 +165,9 @@ export function monthLabels() {
  * The wordiest of the three deliberately: the day editor and the amount dialog
  * are where picking the wrong row is the risk worth spending words on.
  *
- * Both of them still build this formatter inline, per open, with byte-identical
- * options (`ui/day-dialog.js` and `ui/dashboard.js`) — so this is the shape they
- * should adopt rather than a description of what they do. Converting them is a
- * two-line follow-up and it is the per-call cost the memo above argues against;
- * it is out of this change only because nothing else here touches those files.
+ * `ui/day-dialog.js` and `ui/dashboard.js` both call it. They each built this
+ * formatter inline, per open, with byte-identical options — which is the
+ * per-call cost the memo above argues against.
  * @param {Date} d
  */
 export const formatDateLong = (d) => longDate().format(d);
@@ -171,9 +176,10 @@ export const formatDateLong = (d) => longDate().format(d);
  * A date for a label beside a chart — short, and not a serial number.
  *
  * This is what replaced the raw ISO on the calendar's range label and the
- * strength chart's axis. Not the only ISO left in the app, which an earlier
- * version of this said: `windowedChart`'s own range readout still shows one,
- * and `ui/detail.js` records why that is a separate change.
+ * strength chart's axis. `formatStamp` below is its counterpart for a bucket
+ * key, and between them nothing user-facing in `charts.js` shows a storage
+ * string any more — the axes, the tooltips and the calendar's own popover all
+ * read through one of the two.
  * @param {Date} d
  */
 export const formatDateShort = (d) => mediumDate().format(d);
@@ -201,4 +207,41 @@ export function formatStamp(stamp) {
                                           Number(stamp.slice(5, 7)) - 1, 15));
   }
   return stamp;                       // 'YYYY', 'YYYY-Qn', or something new
+}
+
+
+/**
+ * A rough width in pixels for a short label, at a given font size.
+ *
+ * There is no text metric without a DOM, and two suites drive `charts.js` with
+ * a fake one — so a chart that must reserve room for a label it cannot measure
+ * has to estimate. Deliberately generous, and it counts WIDE characters at a
+ * full em: `月曜日` is three characters and about as wide as `Monday`.
+ *
+ * The alternative was to pick a label width that fits everywhere, and there
+ * isn't one: `Intl`'s short weekday is `Mon` in English, `domingo` in pt-PT and
+ * `Jumamosi` in sw-KE. Measured in Chrome, the last two overflowed a fixed
+ * 34px gutter and rendered as `omingo` and `umamosi` — a truncation that is not
+ * a word.
+ *
+ * @param {string} text
+ * @param {number} fontSize
+ */
+const WIDE =
+  /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/;
+// Measured after 0.62 proved too mean for these: `أغسطس` is five characters and
+// ran 5.5px past the end of the completion calendar at font-size 9.5.
+const BROAD = /[\u0590-\u08FF\u0900-\u0DFF\u0E00-\u0E7F]/;
+
+export function estimateTextWidth(text, fontSize) {
+  let ems = 0;
+  for (const ch of String(text)) {
+    // Three classes, each an upper bound rather than an average — this reserves
+    // space, so being generous costs a few pixels of gutter and being mean
+    // costs a clipped word.
+    if (WIDE.test(ch)) ems += 1;          // CJK, Hangul, kana, full-width: square
+    else if (BROAD.test(ch)) ems += 0.8;  // Arabic, Hebrew, Indic, Thai
+    else ems += 0.62;                     // Latin, Cyrillic, Greek, digits
+  }
+  return ems * fontSize;
 }

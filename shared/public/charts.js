@@ -15,7 +15,8 @@ import { SKIP, YES } from './ui/values.js';
 // module in Node. Neither reaches for anything but `Date`, `Intl` and its own
 // constants, which is what keeps them loadable under the fake DOM.
 import {
-  formatDateShort, fromISOLocal, monthLabels, weekdayLetters, weekdayNames,
+  estimateTextWidth, formatDateShort, formatStamp, fromISOLocal, monthLabels,
+  weekdayLetters, weekdayNames,
 } from './ui/dates.js';
 import { isAvoided } from './ui/toggle.js';
 
@@ -292,6 +293,11 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // Future days relative to the real today are not editable and are drawn
       // faintly so the grid keeps its shape.
       const isFuture = date > todayISO;
+      // What the cell SAYS, as against the key it is stored under. The popover
+      // and the <title> are read by a person and by a screen reader; the range
+      // label directly above them is formatted, so these were the last raw ISO
+      // left on the card.
+      const shown = formatDateShort(fromISOLocal(date));
       const value = entriesByDate[date];
       // `skips` when the caller supplied it — it is the only thing that can be
       // trusted, since 3 is a legitimate amount for a measurable habit. The
@@ -306,18 +312,18 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         : habit.type === 'boolean' && value === SKIP;
 
       let fill = empty;
-      let label = `${date}: no entry`;
+      let label = `${shown}: no entry`;
 
       if (isFuture) {
         fill = 'transparent';
-        label = `${date}: in the future`;
+        label = `${shown}: in the future`;
       } else if (value != null) {
         if (isSkip) {
           fill = themed('--surface-2');
-          label = `${date}: skipped`;
+          label = `${shown}: skipped`;
         } else if (habit.type === 'boolean') {
-          if (value === YES) { fill = shade(color, 1); label = `${date}: done`; }
-          else label = `${date}: not done`;
+          if (value === YES) { fill = shade(color, 1); label = `${shown}: done`; }
+          else label = `${shown}: not done`;
         } else if (isAvoided(habit)) {
           // Shown as something to avoid, so the colours are the other way up —
           // the same inversion `dashboard.js` makes, and for the same reason it
@@ -333,10 +339,10 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
           const amount = `${value}${habit.unit ? ' ' + habit.unit : ''}`;
           if (value <= target) {
             fill = shade(color, 1);
-            label = target > 0 ? `${date}: clean — ${amount}` : `${date}: clean`;
+            label = target > 0 ? `${shown}: clean — ${amount}` : `${shown}: clean`;
           } else {
             fill = themed('--danger');
-            label = `${date}: slipped — ${amount}`;
+            label = `${shown}: slipped — ${amount}`;
           }
         } else {
           // For an "at most" habit a low number is the good outcome, so 0 is a
@@ -356,7 +362,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
             const ratio = Math.min(1, value / target);
             if (value > 0) fill = shade(color, Math.max(0.2, ratio));
           }
-          label = `${date}: ${value}${habit.unit ? ' ' + habit.unit : ''}`;
+          label = `${shown}: ${value}${habit.unit ? ' ' + habit.unit : ''}`;
         }
       }
 
@@ -374,12 +380,6 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       if (onPick && !isFuture) {
         rect.setAttribute('cursor', 'pointer');
         rect.setAttribute('role', 'gridcell');
-        // setAttribute, not .dataset — the offline render suites drive this
-        // module against a fake DOM that implements attributes only, so
-        // `.dataset.date` threw and made the clickable calendar untestable
-        // there. Reading it back still works via `rect.dataset.date` in a
-        // real browser, which is where the keyboard handler runs.
-        rect.setAttribute('data-date', date);
         // Roving tabindex: only one cell is a tab stop, so tabbing past the
         // calendar takes one press rather than ~180. Arrows move within it.
         rect.setAttribute('tabindex', '-1');
@@ -397,6 +397,16 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       //
       // setAttribute, not .dataset: the offline render tests use a fake DOM
       // that implements attributes but not the dataset proxy.
+      // Which day this cell IS, always — not only when it is clickable.
+      //
+      // setAttribute, not .dataset: the offline render suites drive this module
+      // against a fake DOM that implements attributes only. Unconditional
+      // because it is the cell's identity rather than part of its interaction,
+      // and because `data-label` beside it is now human copy — "Aug 9, 2026:
+      // clean" — so anything that needs the DAY has to have somewhere stable to
+      // read it. Two suites were parsing the label's first colon-separated
+      // field, which tied them to the wording and to the runner's locale.
+      rect.setAttribute('data-date', date);
       rect.setAttribute('data-label', label);
       svg.appendChild(title(rect, onPick && !isFuture ? `${label} — click to edit` : label));
 
@@ -425,9 +435,15 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // month label above the first week containing a new month
       if (dow === 0 && cursor.getMonth() !== lastMonth) {
         lastMonth = cursor.getMonth();
+        // Nudged left if it would run off the end. The caption is left
+        // anchored above a week column, and `Intl`'s short month is `Aug` in
+        // English and `أغسطس` in Arabic — measured overflowing the viewBox by
+        // 6px on the final column, which an SVG clips rather than wraps.
+        const monthText = monthLabels()[lastMonth];
         svg.appendChild(el('text', {
-          x, y: 9, 'font-size': 9.5, fill: dim,
-        }, monthLabels()[lastMonth]));
+          x: Math.min(x, width - estimateTextWidth(monthText, 9.5)),
+          y: 9, 'font-size': 9.5, fill: dim,
+        }, monthText));
       }
 
       cursor.setDate(cursor.getDate() + 1);
@@ -702,8 +718,26 @@ function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
 export function weekdayMonthChart(months, color,
                                   { width = 720, weekStart = 'monday' } = {}) {
   const rowH = 26;
-  // Two lines of header: the month on every column, the year where it changes.
-  const pad = { top: 30, right: 12, bottom: 8, left: 42 };
+  const ROW_LABEL_SIZE = 10.5;
+  const ROW_LABEL_GAP = 8;
+  // The row captions are `Intl`'s short weekday names, and those are `Mon` in
+  // English, `niedz.` in Polish, `domingo` in pt-PT and `Jumamosi` in sw-KE. A
+  // fixed 42px gutter fitted the first two and clipped the others mid-word —
+  // measured in Chrome, pt-PT rendered `omingo`, `egunda`, `ábado`.
+  //
+  // So the gutter is sized from the labels rather than the labels chosen to fit
+  // the gutter. `narrow` would fit everywhere and is what this deliberately
+  // does NOT use: S/S and T/T are ambiguous and this axis is the whole point of
+  // the chart. 42 stays the floor, so nothing narrows in the common case.
+  const rowLabels = weekdayNames('short');
+  const pad = {
+    top: 30,
+    right: 12,
+    bottom: 8,
+    left: Math.max(42, Math.ceil(Math.max(
+      ...rowLabels.map((t) => estimateTextWidth(t, ROW_LABEL_SIZE))
+    )) + ROW_LABEL_GAP + 4),
+  };
   const height = pad.top + 7 * rowH + pad.bottom;
 
   const svg = svgRoot(width, height);
@@ -736,12 +770,14 @@ export function weekdayMonthChart(months, color,
   // than `Su` by about 6px against a 42px left pad, measured; `narrow` was the
   // other option and would have undone the sentence above.
   const FULL = rotateWeek(weekdayNames('long'), weekStart);
-  const SHORT = rotateWeek(weekdayNames('short'), weekStart);
+  const SHORT = rotateWeek(rowLabels, weekStart);
   const order = weekOrder(weekStart);
   for (let d = 0; d < 7; d++) {
     svg.appendChild(el('text', {
-      x: pad.left - 8, y: pad.top + d * rowH + rowH / 2 + 4,
-      'text-anchor': 'end', 'font-size': 10.5, fill: dim,
+      x: pad.left - ROW_LABEL_GAP, y: pad.top + d * rowH + rowH / 2 + 4,
+      'text-anchor': 'end', 'font-size': ROW_LABEL_SIZE, fill: dim,
+      // The unambiguous name, for a reader who cannot tell two abbreviations
+      // apart and for a screen reader.
     }, SHORT[d]));
   }
 
@@ -752,9 +788,15 @@ export function weekdayMonthChart(months, color,
     // squeezed, so there is always room — and a chart whose axis labels only
     // some columns makes you count to work out which one you are looking at.
     const [yy, mm] = m.month.split('-').map(Number);
+    const monthText = monthLabels()[mm - 1];
+    const half = estimateTextWidth(monthText, 9.5) / 2;
     svg.appendChild(el('text', {
-      x: cx, y: 12, 'text-anchor': 'middle', 'font-size': 9.5, fill: dim,
-    }, monthLabels()[mm - 1]));
+      // Kept inside the viewBox: a centred caption on the first or last column
+      // otherwise hangs off the edge once the month name is not three Latin
+      // characters.
+      x: Math.min(Math.max(cx, half), width - half),
+      y: 12, 'text-anchor': 'middle', 'font-size': 9.5, fill: dim,
+    }, monthText));
 
     // The year, once, wherever it changes — so a window spanning December
     // into January is not two ambiguous "Jan"s.
@@ -781,14 +823,15 @@ export function weekdayMonthChart(months, color,
         svg.appendChild(title(el('circle', {
           cx, cy, r: 3, fill: 'none', stroke: dim, 'stroke-width': 1,
           'stroke-opacity': 0.5,
-        }), `${m.month} ${FULL[r]}: 0 of ${d.total}`));
+        }), `${formatStamp(m.month)} ${FULL[r]}: 0 of ${d.total}`));
         return;
       }
 
       svg.appendChild(title(el('circle', {
         cx, cy, r: 3 + d.rate * (maxR - 3),
         fill: color, 'fill-opacity': 0.3 + 0.7 * d.rate,
-      }), `${m.month} ${FULL[r]}: ${d.completed} of ${d.total} (${Math.round(d.rate * 100)}%)`));
+      }), `${formatStamp(m.month)} ${FULL[r]}: ${d.completed} of ${d.total} `
+        + `(${Math.round(d.rate * 100)}%)`));
     });
   });
 
@@ -914,7 +957,6 @@ function shiftISO(isoDate, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
-
 /* ---------- history bar chart ---------- */
 
 export function historyChart(buckets, color, { width = 720, height = 190, showPercent = true } = {}) {
@@ -954,8 +996,8 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
     const y = pad.top + h - barH;
 
     const label = showPercent
-      ? `${b.bucket}: ${b.completed}/${b.total} (${Math.round(v * 100)}%)`
-      : `${b.bucket}: ${b.completed}`;
+      ? `${formatStamp(b.bucket)}: ${b.completed}/${b.total} (${Math.round(v * 100)}%)`
+      : `${formatStamp(b.bucket)}: ${b.completed}`;
 
     svg.appendChild(title(el('rect', {
       x, y, width: barW, height: Math.max(barH, v > 0 ? 2 : 0), rx: 3, fill: color,
@@ -972,7 +1014,13 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
       'text-anchor': 'middle',
       'font-size': 9.5,
       fill: dim,
-    }, b.bucket));
+      // The same `formatStamp` the card's own range readout uses. These were
+      // the raw bucket key while the header above them was formatted, so one
+      // card read `Jul 21, 2026 → Aug 16, 2026` over an axis of `2026-07-21` —
+      // which is the "one card, two conventions" this whole change exists to
+      // end, reintroduced one card over. On master both halves were raw and
+      // at least AGREED.
+    }, formatStamp(b.bucket)));
   });
 
   return svg;
@@ -1095,7 +1143,7 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
     svg.appendChild(title(el('rect', {
       x: barX, y: cy - 7, width: w, height: 14, rx: 4, fill: color,
       'fill-opacity': 0.45 + 0.55 * (s.length / max),
-    }), `${s.length} days: ${s.start} to ${s.end}`));
+    }), `${s.length} days: ${formatStamp(s.start)} to ${formatStamp(s.end)}`));
 
     // length
     svg.appendChild(el('text', {
@@ -1128,7 +1176,23 @@ function formatRange(startISO, endISO) {
 
 export function frequencyChart(months, color, { width = 720 } = {}) {
   const rowH = 26;
-  const pad = { top: 18, right: 12, bottom: 8, left: 58 };
+  const ROW_LABEL_SIZE = 10.5;
+  const ROW_LABEL_GAP = 8;
+  // Sized from the labels, like `weekdayMonthChart`'s. These rows used to read
+  // the raw `2026-06`, which is seven characters in every language; they read
+  // `formatStamp` now, and that is `Jun 2026` in English, `2026年6月` in
+  // Japanese, `2026. g. jūn.` in Latvian and `أغسطس ٢٠٢٦` in Arabic. Measured
+  // in Chrome at 360px: the last three overflowed a fixed 58px gutter by up to
+  // 13px, which is a label running off the left of the card.
+  const rowLabels = months.map((m) => formatStamp(m.month));
+  const pad = {
+    top: 18,
+    right: 12,
+    bottom: 8,
+    left: Math.max(58, Math.ceil(Math.max(
+      0, ...rowLabels.map((t) => estimateTextWidth(t, ROW_LABEL_SIZE))
+    )) + ROW_LABEL_GAP + 4),
+  };
 
   const maxPerWeek = Math.max(
     1,
@@ -1165,8 +1229,9 @@ export function frequencyChart(months, color, { width = 720 } = {}) {
   shown.forEach((m, r) => {
     const cy = pad.top + r * rowH + rowH / 2;
     svg.appendChild(el('text', {
-      x: pad.left - 8, y: cy + 4, 'text-anchor': 'end', 'font-size': 10.5, fill: dim,
-    }, m.month));
+      x: pad.left - ROW_LABEL_GAP, y: cy + 4, 'text-anchor': 'end',
+      'font-size': ROW_LABEL_SIZE, fill: dim,
+    }, rowLabels[r]));
 
     for (let n = 1; n <= maxPerWeek; n++) {
       const count = m.counts[n] ?? 0;

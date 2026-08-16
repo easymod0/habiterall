@@ -117,7 +117,8 @@ try {
     const c=cells[Math.floor(cells.length*0.6)];
     const b=c.getBoundingClientRect();
     window.__cell=c;
-    return {date:c.dataset.date, x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2),
+    return {date:c.dataset.date, label:c.getAttribute('data-label'),
+            x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2),
             w:+b.width.toFixed(2), inView: b.top>0 && b.bottom<window.innerHeight};})()`);
 
   ck('the chosen cell is on screen', target.inView === true,
@@ -160,9 +161,13 @@ try {
   ck('the hovered cell is raised above its neighbours', hovered.isLast === true);
 
   ck('a popover appeared', hovered.popText != null, String(hovered.popText));
-  ck('the popover shows the hovered date',
-    (hovered.popText ?? '').includes(target.date),
-    `${hovered.popText} (expected ${target.date})`);
+  // The cell's own label, not the ISO date: the popover shows a date written
+  // for a person now (`24 Feb 2026`), and asserting the storage key was both
+  // wrong and locale-bound. `data-label` is what the popover is built from, so
+  // this asks whether it shows the RIGHT cell's text.
+  ck('the popover shows the hovered cell\'s own label',
+    (hovered.popText ?? '') === (target.label ?? '\u0000'),
+    `${hovered.popText} (expected ${target.label})`);
   ck('the popover is fully visible', hovered.popOpacity === 1,
     String(hovered.popOpacity));
   // Deliberately absent: the cursor already says the cell is clickable, and
@@ -202,7 +207,8 @@ try {
     const cells=[...document.querySelectorAll('rect.cal-cell[data-date]')];
     const i=Math.floor(cells.length*0.6);
     return cells.slice(i, i+4).map(c=>{const b=c.getBoundingClientRect();
-      return {date:c.dataset.date, x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2)};});})()`);
+      return {date:c.dataset.date, label:c.getAttribute('data-label'),
+              x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2)};});})()`);
 
   for (const n of neighbours) {
     await move(n.x, n.y);
@@ -218,9 +224,10 @@ try {
   }))()`);
 
   ck('only one popover exists', after.pops <= 1, `${after.pops}`);
+  // The last cell's own label, for the reason the check above uses one.
   ck('the popover follows the cursor to the last cell',
-    (after.text ?? '').includes(neighbours.at(-1).date),
-    `${after.text} (expected ${neighbours.at(-1).date})`);
+    (after.text ?? '') === (neighbours.at(-1).label ?? '\u0000'),
+    `${after.text} (expected ${neighbours.at(-1).label})`);
   ck('only one cell is grown at a time', after.grown <= 1, `${after.grown} grown`);
 
   /* ---------- a re-render must not strand the popover ---------- */
