@@ -97,13 +97,13 @@ async function replay(status) {
       body: JSON.stringify({ value: 2 }),
     });
   }
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls++;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(url);
     return { ok: status >= 200 && status < 300, status };
   };
   const result = await flush();
-  return { ...result, left: await pendingCount(), calls };
+  return { ...result, left: await pendingCount(), calls: calls.length, urls: calls };
 }
 
 test('a write the server accepted is reported as sent, and leaves the queue', async () => {
@@ -112,6 +112,14 @@ test('a write the server accepted is reported as sent, and leaves the queue', as
   assert.equal(r.failed.length, 0);
   assert.equal(r.left, 0);
   assert.equal(r.calls, 2, 'a good answer carries on to the next write');
+  // Oldest first. `calls === 1` on the stopping cases below proves only that the
+  // loop HALTED after one item, not that it took the earlier one — measured,
+  // reversing the sort in `flush()` left this file green and was caught solely
+  // by pwatest's "last wins".
+  assert.deepEqual(r.urls, [
+    '/api/habits/1/entries/2026-01-05',
+    '/api/habits/1/entries/2026-01-06',
+  ], 'replayed oldest first');
 });
 
 test('a 404 is dropped, and reported as a FAILURE rather than a sync', async () => {
@@ -145,6 +153,8 @@ test('401 and 403 keep their place in the queue', async () => {
     assert.equal(r.failed.length, 0, `${status} is not a failure of the write`);
     assert.equal(r.left, 2, `${status} keeps the writes queued`);
     assert.equal(r.calls, 1, `${status} stops the replay rather than walking on`);
+    assert.deepEqual(r.urls, ['/api/habits/1/entries/2026-01-05'],
+      `${status} stopped on the EARLIEST write, not a later one`);
   }
 });
 
