@@ -86,9 +86,16 @@ try{
   // there is a channel for those buttons to appear in.
   ck('but not the user id field, which has nothing to narrow yet',
      await ev(`!document.getElementById('setting-discordUserId')`)===true);
+  // By its id, like the two checks above, rather than by matching an option's
+  // COPY: this is about whether the control is shown, and pinning its wording
+  // made rewording one option look like the control had disappeared.
   ck('and the timezone control, which only servers need',
-     await ev(`[...document.querySelectorAll('#settings-body select')]
-       .some(s=>[...s.options].some(o=>o.textContent.includes("Server's own timezone")))`)===true);
+     await ev(`!!document.getElementById('setting-notifyTimezone')`)===true);
+  // Its default is "follow this device", which is what an account that never
+  // opens this dialog gets — so it is the one option that must always exist.
+  ck('offering to follow this device, which is the default',
+     await ev(`[...(document.getElementById('setting-notifyTimezone')?.options ?? [])]
+       .some(o=>o.value==='auto')`)===true);
   // The dependent fields follow the DRAFT, so they appear the moment the box
   // is ticked — but the tick itself is not a write.
   ck('ticking a destination changes nothing on the server yet',

@@ -1204,9 +1204,14 @@ nothing to set up on the server. If both are configured, the bot wins.
 
 Two settings that matter here:
 
-- **Reminder timezone** — 08:00 on whose clock? The default is the server's own
-  timezone, which is what you want on a machine in your house. On a shared
-  instance, or a VPS in another country, set your own.
+- **Reminder timezone** — 08:00 on whose clock? The default is **Automatic —
+  follow this device**: whichever browser or phone last used the account, sent
+  on requests it was already making. That is right for almost everyone,
+  including a traveller, whose reminders move with them. Two other answers are
+  there when it is not: name a zone to pin reminders to it — the traveller who
+  wants to stay on home time — or pick **Server's own clock**, which is what the
+  default used to be and is the option to choose if you would rather no device
+  reported anything.
 - The webhook URL is checked against Discord's own hosts and rejected
   otherwise. That is deliberate: your server is what makes the request, so
   accepting any URL would turn this field into a way to make it fetch things on
@@ -1506,15 +1511,23 @@ see [`.github/workflows/README.md`](.github/workflows/README.md).
 | `HABITERALL_NOTIFY` | `on` | `off` disables server-sent reminders entirely |
 | `HABITERALL_NOTIFY_INTERVAL_MS` | `60000` | How often to check for due reminders |
 | `DISCORD_BOT_TOKEN` | — | Turns on buttons. One bot per instance; each user points it at their own channel |
-| `TZ` | the host's, **`UTC` in a container** | The clock behind "the server's own timezone" |
+| `TZ` | the host's, **`UTC` in a container** | The fallback clock, for an account no client has used |
 
-> **Set `TZ` if you deploy with Docker.** A container has no timezone, so it is
-> UTC whatever the host is set to. Two things follow it: when an `08:00` reminder
-> fires, and — for a request that names no date — which day a check-off lands on.
-> Left at UTC, someone three hours west gets their morning reminder before dawn,
-> and an evening check-in after 21:00 is filed under tomorrow. In the cloud
-> edition a user can override the first of those in ⚙ → Notifications; there is
-> no per-user override for the second.
+> **`TZ` is the fallback now, not the answer.** A reminder is sent on the
+> account's own clock: the zone it named, else the zone its last browser or
+> phone reported, else this. So `TZ` decides an account that has never opened a
+> client — one restored from a backup, or driven only by Discord buttons — and
+> nothing else about reminders.
+>
+> **It still decides which day a check-off lands on**, though, for a request
+> that names no date: left at UTC, an evening check-in after 21:00 three hours
+> west is filed under tomorrow. There is no per-user override for that one —
+> see issue #121, which is about giving it the same treatment.
+>
+> Worth knowing when upgrading: before this, `TZ` was what reminders used for
+> every account that had not set the timezone setting, which was most of them.
+> They now follow their own devices instead. If you deliberately relied on `TZ`
+> for an account, choose **Server's own clock** in ⚙ → Notifications to keep it.
 
 The scheduler costs nothing until someone configures a destination for it: with
 none, it queries and stops. On-device reminders do not involve it at all.

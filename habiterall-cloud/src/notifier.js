@@ -23,6 +23,7 @@
 import { withNotifierScope, withUser } from './db/pool.js';
 import {
   answeredIds, answerText, CHANNELS, needsServerDelivery, serverChannels,
+  resolveTimeZone,
   zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
@@ -64,7 +65,7 @@ const MAX_ACCOUNTS_PER_TICK = Number(process.env.NOTIFY_MAX_ACCOUNTS) || 500;
 async function candidates() {
   const { rows } = await withNotifierScope((db) =>
     db.query(
-      `SELECT id, settings FROM users
+      `SELECT id, settings, device_time_zone FROM users
         WHERE blocked = false
           AND settings -> 'notifyChannels' ?| $1::text[]
         ORDER BY id
@@ -108,7 +109,11 @@ export async function collect(instant) {
       continue;
     }
 
-    const clock = zonedClock(instant, settings.notifyTimezone ?? '');
+    // Whose clock: the zone the account NAMED, else the one its last client
+    // reported, else this server's. `resolveTimeZone` is the only place that
+    // precedence exists, so the tick and the Discord handler cannot drift.
+    const timeZone = resolveTimeZone(settings, String(row.device_time_zone ?? ''));
+    const clock = zonedClock(instant, timeZone);
 
     // Per account, because one account's read must not abandon the tick. This
     // whole loop sits OUTSIDE `runTick`'s per-account try — `collect` is
@@ -141,6 +146,8 @@ export async function collect(instant) {
       return {
         id: row.id,
         settings,
+        // Resolved once and carried, so `deliverAccount` cannot decide it again.
+        timeZone,
         habits,
         doneToday: answeredIds(habits, entries),
         alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
@@ -274,7 +281,7 @@ export function interactionAdapter() {
 
       const { rows } = await withNotifierScope((db) =>
         db.query(
-          `SELECT id, settings FROM users
+          `SELECT id, settings, device_time_zone FROM users
             WHERE blocked = false
               AND settings ->> 'discordChannelId' = $1
             LIMIT 2`,
@@ -294,11 +301,19 @@ export function interactionAdapter() {
         }
         return null;
       }
-      return { id: rows[0].id, settings: rows[0].settings ?? {} };
+      // `deviceZone` alongside the settings, because `today()` resolves the
+      // same three tiers the tick does — a button press and a reminder must
+      // never disagree about which day it is for this account.
+      return {
+        id: rows[0].id,
+        settings: rows[0].settings ?? {},
+        deviceZone: String(rows[0].device_time_zone ?? ''),
+      };
     },
 
     today(account) {
-      return zonedClock(new Date(), account.settings.notifyTimezone ?? '').date;
+      return zonedClock(new Date(),
+        resolveTimeZone(account.settings, account.deviceZone ?? '')).date;
     },
 
     findHabit(account, habitId) {

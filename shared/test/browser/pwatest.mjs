@@ -236,6 +236,41 @@ try {
   await ev(`(async()=>{ const { clearAll } = await import('/shared/offline.js');
                         await clearAll(); return 1; })()`);
 
+  /* ---- 8. every request says which clock this device is on ---- */
+  //
+  // `ui/api.js` sets `X-Habiterall-Timezone` at its single fetch chokepoint, so
+  // an account following its device costs no extra request. Deleting that one
+  // spread left `npm test` and all 26 browser suites green — the server rule
+  // was covered and neither client's half was — which is how a reminder would
+  // quietly go back to arriving on the container's clock.
+  //
+  // Read off the wire with CDP rather than from the code: what matters is that
+  // the header ARRIVES, and the service worker sits between the two.
+  await send('Network.enable', {}, sessionId);
+  const seen = [];
+  const onRequest = (m) => {
+    if (m.method !== 'Network.requestWillBeSent') return;
+    const { url, headers } = m.params.request;
+    if (url.includes('/api/')) seen.push(headers['X-Habiterall-Timezone'] ?? null);
+  };
+  const priorHandler = ws.onmessage;
+  ws.onmessage = (e) => { try { onRequest(JSON.parse(e.data)); } catch { /* not ours */ } priorHandler(e); };
+
+  await ev(`(async()=>{
+    const { api } = await import('/shared/ui/api.js');
+    await api('/habits');
+    return 1;
+  })()`);
+  await sleep(400);
+  ws.onmessage = priorHandler;
+
+  const zones = seen.filter((z) => z !== null);
+  check('an ordinary API request carries this device\'s timezone',
+    zones.length > 0, `${seen.length} /api/ requests, ${zones.length} with the header`);
+  check('and it is a zone Intl knows, not a placeholder',
+    zones.every((z) => { try { new Intl.DateTimeFormat('en', { timeZone: z }); return true; } catch { return false; } }),
+    zones.join(','));
+
   console.log(fails === 0 ? '\nALL PWA CHECKS PASSED' : `\n${fails} PWA CHECK(S) FAILED`);
 } catch (e) {
   console.error('ERROR:', e.message); fails++;

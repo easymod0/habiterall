@@ -17,6 +17,7 @@ import {
   writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
 } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
+import { DEVICE_ZONE_HEADER, reportedZone } from '@habiterall/shared/notify.js';
 import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
@@ -69,6 +70,70 @@ const uid = (req) => req.session.user.id;
 
 /** Wrap an async handler so rejections reach the error middleware. */
 const route = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+/**
+ * Note which clock the caller's device is on, for `notifyTimezone: 'auto'`.
+ *
+ * On requests that already happen, so following your zone costs no extra
+ * traffic — and the UPDATE is guarded by `WHERE device_time_zone IS DISTINCT
+ * FROM $1`, so a settled account writes here never. Read back by the notifier
+ * through `resolveTimeZone`, and only for an account that has not named a zone.
+ *
+ * Inside `withUser`, so RLS applies and the write can only ever touch the
+ * caller's own row — the app role has column-level UPDATE on this one column
+ * (migration 013) and cannot reach `idp_subject` or `blocked`.
+ *
+ * Never fatal, and not awaited into the request's critical path beyond the
+ * write itself: a request must not fail because the server could not write
+ * down where the user is.
+ */
+/**
+ * How long a memoised zone is trusted before the database is asked again.
+ *
+ * A TTL, and it is the whole correctness of this cache. Without one the memo's
+ * invariant is "the memo equals what the row holds", which is only true PER
+ * PROCESS — and this edition runs behind a load balancer. With two instances,
+ * each suppresses writes based on what IT last wrote, so the row freezes on
+ * whichever warmed up last and later check-ins from the other device never
+ * correct it. Measured with two real processes against one Postgres: the row
+ * stayed on the phone's zone through five more desktop requests, and the
+ * account's reminders then arrive on the wrong device's clock indefinitely.
+ * Stale for a minute is the intended trade; wrong forever is not.
+ *
+ * A minute, matching `isBlocked`'s `BLOCK_CHECK_MS` next door, which is the
+ * cache this is modelled on — and which has a TTL, contrary to what an earlier
+ * comment here claimed.
+ */
+const ZONE_CHECK_MS = 60_000;
+
+/** userId -> {zone, at}. Bounded by the accounts seen this process lifetime. */
+const lastReportedZone = new Map();
+
+api.use(route(async (req, _res, next) => {
+  const user = uid(req);
+  const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
+  const hit = lastReportedZone.get(user);
+  const fresh = hit && hit.zone === zone && Date.now() - hit.at < ZONE_CHECK_MS;
+  if (zone && !fresh) {
+    try {
+      // `IS DISTINCT FROM` still does the real work: this writes no row, no
+      // WAL and no transaction id when the value already matches. What the
+      // memo saves is the TRANSACTION — a pool checkout and four round trips —
+      // on the requests in between.
+      await withUser(user, (db) => db.query(
+        `UPDATE users SET device_time_zone = $1
+          WHERE id = $2 AND device_time_zone IS DISTINCT FROM $1`,
+        [zone, user]
+      ));
+      // After the write, so a failure is retried on the next request rather
+      // than remembered as done.
+      lastReportedZone.set(user, { zone, at: Date.now() });
+    } catch (err) {
+      log.warn('settings.device_clock_not_stored', { user }, err);
+    }
+  }
+  next();
+}));
 
 /* ---------- habits ---------- */
 

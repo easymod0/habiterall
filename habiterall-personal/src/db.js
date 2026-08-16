@@ -119,6 +119,23 @@ db.exec(`
     at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
   );
 
+  -- What the last client to check in said its clock was, for 'auto'.
+  --
+  -- Its own table for the same reason notify_status has one: this is an
+  -- OBSERVATION, not a preference. It arrives on a header rather than through
+  -- PUT /api/settings, it must never travel in a backup — restoring on a
+  -- laptop in another country should not move your reminders — and it has to
+  -- stay tellable apart from a zone the user CHOSE, or 'auto' becomes a
+  -- one-way door. resolveTimeZone reads it only when the setting says 'auto'.
+  -- (No backticks in here: this whole schema is one template literal.)
+  --
+  -- One row, because this edition has one account; the CHECK pins it.
+  CREATE TABLE IF NOT EXISTS device_clock (
+    id        INTEGER PRIMARY KEY CHECK (id = 1),
+    time_zone TEXT NOT NULL DEFAULT '',
+    at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+  );
+
   -- The single account's credentials, when this instance has auth on and is
   -- not configured from the environment.
   --

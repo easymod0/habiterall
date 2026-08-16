@@ -159,6 +159,77 @@ export function parseChannelList(raw) {
 }
 
 /**
+ * "Follow whichever device the account last used", the default.
+ *
+ * A real stored value rather than the absence of one, for the reason
+ * `theme: 'system'` and `at_most_unlogged: 'default'` are: an OBSERVATION and a
+ * DECISION must stay tellable apart. Write the detected zone into
+ * `notifyTimezone` itself and the first client to check in turns "automatic"
+ * into a chosen value, after which there is no way back to automatic and a
+ * stale detection outlives the trip that caused it.
+ *
+ * `''` keeps its old meaning — the server's own clock, chosen deliberately —
+ * so an account that picked it keeps it, and one that has never touched the
+ * setting gets `auto` from the default. Nothing to migrate: `applyDraft` only
+ * writes keys that CHANGED, and `''` was the previous default, so almost no
+ * account has it on disk.
+ */
+export const AUTO_ZONE = 'auto';
+
+/**
+ * The header a client uses to say which clock it is on.
+ *
+ * A header on traffic that already exists rather than a call of its own: the
+ * point of `auto` is that following your zone costs no extra request. Both
+ * clients set it at their single request chokepoint — `ui/api.js` and
+ * `Api.kt` — and the server writes only when the value CHANGES, which for a
+ * settled account is never.
+ */
+export const DEVICE_ZONE_HEADER = 'X-Habiterall-Timezone';
+
+/**
+ * The zone a client just reported, or '' if it did not report a usable one.
+ *
+ * `auto` is refused explicitly: it is the SETTING's word for "ask the device",
+ * so a client echoing it back would be an account asking itself.
+ *
+ * @param {unknown} raw the header value
+ */
+export function reportedZone(raw) {
+  const value = parseTimeZone(raw);
+  return value && value !== AUTO_ZONE ? value : '';
+}
+
+/**
+ * Which clock a server-sent reminder is on, for one account.
+ *
+ * Three tiers, two of which the user sees:
+ *
+ *   an explicit zone   the account named one — always wins, and is how somebody
+ *                      abroad keeps their reminders on home time
+ *   `auto`             the zone a client last reported, else the server's
+ *   `''`               the server's own clock, chosen deliberately
+ *
+ * `reported` is never read unless the setting says `auto`, so an account that
+ * has named a zone is unaffected by what its devices say — which is the whole
+ * point of tier 1 being reachable.
+ *
+ * @param {Record<string, any>} [settings]
+ * @param {string} [reported] the zone a client last sent, if any
+ * @returns {string} an IANA name, or '' for the server's own clock
+ */
+export function resolveTimeZone(settings = {}, reported = '') {
+  const chosen = settings.notifyTimezone ?? AUTO_ZONE;
+  if (chosen !== AUTO_ZONE) return String(chosen);
+  // `reportedZone`, not `parseTimeZone`: the latter now accepts `auto` as a
+  // legal SETTING, and a client echoing that back would be an account asking
+  // itself what time it is. Re-validated here rather than trusted at all,
+  // because it arrives on a header and `formatterFor` runs once per account
+  // inside the tick.
+  return reportedZone(reported);
+}
+
+/**
  * Normalise an IANA time zone name, `''` meaning "use the server's own zone".
  *
  * Validated by asking Intl rather than against a list: the list ships with
@@ -172,6 +243,7 @@ export function parseChannelList(raw) {
 export function parseTimeZone(raw) {
   const value = String(raw ?? '').trim();
   if (!value) return '';
+  if (value === AUTO_ZONE) return AUTO_ZONE;
   if (value.length > 64) return undefined;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: value });
@@ -295,7 +367,88 @@ function formatterFor(timeZone) {
   const key = timeZone || '';
   let fmt = formatters.get(key);
   if (!fmt) {
-    fmt = new Intl.DateTimeFormat('en-US', {
+    fmt = build(timeZone);
+    resolvedZones.set(key, fmt ? key : '');
+    if (!fmt) {
+      // Said once per zone string, not per account per tick. Falling back is
+      // right — one bad value must not end the tick for everyone — but doing it
+      // in silence means an account gets every reminder on the server's clock
+      // forever with nothing on any surface to say so.
+      unusableZones.add(key);
+      fmt = build('');
+    }
+    formatters.set(key, fmt);
+  }
+  return fmt;
+}
+
+/**
+ * What each requested zone actually resolved to — itself, or '' if `Intl`
+ * refused it and the server's clock stood in.
+ *
+ * Recorded where the decision is made rather than recomputed: comparing two
+ * formatters cannot answer it, because the fallback is a separate object each
+ * time. Bounded exactly as `formatters` is.
+ *
+ * @type {Map<string, string>}
+ */
+const resolvedZones = new Map();
+
+/**
+ * Zones `Intl` refused, so the caller can report the fallback.
+ *
+ * Held here rather than logged here because this module takes no logger — it is
+ * pure by design, which is what lets `dueReminders` be tested with no clock and
+ * no transport. `notify-send.js` drains it through the same `once` dedupe that
+ * `too_late` and `unreachable` use.
+ */
+const unusableZones = new Set();
+
+/** @returns {string[]} zones that fell back to the server's clock */
+export function takeUnusableZones() {
+  const out = [...unusableZones];
+  unusableZones.clear();
+  return out;
+}
+
+/**
+ * The zone a clock actually used, which is not always the one asked for.
+ *
+ * `dueReminders` reports the REQUESTED zone in its skip details, so a
+ * `notify.too_late` line for an account whose zone `Intl` will not take printed
+ * `zone: 'Mars/Olympus'` while the verdict came from the server's clock —
+ * a diagnostic that actively misdirects, which is worse than none.
+ *
+ * @param {string} timeZone
+ */
+export function effectiveZone(timeZone) {
+  const key = timeZone || '';
+  // Read from the resolution `formatterFor` already recorded, rather than
+  // building a formatter to find out. This runs once per SKIPPED habit inside
+  // the tick, and `done_today` / `already_sent` hold for every habit for the
+  // rest of the day once a reminder has gone out — so at the documented
+  // ceiling of 500 accounts x 10 habits it ran 5,000 times a minute. Measured:
+  // 178ms per tick building each time, 17ms through the cache. 161ms of
+  // event-loop block a minute, on the process that also serves requests, to
+  // populate one log field.
+  if (!resolvedZones.has(key)) formatterFor(key);
+  return resolvedZones.get(key) ?? key;
+}
+
+/**
+ * A formatter for one zone, or null if `Intl` will not have it.
+ *
+ * Separate so `formatterFor` can fall back. `new Intl.DateTimeFormat` throws a
+ * RangeError for an unknown zone, and this is called once per account inside
+ * the tick — so one account with an unusable value would end the whole tick for
+ * everyone. `parseTimeZone` validates on the way in, but a value can arrive by
+ * other roads: a direct JSONB edit, a restored backup, `auto` reaching here
+ * unresolved, or ICU data changing under a runtime downgrade. Falling back to
+ * the server's clock is wrong for that one account and right for the other 499.
+ */
+function build(timeZone) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
       timeZone: timeZone || undefined,
       // 'h23', not `hour12: false`. They differ at exactly one minute of the
       // day: with hour12:false, en-US resolves to the h24 cycle and formats
@@ -306,9 +459,9 @@ function formatterFor(timeZone) {
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit',
     });
-    formatters.set(key, fmt);
+  } catch {
+    return null;
   }
-  return fmt;
 }
 
 /**
@@ -424,7 +577,13 @@ export function dueReminders({
    * until tomorrow — and it is what an unset container timezone produces.
    */
   const skip = (habit, reason, detail) => {
-    onSkip(habit, reason, { now: clock.time, date: clock.date, zone: timeZone || 'system', ...detail });
+    // The zone the clock USED, not the one asked for — `effectiveZone` answers
+    // '' for a zone Intl refused, and reporting the requested one made a
+    // `too_late` line name a zone that had nothing to do with the verdict.
+    onSkip(habit, reason, {
+      now: clock.time, date: clock.date,
+      zone: effectiveZone(timeZone) || 'system', ...detail,
+    });
     return undefined;
   };
 

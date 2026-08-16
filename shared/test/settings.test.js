@@ -10,6 +10,10 @@ const {
 } =
   await import('../src/validate.js');
 const { computeHistory, UNLOGGED_DEFAULT } = await import('../src/stats.js');
+// Importable under Node because it has no imports of its own — deliberately,
+// so the browser can load it with no build step. That makes the registry
+// itself testable rather than only greppable.
+const { SETTINGS, defaults } = await import('../public/ui/settings.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -323,4 +327,51 @@ test('the filter is not fooled by a prototype key', () => {
   const hostile = JSON.parse('{"__proto__": {"polluted": true}, "skipDays": true}');
   assert.deepEqual(portableSettings(hostile), { skipDays: true });
   assert.equal(/** @type {any} */ ({}).polluted, undefined);
+});
+
+
+/* ---------- a default must satisfy its own rule ---------- */
+
+test('every registry default is a value the registry itself accepts', () => {
+  // The bug this is written for shipped and was caught by review, not by a
+  // test: `notifyTimezone`'s default became `auto` while its `validate`
+  // (`knownTimeZone`) special-cased only `''`, so the default failed its own
+  // check. Invisible online — `sanitise` throws the invalid value away and
+  // substitutes the default, which is the same string — and visible offline as
+  // "Not saved: Reminder timezone" over a write that had already been queued.
+  //
+  // Asked of every key rather than that one, because the shape recurs: any
+  // `select` whose default is missing from `options`, any `toggle` defaulting
+  // to a string, any `validate` that forgets a new state.
+  for (const [key, def] of Object.entries(SETTINGS)) {
+    const value = def.default;
+    assert.notEqual(value, undefined, `${key} has no default`);
+
+    if (def.validate) {
+      assert.ok(def.validate(value),
+        `${key}: the default ${JSON.stringify(value)} fails its own validate()`);
+    } else if (def.type === 'select') {
+      assert.ok(def.options.some((o) => o.value === value),
+        `${key}: the default ${JSON.stringify(value)} is not one of its options`);
+    } else if (def.type === 'toggle') {
+      assert.equal(typeof value, 'boolean', `${key}: a toggle defaulting to ${typeof value}`);
+    } else if (def.type === 'multi') {
+      assert.ok(Array.isArray(value)
+        && value.every((v) => def.options.some((o) => o.value === v)),
+      `${key}: the default ${JSON.stringify(value)} is not a subset of its options`);
+    }
+  }
+});
+
+test('every registry default is a value the SERVER accepts', () => {
+  // The other half, and the one that decides what is actually stored. A
+  // default the server refuses means the very first write of that key is
+  // dropped — and `parseSettings` reports it in `ignored`, which the dialog
+  // turns into "Not saved".
+  const { accepted, rejected } = parseSettings(defaults());
+  assert.deepEqual(rejected, [], `the server refuses its own defaults: ${rejected}`);
+  for (const [key, value] of Object.entries(defaults())) {
+    assert.deepEqual(accepted[key], value,
+      `${key}: the server normalised its own default to ${JSON.stringify(accepted[key])}`);
+  }
 });

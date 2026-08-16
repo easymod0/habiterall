@@ -19,8 +19,8 @@
  */
 
 import {
-  CHANNELS, dueReminders, discordPayload, reminderMessage, serverChannels,
-  unreachableChannels,
+  CHANNELS, dueReminders, discordPayload, reminderMessage, resolveTimeZone,
+  serverChannels, takeUnusableZones, unreachableChannels,
 } from './notify.js';
 import { postReminder } from './discord.js';
 
@@ -112,6 +112,9 @@ function stateKey(o) {
  * @property {number|null} [id] for the log; the personal edition has none
  * @property {Record<string, any>} [settings]
  * @property {import('./types.js').Habit[]} [habits] those with a reminder time
+ * @property {string} [timeZone] the clock this account is on, already resolved
+ *   by `collect` through `resolveTimeZone`. Carried rather than re-derived,
+ *   because deciding it twice is how the two answers came to differ.
  * @property {Set<number>} [doneToday]
  * @property {(habitId: number, channel: string, date: string) => boolean} [alreadySent]
  * @property {Record<string, DeliveryOutcome>} [delivered] channel -> the outcome
@@ -385,7 +388,15 @@ export async function deliverAccount(account, ctx) {
     const due = dueReminders({
       habits: account.habits ?? [],
       instant: ctx.instant,
-      timeZone: settings.notifyTimezone ?? '',
+      // The zone `collect` already resolved, NOT `settings.notifyTimezone`.
+      // Reading the setting here was a SECOND place the clock was decided, and
+      // the two answers stopped agreeing the moment `auto` existed: `collect`
+      // resolved it to the device's zone for `doneToday` and `alreadySent`,
+      // while this passed the literal string `auto` to `dueReminders` — which
+      // fell back to the server's clock, so every reminder for an account
+      // following its device was judged against the wrong day and reported
+      // `too_late`. Resolved once, in `resolveTimeZone`, and carried.
+      timeZone: account.timeZone ?? resolveTimeZone(settings),
       doneToday: account.doneToday,
       // Per channel: adding Discord to an account must not be silenced by the
       // fact that the phone already handled that habit this morning.
@@ -529,6 +540,20 @@ export async function runTick(ctx) {
       errored++;
       log.error?.('notify.account_failed', { user: account?.id }, err);
     }
+  }
+
+  // A zone `Intl` would not take falls back to the server's clock rather than
+  // ending the tick — but silently, it means an account gets every reminder on
+  // the wrong clock forever with nothing to say so. Drained once per tick and
+  // deduped, because it is a configuration rather than an event: it stays wrong
+  // until somebody fixes the value.
+  for (const zone of takeUnusableZones()) {
+    if (!once(`unusable_zone:${zone}`)) continue;
+    log.warn?.('notify.zone_unusable', {
+      zone,
+      reason: 'Intl does not know this zone — reminders for accounts using it '
+        + "are on the server's clock",
+    });
   }
 
   const ms = Date.now() - startedAt;

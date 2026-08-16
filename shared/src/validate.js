@@ -330,6 +330,11 @@ export const SETTING_VALUES = {
   // Which zone a habit's 'HH:MM' reminder means. '' = the server's own zone,
   // which is right for a self-hosted single user and wrong for anyone whose
   // cloud account lives on a box in another country.
+  // `auto` — follow whichever device last used the account — is the DEFAULT,
+  // and `parseTimeZone` accepts it alongside an IANA name and `''` (the
+  // server's own clock, chosen deliberately). `resolveTimeZone` in notify.js
+  // is what turns the three into one answer; this only decides what may be
+  // stored.
   notifyTimezone: parseTimeZone,
 };
 
