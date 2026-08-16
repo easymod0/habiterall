@@ -90,12 +90,19 @@ object Grid {
      * SKIPPED and UNKNOWN are absent because neither is a value — a skip is the
      * status column and an unknown day is the absence of a row.
      */
-    fun valueForState(habit: Habit, state: DayState): Double =
-        if (habit.isAvoided) {
+    fun valueForState(habit: Habit, state: DayState): Double = when {
+        // First, as in the mirror. A skip is the status column and never a
+        // value, so no caller passes it — but the web's `valueForState` answers
+        // SKIP here and this silently answered `target + 1`, which is the one
+        // input on which two functions pinned to each other disagreed. An
+        // unreachable disagreement is still a disagreement, and the next caller
+        // is the one who finds out.
+        state == DayState.SKIPPED -> Sentinels.SKIP
+        habit.isAvoided ->
             if (state == DayState.DONE) Sentinels.UNSET else habit.targetValue + 1
-        } else {
+        else ->
             if (state == DayState.DONE) Sentinels.YES else Sentinels.UNSET
-        }
+    }
 
     fun nextState(
         current: DayState,

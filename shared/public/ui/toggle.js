@@ -102,14 +102,27 @@ export function dayStateOf({ value, isSkip = false, done = false }) {
 /**
  * Is this habit shown as something to avoid?
  *
- * `show_as` is a rendering choice and only means anything against an at-most
- * target — "at least 8 glasses" has nothing to avoid — so both are asked here
- * rather than at each call site. A habit switched from At most to At least
- * keeps its `show_as`, deliberately, so switching back does not lose it; this
- * is what stops it applying in between.
+ * All THREE questions, and the third was missing. `show_as` is a rendering
+ * choice that only means anything for a MEASURABLE habit with an at-most
+ * target: "at least 8 glasses" has nothing to avoid, and a yes/no habit has no
+ * amount for a limit to bound. A habit keeps its `show_as` when its type or
+ * goal is switched — deliberately, so switching back does not lose it — which
+ * is why the predicate and not the stored value is what stops it applying in
+ * between, and why leaving a question out of it is a trap rather than an
+ * omission.
+ *
+ * Asking only two put a habit somewhere it could not leave. Create a
+ * measurable at-most habit, choose "something to avoid", then switch it to
+ * Yes / no and save: the form submits `show_as` regardless, so the stored
+ * habit is boolean + at_most + avoid. `valueForState` then encoded a tap
+ * meaning DONE as 0 — and `isCompleted` reads 0 on a boolean habit as NOT
+ * done, so the day painted as a slip, the next tap recomputed the same state,
+ * and no sequence of taps could ever mark the day done.
  */
 export function isAvoided(habit) {
-  return habit?.show_as === 'avoid' && habit?.target_type === 'at_most';
+  return habit?.show_as === 'avoid'
+    && habit?.target_type === 'at_most'
+    && habit?.type === 'numerical';
 }
 
 /**

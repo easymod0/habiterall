@@ -96,6 +96,14 @@ private fun describe(
         // square to look at, and "not done" for a day nobody has answered is the
         // same conflation the setting exists to undo.
         unanswered -> "no entry"
+        // The spoken language moves with the visual one. A screen reader was
+        // still hearing "0 of 0" for the clean day the grid now draws as a tick
+        // and "1 of 0" for the slip it draws as a cross — true sentences about
+        // a habit nobody describes that way, on the one surface that cannot see
+        // the colour doing the work.
+        habit.isAvoided && value != null ->
+            if (met == true) "clean"
+            else "slipped, ${trimNumber(value)} ${habit.unit}".trim()
         habit.isNumerical && value != null ->
             "${trimNumber(value)} of ${trimNumber(habit.targetValue)} ${habit.unit}".trim()
         met == true -> "done"

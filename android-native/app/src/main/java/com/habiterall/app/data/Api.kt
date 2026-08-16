@@ -77,14 +77,24 @@ data class Habit(
     /**
      * Is this habit shown as something to avoid?
      *
-     * Both halves, because `show_as` is a rendering choice that only means
-     * anything against an at-most target — "at least 8 glasses" has nothing to
-     * avoid. A habit switched to At least keeps its `show_as` so switching back
-     * does not lose it, which is why the predicate and not the stored value is
-     * what stops it applying in between. Mirrors `isAvoided` in
-     * shared/public/ui/toggle.js.
+     * All THREE questions, and the third was missing. `show_as` is a rendering
+     * choice that only means anything for a MEASURABLE habit with an at-most
+     * target: "at least 8 glasses" has nothing to avoid, and a yes/no habit has
+     * no amount for a limit to bound. A habit keeps its `show_as` when its type
+     * or goal is switched — so switching back does not lose it — which is why
+     * the predicate and not the stored value is what stops it applying in
+     * between, and why leaving a question out is a trap rather than an omission.
+     *
+     * Asking only two put a habit somewhere it could not leave: boolean +
+     * at_most + avoid is reachable from the form in one sitting, and then
+     * `Grid.valueForState` encoded a tap meaning DONE as 0, which `isMet` reads
+     * as not done for a yes/no habit. The cell painted red and no sequence of
+     * taps could reach a done day.
+     *
+     * Mirrors `isAvoided` in shared/public/ui/toggle.js.
      */
-    val isAvoided get() = showAs == "avoid" && targetType == "at_most"
+    val isAvoided get() =
+        showAs == "avoid" && targetType == "at_most" && isNumerical
 
     /**
      * Whether a day is a skip.

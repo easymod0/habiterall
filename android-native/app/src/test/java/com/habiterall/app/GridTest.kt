@@ -223,6 +223,34 @@ class GridTest {
     }
 
     @Test
+    fun `a yes-no habit is never avoided, whatever show_as says`() {
+        // Reachable from the form in one sitting: pick Measurable + At most +
+        // avoid, then switch to Yes / no and save. `show_as` is sent regardless
+        // so that switching back does not lose it. Asking only two of the three
+        // questions encoded a tap meaning DONE as 0, which `isMet` reads as NOT
+        // done for a yes/no habit — the cell painted red and no sequence of taps
+        // could reach a done day.
+        val trap = avoid.copy(type = "boolean")
+        assertFalse(trap.isAvoided)
+        assertEquals(Sentinels.YES, Grid.valueForState(trap, Grid.DayState.DONE), 0.0)
+        assertEquals(Sentinels.UNSET, Grid.valueForState(trap, Grid.DayState.NO), 0.0)
+    }
+
+    @Test
+    fun `a skip is the status column on both sides of the mirror`() {
+        // The one input the two `valueForState` functions disagreed on. No
+        // caller passes it — skips are handled before the encoding — but they
+        // are pinned to each other, and an unreachable disagreement is the kind
+        // the next caller discovers.
+        assertEquals(Sentinels.SKIP, Grid.valueForState(avoid, Grid.DayState.SKIPPED), 0.0)
+        assertEquals(
+            Sentinels.SKIP,
+            Grid.valueForState(Habit(id = 9, name = "x", type = "boolean"), Grid.DayState.SKIPPED),
+            0.0,
+        )
+    }
+
+    @Test
     fun `the rendering only applies where there is something to avoid`() {
         // `show_as` is kept when a habit's goal is switched to At least, so
         // switching back does not lose it — which means the predicate, not the

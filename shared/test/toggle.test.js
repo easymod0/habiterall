@@ -176,3 +176,21 @@ test('the rendering only applies where there is something to avoid', () => {
   const flipped = { ...avoidHabit, target_type: 'at_least' };
   assert.equal(valueForState(flipped, 'done'), values.YES);
 });
+
+test('only a MEASURABLE at-most habit is avoided', () => {
+  // The trap a review found, and it is reachable from the habit form in one
+  // sitting: create a measurable at-most habit, choose "something to avoid",
+  // then switch it to Yes / no and save. `show_as` is submitted regardless — so
+  // that switching back does not lose it — and the stored habit is
+  // boolean + at_most + avoid.
+  //
+  // Asking only two of the three questions then encoded a tap meaning DONE as
+  // 0, and `isCompleted` reads 0 on a boolean habit as NOT done. The day
+  // painted as a slip, the next tap recomputed the same state, and no sequence
+  // of taps could ever mark it done.
+  const trap = { type: 'boolean', target_type: 'at_most', target_value: 0, show_as: 'avoid' };
+  assert.equal(isAvoided(trap), false);
+  assert.equal(valueForState(trap, 'done'), values.YES,
+    'a yes/no habit must record YES for a tap meaning done, whatever show_as says');
+  assert.equal(valueForState(trap, 'no'), values.UNSET);
+});
