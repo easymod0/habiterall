@@ -110,6 +110,13 @@ export async function collect(instant) {
 
     const clock = zonedClock(instant, settings.notifyTimezone ?? '');
 
+    // Per account, because one account's read must not abandon the tick. This
+    // whole loop sits OUTSIDE `runTick`'s per-account try — `collect` is
+    // awaited before it — so a pool timeout on account 3 of 400 threw out of
+    // here and discarded every account already collected along with every one
+    // behind it, for the whole minute. It is the same shape as the watermark
+    // failure inside `deliverAccount`, one level up and with a wider blast
+    // radius, and it surfaced only as `startNotifier`'s printf line.
     const account = await withUser(row.id, async (db) => {
       const { rows: habits } = await db.query(
         `SELECT * FROM habits
@@ -147,6 +154,12 @@ export async function collect(instant) {
           permanent: s.permanent === true,
         }])),
       };
+    }).catch((err) => {
+      // Named and counted rather than fatal. `notify.account_failed` is what
+      // `runTick` logs for the delivery half of the same problem, so the two
+      // read alike in a log.
+      log.error?.('notify.account_failed', { user: row.id, phase: 'collect' }, err);
+      return null;
     });
 
     if (account) accounts.push(account);

@@ -498,7 +498,19 @@ export async function runTick(ctx) {
   const instant = ctx.instant ?? new Date();
   const log = ctx.log ?? console;
   const startedAt = Date.now();
-  const accounts = await ctx.collect(instant);
+
+  // A `collect` that throws outright ends the tick — there is nothing to
+  // deliver — but it is named here rather than left to `startNotifier`'s
+  // printf, which is the least greppable line in the file and the only one a
+  // total read failure ever produced. Every other outcome in this module is a
+  // `notify.*` event; this one was not.
+  let accounts;
+  try {
+    accounts = await ctx.collect(instant);
+  } catch (err) {
+    log.error?.('notify.collect_failed', { ms: Date.now() - startedAt }, err);
+    return { accounts: 0, sent: 0, failed: 0, skipped: {} };
+  }
 
   let sent = 0;
   let failed = 0;

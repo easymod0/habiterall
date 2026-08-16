@@ -599,6 +599,24 @@ test('a tick delivers what is due and records it', async () => {
   assert.match(fetch.calls[0].url, /^https:\/\/discord\.com\/api\/webhooks\//);
 });
 
+test('a collect that throws is named, not left to a printf', async () => {
+  // The one outcome in this module that produced no `notify.*` event: a total
+  // read failure fell out of `runTick` to `startNotifier`'s
+  // `log.error('notify: tick failed:', err)`, which is the least greppable line
+  // in the file. It still ends the tick — there is nothing to deliver — but it
+  // says so in the same shape as everything else.
+  const errors = [];
+  const result = await runTick({
+    collect: () => { throw new Error('pool timeout'); },
+    mark: () => {},
+    instant: utc(2026, 8, 13, 8, 0),
+    log: { error: (event) => errors.push(event) },
+  });
+
+  assert.deepEqual(result, { accounts: 0, sent: 0, failed: 0, skipped: {} });
+  assert.deepEqual(errors, ['notify.collect_failed']);
+});
+
 test('collect is handed the tick\'s own instant', async () => {
   // Not left to read its own clock: it has to resolve the user's local date to
   // answer "already sent today", and two clock reads either side of local
