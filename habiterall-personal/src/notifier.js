@@ -326,9 +326,20 @@ export function start(env = process.env) {
     collect: (instant) => {
       // Cheap, and it keeps the table from growing without bound in a
       // long-lived install.
+      //
+      // Guarded, because it is HOUSEKEEPING and this is the first thing a tick
+      // does: an unguarded SQLITE_BUSY here threw out of `collect`, which is
+      // awaited before `runTick`'s per-account try, so a stray lock on the
+      // watermark table abandoned the whole tick before a single reminder had
+      // been considered. Cloud has always guarded its own `prune`; this was the
+      // asymmetry.
       const cutoff = new Date(Number(instant) - KEEP_LOG_DAYS * 86_400_000)
         .toISOString().slice(0, 10);
-      q.prune.run(cutoff);
+      try {
+        q.prune.run(cutoff);
+      } catch (err) {
+        log.warn?.('notify.prune_failed', {}, err);
+      }
       return collect(instant);
     },
     mark,

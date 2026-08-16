@@ -408,6 +408,43 @@ try {
     tokyoAccount?.doneToday?.has(zoned.body.id) === true,
     `doneToday=${JSON.stringify([...(tokyoAccount?.doneToday ?? [])])} ` +
     `tokyo=${tokyoDate} utc=${utcDate}`);
+  /* ---------- housekeeping must not abandon the tick ---------- */
+  //
+  // Pruning old watermark rows is the FIRST thing a tick does, and it used to be
+  // unguarded — so a stray lock on `notify_log` threw out of `collect`, which is
+  // awaited before `runTick`'s per-account try, and the tick ended before a
+  // single reminder had been considered. Cloud has always guarded its own
+  // `prune`; this was the asymmetry.
+  //
+  // A `BEFORE DELETE` trigger is the lock, without needing a second process.
+  // SQLite fires triggers FOR EACH ROW, so there has to be a row old enough to
+  // delete or nothing happens and the check passes vacuously.
+  const { db } = await import('../src/db.js');
+  db.exec(`INSERT INTO notify_log (habit_id, channel, date)
+           VALUES (${habitId}, 'discord', '2020-01-01')`);
+  db.exec(`CREATE TRIGGER busy_prune BEFORE DELETE ON notify_log
+           BEGIN SELECT RAISE(ABORT, 'database is locked'); END`);
+
+  // `createLogger`'s write is resolved at emit time, so patching stdout after
+  // import is enough to read what the tick said.
+  const lines = [];
+  const realWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => { lines.push(String(chunk)); return true; };
+  try {
+    // `startNotifier` ticks immediately, which is the whole point of using it
+    // rather than calling `collect` — the guard is in the wrapper `start`
+    // installs, not in `collect` itself.
+    notifier.start({ ...process.env, HABITERALL_NOTIFY: 'on' }).stop();
+    await new Promise((r) => setTimeout(r, 300));
+  } finally {
+    process.stdout.write = realWrite;
+    db.exec('DROP TRIGGER busy_prune');
+  }
+  const said = lines.join('');
+  ck('a stray lock on the watermark table is reported, not fatal',
+    /notify\.prune_failed/.test(said), said.slice(0, 400));
+  ck('and the tick was not abandoned before it looked at a habit',
+    !/notify\.collect_failed/.test(said), said.slice(0, 400));
 
   console.log(`\n${fails ? `${fails} check(s) failed` : 'all checks passed'}`);
 } finally {
