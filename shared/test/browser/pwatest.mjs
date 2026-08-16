@@ -201,6 +201,41 @@ try {
   check('and the view is refetched, so its optimistic paint cannot survive',
     refused.reloads >= 1, JSON.stringify(refused));
 
+  /* ---- 7. ...and a BLOCKED flush does not reload ---- */
+  //
+  // The negative half, without which `emit('reload')` unconditionally would
+  // pass everything above. The rule is "the queue moved", not "a flush
+  // happened": on a 503 nothing left the queue, the optimistic paint is still
+  // the app's best guess, and reloading would throw away a detail view the user
+  // is reading to tell them nothing. It also matters to `init()`, whose own
+  // `emit('reload')` after a reconnect is only needed BECAUSE a blocked flush
+  // emits none.
+  //
+  // `fetch` is stubbed in the page rather than intercepted over CDP: `/api/`
+  // goes through the service worker's `networkFirst`, and this suite's own note
+  // above records that emulated conditions do not reach a worker's fetches.
+  const blocked = await ev(`(async()=>{
+    const { enqueue, pendingCount } = await import('/shared/offline.js');
+    const { on } = await import('/shared/ui/store.js');
+    const conn = await import('/shared/ui/connectivity.js');
+    let reloads = 0;
+    on('reload', () => { reloads++; });
+    await enqueue({ url:'/api/habits/${HID}/entries/2026-08-12', method:'PUT',
+                    body: JSON.stringify({ value: 2 }) });
+    const real = globalThis.fetch;
+    globalThis.fetch = async () => new Response('{}', { status: 503 });
+    try { await conn.syncNow(); } finally { globalThis.fetch = real; }
+    return { reloads, remaining: await pendingCount() };
+  })()`);
+  check('a blocked flush keeps its writes', blocked.remaining === 1,
+    JSON.stringify(blocked));
+  check('and does NOT reload — nothing left the queue', blocked.reloads === 0,
+    JSON.stringify(blocked));
+
+  // Drain it, so the queue this suite leaves behind is empty.
+  await ev(`(async()=>{ const { clearAll } = await import('/shared/offline.js');
+                        await clearAll(); return 1; })()`);
+
   console.log(fails === 0 ? '\nALL PWA CHECKS PASSED' : `\n${fails} PWA CHECK(S) FAILED`);
 } catch (e) {
   console.error('ERROR:', e.message); fails++;

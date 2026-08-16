@@ -12,9 +12,19 @@ import assert from 'node:assert/strict';
  * long as it has existed, which is how the two came to disagree about 404.
  *
  * A minimal in-memory IndexedDB stands in for the browser's. It implements the
- * four calls `offline.js` makes and nothing else, deliberately: reach for a
- * fifth and this crashes rather than quietly passing, which is the same bargain
- * the fake DOM in `test/browser/atmost.mjs` makes.
+ * four store methods `offline.js` calls and nothing else, deliberately: reach
+ * for a fifth and this crashes rather than quietly passing, which is the same
+ * bargain the fake DOM in `test/browser/atmost.mjs` makes.
+ *
+ * Be exact about where that bargain STOPS, because the fake is faithful to the
+ * branch table and blind to the database itself. It ignores the transaction's
+ * mode, ignores the store's name, and answers `objectStoreNames.contains` with
+ * `true`, so `createObjectStore` never runs. Measured: dropping
+ * `{keyPath: 'seq', autoIncrement: true}` from the schema, and turning the
+ * delete's `readwrite` into `readonly`, both leave this file 6/6 green — and
+ * both fail `test/browser/pwatest.mjs`, which drives a real IndexedDB. The
+ * schema and the transaction semantics stay pwatest's job; what is pinned here
+ * is which answer does what.
  */
 
 /** Enough of IndexedDB for `openDb`/`tx` in offline.js, and no more. */
@@ -65,24 +75,43 @@ const rows = fakeIndexedDB();
 const { enqueue, flush, pendingCount, clearAll } =
   await import('../public/offline.js');
 
-/** Queue one write and replay it against a server answering `status`. */
+/**
+ * Queue TWO writes and replay them against a server answering `status`.
+ *
+ * Two, not one, because half of what this file pins is an ORDERING rule — "a
+ * later write must never overtake an earlier one" — and with a single item
+ * `break` and `continue` are indistinguishable. Measured: with one item queued,
+ * turning the 5xx `break` into a `continue` left every test in the repository
+ * green, and a 503 on write A followed by a good write B for the same day would
+ * then land B and replay A over the top of it.
+ *
+ * `calls` is therefore part of the answer: a rule that keeps its place must also
+ * stop the replay there.
+ */
 async function replay(status) {
   await clearAll();
-  await enqueue({
-    url: '/api/habits/1/entries/2026-01-05',
-    method: 'PUT',
-    body: JSON.stringify({ value: 2 }),
-  });
-  globalThis.fetch = async () => ({ ok: status >= 200 && status < 300, status });
+  for (const date of ['2026-01-05', '2026-01-06']) {
+    await enqueue({
+      url: `/api/habits/1/entries/${date}`,
+      method: 'PUT',
+      body: JSON.stringify({ value: 2 }),
+    });
+  }
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return { ok: status >= 200 && status < 300, status };
+  };
   const result = await flush();
-  return { ...result, left: await pendingCount() };
+  return { ...result, left: await pendingCount(), calls };
 }
 
 test('a write the server accepted is reported as sent, and leaves the queue', async () => {
   const r = await replay(200);
-  assert.equal(r.sent, 1);
+  assert.equal(r.sent, 2);
   assert.equal(r.failed.length, 0);
   assert.equal(r.left, 0);
+  assert.equal(r.calls, 2, 'a good answer carries on to the next write');
 });
 
 test('a 404 is dropped, and reported as a FAILURE rather than a sync', async () => {
@@ -91,17 +120,18 @@ test('a 404 is dropped, and reported as a FAILURE rather than a sync', async () 
   // `sent`, so `syncNow` toasted "Synced 1 change" about an answer that had
   // just been thrown away — the message says the opposite of what happened,
   // which is the failure mode `respondInteraction`'s defer was fixed for.
-  // `Api.kt`'s `isPermanent` has always counted 404 as a failure.
+  // `Api.kt`'s `isPermanent` has always counted 404 as a failure, and
+  // `OutboxRetryTest` pins fourteen status codes to the web's none.
   const r = await replay(404);
   assert.equal(r.sent, 0, 'a discarded write is not a synced one');
-  assert.deepEqual(r.failed.map((f) => f.status), [404]);
+  assert.deepEqual(r.failed.map((f) => f.status), [404, 404]);
   assert.equal(r.left, 0, 'but it is still dropped — it can never apply');
 });
 
 test('a 400 is dropped and reported', async () => {
   const r = await replay(400);
   assert.equal(r.sent, 0);
-  assert.deepEqual(r.failed.map((f) => f.status), [400]);
+  assert.deepEqual(r.failed.map((f) => f.status), [400, 400]);
   assert.equal(r.left, 0);
 });
 
@@ -113,15 +143,17 @@ test('401 and 403 keep their place in the queue', async () => {
     const r = await replay(status);
     assert.equal(r.sent, 0, `${status} did not sync`);
     assert.equal(r.failed.length, 0, `${status} is not a failure of the write`);
-    assert.equal(r.left, 1, `${status} keeps the write queued`);
+    assert.equal(r.left, 2, `${status} keeps the writes queued`);
+    assert.equal(r.calls, 1, `${status} stops the replay rather than walking on`);
   }
 });
 
 test('a 5xx keeps its place in the queue', async () => {
   const r = await replay(503);
-  assert.equal(r.left, 1);
+  assert.equal(r.left, 2);
   assert.equal(r.sent, 0);
   assert.equal(r.failed.length, 0);
+  assert.equal(r.calls, 1, 'or a later write overtakes the one that failed');
 });
 
 test('a network failure stops the replay, preserving order', async () => {
