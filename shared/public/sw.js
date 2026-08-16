@@ -22,6 +22,10 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v12: the amount field. `index.html` grew a second dialog and the
+// day editor's number input became a control, so a stale shell with
+// new scripts has no `#day-count` to bind and throws at module scope —
+// before `start()`, which is outside the `#view-error` surface.
 // v11: the offline strip gained `#offline-message`, because the queued-write
 // count stopped being a child of the banner. connectivity.js looks that element
 // up at module load and paints through it, so a cached v10 index.html would
@@ -54,7 +58,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v11';
+const CACHE_VERSION = 'v12';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -79,10 +83,12 @@ const SHELL = [
   '/shared/auth-session.js',
   '/shared/charts.js',
   '/shared/offline.js',
+  '/shared/ui/amount.js',
   '/shared/ui/api.js',
   '/shared/ui/calendar.js',
   '/shared/ui/components.js',
   '/shared/ui/connectivity.js',
+  '/shared/ui/count-field.js',
   '/shared/ui/dashboard.js',
   '/shared/ui/data-dialog.js',
   '/shared/ui/dates.js',

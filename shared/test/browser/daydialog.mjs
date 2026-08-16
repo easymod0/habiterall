@@ -37,8 +37,8 @@ function mkEl() {
 
 /** The module-level names openDayDialog reads, in one place. */
 const BINDINGS = [
-  'title', 'sub', 'booleanBlock', 'numericBlock', 'numericLabel',
-  'valueInput', 'notes', 'skip', 'clear', 'save', 'dialog',
+  'title', 'sub', 'booleanBlock', 'numericBlock',
+  'notes', 'skip', 'clear', 'save', 'dialog', 'dayCountField',
 ];
 
 /**
@@ -48,6 +48,15 @@ const BINDINGS = [
 function run(habit, date, value, isSkip, prefs = {}) {
   const els = Object.fromEntries(BINDINGS.map((k) => [k, mkEl()]));
   els.dialog = { showModal() { this.open = true; } };
+  // The amount control is a module of its own now (ui/count-field.js), so what
+  // this suite can see is what the dialog ASKS it to show — which is the whole
+  // of the dialog's part in it. What the control then does with a number is
+  // `test/amount.test.js`'s, and it needs no DOM either.
+  els.dayCountField = {
+    shown: undefined, forHabit: undefined, focused: false,
+    set(forHabit, value) { this.forHabit = forHabit; this.shown = value; },
+    focus() { this.focused = true; },
+  };
 
   const doneBtn = { dataset: { action: 'done' }, _attrs: {},
     setAttribute(k,v){ this._attrs[k]=String(v); }, getAttribute(k){ return this._attrs[k]; } };
@@ -118,9 +127,14 @@ r = run(numHabit, '2026-03-15', 6, false);
 check('numerical: number field shown', r.els.numericBlock.hidden === false);
 check('numerical: choice buttons hidden', r.els.booleanBlock.hidden === true);
 check('numerical: Save shown', r.els.save.hidden === false);
-check('numerical: value prefilled', r.els.valueInput.value === '6', r.els.valueInput.value);
-check('numerical: unit in label', r.els.numericLabel.textContent === 'Amount (glasses)',
-  r.els.numericLabel.textContent);
+check('numerical: value handed to the amount field', r.els.dayCountField.shown === 6,
+  String(r.els.dayCountField.shown));
+check('numerical: and the habit with it, which is where the unit and step come from',
+  r.els.dayCountField.forHabit === numHabit);
+// The label itself moved into ui/count-field.js and is asserted where it is
+// now built — test/browser/flowcheck.mjs reads `#day-count`'s legend in a real
+// browser. Restating it here would only re-check this file's own literal.
+
 check('numerical: target in subtitle', r.els.sub.textContent.includes('at least 8 glasses'),
   r.els.sub.textContent);
 
@@ -128,14 +142,16 @@ console.log('--- at-most habit ---');
 r = run(atMost, '2026-03-15', 3, false);
 check('at_most: subtitle says "at most"', r.els.sub.textContent.includes('at most 0 cigs'),
   r.els.sub.textContent);
-check('at_most: value 3 prefilled (not treated as skip)', r.els.valueInput.value === '3',
-  r.els.valueInput.value);
+check('at_most: value 3 prefilled (not treated as skip)', r.els.dayCountField.shown === 3,
+  String(r.els.dayCountField.shown));
 
 console.log('--- skipped day ---');
 r = run(numHabit, '2026-03-17', 0, true);
-check('skip: value field left empty', r.els.valueInput.value === '', r.els.valueInput.value);
-check('skip: placeholder says skipped', r.els.valueInput.placeholder === 'skipped',
-  r.els.valueInput.placeholder);
+// null, not 0: a skipped day has no amount, and for a measurable habit 0 is a
+// real one — a stated lapse. Handing 0 here would prefill the box with an
+// answer nobody gave.
+check('skip: no amount handed to the field', r.els.dayCountField.shown === null,
+  String(r.els.dayCountField.shown));
 check('skip: button reads Unskip', r.els.skip.textContent === 'Unskip', r.els.skip.textContent);
 check('skip: button marked pressed', r.els.skip.getAttribute('aria-pressed') === 'true');
 

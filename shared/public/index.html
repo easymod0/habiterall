@@ -275,10 +275,27 @@
       <button type="button" class="btn day-choice" data-action="not-done">✕ Not done</button>
     </div>
 
-    <label id="day-numeric" hidden>
-      <span id="day-numeric-label">Value</span>
-      <input id="day-value" type="number" min="0" step="any" inputmode="decimal">
-    </label>
+    <div id="day-numeric" hidden>
+      <fieldset class="countfield" id="day-count">
+        <legend id="day-count-label">Amount</legend>
+        <div class="countfield-row">
+          <button type="button" class="btn btn-sm countfield-step" data-step="-1"
+                  aria-label="Less">&minus;</button>
+          <!-- The canonical value, and the only control that is read. The
+               steppers and the presets write into it; typing into it is what
+               `parseAmount` reads. It is `type="text"`, deliberately: a number
+               input filters keystrokes and hands back what survived, so "8,5"
+               arrived as 85 and "abc" as "" — which the day editor read as
+               "no entry" and deleted the day. See ui/amount.js. -->
+          <input class="countfield-typed" id="day-count-typed" type="text"
+                 inputmode="decimal" autocomplete="off" aria-label="Amount">
+          <button type="button" class="btn btn-sm countfield-step" data-step="1"
+                  aria-label="More">+</button>
+        </div>
+        <div class="countfield-presets"></div>
+        <span class="field-hint countfield-hint"></span>
+      </fieldset>
+    </div>
 
     <label id="day-notes-wrap">
       <span>Note <span class="muted">(optional)</span></span>
@@ -292,6 +309,43 @@
       <span class="spacer"></span>
       <button type="button" id="day-cancel" class="btn">Cancel</button>
       <button type="button" id="day-save" class="btn btn-primary">Save</button>
+    </div>
+  </dialog>
+
+  <!-- Recording an amount from the grid. This was a `window.prompt()`: an OS
+       text box with the habit name crammed into its message, no unit beside
+       the field, no target to aim at, and suppressed outright by a browser
+       that has decided the page makes too many dialogs — after which tapping a
+       measurable day did nothing at all. -->
+  <dialog id="count-dialog">
+    <h2 id="count-title">Amount</h2>
+    <p id="count-sub" class="hint"></p>
+
+      <fieldset class="countfield" id="grid-count">
+        <legend id="grid-count-label">Amount</legend>
+        <div class="countfield-row">
+          <button type="button" class="btn btn-sm countfield-step" data-step="-1"
+                  aria-label="Less">&minus;</button>
+          <!-- The canonical value, and the only control that is read. The
+               steppers and the presets write into it; typing into it is what
+               `parseAmount` reads. It is `type="text"`, deliberately: a number
+               input filters keystrokes and hands back what survived, so "8,5"
+               arrived as 85 and "abc" as "" — which the day editor read as
+               "no entry" and deleted the day. See ui/amount.js. -->
+          <input class="countfield-typed" id="grid-count-typed" type="text"
+                 inputmode="decimal" autocomplete="off" aria-label="Amount">
+          <button type="button" class="btn btn-sm countfield-step" data-step="1"
+                  aria-label="More">+</button>
+        </div>
+        <div class="countfield-presets"></div>
+        <span class="field-hint countfield-hint"></span>
+      </fieldset>
+
+    <div class="dialog-actions">
+      <button type="button" id="count-clear" class="btn btn-danger">Clear</button>
+      <span class="spacer"></span>
+      <button type="button" id="count-cancel" class="btn">Cancel</button>
+      <button type="button" id="count-save" class="btn btn-primary">Save</button>
     </div>
   </dialog>
 
