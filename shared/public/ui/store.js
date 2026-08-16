@@ -37,6 +37,11 @@ export const state = {
   calZoom: null,       // overrides the saved zoom for this session; null = use the setting
   dayEdit: null,       // { habitId, date, type } while the day dialog is open
   dragId: null,        // habit being dragged, while a reorder is in flight
+  // What the dashboard's search box holds. Session-only and deliberately NOT a
+  // setting: a filter is something you are doing right now, and one that
+  // followed you to another device — or survived a reload — would be a list
+  // silently missing habits with no memory of why.
+  query: '',
   showArchived: false, // dashboard is showing the archive rather than active
   hasArchived: false,  // any archived habits exist at all
   gridEnd: null,       // last day column shown; null = today

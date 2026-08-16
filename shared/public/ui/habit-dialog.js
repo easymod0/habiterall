@@ -111,6 +111,16 @@ async function saveHabit(e) {
     // set because a modal dialog repaints nothing behind it. Creating from the
     // dashboard still needs 'reload': a repaint alone would draw the old list
     // without the habit that was just made.
+    // The list is being REPLACED — a habit created or renamed — so the
+    // dashboard's search filter goes with it: a habit created behind a live
+    // filter is one the user is told about and cannot see.
+    //
+    // Cleared at the mutators that actually replace the list rather than in the
+    // dashboard's 'reload' listener. That event has ten emitters and only half
+    // of them replace anything, so clearing there also wiped the box on Back
+    // from a habit and on a background reconnect, mid-word. `dashboard.js`'s
+    // archive toggle already works this way.
+    state.query = '';
     emit(state.openHabitId != null ? 'change' : 'reload');
   } catch (err) {
     toast(err.message);
@@ -122,6 +132,7 @@ async function saveHabit(e) {
     // second one.
     if (err.indeterminate) {
       dialog.close();
+      state.query = '';   // the habit may exist; see above
       emit('reload');
     }
   }
@@ -146,6 +157,7 @@ async function deleteHabit() {
 
     await api(`/habits/${id}`, { method: 'DELETE' });
     dialog.close();
+    state.query = '';
     emit('reload');
 
     toast(`Deleted "${habit.name}"`, {
@@ -179,6 +191,7 @@ async function restoreHabit(habit, entries) {
       }
     }
 
+    state.query = '';
     emit('reload');
     toast(`Restored "${habit.name}"`);
   } catch (e) {

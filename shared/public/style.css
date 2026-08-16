@@ -753,6 +753,42 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 /* ---------- list header / archive toggle ---------- */
 
 #list-head { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+
+/*
+ * The habit search. Full width on a phone, where the grid below it is already
+ * the whole screen; the count sits beside it rather than under, so a filtered
+ * list does not shift vertically as you type.
+ */
+#search-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+#habit-search {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+#habit-search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.search-count {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* For a label a screen reader needs and the eye does not. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 #toggle-archived[aria-pressed='true'] {
   border-color: var(--accent);
   color: var(--accent);

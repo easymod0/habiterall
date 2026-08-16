@@ -28,7 +28,7 @@ Postgres one.
 | `src/types.js` | JSDoc typedefs, exporting nothing at runtime. The contract between three packages |
 | `public/app.js` | boot, the top bar, the PWA; `start(authAdapter)` is the entry |
 | `public/ui/store.js` | view state, and the `'change'` / `'reload'` channel views listen on |
-| `public/ui/dashboard.js` | the habit list: day grid, paging, empty state, reordering, checkbox taps |
+| `public/ui/dashboard.js` | the habit list: day grid, paging, search, empty state, reordering, checkbox taps |
 | `public/ui/detail.js` | the single-habit view and every chart on it |
 | `public/ui/habit-dialog.js` | create / edit / delete / undelete a habit |
 | `public/ui/day-dialog.js` | edit one day from the calendar |
@@ -355,6 +355,26 @@ the growth. And the popover is positioned in JS because an SVG rect has no CSS
 box to anchor an HTML tooltip to. `<title>` stays in the markup for screen
 readers but is hidden with `display: none`, or the native bubble covers the
 popover.
+
+**The search box is OUTSIDE `#grid`, and that is the whole design.**
+`paint()` runs on every keystroke and rebuilds that subtree with
+`replaceChildren()`, so a control inside it would lose the caret mid-word.
+`data-focus-key` restores a control that IS rebuilt; the cheaper answer for one
+that need not be is to not rebuild it — and `searchcheck.mjs` asserts a whole
+word arrives with focus still in the box, because moving it inside `#grid` does
+not fail a check, it makes the element unreadable.
+
+Three rules travel with it. **The drag handle goes while a filter is on**: a drop
+against a subset computes a `position` from neighbours that are not the habit's,
+and `persistOrder` sends the RENDERED order. **The threshold reads the unfiltered
+count** (and the box also stays while it has focus), or it vanishes under the
+cursor at the moment a query narrows the list past it. And **the MUTATORS clear the query**, not the `'reload'` listener. Creating a
+habit or restoring a backup replaces the list, so a filter that hides the result
+is a thing the user is told about and cannot see — `habit-dialog` and
+`data-dialog` clear it where the archive toggle already does. Doing it in the
+listener looks equivalent and is not: `'reload'` has ten emitters and only half
+replace anything, so it also wiped the box on **Back from a habit** — the
+feature's main workflow — and on a background reconnect, mid-word.
 
 **A rebuilt control keeps focus via `data-focus-key`, not its position.**
 `dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single

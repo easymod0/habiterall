@@ -143,10 +143,23 @@
         Show archived
       </button>
     </div>
+    <!--
+      Outside #grid on purpose: `paint()` rebuilds that subtree with
+      replaceChildren() on every keystroke's repaint, and a control inside it
+      would lose focus mid-word. `data-focus-key` restores a control that IS
+      rebuilt; the cheaper answer for one that need not be is to not rebuild it.
+    -->
+    <div id="search-row" hidden>
+      <label class="visually-hidden" for="habit-search">Find a habit</label>
+      <input id="habit-search" type="search" autocomplete="off"
+             placeholder="Find a habit…" aria-controls="grid">
+      <span id="search-count" class="search-count" aria-live="polite"></span>
+    </div>
     <div id="grid-head" class="grid-head" hidden></div>
     <div id="grid" class="grid"></div>
     <div id="empty" class="empty" hidden>
       <p id="empty-archived" class="empty-sub" hidden>No archived habits.</p>
+      <p id="empty-nomatch" class="empty-sub" hidden>No habits match that.</p>
 
       <p class="empty-title">Nothing tracked yet</p>
       <p class="empty-sub">
