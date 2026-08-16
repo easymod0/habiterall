@@ -18,7 +18,10 @@
  * different amount, or nothing. The decimal comma is the one that matters: it
  * is what most of Europe's keyboards invite, `inputmode="decimal"` shows it,
  * and dropping it multiplies the answer by ten. `HabitFormScreen.parseAmount`
- * on the phone has a comment about the same input for the same reason.
+ * on the phone has a comment about the same input — note it is NOT a mirror of
+ * this and does not try to be: it reads a habit's TARGET, does a blanket
+ * comma-to-dot replace, and so still reads "10,000" as ten. Worth fixing there,
+ * separately.
  */
 
 /**
@@ -56,9 +59,19 @@ export function parseAmount(raw) {
   // than the bug this parser exists to fix. It is genuinely ambiguous, since
   // "1,500" is fifteen hundred to one reader and one and a half to another, and
   // that is exactly the case the mixed form below is already refused for.
-  // Three digits is what makes it a group; "8,5" and "0,25" are unambiguous
-  // decimals and still work.
-  if (/,\d{3}(?!\d)/.test(text)) return null;
+  //
+  // A non-zero integer part is required, so this fires on a real group and not
+  // on "0,255" or ",255", where no thousands can precede the comma. Three
+  // digits is what makes it a group; "8,5" and "0,25" were never ambiguous.
+  //
+  // **The same ambiguity spelled with a DOT is not closed, and cannot be here.**
+  // `10.000` is ten, and to a de-DE or es-ES reader it is ten thousand — but
+  // `0.500` and `1.250` are ordinary decimals people type, and refusing
+  // `\.\d{3}` to catch the other reading would break far more than it fixed. A
+  // dot is the spelling this field itself writes (`formatAmount`) and shows
+  // (the placeholder), so it gets the benefit of the doubt. Closing that
+  // properly needs a locale, not a regex.
+  if (/[1-9]\d*,\d{3}(?!\d)/.test(text)) return null;
 
   const decimal = text.replace(/,/g, '.');
   if (!/^(\d+(\.\d*)?|\.\d+)$/.test(decimal)) return null;
@@ -76,7 +89,12 @@ export function parseAmount(raw) {
   if (value > MAX_AMOUNT) return null;
   if (value > 0 && value < MIN_AMOUNT) return null;
 
-  return value;
+  // Quantised to what `formatAmount` can show. Without this the domain is
+  // shared only at the ends: `3.14159265` was accepted whole, displayed as
+  // `3.141593` on the next open, and saved as that — a value changing behind a
+  // Save nobody meant to change anything with. Six places is far beyond what a
+  // habit records.
+  return Number(value.toFixed(6));
 }
 
 /**
@@ -136,9 +154,16 @@ export function stepFor(target) {
 export function formatAmount(n) {
   const value = Number(n);
   if (!Number.isFinite(value)) return '';
-  // Six places is far beyond anything a habit records and well inside the
-  // precision that survives a round trip through the database.
-  return String(Number(value.toFixed(6)));
+  const shown = Number(value.toFixed(6));
+
+  // Never render a real amount as nothing. `parseAmount` bounds what can be
+  // TYPED, and that is not a bound on what can arrive: neither `parseEntry`
+  // nor the habit's target is bounded server-side, so an import, the phone or
+  // an older client can store a value smaller than this can show. As "0" it
+  // would be rewritten into a stated lapse by the next Save; as its raw self
+  // it is refused by `parseAmount`, and being refused is loud.
+  if (shown === 0 && value !== 0) return String(value);
+  return String(shown);
 }
 
 /**

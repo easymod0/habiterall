@@ -185,3 +185,51 @@ test('a whole-number goal gets a whole-number step', () => {
   // A fractional goal may still step in fractions.
   assert.ok(!Number.isInteger(stepFor(0.5)));
 });
+
+/* ---------- what verifying the fix caught in the fix ---------- */
+
+test('a thousands group needs thousands in front of it', () => {
+  // The first cut refused any comma followed by three digits, which took
+  // "0,255" and ",255" with it — a nought-point-two-five-five that no reader
+  // could mistake for a group, since nothing precedes the comma to be counted
+  // in thousands. Refusing is loud, so it cost no data, but it refused a form
+  // the rule was never aimed at.
+  assert.equal(parseAmount('0,255'), 0.255);
+  assert.equal(parseAmount(',255'), 0.255);
+  assert.equal(parseAmount('0,500'), 0.5);
+  // And still refuses the real thing.
+  for (const raw of ['10,000', '1,500', '100,000', '12,345']) {
+    assert.equal(parseAmount(raw), null, `${raw} is a group and must be refused`);
+  }
+});
+
+test('an accepted amount survives being shown and read back — every accepted amount', () => {
+  // The bounds alone made this true only at the ENDS. In the middle,
+  // `3.14159265` was accepted whole and displayed as `3.141593`, so opening a
+  // day and pressing Save changed the stored value without anyone asking for a
+  // change. The parser quantises to what the box can show, so the two agree
+  // everywhere rather than in the range the first test happened to sample.
+  const cases = [
+    '3.14159265', '0.1234567', '0.00000149', '999999999999.9',
+    '1000000000000', '0.000001', '0', '8.5', '0.1', '20',
+  ];
+  for (const raw of cases) {
+    const value = parseAmount(raw);
+    assert.notEqual(value, null, `${raw} should be an amount`);
+    assert.equal(parseAmount(formatAmount(value)), value,
+      `${raw} does not survive the box (shown as ${formatAmount(value)})`);
+  }
+});
+
+test('an amount too small to show is never shown as nothing', () => {
+  // `parseAmount` bounds what can be TYPED and that is no bound on what can
+  // ARRIVE: neither `parseEntry` nor a habit's target is bounded server-side,
+  // so an import or an older client can store one. Rendered as "0" it would be
+  // rewritten into a stated lapse by the next Save. Rendered as itself it is
+  // refused, and refused is loud.
+  assert.notEqual(formatAmount(5e-7), '0');
+  assert.equal(parseAmount(formatAmount(5e-7)), null);
+  // Zero itself is still zero — a real answer, and not the case above.
+  assert.equal(formatAmount(0), '0');
+  assert.equal(parseAmount('0'), 0);
+});
