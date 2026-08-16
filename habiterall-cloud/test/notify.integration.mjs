@@ -353,6 +353,44 @@ try {
       .then((r) => r.rows[0]?.status));
   check('and the entry is untouched', unchanged === '', JSON.stringify(unchanged));
 
+  /* ---------- one account's read is not the whole tick ---------- */
+  //
+  // `collect` runs one `withUser` transaction per account, and the loop sits
+  // OUTSIDE `runTick`'s per-account try because `collect` is awaited before it.
+  // So a pool timeout on account 3 of 400 used to throw out of here and discard
+  // every account already collected along with every one behind it, for the
+  // whole minute.
+  //
+  // The seam is `pool.connect`, which is a prototype method — assigning to the
+  // instance shadows it, and the suite already imports `pool` to close it.
+  // `collect` opens one connection for the notifier-scope scan and then one per
+  // account, sequentially, so #2 is the first account.
+  console.log('--- one account\'s read failure ---');
+  const realConnect = pool.connect.bind(pool);
+  let connects = 0;
+  pool.connect = (...args) => (++connects === 2
+    ? Promise.reject(Object.assign(
+      new Error('timeout exceeded when trying to connect'), { code: 'ETIMEDOUT' }))
+    : realConnect(...args));
+  // Caught rather than allowed to escape: without the guard `collect` REJECTS,
+  // and an unhandled rejection here would take the suite down with a stack
+  // trace instead of reporting a failed check.
+  let survived = null;
+  let threw = null;
+  try {
+    survived = await notifier.collect(AT_0800_UTC);
+  } catch (err) {
+    threw = err;
+  } finally {
+    pool.connect = realConnect;
+  }
+  check('one account\'s read failure does not discard the whole tick',
+    !threw && survived?.length === 1,
+    threw ? `collect threw: ${threw.message}` : JSON.stringify({ got: survived.map((a) => a.id) }));
+  check('and it is the OTHER account that survives, not a partial one',
+    survived?.[0]?.id !== undefined && survived[0].habits.length > 0,
+    JSON.stringify((survived ?? []).map((a) => ({ id: a.id, habits: a.habits.length }))));
+
   console.log(fails === 0 ? '\nALL CLOUD NOTIFY CHECKS PASSED' : `\n${fails} CHECK(S) FAILED`);
 } finally {
   await admin.end();
