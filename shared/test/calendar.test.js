@@ -187,3 +187,72 @@ test('an unknown zoom name falls back to the default', () => {
   // trap that once 500'd the settings endpoint.
   assert.deepEqual(zoomLevel('__proto__'), CALENDAR_ZOOM[DEFAULT_ZOOM]);
 });
+
+/* ---------- whose week is it ---------- */
+
+const { weekdayIndex } = await import('../public/ui/calendar.js');
+// The suite above works in ISO strings; these need real dates to ask what
+// weekday a boundary landed on, which is the whole claim being made.
+const fromISO = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (iso, n) => {
+  const d = fromISO(iso); d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+test('the calendar honours the account\'s week start', () => {
+  // The bug: `startOfWeek` in stats.js has always honoured `weekStart`, so the
+  // history and times-per-week charts bucketed on the right day, while this
+  // snapped unconditionally to Sunday. Someone whose week starts on Monday got
+  // a Sunday-anchored heatmap on the chart the detail view opens to, with the
+  // weekday labels beside it saying otherwise. The setting's help text — "used
+  // by the history and times-per-week charts" — is literally true, which is how
+  // it went unnoticed.
+  //
+  // 2026-08-12 is a Wednesday.
+  const sun = calendarWindow('2026-08-12', 4, 'sunday');
+  const mon = calendarWindow('2026-08-12', 4, 'monday');
+
+  assert.equal(fromISO(sun.start).getDay(), 0, 'a Sunday week must start on Sunday');
+  assert.equal(fromISO(mon.start).getDay(), 1, 'a Monday week must start on Monday');
+  assert.equal(fromISO(sun.end).getDay(), 6, 'and close on Saturday');
+  assert.equal(fromISO(mon.end).getDay(), 0, 'and on Sunday');
+});
+
+test('the end anchor survives the week start', () => {
+  // The property `calendarWindow` exists for, and the one a fix here could
+  // easily break: the window is anchored on its END so the day being asked
+  // about is always drawn. Anchoring on the start hides today on six days out
+  // of seven — see the comment on the function.
+  for (const weekStart of ['sunday', 'monday']) {
+    for (let i = 0; i < 14; i++) {
+      const day = addDays('2026-08-01', i);
+      const { start, end } = calendarWindow(day, 6, weekStart);
+      assert.ok(start <= day && day <= end,
+        `${weekStart}: ${day} fell outside ${start}..${end}`);
+    }
+  }
+});
+
+test('a window is always whole weeks, whichever day starts one', () => {
+  for (const weekStart of ['sunday', 'monday']) {
+    for (const weeks of [1, 4, 13, 27, 53]) {
+      const { start, end } = calendarWindow('2026-08-12', weeks, weekStart);
+      const days = Math.round(
+        (fromISO(end).getTime() - fromISO(start).getTime()) / 86400000) + 1;
+      assert.equal(days, weeks * 7, `${weekStart} / ${weeks}`);
+    }
+  }
+});
+
+test('weekdayIndex is how far into ITS week a day falls', () => {
+  // The one place `getDay()`'s Sunday-based numbering is translated. Every
+  // weekday axis reads its labels AND its data through this, because the stats
+  // functions index by `getDay()` and rotating captions alone would caption
+  // Monday's row "Sunday" and leave the bars where they were.
+  const sunday = fromISO('2026-08-16');
+  const monday = fromISO('2026-08-17');
+  assert.equal(weekdayIndex(sunday, 'sunday'), 0);
+  assert.equal(weekdayIndex(sunday, 'monday'), 6, 'Sunday closes a Monday week');
+  assert.equal(weekdayIndex(monday, 'monday'), 0);
+  assert.equal(weekdayIndex(monday, 'sunday'), 1);
+});

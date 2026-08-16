@@ -266,6 +266,10 @@ function render(stats, entries) {
   calScroll.className = 'chart-scroll';
   calScroll.append(calendarChart(entriesByDate, color, habit, {
     zoom,
+    // The account's week, which `startOfWeek` in stats.js has always honoured
+    // while the calendar snapped to Sunday regardless — so the heatmap and the
+    // history chart under it disagreed about where a week begins.
+    weekStart: settings.get('weekStart'),
     weeks: CAL_WEEKS,
     endDate: calEnd,
     skips: skipSet,
@@ -335,7 +339,8 @@ function render(stats, entries) {
 
   /* weekday — seven fixed bars, so nothing to page through */
   host.append(
-    card('By day of week', weekdayChart(stats.weekdays, color, { width: chartWidth }))
+    card('By day of week', weekdayChart(stats.weekdays, color,
+      { width: chartWidth, weekStart: settings.get('weekStart') }))
   );
 
   /* weekday consistency over time — the same question as the bars above,
@@ -356,7 +361,8 @@ function render(stats, entries) {
       width: chartWidth,
       labelOf: (m) => m.month,
       redraw: () => open(habit.id),
-      render: (slice) => weekdayMonthChart(slice, color, { width: chartWidth }),
+      render: (slice) => weekdayMonthChart(slice, color,
+        { width: chartWidth, weekStart: settings.get('weekStart') }),
     });
     host.append(wmCard);
   }

@@ -270,6 +270,25 @@ rate (being mid-slip is not the same as having failed to recover) and reported
 as `openRun` instead; and a rate of `null` means "nothing has ever been
 missed", which is a different claim from 100% and must not render as a number.
 
+**`weekStart` reaches every weekday axis, and for a long time it did not.**
+`startOfWeek` in stats.js has always honoured it, so the history and
+times-per-week charts bucketed on the right day — while `calendarWindow`
+snapped unconditionally to Saturday/Sunday and the weekday charts drew Sunday
+first. Someone whose week starts on Monday got a Sunday-anchored heatmap on the
+chart the detail view opens to, with the labels beside it saying otherwise. The
+setting's own help text says it is "used by the history and times-per-week
+charts", which is literally true and is exactly how it survived.
+
+`weekOrder` in charts.js is the one translation from `getDay()`'s Sunday-based
+numbering to the account's, and **both the labels and the data read through
+it**. Rotating the captions alone would have captioned Monday's row "Sunday"
+and left the bars where they were — a chart wrong in the one dimension it
+exists to show. The calendar heatmap needs neither, because its rows are
+positional: `calendarWindow` decides which day the column starts on and the
+grid fills sequentially from there. What it does need is the labels, and
+Home/End, which jumped to `getDay() === 0` and so walked off the top of a
+Monday-start grid.
+
 **The calendar is anchored on its END, not its start.** Going back
 `weeks*7` days and *then* snapping to a Sunday shifts the whole grid earlier,
 so the last column stops short of today by however many days into the week it

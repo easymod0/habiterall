@@ -89,26 +89,55 @@ function toISO(d) {
  *
  * The window is anchored on its END. The last column is the whole week
  * containing `endDate` — so `endDate` itself is always drawn — and the start
- * is `weeks` whole weeks back from there, always landing on a Sunday so the
- * weekday rows line up.
+ * is `weeks` whole weeks back from there, landing on the first day of a week
+ * so the weekday rows line up.
  *
- * Anchoring on the start instead (go back weeks*7 days, then snap backwards
- * to a Sunday) shifts the entire grid earlier by however many days into the
- * week `endDate` falls, which hides today on six days out of seven.
+ * Anchoring on the start instead (go back weeks*7 days, then snap backwards)
+ * shifts the entire grid earlier by however many days into the week `endDate`
+ * falls, which hides today on six days out of seven.
+ *
+ * **Which day starts a week is the account's, and it was hard-coded here.**
+ * `weekStart` was honoured by `startOfWeek` in stats.js — so the history and
+ * times-per-week charts bucketed on the right day — while this snapped
+ * unconditionally to Saturday/Sunday. Someone whose week starts on Monday got a
+ * Sunday-anchored heatmap on the chart the detail view opens to, with the
+ * weekday labels beside it saying otherwise. The setting's own help text says
+ * it is "used by the history and times-per-week charts", which is literally
+ * true and is how it went unnoticed.
  *
  * @param {string} endDate  last date that must be visible, 'YYYY-MM-DD'
  * @param {number} weeks    number of columns
+ * @param {'monday'|'sunday'} [weekStart] which day a column begins on
  * @returns {{start: string, end: string}} first and last cell in the grid
  */
-export function calendarWindow(endDate, weeks) {
+export function calendarWindow(endDate, weeks, weekStart = 'sunday') {
   const end = fromISO(endDate);
 
-  // Saturday closing endDate's week.
+  // The last day of endDate's week — Saturday for a Sunday-start week, Sunday
+  // for a Monday-start one. `weekdayIndex` is the offset from the first day.
   const lastCell = new Date(end);
-  lastCell.setDate(lastCell.getDate() + (6 - lastCell.getDay()));
+  lastCell.setDate(lastCell.getDate() + (6 - weekdayIndex(end, weekStart)));
 
   const start = new Date(lastCell);
   start.setDate(start.getDate() - (weeks * 7 - 1));
 
   return { start: toISO(start), end: toISO(lastCell) };
+}
+
+/**
+ * How far into its week a date falls, 0-6, counting from `weekStart`.
+ *
+ * `getDay()` is always Sunday-based, so this is the one place that translates.
+ * The calendar's ROWS are the same index, which is why it is exported: the
+ * heatmap draws row `weekdayIndex(date)` and labels it from the same rotation,
+ * and the two reading `getDay()` separately is how a Monday-start grid would
+ * end up with Sunday's label on Monday's row.
+ *
+ * @param {Date} date
+ * @param {'monday'|'sunday'} [weekStart]
+ * @returns {number}
+ */
+export function weekdayIndex(date, weekStart = 'sunday') {
+  const day = date.getDay();
+  return weekStart === 'monday' ? (day + 6) % 7 : day;
 }
