@@ -840,10 +840,15 @@ async function recordValue(habit, date, next) {
   // key here would paint the cell as unknown while the server holds an
   // answer, which with question marks on is a visible lie until the refetch.
   habit.entries[date] = next;
-  // `skips` is what the cell is painted from, so it moves with the value.
-  // Only a boolean habit can reach SKIP from here; a measurable one is
-  // recording an amount, which by definition ends any skip on that day.
-  const wasSkip = setSkip(habit, date, next === SKIP && habit.type === 'boolean');
+  // `skips` is what the cell is painted from, so it clears with the value: any
+  // amount recorded on a day ends a skip that was on it.
+  //
+  // Never SETS one. Skips come through `recordSkip` now, which writes the
+  // status; the condition here used to be `next === SKIP && type === 'boolean'`
+  // and became unsatisfiable when `valueForState` stopped answering for a skip
+  // at all. A dead branch is harmless, but a comment claiming a boolean habit
+  // "can reach SKIP from here" is the line a future skip change would read.
+  const wasSkip = setSkip(habit, date, false);
   paint();
 
   try {

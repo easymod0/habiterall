@@ -421,9 +421,19 @@ a clean day is `done`, a slip is `no` — so `nextDayState` is untouched and its
 Kotlin mirror did not have to learn anything. `valueForState` is what differs:
 `done` writes 0 and `no` writes `target + 1`, where an ordinary habit writes
 `YES` and `UNSET`. It is mirrored in `Grid.valueForState` for the reason the
-cycle is — a tap happens with no network — and `isAvoided` asks BOTH halves,
-because `show_as` is kept when a habit's goal is switched to At least so that
-switching back does not lose it.
+cycle is — a tap happens with no network — and `isAvoided` asks all THREE
+questions: avoid, at-most, and MEASURABLE. `show_as` is kept when a habit's type
+or goal is switched, so that switching back does not lose it, which means the
+predicate carries the whole rule. Asking two of the three put a habit somewhere
+it could not leave — boolean + at_most + avoid is reachable from the form in one
+sitting, and a tap meaning done then encoded as 0, which `isCompleted` reads as
+NOT done for a yes/no habit.
+
+`valueForState` **throws** for a skip rather than answering. A skip is the
+status column, and returning Loop's SKIP sentinel as a value stored three of the
+thing on a measurable habit — `parseEntry` reads 3 as a skip only for a boolean
+one. The dashboard's `recordSkip` writes `{status: 'skip'}`, which is what the
+day editor and the phone have always sent.
 
 Note `toggle.js` declares `UNSET`/`YES`/`SKIP` locally rather than importing
 `ui/values.js`. It is dependency-free on purpose — that is what lets

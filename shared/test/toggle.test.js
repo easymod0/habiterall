@@ -102,6 +102,51 @@ test('the Kotlin mirror is pinned to the same cases', () => {
     const name = state === 'skip' ? 'SKIPPED' : state.toUpperCase();
     assert.ok(kotlin.includes(`DayState.${name}`), `Grid.kt never mentions ${name}`);
   }
+
+  // The encoding beside the cycle, and the refusal beside it. Both were
+  // hand-applied twice — once here, once in Kotlin — and the first attempt got
+  // the second file backwards, teaching Kotlin the web's bug instead of the
+  // reverse. Nothing failed, because nothing looked.
+  assert.match(kotlin, /fun valueForState\(habit: Habit, state: DayState\)/,
+    'Grid.kt has no valueForState — the encoding is mirrored, not shared');
+  assert.match(kotlin, /state == DayState\.SKIPPED ->[\s\S]{0,40}?error\(/,
+    'Grid.kt no longer refuses to encode a skip; the web throws for it');
+});
+
+test('the two isAvoided implementations ask the same questions', () => {
+  // Not in Grid.kt: the phone's lives on the Habit model in Api.kt, so the
+  // check above never saw it. It had to be fixed in two files when a review
+  // found it asking two of its three questions, and the next such fix can land
+  // in one — which is what this exists to stop.
+  const kotlin = readFileSync(
+    join(root, '..', 'android-native', 'app', 'src', 'main', 'java',
+      'com', 'habiterall', 'app', 'data', 'Api.kt'),
+    'utf8'
+  );
+  const decl = /val isAvoided get\(\) =([\s\S]{0,120}?)\n\n/.exec(kotlin);
+  assert.ok(decl, 'Api.kt no longer declares isAvoided');
+
+  // All three questions, in whichever order each language spells them.
+  for (const [what, kt] of [
+    ['the rendering', /showAs == "avoid"/],
+    ['an at-most target', /targetType == "at_most"/],
+    ['a measurable habit', /isNumerical/],
+  ]) {
+    assert.match(decl[1], kt, `Kotlin's isAvoided stopped asking about ${what}`);
+  }
+
+  // And the web's, read from its own source rather than by calling it, so a
+  // clause deleted here is as loud as one deleted there.
+  const web = readFileSync(join(root, 'public', 'ui', 'toggle.js'), 'utf8');
+  const body = web.slice(web.indexOf('export function isAvoided'));
+  const js = body.slice(0, body.indexOf('}'));
+  for (const [what, re] of [
+    ['the rendering', /show_as === 'avoid'/],
+    ['an at-most target', /target_type === 'at_most'/],
+    ['a measurable habit', /type === 'numerical'/],
+  ]) {
+    assert.match(js, re, `the web's isAvoided stopped asking about ${what}`);
+  }
 });
 
 /* ---------- a habit shown as something to avoid ---------- */

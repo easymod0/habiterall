@@ -136,7 +136,9 @@ try {
     if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
     await sleep(250);
   }
-  // Clean -> slip -> skip, which is the cycle with skips enabled.
+  // The day is at `no` when these run, so this is slip -> clean -> skip. The
+  // cycle itself is Loop's DONE -> SKIP -> NO, which the rendering does not
+  // reorder — stated again at the limit-of-two section below.
   await ev(`${cell}.click(); true`); await sleep(700);
   await ev(`${cell}.click(); true`); await sleep(700);
   row = await stored();
@@ -199,8 +201,11 @@ try {
     await sleep(250);
   }
   row = await stored();
+  // Both non-null, or "unchanged" is two absences agreeing and the check says
+  // nothing at all.
+  check('there was a row to be left alone', beforeSwitch !== null, JSON.stringify(beforeSwitch));
   check('the stored day is untouched by the switch',
-    JSON.stringify(row) === JSON.stringify(beforeSwitch), 
+    JSON.stringify(row) === JSON.stringify(beforeSwitch),
     `${JSON.stringify(row)} was ${JSON.stringify(beforeSwitch)}`);
 
   await ev(`${cell}.click(); true`);
