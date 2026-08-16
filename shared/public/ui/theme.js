@@ -23,8 +23,71 @@
 
 import { get, onApply, save } from '/shared/ui/settings.js';
 
-/** Where the two-state version kept its answer, before this was a setting. */
-const LEGACY_KEY = 'habiterall-theme';
+/**
+ * What THIS DEVICE last said about the theme, while the server does not have
+ * it yet. One durable record, and the only thing `choice()` prefers over the
+ * account.
+ *
+ * There were three carriers here — a `serverAnswered` flag, a `userChose`
+ * flag, and this key holding the pre-setting value — with `choice()`
+ * arbitrating between them at render time. Every fix on this branch added a
+ * guard to that set and each one bought the next defect, because the durable
+ * member of the three held the OLDEST answer: a press was remembered in
+ * memory, so a reload preferred the stale key over the choice just made and
+ * quietly undid it. One record, holding the NEWEST answer, is the fix; the
+ * flags are gone rather than joined by a fourth.
+ *
+ * It carries two kinds of answer and says which, because they are retired by
+ * different events and a record that cannot tell them apart has to guess:
+ *
+ *   `light`         a bare value is what the PRE-SETTING build wrote here, and
+ *                   reading it is the whole of the migration. Another device
+ *                   may have set the account since, and that is the more
+ *                   recent decision, so this is discarded the moment the
+ *                   server names any theme at all.
+ *   `press:light`   this device's own press, not yet confirmed. The account
+ *                   naming something else does NOT retire it: the write may
+ *                   still be sitting in the outbox, and the account is then
+ *                   the older answer of the two.
+ *
+ * A press writes `system` here as well as the other two, which the bare
+ * spelling never could — "follow this device" is a state, and a state you
+ * cannot record is one a reload loses.
+ */
+const DEVICE_KEY = 'habiterall-theme';
+const PRESS = 'press:';
+const CHOICES = ['system', 'light', 'dark'];
+
+/** @returns {{value: string, pressed: boolean} | null} */
+function deviceRecord() {
+  let raw;
+  try {
+    raw = localStorage.getItem(DEVICE_KEY);
+  } catch {
+    return null;                 // private browsing; nothing is remembered
+  }
+  if (!raw) return null;
+  if (raw.startsWith(PRESS)) {
+    const value = raw.slice(PRESS.length);
+    return CHOICES.includes(value) ? { value, pressed: true } : null;
+  }
+  // The pre-setting build only ever wrote these two.
+  return raw === 'light' || raw === 'dark' ? { value: raw, pressed: false } : null;
+}
+
+/** Remember a press, durably, BEFORE anything is attempted over the network. */
+function remember(value) {
+  try {
+    localStorage.setItem(DEVICE_KEY, PRESS + value);
+  } catch { /* private browsing: the press lasts this session only */ }
+}
+
+/** The server has it, or has overruled it. Either way this device is done. */
+function forget() {
+  try {
+    localStorage.removeItem(DEVICE_KEY);
+  } catch { /* nothing to clean up */ }
+}
 
 /**
  * Where the button goes next.
@@ -62,51 +125,17 @@ const LABEL = {
 
 const prefersDark = () => matchMedia('(prefers-color-scheme: dark)');
 
-/** The two-state value the old toggle stored here, if it is still around. */
-function legacyChoice() {
-  try {
-    const saved = localStorage.getItem(LEGACY_KEY);
-    return saved === 'light' || saved === 'dark' ? saved : null;
-  } catch {
-    return null;                 // private browsing; nothing to migrate
-  }
-}
-
 /**
- * Whether the server has answered yet — which is the only thing that can tell a
- * stored `theme` from the default one.
+ * The setting's value: this device's own unconfirmed answer if it has one, and
+ * the account's otherwise.
  *
- * `ui/settings.js` deliberately cannot: `load()` goes through `sanitise`, which
- * starts from `defaults()`, so `get('theme')` is `'system'` for an account that
- * has never had one AND for an account set to follow the device. Before the
- * answer, the legacy key is the better guess about this device; after it, the
- * account wins even if this device still holds a stale one — another device may
- * have migrated already, and that is the more recent decision.
+ * `ui/settings.js` cannot make this distinction for us — `load()` goes through
+ * `sanitise`, which starts from `defaults()`, so `get('theme')` is `'system'`
+ * both for an account that has never had one and for an account set to follow
+ * the device. The record is what covers the gap, and it covers it durably.
  */
-let serverAnswered = false;
-
-/**
- * Whether the user has pressed the control this session.
- *
- * A press retires the legacy key's authority immediately, and that is a
- * correctness rule rather than tidiness. Without it, a session whose settings
- * read failed — an offline boot, a 429 from the IP-keyed read limiter, a stale
- * tunnel — left `choice()` preferring the legacy value, so the applier repainted
- * it straight after every press: the button changed nothing on screen while
- * quietly writing the OPPOSITE of the user's stored choice to the account, and
- * the next clean boot adopted that and deleted the key. Silent, irreversible,
- * and reached by pressing a button that looks broken — which is exactly what
- * invites the extra presses.
- */
-let userChose = false;
-
-/** The setting's value, with the pre-setting answer standing in for it. */
 function choice() {
-  if (!serverAnswered && !userChose) {
-    const legacy = legacyChoice();
-    if (legacy) return legacy;
-  }
-  return get('theme') ?? 'system';
+  return deviceRecord()?.value ?? get('theme') ?? 'system';
 }
 
 /**
@@ -142,7 +171,16 @@ function apply(value) {
  */
 export function initTheme({ onLabel } = {}) {
   if (onLabel) announce = onLabel;
-  onApply(() => apply(choice()));
+  onApply((values, meta) => {
+    // `meta.stored` is present only when this update came from the server's
+    // own reply, and it is the ONLY thing that can retire the device record.
+    // Putting it here rather than in `toggleTheme` is what makes the settings
+    // dialog work too: it writes through `saveAll`, which never told this
+    // module anything, so a theme picked there was stored by the server and
+    // then painted over by a record nobody had cleared.
+    if (meta?.stored) reconcile(meta.stored);
+    apply(choice());
+  });
 
   // `system` means live, not "whatever it was at boot". Without this, a laptop
   // that switches at sunset needs a reload to catch up — which is most of what
@@ -153,107 +191,98 @@ export function initTheme({ onLabel } = {}) {
 }
 
 /**
- * Adopt the pre-setting choice, once, so it follows the account from now on.
+ * The server has said what it holds. Decide what becomes of this device's
+ * record, and push it if the account has nothing.
  *
- * Called after `settings.init()` and not before: it is a WRITE, and writing
- * from the cached values would race the answer and could overwrite a `theme`
- * this account already has. Reading the legacy key is safe at any time, which
- * is why `apply` may use it while this has not run yet — the alternative is a
- * dialog showing "Follow this device" over a page the user had set to dark,
- * which is the `historyGranularity` trap in another costume.
+ * This replaced a `migrateTheme()` that ran a `GET /api/settings` of its own
+ * after boot, held its promise so a press could queue behind it, and needed
+ * two flags to describe where it had got to. All of that was recovering an
+ * answer the boot had already been given: `settings.init()` reads the same
+ * route, and `adopt` now passes what it read. So there is no second request,
+ * no promise, and nothing for a press to wait on — which is what removes the
+ * case where a press waited on a request that never came back and was lost
+ * with the tab.
+ *
+ * @param {Record<string, unknown>} stored the keys the server says it HOLDS —
+ *   not the sanitised view, which fills the gaps and so can never answer
+ *   "does this account have a theme at all".
  */
-export function migrateTheme() {
-  migrating = runMigration();
-  return migrating;
+function reconcile(stored) {
+  const record = deviceRecord();
+  if (!record) return;
+
+  // The server has this device's answer. Done — and this is the ordinary end
+  // of a press, since `save()` adopts the reply it gets.
+  if (stored.theme === record.value) { forget(); return; }
+
+  // The account has no theme, so this device's answer becomes the account's.
+  if (!Object.hasOwn(stored, 'theme')) { push(record.value); return; }
+
+  // The account holds something ELSE, and what that means depends on which
+  // kind of record this is. A pre-setting leftover is superseded: another
+  // device has migrated since, and that is the more recent decision.
+  if (!record.pressed) { forget(); return; }
+
+  // A press is not superseded — the account is the older of the two answers,
+  // and the write this device owes has not landed. Sending it again is what
+  // makes the whole arrangement self-healing: a press whose write was lost
+  // (the tab closed before it went out, a 500, or a stale write from this
+  // same boot landing after it) is re-sent on the next reconcile rather than
+  // sitting on this device forever, invisible on every other one.
+  push(record.value);
 }
 
 /**
- * The migration's own promise, so a press can WAIT for it instead of racing it.
+ * Give the account this device's answer.
  *
- * This is the structural half of the fix, and it replaces a fourth boolean.
- * `userChose` closed the window between the read and the guard; it could not
- * close the one between the guard and the migration's own `await save(...)`,
- * because that is a second writer already in flight. Measured, a press landing
- * there either left the account holding the press while the screen and the
- * settings cache held the old value, or was discarded outright — and
- * `toggleTheme` answered `{ok: true}` both times, so nothing was said.
- *
- * One writer at a time is the rule. The press still PAINTS immediately; only
- * its write queues behind the migration's.
+ * Fire and forget: the record is durable, so a failure costs nothing but a
+ * retry on the next boot. The guard is re-entrancy and not state — `save`
+ * adopts the reply, which runs the applier, which lands back in `reconcile`.
+ * That second pass is how the record gets cleared, and it must not start a
+ * second write on the way through.
  */
-let migrating = null;
+let pushing = false;
 
-async function runMigration() {
-  const legacy = legacyChoice();
-  // No legacy key means there is nothing this device can say that the account
-  // cannot; the flag is moot and the read below is not worth making.
-  if (!legacy) { serverAnswered = true; return; }
-
-  // `GET /api/settings` and not `get('theme')`, and this is the whole of it:
-  // `ui/settings.js` fills gaps from `defaults()`, so `get('theme')` answers
-  // `'system'` for an account that has never had one — a guard written against
-  // it can never fire. The route returns only the keys that have been STORED,
-  // which is the one place the difference exists. An earlier version of this
-  // asked the cache, so it never saved and deleted the key anyway: every user
-  // who had pressed the old toggle lost their choice on the first load after
-  // upgrading, silently.
-  let stored;
-  try {
-    const res = await fetch('/api/settings', { credentials: 'same-origin' });
-    if (!res.ok) return;                       // try again next boot
-    stored = await res.json();
-  } catch {
-    return;                                    // offline: the key stays put
-  }
-  if (typeof stored !== 'object' || stored === null) return;
-
-
-
-  // The user got there first — their press is a more recent answer than a key
-  // left over from a previous version. Checked immediately before the write
-  // rather than only after the read, so the migration never becomes the second
-  // writer: `toggleTheme` awaits this promise, so if the press has been
-  // registered at all, this must not issue a PUT of its own.
-  if (userChose) return;
-
-  if (!Object.hasOwn(stored, 'theme')) {
-    const result = await save('theme', legacy);
-    if (!stored$ok(result)) return;
-  }
-  // ONLY once something IS stored — not merely once the read came back. An
-  // earlier version set it above the read's failure returns; this one set it
-  // above the WRITE's, which is the same bug on the other branch: with the GET
-  // succeeding and the PUT answering 429, the flag went true with the legacy
-  // key correctly kept and nothing on the account, so `choice()` answered
-  // 'system' over a page painted dark and the next unrelated cache write
-  // flipped it mid-session.
-  serverAnswered = true;
-  try {
-    localStorage.removeItem(LEGACY_KEY);
-  } catch { /* nothing to clean up */ }
-  // Not if the user pressed while this was in flight — `save`'s own cache
-  // adoption has already repainted their choice, and this would paint over it.
-  if (!userChose) apply(choice());
+function push(value) {
+  if (pushing) return;
+  pushing = true;
+  serialise(() => save('theme', value))
+    .catch(() => {})
+    .finally(() => { pushing = false; });
 }
 
 /**
- * Did a write actually reach the server?
+ * Theme writes go out ONE AT A TIME, in the order they were made.
  *
- * NOT `result.ok`, which is also what `save` answers offline — `{ok: true,
- * offline: true}`, having written the settings cache and queued the PUT. An
- * earlier comment here called that two homes for the answer. It is not: the
- * cache is replaced wholesale by the next `init()` (`settings.js`'s
- * `cache = sanitise(await res.json())`), and the outbox drops a replayed 4xx
- * other than 401/403 — which includes a 429 from the write limiter. So the
- * chain "PUT fails at the network layer, key deleted, replay gets a 429,
- * next boot overwrites the cache" loses the pre-setting choice for good, which
- * is the one thing this whole function exists to prevent.
+ * Two writers of one key cannot be ordered by hoping. The reconcile above may
+ * have a PUT of the pre-setting value in flight when the user presses the
+ * button, and if the two arrive at the server in the other order the account
+ * keeps the value the user just changed away from — measured, and the reason
+ * an earlier version had `toggleTheme` await the migration's promise. That
+ * version was right about the ordering and wrong about the mechanism: it
+ * awaited an UNBOUNDED request, so a PUT that was accepted and never answered
+ * left the press waiting forever and lost it with the tab.
  *
- * The key is cheap to keep and it is the only durable copy, so it stays until
- * the server has it.
+ * A queue is the ordering without the hazard, and it is only safe because
+ * `settings.save` is bounded now — every link settles. The press still PAINTS
+ * before joining it, and the record is already durable by then, so what is
+ * queued is the write and never the answer.
  */
-function stored$ok(result) {
-  return Boolean(result?.ok) && !result?.offline;
+/** @type {Promise<any>} */
+let writes = Promise.resolve();
+
+/**
+ * @template T
+ * @param {() => T | Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+function serialise(fn) {
+  // `then(fn, fn)` rather than `then(fn)`: a failed write must not stop the
+  // ones behind it, and a rejected chain that nothing catches is an unhandled
+  // rejection at boot.
+  const next = writes.then(fn, fn);
+  writes = next.catch(() => {});
+  return next;
 }
 
 /**
@@ -265,36 +294,32 @@ function stored$ok(result) {
  *   all, so silently reverting at some arbitrary later cache write is new.
  */
 export async function toggleTheme() {
-  // Computed before `userChose` is set, so the step is relative to what is on
-  // SCREEN — which, before the migration lands, is the legacy value.
   const next = nextChoice();
-  // The press is the user's answer, so the pre-setting key stops speaking for
-  // this device from here. In memory only: the key itself is the sole durable
-  // copy until the server has the value, and `removeItem` can throw in private
-  // browsing, which is why the flag is the half that has to hold.
-  userChose = true;
 
-  // Paint first: everything below waits on the network, and a press that does
+  // Durable FIRST, before anything is attempted over the network. This is the
+  // whole of the offline fix: the press used to be remembered in a variable,
+  // so reopening the app while still offline preferred the older record on
+  // disk and painted the theme the user had just changed away from — with the
+  // write sitting in the outbox saying otherwise.
+  remember(next);
+
+  // Then paint: everything below waits on the network, and a press that does
   // nothing for a second reads as broken.
   apply(next);
 
-  // Behind the migration, never beside it. It may already have issued a PUT
-  // for the legacy value; two writers on one key is how a press ended up
-  // discarded, or landed while the cache still held the old value.
-  if (migrating) {
-    try {
-      await migrating;
-    } catch { /* its failure is its own business; the press still stands */ }
-  }
+  const result = await serialise(() => save('theme', next))
+    .catch(() => ({ ok: false, error: 'could not save' }));
 
-  const result = await save('theme', next);
-  if (stored$ok(result)) {
-    try {
-      localStorage.removeItem(LEGACY_KEY);
-    } catch { /* nothing to clean up */ }
-  } else if (!result?.ok) {
-    // Put the screen back to what is actually stored rather than leaving it
-    // showing a value the server refused.
+  // Nothing to clear on success: `save` adopted the server's reply, which ran
+  // the applier, which reconciled. What is left is the refusal — a 429, a 500,
+  // a value the server would not have. That is not "not yet", it is "no", so
+  // the record goes and the screen returns to what is actually stored.
+  //
+  // A refusal is NOT the offline answer. `save` reports that as
+  // `{ok: true, offline: true}`, having written the cache and queued the PUT,
+  // and the record has to survive it — that write is still owed.
+  if (!result?.ok) {
+    forget();
     apply(choice());
   }
   return result;

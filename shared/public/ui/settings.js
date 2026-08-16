@@ -486,7 +486,11 @@ function readCache() {
   }
 }
 
-function writeCache(values) {
+/**
+ * @param {Record<string, any>} values
+ * @param {import('./settings.js').ApplyMeta} [meta]
+ */
+function writeCache(values, meta) {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(values));
   } catch {
@@ -501,16 +505,45 @@ function writeCache(values) {
   // turned a successful server write into a rejected `save()` or `set()`,
   // and `app.js`'s theme handler has no `.catch()`, so it would be an
   // unhandled rejection with no toast.
+  notifyAppliers(values, meta);
+}
+
+/**
+ * Hand the values to everything that paints itself from them.
+ *
+ * `meta.stored` is the server's OWN reply — the keys it says it holds, before
+ * `sanitise` fills the gaps — and it is present only when this update came
+ * from a response. That distinction cannot be recovered downstream and one
+ * applier genuinely needs it: `ui/theme.js` keeps a durable note of what this
+ * device last said, and the only thing that may retire that note is the server
+ * confirming it. A cache write is not confirmation; an offline save performs
+ * one, which is how a press made on a train was undone by reopening the app.
+ *
+ * Guarded for the reason the loop it replaced was: this runs on the chokepoint
+ * every write goes through, so an applier that throws must not turn a
+ * successful server write into a rejected `save()`.
+ */
+/**
+ * @param {Record<string, any>} values
+ * @param {ApplyMeta} [meta]
+ */
+function notifyAppliers(values, meta) {
   for (const fn of appliers) {
     try {
-      fn(values);
+      fn(values, meta);
     } catch {
       /* an applier must not break a save either */
     }
   }
 }
 
-/** @type {((values: Record<string, any>) => void)[]} */
+/**
+ * @typedef {{stored?: Record<string, unknown>}} ApplyMeta
+ *   `stored` is the server's own reply — the keys it says it HOLDS, before
+ *   `sanitise` fills the gaps — and is present only when the update came from
+ *   a response rather than from a cache write.
+ */
+/** @type {((values: Record<string, any>, meta?: ApplyMeta) => void)[]} */
 const appliers = [];
 
 /**
@@ -527,6 +560,28 @@ const appliers = [];
  * The callback is invoked immediately with the values in hand, because the
  * caller registering before the first paint is the whole point.
  */
+/**
+ * How long a settings request may take before it counts as unreachable.
+ *
+ * Taken from `ui/api.js`'s bound rather than invented, because it is the same
+ * question — and these calls do NOT go through `api()`, which is how they came
+ * to have no bound at all. Measured: a PUT accepted and never answered (a
+ * stale tunnel, a container that has stopped replying) left `save()` pending
+ * indefinitely, so a caller awaiting it waited forever and the write reached
+ * neither the server nor the outbox. Chrome imposes no ceiling of its own.
+ *
+ * A settings write is a patch of key to value, so it is safe to arrive twice —
+ * which is what makes abandoning one and queueing it a sound answer, where
+ * `POST /habits` would yield a second habit. See `replayable()` in ui/api.js.
+ */
+const REQUEST_MS = 10_000;
+
+/** An abort signal for one request, where the platform has one. */
+const bound = () =>
+  (typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+    ? AbortSignal.timeout(REQUEST_MS)
+    : undefined);
+
 export function onApply(fn) {
   appliers.push(fn);
   // Guarded like the loop in `writeCache`, and for the same reason: this is a
@@ -546,10 +601,18 @@ export function onApply(fn) {
 export async function init() {
   cache = readCache();          // so a slow request never flashes defaults
   try {
-    const res = await fetch('/api/settings', { credentials: 'same-origin' });
+    const res = await fetch('/api/settings',
+      { credentials: 'same-origin', signal: bound() });
     if (res.ok) {
-      cache = sanitise(await res.json());
-      writeCache(cache);
+      // The RAW reply travels with the sanitised one. `sanitise` fills every
+      // gap from `defaults()`, so by the time it is cache the difference
+      // between "the account is set to follow the device" and "the account has
+      // never had a theme" is gone — and that difference is the whole of what
+      // `ui/theme.js` needs to know here. It used to re-ask this same route
+      // after boot to recover it.
+      const stored = await res.json();
+      cache = sanitise(stored);
+      writeCache(cache, stored && typeof stored === 'object' ? { stored } : undefined);
     }
   } catch {
     // Offline: keep the cached values.
@@ -595,10 +658,17 @@ export function onChange(fn) {
 function adopt(serverValues) {
   if (!serverValues || typeof serverValues !== 'object') return;
   const merged = sanitise({ ...load(), ...serverValues });
-  if (JSON.stringify(merged) === JSON.stringify(load())) return;
+  if (JSON.stringify(merged) === JSON.stringify(load())) {
+    // Nothing MOVED, and the appliers are still told — because "the server
+    // holds this value" is news even when it is the value we already had. It
+    // is what retires `ui/theme.js`'s device note, and the commonest shape of
+    // that is a press whose write the server accepts unchanged.
+    notifyAppliers(load(), { stored: serverValues });
+    return;
+  }
 
   cache = merged;
-  writeCache(cache);
+  writeCache(cache, { stored: serverValues });
   for (const fn of listeners) {
     try { fn(cache); } catch { /* a listener must not break a save */ }
   }
@@ -676,6 +746,7 @@ export async function save(key, value) {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body,
+      signal: bound(),
     });
   } catch {
     // Offline: keep it here and send it later. Accepting it locally is the
@@ -726,6 +797,7 @@ export async function saveAll(patch) {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body,
+      signal: bound(),
     });
   } catch {
     // Offline: keep what this browser can judge and send it later, exactly as

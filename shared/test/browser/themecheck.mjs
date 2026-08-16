@@ -316,8 +316,19 @@ try {
     refused.painted === 'dark', JSON.stringify(refused));
   ck('and an unrelated write does not flip it out from under the user',
     refused.after === 'dark', JSON.stringify(refused));
-  ck('the legacy key is kept, so the next boot can still migrate it',
-    refused.legacy === 'dark', JSON.stringify(refused));
+  // Kept on the device, or already carried up — but never simply gone. The
+  // unrelated write above goes to the server and comes back naming the keys
+  // the account holds, and that reply is what the theme reconciles against, so
+  // a read refused with a 429 no longer means waiting for the next boot to
+  // migrate. Either answer is durable; losing both is the failure.
+  // Read from NODE, not from the page: the stub above refuses every
+  // `/api/settings` GET the document makes, including one a check would make
+  // to look at the account, which reported "nothing stored" for a value that
+  // was stored perfectly well.
+  const account = await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
+  ck('the pre-setting choice survives a refused read',
+    refused.legacy === 'dark' || account.theme === 'dark',
+    `${JSON.stringify(refused)} account=${JSON.stringify(account)}`);
 
   // ...and a PRESS in that state must not destroy the choice it is painting.
   //
@@ -330,13 +341,19 @@ try {
   // account's value and deleted the key. Silent and irreversible.
   const pressed = await ev(`(async()=>{
     const { toggleTheme } = await import('/shared/ui/theme.js');
-    // Deleting the key is one of the two things a press does; this makes it
-    // fail, as private browsing and a full quota do, so the OTHER one — the
-    // press retiring the key's authority in memory — is what is under test.
+    // Writing the record is the first thing a press does; this makes the
+    // store fail, as private browsing and a full quota do, so what is under
+    // test is that a press still changes the theme when nothing about it can
+    // be remembered.
     const realRemove = localStorage.removeItem.bind(localStorage);
+    const realSet = localStorage.setItem.bind(localStorage);
     localStorage.removeItem = (k) => {
       if (k === 'habiterall-theme') throw new Error('quota');
       return realRemove(k);
+    };
+    localStorage.setItem = (k, v) => {
+      if (k === 'habiterall-theme') throw new Error('quota');
+      return realSet(k, v);
     };
     const before = document.documentElement.dataset.theme;
     await toggleTheme();
@@ -344,13 +361,18 @@ try {
     const out = { before, painted: document.documentElement.dataset.theme,
                   legacy: localStorage.getItem('habiterall-theme') };
     localStorage.removeItem = realRemove;
+    localStorage.setItem = realSet;
     localStorage.removeItem('habiterall-theme');
     return out;
   })()`);
   ck('a press during a failed read actually changes the theme',
     pressed.painted !== pressed.before, JSON.stringify(pressed));
-  ck('even when the key itself cannot be deleted',
-    pressed.legacy === 'dark' && pressed.painted !== 'dark', JSON.stringify(pressed));
+  // The record cannot be written OR deleted here, so the press has nothing
+  // durable to lean on — and must still paint what was asked for rather than
+  // snapping back to the value it could not retire.
+  ck('even when nothing about the press can be remembered',
+    pressed.painted !== pressed.before && pressed.painted !== null,
+    JSON.stringify(pressed));
 
   await send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId);
 
@@ -498,12 +520,219 @@ try {
     const r = await toggleTheme();
     return { before, result: r, legacy: localStorage.getItem('habiterall-theme') };
   })()`);
-  ck('a press that only reached the outbox keeps the pre-setting key',
-    offlinePress.before === 'dark' && offlinePress.legacy === 'dark',
+  // The record now holds the PRESS, not the value it replaced. That is the
+  // whole of the offline fix: the durable note has to be the newest answer,
+  // because it is what a reload reads. Holding `dark` here — the pre-setting
+  // value — is precisely how reopening the app while still offline undid a
+  // press the outbox was still carrying.
+  ck('a press that only reached the outbox is what the device remembers',
+    offlinePress.before === 'dark' && offlinePress.legacy === 'press:light',
     JSON.stringify(offlinePress));
 
   await send('Page.removeScriptToEvaluateOnNewDocument',
     { identifier: offlineStub.identifier }, sessionId);
+
+  /* ---------- an offline press survives a reload made while offline ---------- */
+  //
+  // The loss this whole model is arranged around. A press is durable the
+  // instant it is made, because a reload reads the DEVICE's note and that note
+  // has to hold the newest answer. It held the OLDEST — the value the press
+  // replaced — so reopening the app while still offline painted the theme the
+  // user had just changed away from, with the write sitting in the outbox
+  // saying otherwise and the settings cache agreeing with the outbox.
+  // A clean document first: removing an `addScriptToEvaluateOnNewDocument`
+  // registration does not undo the stub already installed in the page that is
+  // showing, and the setup below needs a working `fetch`.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  const cutOff = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        return url.includes('/api/settings')
+          ? Promise.reject(new TypeError('Failed to fetch'))
+          : real(input, init);
+      };
+    })();`,
+  }, sessionId);
+
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const offBefore = await ev(`(async()=>{
+    const { toggleTheme } = await import('/shared/ui/theme.js');
+    const before = document.documentElement.dataset.theme;
+    const r = await toggleTheme();
+    return { before, result: r, painted: document.documentElement.dataset.theme,
+             note: localStorage.getItem('habiterall-theme') };
+  })()`);
+  // Reload, still offline. Nothing has reached the server.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const offAfter = await ev(`document.documentElement.dataset.theme`);
+  ck('an offline press survives a reload made while still offline',
+    offBefore.painted !== offBefore.before && offAfter === offBefore.painted,
+    `pressed ${offBefore.before} -> ${offBefore.painted}, reloaded as ${offAfter} `
+    + `(note ${offBefore.note})`);
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: cutOff.identifier }, sessionId);
+
+  /* ---------- a press is never lost to a write that never answers ---------- */
+  //
+  // A settings write had no bound at all — it does not go through `ui/api.js`,
+  // and a non-GET is never seen by the service worker either — so a PUT that
+  // was accepted and never answered left the caller pending indefinitely.
+  // Anything waiting on it waited with it, and the press reached neither the
+  // server nor the outbox: closing the tab lost it outright. What must hold is
+  // that the press is remembered BEFORE any of that, so the answer survives a
+  // request that never comes back.
+  // A clean document first: removing an `addScriptToEvaluateOnNewDocument`
+  // registration does not undo the stub already installed in the page that is
+  // showing, and the setup below needs a working `fetch`.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    // No pre-setting note here, deliberately: with one, the reconcile has a
+    // write of its own in flight and the press waits behind it, so the wait
+    // below would be two bounds rather than one. The press is the only writer
+    // in this block, which is what makes the timing mean something.
+    localStorage.removeItem('habiterall-theme');
+    return 1;
+  })()`);
+  const blackHole = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (url.includes('/api/settings') && (init?.method ?? 'GET') !== 'GET') {
+          // Accepted and never answered — but the signal is HONOURED, because
+          // a real fetch honours it and a stub that does not would pass with
+          // no bound in the code at all. That is the shape of the fake
+          // AbortController in connectivity.test.js, recorded in
+          // shared/CLAUDE.md as a test that pinned nothing.
+          return new Promise((_, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')));
+          });
+        }
+        return real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const hung = await ev(`(async()=>{
+    const { toggleTheme } = await import('/shared/ui/theme.js');
+    const before = document.documentElement.dataset.theme;
+    let settled = 0;
+    const started = Date.now();
+    toggleTheme().then(() => { settled = Date.now() - started; },
+                       () => { settled = Date.now() - started; });
+    await new Promise((r) => setTimeout(r, 600));
+    const early = { painted: document.documentElement.dataset.theme,
+                    note: localStorage.getItem('habiterall-theme'), settled };
+    // ...and then long enough for the bound to bite. 13s against a 10s
+    // ceiling, because the point of the check is that there IS one.
+    await new Promise((r) => setTimeout(r, 13000));
+    return { before, ...early, settledBy: settled };
+  })()`);
+  ck('a press whose write never answers is still on the device',
+    hung.painted !== hung.before && String(hung.note ?? '').endsWith(hung.painted),
+    JSON.stringify(hung));
+  // The bound itself. A settings write does not go through `ui/api.js`, so it
+  // had none — and anything awaiting one waited with it. Unpinned, this is a
+  // one-word regression: drop the `signal` and everything else here still
+  // passes.
+  ck('and the write it is waiting on gives up rather than hanging forever',
+    hung.settledBy > 0 && hung.settledBy < 13000, JSON.stringify(hung));
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: blackHole.identifier }, sessionId);
+
+  /* ---------- the settings DIALOG's write retires the note too ---------- */
+  //
+  // The dialog writes through `saveAll`, which never told this module
+  // anything. So with a pre-setting note still on the device — an offline
+  // boot, or a 429 from the IP-keyed read limiter — the user could pick Light,
+  // press Done, have the server store it, and watch the page stay dark with no
+  // control that would move it this session.
+  // A clean document first: removing an `addScriptToEvaluateOnNewDocument`
+  // registration does not undo the stub already installed in the page that is
+  // showing, and the setup below needs a working `fetch`.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  const noRead = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        return url.includes('/api/settings') && (init?.method ?? 'GET') === 'GET'
+          ? Promise.resolve(new Response('{}', { status: 429 }))
+          : real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const viaDialog = await ev(`(async()=>{
+    const { saveAll } = await import('/shared/ui/settings.js');
+    const before = document.documentElement.dataset.theme;
+    const r = await saveAll({ theme: 'light' });
+    await new Promise((x) => setTimeout(x, 400));
+    return { before, r, painted: document.documentElement.dataset.theme,
+             note: localStorage.getItem('habiterall-theme') };
+  })()`);
+  ck('the settings dialog can set the theme over a pre-setting note',
+    viaDialog.before === 'dark' && viaDialog.painted === 'light',
+    JSON.stringify(viaDialog));
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: noRead.identifier }, sessionId);
+
+  /* ---------- a press the server never got is sent again ---------- */
+  //
+  // The self-healing half, and the reason a press is recorded as a press
+  // rather than as a bare value. A write can be lost outright — the tab closed
+  // before it went out, a 500, or a stale write from the same boot landing
+  // after it — and the account then holds something this device disagrees
+  // with. A bare note cannot tell that from "another device has set the theme
+  // since", so it would have to guess; a press is known to be owed, and is
+  // re-sent on the next reconcile. Without this a press that missed once is
+  // stranded on one device forever, invisible everywhere else.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await fetch(`${APP}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ theme: 'dark' }),
+  });
+  await ev(`(async()=>{
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'press:light');
+    return 1;
+  })()`);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2600);
+  const healed = await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
+  const healedPaint = await ev(`document.documentElement.dataset.theme`);
+  ck('a press the account never received is sent again',
+    healed.theme === 'light' && healedPaint === 'light',
+    `account=${JSON.stringify(healed)} painted=${healedPaint}`);
 
   /* ---------- an applier that throws must not break a save ---------- */
   const applierThrew = await ev(`(async()=>{

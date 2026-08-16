@@ -20,7 +20,7 @@ import * as routes from '/shared/ui/routes.js';
 import * as settingsDialog from '/shared/ui/settings-dialog.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
-import { initTheme, migrateTheme, toggleTheme } from '/shared/ui/theme.js';
+import { initTheme, toggleTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
 import { showError } from '/shared/ui/views.js';
 
@@ -152,10 +152,11 @@ export async function start(adapter) {
 
     // Preferences are server-side, so they must arrive before the first
     // render or the dashboard paints with the wrong day order and flips.
+    // `ui/theme.js` reconciles itself from the reply this makes: the route
+    // says which keys the account actually HOLDS, which is the one question a
+    // cached value cannot answer. There used to be a `migrateTheme()` call
+    // here that re-asked the same route a second time.
     await settings.init();
-    // After the answer, never before: it is a write, and writing from the
-    // cached values would race it. See `migrateTheme`.
-    migrateTheme();
 
     if (opening.view === 'habit') {
       // A link straight to a habit does NOT paint the list on the way. It used
