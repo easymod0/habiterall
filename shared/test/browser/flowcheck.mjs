@@ -143,7 +143,7 @@ try {
   const pickedDate = await ev(`(()=>{
     const cells=[...document.querySelectorAll('#view-detail svg[aria-label="Completion calendar"] rect[cursor="pointer"]')];
     const c=cells[cells.length-3];
-    const d=c.querySelector('title').textContent.split(':')[0];
+    const d=c.getAttribute('data-date');   // stable key; the title is human copy
     c.dispatchEvent(new MouseEvent('click',{bubbles:true}));
     return d;
   })()`);

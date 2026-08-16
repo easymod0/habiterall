@@ -33,15 +33,20 @@ try{
   const raw=await ev(`(()=>{const o=[];
     for(const r of document.querySelectorAll('#view-detail svg[aria-label="Completion calendar"] rect')){
       const t=r.querySelector('title'); if(!t)continue;
-      o.push({title:t.textContent, fill:getComputedStyle(r).fill});
+      o.push({date:r.getAttribute('data-date'), title:t.textContent,
+              fill:getComputedStyle(r).fill});
     } return o.slice(0,400);})()`);
   console.log('    sample titles:'); raw.filter(r=>!/no entry|future/.test(r.title)).slice(0,6).forEach(r=>console.log('      ',JSON.stringify(r.title),r.fill));
   const cells={};
+  // The DAY from `data-date` and the verdict from what follows the first colon.
+  // The title used to open with the ISO date and now opens with a written one,
+  // so matching a date out of it tied this suite to the runner's locale.
   for(const r of raw){
-    const m=r.title.match(/^(\d{4}-\d{2}-\d{2}):\s*(.*)$/); if(!m)continue;
-    let lab=m[2].replace(/\s+—\s+click to edit$/,'');
+    if(!r.date)continue;
+    const i=String(r.title).indexOf(': '); if(i<0)continue;
+    let lab=r.title.slice(i+2).replace(/\s+—\s+click to edit$/,'');
     if(/no entry|future|skipped/.test(lab))continue;
-    cells[m[1]]={label:lab, fill:r.fill};
+    cells[r.date]={label:lab, fill:r.fill};
   }
   const zero=Object.entries(cells).find(([,v])=>/^0( |$)/.test(v.label));
   const over=Object.entries(cells).find(([,v])=>/^[1-9]/.test(v.label));

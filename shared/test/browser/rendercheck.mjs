@@ -37,6 +37,7 @@ globalThis.document = {
 };
 
 const { streakChart } = await import(sharedPublic('charts.js'));
+const { formatDayRange, fromISOLocal } = await import(sharedPublic('ui/dates.js'));
 
 let fails = 0;
 const check = (label, cond, extra = '') => {
@@ -76,17 +77,35 @@ check('the five longest were selected',
   JSON.stringify([...lengthLabels].sort((a,b)=>b-a)) === JSON.stringify(['28','20','17','13','12']),
   lengthLabels.join(','));
 
-const rowDates = texts.filter(t => /\d{4}$/.test(t));
-const endOf = (label) => label.split(/\s+[–-]\s+/).pop();   // "5 Aug 2026"
-const asTime = (s) => Date.parse(s);
+// The ORDER is the property under test; the label's SHAPE is `Intl`'s
+// business. Earlier versions of these checks read the year out of the string
+// with `/\d{4}/` and split on a dash — both English assumptions, and both
+// wrong where it matters: fa-IR's year is 1405, th-TH's 2569, ar-EG writes its
+// digits as `٢٠٢٦`, and ja-JP puts the year first. So the expectation is
+// COMPUTED with the same helper the chart uses, and what is asserted is that
+// the chart drew those labels in that order.
+const wantRows = [...streaks].sort((a, b) => b.length - a.length).slice(0, 5)
+  .sort((a, b) => b.end.localeCompare(a.end))
+  .map((s) => formatDayRange(fromISOLocal(s.start), fromISOLocal(s.end)));
+const rowDates = texts.filter((t) => wantRows.includes(t));
 check('rows are ordered newest first',
-  rowDates.every((d, i) => i === 0 || asTime(endOf(d)) <= asTime(endOf(rowDates[i-1]))),
-  rowDates.join(' | '));
+  JSON.stringify(rowDates) === JSON.stringify(wantRows),
+  `${rowDates.join(' | ')}\n     want ${wantRows.join(' | ')}`);
 
-// 3. date ranges present and formatted
-check('date range collapses repeated year',
-  texts.includes('21 Apr – 18 May 2026'),
-  texts.find(t => t.includes('Apr')) ?? 'none');
+// 3. a range inside one year says so once — the property the hand-composed
+//    version implemented by hand and got wrong outside English. Asserted
+//    against the naive alternative rather than against a literal: whatever
+//    `Intl` elides, the range must be SHORTER than both ends written out.
+{
+  const a = fromISOLocal('2026-04-21');
+  const b = fromISOLocal('2026-05-18');
+  const f = new Intl.DateTimeFormat(undefined,
+    { year: 'numeric', month: 'short', day: 'numeric' });
+  const label = formatDayRange(a, b);
+  check('date range collapses what the two ends share',
+    texts.includes(label) && label.length < `${f.format(a)} – ${f.format(b)}`.length,
+    `${label} vs ${f.format(a)} – ${f.format(b)}`);
+}
 
 // 4. bar widths proportional and within bounds
 const bars = rects.filter(r => r.attrs.fill === '#8b5cf6');
@@ -119,7 +138,11 @@ check('height fits 5 rows', Number(svg.attrs.height) === 6 + 5*30 + 6, svg.attrs
 const titles = [];
 svg.walk(n => { if (n.name === 'title') titles.push(n.text); });
 check('every bar has a tooltip', titles.length === 5, String(titles.length));
-check('tooltip names dates', /\d{4}-\d{2}-\d{2}/.test(titles[0] ?? ''), titles[0] ?? '');
+// The dates are written, not ISO — the row beside them is too, and one card
+// showing both conventions is what this change exists to end. Asserted as "it
+// names two dates and a length" rather than by matching a locale's format.
+check('tooltip names a length and two dates',
+  /\d+ days: .+ to .+/.test(titles[0] ?? ''), titles[0] ?? '');
 
 /* --- edge cases --- */
 const empty = streakChart([], '#8b5cf6', { limit: 5 });
@@ -132,13 +155,38 @@ check('empty state has non-zero height', Number(empty.attrs.height) > 0, empty.a
 const one = streakChart([{ start: '2026-02-09', end: '2026-02-09', length: 1 }], '#8b5cf6');
 const oneTexts = [];
 one.walk(n => { if (n.name === 'text') oneTexts.push(n.text); });
-check('single-day streak shows one date', oneTexts.includes('9 Feb 2026'), oneTexts.join('|'));
+// One date, not the same date twice with a dash between it.
+{
+  const want = new Intl.DateTimeFormat(undefined,
+    { year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(2026, 1, 9));
+  check('single-day streak shows one date', oneTexts.includes(want),
+    `${oneTexts.join('|')} (want ${want})`);
+}
 
 const spanning = streakChart([{ start: '2026-12-28', end: '2027-01-04', length: 8 }], '#8b5cf6');
 const spanTexts = [];
 spanning.walk(n => { if (n.name === 'text') spanTexts.push(n.text); });
-check('year-spanning range shows both years',
-  spanTexts.some(t => t.includes('2026') && t.includes('2027')), spanTexts.join('|'));
+// Both years, whatever the calendar calls them — and only when the calendar
+// AGREES that two are involved. `formatToParts` reads the year, because ja-JP
+// and zh-CN write it `2026年` and a substring match on `2026` misses it.
+//
+// The interesting case is fa-IR, where this range does not span two years at
+// all: 2026-12-28 and 2027-01-04 both fall inside Persian 1405. "Spanning the
+// new year" is a Gregorian claim, so it is asked of the calendar rather than
+// assumed, and where the answer is no, what must hold instead is that the
+// range still names two different days.
+{
+  const yearOf = (d) => new Intl.DateTimeFormat(undefined, { year: 'numeric' })
+    .formatToParts(d).find((p) => p.type === 'year')?.value ?? '';
+  const a = yearOf(fromISOLocal('2026-12-28'));
+  const b = yearOf(fromISOLocal('2027-01-04'));
+  const label = spanTexts.find((t) => t !== '8') ?? '';
+  const oneDay = formatDayRange(fromISOLocal('2026-12-28'), fromISOLocal('2026-12-28'));
+  check('year-spanning range shows both years',
+    a === b ? label.length > 0 && label !== oneDay
+            : label.includes(a) && label.includes(b),
+    `${spanTexts.join('|')} (calendar years ${a} / ${b})`);
+}
 
 const fewer = streakChart(streaks.slice(0, 2), '#8b5cf6', { limit: 5 });
 check('fewer streaks than limit renders only what exists',

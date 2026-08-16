@@ -9,6 +9,7 @@
 
 import { api } from '/shared/ui/api.js';
 import { dayCountField } from '/shared/ui/count-field.js';
+import { formatDateLong, fromISOLocal } from '/shared/ui/dates.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
@@ -55,10 +56,7 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
   const avoided = isAvoided(habit);
   title.textContent = habit.name;
 
-  const [y, m, d] = date.split('-').map(Number);
-  const pretty = new Date(y, m - 1, d).toLocaleDateString(undefined, {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  });
+  const pretty = formatDateLong(fromISOLocal(date));
 
   // Say what's being edited, and against what goal, so the input is unambiguous.
   const goal = numeric

@@ -45,6 +45,12 @@ const BINDINGS = [
 // can be imported with no browser, and a stub here would let the dialog and the
 // grid drift about what a habit shown as "avoid" even is.
 const { isAvoided } = await import('../../public/ui/toggle.js');
+// The harness evals the function's SOURCE, so every free identifier it names
+// has to be handed in — a miss is a loud ReferenceError from `new Function`,
+// not a silent pass. The real implementations rather than stubs, though note
+// nothing here ASSERTS the formatted heading: a stub returning '' would pass
+// these checks identically.
+const { formatDateLong, fromISOLocal } = await import('../../public/ui/dates.js');
 
 /**
  * @param prefs the settings the dialog reads. Both default off, as the server
@@ -73,10 +79,11 @@ function run(habit, date, value, isSkip, prefs = {}) {
   const YES = 2, UNSET = 0;
   const settings = { get: (key) => prefs[key] ?? false };
   const fn = new Function(...BINDINGS, 'state', 'YES', 'UNSET', 'settings',
-    'isAvoided', 'habit', 'date', 'value', 'isSkip',
+    'isAvoided', 'formatDateLong', 'fromISOLocal',
+    'habit', 'date', 'value', 'isSkip',
     `${body}; openDayDialog(habit, date, value, isSkip); return state;`);
   const out = fn(...BINDINGS.map((k) => els[k]), state, YES, UNSET, settings,
-    isAvoided, habit, date, value, isSkip);
+    isAvoided, formatDateLong, fromISOLocal, habit, date, value, isSkip);
   return { els, state: out, doneBtn, notBtn };
 }
 
