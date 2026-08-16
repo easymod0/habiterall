@@ -768,6 +768,11 @@ async function onCheckClick(habit, date) {
       });
 
       if (to === DAY.UNKNOWN) return await clearDay(habit, date);
+      // A skip is the status column, never a value. Writing the SKIP sentinel
+      // works for a yes/no habit — `parseEntry` reads 3 as a skip there — and
+      // silently stores three of the thing on a measurable one, which is what
+      // an avoided habit is underneath.
+      if (to === DAY.SKIP) return await recordSkip(habit, date);
       next = valueForState(habit, to);
     } else {
       // A measurable day is asked for rather than cycled to, and the answer
@@ -779,6 +784,39 @@ async function onCheckClick(habit, date) {
   } catch (e) {
     toast(e.message);
   }
+}
+
+/**
+ * Mark a day as skipped, on the same optimistic path as `recordValue`.
+ *
+ * `{status: 'skip'}` rather than a value, which is what the day editor has
+ * always sent and what the Android client sends. The grid paints a skip from
+ * `habit.skips`, and `entries[date]` is set to the SKIP sentinel alongside it
+ * because that is the shape `/overview` returns — so the optimistic paint and
+ * the refetch agree.
+ */
+async function recordSkip(habit, date) {
+  const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
+  habit.entries[date] = SKIP;
+  const wasSkip = setSkip(habit, date, true);
+  paint();
+
+  try {
+    await api(`/habits/${habit.id}/entries/${date}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status: 'skip' }),
+    });
+  } catch (e) {
+    if (!e.queued) {
+      if (previous === undefined) delete habit.entries[date];
+      else habit.entries[date] = previous;
+      setSkip(habit, date, wasSkip);
+      paint();
+    }
+    throw e;
+  }
+
+  await load();
 }
 
 /**

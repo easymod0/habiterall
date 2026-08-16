@@ -149,9 +149,13 @@ test('what a tap records is what differs, and only that', () => {
   const normal = { type: 'boolean', target_type: 'at_least', target_value: 0 };
   assert.equal(valueForState(normal, 'done'), values.YES);
   assert.equal(valueForState(normal, 'no'), values.UNSET);
-  // A skip is the status column in both, never a value.
-  assert.equal(valueForState(avoidHabit, 'skip'), values.SKIP);
-  assert.equal(valueForState(normal, 'skip'), values.SKIP);
+  // A skip is the status column and never a value, so asking for one is a
+  // programming error rather than an encoding. Returning the SKIP sentinel
+  // here stored a measurable habit's skip as THREE OF THE THING — three
+  // cigarettes on an avoided habit, counted as a real miss — because
+  // `parseEntry` reads 3 as a skip only for a yes/no habit.
+  assert.throws(() => valueForState(avoidHabit, 'skip'), /status column/);
+  assert.throws(() => valueForState(normal, 'skip'), /status column/);
 });
 
 test('a slip is the smallest amount that fails, not always 1', () => {

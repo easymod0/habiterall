@@ -122,9 +122,72 @@ try {
   check('and is marked as a failure, not a count of one',
     slip.text.includes('✗'), JSON.stringify(slip));
 
+  console.log('\n--- a skip is a skip, not three of the thing ---');
+  // The gap that let a real bug through: this suite never turned skips on. The
+  // cycle's skip step wrote the SKIP sentinel as a VALUE, and `parseEntry`
+  // reads 3 as a skip only for a yes/no habit — so on a measurable one, which
+  // is what an avoided habit is underneath, it stored three cigarettes and
+  // counted them as a miss. The skip state was unreachable from the grid.
+  await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ skipDays: true }) }); })()`);
+  await ev(`location.reload()`);
+  for (let i = 0; i < 80; i++) {
+    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+    await sleep(250);
+  }
+  // Clean -> slip -> skip, which is the cycle with skips enabled.
+  await ev(`${cell}.click(); true`); await sleep(700);
+  await ev(`${cell}.click(); true`); await sleep(700);
+  row = await stored();
+  check('the skip step stores a STATUS', row?.status === 'skip', JSON.stringify(row));
+  check('and not the sentinel as an amount', row?.value !== 3, JSON.stringify(row));
+
+  console.log('\n--- a limit of two, where a slip is three ---');
+  // The other gap: every check above used a target of 0, where `target + 1` and
+  // a bare 1 are the same number and the skip sentinel collides with neither.
+  const two = await ev(`(async()=>{
+    const r = await fetch('/api/habits', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name:'Coffee', type:'numerical', unit:'cups',
+        target_value: 2, target_type:'at_most', show_as:'avoid' }) });
+    return (await r.json()).id;})()`);
+  await ev(`location.reload()`);
+  for (let i = 0; i < 80; i++) {
+    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+    await sleep(250);
+  }
+  const twoCell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
+    const row = rows.find(r => r.textContent.includes('Coffee'));
+    return row.querySelector('.day-cell, .check, button[data-focus-key^="check:"]');})()`;
+  const twoStored = async () => ev(`(async()=>{
+    const es = await (await fetch('/api/habits/${two}/entries')).json();
+    const r = es.find(e => e.date === ${JSON.stringify(made.end)});
+    return r ? { value: r.value, status: r.status } : null;})()`);
+
+  await ev(`${twoCell}.click(); true`); await sleep(700);
+  check('a clean day on a limit of two is still 0', (await twoStored())?.value === 0,
+    JSON.stringify(await twoStored()));
+  // With skips enabled the cycle is clean -> skip -> slip, which is Loop's own
+  // DONE -> SKIP -> NO. The rendering does not reorder it; only the values move.
+  await ev(`${twoCell}.click(); true`); await sleep(700);
+  let t = await twoStored();
+  check('the skip step is a status even on a limit of two', t?.status === 'skip',
+    JSON.stringify(t));
+  await ev(`${twoCell}.click(); true`); await sleep(700);
+  t = await twoStored();
+  check('and a slip is THREE — the smallest amount over', t?.value === 3, JSON.stringify(t));
+  check('stored as an amount, not as the skip sentinel', t?.status === '', JSON.stringify(t));
+  await ev(`fetch('/api/habits/${two}', { method:'DELETE' })`);
+  await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ skipDays: false }) }); })()`);
+
   console.log('\n--- the same habit read as an amount is unchanged ---');
   // The rendering is a choice and the storage is not: switching it back must
-  // leave the rows alone and restore the ordinary controls.
+  // leave the rows alone and restore the ordinary controls. Captured rather
+  // than hard-coded, since the sections above move this day around.
+  const beforeSwitch = await stored();
   await ev(`(async()=>{
     const h = await (await fetch('/api/habits/${made.id}')).json();
     await fetch('/api/habits/${made.id}', { method:'PUT',
@@ -136,7 +199,9 @@ try {
     await sleep(250);
   }
   row = await stored();
-  check('the stored day is untouched by the switch', row?.value === 1, JSON.stringify(row));
+  check('the stored day is untouched by the switch',
+    JSON.stringify(row) === JSON.stringify(beforeSwitch), 
+    `${JSON.stringify(row)} was ${JSON.stringify(beforeSwitch)}`);
 
   await ev(`${cell}.click(); true`);
   await sleep(600);

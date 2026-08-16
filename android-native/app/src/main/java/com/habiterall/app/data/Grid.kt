@@ -91,13 +91,14 @@ object Grid {
      * status column and an unknown day is the absence of a row.
      */
     fun valueForState(habit: Habit, state: DayState): Double = when {
-        // First, as in the mirror. A skip is the status column and never a
-        // value, so no caller passes it — but the web's `valueForState` answers
-        // SKIP here and this silently answered `target + 1`, which is the one
-        // input on which two functions pinned to each other disagreed. An
-        // unreachable disagreement is still a disagreement, and the next caller
-        // is the one who finds out.
-        state == DayState.SKIPPED -> Sentinels.SKIP
+        // A skip is the status column and never a value — `record` takes a
+        // `skip` flag for it, and every caller routes SKIPPED there before
+        // reaching this. The web mirror briefly answered the SKIP sentinel
+        // here, which stored a measurable habit's skip as three of the thing;
+        // it throws now, and so does this. Loud rather than silent, because a
+        // caller that gets here has a bug the grid cannot show.
+        state == DayState.SKIPPED ->
+            error("a skip is the status column, not a value")
         habit.isAvoided ->
             if (state == DayState.DONE) Sentinels.UNSET else habit.targetValue + 1
         else ->

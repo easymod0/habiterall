@@ -6,6 +6,7 @@ import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Sentinels
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
@@ -237,17 +238,19 @@ class GridTest {
     }
 
     @Test
-    fun `a skip is the status column on both sides of the mirror`() {
-        // The one input the two `valueForState` functions disagreed on. No
-        // caller passes it — skips are handled before the encoding — but they
-        // are pinned to each other, and an unreachable disagreement is the kind
-        // the next caller discovers.
-        assertEquals(Sentinels.SKIP, Grid.valueForState(avoid, Grid.DayState.SKIPPED), 0.0)
-        assertEquals(
-            Sentinels.SKIP,
-            Grid.valueForState(Habit(id = 9, name = "x", type = "boolean"), Grid.DayState.SKIPPED),
-            0.0,
-        )
+    fun `asking for a skip's value is a programming error, not an encoding`() {
+        // A skip is the status column: `record` takes a flag for it and every
+        // caller routes SKIPPED there first. The web mirror briefly answered
+        // the SKIP sentinel here, which stored a measurable habit's skip as
+        // THREE OF THE THING — three cigarettes on an avoided habit, counted as
+        // a real miss — because the server reads 3 as a skip only for a yes/no
+        // habit. Both sides refuse now.
+        assertThrows(IllegalStateException::class.java) {
+            Grid.valueForState(avoid, Grid.DayState.SKIPPED)
+        }
+        assertThrows(IllegalStateException::class.java) {
+            Grid.valueForState(Habit(id = 9, name = "x", type = "boolean"), Grid.DayState.SKIPPED)
+        }
     }
 
     @Test

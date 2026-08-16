@@ -153,7 +153,18 @@ export function isAvoided(habit) {
  * @returns {number} the value to store
  */
 export function valueForState(habit, state) {
-  if (state === DAY.SKIP) return SKIP;
+  // A skip is NOT a value and must never be written as one. `parseEntry` reads
+  // the SKIP sentinel as a skip only for a BOOLEAN habit, because a measurable
+  // one may legitimately record 3 — so returning it here stored a numerical
+  // habit's skip as three of the thing. On a habit shown as something to avoid
+  // that is three cigarettes, counted as a real miss, and the skip step of the
+  // cycle became unreachable. The Kotlin mirror never had this: it routes
+  // SKIPPED to a status write before the encoding is reached, and so does the
+  // day editor. Loud rather than silent, because a caller that gets here has a
+  // bug that is invisible in the grid.
+  if (state === DAY.SKIP) {
+    throw new Error('a skip is the status column, not a value — write {status: "skip"}');
+  }
 
   if (isAvoided(habit)) {
     const target = Number(habit.target_value) || 0;
