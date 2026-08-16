@@ -92,23 +92,28 @@ check('rows are ordered newest first',
   JSON.stringify(rowDates) === JSON.stringify(wantRows),
   `${rowDates.join(' | ')}\n     want ${wantRows.join(' | ')}`);
 
-// 3. a range inside one year is `Intl`'s to compose, and never LONGER than
-//    both ends written out. An earlier version of this demanded it be
-//    strictly shorter — the property English has, where `Apr 21 – May 18,
-//    2026` drops a year. `Intl` elides nothing in a numeric locale, so
-//    pt-PT's `21/04/2026 – 18/05/2026` is exactly the naive length and the
-//    assertion failed on the product being right. pt-PT is the locale this
-//    file's own comments cite most.
+// 3. the range is `Intl`'s to compose. Two earlier versions of this got the
+//    property wrong in opposite directions: "strictly SHORTER than both ends
+//    written out" is English's behaviour (`Intl` elides nothing in a numeric
+//    locale, so pt-PT's `21/04/2026 – 18/05/2026` failed on being right), and
+//    "never longer" is Western Europe's — es-MX writes
+//    `21 de abr – 18 de may 2026`, which is LONGER than the naive join
+//    because `formatRange` adds connectors the plain format omits. It also
+//    pinned nothing: hand-composing the range passed it.
+//
+//    So what is asserted is delegation itself. It is a mirror of one line of
+//    the implementation, deliberately — the defect it guards is someone
+//    reaching for `${a} – ${b}` again, and no property of the OUTPUT survives
+//    contact with 85 locales.
 {
   const a = fromISOLocal('2026-04-21');
   const b = fromISOLocal('2026-05-18');
   const f = new Intl.DateTimeFormat(undefined,
     { year: 'numeric', month: 'short', day: 'numeric' });
   const label = formatDayRange(a, b);
-  const naive = `${f.format(a)} \u2013 ${f.format(b)}`;
   check('a date range is composed by Intl, not by us',
-    texts.includes(label) && label.length <= naive.length,
-    `${label} vs ${naive}`);
+    texts.includes(label) && label === f.formatRange(a, b),
+    `${label} vs ${f.formatRange(a, b)}`);
 }
 
 // 4. bar widths proportional and within bounds

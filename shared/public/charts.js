@@ -822,8 +822,13 @@ export function weekdayMonthChart(months, color,
                             Number(prev.month.slice(5, 7)) - 1, 15))
       : null;
     if (yearText !== prevYear) {
+      // Clamped like the month above it. That clamp exists because a centred
+      // caption hangs off the edge once it is not three Latin characters, and
+      // the year is localised now too — `\u0e1e.\u0e28. 2569`, `AP \u06f1\u06f4\u06f0\u06f5`, `2026\u5e74`.
+      const yearHalf = estimateTextWidth(yearText, 8.5) * WIDTH_SAFETY / 2;
       svg.appendChild(el('text', {
-        x: cx, y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
+        x: Math.min(Math.max(cx, yearHalf), width - yearHalf),
+        y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
         fill: dim, 'fill-opacity': 0.75,
       }, yearText));
     }
@@ -1209,7 +1214,10 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   // `2025. gada 28. dec. – 2026. gada 4. janv.` needs about 8px of type on a
   // phone; master painted 47.6px of it across the bar.
   const LABEL_GAP = 8;
-  const LABEL_FLOOR = 8;
+  // 7, as `weekdayChart`'s is: at 8 the Devanagari and Bengali numeric forms
+  // (ne-NP `\u0968\u0966\u0968\u096C-\u0966\u096A-\u0968\u0967 \u2013 \u0968\u0966\u0968\u096C-\u0966\u096B-\u0967\u096E`, as-IN the same shape) miss by two
+  // pixels and there is nothing below to catch them.
+  const LABEL_FLOOR = 7;
   const widestOf = (set, size) =>
     Math.max(0, ...set.map((t) => estimateTextWidth(t, size)));
 

@@ -239,6 +239,13 @@ for (const [weekStart, rows] of [['sunday', [0, 2]], ['monday', [1, 3]]]) {
 // of room to its left.
 const RAW_KEY = /^\d{4}(-\d{2}){1,2}$/;
 
+/** The bucket key inside a label or a tooltip, whole or embedded. */
+const keyIn = (text) => {
+  if (RAW_KEY.test(text)) return text;
+  const m = text.match(/(?:^|\s)(\d{4}-\d{2}(?:-\d{2})?)(?=\s|:|$)/);
+  return m ? m[1] : null;
+};
+
 const axisTexts = (svg) => collect(svg)
   .filter((n) => n.name === 'text' && (n.text ?? '').trim())
   .map((n) => ({
@@ -270,12 +277,17 @@ for (const [name, svg] of [
     .filter((n) => n.name === 'title' && (n.text ?? '').trim())
     .map((n) => ({ text: String(n.text) }));
   const raw = [...texts, ...tooltips]
-    // ...except where the locale's OWN formatted month IS that string.
-    // `formatStamp('2026-08')` is literally `2026-08` in lt-LT, which is its
-    // correct `yMMM`, so this check called the product's right answer a raw
-    // storage key and failed a suite over it.
-    .filter((t) => RAW_KEY.test(t.text) || /(^|\s)\d{4}-\d{2}(-\d{2})?(\s|:|$)/.test(t.text))
-    .filter((t) => t.text !== formatStamp(t.text))
+    .map((t) => ({ t, key: keyIn(t.text) }))
+    // A text is only a raw key if it CONTAINS one that this locale would have
+    // written differently. Both halves matter. `formatStamp` passes through
+    // whatever it does not recognise, so excusing any text it maps to itself
+    // excuses every multi-word string — which silently retires the embedded
+    // branch this check exists for, the one that catches a TOOLTIP reading
+    // `2026-06: 2 week(s)`. And in lt-LT `formatStamp('2026-08')` IS `2026-08`,
+    // the locale's correct `yMMM`, so the key must be compared with its own
+    // formatting rather than assumed to be a storage leak.
+    .filter(({ key }) => key !== null && formatStamp(key) !== key)
+    .map(({ t }) => t)
     .map((t) => t.text);
   check(`${name}: no label or tooltip shows a raw storage key`,
     raw.length === 0, raw.slice(0, 3).join(' | '));
@@ -436,6 +448,18 @@ for (const width of [328, 358, 700, 1100]) {
       labels.length > 0 && left + widest <= barX,
       `label ends ${(left + widest).toFixed(1)}, bar starts ${barX} `
       + `(${labels.length ? JSON.stringify(labels[0].text) : 'none'})`);
+
+    // ...with a GAP, and never in less room than the fixed 168 this replaced.
+    //
+    // Both are invisible to the check above, which the shrink loop can always
+    // satisfy by making the type smaller: deleting the floor gives 148.5px on
+    // a phone — 19.5px worse than master, the exact defect this was written
+    // for — and it stayed green in 9 of 10 locales. A label butted against its
+    // own bar did too.
+    check(`streaks at ${width}px: the gutter is at least what it always was`,
+      barX - left >= 168, `${barX - left}px`);
+    check(`streaks at ${width}px: the label does not butt against the bar`,
+      barX - (left + widest) >= 4, `${(barX - left - widest).toFixed(1)}px of gap`);
   }
 }
 

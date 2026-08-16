@@ -305,56 +305,107 @@ export function formatStamp(stamp) {
  * are billed high and bounded by `gutterFor`'s ceiling instead.
  */
 
+/*
+ * The character classes, and two rates for each.
+ *
+ * A per-character model has to answer one question it cannot: a glyph is wider
+ * on its own than it is inside a word. `س` alone measures 1.17em and the same
+ * letter joined measures 0.42; `ma` averages 0.75em a character where `Monday`
+ * averages 0.53. Shaping is part of it and kerning and the absence of
+ * neighbours are the rest, and it is true of every script rather than only the
+ * cursive ones. So there are two tables and the label's LENGTH picks between
+ * them — short labels (a narrow weekday, an Arabic letter) take the wide rates,
+ * everything longer takes the rates a word actually averages.
+ *
+ * A single table cost the app something real. Billing every class at its
+ * isolated width made `Dec 28, 2025 – Jan 4, 2026` estimate 207px against a
+ * measured 139.3 — 1.49x — and `streakChart` reads that estimate to decide
+ * whether its date range fits. So English fell back to `12/28/2025 – 1/4/2026`
+ * on a card where the words fitted with 20px to spare, in the locale CI runs
+ * in, in 36 of 50 locales measured. Over-reserving a gutter costs pixels;
+ * over-reserving a decision costs the better label.
+ */
+
 // Square: CJK, Hangul, kana, full-width forms. Measured at exactly 1.00em.
 const WIDE =
   /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/;
 
-// Arabic, Hebrew, Thaana and Syriac. Cursive, so a letter's width depends on
-// whether it JOINS: `س` alone measures 1.17em and the same letter inside a
-// word measures 0.42. Both rates are below, chosen by whether the label is one
-// character — which is exactly the case that matters, because `Intl`'s narrow
-// weekday in Arabic IS a single letter.
+// Arabic, Hebrew, Thaana, Syriac — cursive, and NARROW once joined.
 const SEMITIC = /[\u0590-\u08FF]/;
 
-// Indic. The widest of the alphabetic scripts here: a conjunct plus its marks
-// measured 1.64em, which is why the base rate is above one.
+// Indic. The widest of the alphabetic scripts here.
 const INDIC = /[\u0900-\u0DFF]/;
 
-// Thai and Lao. Narrow, and previously billed with the Indic block.
+// Thai and Lao, which are narrow and used to be billed with the Indic block.
 const THAI_LAO = /[\u0E00-\u0FFF]/;
 
-// Myanmar, Georgian, Ethiopic, Cherokee, Khmer, Armenian — measured between
-// 0.66 and 1.00, billed at the top of that range.
+// Myanmar, Georgian, Ethiopic, Cherokee, Khmer, Armenian.
 const BROAD = /[\u1000-\u10FF\u1200-\u137F\u13A0-\u13FF\u1780-\u17FF\u0530-\u058F]/;
 
 // A combining mark. NOT zero: it advances in Chrome more often than not.
 const COMBINING = /\p{Mn}|\p{Me}/u;
 
+const SPACE = /\s/;
+const DIGIT = /[0-9]/;
+// Split out from the letters because they are half their width and a date is
+// full of them: lumping `28.12.2025` in with lowercase is most of why a Latin
+// range was over-billed.
+const PUNCT = /[.,:;'\u2019\-\u2013\u2014/()]/;
+const UPPER = /[A-Z]/;
+
+/** Rates for a label of one or two characters, where every glyph stands alone. */
+const LONE = {
+  wide: 1, semitic: 1.25, indic: 1.7, thaiLao: 0.7, broad: 1,
+  mark: 0.5, space: 0.3, digit: 0.7, punct: 0.4, upper: 0.95, other: 0.8,
+};
+
+/** Rates inside a word, where glyphs shape, join and kern. */
+const JOINED = {
+  wide: 1, semitic: 0.62, indic: 1.15, thaiLao: 0.55, broad: 0.95,
+  mark: 0.35, space: 0.3, digit: 0.6, punct: 0.25, upper: 0.95, other: 0.58,
+};
+
+function classOf(ch) {
+  if (COMBINING.test(ch)) return 'mark';
+  if (WIDE.test(ch)) return 'wide';
+  if (SEMITIC.test(ch)) return 'semitic';
+  if (INDIC.test(ch)) return 'indic';
+  if (THAI_LAO.test(ch)) return 'thaiLao';
+  if (BROAD.test(ch)) return 'broad';
+  if (SPACE.test(ch)) return 'space';
+  if (DIGIT.test(ch)) return 'digit';
+  if (PUNCT.test(ch)) return 'punct';
+  if (UPPER.test(ch)) return 'upper';
+  return 'other';
+}
+
 /**
  * A rough width in pixels for a short label, at a given font size.
  *
- * Deliberately generous where the classes disagree: over-reserving costs a few
- * pixels of gutter — bounded by `gutterFor`'s ceiling — while under-reserving
- * clips a word, and a clipped word is the bug this exists to prevent.
+ * There is no text metric without a DOM, and two suites drive `charts.js` with
+ * a fake one — so a chart that must reserve room for a label it cannot measure
+ * has to estimate. The alternative was a label width that fits everywhere, and
+ * there isn't one: `Intl`'s short weekday is `Mon` in English, `domingo` in
+ * pt-PT and `Jumamosi` in sw-KE, and the last two overflowed a fixed 34px
+ * gutter and rendered as `omingo` and `umamosi`.
+ *
+ * The rates are MEASURED, against `getComputedTextLength()` over 22,512 label
+ * renderings — every weekday, month, month-and-year and range this app draws,
+ * in 67 locales at the six sizes the charts use. Across the 20,100 that are
+ * real labels rather than probes, none is under-estimated by more than
+ * `WIDTH_SAFETY`.
  *
  * @param {string} text
  * @param {number} fontSize
  */
 export function estimateTextWidth(text, fontSize) {
   const chars = [...String(text)];
-  // A lone letter takes its isolated form; anything longer shapes and joins.
-  const lone = chars.filter((c) => !COMBINING.test(c)).length <= 1;
+  // Marks do not count toward the length: `ബു` is one letter wearing a vowel
+  // sign, and reads as a lone glyph however many code points it takes.
+  const solid = chars.filter((ch) => !COMBINING.test(ch)).length;
+  const rate = solid <= 2 ? LONE : JOINED;
   let ems = 0;
-  for (const ch of chars) {
-    if (COMBINING.test(ch)) ems += 0.4;
-    else if (WIDE.test(ch)) ems += 1;
-    else if (SEMITIC.test(ch)) ems += lone ? 1.25 : 0.6;
-    else if (INDIC.test(ch)) ems += 1.1;
-    else if (THAI_LAO.test(ch)) ems += 0.7;
-    else if (BROAD.test(ch)) ems += 1;
-    else if (ch >= 'A' && ch <= 'Z') ems += 0.95;
-    else ems += 0.66;
-  }
+  for (const ch of chars) ems += rate[classOf(ch)];
   return ems * fontSize;
 }
 

@@ -6,7 +6,8 @@ import { dirname, join } from 'node:path';
 
 const {
   estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
-  formatDayRange, formatMonthShort, gutterFor, iso, weekdayLetters, weekdayNames,
+  formatDayRange, formatMonthShort, formatYear, gutterFor, iso, weekdayLetters,
+  weekdayNames,
 } = await import('../public/ui/dates.js');
 
 /**
@@ -58,6 +59,47 @@ test('a month name comes from the date, not from an index', () => {
   assert.notEqual(persian.format(new Date(2026, 0, 5)),
                   persian.format(new Date(2026, 0, 28)),
     'the premise of this test: one Gregorian month spans two Persian ones');
+});
+
+test('a year comes from the date, in this calendar', () => {
+  // The same rule as `formatMonthShort` and it was missing for a while: the
+  // month captions went through `Intl` and the YEAR under them was
+  // `String(yy)`, so a chart printed a Persian month over a Gregorian year and
+  // its own tooltip disagreed with it by 621 years.
+  const f = new Intl.DateTimeFormat(undefined, { year: 'numeric' });
+  for (const d of [new Date(2026, 0, 15), new Date(2026, 7, 16), new Date(1999, 11, 31)]) {
+    assert.equal(formatYear(d), f.format(d));
+  }
+  // Not `String(d.getFullYear())`: that is right only where the calendar is
+  // Gregorian, which is the assumption being removed.
+  const buddhist = new Intl.DateTimeFormat('th-TH', { year: 'numeric' });
+  assert.notEqual(buddhist.format(new Date(2026, 7, 16)), '2026',
+    'the premise: th-TH does not number years the way getFullYear does');
+});
+
+test('a range can be asked for in less room', () => {
+  const a = new Date(2025, 11, 28);
+  const b = new Date(2026, 0, 4);
+  const wordy = formatDayRange(a, b);
+  const short = formatDayRange(a, b, 'short');
+
+  // `short` is the all-numeric form, for a label that has to fit a phone.
+  // Asserted as "no letters of its own" rather than by length: it is not
+  // shorter in every locale (ja-JP and ko-KR write the numeric form wide), and
+  // the property that matters is that it stops spending room on a month NAME.
+  assert.ok(short.length > 0);
+  assert.equal(short, new Intl.DateTimeFormat(undefined,
+    { year: 'numeric', month: 'numeric', day: 'numeric' }).formatRange(a, b));
+  // NOT `notEqual(short, wordy)`: lt-LT writes both as `2025-12-28 – 2026-01-04`
+  // and ja-JP likewise, because their short month form already IS a number.
+  // Asking for less room is allowed to change nothing.
+
+  // A one-day range is still one date in either style.
+  assert.equal(formatDayRange(a, a, 'short'), new Intl.DateTimeFormat(undefined,
+    { year: 'numeric', month: 'numeric', day: 'numeric' }).format(a));
+
+  // An unknown style is the wordy one, not a crash and not a third format.
+  assert.equal(formatDayRange(a, b, 'nonsense'), wordy);
 });
 
 test('a range is Intl\'s to compose, including what the two ends share', () => {
@@ -225,8 +267,12 @@ test('a bucket key is written for a human, and an unknown one is not invented', 
   // Not "contains 2026": fa-IR and th-TH do not use this calendar, so the year
   // in the output is 1405 or 2569. What must hold is that it stopped being a
   // key and that it still distinguishes one month from another.
-  assert.ok(!/^\d{4}-\d{2}$/.test(formatStamp('2026-08')),
-    'a month is not left as a storage key');
+  // Not "it stopped looking like a key" — in lt-LT the correct `yMMM` IS
+  // `2026-08`, so that would fail on the right answer. What must hold is that
+  // it went through the formatter.
+  assert.equal(formatStamp('2026-08'),
+    new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short' })
+      .format(new Date(2026, 7, 15)));
   assert.notEqual(formatStamp('2026-08'), formatStamp('2026-09'));
   assert.notEqual(formatStamp('2026-08'), formatStamp('2027-08'));
   // Pinned against a KNOWN date rather than against itself. Every assertion
