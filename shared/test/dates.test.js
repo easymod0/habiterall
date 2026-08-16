@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 const {
-  formatDateLong, formatDateShort, fromISOLocal, iso, monthLabels, weekdayLetters,
+  formatDateLong, formatDateShort, formatStamp, fromISOLocal, iso, monthLabels,
+  weekdayLetters, weekdayNames,
 } = await import('../public/ui/dates.js');
 
 /**
@@ -65,10 +69,84 @@ test('a date is formatted from its LOCAL parts, not shifted through UTC', () => 
   }
 });
 
+test('every weekday width is indexed the same way, and narrow is one character', () => {
+  // `narrow` is what the seven-column grid header and the month grid's rows
+  // read, and both depend on it staying one character. Measured across en, de,
+  // fr, ru, pl, fi, ja and id when this landed; asserted here for whatever
+  // locale the suite runs in.
+  for (const style of ['narrow', 'short', 'long']) {
+    const names = weekdayNames(style);
+    assert.equal(names.length, 7, style);
+    for (let i = 0; i < 7; i++) {
+      const day = new Date(2026, 0, 4 + i);
+      assert.equal(names[day.getDay()],
+        new Intl.DateTimeFormat(undefined, { weekday: style }).format(day),
+        `${style} index ${i}`);
+    }
+  }
+  assert.deepEqual(weekdayLetters(), weekdayNames('narrow'),
+    'the letters ARE the narrow names — one list, not two');
+  for (const letter of weekdayNames('narrow')) {
+    assert.equal([...letter].length, 1, `narrow "${letter}" is not one character`);
+  }
+});
+
+test('a bucket key is written for a human, and an unknown one is not invented', () => {
+  // `windowedChart`'s range readout is handed whatever its chart buckets by,
+  // and `BUCKETERS` in stats.js makes four shapes.
+  assert.equal(formatStamp('2026-08-16'), formatDateShort(fromISOLocal('2026-08-16')));
+  assert.match(formatStamp('2026-08'), /2026/);
+  assert.ok(!/\d{4}-\d{2}$/.test(formatStamp('2026-08')), 'a month is not left as a key');
+  // No Intl form, already readable, and inventing one is how a label lies.
+  assert.equal(formatStamp('2026-Q3'), '2026-Q3');
+  assert.equal(formatStamp('2026'), '2026');
+  assert.equal(formatStamp('whatever'), 'whatever');
+});
+
+test('the lists are frozen, because they are handed out by reference', () => {
+  // Held for the life of the page, so one caller reversing in place would
+  // corrupt every chart in the session.
+  assert.ok(Object.isFrozen(monthLabels()));
+  assert.ok(Object.isFrozen(weekdayNames('short')));
+  assert.throws(() => { monthLabels().reverse(); });
+});
+
 test('the formatters are built once, not per call', () => {
   // The grid header asks for a weekday per column on every paint, and
   // `Intl.DateTimeFormat` is not cheap. Identity is the observable part of the
   // memo: a fresh array every call would also mean a fresh formatter.
   assert.equal(weekdayLetters(), weekdayLetters());
   assert.equal(monthLabels(), monthLabels());
+});
+
+
+test('no module hardcodes a weekday or month list any more', () => {
+  // The check `weekcheck.mjs` cannot make. It reads its expected captions from
+  // this module now, so it is locale-agnostic — and therefore blind to a
+  // hardcoded ENGLISH array when the suite itself runs in English, which is
+  // every CI run. Reading the source is the only thing that catches a
+  // reintroduction, and it is the pattern `toggle.test.js` already uses to pin
+  // `values.js` against `toggle.js`'s own declaration.
+  //
+  // There were five: two in `ui/dashboard.js`, three in `charts.js`, all
+  // silently English whatever the browser was set to.
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
+  const suspects = [
+    ['charts.js', readFileSync(join(root, 'charts.js'), 'utf8')],
+    ['ui/dashboard.js', readFileSync(join(root, 'ui', 'dashboard.js'), 'utf8')],
+    ['ui/detail.js', readFileSync(join(root, 'ui', 'detail.js'), 'utf8')],
+  ];
+
+  // Two adjacent quoted English day or month names is an array; one on its own
+  // is prose, a settings option, or a `weekStart` value.
+  const DAYS = 'Sun|Mon|Tue|Wed|Thu|Fri|Sat|Su|Mo|Tu|We|Th|Fr|Sa'
+    + '|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
+  const MONTHS = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
+  const pattern = new RegExp(`'(${DAYS}|${MONTHS})'\\s*,\\s*'(${DAYS}|${MONTHS})'`);
+
+  for (const [name, src] of suspects) {
+    const hit = pattern.exec(src);
+    assert.equal(hit, null,
+      `${name} names weekdays or months itself (${hit?.[0]}) — use ui/dates.js`);
+  }
 });

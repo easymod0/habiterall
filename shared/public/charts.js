@@ -727,12 +727,16 @@ export function weekdayMonthChart(months, color,
   const maxR = Math.min(11, colW / 2 - 2, rowH / 2 - 2);
 
   // Weekday rows in the same order as the calendar heatmap above — which is
-  // the account's `weekStart`, not always Sunday. Two letters, not one: S/S and
-  // T/T are ambiguous, and this axis is the whole point of the chart.
-  const FULL = rotateWeek(
-    ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
-    weekStart);
-  const SHORT = rotateWeek(['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'], weekStart);
+  // the account's `weekStart`, not always Sunday. NOT one letter: S/S and T/T
+  // are ambiguous and this axis is the whole point of the chart, which is why
+  // the hardcoded version wrote `Su`/`Mo`.
+  //
+  // `Intl` has no two-letter width, so this is `short` — three characters in
+  // English, and whatever the locale's own abbreviation is elsewhere. Wider
+  // than `Su` by about 6px against a 42px left pad, measured; `narrow` was the
+  // other option and would have undone the sentence above.
+  const FULL = rotateWeek(weekdayNames('long'), weekStart);
+  const SHORT = rotateWeek(weekdayNames('short'), weekStart);
   const order = weekOrder(weekStart);
   for (let d = 0; d < 7; d++) {
     svg.appendChild(el('text', {
@@ -1007,8 +1011,8 @@ export function weekdayChart(days, color,
   const slot = w / 7;
   const barW = Math.min(46, slot * 0.6);
 
-  const FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const FULL = weekdayNames('long');
+  const SHORT = weekdayNames('short');
 
   order.forEach((weekday, i) => {
     const d = days[weekday];
@@ -1103,9 +1107,6 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   return svg;
 }
 
-const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
 /**
  * "21 Apr – 18 May 2026", collapsing to a single date for one-day streaks and
  * dropping the repeated year.
@@ -1114,8 +1115,9 @@ function formatRange(startISO, endISO) {
   const [sy, sm, sd] = startISO.split('-').map(Number);
   const [ey, em, ed] = endISO.split('-').map(Number);
 
-  const s = `${sd} ${MONTH_SHORT[sm - 1]}`;
-  const e = `${ed} ${MONTH_SHORT[em - 1]}`;
+  const months = monthLabels();
+  const s = `${sd} ${months[sm - 1]}`;
+  const e = `${ed} ${months[em - 1]}`;
 
   if (startISO === endISO) return `${s} ${sy}`;
   if (sy !== ey) return `${s} ${sy} – ${e} ${ey}`;

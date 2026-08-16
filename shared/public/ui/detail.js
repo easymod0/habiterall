@@ -16,7 +16,8 @@ import {
   card, cardInnerWidth, segmented, subheading, windowedChart,
 } from '/shared/ui/components.js';
 import {
-  addDaysISO, formatDateShort, freqLabel, fromISOLocal, targetLabel, todayISO,
+  addDaysISO, formatDateShort, formatStamp, freqLabel, fromISOLocal,
+  targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { isAvoided } from '/shared/ui/toggle.js';
 import { openDayDialog } from '/shared/ui/day-dialog.js';
@@ -182,7 +183,7 @@ function render(stats, entries) {
     // only pages once the vertices would overlap.
     density: 'point',
     width: chartWidth,
-    labelOf: (p) => p.date,
+    labelOf: (p) => formatStamp(p.date),
     redraw: () => open(habit.id),
     render: (slice) => scoreChart(slice, color, { width: chartWidth }),
   });
@@ -272,14 +273,9 @@ function render(stats, entries) {
   // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
   // says "Completion calendar" reads as a serial number.
   //
-  // It is NOT the last one, which an earlier version of this comment claimed
-  // and a review disproved. `windowedChart` builds its own range readout with
-  // the same `.cal-range` class (ui/components.js), and all four callers hand
-  // `labelOf` a raw storage string — so the strength card's HEADER still says
-  // `2026-07-03 → 2026-08-16` above an axis that now says `Jul 3, 2026`. One
-  // card, two conventions. Converting `labelOf`'s four call sites is the rest
-  // of this and is left out on purpose: each one is a different unit (a day, a
-  // bucket, a month) and picking a format for each is a separate decision.
+  // Every other range readout in the app goes through `formatStamp`, including
+  // `windowedChart`'s — which used to show the raw bucket key, so this card's
+  // sibling read `2026-07-03 → 2026-08-16` above an axis saying `Jul 3, 2026`.
   navLabel.textContent =
     `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
     `${formatDateShort(fromISOLocal(calLast))}`;
@@ -370,7 +366,7 @@ function render(stats, entries) {
     items: stats.history,
     density: 'bar',
     width: chartWidth,
-    labelOf: (b) => b.bucket,
+    labelOf: (b) => formatStamp(b.bucket),
     redraw: () => open(habit.id),
     render: (slice) => historyChart(slice, color, {
       showPercent: historyMode() === 'percent',
@@ -401,7 +397,7 @@ function render(stats, entries) {
       items: stats.weekdayByMonth,
       density: 'circle',
       width: chartWidth,
-      labelOf: (m) => m.month,
+      labelOf: (m) => formatStamp(m.month),
       redraw: () => open(habit.id),
       render: (slice) => weekdayMonthChart(slice, color,
         { width: chartWidth, weekStart: settings.get('weekStart') }),
@@ -421,7 +417,7 @@ function render(stats, entries) {
       items: stats.frequency,
       density: 60,   // ~12 rows on a typical card
       width: chartWidth,
-      labelOf: (m) => m.month,
+      labelOf: (m) => formatStamp(m.month),
       redraw: () => open(habit.id),
       render: (slice) => frequencyChart(slice, color, { width: chartWidth }),
     });

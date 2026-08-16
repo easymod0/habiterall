@@ -9,8 +9,8 @@
 import { api } from '/shared/ui/api.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import {
-  addDaysISO, datesEndingOn, freqLabel, fromISOLocal, iso, monthLabels,
-  targetLabel, todayISO, weekdayLetters,
+  addDaysISO, datesEndingOn, formatDateLong, freqLabel, fromISOLocal, iso,
+  monthLabels, targetLabel, todayISO, weekdayLetters,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
@@ -766,9 +766,8 @@ function openCountDialog(habit, date) {
   // The date in words. A grid cell is a square in a row of squares, so the
   // dialog has to say which day it is about — the ISO string reads as a serial
   // number, and the whole risk of an editable history is fixing the wrong one.
-  countSub.textContent = fromISOLocal(date).toLocaleDateString(undefined, {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  }) + (habit.unit ? ` · ${habit.unit}` : '');
+  countSub.textContent = formatDateLong(fromISOLocal(date))
+    + (habit.unit ? ` · ${habit.unit}` : '');
   // Whether a ROW exists, not whether there is an amount to show. A skipped
   // day has a row and `current` is nulled above so the SKIP sentinel is not
   // prefilled as an amount — deriving the button from that hid Clear on the

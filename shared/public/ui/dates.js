@@ -96,16 +96,42 @@ const fmt = (opts) => {
 };
 
 const narrowWeekday = fmt({ weekday: 'narrow' });
+const shortWeekday = fmt({ weekday: 'short' });
+const longWeekday = fmt({ weekday: 'long' });
 const shortMonth = fmt({ month: 'short' });
 const longDate = fmt({ weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+const monthAndYear = fmt({ year: 'numeric', month: 'short' });
 const mediumDate = fmt({ year: 'numeric', month: 'short', day: 'numeric' });
 
 /** A reference week, so the seven labels can be asked for by `getDay()`. */
 const WEEK_SAMPLE = [4, 5, 6, 7, 8, 9, 10].map((d) => new Date(2026, 0, d));
 const MONTH_SAMPLE = Array.from({ length: 12 }, (_, m) => new Date(2026, m, 15));
 
-let weekdayCache = null;
+/** @type {Record<string, readonly string[]>} */
+const weekdayCache = {};
 let monthCache = null;
+
+/**
+ * Weekday names in one of `Intl`'s three widths, indexed by `getDay()`.
+ *
+ * `narrow` is one character in every locale checked (en, de, fr, ru, pl, fi,
+ * ja, id), which is what makes it safe for a seven-column header; `short` and
+ * `long` are not bounded and their callers have room.
+ *
+ * There is no two-letter width, which is what `charts.js` used to hardcode for
+ * the month grid's rows. Those read `narrow` now — the same letters the
+ * calendar heatmap beside them already uses, so the two agree where before one
+ * said `Su` and the other `S`.
+ *
+ * @param {'narrow'|'short'|'long'} [style]
+ * @returns {readonly string[]}
+ */
+export function weekdayNames(style = 'short') {
+  if (weekdayCache[style]) return weekdayCache[style];
+  const f = style === 'long' ? longWeekday : style === 'narrow' ? narrowWeekday : shortWeekday;
+  weekdayCache[style] = Object.freeze(WEEK_SAMPLE.map((d) => f().format(d)));
+  return weekdayCache[style];
+}
 
 /**
  * One letter per weekday, indexed by `getDay()` — Sunday first, as JavaScript
@@ -113,12 +139,17 @@ let monthCache = null;
  * week start; this is only the text.
  */
 export function weekdayLetters() {
-  return (weekdayCache ??= WEEK_SAMPLE.map((d) => narrowWeekday().format(d)));
+  return weekdayNames('narrow');
 }
 
 /** Short month names, indexed by `getMonth()`. */
+/** @returns {readonly string[]} */
 export function monthLabels() {
-  return (monthCache ??= MONTH_SAMPLE.map((d) => shortMonth().format(d)));
+  // Frozen, like the weekday lists: these are handed out by reference and held
+  // for the life of the page, so one caller reversing in place would corrupt
+  // every chart in the session. `defaults()` in ui/settings.js copies its
+  // arrays for the same reason.
+  return (monthCache ??= Object.freeze(MONTH_SAMPLE.map((d) => shortMonth().format(d))));
 }
 
 /**
@@ -146,3 +177,28 @@ export const formatDateLong = (d) => longDate().format(d);
  * @param {Date} d
  */
 export const formatDateShort = (d) => mediumDate().format(d);
+
+/**
+ * A bucket key, written for a human.
+ *
+ * `windowedChart`'s range readout is handed whatever its chart buckets by, and
+ * `BUCKETERS` in stats.js produces four shapes: `YYYY-MM-DD` for a day or a
+ * week, `YYYY-MM` for a month, `YYYY-Qn` for a quarter and `YYYY` for a year.
+ * All four were being shown raw, so the strength card's HEADER read
+ * `2026-07-03 → 2026-08-16` above an axis that said `Jul 3, 2026` — one card,
+ * two conventions.
+ *
+ * A quarter has no `Intl` form and is already readable, so it is passed
+ * through; so is anything unrecognised, because inventing a format for a key
+ * this does not know is how a label starts lying.
+ *
+ * @param {string} stamp
+ */
+export function formatStamp(stamp) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(stamp)) return formatDateShort(fromISOLocal(stamp));
+  if (/^\d{4}-\d{2}$/.test(stamp)) {
+    return monthAndYear().format(new Date(Number(stamp.slice(0, 4)),
+                                          Number(stamp.slice(5, 7)) - 1, 15));
+  }
+  return stamp;                       // 'YYYY', 'YYYY-Qn', or something new
+}

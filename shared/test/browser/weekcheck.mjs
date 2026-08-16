@@ -39,6 +39,7 @@ globalThis.document = {
 
 const { weekdayChart, weekdayMonthChart } = await import(sharedPublic('charts.js'));
 const { calendarWindow, weekdayIndex } = await import(sharedPublic('ui/calendar.js'));
+const { weekdayNames } = await import(sharedPublic('ui/dates.js'));
 
 let fails = 0;
 const check = (label, cond, extra = '') => {
@@ -131,13 +132,21 @@ for (const weekStart of ['sunday', 'monday']) {
   // alone leaves the visible labels free to sit beside the wrong rows, which is
   // the exact failure this file exists to catch and the first version of it
   // missed.
+  // Read from `ui/dates.js` rather than restated as English literals: the
+  // captions are `Intl`'s now, so a literal table would pin en-US and fail
+  // anywhere else — and restating what the code says is how a mirror test comes
+  // to agree with itself. The two lists are indexed by `getDay()`, which is
+  // what lets a full name be turned into the caption that should sit beside it.
+  const shortNames = weekdayNames('short');
+  const longNames = weekdayNames('long');
+  const SHORT = Object.fromEntries(
+    longNames.map((full, i) => [full, shortNames[i]]));
+
   const axis = collect(svg)
-    .filter((n) => n.name === 'text' && /^(Su|Mo|Tu|We|Th|Fr|Sa)$/.test(n.text ?? ''))
+    .filter((n) => n.name === 'text' && shortNames.includes(n.text ?? ''))
     .map((n) => ({ y: Number(n.attrs.y), label: n.text }))
     .sort((a, b) => a.y - b.y)
     .map((n) => n.label);
-  const SHORT = { Sunday: 'Su', Monday: 'Mo', Tuesday: 'Tu', Wednesday: 'We',
-    Thursday: 'Th', Friday: 'Fr', Saturday: 'Sa' };
   check(`${weekStart}: the drawn row captions match the rows' own data`,
     axis.join(',') === order.map((n) => SHORT[n]).join(','),
     `${axis.join(',')} (want ${order.map((n) => SHORT[n]).join(',')})`);
