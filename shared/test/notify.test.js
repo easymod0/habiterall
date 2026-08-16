@@ -8,7 +8,8 @@ const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
   answeredIds, channelConfigured, discordPayload, dueReminders, enabledChannels,
   minutesOfDay, needsServerDelivery, parseChannelList, parseDiscordWebhook,
-  parseTimeZone, reminderMessage, serverChannels, zonedClock,
+  parseTimeZone, reminderMessage, reportedZone, resolveTimeZone, serverChannels,
+  zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
 } = await import('../src/notify.js');
 
 const { deliverAccount, postWebhook, resetSaid, runTick, sendToChannel, warnUnreachable } =
@@ -161,6 +162,49 @@ test('the server only delivers for channels that are on, its own, and ready', ()
   assert.equal(needsServerDelivery({ notifyChannels: ['android'] }), false);
   assert.equal(
     needsServerDelivery({ notifyChannels: ['discord'], discordWebhook: url }), true);
+});
+
+test('which clock a reminder is on: named beats device beats server', () => {
+  // Three tiers, two of which the user sees. The precedence lives in exactly
+  // one function so the tick and the Discord button handler cannot disagree
+  // about which day it is for an account.
+  assert.equal(resolveTimeZone({ notifyTimezone: 'Europe/Berlin' }, 'Pacific/Auckland'),
+    'Europe/Berlin', 'a named zone always wins — this is "keep me on home time"');
+  assert.equal(resolveTimeZone({ notifyTimezone: AUTO_ZONE }, 'Pacific/Auckland'),
+    'Pacific/Auckland');
+  assert.equal(resolveTimeZone({}, 'Pacific/Auckland'), 'Pacific/Auckland',
+    'auto is the default, so an untouched account follows its device');
+  assert.equal(resolveTimeZone({ notifyTimezone: AUTO_ZONE }, ''), '',
+    'and falls back to the server when no client has ever reported one');
+
+  // `''` keeps its old meaning: the server's clock, chosen deliberately. This
+  // is the opt-out, and it must not be overridden by what a device says.
+  assert.equal(resolveTimeZone({ notifyTimezone: '' }, 'Pacific/Auckland'), '',
+    "an account that picked the server's clock is not followed anywhere");
+
+  // A device value is re-validated here, not trusted: it arrives on a header.
+  assert.equal(resolveTimeZone({}, 'Moon/Base'), '');
+  assert.equal(resolveTimeZone({}, AUTO_ZONE), '',
+    'a client echoing the setting back is an account asking itself');
+});
+
+test('a reported zone is a header value, and is treated as one', () => {
+  assert.equal(DEVICE_ZONE_HEADER, 'X-Habiterall-Timezone');
+  assert.equal(reportedZone('Pacific/Auckland'), 'Pacific/Auckland');
+  for (const junk of ['', undefined, null, 'auto', 'Moon/Base', 'x'.repeat(80), 42]) {
+    assert.equal(reportedZone(junk), '', `accepted ${JSON.stringify(junk)}`);
+  }
+});
+
+test('a zone Intl will not take does not end the tick', () => {
+  // `new Intl.DateTimeFormat` throws RangeError for an unknown zone, and
+  // `formatterFor` runs once per account INSIDE the tick — so one account with
+  // an unusable value would have ended the pass for everyone. It can arrive by
+  // a direct database edit, a restore, or ICU data changing under a downgrade.
+  const noon = new Date(Date.UTC(2026, 7, 16, 12, 0));
+  assert.equal(zonedClock(noon, 'Moon/Base').date, zonedClock(noon, '').date);
+  assert.equal(zonedClock(noon, AUTO_ZONE).date, zonedClock(noon, '').date,
+    'including `auto`, if it ever reaches here unresolved');
 });
 
 test('a time zone is validated by asking Intl, not by pattern', () => {

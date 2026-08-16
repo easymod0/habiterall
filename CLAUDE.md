@@ -697,6 +697,43 @@ click recording twice, and a defer delays that, so the buttons stay live while
 the write is in flight. `record` is an upsert for every action, so a double press
 is idempotent and the window costs nothing.
 
+**Whose clock a server-sent reminder is on is resolved in ONE place, and the
+answer has three tiers.** `resolveTimeZone` (shared/src/notify.js): the zone the
+account NAMED wins, else the zone its last client reported, else the server's
+own. `notifyTimezone` defaults to `auto` — the second tier — so an account that
+has never opened the settings dialog gets reminders on its own clock instead of
+on a container's, which is UTC in both compose files and therefore right for
+almost nobody.
+
+The reported zone is **stored apart from the setting**, and that is the whole
+design rather than an implementation detail. It is an OBSERVATION the server
+makes from a request header; `notifyTimezone` is a DECISION the user sent. Fold
+the first into the second and the first client to check in turns "follow my
+device" into a chosen value, after which nothing can reach automatic again and a
+stale detection outlives the trip that caused it — the same distinction
+`theme: 'system'` and `at_most_unlogged: 'default'` already draw, and the reason
+`''` keeps its old meaning of "the server's clock, chosen deliberately". It is
+also why it is a `device_clock` table in personal and a `users` column in cloud
+rather than a key in the settings blob: `/api/export` carries settings, and
+restoring a backup on a laptop abroad must not move when your reminders arrive.
+
+**It costs no extra request.** `X-Habiterall-Timezone` rides on traffic both
+clients already make — `ui/api.js`'s single `fetch` and an OkHttp interceptor in
+`Api.kt` — and the server writes only when the value CHANGES, so a settled
+account writes here never. This is not a mirrored RULE: the client reports a
+fact and the server decides what it means, so there is nothing to drift.
+
+Two traps, both of which bit while this was written. `deliverAccount` used to
+re-derive the zone from `settings.notifyTimezone` for `dueReminders`, which was a
+SECOND place the clock was decided — and the two answers diverged the moment
+`auto` existed: `collect` resolved it to the device's zone while this passed the
+literal string `auto`, so every reminder for a following account was judged
+against the wrong day and reported `too_late`. The account carries its resolved
+`timeZone` now. And `new Intl.DateTimeFormat` THROWS for a zone it does not
+know, inside a loop that runs once per account, so one bad value would have
+ended the tick for everyone; `formatterFor` falls back to the server's clock
+instead.
+
 **A server-sent reminder is written down after it is sent** (`notify_log`,
 keyed on habit + channel + the user's *local* date). Without that watermark a
 minute-by-minute tick re-sends for as long as the catch-up window lasts. Keyed

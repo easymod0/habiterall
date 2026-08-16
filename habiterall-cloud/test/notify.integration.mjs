@@ -353,6 +353,44 @@ try {
       .then((r) => r.rows[0]?.status));
   check('and the entry is untouched', unchanged === '', JSON.stringify(unchanged));
 
+  /* ---------- one account follows its device, another does not ---------- */
+  //
+  // The multi-tenant half of the same rule: two accounts, one on `auto` and one
+  // that named a zone, must resolve independently — the same property the
+  // watermark check above proves for the calendar day.
+  console.log('--- whose clock ---');
+  const follower = await mkUser('sub-follow', {
+    notifyChannels: ['discord'], discordWebhook: WEBHOOK, notifyTimezone: 'auto',
+  });
+  const pinned = await mkUser('sub-pinned', {
+    notifyChannels: ['discord'], discordWebhook: WEBHOOK, notifyTimezone: 'UTC',
+  });
+  await mkHabit(follower, 'Follows the phone', '08:00');
+  await mkHabit(pinned, 'Stays on UTC', '08:00');
+
+  // Both phones report Tokyo. Only the account on `auto` should move.
+  await admin.query(
+    `UPDATE users SET device_time_zone = 'Asia/Tokyo' WHERE id = ANY($1::bigint[])`,
+    [[follower, pinned]]);
+
+  const tokyoMorningAgain = new Date(Date.UTC(2026, 7, 13, 23, 0)); // 08:00 Tokyo
+  const atTokyo = await notifier.collect(tokyoMorningAgain);
+  const followerDue = await deliverAccount(atTokyo.find((a) => a.id === follower),
+    { instant: tokyoMorningAgain, mark: notifier.mark, fetch: fakeFetch() });
+  check('an account on auto is due at 08:00 on its phone\'s clock',
+    followerDue.sent === 1, JSON.stringify(followerDue));
+
+  const pinnedAtTokyo = await deliverAccount(atTokyo.find((a) => a.id === pinned),
+    { instant: tokyoMorningAgain, mark: notifier.mark, fetch: fakeFetch() });
+  check('an account that named UTC is not moved by its phone',
+    pinnedAtTokyo.sent === 0, JSON.stringify(pinnedAtTokyo));
+
+  const atUtc = await notifier.collect(AT_0800_UTC);
+  const pinnedDue = await deliverAccount(atUtc.find((a) => a.id === pinned),
+    { instant: AT_0800_UTC, mark: notifier.mark, fetch: fakeFetch() });
+  check('...and is due at 08:00 UTC instead', pinnedDue.sent === 1,
+    JSON.stringify(pinnedDue));
+
   /* ---------- one account's read is not the whole tick ---------- */
   //
   // `collect` runs one `withUser` transaction per account, and the loop sits
@@ -366,6 +404,10 @@ try {
   // `collect` opens one connection for the notifier-scope scan and then one per
   // account, sequentially, so #2 is the first account.
   console.log('--- one account\'s read failure ---');
+  // Relative to a clean pass, not a hardcoded count: this suite grows accounts
+  // as it goes, and an absolute number here breaks whenever a section above
+  // adds one — which is a test failing for a reason that is not the code's.
+  const healthy = (await notifier.collect(AT_0800_UTC)).length;
   const realConnect = pool.connect.bind(pool);
   let connects = 0;
   pool.connect = (...args) => (++connects === 2
@@ -385,10 +427,12 @@ try {
     pool.connect = realConnect;
   }
   check('one account\'s read failure does not discard the whole tick',
-    !threw && survived?.length === 1,
-    threw ? `collect threw: ${threw.message}` : JSON.stringify({ got: survived.map((a) => a.id) }));
-  check('and it is the OTHER account that survives, not a partial one',
-    survived?.[0]?.id !== undefined && survived[0].habits.length > 0,
+    !threw && survived?.length === healthy - 1,
+    threw ? `collect threw: ${threw.message}`
+      : JSON.stringify({ got: survived.map((a) => a.id), healthy }));
+  check('and the survivors are whole accounts, not partial ones',
+    (survived ?? []).length > 0
+      && survived.every((a) => a.id !== undefined && a.habits.length > 0),
     JSON.stringify((survived ?? []).map((a) => ({ id: a.id, habits: a.habits.length }))));
 
   console.log(fails === 0 ? '\nALL CLOUD NOTIFY CHECKS PASSED' : `\n${fails} CHECK(S) FAILED`);

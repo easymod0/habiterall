@@ -32,13 +32,45 @@ import {
   writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
 } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
+import { DEVICE_ZONE_HEADER, reportedZone } from '@habiterall/shared/notify.js';
 import { log } from '@habiterall/shared/log.js';
 
 export const api = express.Router();
 
+/**
+ * Note which clock the caller's device is on, for `notifyTimezone: 'auto'`.
+ *
+ * On requests that already happen, so following your zone costs no extra
+ * traffic — and written only when it CHANGES, which for a settled account is
+ * never. Read back by the notifier through `resolveTimeZone`, and only for an
+ * account that has not named a zone of its own.
+ *
+ * Never fatal. This is an optimisation of a default: a request must not fail
+ * because the server could not write down where the user is.
+ */
+api.use((req, _res, next) => {
+  const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
+  if (zone) {
+    try {
+      if (zone !== String(q.deviceClock.get()?.time_zone ?? '')) {
+        q.setDeviceClock.run(zone);
+      }
+    } catch (err) {
+      log.warn?.('settings.device_clock_not_stored', {}, err);
+    }
+  }
+  next();
+});
+
 /* ---------- statements ---------- */
 
 const q = {
+  deviceClock: db.prepare(`SELECT time_zone FROM device_clock WHERE id = 1`),
+  setDeviceClock: db.prepare(`
+    INSERT INTO device_clock (id, time_zone) VALUES (1, ?)
+    ON CONFLICT(id) DO UPDATE SET time_zone = excluded.time_zone,
+                                  at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+  `),
   allHabits: db.prepare(
     `SELECT * FROM habits WHERE archived = ? ORDER BY position, id`
   ),

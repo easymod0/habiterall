@@ -12,7 +12,8 @@
 
 import { db, UNSET, YES, SKIP } from './db.js';
 import {
-  answeredIds, answerText, needsServerDelivery, serverChannels, zonedClock,
+  answeredIds, answerText, needsServerDelivery, resolveTimeZone, serverChannels,
+  zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
   notifierConfig, sendToChannel, startNotifier, warnUnreachable,
@@ -27,6 +28,7 @@ const KEEP_LOG_DAYS = 45;
 
 const q = {
   settings: db.prepare(`SELECT key, value FROM settings`),
+  deviceClock: db.prepare(`SELECT time_zone FROM device_clock WHERE id = 1`),
   habits: db.prepare(`
     SELECT * FROM habits
      WHERE archived = 0 AND reminder_time <> ''
@@ -68,6 +70,15 @@ const q = {
   `),
 };
 
+/** What the last client to check in said its clock was; '' if none has. */
+function deviceZone() {
+  try {
+    return String(q.deviceClock.get()?.time_zone ?? '');
+  } catch {
+    return '';                 // an older database, before the table existed
+  }
+}
+
 /** The stored preferences, as the plain object the shared code expects. */
 export function loadSettings() {
   const out = {};
@@ -106,8 +117,11 @@ export function collect(now = new Date()) {
   if (!habits.length) return [];
 
   // The user's own day, not the server's: `zonedClock` is what decides which
-  // date "already done" and "already sent" are asked about.
-  const clock = zonedClock(now, settings.notifyTimezone ?? '');
+  // date "already done" and "already sent" are asked about, and
+  // `resolveTimeZone` is what decides whose clock that is — the zone the
+  // account NAMED, else the one its last client reported, else this server's.
+  const timeZone = resolveTimeZone(settings, deviceZone());
+  const clock = zonedClock(now, timeZone);
 
   const doneToday = answeredIds(habits, /** @type {any} */ (q.entriesOn.all(clock.date)));
   const sent = new Set(
@@ -117,6 +131,8 @@ export function collect(now = new Date()) {
   return [{
     id: null,                 // single user; nothing to identify
     settings,
+    // Resolved once and carried, so `deliverAccount` cannot decide it again.
+    timeZone,
     habits,
     doneToday,
     alreadySent: (habitId, channel) => sent.has(`${habitId}:${channel}`),
@@ -196,7 +212,8 @@ export function interactionAdapter() {
     },
 
     today(account) {
-      return zonedClock(new Date(), account.settings.notifyTimezone ?? '').date;
+      return zonedClock(new Date(),
+        resolveTimeZone(account.settings, deviceZone())).date;
     },
 
     findHabit(account, habitId) {

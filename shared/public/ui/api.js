@@ -90,6 +90,31 @@ async function queueWrite(url, method, options) {
 }
 
 /**
+ * Tell the server which clock this device is on.
+ *
+ * A header on requests that already happen, rather than a call of its own —
+ * the whole point is that following your zone costs no extra traffic. ~30 bytes
+ * on each request; the server compares it to what it holds and writes only when
+ * it differs, which for a settled account is never.
+ *
+ * It is read for exactly one thing: a server-sent reminder for an account whose
+ * `notifyTimezone` is `auto`. An account that has NAMED a zone ignores this
+ * entirely, which is what makes "keep my reminders on home time while I travel"
+ * a thing you can still ask for. See `resolveTimeZone` in shared/src/notify.js.
+ *
+ * Silent on a runtime that will not answer: this is an optimisation of the
+ * default, never a requirement.
+ */
+function deviceClockHeader() {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zone ? { 'X-Habiterall-Timezone': zone } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Say a write is queued, and hand back the error the caller expects.
  *
  * Separate from the enqueue because with staging the write is often ALREADY in
@@ -152,7 +177,7 @@ export async function api(path, options = {}) {
   let res;
   try {
     res = await fetch(url, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...deviceClockHeader() },
       credentials: 'same-origin',
       ...options,
       // A timeout rejects the fetch, so it lands in the same `catch` as a

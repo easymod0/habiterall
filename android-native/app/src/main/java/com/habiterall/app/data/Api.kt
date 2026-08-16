@@ -11,6 +11,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 /**
@@ -433,6 +434,12 @@ class ApiException(val status: Int, message: String) : Exception(message) {
  *   screen can send the whole app back to sign-in. Absent for background
  *   callers, which queue and retry instead of asking anybody anything.
  */
+/**
+ * Mirrors `DEVICE_ZONE_HEADER` in shared/src/notify.js. A header name, not a
+ * rule — but the two clients and the server all have to spell it the same.
+ */
+private const val DEVICE_ZONE_HEADER = "X-Habiterall-Timezone"
+
 class Api(
     private val baseUrl: String,
     private val onUnauthorized: (() -> Unit)? = null,
@@ -461,6 +468,24 @@ class Api(
         // The OIDC flow is redirects, and OkHttp follows them by default. That
         // is left ON deliberately: `POST /auth/logout` answers with where to go
         // next, and a login that lands mid-chain would leave the cookie unset.
+        //
+        // Which clock this phone is on, for an account whose reminder timezone
+        // is `auto`. An interceptor rather than a line at each `Request.Builder`
+        // for the same reason the web sets it inside `api()`: one chokepoint, so
+        // a request added later cannot forget it.
+        //
+        // This is NOT a mirrored rule — the phone reports a fact and the server
+        // decides what to do with it, so there is nothing here that could drift
+        // from `resolveTimeZone`. The phone's own alarms never consult it; they
+        // are already on this clock by construction.
+        .addInterceptor { chain ->
+            val zone = runCatching { TimeZone.getDefault().id }.getOrNull()
+            val req = chain.request()
+            chain.proceed(
+                if (zone.isNullOrBlank()) req
+                else req.newBuilder().header(DEVICE_ZONE_HEADER, zone).build()
+            )
+        }
         .build()
 
     private fun url(path: String) = baseUrl.trimEnd('/') + path

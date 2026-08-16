@@ -17,6 +17,7 @@ import {
   writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
 } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
+import { DEVICE_ZONE_HEADER, reportedZone } from '@habiterall/shared/notify.js';
 import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
@@ -33,6 +34,7 @@ import {
 } from '@habiterall/shared/stats.js';
 
 export const api = express.Router();
+
 
 const SUMMARY_WINDOW_DAYS = 400;
 
@@ -69,6 +71,38 @@ const uid = (req) => req.session.user.id;
 
 /** Wrap an async handler so rejections reach the error middleware. */
 const route = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+/**
+ * Note which clock the caller's device is on, for `notifyTimezone: 'auto'`.
+ *
+ * On requests that already happen, so following your zone costs no extra
+ * traffic — and the UPDATE is guarded by `WHERE device_time_zone IS DISTINCT
+ * FROM $1`, so a settled account writes here never. Read back by the notifier
+ * through `resolveTimeZone`, and only for an account that has not named a zone.
+ *
+ * Inside `withUser`, so RLS applies and the write can only ever touch the
+ * caller's own row — the app role has column-level UPDATE on this one column
+ * (migration 013) and cannot reach `idp_subject` or `blocked`.
+ *
+ * Never fatal, and not awaited into the request's critical path beyond the
+ * write itself: a request must not fail because the server could not write
+ * down where the user is.
+ */
+api.use(route(async (req, _res, next) => {
+  const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
+  if (zone) {
+    try {
+      await withUser(uid(req), (db) => db.query(
+        `UPDATE users SET device_time_zone = $1
+          WHERE id = $2 AND device_time_zone IS DISTINCT FROM $1`,
+        [zone, uid(req)]
+      ));
+    } catch (err) {
+      log.warn('settings.device_clock_not_stored', { user: uid(req) }, err);
+    }
+  }
+  next();
+}));
 
 /* ---------- habits ---------- */
 

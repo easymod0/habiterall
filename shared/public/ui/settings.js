@@ -80,7 +80,8 @@ function timeZoneOptions() {
   if (!zones.length && device) zones = [device];
 
   return [
-    { value: '', label: "Server's own timezone" },
+    { value: 'auto', label: 'Automatic — follow this device' },
+    { value: '', label: "Server's own clock" },
     ...zones.map((zone) => ({
       value: zone,
       label: zone === device ? `${zone} (this device)` : zone,
@@ -259,9 +260,16 @@ export const SETTINGS = {
   notifyTimezone: {
     section: 'Notifications',
     label: 'Reminder timezone',
-    help: 'Which clock "08:00" is on. Only affects reminders the server sends; the Android app uses the phone\'s own clock.',
+    help: 'Which clock "08:00" is on. Only affects reminders the server sends; '
+      + 'the Android app uses the phone\'s own clock. Following your device '
+      + 'means a reminder travels with you; name a zone to keep it on home time.',
     type: 'select',
-    default: '',
+    // `auto` rather than `''`: "follow whichever device I last used" is a
+    // state, not the absence of one, and it has to stay tellable apart from a
+    // zone the user CHOSE — see AUTO_ZONE in shared/src/notify.js. `''` keeps
+    // its old meaning, so an account that deliberately picked the server's
+    // clock keeps it, and one that never touched the setting gets `auto`.
+    default: 'auto',
     options: timeZoneOptions(),
     // Checked against Intl rather than the option list, so a zone this
     // browser's data does not list — but the server's does — is still shown

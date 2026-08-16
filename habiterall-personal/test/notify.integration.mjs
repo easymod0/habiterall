@@ -408,6 +408,71 @@ try {
     tokyoAccount?.doneToday?.has(zoned.body.id) === true,
     `doneToday=${JSON.stringify([...(tokyoAccount?.doneToday ?? [])])} ` +
     `tokyo=${tokyoDate} utc=${utcDate}`);
+  /* ---------- the reminder follows the device, unless told not to ---------- */
+  //
+  // End to end: the header a client already sends on every request reaches
+  // storage, and the tick reads it back. `notifyTimezone` is left at `auto` for
+  // the first half — the default — so this is the path an account that has
+  // never opened the settings dialog takes.
+  await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      notifyChannels: ['discord'],
+      discordWebhook: WEBHOOK,
+      discordChannelId: '',
+      notifyTimezone: 'auto',
+    }),
+  });
+  // 22:00 UTC on the 10th is 07:00 on the 11th in Tokyo, so the two calendars
+  // disagree at this instant — which is the only way to tell them apart.
+  const followInstant = new Date(Date.UTC(2026, 7, 10, 22, 0));
+  const followed = await api('/api/habits', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Followed', reminder_time: '07:00' }),
+  });
+  await api(`/api/habits/${followed.body.id}/entries/2026-08-11`, {
+    method: 'PUT', body: JSON.stringify({ value: 2 }),
+  });
+
+  // No header sent yet, so nothing has been reported and the server's own
+  // clock stands: on the server's 10th, the Tokyo-dated answer is unseen.
+  ck('with no device reported, the account is on the server\'s clock',
+    notifier.collect(followInstant)[0]?.doneToday?.has(followed.body.id) === false,
+    'the server has no reason to think otherwise yet');
+
+  // One ordinary request, carrying the header every client already sends.
+  await fetch(`${base}/api/habits`, {
+    headers: { 'Content-Type': 'application/json',
+      'X-Habiterall-Timezone': 'Asia/Tokyo' },
+  });
+
+  ck('a device that checked in moves the account to its clock',
+    notifier.collect(followInstant)[0]?.doneToday?.has(followed.body.id) === true,
+    'no extra request — the header rode on GET /api/habits');
+
+  // ...and naming a zone beats the device, which is how somebody abroad keeps
+  // their reminders on home time.
+  await api('/api/settings', {
+    method: 'PUT', body: JSON.stringify({ notifyTimezone: 'UTC' }),
+  });
+  ck('a named zone wins over whatever the device says',
+    notifier.collect(followInstant)[0]?.doneToday?.has(followed.body.id) === false,
+    'the account asked for UTC and must stay there');
+
+  // The device's report is NOT the setting: switching back to auto restores it,
+  // which is only possible because the two are stored apart.
+  await api('/api/settings', {
+    method: 'PUT', body: JSON.stringify({ notifyTimezone: 'auto' }),
+  });
+  ck('and switching back to automatic is a way back, not a one-way door',
+    notifier.collect(followInstant)[0]?.doneToday?.has(followed.body.id) === true,
+    'the reported zone survived the detour through an explicit one');
+
+  ck('a reported zone is never exported',
+    !JSON.stringify(await (await fetch(`${base}/api/export`)).json())
+      .includes('Asia/Tokyo'),
+    'restoring a backup abroad must not move when reminders arrive');
+
   /* ---------- housekeeping must not abandon the tick ---------- */
   //
   // Pruning old watermark rows is the FIRST thing a tick does, and it used to be
