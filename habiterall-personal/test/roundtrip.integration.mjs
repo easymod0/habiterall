@@ -16,7 +16,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, checkAgainstFixture,
+  LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS,
 } from '@habiterall/shared/test/roundtrip-fixture.mjs';
 // The clamp import must honour is the one the API enforces, so the test asks
 // the same table rather than restating a number that could drift from it.
@@ -120,6 +121,11 @@ const baselineLoopDb = await current({ fields: LOOP_DB_HABIT_FIELDS });
 
 ck('fixture seeded', baselineFull.length === FIXTURE.length,
   `${baselineFull.length} habits`);
+
+// Against the fixture, not against the route. `current()` IS `GET /api/export`,
+// so everything below this line compares the export with itself; this is the
+// only check in the suite that can see the export destroying a field.
+checkAgainstFixture(baselineFull, ck);
 
 // Guard the guard: if the fixture did not survive being written in the first
 // place, every round-trip below would compare wrong data against wrong data

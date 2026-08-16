@@ -57,6 +57,15 @@ const HABIT_TYPES = {
   freq_denominator: 'number',
   color: 'string',
   reminder_time: 'string',
+  // The three that were in Kotlin's `Habit` and not here. Every one of them
+  // has a Kotlin default, so kotlinx substitutes it in silence when the server
+  // omits the field — the "a field at its default everywhere compares equal to
+  // itself" failure, one layer out, on the client this suite exists for.
+  // Measured: deleting all three from every habit response left this suite
+  // green.
+  reminder_message: 'string',
+  at_most_unlogged: 'string',
+  show_as: 'string',
   position: 'number',
   archived: 'boolean',
 };
@@ -92,10 +101,14 @@ checkShape('PUT /habits/:id', updated);
 ck('an archived habit reports archived: true',
   updated.archived === true, JSON.stringify(updated.archived));
 
+// Assert the habit is there rather than guarding on it: a route that regressed
+// to zero habits would DELETE the check below rather than fail it.
 const overview = await (await fetch(`${base}/api/overview?days=7&archived=true`)).json();
+ck('GET /overview returned the habit', overview.habits.length > 0);
 if (overview.habits.length) checkShape('GET /overview', overview.habits[0]);
 
 const exported = await (await fetch(`${base}/api/export`)).json();
+ck('GET /export returned the habit', exported.habits.length > 0);
 if (exported.habits.length) checkShape('GET /export', exported.habits[0]);
 
 server.close();

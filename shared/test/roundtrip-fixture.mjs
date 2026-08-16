@@ -259,6 +259,54 @@ export function pick(obj, fields) {
 }
 
 /**
+ * Check a baseline snapshot against the FIXTURE, which is the only oracle in
+ * this file that does not come out of the code under test.
+ *
+ * Both round-trip suites read their "before" through the thing they are
+ * testing — personal's `current()` is `GET /api/export`, and cloud builds its
+ * expectation with `toJsonBackup` — so a field the export destroys is
+ * destroyed identically on both sides of every `diff()` and the round trip
+ * agrees with itself. Measured against `3c19da4`: clobbering `color`, `unit`,
+ * `at_most_unlogged` and `show_as` in personal's `toApiHabit` passed 546 unit
+ * tests plus every integration and offline browser suite in the repo. That is
+ * the whole of #113's `show_as` and every habit-level unlogged override
+ * silently switched off, with nothing red.
+ *
+ * Only the fields a fixture habit actually DECLARES are compared, so this
+ * cannot go stale: adding a field to the fixture starts watching it, and a
+ * habit that leaves one at its default is not asked about it — which is the
+ * same rule the fixture's own comments already apply by hand when they set
+ * `at_most_unlogged` and `show_as` away from their defaults on purpose.
+ *
+ * @param {any[]} baseline  the output of `snapshot(...)` with default fields
+ * @param {(name: string, ok: boolean, detail?: string) => void} ck
+ */
+export function checkAgainstFixture(baseline, ck) {
+  ck('every fixture habit is in the baseline',
+    baseline.length === FIXTURE.length,
+    `${baseline.length} of ${FIXTURE.length}`);
+
+  for (const want of FIXTURE) {
+    const got = baseline.find((h) => h.name === want.name);
+    if (!got) {
+      ck(`fixture habit "${want.name}" is in the baseline`, false);
+      continue;
+    }
+    for (const field of JSON_HABIT_FIELDS) {
+      if (!Object.hasOwn(want, field)) continue;
+      const expected = pick(want, [field])[field];
+      ck(`${want.name}: ${field} is what was stored`,
+        got[field] === expected,
+        `expected ${JSON.stringify(expected)} got ${JSON.stringify(got[field])}`);
+    }
+    const wantEntries = entrySetWithNotes(want.entries ?? []);
+    ck(`${want.name}: every entry is what was stored`,
+      JSON.stringify(got.entries) === JSON.stringify(wantEntries),
+      `expected ${JSON.stringify(wantEntries)} got ${JSON.stringify(got.entries)}`);
+  }
+}
+
+/**
  * A stable, order-independent description of the whole dataset, for the
  * formats that are supposed to be lossless.
  */

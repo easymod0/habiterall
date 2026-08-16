@@ -177,10 +177,23 @@ test('the cycle is untouched by any of this', () => {
   // walks the same four states in the same order — a clean day is `done`, a
   // slip is `no` — so `nextDayState`, which the Kotlin `Grid.nextState`
   // mirrors, did not have to learn anything.
-  for (const prefs of [{}, { skipDays: true }, { questionMarks: true }]) {
-    for (const state of ['unknown', 'done', 'skip', 'no']) {
-      assert.equal(nextDayState(state, prefs), nextDayState(state, prefs));
-    }
+  //
+  // Written as a table rather than as a loop comparing the function with
+  // ITSELF, which is what stood here: `nextDayState` takes no habit, so
+  // "untouched by `show_as`" is true of its signature and twelve assertions
+  // of `f(x) === f(x)` proved nothing. Both preferences could be deleted from
+  // the function outright and this test stayed green.
+  const cycles = [
+    [{},                                     ['done', 'no',   'no', 'done']],
+    [{ skipDays: true },                     ['done', 'skip', 'no', 'done']],
+    [{ questionMarks: true },                ['done', 'no',   'no', 'unknown']],
+    [{ skipDays: true, questionMarks: true }, ['done', 'skip', 'no', 'unknown']],
+  ];
+  for (const [prefs, expected] of cycles) {
+    assert.deepEqual(
+      ['unknown', 'done', 'skip', 'no'].map((s) => nextDayState(s, prefs)),
+      expected,
+      `cycle under ${JSON.stringify(prefs)}`);
   }
   assert.equal(nextDayState('unknown'), 'done');
   assert.equal(nextDayState('done'), 'no');
