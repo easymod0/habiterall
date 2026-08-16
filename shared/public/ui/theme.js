@@ -58,14 +58,33 @@ const DEVICE_KEY = 'habiterall-theme';
 const PRESS = 'press:';
 const CHOICES = ['system', 'light', 'dark'];
 
-/** @returns {{value: string, pressed: boolean} | null} */
-function deviceRecord() {
-  let raw;
+/**
+ * Where the record lives when localStorage will not take it.
+ *
+ * `undefined` means defer to the store; anything else — including `null`,
+ * which means forgotten — is the answer for this session. Private browsing and
+ * a full quota can leave a store that READS an old value and refuses to
+ * overwrite or delete it, and then a press has nowhere to go: the stale value
+ * wins, the applier repaints it, and the button looks dead while writing the
+ * opposite to the account. This is not a second record, it is the same one
+ * with a volatile tier under the durable one.
+ *
+ * @type {string | null | undefined}
+ */
+let shadow;
+
+function rawRecord() {
+  if (shadow !== undefined) return shadow;
   try {
-    raw = localStorage.getItem(DEVICE_KEY);
+    return localStorage.getItem(DEVICE_KEY);
   } catch {
     return null;                 // private browsing; nothing is remembered
   }
+}
+
+/** @returns {{value: string, pressed: boolean} | null} */
+function deviceRecord() {
+  const raw = rawRecord();
   if (!raw) return null;
   if (raw.startsWith(PRESS)) {
     const value = raw.slice(PRESS.length);
@@ -77,16 +96,20 @@ function deviceRecord() {
 
 /** Remember a press, durably, BEFORE anything is attempted over the network. */
 function remember(value) {
+  shadow = PRESS + value;
   try {
-    localStorage.setItem(DEVICE_KEY, PRESS + value);
-  } catch { /* private browsing: the press lasts this session only */ }
+    localStorage.setItem(DEVICE_KEY, shadow);
+    shadow = undefined;          // the store has it; it is the truth again
+  } catch { /* keep it in memory for this session */ }
 }
 
 /** The server has it, or has overruled it. Either way this device is done. */
 function forget() {
+  shadow = null;
   try {
     localStorage.removeItem(DEVICE_KEY);
-  } catch { /* nothing to clean up */ }
+    shadow = undefined;
+  } catch { /* the tombstone above stands in until the tab closes */ }
 }
 
 /**
@@ -178,7 +201,7 @@ export function initTheme({ onLabel } = {}) {
     // dialog work too: it writes through `saveAll`, which never told this
     // module anything, so a theme picked there was stored by the server and
     // then painted over by a record nobody had cleared.
-    if (meta?.stored) reconcile(meta.stored);
+    if (meta?.stored) reconcile(meta.stored, meta.full === true);
     apply(choice());
   });
 
@@ -203,11 +226,13 @@ export function initTheme({ onLabel } = {}) {
  * case where a press waited on a request that never came back and was lost
  * with the tab.
  *
- * @param {Record<string, unknown>} stored the keys the server says it HOLDS —
- *   not the sanitised view, which fills the gaps and so can never answer
- *   "does this account have a theme at all".
+ * @param {Record<string, unknown>} stored the keys the server named — not the
+ *   sanitised view, which fills the gaps and so can never answer "does this
+ *   account have a theme at all".
+ * @param {boolean} full whether `stored` is the account's WHOLE state (the
+ *   boot GET) rather than one write's accepted patch.
  */
-function reconcile(stored) {
+function reconcile(stored, full) {
   const record = deviceRecord();
   if (!record) return;
 
@@ -215,20 +240,31 @@ function reconcile(stored) {
   // of a press, since `save()` adopts the reply it gets.
   if (stored.theme === record.value) { forget(); return; }
 
+  // The server NAMED a theme and it is not this device's. That is answerable
+  // from a patch as well as from a full reply — the server has just told us
+  // what it holds — and what it means depends on which kind of record this is.
+  // A pre-setting leftover is superseded: another device has migrated since,
+  // or the settings dialog on this one has just set a theme, and either is a
+  // more recent decision.
+  if (Object.hasOwn(stored, 'theme')) {
+    if (!record.pressed) { forget(); return; }
+    push(record.value);
+    return;
+  }
+
+  // The reply named no theme. Only a FULL reply may be read as "the account
+  // has none" — the personal edition answers a write with the accepted PATCH
+  // (`res.json({settings: accepted})`), so `{calendarZoom: 'wide'}` says
+  // nothing whatsoever about the theme. Read as though it did, a device whose
+  // settings GET had been refused (offline, or a 429 from the IP-keyed read
+  // limiter) pushed its own pre-setting value over a theme another device had
+  // already set, the moment the user changed an unrelated preference. Nothing
+  // said so, and it reverted everywhere. Cloud returns the whole blob, so this
+  // was one edition only — which is worse rather than better, since the rule
+  // has to hold for both.
+  if (!full) return;
+
   // The account has no theme, so this device's answer becomes the account's.
-  if (!Object.hasOwn(stored, 'theme')) { push(record.value); return; }
-
-  // The account holds something ELSE, and what that means depends on which
-  // kind of record this is. A pre-setting leftover is superseded: another
-  // device has migrated since, and that is the more recent decision.
-  if (!record.pressed) { forget(); return; }
-
-  // A press is not superseded — the account is the older of the two answers,
-  // and the write this device owes has not landed. Sending it again is what
-  // makes the whole arrangement self-healing: a press whose write was lost
-  // (the tab closed before it went out, a 500, or a stale write from this
-  // same boot landing after it) is re-sent on the next reconcile rather than
-  // sitting on this device forever, invisible on every other one.
   push(record.value);
 }
 
@@ -319,7 +355,11 @@ export async function toggleTheme() {
   // `{ok: true, offline: true}`, having written the cache and queued the PUT,
   // and the record has to survive it — that write is still owed.
   if (!result?.ok) {
-    forget();
+    // Only if the record is still THIS press's. Two presses inside one round
+    // trip both queue, the second has already replaced the record, and an
+    // unconditional `forget()` on the first one's refusal would delete the
+    // second's answer and repaint over it.
+    if (deviceRecord()?.value === next) forget();
     apply(choice());
   }
   return result;

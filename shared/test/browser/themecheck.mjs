@@ -734,6 +734,106 @@ try {
     healed.theme === 'light' && healedPaint === 'light',
     `account=${JSON.stringify(healed)} painted=${healedPaint}`);
 
+  /* ---------- an unrelated write must not push this device's note ---------- */
+  //
+  // The case every other check here misses, because they all DELETE the
+  // account's settings first. Here the account ALREADY holds a theme — set on
+  // another device — while this one still carries a pre-setting note and its
+  // own settings read has been refused.
+  //
+  // The personal edition answers a write with the accepted PATCH, so the reply
+  // to a calendar-zoom write names no theme. Read as "the account has none",
+  // that made this device push its stale note over the theme the user set on
+  // their phone yesterday, on a write about something else entirely. Cloud
+  // returns the whole blob and was unaffected, which is worse rather than
+  // better: an edition deciding a correctness rule is the bug.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await fetch(`${APP}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ theme: 'light' }),
+  });
+  await ev(`(async()=>{
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  const noGet = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        return url.includes('/api/settings') && (init?.method ?? 'GET') === 'GET'
+          ? Promise.resolve(new Response('{}', { status: 429 }))
+          : real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  await ev(`(async()=>{
+    const { set } = await import('/shared/ui/settings.js');
+    set('calendarZoom', 'wide');
+    await new Promise((r) => setTimeout(r, 800));
+    return 1;
+  })()`);
+  const kept = await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
+  ck('an unrelated write does not push a stale note over the account',
+    kept.theme === 'light', `account=${JSON.stringify(kept)}`);
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: noGet.identifier }, sessionId);
+
+  /* ---------- a write that ran out of time is not filed as offline ---------- */
+  //
+  // Bounding the request created a second way to lose a press. `save`'s catch
+  // means "offline", which caches the value and QUEUES it — and an abandoned
+  // write is of unknown outcome, so replaying it later means writing it over
+  // whatever the user has done since. Measured: a press whose write was
+  // black-holed, then a second press that succeeded, and the next boot painted
+  // the FIRST value because the outbox replayed it. Both presses had answered
+  // `{ok: true}`, so nothing was ever said.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.removeItem('habiterall-theme');
+    return 1;
+  })()`);
+  const swallow = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      let once = false;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (url.includes('/api/settings') && (init?.method ?? 'GET') !== 'GET' && !once) {
+          once = true;
+          return new Promise((_, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')));
+          });
+        }
+        return real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const timedOut = await ev(`(async()=>{
+    const { toggleTheme } = await import('/shared/ui/theme.js');
+    const first = await toggleTheme();
+    const { pending } = await import('/shared/offline.js');
+    return { first, queued: (await pending()).length };
+  })()`);
+  ck('a write that ran out of time is not queued for replay',
+    timedOut.first?.ok === false && timedOut.queued === 0,
+    JSON.stringify(timedOut));
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: swallow.identifier }, sessionId);
+
   /* ---------- an applier that throws must not break a save ---------- */
   const applierThrew = await ev(`(async()=>{
     const s = await import('/shared/ui/settings.js');

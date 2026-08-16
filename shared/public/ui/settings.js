@@ -538,10 +538,12 @@ function notifyAppliers(values, meta) {
 }
 
 /**
- * @typedef {{stored?: Record<string, unknown>}} ApplyMeta
- *   `stored` is the server's own reply — the keys it says it HOLDS, before
- *   `sanitise` fills the gaps — and is present only when the update came from
- *   a response rather than from a cache write.
+ * @typedef {{stored?: Record<string, unknown>, full?: boolean}} ApplyMeta
+ *   `stored` is the server's own reply — the keys it names, before `sanitise`
+ *   fills the gaps — and is present only when the update came from a response
+ *   rather than from a cache write. `full` says that reply was the account's
+ *   WHOLE state (the boot GET) rather than one write's accepted patch, which
+ *   is the only thing that can answer "does the account hold this key at all".
  */
 /** @type {((values: Record<string, any>, meta?: ApplyMeta) => void)[]} */
 const appliers = [];
@@ -576,11 +578,41 @@ const appliers = [];
  */
 const REQUEST_MS = 10_000;
 
-/** An abort signal for one request, where the platform has one. */
-const bound = () =>
-  (typeof AbortSignal !== 'undefined' && AbortSignal.timeout
-    ? AbortSignal.timeout(REQUEST_MS)
-    : undefined);
+/**
+ * An abort signal for one request.
+ *
+ * `AbortSignal.timeout` is Chrome 103 / Firefox 100 / Safari 16, and returning
+ * `undefined` below it does not degrade gracefully — `ui/theme.js` serialises
+ * its writes, so ONE unbounded link wedges every write after it for the life of
+ * the page. `offline.js`'s `isReachable` already hand-rolls this; so does this.
+ */
+const bound = () => {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(REQUEST_MS);
+  }
+  if (typeof AbortController === 'undefined') return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')),
+             REQUEST_MS);
+  return controller.signal;
+};
+
+/**
+ * Did this request run out of time, rather than fail to leave the machine?
+ *
+ * The difference decides whether the write is QUEUED, and getting it wrong is
+ * a data loss with no offline state anywhere near it. Aborting does not recall
+ * a request the server may already have begun, so an abandoned write is of
+ * unknown outcome — filing it in the outbox means replaying it later, over
+ * whatever the user has done since. Measured: a press whose write was
+ * black-holed, then a second press that succeeded, and the next boot painted
+ * the FIRST value because the outbox replayed it. A genuine network failure is
+ * different: nothing left, so nothing can have landed, and queueing is right.
+ *
+ * @param {unknown} err
+ */
+const timedOut = (err) =>
+  err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
 
 export function onApply(fn) {
   appliers.push(fn);
@@ -612,7 +644,17 @@ export async function init() {
       // after boot to recover it.
       const stored = await res.json();
       cache = sanitise(stored);
-      writeCache(cache, stored && typeof stored === 'object' ? { stored } : undefined);
+      // `full: true` — this reply is the account's WHOLE state, which a PUT's
+      // is not. The personal edition answers a write with the accepted PATCH
+      // (`res.json({settings: accepted})`), so a reply that does not mention
+      // `theme` means "this write did not set one", never "the account has
+      // none". Read as the latter it let a device push its own pre-setting
+      // theme over an account another device had already set — on a write
+      // about the calendar zoom. Cloud returns the whole blob, so the bug was
+      // one edition only, which is worse rather than better: the rule has to
+      // hold for both.
+      writeCache(cache, stored && typeof stored === 'object'
+        ? { stored, full: true } : undefined);
     }
   } catch {
     // Offline: keep the cached values.
@@ -709,11 +751,16 @@ export function set(key, value) {
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body,
+    signal: bound(),
   }).then(async (res) => {
     if (!res.ok) return;
     const payload = await res.json().catch(() => null);
     adopt(payload?.settings);
-  }).catch(async () => {
+  }).catch(async (err) => {
+    // Out of time is not offline, and this one is fire-and-forget: nobody is
+    // waiting to be told, so an abandoned write is simply dropped rather than
+    // queued to replay over whatever the user does next.
+    if (timedOut(err)) return;
     // Offline. Queue the write so the choice reaches the server rather than
     // living on this device only — otherwise a preference set on a train
     // silently fails to follow the account.
@@ -748,7 +795,12 @@ export async function save(key, value) {
       body,
       signal: bound(),
     });
-  } catch {
+  } catch (err) {
+    // Out of time is NOT offline. See `timedOut`: the request may have landed,
+    // so queueing it means replaying an unknown outcome over whatever came
+    // next. The caller is told instead, and for the theme the durable device
+    // record means the answer survives and is re-sent on the next reconcile.
+    if (timedOut(err)) return { ok: false, error: 'the server did not answer' };
     // Offline: keep it here and send it later. Accepting it locally is the
     // lesser evil — the alternative is silently discarding what was typed.
     if (!isValid(def, value)) return { ok: false, error: 'not a valid value' };
@@ -799,7 +851,9 @@ export async function saveAll(patch) {
       body,
       signal: bound(),
     });
-  } catch {
+  } catch (err) {
+    // Out of time is not offline — see `timedOut` above `save`.
+    if (timedOut(err)) return { ok: false, ignored: [], error: 'the server did not answer' };
     // Offline: keep what this browser can judge and send it later, exactly as
     // `save` does. Anything only the server can rule on is accepted here too —
     // discarding what was typed is the worse of the two wrongs, and the queued
@@ -836,7 +890,8 @@ export async function reset() {
   cache = defaults();
   writeCache(cache);
   try {
-    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    await fetch('/api/settings',
+      { method: 'DELETE', credentials: 'same-origin', signal: bound() });
   } catch { /* offline; defaults still apply here */ }
   return cache;
 }
