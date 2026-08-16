@@ -16,7 +16,8 @@ import { SKIP, YES } from './ui/values.js';
 // constants, which is what keeps them loadable under the fake DOM.
 import {
   WIDTH_SAFETY, estimateTextWidth, formatDateShort, formatStamp, fromISOLocal,
-  formatDayRange, formatMonthShort, gutterFor, weekdayLetters, weekdayNames,
+  formatDayRange, formatMonthShort, formatYear, gutterFor, weekdayLetters,
+  weekdayNames,
 } from './ui/dates.js';
 import { isAvoided } from './ui/toggle.js';
 
@@ -790,7 +791,8 @@ export function weekdayMonthChart(months, color,
     const cx = pad.left + (c + 0.5) * colW;
 
     const [yy, mm] = m.month.split('-').map(Number);
-    const monthText = formatMonthShort(new Date(yy, mm - 1, 15));
+    const monthDate = new Date(yy, mm - 1, 15);
+    const monthText = formatMonthShort(monthDate);
     const half = estimateTextWidth(monthText, 9.5) * WIDTH_SAFETY / 2;
     // Kept inside the viewBox: a centred caption on the first or last column
     // otherwise hangs off the edge once the month name is not three Latin
@@ -805,11 +807,25 @@ export function weekdayMonthChart(months, color,
 
     // The year, once, wherever it changes — so a window spanning December
     // into January is not two ambiguous "Jan"s.
-    if (c === 0 || yy !== Number(shown[c - 1].month.split('-')[0])) {
+    //
+    // Both halves read the FORMATTED year and not `yy`. Printing `String(yy)`
+    // put a Gregorian number under a localised month name: `مرداد` above
+    // `2026`, with this same chart's tooltip 20px away saying `مرداد ۱۴۰۵` —
+    // one column, two calendars, 621 years apart. And the change of year is
+    // the formatted one too, because a Persian year turns at Farvardin: keyed
+    // on `yy` the caption appeared at the January column, which is the middle
+    // of a Persian year and not the start of anything.
+    const yearText = formatYear(monthDate);
+    const prev = shown[c - 1];
+    const prevYear = prev
+      ? formatYear(new Date(Number(prev.month.slice(0, 4)),
+                            Number(prev.month.slice(5, 7)) - 1, 15))
+      : null;
+    if (yearText !== prevYear) {
       svg.appendChild(el('text', {
         x: cx, y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
         fill: dim, 'fill-opacity': 0.75,
-      }, String(yy)));
+      }, yearText));
     }
 
     // Through the row order, not `forEach`'s index: `computeWeekdayByMonth`
@@ -1177,9 +1193,51 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   // card and painted 14px INTO the bar it is supposed to sit beside. The same
   // fixed-gutter-against-a-localised-label defect this file fixes in three
   // other charts, left standing in the fourth.
-  const labels = top.map((s) => rangeLabel(s.start, s.end));
-  const LABEL_W = gutterFor(labels, LABEL_SIZE, 168, 8, (width - pad.right - COUNT_W) * 0.6)
-    - 8;
+  //
+  // A first version asked `gutterFor` for the answer and came out WORSE than
+  // the fixed number it replaced. On a 328px card the ceiling it passed — 60%
+  // of the plot — works out at 166.8, which is BELOW the 168 floor, so the
+  // floor won, the measurement was discarded, and subtracting the gap left
+  // 160: eight pixels narrower than master, unconditionally, at the width this
+  // whole change is motivated by. A ceiling under a floor is not a bound, it
+  // is an off-by-one with a rationale.
+  //
+  // So the label gets what the card can spare and never less than it had, and
+  // where that is still not enough the TYPE shrinks — the same last resort
+  // `weekdayChart` uses, for the same reason: a label painted over its own bar
+  // is worse than a small one. lv-LV's
+  // `2025. gada 28. dec. – 2026. gada 4. janv.` needs about 8px of type on a
+  // phone; master painted 47.6px of it across the bar.
+  const LABEL_GAP = 8;
+  const LABEL_FLOOR = 8;
+  const widestOf = (set, size) =>
+    Math.max(0, ...set.map((t) => estimateTextWidth(t, size)));
+
+  // RESERVING uses the safety margin, because a reservation that is short
+  // clips a word.
+  const wordy = top.map((s) => rangeLabel(s.start, s.end));
+  const LABEL_W = Math.max(168,
+    Math.min(Math.ceil(widestOf(wordy, LABEL_SIZE) * WIDTH_SAFETY) + LABEL_GAP,
+             (width - pad.left - pad.right - COUNT_W) * 0.55));
+
+  // The FORMAT is chosen before the type size, because writing the same dates
+  // in digits is a smaller loss than making them unreadable. lv-LV's
+  // `2025. gada 28. dec. – 2026. gada 4. janv.` fits no card at any legible
+  // size; `2025-12-28 – 2026-01-04` says the same thing and fits.
+  const labels = widestOf(wordy, LABEL_SIZE) <= LABEL_W - LABEL_GAP
+    ? wordy
+    : top.map((s) => rangeLabel(s.start, s.end, 'short'));
+
+  // DEGRADING does not. The margin is there so a reservation is never short;
+  // applied to a decision about whether to shrink the type it makes the chart
+  // pessimistic about itself and shrinks labels that would have fitted — en-US
+  // went to the 8px floor over about two pixels of real overflow. Over-
+  // reserving a gutter costs pixels; over-reserving here costs legibility.
+  let labelSize = LABEL_SIZE;
+  while (labelSize > LABEL_FLOOR && widestOf(labels, labelSize) > LABEL_W - LABEL_GAP) {
+    labelSize -= 0.5;
+  }
+
   const barX = pad.left + LABEL_W;
   const barMax = width - pad.right - COUNT_W - barX;
 
@@ -1190,7 +1248,7 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
 
     // date range, e.g. "21 Apr – 18 May 2026"
     svg.appendChild(el('text', {
-      x: pad.left, y: cy + 4, 'font-size': LABEL_SIZE, fill: dim,
+      x: pad.left, y: cy + 4, 'font-size': labelSize, fill: dim,
     }, labels[i]));
 
     // track + bar
@@ -1216,8 +1274,8 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
  * "21 Apr – 18 May 2026" — what the two ends share is `Intl`'s decision, not
  * ours, and so is the field order and the calendar.
  */
-function rangeLabel(startISO, endISO) {
-  return formatDayRange(fromISOLocal(startISO), fromISOLocal(endISO));
+function rangeLabel(startISO, endISO, style) {
+  return formatDayRange(fromISOLocal(startISO), fromISOLocal(endISO), style);
 }
 
 /* ---------- frequency bubble chart ---------- */

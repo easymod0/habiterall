@@ -161,13 +161,21 @@ try {
   ck('the hovered cell is raised above its neighbours', hovered.isLast === true);
 
   ck('a popover appeared', hovered.popText != null, String(hovered.popText));
-  // The cell's own label, not the ISO date: the popover shows a date written
-  // for a person now (`24 Feb 2026`), and asserting the storage key was both
-  // wrong and locale-bound. `data-label` is what the popover is built from, so
-  // this asks whether it shows the RIGHT cell's text.
-  ck('the popover shows the hovered cell\'s own label',
-    (hovered.popText ?? '') === (target.label ?? '\u0000'),
-    `${hovered.popText} (expected ${target.label})`);
+  // Not the ISO date — the popover writes a date for a person now, and
+  // asserting the storage key would pin en-US. But not `data-label` either:
+  // comparing the popover against the attribute it is BUILT FROM asks nothing
+  // about which day it names. Mutated, with every calendar popover shifted a
+  // day forward, that version passed seven suites; the master version it
+  // replaced failed. So the expectation is computed from the cell's own DATE,
+  // through the same helper, which stays locale-free and still moves when the
+  // date does.
+  const wantLabel = await ev(`(async()=>{
+    const { formatDateShort, fromISOLocal } = await import('/shared/ui/dates.js');
+    return formatDateShort(fromISOLocal(${JSON.stringify(target.date)}));
+  })()`);
+  ck('the popover names the day the hovered cell is',
+    String(hovered.popText ?? '').includes(wantLabel),
+    `${hovered.popText} (expected to contain ${wantLabel})`);
   ck('the popover is fully visible', hovered.popOpacity === 1,
     String(hovered.popOpacity));
   // Deliberately absent: the cursor already says the cell is clickable, and

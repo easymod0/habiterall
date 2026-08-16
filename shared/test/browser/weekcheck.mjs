@@ -37,10 +37,10 @@ globalThis.document = {
   createElement: (name) => new FakeNode(name),
 };
 
-const { frequencyChart, historyChart, weekdayChart, weekdayMonthChart } =
+const { frequencyChart, historyChart, streakChart, weekdayChart, weekdayMonthChart } =
   await import(sharedPublic('charts.js'));
 const { calendarWindow, weekdayIndex } = await import(sharedPublic('ui/calendar.js'));
-const { estimateTextWidth, formatStamp, gutterFor, weekdayNames } =
+const { estimateTextWidth, formatStamp, formatYear, gutterFor, weekdayNames } =
   await import(sharedPublic('ui/dates.js'));
 
 let fails = 0;
@@ -151,8 +151,16 @@ for (const weekStart of ['sunday', 'monday']) {
   // anywhere else — and restating what the code says is how a mirror test comes
   // to agree with itself. The two lists are indexed by `getDay()`, which is
   // what lets a full name be turned into the caption that should sit beside it.
+  //
+  // Selected by POSITION and not by text. Filtering on "is this one of the
+  // short weekday names" assumes no other caption on the chart can be one, and
+  // in rw-RW `Kan.` is both Thursday and August — so the month caption was
+  // collected as an eighth row and the check reported the week order as broken
+  // on a chart that was drawing it correctly. The row captions are the
+  // right-anchored texts in the left gutter; nothing else on this chart is.
   const axis = collect(svg)
-    .filter((n) => n.name === 'text' && shortNames.includes(n.text ?? ''))
+    .filter((n) => n.name === 'text' && n.attrs['text-anchor'] === 'end'
+      && (n.text ?? '').trim())
     .map((n) => ({ y: Number(n.attrs.y), label: n.text }))
     .sort((a, b) => a.y - b.y)
     .map((n) => n.label);
@@ -262,7 +270,12 @@ for (const [name, svg] of [
     .filter((n) => n.name === 'title' && (n.text ?? '').trim())
     .map((n) => ({ text: String(n.text) }));
   const raw = [...texts, ...tooltips]
+    // ...except where the locale's OWN formatted month IS that string.
+    // `formatStamp('2026-08')` is literally `2026-08` in lt-LT, which is its
+    // correct `yMMM`, so this check called the product's right answer a raw
+    // storage key and failed a suite over it.
     .filter((t) => RAW_KEY.test(t.text) || /(^|\s)\d{4}-\d{2}(-\d{2})?(\s|:|$)/.test(t.text))
+    .filter((t) => t.text !== formatStamp(t.text))
     .map((t) => t.text);
   check(`${name}: no label or tooltip shows a raw storage key`,
     raw.length === 0, raw.slice(0, 3).join(' | '));
@@ -365,6 +378,65 @@ for (const width of [328, 358, 700, 1100]) {
   check('history: long axis labels are thinned rather than overlapped',
     overlaps.length === 0,
     `${drawn.length} drawn, ${overlaps.length} overlapping`);
+}
+
+/* ---------- a year is a field of the date, like the month ---------- */
+//
+// The month captions went through `Intl` and the YEAR under them did not: it
+// was `String(yy)`, the Gregorian number, printed beneath a localised month
+// name. In fa-IR that is `\u0645\u0631\u062f\u0627\u062f` above `2026` while this same chart's tooltip
+// says `\u0645\u0631\u062f\u0627\u062f \u06f1\u06f4\u06f0\u06f5` — one column, two calendars, 621 years apart, which is
+// the defect the whole change is named after, relocated one chart over.
+//
+// Asserted against `Intl` given the same date, so it holds in every calendar
+// rather than in en-US, where a Gregorian number happens to be right.
+{
+  const months = ['2026-11', '2026-12', '2027-01', '2027-02'].map((month) => ({
+    month, days: Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map((d) =>
+      [d, { completed: 1, total: 2 }])),
+  }));
+  const svg = weekdayMonthChart(months, '#3b82f6', { width: 700, weekStart: 'monday' });
+  const wantYears = new Set(months.map((m) =>
+    formatYear(new Date(Number(m.month.slice(0, 4)), Number(m.month.slice(5, 7)) - 1, 15))));
+  const drawn = collect(svg)
+    .filter((n) => n.name === 'text' && n.attrs.y === '22' && (n.text ?? '').trim())
+    .map((n) => String(n.text));
+  check('the year caption is this calendar\'s year, not the Gregorian one',
+    drawn.length > 0 && drawn.every((t) => wantYears.has(t)),
+    `${drawn.join(',')} (want one of ${[...wantYears].join(',')})`);
+}
+
+/* ---------- a streak's date range fits beside its bar ---------- */
+//
+// `LABEL_W` was a fixed 168 with the comment `room for "12 Mar \u2013 24 Mar"`,
+// written when the label was English. Localised, lv-LV's medium range is
+// 223.6px and painted 47.6px across the bar. A first fix asked `gutterFor` for
+// the width and was WORSE — its ceiling worked out below its floor on a phone,
+// so the measurement was discarded and the gap subtracted, leaving 8px less
+// than the fixed number. Nothing caught either, in any locale.
+//
+// The property is simply that the widest label ends before the bar begins, at
+// every width a card is drawn at.
+{
+  const streaks = [
+    { start: '2025-12-28', end: '2026-01-04', length: 8 },
+    { start: '2026-04-21', end: '2026-05-18', length: 28 },
+  ];
+  for (const width of [328, 358, 700, 1100]) {
+    const svg = streakChart(streaks, '#8b5cf6', { width });
+    const nodes = collect(svg);
+    const barX = Math.min(...nodes.filter((n) => n.name === 'rect')
+      .map((n) => Number(n.attrs.x)));
+    const labels = nodes.filter((n) => n.name === 'text'
+      && n.attrs['text-anchor'] !== 'end' && !/^\d+$/.test(n.text ?? ''));
+    const left = Math.min(...labels.map((n) => Number(n.attrs.x)));
+    const widest = Math.max(0, ...labels.map((n) =>
+      estimateTextWidth(String(n.text), Number(n.attrs['font-size']))));
+    check(`streaks at ${width}px: the date range ends before the bar starts`,
+      labels.length > 0 && left + widest <= barX,
+      `label ends ${(left + widest).toFixed(1)}, bar starts ${barX} `
+      + `(${labels.length ? JSON.stringify(labels[0].text) : 'none'})`);
+  }
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL WEEK CHECKS PASSED');

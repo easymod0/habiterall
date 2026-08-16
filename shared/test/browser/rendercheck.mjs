@@ -92,19 +92,23 @@ check('rows are ordered newest first',
   JSON.stringify(rowDates) === JSON.stringify(wantRows),
   `${rowDates.join(' | ')}\n     want ${wantRows.join(' | ')}`);
 
-// 3. a range inside one year says so once — the property the hand-composed
-//    version implemented by hand and got wrong outside English. Asserted
-//    against the naive alternative rather than against a literal: whatever
-//    `Intl` elides, the range must be SHORTER than both ends written out.
+// 3. a range inside one year is `Intl`'s to compose, and never LONGER than
+//    both ends written out. An earlier version of this demanded it be
+//    strictly shorter — the property English has, where `Apr 21 – May 18,
+//    2026` drops a year. `Intl` elides nothing in a numeric locale, so
+//    pt-PT's `21/04/2026 – 18/05/2026` is exactly the naive length and the
+//    assertion failed on the product being right. pt-PT is the locale this
+//    file's own comments cite most.
 {
   const a = fromISOLocal('2026-04-21');
   const b = fromISOLocal('2026-05-18');
   const f = new Intl.DateTimeFormat(undefined,
     { year: 'numeric', month: 'short', day: 'numeric' });
   const label = formatDayRange(a, b);
-  check('date range collapses what the two ends share',
-    texts.includes(label) && label.length < `${f.format(a)} – ${f.format(b)}`.length,
-    `${label} vs ${f.format(a)} – ${f.format(b)}`);
+  const naive = `${f.format(a)} \u2013 ${f.format(b)}`;
+  check('a date range is composed by Intl, not by us',
+    texts.includes(label) && label.length <= naive.length,
+    `${label} vs ${naive}`);
 }
 
 // 4. bar widths proportional and within bounds

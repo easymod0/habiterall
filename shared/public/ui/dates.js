@@ -101,7 +101,9 @@ const longWeekday = fmt({ weekday: 'long' });
 const shortMonth = fmt({ month: 'short' });
 const longDate = fmt({ weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const monthAndYear = fmt({ year: 'numeric', month: 'short' });
+const yearOnly = fmt({ year: 'numeric' });
 const mediumDate = fmt({ year: 'numeric', month: 'short', day: 'numeric' });
+const numericDate = fmt({ year: 'numeric', month: 'numeric', day: 'numeric' });
 
 /** A reference week, so the seven labels can be asked for by `getDay()`. */
 const WEEK_SAMPLE = [4, 5, 6, 7, 8, 9, 10].map((d) => new Date(2026, 0, d));
@@ -168,6 +170,24 @@ export function weekdayLetters() {
 export const formatMonthShort = (d) => shortMonth().format(d);
 
 /**
+ * The year of a REAL date, as this locale's calendar numbers it.
+ *
+ * The same rule as `formatMonthShort` and it exists for the same reason: a
+ * chart that captions a column `مرداد` and then writes `2026` underneath is
+ * naming one column in two calendars, and the two disagree by 621 years. The
+ * Gregorian year is not a label, it is a field of the date — hand it to `Intl`
+ * like the rest of it.
+ *
+ * Note the CHANGE of year has to be read from this string too, not from the
+ * Gregorian one: a Persian year turns at Farvardin, not at January, so a
+ * caption placed where `yy` increments appears in the wrong column even once
+ * the number itself is right.
+ *
+ * @param {Date} d
+ */
+export const formatYear = (d) => yearOnly().format(d);
+
+/**
  * A span of two dates, as one string, in the locale's own conventions.
  *
  * `Intl.DateTimeFormat.prototype.formatRange` decides three things a hand
@@ -181,11 +201,19 @@ export const formatMonthShort = (d) => shortMonth().format(d);
  * app's floor; the fallback is there because an absent Intl method must
  * degrade to a readable string rather than throw inside a render.
  *
+ * `style` picks how much room it may take. `short` is the all-numeric form,
+ * for a label that has to fit a phone: lv-LV's medium range is
+ * `2025. gada 28. dec. – 2026. gada 4. janv.`, which no type size makes fit
+ * beside a bar on a 328px card, and shrinking it to something that does is
+ * worse than writing the same dates in digits. Which one a caller wants is a
+ * question about ITS layout, so it is a parameter rather than a rule here.
+ *
  * @param {Date} a  the earlier end
  * @param {Date} b  the later end
+ * @param {'medium'|'short'} [style]
  */
-export function formatDayRange(a, b) {
-  const f = mediumDate();
+export function formatDayRange(a, b, style = 'medium') {
+  const f = style === 'short' ? numericDate() : mediumDate();
   if (typeof f.formatRange !== 'function') return `${f.format(a)} – ${f.format(b)}`;
   // Identical ends: `formatRange` is specified to fall back to formatting the
   // single date, but engines have disagreed, and "3 Aug 2026 – 3 Aug 2026" for
