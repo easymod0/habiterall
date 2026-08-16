@@ -92,8 +92,17 @@ export async function syncNow() {
   const { sent, failed, remaining } = await flush();
   await refreshOfflineBadge();
 
+  // Repaint if anything LEFT the queue, not only if something succeeded. The
+  // refused write is the case that needs it most: `recordValue` painted the day
+  // before awaiting and `api()` let that paint STAND because the write was
+  // queued — "Saved offline, will sync when you reconnect" — so a refetch is
+  // the only thing that can take it back down again. Conditioning the reload on
+  // `sent` meant a flush where every write was refused left the grid claiming
+  // days the server never accepted, indefinitely, with the score and streak
+  // beside them computed without those days, behind a toast that cleared itself
+  // in 2.6 seconds.
+  if (sent || failed.length) emit('reload');
   if (sent) {
-    emit('reload');
     toast(`Synced ${sent} change${sent === 1 ? '' : 's'}`);
   }
   if (failed.length) {
@@ -126,7 +135,8 @@ export function init() {
 
     // Whatever was on screen was rendered from cache, and the server may have
     // changed under it — from another device, or from this one before the
-    // outage. syncNow only reloads when it actually sent something.
+    // outage. syncNow only reloads when the queue actually moved, and an
+    // outage that queued nothing does not move it.
     if (wasOffline) {
       wasOffline = false;
       emit('reload');

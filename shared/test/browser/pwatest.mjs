@@ -171,6 +171,71 @@ try {
   check('writes replay in submission order (last wins)',
     ordered?.status === 'skip', JSON.stringify(ordered));
 
+  /* ---- 6. a REFUSED write takes its optimistic paint down with it ---- */
+  //
+  // The half `flush()` cannot cover on its own. A queued write was painted
+  // before it was attempted and `api()` let that paint STAND, because being
+  // queued is not a failure — "Saved offline, will sync when you reconnect".
+  // So when the replay is then refused, a refetch is the only thing that can
+  // take the day back off the grid. `syncNow` used to emit 'reload' only when
+  // something SUCCEEDED, so a flush where every write was refused left the grid
+  // claiming days the server had never accepted, indefinitely, with the streak
+  // beside them computed without those days.
+  //
+  // A habit id that does not exist is the cheapest way to make the server
+  // refuse a queued write for a reason that is not the network.
+  const refused = await ev(`(async()=>{
+    const { enqueue } = await import('/shared/offline.js');
+    const { on } = await import('/shared/ui/store.js');
+    const conn = await import('/shared/ui/connectivity.js');
+    let reloads = 0;
+    on('reload', () => { reloads++; });
+    await enqueue({ url:'/api/habits/999999/entries/2026-08-11', method:'PUT',
+                    body: JSON.stringify({ value: 2 }) });
+    await conn.syncNow();
+    const { pendingCount } = await import('/shared/offline.js');
+    return { reloads, remaining: await pendingCount() };
+  })()`);
+  check('a refused write is dropped from the queue',
+    refused.remaining === 0, JSON.stringify(refused));
+  check('and the view is refetched, so its optimistic paint cannot survive',
+    refused.reloads >= 1, JSON.stringify(refused));
+
+  /* ---- 7. ...and a BLOCKED flush does not reload ---- */
+  //
+  // The negative half, without which `emit('reload')` unconditionally would
+  // pass everything above. The rule is "the queue moved", not "a flush
+  // happened": on a 503 nothing left the queue, the optimistic paint is still
+  // the app's best guess, and reloading would throw away a detail view the user
+  // is reading to tell them nothing. It also matters to `init()`, whose own
+  // `emit('reload')` after a reconnect is only needed BECAUSE a blocked flush
+  // emits none.
+  //
+  // `fetch` is stubbed in the page rather than intercepted over CDP: `/api/`
+  // goes through the service worker's `networkFirst`, and this suite's own note
+  // above records that emulated conditions do not reach a worker's fetches.
+  const blocked = await ev(`(async()=>{
+    const { enqueue, pendingCount } = await import('/shared/offline.js');
+    const { on } = await import('/shared/ui/store.js');
+    const conn = await import('/shared/ui/connectivity.js');
+    let reloads = 0;
+    on('reload', () => { reloads++; });
+    await enqueue({ url:'/api/habits/${HID}/entries/2026-08-12', method:'PUT',
+                    body: JSON.stringify({ value: 2 }) });
+    const real = globalThis.fetch;
+    globalThis.fetch = async () => new Response('{}', { status: 503 });
+    try { await conn.syncNow(); } finally { globalThis.fetch = real; }
+    return { reloads, remaining: await pendingCount() };
+  })()`);
+  check('a blocked flush keeps its writes', blocked.remaining === 1,
+    JSON.stringify(blocked));
+  check('and does NOT reload — nothing left the queue', blocked.reloads === 0,
+    JSON.stringify(blocked));
+
+  // Drain it, so the queue this suite leaves behind is empty.
+  await ev(`(async()=>{ const { clearAll } = await import('/shared/offline.js');
+                        await clearAll(); return 1; })()`);
+
   console.log(fails === 0 ? '\nALL PWA CHECKS PASSED' : `\n${fails} PWA CHECK(S) FAILED`);
 } catch (e) {
   console.error('ERROR:', e.message); fails++;
