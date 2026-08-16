@@ -629,7 +629,20 @@ const countTitle = $('#count-title');
 const countSub = $('#count-sub');
 const countClear = $('#count-clear');
 
-/** Which habit and day the dialog is editing, while it is open. */
+/**
+ * Which habit and day the dialog is editing, while it is open.
+ *
+ * The habit's ID rather than the habit, which is the shape `day-dialog.js`
+ * already uses and for a reason that bites here: `load()` REPLACES every
+ * object in `state.habits`, and it can run while this dialog is open — a
+ * reconnect flush emits `'reload'`, and so does the visibility sync. Holding
+ * the object meant the optimistic write landed on an orphan and `paint()`,
+ * which iterates `state.habits`, went on drawing the old cell. Online the
+ * trailing refetch hides it; offline there is no refetch, so the grid asserts
+ * one amount while a different one sits in the outbox — precisely what the
+ * comment on `recordValue` exists to prevent, arriving through the door the
+ * synchronous `prompt()` used to hold shut.
+ */
 let counting = null;
 
 /**
@@ -650,7 +663,7 @@ function openCountDialog(habit, date) {
   const skipped = habit.skips?.includes(date) ?? false;
   const current = skipped ? null : habit.entries[date];
 
-  counting = { habit, date };
+  counting = { habitId: habit.id, date };
   countTitle.textContent = habit.name;
   // The date in words. A grid cell is a square in a row of squares, so the
   // dialog has to say which day it is about — the ISO string reads as a serial
@@ -658,10 +671,19 @@ function openCountDialog(habit, date) {
   countSub.textContent = fromISOLocal(date).toLocaleDateString(undefined, {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   }) + (habit.unit ? ` · ${habit.unit}` : '');
-  countClear.hidden = current == null;
+  // Whether a ROW exists, not whether there is an amount to show. A skipped
+  // day has a row and `current` is nulled above so the SKIP sentinel is not
+  // prefilled as an amount — deriving the button from that hid Clear on the
+  // one kind of day that most needs it, since this dialog has no Unskip.
+  countClear.hidden = !skipped && habit.entries[date] == null;
   gridCountField.set(habit, current);
   countDialog.showModal();
   gridCountField.focus();
+}
+
+/** The habit this dialog is about, as `state.habits` holds it NOW. */
+function countingHabit() {
+  return state.habits.find((h) => h.id === counting?.habitId) ?? null;
 }
 
 async function saveCount() {
@@ -671,15 +693,22 @@ async function saveCount() {
   const amount = gridCountField.value();
   if (amount === null) return gridCountField.complain();
 
-  const { habit, date } = counting;
+  const habit = countingHabit();
+  const { date } = counting;
   countDialog.close();
   counting = null;
+  // Deleted, or archived out of the list, while the dialog was open.
+  if (!habit) return;
 
   try {
     if (amount === '') await clearDay(habit, date);
     else await recordValue(habit, date, amount);
   } catch (e) {
-    if (!e.queued) toast(e.message);
+    // Toasted whatever it is, exactly as the boolean tap does. A QUEUED write
+    // throws too, carrying "Saved offline — will sync when you reconnect", and
+    // swallowing that took the confirmation away from the one path where the
+    // user had just filled in a form and pressed Save.
+    toast(e.message);
   }
 }
 
@@ -780,13 +809,15 @@ export function init() {
     // thing an empty box also does — but a button says so, where an empty box
     // is something you have to know. Both go through `clearDay`.
     if (!counting) return;
-    const { habit, date } = counting;
+    const habit = countingHabit();
+    const { date } = counting;
     countDialog.close();
     counting = null;
+    if (!habit) return;
     try {
       await clearDay(habit, date);
     } catch (e) {
-      if (!e.queued) toast(e.message);
+      toast(e.message);
     }
   });
   gridCountField.onEnter(saveCount);

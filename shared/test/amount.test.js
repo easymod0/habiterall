@@ -135,3 +135,53 @@ test('an amount is written the way a person writes it', () => {
   assert.equal(formatAmount(0.30000000000000004), '0.3');
   assert.equal(formatAmount(NaN), '');
 });
+
+/* ---------- what a review caught ---------- */
+
+test('a thousands separator is refused, not read as a decimal point', () => {
+  // The regression this parser nearly shipped, and it was worse than the bug
+  // it fixes: "10,000" — this module's own example habit, 10,000 steps — read
+  // as TEN. A thousandfold under-record, silent, and the old day editor got it
+  // right (the browser stripped the comma to 10000) while the old grid refused
+  // it loudly. It is genuinely ambiguous, which is the same reason the mixed
+  // form below is refused: "1,500" is fifteen hundred to one reader and one and
+  // a half to another.
+  for (const raw of ['10,000', '1,500', '1,000', '12,345', '1,000,000']) {
+    assert.equal(parseAmount(raw), null, `${raw} was guessed at rather than refused`);
+  }
+  // Three digits is what makes it a group. One or two are an unambiguous
+  // decimal and must keep working, or the comma rule is useless.
+  assert.equal(parseAmount('8,5'), 8.5);
+  assert.equal(parseAmount('0,25'), 0.25);
+  assert.equal(parseAmount('1,2345'), 1.2345);
+});
+
+test('everything accepted can be shown back faithfully', () => {
+  // `parseAmount` and `formatAmount` must have one domain, or the control ends
+  // up displaying a value its own `value()` refuses. `String()` goes
+  // exponential at 1e21 and this parser rejects an exponent; anything under
+  // half a millionth formats to "0", which the next Save would rewrite into a
+  // stated lapse.
+  for (const raw of ['1e21', '1000000000000000000000', '0.0000001']) {
+    assert.equal(parseAmount(raw), null, `${raw} was accepted but cannot be shown`);
+  }
+  for (const raw of ['1000000000000', '0.000001', '0', '8.5']) {
+    const value = parseAmount(raw);
+    assert.notEqual(value, null, `${raw} should be an amount`);
+    assert.equal(parseAmount(formatAmount(value)), value,
+      `${raw} does not survive a round trip through the box`);
+  }
+});
+
+test('a whole-number goal gets a whole-number step', () => {
+  // An eighth of a target below 8 is a fraction, so "3 glasses" stepped to
+  // 3.25 glasses — an amount in a unit that does not divide. The goal's own
+  // form is the signal: half a kilometre is a real thing to record, a quarter
+  // of a glass is not.
+  for (const target of [1, 2, 3, 5, 8, 20, 100, 10000]) {
+    assert.ok(Number.isInteger(stepFor(target)),
+      `stepFor(${target}) = ${stepFor(target)} is fractional on a whole goal`);
+  }
+  // A fractional goal may still step in fractions.
+  assert.ok(!Number.isInteger(stepFor(0.5)));
+});

@@ -110,6 +110,13 @@ try {
   check('and nothing called window.prompt()', await ev(`window.__prompted === false`));
   check('the dialog names the habit',
     await ev(`document.getElementById('count-title').textContent`) === target.name);
+  // The unit belongs beside the number or the box is asking an unstated
+  // question — the whole complaint against the prompt(), which crammed the
+  // habit name into its message and had nowhere to put this.
+  check('and labels the box with the unit',
+    await ev(`document.querySelector('#grid-count legend').textContent`)
+      === `Amount (${target.unit})`,
+    await ev(`document.querySelector('#grid-count legend').textContent`));
 
   console.log('\n--- a decimal comma is the amount, not ten times it ---');
   await typeAndSave('8,5');
@@ -137,7 +144,35 @@ try {
     /not an amount/.test(await ev(
       `document.querySelector('#grid-count .countfield-hint').textContent`)));
 
+  console.log('\n--- a limit of zero gets the button its whole point needs ---');
+  // `[0, target]` guarded on `target > 0` withheld the 0 preset from exactly
+  // the habit the code's own comment says it is for — an at-most-0 limit, where
+  // 0 is the day worth recording — and the goal line vanished from the hint for
+  // the same reason. Checked against the fixture's own limit habit.
+  const limit = await ev(`(async()=>{
+    const d = await (await fetch('/api/overview?days=7')).json();
+    const h = d.habits.find(x => x.target_type === 'at_most');
+    const rows = [...document.querySelectorAll('#grid .habit-row')];
+    const row = rows.find(r => r.textContent.includes(h.name));
+    row.querySelector('.day-cell, .check, button[data-focus-key^="check:"]').click();
+    return { name: h.name, target: h.target_value };})()`);
+  await sleep(400);
+  console.log(`    limit habit: ${limit.name} (at most ${limit.target})`);
+  const presets = await ev(
+    `[...document.querySelectorAll('#grid-count .countfield-presets button')].map(b=>b.textContent)`);
+  check('a limit of 0 still offers the 0 button', presets.includes('0'), JSON.stringify(presets));
+  check('and only one of it', presets.length === 1, JSON.stringify(presets));
+  check('the hint still states the goal',
+    /at most 0/.test(await ev(
+      `document.querySelector('#grid-count .countfield-hint').textContent`)),
+    await ev(`document.querySelector('#grid-count .countfield-hint').textContent`));
+  await ev(`document.getElementById('count-cancel').click(); true`);
+  await sleep(200);
+
   console.log('\n--- zero is an answer; empty is not ---');
+  // Back to the at-least habit: the section above closed the dialog on a
+  // different one, and Save on a closed dialog writes nothing.
+  check('reopened', await openToday());
   await typeAndSave('0');
   row = await stored();
   check('0 writes a row — a stated lapse, not a deletion',

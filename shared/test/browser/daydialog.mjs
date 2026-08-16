@@ -131,6 +131,11 @@ check('numerical: value handed to the amount field', r.els.dayCountField.shown =
   String(r.els.dayCountField.shown));
 check('numerical: and the habit with it, which is where the unit and step come from',
   r.els.dayCountField.forHabit === numHabit);
+// The unit label moved into the control, so what this suite can still say is
+// that the habit carrying it arrives — the label itself is asserted where it is
+// now built, in test/browser/countcheck.mjs.
+check('numerical: the habit carries the unit the label is built from',
+  r.els.dayCountField.forHabit.unit === 'glasses');
 check('numerical: target in subtitle', r.els.sub.textContent.includes('at least 8 glasses'),
   r.els.sub.textContent);
 

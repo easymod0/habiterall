@@ -48,11 +48,13 @@ function createCountField(root) {
 
   function defaultHint() {
     if (!habit) return '';
-    const target = goal();
-    if (!target) return 'Leave empty to clear the day.';
+    // A target of 0 is a real goal and the commonest one on a limit — "at most
+    // 0 cigarettes". Testing the NUMBER for truthiness dropped the goal line
+    // for exactly the habit whose goal is the whole point.
+    if (habit.target_value == null) return 'Leave empty to clear the day.';
     const direction = habit.target_type === 'at_most' ? 'at most' : 'at least';
     const unit = habit.unit ? ` ${habit.unit}` : '';
-    return `Target ${direction} ${formatAmount(target)}${unit}. Leave empty to clear.`;
+    return `Target ${direction} ${formatAmount(goal())}${unit}. Leave empty to clear.`;
   }
 
   function hint(message, isError = false) {
@@ -68,7 +70,14 @@ function createCountField(root) {
     // the goal is what you are aiming at, and on an at-most habit 0 is. The
     // steppers cover everything between, which is why there is no ladder of
     // buttons here — that is what the spinner was for and it did not scale.
-    const values = target > 0 ? [0, target] : [];
+    //
+    // 0 is offered whatever the target, and `target > 0 ? [0, target] : []`
+    // withheld it from the one habit the sentence above says it is FOR: a
+    // limit of zero got no buttons at all, so recording the day it exists to
+    // record meant typing. Deduplicated, since on that habit they are the same
+    // amount and two identical buttons read as one of them doing something
+    // else.
+    const values = [...new Set([0, target])];
     for (const value of values) {
       const button = document.createElement('button');
       button.type = 'button';

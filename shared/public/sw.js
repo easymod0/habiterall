@@ -54,7 +54,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v11';
+const CACHE_VERSION = 'v12';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

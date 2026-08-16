@@ -50,12 +50,42 @@ export function parseAmount(raw) {
   const text = String(raw ?? '').trim();
   if (text === '') return '';
 
+  // A comma group that reads as a thousands separator is REFUSED, not guessed.
+  // Reading it as a decimal point is how "10,000 steps" — this module's own
+  // example habit — became ten: a thousandfold under-record, silent, and worse
+  // than the bug this parser exists to fix. It is genuinely ambiguous, since
+  // "1,500" is fifteen hundred to one reader and one and a half to another, and
+  // that is exactly the case the mixed form below is already refused for.
+  // Three digits is what makes it a group; "8,5" and "0,25" are unambiguous
+  // decimals and still work.
+  if (/,\d{3}(?!\d)/.test(text)) return null;
+
   const decimal = text.replace(/,/g, '.');
   if (!/^(\d+(\.\d*)?|\.\d+)$/.test(decimal)) return null;
 
   const value = Number(decimal);
-  return Number.isFinite(value) && value >= 0 ? value : null;
+  if (!Number.isFinite(value) || value < 0) return null;
+
+  // Bounded at both ends so that everything this accepts is something
+  // `formatAmount` can show back faithfully. Without it the two disagree at the
+  // extremes and the control ends up displaying a value its own `value()`
+  // refuses: `String()` goes exponential at 1e21 and this parser rejects an
+  // exponent, and anything under half a millionth formats to "0" — which the
+  // next Save would rewrite into a stated lapse. A trillion is past any amount
+  // a habit records.
+  if (value > MAX_AMOUNT) return null;
+  if (value > 0 && value < MIN_AMOUNT) return null;
+
+  return value;
 }
+
+/**
+ * The range an amount may take, chosen so `parseAmount` and `formatAmount`
+ * have the same domain — see the bounds check above for what goes wrong when
+ * they do not.
+ */
+export const MAX_AMOUNT = 1e12;
+export const MIN_AMOUNT = 1e-6;
 
 /**
  * How much one press of − or + should move, for a habit with this target.
@@ -80,10 +110,15 @@ export function stepFor(target) {
   if (!Number.isFinite(goal) || goal <= 0) return 1;
 
   const ladder = [0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+  // A whole-number goal gets a whole-number step. Below a target of 8 an eighth
+  // is a fraction, so "3 glasses" stepped to 3.25 glasses — an amount in a unit
+  // that does not divide. The goal's own form is the honest signal for that:
+  // half a kilometre is a real thing to record, a quarter of a glass is not.
+  const floor = Number.isInteger(goal) ? 1 : ladder[0];
   const wanted = goal / 8;
 
-  let step = ladder[0];
-  for (const rung of ladder) if (rung <= wanted) step = rung;
+  let step = floor;
+  for (const rung of ladder) if (rung <= wanted && rung >= floor) step = rung;
   return step;
 }
 
