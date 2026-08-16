@@ -29,6 +29,16 @@ const API = 'https://discord.com/api/v10';
 export const INTERACTION = { PING: 1, COMMAND: 2, COMPONENT: 3, AUTOCOMPLETE: 4, MODAL: 5 };
 
 /** Interaction callback types, likewise. */
+/**
+ * The statuses `discordRequest` words in terms of a CHANNEL.
+ *
+ * Shared with `handleInteraction`'s `why()`, which overrides exactly this set:
+ * on an interaction endpoint a 404 is a token, not a channel the bot was not
+ * invited to. Two copies of the list 240 lines apart is how a fourth
+ * channel-worded status gets added here and silently passed through there.
+ */
+const CHANNEL_WORDED = [401, 403, 404];
+
 export const CALLBACK = {
   MESSAGE: 4,
   DEFER: 5,
@@ -96,7 +106,11 @@ export async function discordRequest(req, deps = {}) {
     // 401 is the token, 403 is the bot's permissions in that channel, 404 is a
     // channel that does not exist or that the bot cannot see. None of the three
     // fixes itself, and retrying every minute helps nobody.
-    if ([401, 403, 404].includes(res.status)) {
+    //
+    // These three are also the ONLY statuses this function words in terms of a
+    // channel, which is what `why()` in `handleInteraction` overrides — hence
+    // the shared constant. Word a fourth here and that one has to know.
+    if (CHANNEL_WORDED.includes(res.status)) {
       return {
         ok: false,
         status: res.status,
@@ -318,8 +332,35 @@ export async function handleInteraction(interaction, adapter) {
   // Whether the three-second callback has been spent, which is all `respond`
   // needs to know to pick an endpoint.
   let acknowledged = false;
+
+  /**
+   * What to say about a failed response to an INTERACTION.
+   *
+   * Not `result.error`, for 401/403/404. That prose is `discordRequest`'s and it
+   * is written for `postReminder` — the bot posting into a channel — so on the
+   * interaction endpoints it names the wrong fault: a 404 from
+   * `/webhooks/{app}/{token}` is an expired or never-acknowledged token, and a
+   * 401 is the application id, neither of which is "check the id, and that the
+   * bot was invited". An operator reading that re-invites a bot that is fine.
+   *
+   * The status leads for those three and the sender's own sentence stands for
+   * everything else, which is where it is accurate (a 429, a 5xx, a network
+   * error).
+   */
+  const why = (r) => (CHANNEL_WORDED.includes(r?.status)
+    ? `Discord returned ${r.status} — the interaction token is expired or not ours`
+    : (r?.error ?? `status ${r?.status}`));
+
   const send = async (response) => {
-    await respond(interaction, response, { acknowledged });
+    const result = await respond(interaction, response, { acknowledged });
+    // `respondInteraction` RETURNS its failures rather than throwing — every
+    // HTTP and network error comes back as `{ok: false}` from `discordRequest`
+    // — so discarding the result here made a lost answer completely silent. The
+    // press wrote its entry, the reminder was left unchanged with its buttons
+    // still live, and no log line said why.
+    if (result && result.ok === false) {
+      log.error?.('discord: answering an interaction failed:', why(result));
+    }
     return response;
   };
 
@@ -364,8 +405,24 @@ export async function handleInteraction(interaction, adapter) {
   const opensModal = type === INTERACTION.COMPONENT && parsed.action === 'amount';
   if (!opensModal && interaction.message && interaction.application_id) {
     try {
-      await respond(interaction, { type: CALLBACK.DEFER_UPDATE }, { acknowledged });
-      acknowledged = true;
+      const ack = await respond(interaction, { type: CALLBACK.DEFER_UPDATE }, { acknowledged });
+      // A failure here does NOT throw. `respondInteraction` goes through
+      // `discordRequest`, which turns every HTTP status and every network error
+      // into `{ok: false, status, error}` — so `acknowledged = true` used to run
+      // on a defer that got a 500, a 429 or a timeout, and the `catch` below was
+      // dead code. The real answer then went to
+      // `PATCH /webhooks/{app}/{token}/messages/@original`, which Discord
+      // answers 404 for an interaction that was never acknowledged: the entry
+      // WAS written, the reminder was left unchanged with its buttons live, and
+      // nothing was logged. The user presses again and still sees nothing.
+      //
+      // Only an explicit `{ok: false}` counts as a failure, so an adapter that
+      // returns nothing is still read as having acknowledged — which is what the
+      // callback endpoint answering 204 amounts to.
+      acknowledged = !(ack && ack.ok === false);
+      if (!acknowledged) {
+        log.error?.('discord: acknowledging an interaction failed:', why(ack));
+      }
     } catch (err) {
       // A defer that fails leaves the interaction lost either way, and the
       // write is the half worth finishing — so this is swallowed rather than

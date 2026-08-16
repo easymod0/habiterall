@@ -348,6 +348,82 @@ test('a press is acknowledged BEFORE any storage is touched', async () => {
   ], 'the acknowledgement must come first, and the answer must follow it');
 });
 
+test('a defer that FAILED is not an acknowledgement', async () => {
+  // `respondInteraction` never rejects: `discordRequest` turns every HTTP status
+  // and every network error into `{ok: false}`. So `acknowledged = true` ran on
+  // a defer that got a 500, and the `catch` written for exactly this was dead
+  // code. The real answer then went to the webhook endpoint, which Discord
+  // answers 404 for an interaction that was never acknowledged — the entry was
+  // written, the reminder sat unchanged with its buttons still live, and nothing
+  // was logged. The user presses again and still sees nothing.
+  //
+  // The failure is the REAL one for the case that matters — a 404 on the
+  // callback, which is an interaction token that has expired or was never ours.
+  // A hand-written 500 would exercise the pass-through half of `why()` and leave
+  // the override unpinned: measured, reverting `why(ack)` alone and keeping
+  // `why(result)` left the whole suite green.
+  const expired = await discordRequest({ token: 't', path: '/x' },
+    { fetch: fakeFetch([{ status: 404 }]) });
+  assert.match(expired.error, /invited/,
+    'the sender still says the channel thing — right for postReminder, wrong here');
+
+  const errors = [];
+  const a = adapter({
+    respond: async (_i, response, opts = {}) => {
+      a.sent.push(response);
+      a.after.push(!!opts.acknowledged);
+      return response.type === CALLBACK.DEFER_UPDATE ? expired : { ok: true };
+    },
+    log: { warn: () => {}, error: (...args) => errors.push(args.join(' ')) },
+  });
+
+  await handleInteraction(click(), a);
+
+  assert.deepEqual(a.sent.map((r) => r.type),
+    [CALLBACK.DEFER_UPDATE, CALLBACK.UPDATE_MESSAGE]);
+  assert.deepEqual(a.after, [false, false],
+    'the callback was not spent, so the answer must still use it');
+  assert.equal(a.recorded.length, 1, 'and the write still happens — that half is worth finishing');
+  const said = errors.join(' | ');
+  assert.ok(/acknowledg/i.test(said), said);
+  assert.ok(/404/.test(said), said);
+  assert.ok(!/invited/.test(said),
+    `a failed defer is not about the bot's invite: ${said}`);
+});
+
+test('an answer that could not be delivered says so, and names the right fault', async () => {
+  // Same shape one step later: `send()` discarded `respond`'s result, so a
+  // failed FINAL answer after a good defer was equally silent.
+  //
+  // The failure is built by the REAL `discordRequest` rather than by a string
+  // this code path could never produce — which is what hid the second half of
+  // this. Its 401/403/404 prose is written for `postReminder`, the bot posting
+  // into a channel, and on the interaction webhook a 404 is an expired or
+  // unacknowledged token. An operator told to check "that the bot was invited"
+  // re-invites a bot that is fine.
+  const permanent404 = await discordRequest({ token: 't', path: '/x' },
+    { fetch: fakeFetch([{ status: 404 }]) });
+  assert.match(permanent404.error, /invited/,
+    'the sender still says the channel thing — that is right for postReminder');
+
+  const errors = [];
+  const a = adapter({
+    respond: async (_i, response) => {
+      a.sent.push(response);
+      return response.type === CALLBACK.DEFER_UPDATE ? { ok: true } : permanent404;
+    },
+    log: { warn: () => {}, error: (...args) => errors.push(args.join(' ')) },
+  });
+
+  await handleInteraction(click(), a);
+  assert.equal(a.recorded.length, 1);
+  const said = errors.join(' | ');
+  assert.ok(/answering an interaction failed/.test(said), said);
+  assert.ok(/404/.test(said), said);
+  assert.ok(!/invited/.test(said),
+    `an interaction 404 is not about the bot's invite: ${said}`);
+});
+
 test('a deferred answer edits the reminder; an undeferred one uses the callback', async () => {
   const a = adapter();
   await handleInteraction(click(), a);
