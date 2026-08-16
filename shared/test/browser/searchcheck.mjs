@@ -202,6 +202,34 @@ try {
   ck('and focus is restored to the cell that was tapped',
     /^check:/.test(String(ticked.focusKey)), String(ticked.focusKey));
 
+  /* ---------- a list that is REPLACED clears the query ---------- */
+  //
+  // The same surprise the archive toggle is protected from, on the two other
+  // paths that replace the list. Measured before the fix: 8 habits, query
+  // "wombat", create one — the toast says "Habit created" and the list it lands
+  // in does not contain it. A restore was worse: "No habits match that." over a
+  // freshly imported account.
+  await ev(`(() => { const i = document.getElementById('habit-search');
+    i.value = 'wombat'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await sleep(300);
+  const created = await ev(`(async()=>{
+    const { emit } = await import('/shared/ui/store.js');
+    await fetch('/api/habits', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Newly made', type: 'boolean' }) });
+    emit('reload');
+    await new Promise((r) => setTimeout(r, 1500));
+    return {
+      value: document.getElementById('habit-search').value,
+      rows: [...document.querySelectorAll('#grid .habit-row .habit-name')]
+        .map((n) => n.textContent.trim()),
+    };
+  })()`);
+  ck('creating a habit clears the filter it would be invisible behind',
+    created.value === '', created.value);
+  ck('and the new habit is on screen',
+    created.rows.includes('Zzz Newly made'), JSON.stringify(created.rows.length));
+
   console.log(fails === 0 ? '\nALL SEARCH CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

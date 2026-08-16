@@ -140,11 +140,20 @@ export function paint() {
   // The onboarding panel is only for a genuinely empty tracker; an empty
   // archive view just needs a line of text.
   const shown = visibleHabits();
-  const filtering = shown.length !== state.habits.length || !!state.query.trim();
+  // `shown` can only be shorter when there is a query, so this IS the query —
+  // written as the question being asked rather than as a comparison that reads
+  // like it guards a case it cannot reach.
+  const filtering = !!state.query.trim();
 
   // The box appears once there are enough habits to lose one in, and never
   // disappears while a query is in it.
-  searchRow.hidden = state.habits.length < SEARCH_FROM && !state.query;
+  // ...and never while it has the caret. Below the threshold, clearing the
+  // query — by Escape, by Chrome's own ×, or by backspacing the last character
+  // — would otherwise hide the row out from under the cursor and drop focus to
+  // <body>.
+  searchRow.hidden = state.habits.length < SEARCH_FROM
+    && !state.query
+    && document.activeElement !== searchInput;
   if (searchInput.value !== state.query) searchInput.value = state.query;
   searchCount.textContent = filtering
     ? `${shown.length} of ${state.habits.length}`
@@ -992,5 +1001,16 @@ export function init() {
   // The dashboard repaints from what it already has; only a 'reload' goes back
   // to the server. Both are ignored while the detail view is the one showing.
   on('change', () => { if (state.openHabitId == null) paint(); });
-  on('reload', () => { load().catch((e) => toast(e.message)); });
+  // A 'reload' is "the list you were filtering has been replaced" — a habit
+  // created, a backup restored — so the query goes with it, for the reason the
+  // archive toggle clears it. Without this, creating a habit while a filter is
+  // live toasts "Habit created" over a list the new habit is not in, and a
+  // restore reads "No habits match that." over the freshly imported account.
+  //
+  // Note a check-off does NOT come through here: it ends in `load()` directly,
+  // which is why the query survives one and is cleared by this.
+  on('reload', () => {
+    state.query = '';
+    load().catch((e) => toast(e.message));
+  });
 }
