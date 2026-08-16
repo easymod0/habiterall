@@ -114,7 +114,8 @@ export const SETTINGS = {
   weekStart: {
     section: 'Dashboard',
     label: 'Week starts on',
-    help: 'Used by the history and times-per-week charts.',
+    help: 'Which day a week begins on, everywhere: the calendar, its weekday ' +
+      'rows and keys, the history buckets and both by-weekday charts.',
     type: 'select',
     default: 'monday',
     options: [

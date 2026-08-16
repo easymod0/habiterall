@@ -1,5 +1,6 @@
 package com.habiterall.app
 
+import com.habiterall.app.ui.amountComplaint
 import com.habiterall.app.ui.formatAmount
 import com.habiterall.app.ui.parseAmount
 import org.junit.Assert.assertEquals
@@ -44,6 +45,69 @@ class HabitAmountTest {
         assertNull(parseAmount("eight"))
         assertNull(parseAmount("8 glasses"))
         assertNull(parseAmount("."))
+    }
+
+    @Test
+    fun `a thousands group is refused, not read as a decimal point`() {
+        // The bug this test is named for: a blanket comma-to-dot replace read
+        // "10,000" as TEN, so a habit created with a goal of ten thousand steps
+        // stored one of ten — met by every day, permanently complete, silent.
+        // The server cannot catch it: `parseHabit` bounds nothing above, so ten
+        // is a valid target.
+        //
+        // Refusing is the only honest answer, because it IS ambiguous: "1,500"
+        // is fifteen hundred to one reader and one and a half to another.
+        assertNull(parseAmount("10,000"))
+        assertNull(parseAmount("1,500"))
+        assertNull(parseAmount("100,000"))
+        assertNull(parseAmount("12,345"))
+    }
+
+    @Test
+    fun `a comma with no thousands in front of it is still a decimal point`() {
+        // The rule needs a non-zero integer part, or it takes the European
+        // decimals the comma handling exists for. Nothing precedes these commas
+        // that could be counted in thousands.
+        assertEquals(0.255, parseAmount("0,255")!!, 0.0)
+        assertEquals(0.255, parseAmount(",255")!!, 0.0)
+        assertEquals(0.5, parseAmount("0,500")!!, 0.0)
+    }
+
+    @Test
+    fun `the generosity of toDoubleOrNull is not inherited`() {
+        // None of these is something a person types into a box asking for a
+        // goal, and each parsed to a number that then became the target. "1e3"
+        // is the sharp one — a thousand, silently.
+        assertNull(parseAmount("1e3"))
+        assertNull(parseAmount("1E3"))
+        assertNull(parseAmount("0x10"))
+        assertNull(parseAmount("Infinity"))
+        assertNull(parseAmount("NaN"))
+        assertNull(parseAmount("+8"))
+        assertNull(parseAmount("8d"))
+        assertNull(parseAmount("8f"))
+    }
+
+    @Test
+    fun `a negative target is refused here rather than at the server`() {
+        // `parseHabit` refuses it too, so this is not the only guard — but a
+        // form that can produce a value its own API rejects produces an error
+        // message where the user asked for a habit.
+        assertNull(parseAmount("-5"))
+        assertNull(parseAmount("-0.5"))
+    }
+
+    @Test
+    fun `the refusal says what to do about it`() {
+        // "Not a number" is true of "eight" and unhelpful for "10,000", which
+        // is a number and a reasonable thing to type. A refusal nobody can act
+        // on is only half better than the silent ten it replaced.
+        assertEquals(
+            "Type it without the thousands separator — 10000, not 10,000.",
+            amountComplaint("10,000"),
+        )
+        assertEquals("Not a number", amountComplaint("eight"))
+        assertEquals("Not a number", amountComplaint("1e3"))
     }
 
     @Test
