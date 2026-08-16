@@ -352,6 +352,35 @@ export async function deliverAccount(account, ctx) {
     }
   };
 
+  /**
+   * Write the watermark, and survive a storage failure.
+   *
+   * This was the one storage call in the loop with nothing around it, next to a
+   * `noteOutcome` that has had a try/catch since it was written — and it is the
+   * call most likely to fail on the cloud side, where `mark` opens its own pool
+   * connection per habit, so pool exhaustion reaches it. An exception here
+   * unwound `deliverAccount` entirely: the habit whose reminder had JUST BEEN
+   * DELIVERED took the remaining due habits down with it, unattempted, and the
+   * tick reported `sent: 0` about a message the user was looking at.
+   *
+   * Reported at error, because the consequence outlives the tick: with no
+   * watermark the next minute re-sends the same reminder, for the whole
+   * catch-up window. That is worth a line each time rather than a deduped one —
+   * a healthy instance writes here never.
+   *
+   * @returns {Promise<boolean>} whether the watermark is stored
+   */
+  const mark = async (habitId, channel, date) => {
+    try {
+      await ctx.mark(account, habitId, channel, date);
+      return true;
+    } catch (err) {
+      log.error?.('notify.watermark_not_stored',
+        { channel, habit: habitId, user: account.id, date }, err);
+      return false;
+    }
+  };
+
   for (const channel of channels) {
     const due = dueReminders({
       habits: account.habits ?? [],
@@ -415,7 +444,7 @@ export async function deliverAccount(account, ctx) {
       }
 
       if (result.ok) {
-        await ctx.mark(account, item.habit.id, channel, item.date);
+        await mark(item.habit.id, channel, item.date);
         // A success is worth storing for one reason: it CLEARS a failure the
         // user is being shown. Nothing changed, nothing is written.
         await noteOutcome(channel, result, item.date);
@@ -431,7 +460,7 @@ export async function deliverAccount(account, ctx) {
       failed++;
       // A permanent failure is recorded as sent: the reminder is never going
       // to arrive, and retrying it every minute until midnight helps nobody.
-      if (result.permanent) await ctx.mark(account, item.habit.id, channel, item.date);
+      if (result.permanent) await mark(item.habit.id, channel, item.date);
 
       // ...and this is how the user finds out, rather than by pressing a test
       // button nothing suggests pressing. A deleted webhook or a bot removed

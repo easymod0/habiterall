@@ -636,6 +636,39 @@ test('a permanently failed send IS recorded, so it is not retried all day', asyn
   assert.equal(marked.length, 1, 'a deleted webhook will not start working before midnight');
 });
 
+test('a watermark that will not store does not abandon the account', async () => {
+  // `mark` was the one storage call in the loop with nothing around it, beside a
+  // `noteOutcome` that has had a try/catch since it was written — and on the
+  // cloud side it opens its own pool connection per habit, so pool exhaustion
+  // reaches it first. An exception unwound `deliverAccount` entirely: the habit
+  // whose reminder had JUST been delivered took the two behind it down with it,
+  // never attempted, and `runTick` reported `sent: 0` about a message the user
+  // was looking at.
+  const errors = [];
+  const three = account({
+    habits: [habit({ id: 1 }), habit({ id: 2 }), habit({ id: 3 })],
+  });
+  const fetch = fakeFetch([{ status: 204 }]);
+
+  const result = await deliverAccount(three, {
+    instant: utc(2026, 8, 13, 8, 0),
+    mark: () => { throw new Error('pool timeout'); },
+    fetch,
+    log: { error: (event, fields) => errors.push([event, fields.habit]) },
+  });
+
+  assert.equal(fetch.calls.length, 3, 'every due habit is still attempted');
+  assert.deepEqual(result, { sent: 3, failed: 0, skipped: {} },
+    'and a delivered reminder is reported as delivered');
+  // Loud, because the consequence outlives the tick: with no watermark the next
+  // minute re-sends, for the whole catch-up window.
+  assert.deepEqual(errors, [
+    ['notify.watermark_not_stored', 1],
+    ['notify.watermark_not_stored', 2],
+    ['notify.watermark_not_stored', 3],
+  ]);
+});
+
 test('a failure is written down where the user can see it', async () => {
   // The whole point: a deleted webhook was recorded as sent, logged at warn, and
   // that was the ONLY surface. Reminders stopped while the habit, its time and
