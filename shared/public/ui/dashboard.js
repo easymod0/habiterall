@@ -32,11 +32,18 @@ const listHead = $('#list-head');
 const toggleArchived = $('#toggle-archived');
 const empty = $('#empty');
 const emptyArchived = $('#empty-archived');
+const emptyNoMatch = $('#empty-nomatch');
+const searchRow = $('#search-row');
+const searchInput = /** @type {HTMLInputElement} */ ($('#habit-search'));
+const searchCount = $('#search-count');
 const starters = $('#starters');
 // querySelectorAll yields Element, which has no `hidden`; these are all
 // HTMLElements in practice.
 const emptyOnboarding = /** @type {HTMLElement[]} */ ([...document.querySelectorAll(
-  '.empty-title, .empty-sub:not(#empty-archived), #starters, .empty-actions, .empty-note'
+  // Both of the specifically-addressed lines are excluded: they are shown by
+  // their own rule, and the onboarding sweep would otherwise fight it.
+  '.empty-title, .empty-sub:not(#empty-archived):not(#empty-nomatch),'
+  + ' #starters, .empty-actions, .empty-note'
 )]);
 
 const GRID_DAYS = 14;         // most columns we will ever show
@@ -79,6 +86,36 @@ export async function load() {
   paint();
 }
 
+/**
+ * How many habits it takes before a search box earns its place.
+ *
+ * #74's own framing: "fine at eight habits and unpleasant at thirty". A control
+ * above a list of four is clutter, and one that appears at exactly the moment
+ * you need it is better than one that is always there. Read from the UNFILTERED
+ * count, or the box would vanish under the cursor the moment a query narrowed
+ * the list past the threshold.
+ */
+const SEARCH_FROM = 6;
+
+/** Fold case and strip the accents, so "cafe" finds "Café". */
+const fold = (s) => String(s ?? '')
+  .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+
+/**
+ * The habits the list is showing.
+ *
+ * A filter over what is already in memory — no API change, no schema change,
+ * and it works offline, which is what makes this the cheap half of #74. Name
+ * and description, because a habit called "Gym" whose description says
+ * "swimming Tuesdays" is one people look for by the second.
+ */
+function visibleHabits() {
+  const query = fold(state.query).trim();
+  if (!query) return state.habits;
+  return state.habits.filter((h) =>
+    fold(h.name).includes(query) || fold(h.description).includes(query));
+}
+
 export function paint() {
   state.openHabitId = null;
   // The URL follows the view. Cheap to call on every repaint — and this is
@@ -102,9 +139,25 @@ export function paint() {
 
   // The onboarding panel is only for a genuinely empty tracker; an empty
   // archive view just needs a line of text.
+  const shown = visibleHabits();
+  const filtering = shown.length !== state.habits.length || !!state.query.trim();
+
+  // The box appears once there are enough habits to lose one in, and never
+  // disappears while a query is in it.
+  searchRow.hidden = state.habits.length < SEARCH_FROM && !state.query;
+  if (searchInput.value !== state.query) searchInput.value = state.query;
+  searchCount.textContent = filtering
+    ? `${shown.length} of ${state.habits.length}`
+    : '';
+
+  // An empty ACCOUNT gets the onboarding panel; an empty RESULT gets a
+  // sentence. Offering "create your first habit" to someone who has thirty and
+  // mistyped one would be the app forgetting what it holds.
   const isEmpty = state.habits.length === 0;
-  empty.hidden = !isEmpty;
+  const noMatch = !isEmpty && shown.length === 0;
+  empty.hidden = !isEmpty && !noMatch;
   emptyArchived.hidden = !(isEmpty && state.showArchived);
+  emptyNoMatch.hidden = !noMatch;
   for (const el of emptyOnboarding) el.hidden = !(isEmpty && !state.showArchived);
 
   if (isEmpty && !state.showArchived) renderStarters();
@@ -116,14 +169,21 @@ export function paint() {
   if (settings.get('dayOrder') === 'newest-left') dates.reverse();
   renderGridHeader(dates, todayIso);
 
-  for (const habit of state.habits) {
+  for (const habit of shown) {
     const row = document.createElement('div');
     row.className = 'habit-row' + (habit.archived ? ' archived' : '');
     row.dataset.habitId = String(habit.id);
 
     // Drag handle. Reordering only makes sense in the active list, and only
     // when there is more than one habit to move.
-    const reorderable = !state.showArchived && state.habits.length > 1;
+    // ...and not while a filter is on. Dragging only means something in the
+    // list's real order: a drop against a filtered list computes a `position`
+    // from neighbours that are not the habit's actual neighbours, so the write
+    // lands somewhere nobody asked for and the rows appear to jump when the
+    // query is cleared. `persistOrder` sends the rendered order, which is
+    // exactly what must not be a subset.
+    const reorderable =
+      !state.showArchived && !filtering && state.habits.length > 1;
     if (reorderable) {
       const handle = document.createElement('button');
       handle.className = 'drag-handle';
@@ -876,7 +936,28 @@ async function recordValue(habit, date, next) {
 export function init() {
   toggleArchived.addEventListener('click', () => {
     state.showArchived = !state.showArchived;
+    // A query is about the list you were looking at, not the one you are
+    // switching to — and leaving it on would show an empty archive with no
+    // obvious reason why.
+    state.query = '';
     load().catch((e) => toast(e.message));
+  });
+
+  // `paint()`, not `load()`: the habits are already in memory, which is the
+  // whole reason this half of #74 is cheap. No request, and it works offline.
+  searchInput.addEventListener('input', () => {
+    state.query = searchInput.value;
+    paint();
+  });
+
+  // Escape clears rather than closing anything, which is what a search box does
+  // everywhere else. `type="search"` gives Chrome its own × as well.
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !searchInput.value) return;
+    e.stopPropagation();
+    searchInput.value = '';
+    state.query = '';
+    paint();
   });
 
   $('#count-cancel').addEventListener('click', () => { countDialog.close(); counting = null; });
