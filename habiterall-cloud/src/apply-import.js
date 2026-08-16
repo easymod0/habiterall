@@ -166,9 +166,9 @@ export async function applyImport(userId, habits, mode = 'merge') {
           `INSERT INTO habits (user_id, name, description, type, unit,
                                target_value, target_type, freq_numerator,
                                freq_denominator, color, reminder_time,
-                               reminder_message, at_most_unlogged, position,
-                               archived)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                               reminder_message, at_most_unlogged, show_as,
+                               position, archived)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
            RETURNING id`,
           [
             userId,                                   // from the session, always
@@ -184,6 +184,7 @@ export async function applyImport(userId, habits, mode = 'merge') {
             clean.reminder_time,
             clean.reminder_message,
             clean.at_most_unlogged,
+            clean.show_as,
             position++,
             clean.archived,
           ]

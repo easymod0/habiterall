@@ -95,6 +95,13 @@ class Settings(private val context: Context) {
                     it.targetValue.toString(),
                     it.unit.replace('|', ' ').replace('\n', ' '),
                     it.reminderMessage.replace('|', ' ').replace('\n', ' '),
+                    // Appended, never inserted: the reader below indexes by
+                    // position and tolerates a SHORT line, so a cache written
+                    // before this field existed still arms its alarms. Putting
+                    // it anywhere but the end would silently re-read every
+                    // other field one place over.
+                    it.showAs,
+                    it.targetType,
                 ).joinToString("|")
             }
         context.dataStore.edit { it[reminderCacheKey] = line }
@@ -139,6 +146,13 @@ class Settings(private val context: Context) {
                 // has six fields, and losing every reminder on upgrade would be
                 // a far worse bug than a missing prompt for one sync.
                 reminderMessage = f.getOrNull(6) ?: "",
+                // The notification's own buttons depend on these — a habit
+                // shown as something to avoid is answered yes/no, not with a
+                // number pad — and the shade is built with no network, which is
+                // the whole reason this cache exists. Defaults match the
+                // server's, so an older cache posts what it always did.
+                showAs = f.getOrNull(7) ?: "amount",
+                targetType = f.getOrNull(8) ?: "at_least",
             )
         }.toList()
     }

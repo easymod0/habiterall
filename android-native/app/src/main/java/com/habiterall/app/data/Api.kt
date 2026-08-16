@@ -58,6 +58,8 @@ data class Habit(
     @SerialName("reminder_message") val reminderMessage: String = "",
     /** See [HabitInput.atMostUnlogged]; this is the stored value coming back. */
     @SerialName("at_most_unlogged") val atMostUnlogged: String = "default",
+    /** See [HabitInput.showAs]. */
+    @SerialName("show_as") val showAs: String = "amount",
     val position: Int = 0,
     val archived: Boolean = false,
     // Present on /overview only.
@@ -71,6 +73,18 @@ data class Habit(
     val skips: List<String> = emptyList(),
 ) {
     val isNumerical get() = type == "numerical"
+
+    /**
+     * Is this habit shown as something to avoid?
+     *
+     * Both halves, because `show_as` is a rendering choice that only means
+     * anything against an at-most target — "at least 8 glasses" has nothing to
+     * avoid. A habit switched to At least keeps its `show_as` so switching back
+     * does not lose it, which is why the predicate and not the stored value is
+     * what stops it applying in between. Mirrors `isAvoided` in
+     * shared/public/ui/toggle.js.
+     */
+    val isAvoided get() = showAs == "avoid" && targetType == "at_most"
 
     /**
      * Whether a day is a skip.
@@ -115,6 +129,7 @@ data class Habit(
         color = color,
         reminderTime = reminderTime,
         reminderMessage = reminderMessage,
+        showAs = showAs,
         // Every field, and this is the bridge that has to carry them: a habit
         // PUT REPLACES, so a field dropped here is a field RESET on the server
         // by the two callers that flip one thing about a habit they fetched —
@@ -170,6 +185,13 @@ data class HabitInput(
      * silently resetting an override set on another client.
      */
     @SerialName("at_most_unlogged") val atMostUnlogged: String = "default",
+    /**
+     * How the habit is SHOWN — `"amount"`, or `"avoid"` for something you are
+     * trying not to do. Presentation only: the verdict still comes from the
+     * target, which is what lets a Loop file lose this without losing what the
+     * rows mean. Carried here because a habit PUT REPLACES.
+     */
+    @SerialName("show_as") val showAs: String = "amount",
     val archived: Boolean = false,
 )
 

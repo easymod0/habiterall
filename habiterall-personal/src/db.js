@@ -41,6 +41,11 @@ db.exec(`
     -- what a day with NO ROW is worth on an at-most target: 'miss',
     -- 'success', or 'default' to follow the account's atMostUnlogged
     at_most_unlogged TEXT NOT NULL DEFAULT 'default',
+    -- how the habit is SHOWN: 'amount', or 'avoid' for something you are
+    -- trying not to do. Presentation only — the verdict comes from
+    -- target_type and target_value, which is what lets a Loop file lose it
+    -- without losing what the rows mean
+    show_as       TEXT    NOT NULL DEFAULT 'amount',
     position      INTEGER NOT NULL DEFAULT 0,
     archived      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -174,6 +179,10 @@ if (!habitColumns.has('reminder_time')) {
 if (!habitColumns.has('reminder_message')) {
   db.exec(`ALTER TABLE habits ADD COLUMN reminder_message TEXT NOT NULL DEFAULT ''`);
   console.log('migrated habits: added reminder_message');
+}
+if (!habitColumns.has('show_as')) {
+  db.exec(`ALTER TABLE habits ADD COLUMN show_as TEXT NOT NULL DEFAULT 'amount'`);
+  console.log('migrated habits: added show_as');
 }
 if (!habitColumns.has('at_most_unlogged')) {
   // 'default' for everything that already exists, which is the one value that

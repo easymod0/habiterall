@@ -1156,7 +1156,12 @@ class MainActivity : ComponentActivity() {
 
         /** What a tap does: the web grid's cycle, or the number dialog. */
         fun tapDay(habit: Habit, date: String) {
-            if (habit.isNumerical) {
+            // A habit shown as something to avoid CYCLES rather than asking for
+            // a number, which is the whole of what that rendering buys: the
+            // answer is yes-or-no, and typing an amount to say "none today" is
+            // the friction it removes. A long press still opens the dialog for
+            // an exact count.
+            if (habit.isNumerical && !habit.isAvoided) {
                 editing = habit to date
                 return
             }
@@ -1168,13 +1173,14 @@ class MainActivity : ComponentActivity() {
                 isSkip = habit.isSkipped(date),
                 done = habit.isMet(habit.valueOn(date), false) == true,
             )
-            when (Grid.nextState(current, skipDays, questionMarks)) {
-                Grid.DayState.DONE -> record(habit, date, Sentinels.YES, false)
+            when (val next = Grid.nextState(current, skipDays, questionMarks)) {
                 Grid.DayState.SKIPPED -> record(habit, date, null, true)
-                // A stated lapse is a row holding 0; only UNKNOWN clears the day,
-                // which the outbox turns into a DELETE.
-                Grid.DayState.NO -> record(habit, date, Sentinels.UNSET, false)
                 Grid.DayState.UNKNOWN -> record(habit, date, null, false)
+                // The VALUE comes from `Grid.valueForState`, the one place that
+                // knows a clean day on an avoided habit is 0 and a slip is the
+                // smallest amount over. A stated lapse is a row holding 0; only
+                // UNKNOWN clears the day, which the outbox turns into a DELETE.
+                else -> record(habit, date, Grid.valueForState(habit, next), false)
             }
         }
 

@@ -81,6 +81,7 @@ private data class Draft(
     val reminderTime: String = "",
     val reminderMessage: String = "",
     val atMostUnlogged: String = "default",
+    val showAs: String = "amount",
     val archived: Boolean = false,
 )
 
@@ -98,6 +99,7 @@ private fun Habit.toDraft() = Draft(
     reminderTime = reminderTime,
     reminderMessage = reminderMessage,
     atMostUnlogged = atMostUnlogged,
+    showAs = showAs,
     archived = archived,
 )
 
@@ -152,6 +154,7 @@ private fun Draft.toInput() = HabitInput(
     // the control below is on screen: a habit PUT REPLACES, so an omitted
     // field is reset rather than left alone.
     atMostUnlogged = atMostUnlogged,
+    showAs = showAs,
     archived = archived,
 )
 
@@ -357,6 +360,28 @@ fun HabitFormScreen(
                 // value is still submitted while this is hidden — see
                 // `Draft.toInput`.
                 if (draft.atMost) {
+                    SectionLabel("Show this habit as")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            "amount" to "An amount",
+                            "avoid" to "Something to avoid",
+                        ).forEach { (value, label) ->
+                            FilterChip(
+                                selected = draft.showAs == value,
+                                onClick = { draft = draft.copy(showAs = value) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text(
+                        "\"Something to avoid\" answers with a tap instead of a number, " +
+                            "paints a slip rather than an achievement, and asks the " +
+                            "reminder the other way round. It changes only how the habit " +
+                            "is shown — what is stored is the same either way.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
                     SectionLabel("A day you never log")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf(

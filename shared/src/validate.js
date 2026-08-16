@@ -36,6 +36,35 @@ export const TARGET_TYPES = new Set(['at_least', 'at_most']);
  */
 export const AT_MOST_UNLOGGED = new Set(['default', 'miss', 'success']);
 
+/**
+ * How a habit is SHOWN — as an amount to reach, or as something to avoid.
+ *
+ * A habit you want to stop is stored as what it is: a measurable habit with an
+ * at-most target of 0, which needs no new storage, round-trips through Loop
+ * perfectly and is already what `isCompleted` and the score read. What it
+ * lacked was an interaction — you answered it by typing a number, a filled
+ * cell painted as an achievement, and the wording asked whether you had done
+ * the thing you are trying not to do.
+ *
+ * So this decides the RENDERING and nothing else. That is the whole reason it
+ * can exist at all: issue #64's other option was a flag that inverts the
+ * JUDGEMENT, and Loop's schema has nowhere to carry one — losing it on a round
+ * trip would flip every verdict in the file. Losing this one loses a display
+ * preference, and the rows go on meaning exactly what they meant. `YES` still
+ * means the thing occurred, `isCompleted` still comes from `target_type` and
+ * `target_value`, and the export is untouched.
+ *
+ * Per habit, because that is the only level it can be: an account holds habits
+ * of both kinds at once.
+ *
+ * `'avoid'` is offered for any at-most target and is only meaningful there —
+ * "at least 8 glasses" has nothing to avoid. It is not restricted to a target
+ * of 0, because "at most 2 coffees" is also a thing people want to see as a
+ * limit rather than as an amount; what the target decides is what a tap
+ * RECORDS, not whether the option applies.
+ */
+export const SHOW_AS = new Set(['amount', 'avoid']);
+
 export const LIMITS = {
   name: 100,
   description: 500,
@@ -131,6 +160,9 @@ export function parseHabit(body = {}) {
     // an answer the user gave. `AT_MOST_UNLOGGED` says why it exists.
     at_most_unlogged: AT_MOST_UNLOGGED.has(body.at_most_unlogged)
       ? body.at_most_unlogged : 'default',
+    // Presentation only — see SHOW_AS. Stored regardless of the target type,
+    // so switching a habit's goal back and forth does not discard the answer.
+    show_as: SHOW_AS.has(body.show_as) ? body.show_as : 'amount',
     archived: !!body.archived,
   };
 }

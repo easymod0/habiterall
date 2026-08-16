@@ -103,3 +103,76 @@ test('the Kotlin mirror is pinned to the same cases', () => {
     assert.ok(kotlin.includes(`DayState.${name}`), `Grid.kt never mentions ${name}`);
   }
 });
+
+/* ---------- a habit shown as something to avoid ---------- */
+
+const { isAvoided, valueForState } = await import('../public/ui/toggle.js');
+const values = await import('../public/ui/values.js');
+
+const avoidHabit = {
+  type: 'numerical', target_type: 'at_most', target_value: 0, show_as: 'avoid',
+};
+
+test('toggle.js\'s own copy of the wire values matches ui/values.js', () => {
+  // It declares them locally so this file can be run with no module
+  // resolution; that makes it a third copy, and a third copy drifts unless
+  // something says otherwise. Read out of the source rather than the exports,
+  // since they are deliberately not exported.
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'public', 'ui', 'toggle.js'), 'utf8');
+  const line = /const UNSET = (\d+), YES = (\d+), SKIP = (\d+);/.exec(src);
+  assert.ok(line, 'toggle.js no longer declares the three values in one line');
+  assert.equal(Number(line[1]), values.UNSET);
+  assert.equal(Number(line[2]), values.YES);
+  assert.equal(Number(line[3]), values.SKIP);
+});
+
+test('the cycle is untouched by any of this', () => {
+  // The whole reason this feature is small. A habit you are trying not to do
+  // walks the same four states in the same order — a clean day is `done`, a
+  // slip is `no` — so `nextDayState`, which the Kotlin `Grid.nextState`
+  // mirrors, did not have to learn anything.
+  for (const prefs of [{}, { skipDays: true }, { questionMarks: true }]) {
+    for (const state of ['unknown', 'done', 'skip', 'no']) {
+      assert.equal(nextDayState(state, prefs), nextDayState(state, prefs));
+    }
+  }
+  assert.equal(nextDayState('unknown'), 'done');
+  assert.equal(nextDayState('done'), 'no');
+});
+
+test('what a tap records is what differs, and only that', () => {
+  // done is a CLEAN day on an avoided habit — the goal — and `no` is a slip.
+  assert.equal(valueForState(avoidHabit, 'done'), 0);
+  assert.equal(valueForState(avoidHabit, 'no'), 1);
+  // A normal habit is unchanged.
+  const normal = { type: 'boolean', target_type: 'at_least', target_value: 0 };
+  assert.equal(valueForState(normal, 'done'), values.YES);
+  assert.equal(valueForState(normal, 'no'), values.UNSET);
+  // A skip is the status column in both, never a value.
+  assert.equal(valueForState(avoidHabit, 'skip'), values.SKIP);
+  assert.equal(valueForState(normal, 'skip'), values.SKIP);
+});
+
+test('a slip is the smallest amount that fails, not always 1', () => {
+  // "At most 2 coffees" shown as a limit: a slip is three, the smallest count
+  // that is over. It is the least the app can claim on the user's behalf, and
+  // the day editor still takes the exact number.
+  const limit = { ...avoidHabit, target_value: 2 };
+  assert.equal(valueForState(limit, 'no'), 3);
+  assert.equal(valueForState(limit, 'done'), 0);
+});
+
+test('the rendering only applies where there is something to avoid', () => {
+  // `show_as` is kept when a habit's goal is switched to At least, so that
+  // switching back does not lose it — which means the predicate, not the
+  // stored value, is what stops it applying in between.
+  assert.equal(isAvoided(avoidHabit), true);
+  assert.equal(isAvoided({ ...avoidHabit, target_type: 'at_least' }), false);
+  assert.equal(isAvoided({ ...avoidHabit, show_as: 'amount' }), false);
+  assert.equal(isAvoided({}), false);
+  assert.equal(isAvoided(undefined), false);
+  // And an at-least habit still records the ordinary way.
+  const flipped = { ...avoidHabit, target_type: 'at_least' };
+  assert.equal(valueForState(flipped, 'done'), values.YES);
+});

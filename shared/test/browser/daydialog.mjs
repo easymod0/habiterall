@@ -41,6 +41,11 @@ const BINDINGS = [
   'notes', 'skip', 'clear', 'save', 'dialog', 'dayCountField',
 ];
 
+// The real rule, not a stub: `ui/toggle.js` is dependency-free precisely so it
+// can be imported with no browser, and a stub here would let the dialog and the
+// grid drift about what a habit shown as "avoid" even is.
+const { isAvoided } = await import('../../public/ui/toggle.js');
+
 /**
  * @param prefs the settings the dialog reads. Both default off, as the server
  *   does — this is the fake `ui/settings.js` for the sliced-out function.
@@ -68,10 +73,10 @@ function run(habit, date, value, isSkip, prefs = {}) {
   const YES = 2, UNSET = 0;
   const settings = { get: (key) => prefs[key] ?? false };
   const fn = new Function(...BINDINGS, 'state', 'YES', 'UNSET', 'settings',
-    'habit', 'date', 'value', 'isSkip',
+    'isAvoided', 'habit', 'date', 'value', 'isSkip',
     `${body}; openDayDialog(habit, date, value, isSkip); return state;`);
   const out = fn(...BINDINGS.map((k) => els[k]), state, YES, UNSET, settings,
-    habit, date, value, isSkip);
+    isAvoided, habit, date, value, isSkip);
   return { els, state: out, doneBtn, notBtn };
 }
 
@@ -157,6 +162,44 @@ check('skip: button marked pressed', r.els.skip.getAttribute('aria-pressed') ===
 
 r = run(boolHabit, '2026-03-18', 2, false);
 check('non-skip: button reads Skip day', r.els.skip.textContent === 'Skip day', r.els.skip.textContent);
+
+console.log('--- shown as something to avoid ---');
+// Stored as what it is — a measurable habit with an at-most target — and shown
+// the other way up. The dialog is the surface where that has to be legible:
+// "Done" on a habit you are trying not to do reads as the opposite of what
+// pressing it records.
+const avoid = { id: 4, name: 'Smoking', type: 'numerical', unit: '',
+  target_value: 0, target_type: 'at_most', show_as: 'avoid' };
+
+r = run(avoid, '2026-03-15', 0, false);
+const labels = () => r.els.booleanBlock._choices.map((b) => b.textContent);
+check('avoid: the two choices are shown, not the bare amount box',
+  r.els.booleanBlock.hidden === false, String(r.els.booleanBlock.hidden));
+check('avoid: and the amount box stays, for an exact count',
+  r.els.numericBlock.hidden === false, String(r.els.numericBlock.hidden));
+check('avoid: the buttons say what they record',
+  labels()[0] === '✓ Clean day' && labels()[1] === '✗ Slipped', JSON.stringify(labels()));
+check('avoid: a day of 0 is the CLEAN one, which is the inversion',
+  r.doneBtn.getAttribute('aria-pressed') === 'true' &&
+  r.notBtn.getAttribute('aria-pressed') === 'false',
+  `${r.doneBtn.getAttribute('aria-pressed')} / ${r.notBtn.getAttribute('aria-pressed')}`);
+
+r = run(avoid, '2026-03-15', 1, false);
+check('avoid: a day of 1 is the slip',
+  r.notBtn.getAttribute('aria-pressed') === 'true' &&
+  r.doneBtn.getAttribute('aria-pressed') === 'false',
+  `${r.doneBtn.getAttribute('aria-pressed')} / ${r.notBtn.getAttribute('aria-pressed')}`);
+
+// A limit of two: anything at or under it is clean, and over is the slip.
+const limit = { ...avoid, id: 5, name: 'Coffee', unit: 'cups', target_value: 2 };
+r = run(limit, '2026-03-15', 2, false);
+check('avoid: at the limit is still clean', r.doneBtn.getAttribute('aria-pressed') === 'true');
+r = run(limit, '2026-03-15', 3, false);
+check('avoid: over it is the slip', r.notBtn.getAttribute('aria-pressed') === 'true');
+
+// The same habit read as an amount keeps the amount box and loses the buttons.
+r = run({ ...avoid, show_as: 'amount' }, '2026-03-15', 0, false);
+check('amount: no choice buttons', r.els.booleanBlock.hidden === true);
 
 console.log('--- state tracking ---');
 r = run(numHabit, '2026-04-01', 5, false);

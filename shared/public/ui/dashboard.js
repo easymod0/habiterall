@@ -16,7 +16,9 @@ import * as routes from '/shared/ui/routes.js';
 import { gridCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { on, state } from '/shared/ui/store.js';
-import { DAY, dayStateOf, nextDayState } from '/shared/ui/toggle.js';
+import {
+  DAY, dayStateOf, isAvoided, nextDayState, valueForState,
+} from '/shared/ui/toggle.js';
 import { toast } from '/shared/ui/toast.js';
 import { SKIP, UNSET, YES } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
@@ -550,6 +552,28 @@ function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
     return;
   }
 
+  // Shown as something to avoid: a clean day is the achievement and a slip is
+  // the thing to see, so the colours are the other way round. Painting a slip
+  // in the habit's own colour — which is what the at-most branch below does,
+  // correctly, for a habit read as an amount — reads as having done well.
+  if (isAvoided(habit)) {
+    const target = Number(habit.target_value) || 0;
+    if (value <= target) {
+      box.style.background = habit.color;
+      box.textContent = '✓';
+    } else {
+      // The count, because how far over matters on a limit of two coffees and
+      // is the whole answer on a limit of none.
+      box.style.background = 'var(--danger)';
+      box.style.color = '#fff';
+      box.textContent = target === 0 && value === 1
+        ? '✗'
+        : (value % 1 === 0 ? String(value) : value.toFixed(1));
+      box.style.fontSize = '9.5px';
+    }
+    return;
+  }
+
   // numerical: shade by progress toward target, show the raw number.
   // For an "at most" habit a low number is the good outcome, so 0 is a full
   // success and must be painted, not left blank.
@@ -717,7 +741,12 @@ async function saveCount() {
 async function onCheckClick(habit, date) {
   try {
     let next;
-    if (habit.type === 'boolean') {
+    // A habit shown as something to avoid CYCLES rather than asking for a
+    // number, which is the whole of what the rendering buys: the answer is
+    // yes-or-no, and typing an amount to say "none today" is the friction it
+    // exists to remove. `valueForState` is what makes the same four states
+    // record different values — see ui/toggle.js.
+    if (habit.type === 'boolean' || isAvoided(habit)) {
       // Loop's cycle, and both of its switches — `ui/toggle.js` owns it and the
       // native client mirrors it. Note what is read here: whether the map HOLDS
       // the date, not what it holds. `habit.entries[date] ?? UNSET` was fine
@@ -727,8 +756,11 @@ async function onCheckClick(habit, date) {
       const cur = habit.entries[date];
       const current = dayStateOf({
         value: Object.hasOwn(habit.entries, date) ? cur : undefined,
-        isSkip: (habit.skips?.includes(date) ?? false) || cur === SKIP,
-        done: cur === YES,
+        isSkip: (habit.skips?.includes(date) ?? false) ||
+          (habit.type === 'boolean' && cur === SKIP),
+        // What counts as done differs: `YES` for a yes/no habit, and being at
+        // or under the limit for one being avoided, where 0 is the goal.
+        done: isAvoided(habit) ? cur <= (Number(habit.target_value) || 0) : cur === YES,
       });
       const to = nextDayState(current, {
         skipDays: settings.get('skipDays'),
@@ -736,7 +768,7 @@ async function onCheckClick(habit, date) {
       });
 
       if (to === DAY.UNKNOWN) return await clearDay(habit, date);
-      next = to === DAY.DONE ? YES : to === DAY.SKIP ? SKIP : UNSET;
+      next = valueForState(habit, to);
     } else {
       // A measurable day is asked for rather than cycled to, and the answer
       // comes back through `saveCount` into the very same `recordValue`.

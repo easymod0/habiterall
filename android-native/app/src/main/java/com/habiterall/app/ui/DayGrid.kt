@@ -36,6 +36,16 @@ import com.habiterall.app.data.Habit
 import java.time.LocalDate
 
 /**
+ * A day that went over the limit, on a habit shown as something to avoid.
+ *
+ * Not the habit's own colour at reduced alpha, which is what a measurable
+ * habit's shortfall uses: on a habit you are trying not to do, wearing the
+ * habit's colour is what a GOOD day wears. A slip has to read as the thing it
+ * is at a glance, in a grid where every other filled square is an achievement.
+ */
+private val SLIP = Color(0xFFDC2626)
+
+/**
  * The day grid: one row per habit, and one column per day.
  *
  * The habit's name is pinned and the days scroll, all of them together — a
@@ -272,8 +282,19 @@ private fun DayCell(
     // How full the square looks. A measurable habit that fell short shows a
     // faint version of its own colour rather than nothing, because "8 of 20
     // pages" is not the same day as one with no entry at all.
+    // Shown as something to avoid: a clean day is the achievement and a slip
+    // is the thing to see, so the colours are the other way up. Filling a slip
+    // with the habit's own colour — right for a habit read as an amount, where
+    // a bigger number is more done — reads as having done well.
+    val avoided = habit.isAvoided
+
     val fill = when {
         skipped -> Color.Transparent
+        avoided -> when {
+            met == true -> color
+            value != null -> SLIP
+            else -> Color.Transparent
+        }
         met == true -> color
         value != null && value > 0 -> color.copy(alpha = 0.35f)
         else -> Color.Transparent
@@ -282,6 +303,15 @@ private fun DayCell(
     val label = when {
         skipped -> "–"
         questionMarks && unknown -> "?"
+        // A clean day is a tick rather than a nought: the number says nothing
+        // on a limit of none, and the tick is what the day WAS. Over the limit
+        // the count is the answer, because how far over matters on a limit of
+        // two — except a bare 1 over a limit of 0, where the count adds nothing
+        // the cross does not already say.
+        avoided && met == true -> "✓"
+        avoided -> value?.let {
+            if (habit.targetValue == 0.0 && it == 1.0) "✗" else trimNumber(it)
+        } ?: ""
         habit.isNumerical -> value?.let { trimNumber(it) } ?: ""
         met == true -> "✓"
         else -> ""

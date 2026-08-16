@@ -49,7 +49,7 @@ Postgres one.
 | `public/ui/resample.js` | thins the daily score series for the strength chart |
 | `public/ui/dates.js` | browser-side date helpers |
 | `public/ui/time.js` | parsing and formatting a reminder time, DOM-free so it is testable |
-| `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, DOM-free, mirrored in Kotlin |
+| `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, and what each state is WORTH for this habit. DOM-free, mirrored in Kotlin |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
 | `public/ui/values.js` | `UNSET` / `YES` / `SKIP` for the browser, mirroring `src/constants.js` |
 | `public/auth-session.js` | the one auth adapter: `none` / `password` / `setup` / `oidc`, chosen by what the server reports |
@@ -414,6 +414,23 @@ you add a form to one, add it to both. The two that catch people out: `12 am` is
 00:00 while `12 pm` is 12:00, and an empty box means "no reminder" while
 unparseable text is an error to report — the caller does different things with
 them, so they are `''` and `null` rather than both falsy.
+
+**A habit shown as something to avoid keeps the cycle and changes the
+encoding.** `show_as: 'avoid'` on an at-most habit walks the same four states —
+a clean day is `done`, a slip is `no` — so `nextDayState` is untouched and its
+Kotlin mirror did not have to learn anything. `valueForState` is what differs:
+`done` writes 0 and `no` writes `target + 1`, where an ordinary habit writes
+`YES` and `UNSET`. It is mirrored in `Grid.valueForState` for the reason the
+cycle is — a tap happens with no network — and `isAvoided` asks BOTH halves,
+because `show_as` is kept when a habit's goal is switched to At least so that
+switching back does not lose it.
+
+Note `toggle.js` declares `UNSET`/`YES`/`SKIP` locally rather than importing
+`ui/values.js`. It is dependency-free on purpose — that is what lets
+`test/toggle.test.js` run it with no browser, since the absolute `/shared/...`
+specifiers the rest of `public/ui` uses do not resolve under Node — and
+`test/toggle.test.js` reads the declaration out of the source and pins it
+against `values.js` so the third copy cannot drift.
 
 **The tap cycle is mirrored in Kotlin too.** `public/ui/toggle.js` and
 `Grid.nextState` are Loop's `Entry.nextToggleValue`, and `test/toggle.test.js` and

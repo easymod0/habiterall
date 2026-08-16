@@ -110,6 +110,11 @@ export const FIXTURE = [
     // exactly how `reminder_message` went unwatched in the cloud suite for as
     // long as it did.
     at_most_unlogged: 'success',
+    // Shown as something to avoid — a rendering choice, and the reason it can
+    // be one: no Loop format carries it, and losing it on a round trip costs
+    // the display and not the meaning. NOT 'amount', or the comparison would
+    // be two defaults agreeing again.
+    show_as: 'avoid',
     archived: false,
     entries: [
       { date: '2026-01-05', value: 0, status: '', notes: '' },
@@ -236,7 +241,7 @@ export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color'];
  * list; this is the case where exactly one is right.
  */
 export const JSON_HABIT_FIELDS = [
-  ...LOOP_DB_HABIT_FIELDS, 'color', 'at_most_unlogged',
+  ...LOOP_DB_HABIT_FIELDS, 'color', 'at_most_unlogged', 'show_as',
 ];
 
 export function pick(obj, fields) {

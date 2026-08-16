@@ -40,7 +40,7 @@ const MILLIS_PER_DAY = 86_400_000;
 import { unzip } from './unzip.js';
 // The same limits the API enforces, so an import cannot store what a typed-in
 // habit could not.
-import { LIMITS, AT_MOST_UNLOGGED } from './validate.js';
+import { LIMITS, AT_MOST_UNLOGGED, SHOW_AS } from './validate.js';
 import { TIME_RE } from './constants.js';
 
 /**
@@ -1040,6 +1040,11 @@ export function normaliseImportedHabit(h) {
     // answer, and the honest one for a file that said nothing.
     at_most_unlogged: AT_MOST_UNLOGGED.has(h.at_most_unlogged)
       ? h.at_most_unlogged : 'default',
+    // habiterall's own JSON carries it; no Loop format has anywhere to put a
+    // rendering preference, so a Loop file always yields 'amount' — and losing
+    // it costs the display, never the meaning. That asymmetry is why this is a
+    // display flag and not the judgement-inverting one #64 also considered.
+    show_as: SHOW_AS.has(h.show_as) ? h.show_as : 'amount',
     archived: !!h.archived,
   };
 }
