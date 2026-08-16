@@ -233,7 +233,28 @@ try {
   await ev(`[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.trim()==='+')?.click()`);
   await sleep(700);
 
-  const orphans = await ev(`document.querySelectorAll('.cal-pop.is-open').length`);
+  // STRANDED means "cannot be closed", not merely "open", and the difference is
+  // the whole point of `watchDetach` in charts.js: the bug was a popover left
+  // over a DETACHED calendar, where no pointer event can fire again and nothing
+  // takes it down.
+  //
+  // Counting open popovers asked a stricter question than that, and one whose
+  // answer depends on where the replacement SVG lands — so on the calendar's
+  // geometry, so on today's DATE. When it lands under the motionless pointer it
+  // fires `pointerover` and opens a popover for the cell now under the cursor,
+  // which is a live hover and correct: measured, that cell is `isConnected` and
+  // the popover closes as soon as the pointer moves. On 16 August 2026 (UTC)
+  // that is what happens, and this suite then failed on MASTER for every pull
+  // request opened that day.
+  //
+  // So the question is ownership. A popover whose active cell is still in the
+  // document belongs to a calendar that can close it; one with no connected
+  // owner is the stranding this check is named for.
+  const orphans = await ev(`(()=>{
+    if (!document.querySelector('.cal-pop.is-open')) return 0;
+    const owner = document.querySelector('.cal-cell.is-active');
+    return owner?.isConnected ? 0 : 1;
+  })()`);
   ck('no popover is stranded after a re-render', orphans === 0, `${orphans} left open`);
 
   /* ---------- keyboard ---------- */
