@@ -367,10 +367,49 @@ function formatterFor(timeZone) {
   const key = timeZone || '';
   let fmt = formatters.get(key);
   if (!fmt) {
-    fmt = build(timeZone) ?? build('');
+    fmt = build(timeZone);
+    if (!fmt) {
+      // Said once per zone string, not per account per tick. Falling back is
+      // right — one bad value must not end the tick for everyone — but doing it
+      // in silence means an account gets every reminder on the server's clock
+      // forever with nothing on any surface to say so.
+      unusableZones.add(key);
+      fmt = build('');
+    }
     formatters.set(key, fmt);
   }
   return fmt;
+}
+
+/**
+ * Zones `Intl` refused, so the caller can report the fallback.
+ *
+ * Held here rather than logged here because this module takes no logger — it is
+ * pure by design, which is what lets `dueReminders` be tested with no clock and
+ * no transport. `notify-send.js` drains it through the same `once` dedupe that
+ * `too_late` and `unreachable` use.
+ */
+const unusableZones = new Set();
+
+/** @returns {string[]} zones that fell back to the server's clock */
+export function takeUnusableZones() {
+  const out = [...unusableZones];
+  unusableZones.clear();
+  return out;
+}
+
+/**
+ * The zone a clock actually used, which is not always the one asked for.
+ *
+ * `dueReminders` reports the REQUESTED zone in its skip details, so a
+ * `notify.too_late` line for an account whose zone `Intl` will not take printed
+ * `zone: 'Mars/Olympus'` while the verdict came from the server's clock —
+ * a diagnostic that actively misdirects, which is worse than none.
+ *
+ * @param {string} timeZone
+ */
+export function effectiveZone(timeZone) {
+  return build(timeZone) ? (timeZone || '') : '';
 }
 
 /**
@@ -515,7 +554,13 @@ export function dueReminders({
    * until tomorrow — and it is what an unset container timezone produces.
    */
   const skip = (habit, reason, detail) => {
-    onSkip(habit, reason, { now: clock.time, date: clock.date, zone: timeZone || 'system', ...detail });
+    // The zone the clock USED, not the one asked for — `effectiveZone` answers
+    // '' for a zone Intl refused, and reporting the requested one made a
+    // `too_late` line name a zone that had nothing to do with the verdict.
+    onSkip(habit, reason, {
+      now: clock.time, date: clock.date,
+      zone: effectiveZone(timeZone) || 'system', ...detail,
+    });
     return undefined;
   };
 

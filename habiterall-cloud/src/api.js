@@ -35,7 +35,6 @@ import {
 
 export const api = express.Router();
 
-
 const SUMMARY_WINDOW_DAYS = 400;
 
 /**
@@ -88,17 +87,39 @@ const route = (fn) => (req, res, next) => fn(req, res, next).catch(next);
  * write itself: a request must not fail because the server could not write
  * down where the user is.
  */
+/**
+ * What each account last reported, so an unchanged zone costs no database at
+ * all — not even a transaction.
+ *
+ * `IS DISTINCT FROM` already made the unchanged case write no row: measured,
+ * 200 unchanged requests consumed zero transaction ids and left no dead tuples.
+ * What it did NOT avoid was the transaction itself — a pool checkout and four
+ * round trips (BEGIN, set_config, UPDATE, COMMIT) on every authenticated
+ * request, about 0.4ms on loopback and 5-10ms against a networked Postgres.
+ * That is the wrong shape for something whose entire purpose is to notice a
+ * change that happens roughly never.
+ *
+ * Same shape as `auth.js`'s block cache. Unbounded is fine: one small string
+ * per account that has made a request this process lifetime, and a restart
+ * simply re-learns them.
+ */
+const lastReportedZone = new Map();
+
 api.use(route(async (req, _res, next) => {
+  const user = uid(req);
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
-  if (zone) {
+  if (zone && lastReportedZone.get(user) !== zone) {
     try {
-      await withUser(uid(req), (db) => db.query(
+      await withUser(user, (db) => db.query(
         `UPDATE users SET device_time_zone = $1
           WHERE id = $2 AND device_time_zone IS DISTINCT FROM $1`,
-        [zone, uid(req)]
+        [zone, user]
       ));
+      // After the write, so a failure is retried on the next request rather
+      // than remembered as done.
+      lastReportedZone.set(user, zone);
     } catch (err) {
-      log.warn('settings.device_clock_not_stored', { user: uid(req) }, err);
+      log.warn('settings.device_clock_not_stored', { user }, err);
     }
   }
   next();

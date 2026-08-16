@@ -15,8 +15,12 @@ in `src/db/` or `src/auth.js`.
 - A query that forgets its `WHERE` clause therefore returns **nothing**. The
   isolation fails closed.
 - The app connects as `habiterall_app`: not the table owner, `NOBYPASSRLS`,
-  no DDL, no `INSERT`/`DELETE` on `users`, and `UPDATE` only on
-  `email`/`display_name`/`last_seen_at`.
+  no DDL, no `INSERT`/`DELETE` on `users`, and column-level `UPDATE` on
+  `email`, `display_name`, `last_seen_at`, `settings` and `device_time_zone`
+  — and nothing else. Keep that list exact: it is the one place the boundary is
+  written down in prose, and it had already gone stale for `settings` once.
+  `idp_subject`, `idp_issuer`, `blocked` and `id` are SELECT-only, which is
+  what stops an account editing its own identity or unblocking itself.
 
 **`withoutUser` bypasses that boundary.** It exists for migrations, the
 session store, and user provisioning. Keep its call sites countable on one
@@ -41,6 +45,13 @@ session's `user_id`. See the header comment in `src/apply-import.js`.
 `users_select_self` / `users_update_self` policies — no new RLS needed. The
 app role was granted `UPDATE (settings)` explicitly; it still cannot touch
 `idp_subject` or `blocked`.
+
+`device_time_zone` (migration 013) is the same arrangement and is deliberately
+NOT in that blob: it is an observation the server makes from a request header,
+where everything in `settings` is a decision the user sent through
+`PUT /api/settings`. Keeping them apart is what makes `notifyTimezone: 'auto'`
+reversible, and what keeps a device's zone out of `/api/export` — restoring a
+backup on a laptop abroad must not move when reminders arrive.
 
 **The reminder scheduler is the one job with no user to scope to**, and
 migration 008 is where that is paid for. It must ask "who has a webhook

@@ -20,7 +20,7 @@
 
 import {
   CHANNELS, dueReminders, discordPayload, reminderMessage, resolveTimeZone,
-  serverChannels, unreachableChannels,
+  serverChannels, takeUnusableZones, unreachableChannels,
 } from './notify.js';
 import { postReminder } from './discord.js';
 
@@ -540,6 +540,20 @@ export async function runTick(ctx) {
       errored++;
       log.error?.('notify.account_failed', { user: account?.id }, err);
     }
+  }
+
+  // A zone `Intl` would not take falls back to the server's clock rather than
+  // ending the tick — but silently, it means an account gets every reminder on
+  // the wrong clock forever with nothing to say so. Drained once per tick and
+  // deduped, because it is a configuration rather than an event: it stays wrong
+  // until somebody fixes the value.
+  for (const zone of takeUnusableZones()) {
+    if (!once(`unusable_zone:${zone}`)) continue;
+    log.warn?.('notify.zone_unusable', {
+      zone,
+      reason: 'Intl does not know this zone — reminders for accounts using it '
+        + "are on the server's clock",
+    });
   }
 
   const ms = Date.now() - startedAt;

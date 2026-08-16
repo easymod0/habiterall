@@ -48,15 +48,19 @@ export const api = express.Router();
  * Never fatal. This is an optimisation of a default: a request must not fail
  * because the server could not write down where the user is.
  */
+/** The last zone written, so an unchanged one costs not even a SELECT. */
+let lastReportedZone = null;
+
 api.use((req, _res, next) => {
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
-  if (zone) {
+  if (zone && zone !== lastReportedZone) {
     try {
       if (zone !== String(q.deviceClock.get()?.time_zone ?? '')) {
         q.setDeviceClock.run(zone);
       }
+      lastReportedZone = zone;
     } catch (err) {
-      log.warn?.('settings.device_clock_not_stored', {}, err);
+      log.warn('settings.device_clock_not_stored', {}, err);
     }
   }
   next();

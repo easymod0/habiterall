@@ -157,4 +157,58 @@ class AppSettingsDefaultsTest {
         assertEquals("count", set.historyModeOrDefault)
         assertEquals("year", set.scoreGranularityOrDefault)
     }
+
+    /**
+     * The header this client uses to tell the server which clock it is on, and
+     * the name the SERVER reads it back under.
+     *
+     * A one-string mirror, and unguarded until now: rename `DEVICE_ZONE_HEADER`
+     * in shared/src/notify.js and the phone silently stops reporting, with the
+     * only symptom being reminders on the wrong clock for accounts set to
+     * follow their device — which nothing in either suite would have said.
+     *
+     * Read out of the source rather than restated, for the reason the defaults
+     * above are: a literal-for-literal test would be written wrong by whoever
+     * wrote the constant wrong.
+     *
+     * One caveat worth knowing, and it applies to every test in this file:
+     * `shared/` is not a declared Gradle input, so a change THERE alone leaves
+     * `testDebugUnitTest` UP-TO-DATE and this never runs. Verified — renaming
+     * the JS constant reported success until `--rerun-tasks`. CI checks out
+     * clean so it always runs there; locally, use `--rerun-tasks` before
+     * believing a green result about a change outside this module.
+     */
+    @Test
+    fun `the device-clock header is spelled the same on both sides`() {
+        var dir: java.io.File? = java.io.File("").absoluteFile
+        var source: String? = null
+        while (dir != null && source == null) {
+            val candidate = java.io.File(dir, "shared/src/notify.js")
+            if (candidate.isFile) source = candidate.readText()
+            dir = dir.parentFile
+        }
+        assertTrue(
+            "shared/src/notify.js not found above ${java.io.File("").absolutePath}",
+            source != null,
+        )
+
+        val declared = Regex("""DEVICE_ZONE_HEADER\s*=\s*'([^']+)'""")
+            .find(source!!)?.groupValues?.get(1)
+        assertTrue("DEVICE_ZONE_HEADER is not declared in shared/src/notify.js", declared != null)
+
+        // The Kotlin side is a private top-level const, so it is read from ITS
+        // source too rather than exposed just for a test.
+        var kdir: java.io.File? = java.io.File("").absoluteFile
+        var kotlin: String? = null
+        while (kdir != null && kotlin == null) {
+            val candidate = java.io.File(kdir, "android-native/app/src/main/java/com/habiterall/app/data/Api.kt")
+            if (candidate.isFile) kotlin = candidate.readText()
+            kdir = kdir.parentFile
+        }
+        assertTrue("Api.kt not found", kotlin != null)
+        val mine = Regex("""DEVICE_ZONE_HEADER\s*=\s*"([^"]+)"""")
+            .find(kotlin!!)?.groupValues?.get(1)
+
+        assertEquals(declared, mine)
+    }
 }

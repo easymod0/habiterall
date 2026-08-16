@@ -468,6 +468,28 @@ try {
     notifier.collect(followInstant)[0]?.doneToday?.has(followed.body.id) === true,
     'the reported zone survived the detour through an explicit one');
 
+  // Through `deliverAccount`, not only `collect`. The bug this whole change
+  // leads with — `deliverAccount` re-deriving the zone from the raw setting,
+  // so an `auto` account had its dueness judged on the server's clock and
+  // reported `too_late` — was pinned ONLY by the cloud suite, which needs
+  // Postgres. `deliverAccount` is shared code; the edition that runs without a
+  // database should catch it too.
+  await api('/api/settings', {
+    method: 'PUT', body: JSON.stringify({ notifyTimezone: 'auto' }),
+  });
+  const dueHabit = await api('/api/habits', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Due on the device clock', reminder_time: '07:00' }),
+  });
+  const fetchZone = fakeFetch();
+  const zoneDelivery = await deliverAccount(notifier.collect(followInstant)[0], {
+    instant: followInstant, mark: notifier.mark, fetch: fetchZone,
+    log: { debug: () => {}, info: () => {}, warn: () => {} },
+  });
+  ck('a reminder is DUE on the device\'s clock, not just answered on it',
+    zoneDelivery.sent >= 1 && (zoneDelivery.skipped?.too_late ?? 0) === 0,
+    `${JSON.stringify(zoneDelivery)} habit=${dueHabit.body.id}`);
+
   ck('a reported zone is never exported',
     !JSON.stringify(await (await fetch(`${base}/api/export`)).json())
       .includes('Asia/Tokyo'),

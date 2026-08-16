@@ -56,6 +56,15 @@ function deviceTimeZone() {
 function knownTimeZone(value) {
   if (typeof value !== 'string') return false;
   if (value === '') return true;                 // '' = use the server's zone
+  // 'auto' = follow whichever device last checked in, and it is the DEFAULT —
+  // so omitting it made the registry's own default fail its own validator.
+  // Invisible online, because `sanitise` throws the invalid value away and
+  // substitutes the default, which is the same string. Offline it was not:
+  // `saveAll` reported `ignored: ['notifyTimezone']`, the dialog toasted
+  // "Not saved: Reminder timezone" and redrew the old value — while the offline
+  // branch had already queued a write body containing `auto`, which landed on
+  // reconnect. Told it did not save, shown the old value, and it saved anyway.
+  if (value === 'auto') return true;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: value });
     return true;
