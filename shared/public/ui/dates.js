@@ -227,21 +227,83 @@ export function formatStamp(stamp) {
  * @param {string} text
  * @param {number} fontSize
  */
+// Square: CJK, Hangul, kana, full-width forms.
 const WIDE =
   /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/;
-// Measured after 0.62 proved too mean for these: `أغسطس` is five characters and
-// ran 5.5px past the end of the completion calendar at font-size 9.5.
-const BROAD = /[\u0590-\u08FF\u0900-\u0DFF\u0E00-\u0E7F]/;
 
+// Broader than Latin per character, and measured rather than guessed. Arabic,
+// Hebrew, Thaana, Indic, Thai, Lao, Tibetan, Myanmar, Georgian, Ethiopic,
+// Cherokee and Khmer — the last six were silently taking the Latin rate, which
+// is where the worst under-estimates were: `ᏉᏅᎯ` (Cherokee) measured 32.5px
+// against an estimate of 19.5.
+const BROAD =
+  /[\u0530-\u058F\u0590-\u08FF\u0900-\u0DFF\u0E00-\u0FFF\u1000-\u109F\u10A0-\u10FF\u1200-\u137F\u13A0-\u13FF\u1780-\u17FF]/;
+
+// Zero advance: a combining mark sits on the character before it. Billing them
+// as full characters made Indic gutters 2-3x too wide — `ਸ਼ੁੱ` was estimated at
+// 28.8px against a real 7.4.
+const COMBINING = /\p{Mn}|\p{Me}/u;
+
+/**
+ * A rough width in pixels for a short label, at a given font size.
+ *
+ * There is no text metric without a DOM, and two suites drive `charts.js` with
+ * a fake one — so a chart that must reserve room for a label it cannot measure
+ * has to estimate. Deliberately generous: over-reserving costs a few pixels of
+ * gutter, under-reserving clips a word, and a clipped word is the bug this
+ * exists to prevent.
+ *
+ * The alternative was to pick a label width that fits everywhere, and there
+ * isn't one: `Intl`'s short weekday is `Mon` in English, `domingo` in pt-PT and
+ * `Jumamosi` in sw-KE. Measured in Chrome, the last two overflowed a fixed
+ * 34px gutter and rendered as `omingo` and `umamosi`.
+ *
+ * Accuracy was measured against `getBBox()` over ~4,000 label strings from 88
+ * locales; the margin below covers what the classes alone do not, including
+ * capital-heavy Latin, where 0.62em was slightly mean.
+ *
+ * @param {string} text
+ * @param {number} fontSize
+ */
 export function estimateTextWidth(text, fontSize) {
   let ems = 0;
   for (const ch of String(text)) {
-    // Three classes, each an upper bound rather than an average — this reserves
-    // space, so being generous costs a few pixels of gutter and being mean
-    // costs a clipped word.
-    if (WIDE.test(ch)) ems += 1;          // CJK, Hangul, kana, full-width: square
-    else if (BROAD.test(ch)) ems += 0.8;  // Arabic, Hebrew, Indic, Thai
-    else ems += 0.62;                     // Latin, Cyrillic, Greek, digits
+    if (COMBINING.test(ch)) continue;
+    else if (WIDE.test(ch)) ems += 1;
+    else if (BROAD.test(ch)) ems += 1;
+    else ems += 0.65;
   }
   return ems * fontSize;
+}
+
+/**
+ * How much more than the estimate to RESERVE.
+ *
+ * A margin rather than a per-script table three levels deep: the remaining
+ * error is one script's average against another's widest glyph, and 15% of a
+ * gutter is cheaper than measuring every writing system.
+ *
+ * Deliberately separate from `estimateTextWidth`, which answers "how wide is
+ * this, roughly". Folding the margin in made the estimate wrong in the other
+ * direction and reported a `100%` axis label as 2px short of a gutter it
+ * clears — a test failing because the padding was inside the ruler.
+ */
+export const WIDTH_SAFETY = 1.15;
+
+/**
+ * How much room a right-anchored row label needs, given a floor.
+ *
+ * Extracted so the arithmetic is testable without a locale: two charts size
+ * their left gutter this way, and the failure it prevents — a caption clipped
+ * mid-word — only shows in locales CI does not run in. `floor` keeps the common
+ * case looking exactly as it did.
+ *
+ * @param {readonly string[]} labels
+ * @param {number} fontSize
+ * @param {number} floor    the smallest gutter to use
+ * @param {number} gap      space between the label and the plot
+ */
+export function gutterFor(labels, fontSize, floor, gap) {
+  const widest = Math.max(0, ...labels.map((t) => estimateTextWidth(t, fontSize)));
+  return Math.max(floor, Math.ceil(widest * WIDTH_SAFETY) + gap + 4);
 }

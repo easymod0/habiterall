@@ -15,8 +15,8 @@ import { SKIP, YES } from './ui/values.js';
 // module in Node. Neither reaches for anything but `Date`, `Intl` and its own
 // constants, which is what keeps them loadable under the fake DOM.
 import {
-  estimateTextWidth, formatDateShort, formatStamp, fromISOLocal, monthLabels,
-  weekdayLetters, weekdayNames,
+  WIDTH_SAFETY, estimateTextWidth, formatDateShort, formatStamp, fromISOLocal,
+  gutterFor, monthLabels, weekdayLetters, weekdayNames,
 } from './ui/dates.js';
 import { isAvoided } from './ui/toggle.js';
 
@@ -441,7 +441,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         // 6px on the final column, which an SVG clips rather than wraps.
         const monthText = monthLabels()[lastMonth];
         svg.appendChild(el('text', {
-          x: Math.min(x, width - estimateTextWidth(monthText, 9.5)),
+          x: Math.min(x, width - estimateTextWidth(monthText, 9.5) * WIDTH_SAFETY),
           y: 9, 'font-size': 9.5, fill: dim,
         }, monthText));
       }
@@ -731,12 +731,8 @@ export function weekdayMonthChart(months, color,
   // the chart. 42 stays the floor, so nothing narrows in the common case.
   const rowLabels = weekdayNames('short');
   const pad = {
-    top: 30,
-    right: 12,
-    bottom: 8,
-    left: Math.max(42, Math.ceil(Math.max(
-      ...rowLabels.map((t) => estimateTextWidth(t, ROW_LABEL_SIZE))
-    )) + ROW_LABEL_GAP + 4),
+    top: 30, right: 12, bottom: 8,
+    left: gutterFor(rowLabels, ROW_LABEL_SIZE, 42, ROW_LABEL_GAP),
   };
   const height = pad.top + 7 * rowH + pad.bottom;
 
@@ -789,7 +785,7 @@ export function weekdayMonthChart(months, color,
     // some columns makes you count to work out which one you are looking at.
     const [yy, mm] = m.month.split('-').map(Number);
     const monthText = monthLabels()[mm - 1];
-    const half = estimateTextWidth(monthText, 9.5) / 2;
+    const half = estimateTextWidth(monthText, 9.5) * WIDTH_SAFETY / 2;
     svg.appendChild(el('text', {
       // Kept inside the viewBox: a centred caption on the first or last column
       // otherwise hangs off the edge once the month name is not three Latin
@@ -1005,14 +1001,28 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
   });
 
   // Label a subset of buckets so text never overlaps.
-  const every = Math.ceil(buckets.length / Math.max(1, Math.floor(w / 62)));
+  //
+  // The budget is MEASURED from the labels rather than the fixed 62px that
+  // stood here. 62 was safe while this drew the raw `2026-08-01` — 49.6px, the
+  // same in every locale — and stopped being safe the moment the label became
+  // `formatStamp`'s output, which is unbounded: `26 de dez. de 2026` is 78.9px
+  // in pt-BR and overlapped its neighbour by 4.5px at a 328px card, which is a
+  // card on a phone. Same estimator the row gutters use, for the same reason.
+  const AXIS_SIZE = 9.5;
+  const axisLabels = buckets.map((b) => formatStamp(b.bucket));
+  const widestAxis = Math.max(
+    1, ...axisLabels.map((t) => estimateTextWidth(t, AXIS_SIZE) * WIDTH_SAFETY)
+  );
+  const every = Math.ceil(
+    buckets.length / Math.max(1, Math.floor(w / (widestAxis + 10)))
+  );
   buckets.forEach((b, i) => {
     if (i % every !== 0) return;
     svg.appendChild(el('text', {
       x: pad.left + i * slot + slot / 2,
       y: height - 12,
       'text-anchor': 'middle',
-      'font-size': 9.5,
+      'font-size': AXIS_SIZE,
       fill: dim,
       // The same `formatStamp` the card's own range readout uses. These were
       // the raw bucket key while the header above them was formatted, so one
@@ -1020,7 +1030,7 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
       // which is the "one card, two conventions" this whole change exists to
       // end, reintroduced one card over. On master both halves were raw and
       // at least AGREED.
-    }, formatStamp(b.bucket)));
+    }, axisLabels[i]));
   });
 
   return svg;
@@ -1060,7 +1070,20 @@ export function weekdayChart(days, color,
   const barW = Math.min(46, slot * 0.6);
 
   const FULL = weekdayNames('long');
-  const SHORT = weekdayNames('short');
+  // Seven captions across one card, so unlike the row gutters this cannot grow
+  // to fit — it has to choose a label that does. `Sun Mon Tue` fits anywhere;
+  // `domingo segunda terça` and `Jumatatu Jumanne Jumatano` do not, and
+  // measured at 360px in pt-PT and sw-KE they overlapped their neighbours.
+  //
+  // Narrow always fits (one or two characters in every locale checked) and its
+  // ambiguity is resolved by the tooltip, which carries the full name — the
+  // same trade the calendar heatmap's rows already make. Preferring short
+  // where it fits means English and most of Europe are unchanged.
+  const AXIS_SIZE = 10;
+  const shortNames = weekdayNames('short');
+  const SHORT = shortNames.every(
+    (t) => estimateTextWidth(t, AXIS_SIZE) * WIDTH_SAFETY <= slot
+  ) ? shortNames : weekdayNames('narrow');
 
   order.forEach((weekday, i) => {
     const d = days[weekday];
@@ -1186,12 +1209,8 @@ export function frequencyChart(months, color, { width = 720 } = {}) {
   // 13px, which is a label running off the left of the card.
   const rowLabels = months.map((m) => formatStamp(m.month));
   const pad = {
-    top: 18,
-    right: 12,
-    bottom: 8,
-    left: Math.max(58, Math.ceil(Math.max(
-      0, ...rowLabels.map((t) => estimateTextWidth(t, ROW_LABEL_SIZE))
-    )) + ROW_LABEL_GAP + 4),
+    top: 18, right: 12, bottom: 8,
+    left: gutterFor(rowLabels, ROW_LABEL_SIZE, 58, ROW_LABEL_GAP),
   };
 
   const maxPerWeek = Math.max(
@@ -1240,7 +1259,7 @@ export function frequencyChart(months, color, { width = 720 } = {}) {
       svg.appendChild(title(el('circle', {
         cx: pad.left + (n - 0.5) * colW, cy, r: radius,
         fill: color, 'fill-opacity': 0.35 + 0.65 * (count / maxCount),
-      }), `${m.month}: ${count} week(s) with ${n} completion(s)`));
+      }), `${rowLabels[r]}: ${count} week(s) with ${n} completion(s)`));
     }
   });
 

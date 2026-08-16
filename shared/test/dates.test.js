@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 const {
   estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
-  iso, monthLabels, weekdayLetters, weekdayNames,
+  gutterFor, iso, monthLabels, weekdayLetters, weekdayNames,
 } = await import('../public/ui/dates.js');
 
 /**
@@ -60,13 +60,70 @@ test('a date is formatted from its LOCAL parts, not shifted through UTC', () => 
   for (const date of ['2026-01-01', '2026-06-15', '2026-12-31']) {
     const d = fromISOLocal(date);
     assert.equal(iso(d), date, 'round trip');
-    const short = formatDateShort(d);
-    const long = formatDateLong(d);
-    const dayOfMonth = String(d.getDate());
-    assert.ok(short.includes(dayOfMonth), `${short} does not contain ${dayOfMonth}`);
-    assert.ok(long.includes(dayOfMonth), `${long} does not contain ${dayOfMonth}`);
-    assert.ok(short.includes('2026'), short);
+    // The formatter's own answer for the same `Date`, which is the only thing
+    // that is true everywhere. Two earlier versions asserted the string
+    // CONTAINED '2026' and the day number: false in ar-EG and bn-IN, whose
+    // digits are not Latin, and false again in fa-IR and th-TH, which do not
+    // use this calendar at all — `2026-01-01` is `۱۱ دی ۱۴۰۴` and
+    // `1 ม.ค. 2569`. What the helpers owe their callers is the right DATE and
+    // a stable set of options, not a particular numeral.
+    assert.equal(formatDateShort(d),
+      new Intl.DateTimeFormat(undefined,
+        { year: 'numeric', month: 'short', day: 'numeric' }).format(d));
+    assert.equal(formatDateLong(d),
+      new Intl.DateTimeFormat(undefined,
+        { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).format(d));
   }
+
+  // And they are actually a function of the date — the check above would hold
+  // for a formatter that ignored its argument.
+  const days = ['2026-01-01', '2026-01-02', '2026-06-15'].map(fromISOLocal);
+  assert.equal(new Set(days.map(formatDateShort)).size, 3);
+  assert.equal(new Set(days.map(formatDateLong)).size, 3);
+
+  // The trap `fromISOLocal` exists for, stated as a property rather than a
+  // string: a date built by parsing '2026-01-01' as UTC is 31 December for
+  // anyone west of Greenwich, so these two must not print the same.
+  assert.notEqual(formatDateShort(fromISOLocal('2026-01-01')),
+    formatDateShort(fromISOLocal('2025-12-31')));
+});
+
+test('a gutter reserves more than the label needs, in any script', () => {
+  // The arithmetic two charts size their left gutter with, pinned here rather
+  // than only in `weekcheck` — where it can only ever be exercised in whatever
+  // locale the runner happens to be in. Reverting `weekdayMonthChart` to a
+  // fixed 42px is invisible in English (`Mon` fits) and clips in pt-PT, so a
+  // browser assertion alone leaves CI blind to it.
+  const FONT = 10.5;
+  for (const labels of [
+    ['Mon', 'Tue', 'Wed'],                 // en
+    ['domingo', 'segunda', 'sábado'],      // pt-PT — clipped a fixed 42px
+    ['Jumamosi', 'Jumatatu'],              // sw-KE — the widest measured
+    ['月曜日', '日曜日'],                    // ja — square glyphs
+    ['أغسطس', 'الخميس'],                    // ar
+    ['ᏉᏅᎯ'],                                // chr — was taking the Latin rate
+  ]) {
+    const gutter = gutterFor(labels, FONT, 42, 8);
+    for (const label of labels) {
+      assert.ok(gutter >= estimateTextWidth(label, FONT) + 8,
+        `"${label}" needs ${estimateTextWidth(label, FONT)}+8, gutter is ${gutter}`);
+    }
+  }
+  // The floor holds for the common case, so nothing narrows where it did not.
+  assert.equal(gutterFor(['Mon', 'Tue'], FONT, 42, 8), 42);
+  // ...and a long one grows past it rather than clipping.
+  assert.ok(gutterFor(['Jumamosi'], FONT, 42, 8) > 42);
+  // An empty set falls back to the floor rather than -Infinity.
+  assert.equal(gutterFor([], FONT, 58, 8), 58);
+});
+
+test('a combining mark takes no width of its own', () => {
+  // Billing them as full characters made Indic gutters 2-3x too wide — one
+  // measured 28.8px estimated against 7.4px real, which reserves a third of a
+  // phone-width card for nothing.
+  const base = estimateTextWidth('\u0938', 10.5);            // स
+  const withMark = estimateTextWidth('\u0938\u0941', 10.5);  // सु
+  assert.equal(withMark, base, 'a combining vowel sign added width');
 });
 
 test('every weekday width is indexed the same way, and narrow is one character', () => {
@@ -122,8 +179,13 @@ test('a bucket key is written for a human, and an unknown one is not invented', 
   // `windowedChart`'s range readout is handed whatever its chart buckets by,
   // and `BUCKETERS` in stats.js makes four shapes.
   assert.equal(formatStamp('2026-08-16'), formatDateShort(fromISOLocal('2026-08-16')));
-  assert.match(formatStamp('2026-08'), /2026/);
-  assert.ok(!/\d{4}-\d{2}$/.test(formatStamp('2026-08')), 'a month is not left as a key');
+  // Not "contains 2026": fa-IR and th-TH do not use this calendar, so the year
+  // in the output is 1405 or 2569. What must hold is that it stopped being a
+  // key and that it still distinguishes one month from another.
+  assert.ok(!/^\d{4}-\d{2}$/.test(formatStamp('2026-08')),
+    'a month is not left as a storage key');
+  assert.notEqual(formatStamp('2026-08'), formatStamp('2026-09'));
+  assert.notEqual(formatStamp('2026-08'), formatStamp('2027-08'));
   // No Intl form, already readable, and inventing one is how a label lies.
   assert.equal(formatStamp('2026-Q3'), '2026-Q3');
   assert.equal(formatStamp('2026'), '2026');

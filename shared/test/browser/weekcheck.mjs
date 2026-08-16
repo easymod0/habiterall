@@ -40,7 +40,7 @@ globalThis.document = {
 const { frequencyChart, historyChart, weekdayChart, weekdayMonthChart } =
   await import(sharedPublic('charts.js'));
 const { calendarWindow, weekdayIndex } = await import(sharedPublic('ui/calendar.js'));
-const { estimateTextWidth, formatStamp, weekdayNames } =
+const { estimateTextWidth, formatStamp, gutterFor, weekdayNames } =
   await import(sharedPublic('ui/dates.js'));
 
 let fails = 0;
@@ -226,7 +226,15 @@ const RAW_KEY = /^\d{4}(-\d{2}){1,2}$/;
 
 const axisTexts = (svg) => collect(svg)
   .filter((n) => n.name === 'text' && (n.text ?? '').trim())
-  .map((n) => ({ text: String(n.text), x: Number(n.attrs.x), anchor: n.attrs['text-anchor'] }));
+  .map((n) => ({
+    text: String(n.text),
+    x: Number(n.attrs.x),
+    anchor: n.attrs['text-anchor'],
+    // Read from the node, not assumed: these charts draw at 9.5 and 10.5, and
+    // estimating a 9.5px label at 10.5 reported a percentage axis as 4px short
+    // when it fits.
+    size: Number(n.attrs['font-size']) || 10.5,
+  }));
 
 const buckets = ['2026-06', '2026-07', '2026-08'].map((bucket) => ({
   bucket, completed: 2, total: 4, value: 0, skipped: 0,
@@ -238,16 +246,94 @@ for (const [name, svg] of [
     buckets.map((b) => ({ month: b.bucket, counts: { 3: 2 } })), '#3b82f6', { width: 700 })],
   ['weekday by month', weekdayMonthChart(months, '#3b82f6', { width: 700, weekStart: 'monday' })],
 ]) {
+  // `<title>` too, not only `<text>`. A first version looked at drawn labels
+  // alone and walked straight past the one tooltip the conversion missed —
+  // a bubble reading `2026-06: 2 week(s)…` eight pixels from a row label
+  // reading `Jun 2026`.
   const texts = axisTexts(svg);
-  const raw = texts.filter((t) => RAW_KEY.test(t.text)).map((t) => t.text);
-  check(`${name}: no axis label is a raw storage key`, raw.length === 0, raw.join(','));
+  const tooltips = collect(svg)
+    .filter((n) => n.name === 'title' && (n.text ?? '').trim())
+    .map((n) => ({ text: String(n.text) }));
+  const raw = [...texts, ...tooltips]
+    .filter((t) => RAW_KEY.test(t.text) || /(^|\s)\d{4}-\d{2}(-\d{2})?(\s|:|$)/.test(t.text))
+    .map((t) => t.text);
+  check(`${name}: no label or tooltip shows a raw storage key`,
+    raw.length === 0, raw.slice(0, 3).join(' | '));
 
   // Right-anchored labels are the row gutters; `x` is where they END.
+  //
+  // NOT filtered on `x > 0`, which is how the first version of this passed
+  // vacuously: moving a caption to `x: 0` draws it entirely outside the chart,
+  // invisible, and simply removed it from the set being checked. A label at 0
+  // needs its whole width and has none, so it fails — which is the answer.
   const tight = texts
-    .filter((t) => t.anchor === 'end' && t.x > 0)
-    .filter((t) => estimateTextWidth(t.text, 10.5) > t.x)
-    .map((t) => `${t.text} needs ${Math.ceil(estimateTextWidth(t.text, 10.5))}px, has ${t.x}`);
+    .filter((t) => t.anchor === 'end')
+    .filter((t) => estimateTextWidth(t.text, t.size) > t.x)
+    .map((t) => `${t.text} needs ${Math.ceil(estimateTextWidth(t.text, t.size))}px `
+      + `at ${t.size}px, has ${t.x}`);
   check(`${name}: every row label fits its gutter`, tight.length === 0, tight.join(' | '));
+}
+
+// The gutter WIRING, which the fits-its-gutter check cannot see in English:
+// `Mon` clears a fixed 42px, so reverting `weekdayMonthChart` to one is
+// invisible here and clips in pt-PT. Asserting the drawn position IS what
+// `gutterFor` computes pins it in any locale, including the one CI runs in.
+for (const [name, svg, labels, size, floor] of [
+  ['weekday by month', weekdayMonthChart(months, '#3b82f6', { width: 700, weekStart: 'monday' }),
+    weekdayNames('short'), 10.5, 42],
+  ['times per week', frequencyChart(
+    buckets.map((b) => ({ month: b.bucket, counts: { 3: 2 } })), '#3b82f6', { width: 700 }),
+  buckets.map((b) => formatStamp(b.bucket)), 10.5, 58],
+]) {
+  const GAP = 8;
+  const xs = axisTexts(svg).filter((t) => t.anchor === 'end' && t.size === size)
+    .map((t) => t.x);
+  check(`${name}: the gutter is the one gutterFor computes`,
+    xs.length > 0 && xs.every((x) => x === gutterFor(labels, size, floor, GAP) - GAP),
+    `x=${[...new Set(xs)].join(',')} want ${gutterFor(labels, size, floor, GAP) - GAP}`);
+}
+
+// Seven captions across one card cannot grow to fit, so `weekdayChart` picks a
+// label that does. Pinned by driving it narrow: at a width where the short
+// names cannot fit, it must fall back rather than overlap. Measured in Chrome
+// before this — pt-PT and sw-KE overlapped at 360px.
+// 160px is chosen so even `Mon` cannot fit a slot — the fallback is then
+// exercised in ENGLISH, where the bug it prevents does not otherwise exist.
+// Without it this is what pt-PT looks like at a normal width.
+for (const width of [700, 160]) {
+  const svg = weekdayChart(days, '#3b82f6', { width, weekStart: 'monday' });
+  const drawn = axisTexts(svg)
+    .filter((t) => t.anchor === 'middle')
+    .sort((a, b) => a.x - b.x);
+  const clash = drawn.slice(1).filter((t, i) =>
+    t.x - drawn[i].x
+      < (estimateTextWidth(t.text, t.size) + estimateTextWidth(drawn[i].text, t.size)) / 2);
+  check(`weekday axis at ${width}px: captions do not overlap`,
+    drawn.length === 7 && clash.length === 0,
+    `${drawn.map((t) => t.text).join(',')} — ${clash.length} clashing`);
+}
+
+// A long axis label, without needing a locale that has one. `formatStamp`
+// passes an unrecognised key through verbatim, so this exercises the branch
+// where the history axis's old fixed 62px budget overlapped — measured in
+// pt-BR at a phone-width card, and invisible in English.
+{
+  // Twelve, not three: with only a handful the slots are so wide that no budget
+  // can overlap them, and the check passes for the wrong reason. A year of
+  // months is what the chart actually draws.
+  const wide = Array.from({ length: 12 }, (_, i) => ({
+    bucket: `a-very-long-bucket-label-${i}`,
+    completed: 1, total: 2, value: 0, skipped: 0,
+  }));
+  const svg = historyChart(wide, '#3b82f6', { width: 700 });
+  const drawn = axisTexts(svg)
+    .filter((t) => t.anchor === 'middle' && wide.some((b) => b.bucket === t.text))
+    .sort((a, b) => a.x - b.x);
+  const overlaps = drawn.slice(1).filter((t, i) =>
+    t.x - drawn[i].x < (estimateTextWidth(t.text, t.size) + estimateTextWidth(drawn[i].text, t.size)) / 2);
+  check('history: long axis labels are thinned rather than overlapped',
+    overlaps.length === 0,
+    `${drawn.length} drawn, ${overlaps.length} overlapping`);
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL WEEK CHECKS PASSED');
