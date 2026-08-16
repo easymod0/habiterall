@@ -7,12 +7,29 @@
 // Node, where a root-absolute specifier resolves against the filesystem root.
 // A relative path works in both the browser and Node.
 import {
-  calendarWindow, zoomLevel, calendarWidth, CALENDAR_PAD_LEFT, DEFAULT_ZOOM,
+  calendarWindow, weekdayIndex, zoomLevel, calendarWidth, CALENDAR_PAD_LEFT,
+  DEFAULT_ZOOM,
 } from './ui/calendar.js';
 import { SKIP, YES } from './ui/values.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+/**
+ * The seven `getDay()` indices in the order the rows are drawn.
+ *
+ * Sunday-start is the identity; Monday-start is `[1..6, 0]`. Everything with a
+ * weekday axis reads BOTH its labels and its data through this, which is the
+ * point: the stats functions index days by `getDay()`, so rotating the captions
+ * alone would caption Monday's row "Su" and leave the bars where they were —
+ * a chart that is wrong in the one dimension it exists to show.
+ */
+const weekOrder = (weekStart) =>
+  weekStart === 'monday' ? [1, 2, 3, 4, 5, 6, 0] : [0, 1, 2, 3, 4, 5, 6];
+
+/** Those labels in row order. */
+const rotateWeek = (labels, weekStart) =>
+  weekOrder(weekStart).map((i) => labels[i]);
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -140,6 +157,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     streaks = null,     // [{start, end, length}] to underline as runs
     minStreak = 3,      // shorter runs are noise, not an achievement
     unknownMark = false, // draw '?' on days with no entry (`questionMarks`)
+    weekStart = 'monday', // which day a column begins on
   } = opts;
 
   const level = zoomLevel(zoom);
@@ -155,8 +173,10 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   // gap, and that one extra pixel-gap was enough to trip `max-width: 100%`
   // into scaling the whole grid down.
   const width = calendarWidth(weeks, zoom);
-  // The extra 4px at the foot leaves room for the wrap tab hanging below
-  // Saturday; the one above Sunday sits inside padTop's existing space.
+  // The extra 4px at the foot leaves room for the wrap tab hanging below the
+  // week's LAST row; the one above its first sits inside padTop's existing
+  // space. Which weekday those are depends on `weekStart` — the rows are
+  // positional — so they are named by position here rather than by day.
   const height = padTop + 7 * step + 4;
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Completion calendar');
@@ -177,12 +197,16 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
 
   // The window is anchored on its end so `last` is always drawn — see
   // calendarWindow, where the reasoning and the regression test live.
-  const start = fromISOLocal(calendarWindow(iso(last), weeks).start);
+  const start = fromISOLocal(calendarWindow(iso(last), weeks, weekStart).start);
 
+  // Two labels, at the first and third rows. They move with the setting: the
+  // grid's rows are positional — row 0 is whatever `calendarWindow` started the
+  // week on — so a fixed 'S' over row 0 captions Monday on a Monday-start week.
+  const calLabels = rotateWeek(WEEKDAY_LABELS, weekStart);
   for (let i = 0; i < 3; i += 2) {
     svg.appendChild(el('text', {
       x: 0, y: padTop + (i * step) + CELL - 2, 'font-size': 9, fill: dim,
-    }, WEEKDAY_LABELS[i]));
+    }, calLabels[i]));
   }
 
   // Dates belonging to a streak worth showing, so each cell can decide
@@ -220,13 +244,14 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
             fill: link,
           }));
         } else if (wk < weeks - 1) {
-          // Saturday to Sunday: the run wraps to the top of the NEXT column,
+          // Last row to first: the run wraps to the top of the NEXT column,
           // a jump from bottom-right to top-left that no straight connector
           // can span. Routing an elbow around the grid was tried and looked
           // like a smudge — it crossed unrelated cells and got clipped.
           //
-          // Instead, two small tabs: one off the bottom of Saturday and one
-          // off the top of the following Sunday. They are the same mark as
+          // Instead, two small tabs: one off the bottom of the week's last
+          // row and one off the top of the next week's first. They are the
+          // same mark as
           // the within-column connector, so a half-connector reads as
           // "continues" — the way a hyphen at the end of a line does.
           const tab = (cx, cy) => el('rect', {
@@ -332,7 +357,8 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         rect.setAttribute('tabindex', '-1');
         rect.addEventListener('click', () => onPick(date));
         rect.addEventListener('focus', () => setRovingFocus(svg, rect));
-        rect.addEventListener('keydown', (e) => handleGridKey(e, svg, rect, onPick));
+        rect.addEventListener('keydown',
+          (e) => handleGridKey(e, svg, rect, onPick, weekStart));
         cells.push(rect);
       }
 
@@ -589,7 +615,8 @@ function setRovingFocus(svg, cell) {
  * visual layout: columns are weeks, rows are weekdays. Home/End jump to the
  * ends of the week, PageUp/PageDown by four weeks.
  */
-function handleGridKey(e, svg, cell, onPick) {
+/** @param {'monday'|'sunday'} [weekStart] */
+function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
   const date = cell.dataset.date;
 
   if (e.key === 'Enter' || e.key === ' ') {
@@ -613,7 +640,11 @@ function handleGridKey(e, svg, cell, onPick) {
 
   let targetDate;
   if (e.key === 'Home' || e.key === 'End') {
-    const dow = fromISOLocal(date).getDay();
+    // Ends of the WEEK as the grid draws it: on a Monday-start calendar Home is
+    // Monday, and `getDay()` alone would jump to the Sunday in the column
+    // before — off the top of the grid, where `byDate` finds nothing and the
+    // key silently does nothing.
+    const dow = weekdayIndex(fromISOLocal(date), weekStart);
     targetDate = shiftISO(date, e.key === 'Home' ? -dow : 6 - dow);
   } else {
     targetDate = shiftISO(date, delta);
@@ -640,7 +671,8 @@ function handleGridKey(e, svg, cell, onPick) {
  * Rate, not count: months hold four or five of each weekday, and a raw count
  * would make February look worse than March for no reason.
  */
-export function weekdayMonthChart(months, color, { width = 720 } = {}) {
+export function weekdayMonthChart(months, color,
+                                  { width = 720, weekStart = 'monday' } = {}) {
   const rowH = 26;
   // Two lines of header: the month on every column, the year where it changes.
   const pad = { top: 30, right: 12, bottom: 8, left: 42 };
@@ -666,11 +698,14 @@ export function weekdayMonthChart(months, color, { width = 720 } = {}) {
   const colW = Math.min(72, w / shown.length);
   const maxR = Math.min(11, colW / 2 - 2, rowH / 2 - 2);
 
-  // Weekday rows, Sunday first to match the calendar heatmap above it.
-  // Two letters, not one: S/S and T/T are ambiguous, and this axis is the
-  // whole point of the chart.
-  const FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const SHORT = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+  // Weekday rows in the same order as the calendar heatmap above — which is
+  // the account's `weekStart`, not always Sunday. Two letters, not one: S/S and
+  // T/T are ambiguous, and this axis is the whole point of the chart.
+  const FULL = rotateWeek(
+    ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+    weekStart);
+  const SHORT = rotateWeek(['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'], weekStart);
+  const order = weekOrder(weekStart);
   for (let d = 0; d < 7; d++) {
     svg.appendChild(el('text', {
       x: pad.left - 8, y: pad.top + d * rowH + rowH / 2 + 4,
@@ -698,8 +733,13 @@ export function weekdayMonthChart(months, color, { width = 720 } = {}) {
       }, String(yy)));
     }
 
-    m.days.forEach((d, r) => {
-      if (!d.total) return;
+    // Through the row order, not `forEach`'s index: `computeWeekdayByMonth`
+    // returns days indexed by `getDay()`, and the rows are drawn in the
+    // account's own week order. Reading them positionally is what would put
+    // Sunday's data on Monday's row under a rotated label.
+    order.forEach((weekday, r) => {
+      const d = m.days[weekday];
+      if (!d?.total) return;
       const cy = pad.top + r * rowH + rowH / 2;
 
       // An empty ring for a weekday that occurred but was never completed:
@@ -913,7 +953,8 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
 
 /* ---------- weekday breakdown ---------- */
 
-export function weekdayChart(days, color, { width = 720, height = 170 } = {}) {
+export function weekdayChart(days, color,
+                             { width = 720, height = 170, weekStart = 'monday' } = {}) {
   const pad = { top: 12, right: 12, bottom: 30, left: 34 };
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Completions by day of week');
@@ -923,6 +964,11 @@ export function weekdayChart(days, color, { width = 720, height = 170 } = {}) {
   const dim = themed('--text-dim');
   const border = themed('--border');
 
+  // Bars in the account's own week order, not `getDay()`'s. `computeWeekdays`
+  // indexes by `getDay()`, so this is where the two are reconciled — and both
+  // the bar and its caption read through the same array, which is what stops
+  // one moving without the other.
+  const order = weekOrder(weekStart);
   const rates = days.map((d) => (d.total ? d.completed / d.total : 0));
 
   for (const frac of [0, 0.5, 1]) {
@@ -938,20 +984,25 @@ export function weekdayChart(days, color, { width = 720, height = 170 } = {}) {
   const slot = w / 7;
   const barW = Math.min(46, slot * 0.6);
 
-  days.forEach((d, i) => {
-    const rate = rates[i];
+  const FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  order.forEach((weekday, i) => {
+    const d = days[weekday];
+    if (!d) return;
+    const rate = rates[weekday];
     const barH = rate * h;
     const x = pad.left + i * slot + (slot - barW) / 2;
 
     svg.appendChild(title(el('rect', {
       x, y: pad.top + h - barH, width: barW,
       height: Math.max(barH, rate > 0 ? 2 : 0), rx: 4, fill: color,
-    }), `${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][i]}: ${d.completed}/${d.total}`));
+    }), `${FULL[weekday]}: ${d.completed}/${d.total}`));
 
     svg.appendChild(el('text', {
       x: pad.left + i * slot + slot / 2, y: height - 10,
       'text-anchor': 'middle', 'font-size': 11, fill: dim,
-    }, ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][i]));
+    }, SHORT[weekday]));
   });
 
   return svg;

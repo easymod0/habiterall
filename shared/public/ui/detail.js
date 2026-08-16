@@ -254,8 +254,19 @@ function render(stats, entries) {
   calHead.append(nav);
 
   const calEnd = state.calEnd ?? todayISO();
-  const calStart = calendarWindow(calEnd, CAL_WEEKS).start;
-  navLabel.textContent = `${calStart} → ${calEnd}`;
+  // BOTH ends from the same window the grid below is drawn with. Left to the
+  // parameter default this label named a date the calendar does not start on —
+  // by a day most of the week, by six whenever the anchor falls on the week's
+  // last day — and the right-hand side had the same fault for the same reason:
+  // `calEnd` is the day being asked about, not the last cell, so paging back
+  // drew up to six further days of real history beyond the labelled end.
+  //
+  // Clamped to today, because the window's last column runs to the end of the
+  // week and those days have not happened yet. The label says what is shown
+  // and answerable; the future cells are drawn but empty.
+  const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
+  const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
+  navLabel.textContent = `${calWindow.start} → ${calLast}`;
 
   const skipSet = new Set(entries.filter((e) => e.status === 'skip').map((e) => e.date));
   const notesByDate = Object.fromEntries(
@@ -266,6 +277,10 @@ function render(stats, entries) {
   calScroll.className = 'chart-scroll';
   calScroll.append(calendarChart(entriesByDate, color, habit, {
     zoom,
+    // The account's week, which `startOfWeek` in stats.js has always honoured
+    // while the calendar snapped to Sunday regardless — so the heatmap and the
+    // history chart under it disagreed about where a week begins.
+    weekStart: settings.get('weekStart'),
     weeks: CAL_WEEKS,
     endDate: calEnd,
     skips: skipSet,
@@ -335,7 +350,8 @@ function render(stats, entries) {
 
   /* weekday — seven fixed bars, so nothing to page through */
   host.append(
-    card('By day of week', weekdayChart(stats.weekdays, color, { width: chartWidth }))
+    card('By day of week', weekdayChart(stats.weekdays, color,
+      { width: chartWidth, weekStart: settings.get('weekStart') }))
   );
 
   /* weekday consistency over time — the same question as the bars above,
@@ -356,7 +372,8 @@ function render(stats, entries) {
       width: chartWidth,
       labelOf: (m) => m.month,
       redraw: () => open(habit.id),
-      render: (slice) => weekdayMonthChart(slice, color, { width: chartWidth }),
+      render: (slice) => weekdayMonthChart(slice, color,
+        { width: chartWidth, weekStart: settings.get('weekStart') }),
     });
     host.append(wmCard);
   }

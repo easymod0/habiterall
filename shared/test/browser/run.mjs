@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const BASE = process.env.BASE ?? 'http://localhost:3000';
 
 /** Suites that need no server (pure rendering against a fake DOM). */
-const OFFLINE_SUITES = new Set(['rendercheck', 'daydialog', 'atmost']);
+const OFFLINE_SUITES = new Set(['rendercheck', 'daydialog', 'atmost', 'weekcheck']);
 
 const requested = process.argv.slice(2);
 const all = readdirSync(here)

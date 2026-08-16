@@ -112,6 +112,25 @@ snapped to a round number, because 1 is right for "8 glasses" and useless for
 storage, which is the only thing that can catch the control and the database
 disagreeing about what was typed.
 
+**A chart's labels and its data have to be asserted TOGETHER.** `weekcheck.mjs`
+exists because a review broke the week-start plumbing four ways at once — bars
+read positionally while captions rotated, the calendar's row labels left
+unrotated, Home/End back on `getDay()`, the month grid reading rows by index —
+and the whole unit suite and every browser suite still passed. The arithmetic
+was covered; nothing looked at a rendered chart. The failure that matters is not
+"the wrong day is first", it is a caption and a datum moving independently,
+which reads as deliberate.
+
+Note where each half is pinned, because the split is forced rather than chosen.
+`weekcheck.mjs` is OFFLINE and covers the labels and the pairing. **Home/End is
+in `feat4.mjs`, in a real browser**, because the handler is reached through a
+`keydown` listener that only exists when the calendar is interactive and it
+reads `dataset`, which the offline fake DOM does not have — a first version of
+`weekcheck` claimed to cover it and did not, and the `getDay()` mutation passed
+every suite in the repo. The month chart needs BOTH its tooltip and its drawn
+caption asserted: they are built from different arrays, so checking one leaves
+the other free to move.
+
 **`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
 still works for boolean habits (where `3` is unambiguously a skip) but is
 wrong for numerical ones, where `3` is a real amount.
@@ -270,8 +289,28 @@ rate (being mid-slip is not the same as having failed to recover) and reported
 as `openRun` instead; and a rate of `null` means "nothing has ever been
 missed", which is a different claim from 100% and must not render as a number.
 
+**`weekStart` reaches every weekday axis, and for a long time it did not.**
+`startOfWeek` in stats.js has always honoured it, so the history and
+times-per-week charts bucketed on the right day — while `calendarWindow`
+snapped unconditionally to Saturday/Sunday and the weekday charts drew Sunday
+first. Someone whose week starts on Monday got a Sunday-anchored heatmap on the
+chart the detail view opens to, with the labels beside it saying otherwise. The
+setting's own help text says it is "used by the history and times-per-week
+charts", which is literally true and is exactly how it survived.
+
+`weekOrder` in charts.js is the one translation from `getDay()`'s Sunday-based
+numbering to the account's, and **both the labels and the data read through
+it**. Rotating the captions alone would have captioned Monday's row "Sunday"
+and left the bars where they were — a chart wrong in the one dimension it
+exists to show. The calendar heatmap needs neither, because its rows are
+positional: `calendarWindow` decides which day the column starts on and the
+grid fills sequentially from there. What it does need is the labels, and
+Home/End, which jumped to `getDay() === 0` and so walked off the top of a
+Monday-start grid.
+
 **The calendar is anchored on its END, not its start.** Going back
-`weeks*7` days and *then* snapping to a Sunday shifts the whole grid earlier,
+`weeks*7` days and *then* snapping back to the week's first day shifts the whole
+grid earlier,
 so the last column stops short of today by however many days into the week it
 is — today's square was invisible on six days out of seven. `calendarWindow`
 owns this and `test/calendar.test.js` pins it.
