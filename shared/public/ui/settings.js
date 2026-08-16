@@ -108,6 +108,23 @@ function timeZoneOptions() {
  * @type {Record<string, SettingDef>}
  */
 export const SETTINGS = {
+  theme: {
+    section: 'Dashboard',
+    label: 'Theme',
+    help: 'Light, dark, or whatever this device is set to.',
+    type: 'select',
+    // `system` rather than a light/dark pair, because "follow the device" is a
+    // state and not the absence of one. The old two-way toggle wrote
+    // localStorage, so pressing it once was irreversible: there was no way back
+    // to following the system, and a machine that goes dark at sunset stopped
+    // doing so with nothing on screen to say why.
+    default: 'system',
+    options: [
+      { value: 'system', label: 'Follow this device' },
+      { value: 'light', label: 'Light' },
+      { value: 'dark', label: 'Dark' },
+    ],
+  },
   dayOrder: {
     section: 'Dashboard',
     label: 'Day order',
@@ -475,6 +492,31 @@ function writeCache(values) {
   } catch {
     // Private browsing or a full quota; the server copy still stands.
   }
+  // After the store, and outside its try: a setting the browser APPLIES to
+  // itself has to follow the value whether or not localStorage would take it.
+  for (const fn of appliers) fn(values);
+}
+
+/** @type {((values: Record<string, any>) => void)[]} */
+const appliers = [];
+
+/**
+ * Follow a setting the browser applies to ITSELF, rather than reading at render
+ * time.
+ *
+ * Distinct from `onChange`, which fires only when the server disagreed with
+ * what was sent — that is the dialog's cue to redraw, and it says nothing about
+ * an ordinary save. A theme has to follow every path the cache moves by: the
+ * first read from localStorage, the answer to `init()`, a `set`, a `save`, a
+ * `saveAll` and a `reset`. Six call sites, or one chokepoint, and `writeCache`
+ * is already on all six.
+ *
+ * The callback is invoked immediately with the values in hand, because the
+ * caller registering before the first paint is the whole point.
+ */
+export function onApply(fn) {
+  appliers.push(fn);
+  fn(load());
 }
 
 /**

@@ -50,7 +50,7 @@ Postgres one.
 | `public/ui/dates.js` | browser-side date helpers |
 | `public/ui/time.js` | parsing and formatting a reminder time, DOM-free so it is testable |
 | `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, and what each state is WORTH for this habit. DOM-free, mirrored in Kotlin |
-| `public/ui/theme.js` | light/dark, with a redraw callback |
+| `public/ui/theme.js` | light / dark / follow-the-device, as a stored preference. No redraw callback — see `themed` in charts.js |
 | `public/ui/values.js` | `UNSET` / `YES` / `SKIP` for the browser, mirroring `src/constants.js` |
 | `public/auth-session.js` | the one auth adapter: `none` / `password` / `setup` / `oidc`, chosen by what the server reports |
 | `public/charts.js` | hand-rolled SVG charts |

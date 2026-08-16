@@ -158,6 +158,58 @@ try {
       !!blend.sample && /var\(--grid-empty\)/.test(blend.sample), blend.sample);
   }
 
+  /* ---------- the theme is a preference, and `system` is one of three ---------- */
+  //
+  // It used to live in localStorage under `habiterall-theme`, so it did not
+  // follow the account — and `toggleTheme` wrote one of two values, which made
+  // the first press irreversible: nothing could get back to following the
+  // device. Both halves are checked here rather than in a unit test, because
+  // what is being asserted is that the SERVER ends up holding it and that the
+  // page paints from it on the next load.
+  const cycled = await ev(`(async()=>{
+    const theme = await import('/shared/ui/theme.js');
+    const out = [];
+    // Three presses from wherever it is: the cycle must return to its start,
+    // which is what "there is a way back to the system" means.
+    for (let i = 0; i < 4; i++) {
+      out.push(await (await fetch('/api/settings',
+        { credentials: 'same-origin' })).json().then(s => s.theme ?? null));
+      await theme.toggleTheme();
+    }
+    return out;
+  })()`);
+  ck('pressing the control stores the theme on the SERVER',
+    cycled.slice(1).every((v) => v !== null), JSON.stringify(cycled));
+  ck('and the cycle includes a way back to following the device',
+    cycled.includes('system'), JSON.stringify(cycled));
+  ck('the three states are all reachable',
+    new Set(cycled.filter(Boolean)).size >= 3, JSON.stringify(cycled));
+
+  // Land on an explicit value, reload, and see it survive with no localStorage
+  // theme key in play.
+  await ev(`(async()=>{
+    const { save } = await import('/shared/ui/settings.js');
+    localStorage.removeItem('habiterall-theme');
+    await save('theme', 'dark');
+    return 1;
+  })()`);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const survived = await ev(`document.documentElement.dataset.theme`);
+  ck('a stored theme survives a reload', survived === 'dark', String(survived));
+
+  // And `system` paints from the device rather than freezing at whatever the
+  // last explicit choice was.
+  const followed = await ev(`(async()=>{
+    const { save } = await import('/shared/ui/settings.js');
+    await save('theme', 'system');
+    const wantsDark = matchMedia('(prefers-color-scheme: dark)').matches;
+    return { painted: document.documentElement.dataset.theme,
+             expected: wantsDark ? 'dark' : 'light' };
+  })()`);
+  ck('and "follow this device" resolves against the device',
+    followed.painted === followed.expected, JSON.stringify(followed));
+
   console.log(fails === 0 ? '\nALL THEME CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

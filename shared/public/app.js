@@ -20,7 +20,7 @@ import * as routes from '/shared/ui/routes.js';
 import * as settingsDialog from '/shared/ui/settings-dialog.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
-import { initTheme, toggleTheme } from '/shared/ui/theme.js';
+import { initTheme, migrateTheme, toggleTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
 import { showError } from '/shared/ui/views.js';
 
@@ -128,7 +128,16 @@ export async function start(adapter) {
   // be taken now or it is gone by the time there is somewhere to use it.
   const opening = routes.current();
 
-  initTheme();
+  // The button is this module's, so the label is written here; `theme.js`
+  // only says what it should read. Two modules reaching for one id is what
+  // `test/ui-modules.test.js` refuses.
+  initTheme({
+    onLabel: (text) => {
+      const button = $('#btn-theme');
+      button.title = text;
+      button.setAttribute('aria-label', text);
+    },
+  });
   connectivity.refreshOfflineBadge();
 
   try {
@@ -140,6 +149,9 @@ export async function start(adapter) {
     // Preferences are server-side, so they must arrive before the first
     // render or the dashboard paints with the wrong day order and flips.
     await settings.init();
+    // After the answer, never before: it is a write, and writing from the
+    // cached values would race it. See `migrateTheme`.
+    migrateTheme();
 
     if (opening.view === 'habit') {
       // A link straight to a habit does NOT paint the list on the way. It used
