@@ -1001,16 +1001,5 @@ export function init() {
   // The dashboard repaints from what it already has; only a 'reload' goes back
   // to the server. Both are ignored while the detail view is the one showing.
   on('change', () => { if (state.openHabitId == null) paint(); });
-  // A 'reload' is "the list you were filtering has been replaced" — a habit
-  // created, a backup restored — so the query goes with it, for the reason the
-  // archive toggle clears it. Without this, creating a habit while a filter is
-  // live toasts "Habit created" over a list the new habit is not in, and a
-  // restore reads "No habits match that." over the freshly imported account.
-  //
-  // Note a check-off does NOT come through here: it ends in `load()` directly,
-  // which is why the query survives one and is cleared by this.
-  on('reload', () => {
-    state.query = '';
-    load().catch((e) => toast(e.message));
-  });
+  on('reload', () => { load().catch((e) => toast(e.message)); });
 }

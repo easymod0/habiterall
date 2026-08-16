@@ -213,12 +213,15 @@ try {
     i.value = 'wombat'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await sleep(300);
   const created = await ev(`(async()=>{
-    const { emit } = await import('/shared/ui/store.js');
-    await fetch('/api/habits', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Zzz Newly made', type: 'boolean' }) });
-    emit('reload');
-    await new Promise((r) => setTimeout(r, 1500));
+    // Through the real dialog, not by emitting 'reload' by hand: the claim is
+    // about what CREATING a habit does, and a hand-fired event would stay green
+    // backticks in here: the whole block is one template literal.)
+    // if habit-dialog switched to change or stopped clearing the query. (No
+    document.getElementById('btn-new').click();
+    await new Promise((r) => setTimeout(r, 400));
+    document.querySelector('#habit-form [name=name]').value = 'Zzz Newly made';
+    document.getElementById('habit-form').requestSubmit();
+    await new Promise((r) => setTimeout(r, 1800));
     return {
       value: document.getElementById('habit-search').value,
       rows: [...document.querySelectorAll('#grid .habit-row .habit-name')]
@@ -229,6 +232,32 @@ try {
     created.value === '', created.value);
   ck('and the new habit is on screen',
     created.rows.includes('Zzz Newly made'), JSON.stringify(created.rows.length));
+
+  /* ---------- ...but Back from a habit does NOT ---------- */
+  //
+  // The other half, and the one that made clearing on every 'reload' wrong:
+  // finding a habit, opening it and coming back is the search feature's main
+  // workflow, and `detail.js` reaches the dashboard by emitting the same
+  // 'reload'. Clearing there cost a re-type every time.
+  const roundTrip = await ev(`(async()=>{
+    const i = document.getElementById('habit-search');
+    i.value = 'wombat'; i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const before = document.querySelectorAll('#grid .habit-row').length;
+    document.querySelector('#grid .habit-row .habit-meta').click();
+    await new Promise((r) => setTimeout(r, 1500));
+    const onDetail = !document.getElementById('view-detail').hidden;
+    history.back();
+    await new Promise((r) => setTimeout(r, 1800));
+    return { before, onDetail,
+      value: document.getElementById('habit-search').value,
+      rows: document.querySelectorAll('#grid .habit-row').length };
+  })()`);
+  ck('opening a habit from a filtered list works', roundTrip.onDetail === true,
+    JSON.stringify(roundTrip));
+  ck('and coming back KEEPS the filter you were using',
+    roundTrip.value === 'wombat' && roundTrip.rows === roundTrip.before,
+    JSON.stringify(roundTrip));
 
   console.log(fails === 0 ? '\nALL SEARCH CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {

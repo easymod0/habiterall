@@ -12,7 +12,7 @@
  * never passes through memory here.
  */
 
-import { emit } from '/shared/ui/store.js';
+import { emit, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -88,6 +88,9 @@ async function runImport() {
     }
     result.hidden = false;
 
+    // A restore replaces every habit, so the dashboard's filter goes with it —
+    // otherwise the freshly imported account reads "No habits match that."
+    state.query = '';
     emit('reload');
     toast('Import complete');
   } catch (e) {

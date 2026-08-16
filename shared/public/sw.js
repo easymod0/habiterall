@@ -22,6 +22,10 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v13: the habit search. `index.html` grew `#search-row`, `#habit-search`,
+// `#search-count` and `#empty-nomatch`, and dashboard.js looks all four up at
+// module scope and dereferences them in `paint()` — so a stale v12 shell with
+// the new script is the v11 and v12 failure mode again, verbatim.
 // v12: the amount field. `index.html` grew a second dialog and the
 // day editor's number input became a control, so a stale shell with
 // new scripts has no `#day-count` to bind and throws at module scope —

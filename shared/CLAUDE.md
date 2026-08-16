@@ -368,11 +368,13 @@ Three rules travel with it. **The drag handle goes while a filter is on**: a dro
 against a subset computes a `position` from neighbours that are not the habit's,
 and `persistOrder` sends the RENDERED order. **The threshold reads the unfiltered
 count** (and the box also stays while it has focus), or it vanishes under the
-cursor at the moment a query narrows the list past it. And **`'reload'` clears
-the query** — it means "the list you were filtering has been replaced", so
-creating a habit or restoring a backup does not leave the result invisible
-behind a stale filter. A check-off does not come through there; it ends in
-`load()`, which is why the query survives one.
+cursor at the moment a query narrows the list past it. And **the MUTATORS clear the query**, not the `'reload'` listener. Creating a
+habit or restoring a backup replaces the list, so a filter that hides the result
+is a thing the user is told about and cannot see — `habit-dialog` and
+`data-dialog` clear it where the archive toggle already does. Doing it in the
+listener looks equivalent and is not: `'reload'` has ten emitters and only half
+replace anything, so it also wiped the box on **Back from a habit** — the
+feature's main workflow — and on a background reconnect, mid-word.
 
 **A rebuilt control keeps focus via `data-focus-key`, not its position.**
 `dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single
