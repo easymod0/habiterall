@@ -74,9 +74,13 @@ check('avoid: a slip reads as a failure', c4[d1]==='var(--danger)', c4[d1]);
 // The gate is all THREE questions, so a habit that is at_most and numerical but
 // still shown as an amount keeps the old shading — and one that is `avoid` on a
 // boolean or an at_least habit is not reachable as an inversion either.
-const c5=paint({[d0]:0,[d1]:2},'#10b981',
+// `d1` is OVER the limit, deliberately: with a value at or under it the two
+// branches agree and the check passes with the `show_as` clause deleted from
+// `isAvoided`. Measured — it did.
+const c5=paint({[d0]:0,[d1]:3},'#10b981',
   {...smoking,target_value:2,show_as:'amount'});
-check('at_most shown as an amount is unchanged', c5[d1]==='#10b981', c5[d1]);
+check('at_most shown as an amount is unchanged, and still SHADES an overage',
+  c5[d1]!=='var(--danger)'&&String(c5[d1]).includes('#10b981'), c5[d1]);
 
 // A limit of two: one is still under it, so it is a clean day.
 const c6=paint({[d0]:1,[d1]:3},'#10b981',{...smoking,target_value:2});

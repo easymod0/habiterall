@@ -16,6 +16,7 @@ import {
   card, cardInnerWidth, segmented, subheading, windowedChart,
 } from '/shared/ui/components.js';
 import { addDaysISO, freqLabel, targetLabel, todayISO } from '/shared/ui/dates.js';
+import { isAvoided } from '/shared/ui/toggle.js';
 import { openDayDialog } from '/shared/ui/day-dialog.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import { resampleScores } from '/shared/ui/resample.js';
@@ -294,17 +295,32 @@ function render(stats, entries) {
   }));
   calCard.append(calScroll);
 
+  // The legend has to describe the grid above it, and for an avoided habit that
+  // grid has two colours rather than a ramp — a clean day in the habit's colour
+  // and a slip in red. A "Less ▢▢▢▢ More" ramp under it advertises a shading
+  // the cells no longer use and shows no red at all, which is the same "two
+  // surfaces over one dataset disagree" the inversion exists to end.
   const legend = document.createElement('div');
   legend.className = 'legend';
-  legend.append(document.createTextNode('Less'));
-  for (const t of [0.2, 0.45, 0.7, 1]) {
+  const swatch = (background, opacity) => {
     const sw = document.createElement('span');
     sw.className = 'legend-swatch';
-    sw.style.background = color;
-    sw.style.opacity = String(t);
+    sw.style.background = background;
+    if (opacity != null) sw.style.opacity = String(opacity);
     legend.append(sw);
+    return sw;
+  };
+
+  if (isAvoided(habit)) {
+    legend.append(document.createTextNode('Clean'));
+    swatch(color);
+    swatch('var(--danger)');
+    legend.append(document.createTextNode('Slipped'));
+  } else {
+    legend.append(document.createTextNode('Less'));
+    for (const t of [0.2, 0.45, 0.7, 1]) swatch(color, t);
+    legend.append(document.createTextNode('More'));
   }
-  legend.append(document.createTextNode('More'));
   calCard.append(legend);
   host.append(calCard);
 
