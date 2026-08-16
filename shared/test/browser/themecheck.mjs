@@ -90,6 +90,29 @@ try {
     };
   })()`);
 
+  // From a KNOWN state, and under a KNOWN device preference.
+  //
+  // Both halves matter. The stored value, so this does not depend on what a
+  // previous suite left behind — and the emulated media, because the property
+  // under test is "the first press from `system` changes the appearance", and
+  // with a fixed `['system','light','dark']` cycle that is only false when the
+  // device prefers LIGHT. Measured: this machine's headless Chrome prefers
+  // dark, so the suite passed against the exact regression it was written for
+  // until the preference was pinned here, and the only guard was whatever CI's
+  // device happened to say.
+  await send('Emulation.setEmulatedMedia',
+    { features: [{ name: 'prefers-color-scheme', value: 'light' }] }, sessionId);
+  await sleep(200);
+  const emulated = await ev(`matchMedia('(prefers-color-scheme: dark)').matches`);
+  ck('the device preference is pinned to light for this check', emulated === false,
+    `prefers-dark=${emulated}`);
+  await ev(`(async()=>{
+    const { save } = await import('/shared/ui/settings.js');
+    await save('theme', 'system');
+    return 1;
+  })()`);
+  await sleep(400);
+
   const before = await look();
   ck('the calendar has cells to inspect', before.cells > 0, JSON.stringify(before));
   ck('an unrecorded day defers to the theme rather than naming a colour',
@@ -100,16 +123,6 @@ try {
   // is a refetch, so this makes one impossible rather than merely unlikely.
   await send('Network.setBlockedURLs', { urls: ['*/api/habits/*'] }, sessionId);
 
-  // From a KNOWN state, so this does not depend on what the device prefers or
-  // on what a previous suite left stored. The first press from `system` is
-  // defined to change the appearance — see `nextChoice` in ui/theme.js — which
-  // is exactly the property this assertion is about.
-  await ev(`(async()=>{
-    const { save } = await import('/shared/ui/settings.js');
-    await save('theme', 'system');
-    return 1;
-  })()`);
-  await sleep(300);
   await ev(`document.querySelector('#btn-theme').click()`);
   await sleep(1200);
 
@@ -253,6 +266,60 @@ try {
     JSON.stringify(migrated));
   ck('and the page is painted with it, not with the default',
     migrated.painted === 'dark', JSON.stringify(migrated));
+
+  /* ---------- a boot whose settings read FAILS ---------- */
+  //
+  // The migration's fallback path, which is the half its own fix nearly broke.
+  // `serverAnswered` says "the account is authoritative from here"; setting it
+  // before the read meant every failure — offline, a 429 from the read limiter
+  // (this edition keys it on IP), a proxy's 502 — left it true with the legacy
+  // key still on disk and nothing stored. `choice()` then answered 'system'
+  // while the page was painted dark, so the next unrelated cache write flipped
+  // the theme mid-session and it reverted on reload. Silent, both ways.
+  //
+  // The stub is installed BEFORE the document so it is in place for the boot,
+  // and it fails only `/api/settings` — everything else loads normally, which
+  // is what makes this the shape of a rate-limited read rather than an outage.
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'dark');
+    return 1;
+  })()`);
+  const { identifier } = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (url.includes('/api/settings') && (init?.method ?? 'GET') === 'GET') {
+          return Promise.resolve(new Response('{}', { status: 429 }));
+        }
+        return real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(3000);
+
+  const refused = await ev(`(async()=>{
+    const painted = document.documentElement.dataset.theme;
+    // Any unrelated preference write — the in-place calendar zoom the detail
+    // view offers — which goes through the same writeCache chokepoint the theme
+    // listens on. (No backticks in here: this block is one template literal.)
+    const { set } = await import('/shared/ui/settings.js');
+    set('calendarZoom', 'wide');
+    await new Promise((r) => setTimeout(r, 400));
+    return { painted, after: document.documentElement.dataset.theme,
+             legacy: localStorage.getItem('habiterall-theme') };
+  })()`);
+  ck('a failed settings read still paints the pre-setting choice',
+    refused.painted === 'dark', JSON.stringify(refused));
+  ck('and an unrelated write does not flip it out from under the user',
+    refused.after === 'dark', JSON.stringify(refused));
+  ck('the legacy key is kept, so the next boot can still migrate it',
+    refused.legacy === 'dark', JSON.stringify(refused));
+
+  await send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId);
 
   console.log(fails === 0 ? '\nALL THEME CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {

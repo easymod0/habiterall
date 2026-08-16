@@ -149,9 +149,9 @@ export function initTheme({ onLabel } = {}) {
  */
 export async function migrateTheme() {
   const legacy = legacyChoice();
-  // From here on the account is authoritative, whatever happens below.
-  serverAnswered = true;
-  if (!legacy) return;
+  // No legacy key means there is nothing this device can say that the account
+  // cannot; the flag is moot and the read below is not worth making.
+  if (!legacy) { serverAnswered = true; return; }
 
   // `GET /api/settings` and not `get('theme')`, and this is the whole of it:
   // `ui/settings.js` fills gaps from `defaults()`, so `get('theme')` answers
@@ -171,11 +171,26 @@ export async function migrateTheme() {
   }
   if (typeof stored !== 'object' || stored === null) return;
 
+  // ONLY here, once the server has actually answered. Setting it above meant
+  // every early return — offline, a 429 from the read limiter, a proxy's 502 —
+  // left the flag true with the legacy key still on disk and nothing stored on
+  // the account. `choice()` then answered 'system' while the page was painted
+  // dark, so the next unrelated `writeCache` — an in-place calendar zoom, say —
+  // flipped the theme mid-session, silently, and reverted on reload. It also
+  // resurrected the dead press this branch's other commit removed. Measured
+  // both ways with the read blocked and with it answering 429.
+  serverAnswered = true;
+
   if (!Object.hasOwn(stored, 'theme')) {
     const result = await save('theme', legacy);
-    // Nothing is deleted that was not stored. `save` queues when offline and
-    // reports `{ok: false}` when the server refuses, and either way the local
-    // key is the only copy of the answer left.
+    // A refusal keeps the key, so nothing is deleted that was refused.
+    //
+    // Offline is NOT a refusal and is deliberately allowed through: `save`'s
+    // offline branch answers `{ok: true, offline: true}` having written the
+    // settings cache and queued the PUT, so the answer is held in two places
+    // that both outlive this page. An earlier comment here claimed `save`
+    // reports `{ok: false}` when offline — it does not, and the invariant is
+    // the weaker "not deleted while it is only in localStorage".
     if (!result?.ok) return;
   }
   try {
