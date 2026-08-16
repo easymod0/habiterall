@@ -639,14 +639,19 @@ const getSettings = async () => (await (await api('/api/settings')).json());
 // Two of these decide what the rows in the same backup MEAN, so a backup that
 // did not carry them restored a history the app then read differently. The JSON
 // export carried no settings at all until this was fixed.
+// `theme` is in here for the reason `reminder_message` taught the cloud suite:
+// a field left at its default everywhere compares equal to itself and passes
+// with the field dropped from the allowlist entirely. It is set to a value the
+// registry's default is NOT, which is what makes the assertion below bite.
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
-  atMostUnlogged: 'success' });
+  atMostUnlogged: 'success', theme: 'dark' });
 const withSettings = Buffer.from(await (await api('/api/export')).arrayBuffer());
 const exported = JSON.parse(withSettings.toString('utf8')).settings ?? {};
 
 ck('the JSON backup carries the settings',
   exported.skipDays === true && exported.questionMarks === true &&
-  exported.dayOrder === 'newest-right' && exported.atMostUnlogged === 'success',
+  exported.dayOrder === 'newest-right' && exported.atMostUnlogged === 'success' &&
+  exported.theme === 'dark',
   JSON.stringify(exported));
 
 // And nothing that is a capability rather than a preference. A backup file is
@@ -676,16 +681,17 @@ ck('though it can still set a display preference',
 // Put the habits back for the sections below.
 await restore(jsonBackup, 'replace');
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
-  atMostUnlogged: 'success' });
+  atMostUnlogged: 'success', theme: 'dark' });
 
 await putSettings({ skipDays: false, questionMarks: false, dayOrder: 'newest-left',
-  atMostUnlogged: 'miss' });
+  atMostUnlogged: 'miss', theme: 'light' });
 const restored = await restore(withSettings, 'replace');
 const back = await getSettings();
 
 ck('a replace-mode restore puts them back',
   back.skipDays === true && back.questionMarks === true &&
-  back.dayOrder === 'newest-right' && back.atMostUnlogged === 'success',
+  back.dayOrder === 'newest-right' && back.atMostUnlogged === 'success' &&
+  back.theme === 'dark',
   JSON.stringify(back));
 ck('and says how many it applied', restored.settings >= 3, String(restored.settings));
 

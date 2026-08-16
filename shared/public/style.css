@@ -1,4 +1,13 @@
+/*
+ * `color-scheme` as well as the variables, because it is what native surfaces
+ * read: scrollbars, form controls and the caret take no notice of `--bg`. It
+ * is keyed on `data-theme` rather than on the media query for the same reason
+ * the variables are — `apply()` has already resolved `system` against the
+ * device by the time it sets the attribute, so this follows the ACCOUNT's
+ * choice, which is the whole point of the setting.
+ */
 :root {
+  color-scheme: light;
   --bg: #f6f7f9;
   --surface: #ffffff;
   --surface-2: #eef0f4;
@@ -13,6 +22,7 @@
 }
 
 :root[data-theme='dark'] {
+  color-scheme: dark;
   --bg: #0f1216;
   --surface: #171b21;
   --surface-2: #1f242c;

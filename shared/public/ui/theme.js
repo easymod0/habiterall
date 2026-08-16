@@ -146,7 +146,17 @@ const LABEL = {
   dark: 'Theme: dark',
 };
 
-const prefersDark = () => matchMedia('(prefers-color-scheme: dark)');
+/**
+ * One `MediaQueryList`, built on first use.
+ *
+ * Lazily rather than at module scope, so importing this into a fake DOM that
+ * has no `matchMedia` does not throw before a test can install one — and once,
+ * so the object carrying the `change` listener is the same object every other
+ * caller reads. A fresh one per call is retained by nothing but the listener
+ * registration, which modern engines honour and older WebKit did not.
+ */
+let media;
+const prefersDark = () => (media ??= matchMedia('(prefers-color-scheme: dark)'));
 
 /**
  * The setting's value: this device's own unconfirmed answer if it has one, and
@@ -162,7 +172,15 @@ function choice() {
 }
 
 /**
- * What the button should say it will do next, given where the cycle is.
+ * What the button should say, given where the cycle is.
+ *
+ * The current STATE, not the next action — `LABEL` reads "Theme: light", and
+ * this string becomes the control's `aria-label`, where a name for the action
+ * would be the conventional choice. It says the state on purpose: the cycle is
+ * three-valued and device-relative, so "switch to dark" is a promise this
+ * module would have to keep against `nextChoice`, and the one press that
+ * cannot change the pixels (returning to `system` from a matching value) is
+ * exactly where such a label would lie.
  *
  * Returned rather than written, because `#btn-theme` belongs to `app.js` and
  * `test/ui-modules.test.js` fails when two modules reach for one id. Note this
@@ -172,12 +190,37 @@ function choice() {
 /** @type {(text: string) => void} */
 let announce = () => {};
 
-/** Paint it, resolving `system` against the device. */
+/**
+ * Paint it, resolving `system` against the device.
+ *
+ * The `theme-color` metas are carried along, and they are the reason this
+ * writes anything outside the attribute. index.html keys them on
+ * `prefers-color-scheme`, which was only ever wrong after a deliberate toggle;
+ * now that the theme follows the ACCOUNT, an installed PWA set to dark on a
+ * light phone is the ordinary state, and it drew a light status bar and address
+ * bar around a dark app. Both tags are written rather than replaced by one, so
+ * the pre-JS paint keeps a matching pair to choose from.
+ *
+ * The colour is read back from the cascade rather than repeated here: `--bg` is
+ * the same value the page is about to be painted in, and a second copy in
+ * JavaScript is a second thing to update when the palette moves.
+ */
 function apply(value) {
   document.documentElement.dataset.theme =
     value === 'light' || value === 'dark'
       ? value
       : (prefersDark().matches ? 'dark' : 'light');
+
+  try {
+    const bg = getComputedStyle(document.documentElement)
+      .getPropertyValue('--bg').trim();
+    if (bg) {
+      for (const tag of document.querySelectorAll('meta[name="theme-color"]')) {
+        tag.setAttribute('content', bg);
+      }
+    }
+  } catch { /* a document without a cascade; the attribute is what matters */ }
+
   announce(LABEL[value] ?? LABEL.system);
 }
 
@@ -201,7 +244,9 @@ export function initTheme({ onLabel } = {}) {
     // dialog work too: it writes through `saveAll`, which never told this
     // module anything, so a theme picked there was stored by the server and
     // then painted over by a record nobody had cleared.
-    if (meta?.stored) reconcile(meta.stored, meta.full === true);
+    if (meta?.stored) {
+      reconcile(meta.stored, meta.full === true, meta.wrote ?? []);
+    }
     apply(choice());
   });
 
@@ -231,10 +276,23 @@ export function initTheme({ onLabel } = {}) {
  *   account have a theme at all".
  * @param {boolean} full whether `stored` is the account's WHOLE state (the
  *   boot GET) rather than one write's accepted patch.
+ * @param {string[]} wrote the keys THIS DEVICE just sent, if this reply came
+ *   from a write rather than from the boot GET.
  */
-function reconcile(stored, full) {
+function reconcile(stored, full, wrote = []) {
   const record = deviceRecord();
   if (!record) return;
+
+  // Somebody ELSE on this device has just named a theme — which in practice is
+  // the settings dialog, since this module's own writes are `mine`. A press is
+  // not retired by the ACCOUNT disagreeing with it, deliberately (the write may
+  // still be in the outbox, and the account is then the older answer of the
+  // two) — but a choice made on this same device afterwards is unambiguously
+  // newer, and pushing the press back over it reverted the dialog with nothing
+  // said, then did it again when the outbox replayed. `wrote` and not
+  // `stored`, because cloud answers every write with the whole blob, so a
+  // reply naming `theme` does not mean this write was about it.
+  if (!mine && wrote.includes('theme')) { forget(); return; }
 
   // The server has this device's answer. Done — and this is the ordinary end
   // of a press, since `save()` adopts the reply it gets.
@@ -282,9 +340,29 @@ let pushing = false;
 function push(value) {
   if (pushing) return;
   pushing = true;
-  serialise(() => save('theme', value))
+  serialise(() => saveTheme(value))
     .catch(() => {})
     .finally(() => { pushing = false; });
+}
+
+/**
+ * This module's own write of the theme, marked as such.
+ *
+ * `reconcile` retires the record when another writer on this device names a
+ * theme, and every write here would otherwise look like one — `save` adopts
+ * its reply synchronously, so the reconcile happens inside this call while the
+ * counter is still up. A counter rather than a flag because it costs nothing
+ * to be right about re-entrancy, which `push`'s own guard exists for.
+ */
+let mine = 0;
+
+async function saveTheme(value) {
+  mine++;
+  try {
+    return await save('theme', value);
+  } finally {
+    mine--;
+  }
 }
 
 /**
@@ -324,10 +402,11 @@ function serialise(fn) {
 /**
  * Walk to the next of the three and remember it.
  *
- * @returns {Promise<{ok: boolean, error?: string}>} so the caller can say when
- *   it did not stick. `save` queues on a network error but DROPS a 429, a 500
- *   or a 403 — and the button used to write localStorage and could not fail at
- *   all, so silently reverting at some arbitrary later cache write is new.
+ * @returns {Promise<{ok: boolean, indeterminate?: boolean, error?: string}>} so
+ *   the caller can say when it did not stick. `save` queues on a network error
+ *   but DROPS a 429, a 500 or a 403 — and the button used to write localStorage
+ *   and could not fail at all, so silently reverting at some arbitrary later
+ *   cache write is new.
  */
 export async function toggleTheme() {
   const next = nextChoice();
@@ -343,8 +422,11 @@ export async function toggleTheme() {
   // nothing for a second reads as broken.
   apply(next);
 
-  const result = await serialise(() => save('theme', next))
-    .catch(() => ({ ok: false, error: 'could not save' }));
+  // `indeterminate: false` rather than absent: an unexpected throw is not the
+  // known-unknown a timeout is, and leaving the field off would make the
+  // branch below read it as one shape while the type said another.
+  const result = await serialise(() => saveTheme(next))
+    .catch(() => ({ ok: false, indeterminate: false, error: 'could not save' }));
 
   // Nothing to clear on success: `save` adopted the server's reply, which ran
   // the applier, which reconciled. What is left is the refusal — a 429, a 500,
@@ -354,7 +436,16 @@ export async function toggleTheme() {
   // A refusal is NOT the offline answer. `save` reports that as
   // `{ok: true, offline: true}`, having written the cache and queued the PUT,
   // and the record has to survive it — that write is still owed.
-  if (!result?.ok) {
+  //
+  // Nor is it a write that ran out of time, which is the third answer and the
+  // one this treated as the first. `save` bounds the request at ten seconds
+  // and cannot recall it, so a black-holed PUT may have landed: there is no
+  // verdict to act on. Deleting the record there did the one thing that makes
+  // it unrecoverable — the write may not have landed AND the answer is gone —
+  // and repainted the old theme ten seconds after the press, which reads as
+  // the app undoing a deliberate act by itself. Keeping both means the next
+  // reconcile re-sends it, which is what the comment in `save` promises.
+  if (!result?.ok && !result?.indeterminate) {
     // Only if the record is still THIS press's. Two presses inside one round
     // trip both queue, the second has already replaced the record, and an
     // unconditional `forget()` on the first one's refusal would delete the

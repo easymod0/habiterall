@@ -128,6 +128,77 @@ class AppSettingsDefaultsTest {
         assertTrue(AppSettings().androidRemindersEnabled)
     }
 
+    /**
+     * Every key the registry has is one somebody decided about.
+     *
+     * The tests above name their keys, so a key ADDED to the registry could not
+     * fail any of them — and the mirror it needs would go missing in exactly
+     * the silence this whole file exists to end. `theme` is what showed it up:
+     * it landed as a real setting, the WebView this app embeds now paints from
+     * the account, and nothing here noticed there was no default for it.
+     *
+     * So the registry is enumerated and every key must be in one list or the
+     * other. [NOT_MIRRORED] is the deliberate half, and each entry carries its
+     * reason — the same shape as `ELSEWHERE` in shared/test/compose.test.js,
+     * and for the same purpose: "we thought about it" has to be written down,
+     * or it is indistinguishable from "we forgot".
+     */
+    private val mirrored = setOf(
+        "dayOrder", "weekStart", "calendarZoom", "skipDays", "questionMarks",
+        "atMostUnlogged", "scoreGranularity", "historyGranularity", "historyMode",
+        "notifyChannels", "confirmDelete",
+    )
+
+    private val notMirrored = mapOf(
+        // Painted by the WebView from the account, through the same cascade the
+        // browser uses. The native chrome around it follows the system theme,
+        // which is Android's own setting and not this account's — so a default
+        // here would be a value nothing on this client reads.
+        "theme" to "the WebView paints it; native chrome follows Android",
+        // Server-sent destinations. The phone's own channel is `notifyChannels`,
+        // which IS mirrored; these three configure Discord, which this client
+        // neither posts to nor holds the credential for.
+        "discordChannelId" to "a server-sent destination this client never posts to",
+        "discordUserId" to "a server-sent destination this client never posts to",
+        "discordWebhook" to "a server-sent destination this client never posts to",
+        // The phone's alarms are local and already on the device's own clock,
+        // so there is nothing here for this to govern. `resolveTimeZone` reads
+        // it for the SERVER's sends only.
+        "notifyTimezone" to "the local alarm is already on this device's clock",
+    )
+
+    @Test
+    fun `every registry key is mirrored or deliberately not`() {
+        val keys = Regex("""\n {2}([a-zA-Z][a-zA-Z0-9]*): \{""")
+            .findAll(registry)
+            .map { it.groupValues[1] }
+            .toList()
+
+        // A registry that suddenly parses as nothing would pass every assertion
+        // below it, so the count is checked before the contents.
+        assertTrue(
+            "found ${keys.size} keys in the registry — the shape it is read by " +
+                "must have changed",
+            keys.size >= 12,
+        )
+
+        for (key in keys) {
+            assertTrue(
+                "`$key` is in SETTINGS and is neither mirrored in AppSettings nor " +
+                    "listed in notMirrored with a reason. Decide which it is: a " +
+                    "setting this client should honour needs a default here, and " +
+                    "one it should not needs a line saying so.",
+                key in mirrored || key in notMirrored,
+            )
+        }
+
+        // And the other direction, so a key REMOVED from the registry does not
+        // leave a mirror behind claiming to track something that is gone.
+        for (key in mirrored + notMirrored.keys) {
+            assertTrue("`$key` is listed here but is no longer in SETTINGS", key in keys)
+        }
+    }
+
     @Test
     fun `a stored value wins over every default`() {
         // The other half of the contract: null means untouched, and anything

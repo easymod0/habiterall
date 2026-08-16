@@ -221,6 +221,30 @@ try {
   const survived = await ev(`document.documentElement.dataset.theme`);
   ck('a stored theme survives a reload', survived === 'dark', String(survived));
 
+  // The chrome AROUND the app follows it too. index.html keys its two
+  // `theme-color` tags on `prefers-color-scheme`, which was only ever wrong
+  // after a deliberate toggle — and now that the theme is the ACCOUNT's, an
+  // installed PWA set to dark on a light phone is the ordinary state. It drew
+  // a light status bar and address bar around a dark app.
+  //
+  // Asserted against the cascade rather than against a literal, since that is
+  // where `apply()` reads it from: a hex pinned here would go stale the day
+  // the palette moves, and would pass while the page painted something else.
+  const chrome1 = await ev(`(() => {
+    const bg = getComputedStyle(document.documentElement)
+      .getPropertyValue('--bg').trim();
+    const tags = [...document.querySelectorAll('meta[name="theme-color"]')]
+      .map((m) => m.getAttribute('content'));
+    return { bg, tags, scheme: getComputedStyle(document.documentElement).colorScheme };
+  })()`);
+  ck('the browser chrome is told which theme the ACCOUNT is on',
+    chrome1.tags.length > 0 && chrome1.tags.every((c) => c === chrome1.bg),
+    JSON.stringify(chrome1));
+  // `color-scheme` is the other half, and it is what native surfaces read:
+  // scrollbars, form controls and the caret take no notice of `--bg`.
+  ck('...and so are the scrollbars and form controls',
+    chrome1.scheme === 'dark', JSON.stringify(chrome1));
+
   // And `system` paints from the device rather than freezing at whatever the
   // last explicit choice was.
   const followed = await ev(`(async()=>{
@@ -635,19 +659,45 @@ try {
     const before = document.documentElement.dataset.theme;
     let settled = 0;
     const started = Date.now();
-    toggleTheme().then(() => { settled = Date.now() - started; },
+    let answer = null;
+    toggleTheme().then((r) => { settled = Date.now() - started; answer = r; },
                        () => { settled = Date.now() - started; });
     await new Promise((r) => setTimeout(r, 600));
     const early = { painted: document.documentElement.dataset.theme,
-                    note: localStorage.getItem('habiterall-theme'), settled };
+                    note: localStorage.getItem('habiterall-theme') };
     // ...and then long enough for the bound to bite. 13s against a 10s
     // ceiling, because the point of the check is that there IS one.
+    //
+    // EVERY reading an assertion wants is taken AFTER this sleep. Sampled at
+    // 600ms and returned at 13s, the record reads as present because the code
+    // had not yet reached the line that deleted it — which is how a check
+    // written to pin exactly this passed against a build that threw the answer
+    // away and reverted the theme ten seconds after the press.
     await new Promise((r) => setTimeout(r, 13000));
-    return { before, ...early, settledBy: settled };
+    return {
+      before,
+      early,
+      painted: document.documentElement.dataset.theme,
+      note: localStorage.getItem('habiterall-theme'),
+      settledBy: settled,
+      indeterminate: !!(answer && answer.indeterminate === true),
+      ok: !!(answer && answer.ok === true),
+    };
   })()`);
+  ck('a press paints before the write is answered',
+    hung.early.painted !== hung.before, JSON.stringify(hung.early));
   ck('a press whose write never answers is still on the device',
-    hung.painted !== hung.before && String(hung.note ?? '').endsWith(hung.painted),
-    JSON.stringify(hung));
+    String(hung.note ?? '').endsWith(hung.painted), JSON.stringify(hung));
+  // The half the sampling hid. A write that ran out of time is of UNKNOWN
+  // outcome — it may have landed — so there is no verdict to revert to, and
+  // deleting the record is the one move that makes the answer unrecoverable:
+  // the write may not have arrived AND the device no longer knows what was
+  // pressed. Reverting the paint on top of that is the app undoing a
+  // deliberate act by itself, ten seconds later, under a toast.
+  ck('...and the theme it painted is still the one on screen',
+    hung.painted !== hung.before, JSON.stringify(hung));
+  ck('...and the caller is told it is a silence, not a refusal',
+    hung.indeterminate === true && hung.ok === false, JSON.stringify(hung));
   // The bound itself. A settings write does not go through `ui/api.js`, so it
   // had none — and anything awaiting one waited with it. Unpinned, this is a
   // one-word regression: drop the `signal` and everything else here still
@@ -833,6 +883,136 @@ try {
 
   await send('Page.removeScriptToEvaluateOnNewDocument',
     { identifier: swallow.identifier }, sessionId);
+
+  /* ---------- a choice made HERE beats a press made here ---------- */
+  //
+  // The other half of "the dialog's write retires the note", and the half the
+  // check above cannot reach: it seeds a BARE note, which is retired by the
+  // account naming anything at all. A press is deliberately tougher — the
+  // account disagreeing does not retire it, because the write may still be in
+  // the outbox and the account is then the older answer of the two.
+  //
+  // Against a choice made on this same device afterwards, that toughness was
+  // wrong. Press to dark offline, reconnect, open Settings, pick Light, press
+  // Done: the reply reached `reconcile`, the press was still on the device, and
+  // it was pushed straight back over the choice with nothing said — then again
+  // when the outbox replayed the queued press. The rule is `wrote`, not
+  // `stored`: cloud answers every write with the whole blob, so a reply naming
+  // `theme` cannot say whether this write was about it.
+  // The read is refused for the whole block, which is what keeps the press
+  // UNCONFIRMED — the state the bug needs and the state the real report is in.
+  // Without it the boot GET reconciles first: the account holds no theme, so
+  // the record is pushed and then retired by its own reply, and the dialog
+  // then writes over an account with nothing left to argue with. Every wrong
+  // version of `reconcile` passes that, because there is no record by the time
+  // the dialog runs. Offline is how it happens for real (the press is in the
+  // outbox), and a 429 from the IP-keyed read limiter is how it happens on a
+  // household behind one NAT.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'press:dark');
+    return 1;
+  })()`);
+  const noReadPress = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        return url.includes('/api/settings') && (init?.method ?? 'GET') === 'GET'
+          ? Promise.resolve(new Response('{}', { status: 429 }))
+          : real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const overPress = await ev(`(async()=>{
+    const { saveAll } = await import('/shared/ui/settings.js');
+    const before = document.documentElement.dataset.theme;
+    await saveAll({ theme: 'light' });
+    // Long enough that a push, if one were started, would have landed — so
+    // "the account holds the choice" is a real answer rather than a race the
+    // assertion happened to win.
+    await new Promise((x) => setTimeout(x, 900));
+    return { before, painted: document.documentElement.dataset.theme,
+             note: localStorage.getItem('habiterall-theme') };
+  })()`);
+  const overPressAccount =
+    await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
+  ck('a dialog choice wins over this device\'s own unconfirmed press',
+    overPress.before === 'dark' && overPress.painted === 'light',
+    JSON.stringify(overPress));
+  ck('...and the account is left holding the choice, not the press',
+    overPressAccount.theme === 'light', JSON.stringify(overPressAccount));
+
+  // Not "the note is gone", which reads as the obvious companion assertion and
+  // cannot fail: a version that pushes the press instead has that push's own
+  // reply retire the record, so the key is null either way. What distinguishes
+  // them is where the account ENDS UP, here and after a reload.
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: noReadPress.identifier }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2600);
+  const overPressLater =
+    await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
+  ck('...and a reload does not hand the press a second chance at it',
+    overPressLater.theme === 'light', JSON.stringify(overPressLater));
+
+  /* ---------- Restore defaults reaches the theme too ---------- */
+  //
+  // `reset()` was the one write path that passed no meta, so nothing
+  // reconciled and the device record outlived it. With a record outstanding —
+  // an un-migrated pre-setting key, or a press made offline — Restore defaults
+  // reset every setting except the theme, and the next boot then PUSHED the
+  // record back onto the account it had just been cleared from. The setting
+  // the user had explicitly asked to forget was the one that came back.
+  // The read is refused here too, and for the same reason: a boot GET that
+  // succeeds retires the record before Restore defaults is ever pressed, so
+  // every wrong version passes.
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(1200);
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    localStorage.setItem('habiterall-theme', 'press:dark');
+    return 1;
+  })()`);
+  const noReadReset = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        return url.includes('/api/settings') && (init?.method ?? 'GET') === 'GET'
+          ? Promise.resolve(new Response('{}', { status: 429 }))
+          : real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2500);
+  const afterReset = await ev(`(async()=>{
+    const { reset } = await import('/shared/ui/settings.js');
+    await reset();
+    await new Promise((x) => setTimeout(x, 500));
+    return { note: localStorage.getItem('habiterall-theme') };
+  })()`);
+  ck('Restore defaults forgets this device\'s theme record',
+    afterReset.note === null, JSON.stringify(afterReset));
+
+  // And it stays forgotten. The stub comes off first, because the next boot's
+  // GET is exactly where the push would have happened: the account now names
+  // no theme, and a surviving record reads that as "send mine".
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: noReadReset.identifier }, sessionId);
+  await send('Page.navigate', { url: `${APP}/` }, sessionId);
+  await sleep(2600);
+  const resetAccount =
+    await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
+  ck('...and the next boot does not put it back on the account',
+    resetAccount.theme === undefined, JSON.stringify(resetAccount));
 
   /* ---------- an applier that throws must not break a save ---------- */
   const applierThrew = await ev(`(async()=>{
