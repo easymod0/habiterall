@@ -319,7 +319,16 @@ export async function handleInteraction(interaction, adapter) {
   // needs to know to pick an endpoint.
   let acknowledged = false;
   const send = async (response) => {
-    await respond(interaction, response, { acknowledged });
+    const result = await respond(interaction, response, { acknowledged });
+    // `respondInteraction` RETURNS its failures rather than throwing — every
+    // HTTP and network error comes back as `{ok: false}` from `discordRequest`
+    // — so discarding the result here made a lost answer completely silent. The
+    // press wrote its entry, the reminder was left unchanged with its buttons
+    // still live, and no log line said why.
+    if (result && result.ok === false) {
+      log.error?.('discord: answering an interaction failed:',
+        result.error ?? `status ${result.status}`);
+    }
     return response;
   };
 
@@ -364,8 +373,25 @@ export async function handleInteraction(interaction, adapter) {
   const opensModal = type === INTERACTION.COMPONENT && parsed.action === 'amount';
   if (!opensModal && interaction.message && interaction.application_id) {
     try {
-      await respond(interaction, { type: CALLBACK.DEFER_UPDATE }, { acknowledged });
-      acknowledged = true;
+      const ack = await respond(interaction, { type: CALLBACK.DEFER_UPDATE }, { acknowledged });
+      // A failure here does NOT throw. `respondInteraction` goes through
+      // `discordRequest`, which turns every HTTP status and every network error
+      // into `{ok: false, status, error}` — so `acknowledged = true` used to run
+      // on a defer that got a 500, a 429 or a timeout, and the `catch` below was
+      // dead code. The real answer then went to
+      // `PATCH /webhooks/{app}/{token}/messages/@original`, which Discord
+      // answers 404 for an interaction that was never acknowledged: the entry
+      // WAS written, the reminder was left unchanged with its buttons live, and
+      // nothing was logged. The user presses again and still sees nothing.
+      //
+      // Only an explicit `{ok: false}` counts as a failure, so an adapter that
+      // returns nothing is still read as having acknowledged — which is what the
+      // callback endpoint answering 204 amounts to.
+      acknowledged = !(ack && ack.ok === false);
+      if (!acknowledged) {
+        log.error?.('discord: acknowledging an interaction failed:',
+          ack.error ?? `status ${ack.status}`);
+      }
     } catch (err) {
       // A defer that fails leaves the interaction lost either way, and the
       // write is the half worth finishing — so this is swallowed rather than

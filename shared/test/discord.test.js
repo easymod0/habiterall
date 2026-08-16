@@ -348,6 +348,56 @@ test('a press is acknowledged BEFORE any storage is touched', async () => {
   ], 'the acknowledgement must come first, and the answer must follow it');
 });
 
+test('a defer that FAILED is not an acknowledgement', async () => {
+  // `respondInteraction` never rejects: `discordRequest` turns every HTTP status
+  // and every network error into `{ok: false}`. So `acknowledged = true` ran on
+  // a defer that got a 500, and the `catch` written for exactly this was dead
+  // code. The real answer then went to the webhook endpoint, which Discord
+  // answers 404 for an interaction that was never acknowledged — the entry was
+  // written, the reminder sat unchanged with its buttons still live, and nothing
+  // was logged. The user presses again and still sees nothing.
+  const errors = [];
+  const a = adapter({
+    respond: async (_i, response, opts = {}) => {
+      a.sent.push(response);
+      a.after.push(!!opts.acknowledged);
+      if (response.type === CALLBACK.DEFER_UPDATE) {
+        return { ok: false, status: 500, error: 'Discord returned 500' };
+      }
+      return { ok: true };
+    },
+    log: { warn: () => {}, error: (...args) => errors.push(args.join(' ')) },
+  });
+
+  await handleInteraction(click(), a);
+
+  assert.deepEqual(a.sent.map((r) => r.type),
+    [CALLBACK.DEFER_UPDATE, CALLBACK.UPDATE_MESSAGE]);
+  assert.deepEqual(a.after, [false, false],
+    'the callback was not spent, so the answer must still use it');
+  assert.equal(a.recorded.length, 1, 'and the write still happens — that half is worth finishing');
+  assert.ok(errors.some((e) => /acknowledg/i.test(e)), errors.join(' | '));
+});
+
+test('an answer that could not be delivered says so', async () => {
+  // Same shape one step later: `send()` discarded `respond`'s result, so a
+  // failed FINAL answer after a good defer was equally silent.
+  const errors = [];
+  const a = adapter({
+    respond: async (_i, response) => {
+      a.sent.push(response);
+      return response.type === CALLBACK.DEFER_UPDATE
+        ? { ok: true }
+        : { ok: false, status: 404, error: 'Unknown Webhook' };
+    },
+    log: { warn: () => {}, error: (...args) => errors.push(args.join(' ')) },
+  });
+
+  await handleInteraction(click(), a);
+  assert.equal(a.recorded.length, 1);
+  assert.ok(errors.some((e) => /Unknown Webhook/.test(e)), errors.join(' | '));
+});
+
 test('a deferred answer edits the reminder; an undeferred one uses the callback', async () => {
   const a = adapter();
   await handleInteraction(click(), a);
