@@ -107,10 +107,12 @@ function toISO(d) {
  *
  * @param {string} endDate  last date that must be visible, 'YYYY-MM-DD'
  * @param {number} weeks    number of columns
- * @param {'monday'|'sunday'} [weekStart] which day a column begins on
+ * @param {'monday'|'sunday'} [weekStart] which day a column begins on;
+ *   defaults to the registry's own default, so a caller that forgets gets the
+ *   app's answer rather than a third one
  * @returns {{start: string, end: string}} first and last cell in the grid
  */
-export function calendarWindow(endDate, weeks, weekStart = 'sunday') {
+export function calendarWindow(endDate, weeks, weekStart = 'monday') {
   const end = fromISO(endDate);
 
   // The last day of endDate's week — Saturday for a Sunday-start week, Sunday
@@ -137,7 +139,7 @@ export function calendarWindow(endDate, weeks, weekStart = 'sunday') {
  * @param {'monday'|'sunday'} [weekStart]
  * @returns {number}
  */
-export function weekdayIndex(date, weekStart = 'sunday') {
+export function weekdayIndex(date, weekStart = 'monday') {
   const day = date.getDay();
   return weekStart === 'monday' ? (day + 6) % 7 : day;
 }

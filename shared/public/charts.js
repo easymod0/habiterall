@@ -157,7 +157,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     streaks = null,     // [{start, end, length}] to underline as runs
     minStreak = 3,      // shorter runs are noise, not an achievement
     unknownMark = false, // draw '?' on days with no entry (`questionMarks`)
-    weekStart = 'sunday', // which day a column begins on
+    weekStart = 'monday', // which day a column begins on
   } = opts;
 
   const level = zoomLevel(zoom);
@@ -173,8 +173,10 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   // gap, and that one extra pixel-gap was enough to trip `max-width: 100%`
   // into scaling the whole grid down.
   const width = calendarWidth(weeks, zoom);
-  // The extra 4px at the foot leaves room for the wrap tab hanging below
-  // Saturday; the one above Sunday sits inside padTop's existing space.
+  // The extra 4px at the foot leaves room for the wrap tab hanging below the
+  // week's LAST row; the one above its first sits inside padTop's existing
+  // space. Which weekday those are depends on `weekStart` — the rows are
+  // positional — so they are named by position here rather than by day.
   const height = padTop + 7 * step + 4;
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Completion calendar');
@@ -242,13 +244,14 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
             fill: link,
           }));
         } else if (wk < weeks - 1) {
-          // Saturday to Sunday: the run wraps to the top of the NEXT column,
+          // Last row to first: the run wraps to the top of the NEXT column,
           // a jump from bottom-right to top-left that no straight connector
           // can span. Routing an elbow around the grid was tried and looked
           // like a smudge — it crossed unrelated cells and got clipped.
           //
-          // Instead, two small tabs: one off the bottom of Saturday and one
-          // off the top of the following Sunday. They are the same mark as
+          // Instead, two small tabs: one off the bottom of the week's last
+          // row and one off the top of the next week's first. They are the
+          // same mark as
           // the within-column connector, so a half-connector reads as
           // "continues" — the way a hyphen at the end of a line does.
           const tab = (cx, cy) => el('rect', {
@@ -613,7 +616,7 @@ function setRovingFocus(svg, cell) {
  * ends of the week, PageUp/PageDown by four weeks.
  */
 /** @param {'monday'|'sunday'} [weekStart] */
-function handleGridKey(e, svg, cell, onPick, weekStart = 'sunday') {
+function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
   const date = cell.dataset.date;
 
   if (e.key === 'Enter' || e.key === ' ') {
@@ -668,7 +671,8 @@ function handleGridKey(e, svg, cell, onPick, weekStart = 'sunday') {
  * Rate, not count: months hold four or five of each weekday, and a raw count
  * would make February look worse than March for no reason.
  */
-export function weekdayMonthChart(months, color, { width = 720, weekStart = 'sunday' } = {}) {
+export function weekdayMonthChart(months, color,
+                                  { width = 720, weekStart = 'monday' } = {}) {
   const rowH = 26;
   // Two lines of header: the month on every column, the year where it changes.
   const pad = { top: 30, right: 12, bottom: 8, left: 42 };
@@ -950,7 +954,7 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
 /* ---------- weekday breakdown ---------- */
 
 export function weekdayChart(days, color,
-                             { width = 720, height = 170, weekStart = 'sunday' } = {}) {
+                             { width = 720, height = 170, weekStart = 'monday' } = {}) {
   const pad = { top: 12, right: 12, bottom: 30, left: 34 };
   const svg = svgRoot(width, height);
   svg.setAttribute('aria-label', 'Completions by day of week');

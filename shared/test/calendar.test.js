@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  calendarWindow, zoomLevel, weeksForWidth, calendarWidth,
+  calendarWindow, weekdayIndex, zoomLevel, weeksForWidth, calendarWidth,
   CALENDAR_ZOOM, DEFAULT_ZOOM, CALENDAR_PAD_LEFT,
 } from '../public/ui/calendar.js';
 
 /** Every date the grid draws, in order. */
-function cells(endDate, weeks) {
-  const { start } = calendarWindow(endDate, weeks);
+function cells(endDate, weeks, weekStart = 'sunday') {
+  const { start } = calendarWindow(endDate, weeks, weekStart);
   const [y, m, d] = start.split('-').map(Number);
   const cursor = new Date(y, m - 1, d);
   const out = [];
@@ -42,10 +42,14 @@ test('the end date is always drawn, whatever weekday it falls on', () => {
   }
 });
 
-test('the grid always starts on a Sunday so the weekday rows line up', () => {
+test('a Sunday-start grid always starts on a Sunday so the weekday rows line up', () => {
+  // Explicit now that the week is the account's. The parameter defaults to
+  // MONDAY — the registry's default, and `startOfWeek`'s — so that a caller who
+  // forgets it gets the app's own answer rather than a third one; a test that
+  // is about Sunday has to say Sunday.
   for (const day of ['2026-08-09', '2026-08-12', '2026-08-15', '2026-01-01']) {
     for (const weeks of [14, 27, 53]) {
-      const { start } = calendarWindow(day, weeks);
+      const { start } = calendarWindow(day, weeks, 'sunday');
       assert.equal(
         new Date(start + 'T00:00:00').getDay(), 0,
         `${day} @ ${weeks}w started on a ${new Date(start + 'T00:00:00').getDay()}`
@@ -54,13 +58,17 @@ test('the grid always starts on a Sunday so the weekday rows line up', () => {
   }
 });
 
-test('the grid ends on the Saturday closing the end date\'s week', () => {
+test('a Sunday-start grid ends on the Saturday closing the end date\'s week', () => {
   // Wednesday -> that week's Saturday.
-  assert.equal(calendarWindow('2026-08-12', 27).end, '2026-08-15');
+  assert.equal(calendarWindow('2026-08-12', 27, 'sunday').end, '2026-08-15');
   // A Saturday is already the end of its own week.
-  assert.equal(calendarWindow('2026-08-15', 27).end, '2026-08-15');
+  assert.equal(calendarWindow('2026-08-15', 27, 'sunday').end, '2026-08-15');
   // A Sunday opens a new week, so the grid runs to the following Saturday.
-  assert.equal(calendarWindow('2026-08-16', 27).end, '2026-08-22');
+  assert.equal(calendarWindow('2026-08-16', 27, 'sunday').end, '2026-08-22');
+  // And the same three on a Monday week, where the boundaries move by a day.
+  assert.equal(calendarWindow('2026-08-12', 27, 'monday').end, '2026-08-16');
+  assert.equal(calendarWindow('2026-08-16', 27, 'monday').end, '2026-08-16');
+  assert.equal(calendarWindow('2026-08-17', 27, 'monday').end, '2026-08-23');
 });
 
 test('the window spans exactly the requested number of weeks', () => {
@@ -68,7 +76,7 @@ test('the window spans exactly the requested number of weeks', () => {
     const drawn = cells('2026-08-12', weeks);
     assert.equal(drawn.length, weeks * 7);
 
-    const { start, end } = calendarWindow('2026-08-12', weeks);
+    const { start, end } = calendarWindow('2026-08-12', weeks, 'sunday');
     assert.equal(drawn[0], start);
     assert.equal(drawn.at(-1), end);
   }
@@ -79,7 +87,7 @@ test('a date in the future of the window is still the anchor', () => {
   // in the grid rather than sitting mid-column.
   const drawn = cells('2026-03-04', 14);
   assert.ok(drawn.includes('2026-03-04'));
-  assert.equal(calendarWindow('2026-03-04', 14).end, '2026-03-07');
+  assert.equal(calendarWindow('2026-03-04', 14, 'sunday').end, '2026-03-07');
 });
 
 test('the window crosses a year boundary correctly', () => {
@@ -190,7 +198,6 @@ test('an unknown zoom name falls back to the default', () => {
 
 /* ---------- whose week is it ---------- */
 
-const { weekdayIndex } = await import('../public/ui/calendar.js');
 // The suite above works in ISO strings; these need real dates to ask what
 // weekday a boundary landed on, which is the whole claim being made.
 const fromISO = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };

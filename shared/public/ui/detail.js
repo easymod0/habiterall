@@ -254,7 +254,10 @@ function render(stats, entries) {
   calHead.append(nav);
 
   const calEnd = state.calEnd ?? todayISO();
-  const calStart = calendarWindow(calEnd, CAL_WEEKS).start;
+  // The same week the grid below is drawn with. Left to the default this label
+  // named a date the calendar does not start on — by a day most of the week and
+  // by six whenever `calEnd` falls on the week's last day.
+  const calStart = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart')).start;
   navLabel.textContent = `${calStart} → ${calEnd}`;
 
   const skipSet = new Set(entries.filter((e) => e.status === 'skip').map((e) => e.date));

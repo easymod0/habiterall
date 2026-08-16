@@ -112,6 +112,16 @@ snapped to a round number, because 1 is right for "8 glasses" and useless for
 storage, which is the only thing that can catch the control and the database
 disagreeing about what was typed.
 
+**A chart's labels and its data have to be asserted TOGETHER.** `weekcheck.mjs`
+exists because a review broke the week-start plumbing four ways at once — bars
+read positionally while captions rotated, the calendar's row labels left
+unrotated, Home/End back on `getDay()`, the month grid reading rows by index —
+and the whole unit suite and every browser suite still passed. The arithmetic
+was covered; nothing looked at a rendered chart. The failure that matters is not
+"the wrong day is first", it is a caption and a datum moving independently,
+which reads as deliberate. Each check there ties one to the other, and the four
+mutations each fail it.
+
 **`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
 still works for boolean habits (where `3` is unambiguously a skip) but is
 wrong for numerical ones, where `3` is a real amount.
@@ -290,7 +300,8 @@ Home/End, which jumped to `getDay() === 0` and so walked off the top of a
 Monday-start grid.
 
 **The calendar is anchored on its END, not its start.** Going back
-`weeks*7` days and *then* snapping to a Sunday shifts the whole grid earlier,
+`weeks*7` days and *then* snapping back to the week's first day shifts the whole
+grid earlier,
 so the last column stops short of today by however many days into the week it
 is — today's square was invisible on six days out of seven. `calendarWindow`
 owns this and `test/calendar.test.js` pins it.
