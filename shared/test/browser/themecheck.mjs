@@ -100,6 +100,16 @@ try {
   // is a refetch, so this makes one impossible rather than merely unlikely.
   await send('Network.setBlockedURLs', { urls: ['*/api/habits/*'] }, sessionId);
 
+  // From a KNOWN state, so this does not depend on what the device prefers or
+  // on what a previous suite left stored. The first press from `system` is
+  // defined to change the appearance — see `nextChoice` in ui/theme.js — which
+  // is exactly the property this assertion is about.
+  await ev(`(async()=>{
+    const { save } = await import('/shared/ui/settings.js');
+    await save('theme', 'system');
+    return 1;
+  })()`);
+  await sleep(300);
   await ev(`document.querySelector('#btn-theme').click()`);
   await sleep(1200);
 

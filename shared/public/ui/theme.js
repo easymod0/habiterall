@@ -26,8 +26,33 @@ import { get, onApply, save } from '/shared/ui/settings.js';
 /** Where the two-state version kept its answer, before this was a setting. */
 const LEGACY_KEY = 'habiterall-theme';
 
-/** What the button walks through. `system` is in it, or it is unreachable. */
-const CYCLE = ['system', 'light', 'dark'];
+/**
+ * Where the button goes next.
+ *
+ * A fixed `['system', 'light', 'dark']` looks right and has a dead press in it:
+ * from `system` on a device that prefers light, the next value IS light, so the
+ * button does nothing visible and reads as broken. Found in CI, where a fresh
+ * profile starts at `system` and Chrome prefers light — `themecheck`'s
+ * "the theme actually switched" caught it, which is what that assertion is for.
+ *
+ * So the first step is always the OPPOSITE of what the device is showing, and
+ * the order is device-relative: system -> the other one -> the device's own ->
+ * system. All three are reachable and the first press — the common one — always
+ * changes what is on screen.
+ *
+ * The last step is the one that cannot change the pixels: returning to `system`
+ * from a value that matches the device is the same appearance by definition.
+ * That is what the label is for, and why there is one.
+ */
+function nextChoice() {
+  const current = choice();
+  const deviceDark = prefersDark().matches;
+  const differs = deviceDark ? 'light' : 'dark';
+  const matches = deviceDark ? 'dark' : 'light';
+  if (current === 'system') return differs;
+  if (current === differs) return matches;
+  return 'system';
+}
 
 const LABEL = {
   system: 'Theme: following this device',
@@ -118,7 +143,7 @@ export async function migrateTheme() {
 
 /** Walk to the next of the three and remember it. */
 export function toggleTheme() {
-  const next = CYCLE[(CYCLE.indexOf(choice()) + 1) % CYCLE.length];
+  const next = nextChoice();
   // Paint first: `save` waits for the server and queues when offline, and a
   // press that does nothing for a second reads as broken.
   apply(next);
