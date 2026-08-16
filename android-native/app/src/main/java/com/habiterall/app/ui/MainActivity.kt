@@ -1509,18 +1509,17 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * A dropdown for the hour, one for the minute, and a box to type into.
+     * Setting a habit's reminder from the list, without opening the form.
      *
-     * All three edit one value, which is submitted verbatim as `reminder_time`.
-     * The dropdowns exist because picking 08:30 should not require typing a
-     * colon, and the text box stays because typing "830" or "8:30 pm" is
-     * faster than two menus — [ReminderTime.parse] is what makes those equal.
+     * The time control is [ReminderTimeField], shared with the habit form —
+     * that is where the rule about the box being the submitted value lives, and
+     * why this was never a bare `^HH:MM$` field.
      *
-     * This was a bare text field validated against `^HH:MM$`, which rejected
-     * every form anyone naturally types.
-     *
-     * "Remove" is a first-class button rather than a hidden gesture: clearing
-     * the field is how a reminder is deleted, and that should not be a guess.
+     * What is this dialog's own is the pair of exits. "Remove" is a first-class
+     * button rather than a hidden gesture, and it does not merely clear the box:
+     * it SAVES an empty time and closes, because that is what deleting a
+     * reminder from here means. The habit form's equivalent clears its draft
+     * instead, since nothing there is written until Save.
      */
     @Composable
     private fun ReminderDialog(
@@ -1547,61 +1546,12 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.bodySmall,
                     )
 
-                    val current = ReminderTime.split(parsed ?: "")
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        TimeMenu(
-                            label = current?.first ?: "--",
-                            options = ReminderTime.hours(),
-                            onPick = { hour ->
-                                typed = "$hour:${current?.second ?: "00"}"
-                            },
-                        )
-                        Text(":")
-                        TimeMenu(
-                            // The typed minute is included in the list, so an
-                            // odd 08:37 is not silently rounded to 08:35.
-                            label = current?.second ?: "--",
-                            options = ReminderTime.minutes(current?.second?.toIntOrNull())
-                                .map { it to it },
-                            onPick = { minute ->
-                                typed = "${current?.first ?: "08"}:$minute"
-                            },
-                        )
-                        OutlinedTextField(
-                            value = typed,
-                            onValueChange = { typed = it },
-                            label = { Text("or type") },
-                            placeholder = { Text("08:30") },
-                            singleLine = true,
-                            isError = !valid,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-
-                    Text(
-                        if (!valid) {
-                            "\"$typed\" is not a time — try 08:30, 8:30 pm or 2030."
-                        } else if (parsed.isNullOrEmpty()) {
-                            "No reminder — nothing will be sent for this habit."
-                        } else {
-                            ReminderTime.describe(parsed)
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (valid) {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else {
-                            MaterialTheme.colorScheme.error
-                        },
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (common in ReminderTime.COMMON) {
-                            TextButton(onClick = { typed = common }) { Text(common) }
-                        }
-                    }
+                    // The picker, the box and the quick picks, shared with the
+                    // habit form — see [ReminderTimeField]. "Remove" stays a
+                    // dialog button rather than a quick pick here, because it
+                    // does not edit the field: it saves an empty time and
+                    // closes.
+                    ReminderTimeField(value = typed, onValueChange = { typed = it })
 
                     OutlinedTextField(
                         value = message,
@@ -1640,37 +1590,6 @@ class MainActivity : ComponentActivity() {
                 }
             },
         )
-    }
-
-    /**
-     * One dropdown of `value to label` pairs.
-     *
-     * A button that opens a `DropdownMenu`, rather than an
-     * `ExposedDropdownMenuBox`: the hour list is 24 items and the minute list
-     * grows by one when an odd minute is typed, so the menu has to be
-     * rebuildable without the text-field plumbing the exposed variant brings.
-     */
-    @Composable
-    private fun TimeMenu(
-        label: String,
-        options: List<Pair<String, String>>,
-        onPick: (String) -> Unit,
-    ) {
-        var open by remember { mutableStateOf(false) }
-        Box {
-            OutlinedButton(onClick = { open = true }) { Text(label) }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                for ((value, text) in options) {
-                    DropdownMenuItem(
-                        text = { Text(text) },
-                        onClick = {
-                            open = false
-                            onPick(value)
-                        },
-                    )
-                }
-            }
-        }
     }
 
     /**

@@ -418,33 +418,20 @@ fun HabitFormScreen(
             /* ------------------------------------------------------- reminder */
 
             SectionLabel("Reminder")
-            OutlinedTextField(
+            // The same control the habit list's reminder dialog uses. This
+            // screen had the bare box and the quick picks alone, so setting a
+            // time while creating a habit meant typing one and setting it
+            // afterwards meant picking it from a menu — same field, same habit,
+            // two affordances depending on the way in. See [ReminderTimeField].
+            ReminderTimeField(
                 value = draft.reminderTime,
                 onValueChange = { draft = draft.copy(reminderTime = it) },
-                label = { Text("Time") },
-                placeholder = { Text("08:30") },
-                singleLine = true,
-                isError = timeParsed == null,
-                supportingText = {
-                    Text(
-                        when {
-                            timeParsed == null ->
-                                "\"${draft.reminderTime}\" is not a time — try 08:30, 8:30 pm or 2030."
-                            timeParsed.isEmpty() -> "Blank means no reminder."
-                            else -> ReminderTime.describe(timeParsed)
-                        },
-                        color = if (timeParsed == null) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
                 modifier = Modifier.fillMaxWidth(),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (common in ReminderTime.COMMON) {
-                    TextButton(onClick = { draft = draft.copy(reminderTime = common) }) {
-                        Text(common)
-                    }
-                }
+            ) {
+                // Clearing the DRAFT, not saving an empty time: this screen has
+                // a Save button of its own and nothing is written until it is
+                // pressed. The dialog's equivalent is its "Remove" button,
+                // which does write.
                 if (draft.reminderTime.isNotBlank()) {
                     TextButton(onClick = { draft = draft.copy(reminderTime = "") }) {
                         Text("None")
