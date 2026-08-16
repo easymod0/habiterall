@@ -32,7 +32,8 @@ const { unzip } = await import('@habiterall/shared/unzip.js');
 const { parseSettings, portableSettings, LIMITS } =
   await import('@habiterall/shared/validate.js');
 const {
-  FIXTURE, snapshot, diff, LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS, JSON_HABIT_FIELDS,
+  FIXTURE, snapshot, diff, checkAgainstFixture,
+  LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS, JSON_HABIT_FIELDS,
 } = await import('@habiterall/shared/test/roundtrip-fixture.mjs');
 
 const pg = (await import('pg')).default;
@@ -169,6 +170,12 @@ const baselineLoopDb = snapshot(seeded, { fields: LOOP_DB_HABIT_FIELDS });
 
 ck('fixture seeded', baselineFull.length === FIXTURE.length,
   `${baselineFull.length} habits`);
+
+// Against the fixture rather than against the seed. This suite writes its
+// columns by hand, which is how `reminder_message` sat comparing '' with ''
+// for as long as it did; the fixture is the only description of the data that
+// does not come out of the code under test.
+checkAgainstFixture(baselineFull, ck);
 
 const water = baselineFull.find((h) => h.name === 'Water');
 ck('a literal 3 on a numerical habit is not a skip',

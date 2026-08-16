@@ -366,6 +366,49 @@ try {
   ck('a habit id that is not ours is refused',
     /no longer exists/i.test(forged.at(-1)?.data?.content ?? ''), JSON.stringify(forged.at(-1)));
 
+  /* ---------- whose day is it ---------- */
+  //
+  // Everything above runs at `notifyTimezone: 'UTC'` against instants built
+  // with `Date.UTC`, which makes the account's zone unfalsifiable there:
+  // hard-coding `zonedClock(now, 'UTC')` in the notifier — the setting ignored
+  // outright — passes every check in this file. `zonedClock` itself is unit
+  // tested; what is not is this edition's WIRING of the setting into
+  // `collect`, and that is the half that decides which calendar day
+  // "already done" and "already sent" are asked about.
+  //
+  // 22:00 UTC on the 10th is 07:00 on the 11th in Tokyo. The entry is written
+  // on the TOKYO date, so a notifier reading the server's day looks at the
+  // 10th, finds nothing, and reports the habit as still needing its nudge.
+  // Both dates are in the past, because `PUT /entries/:date` refuses a future
+  // one against the SERVER's day — which is its own problem and not this
+  // test's.
+  await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      notifyChannels: ['discord'],
+      discordWebhook: WEBHOOK,
+      discordChannelId: '',
+      notifyTimezone: 'Asia/Tokyo',
+    }),
+  });
+  const tokyoInstant = new Date(Date.UTC(2026, 7, 10, 22, 0));
+  const tokyoDate = '2026-08-11';
+  const utcDate = '2026-08-10';
+
+  const zoned = await api('/api/habits', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Zoned', reminder_time: '07:00' }),
+  });
+  await api(`/api/habits/${zoned.body.id}/entries/${tokyoDate}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2 }),
+  });
+
+  const tokyoAccount = notifier.collect(tokyoInstant)[0];
+  ck("the account's own day decides what counts as answered, not the server's",
+    tokyoAccount?.doneToday?.has(zoned.body.id) === true,
+    `doneToday=${JSON.stringify([...(tokyoAccount?.doneToday ?? [])])} ` +
+    `tokyo=${tokyoDate} utc=${utcDate}`);
+
   console.log(`\n${fails ? `${fails} check(s) failed` : 'all checks passed'}`);
 } finally {
   server.close();
