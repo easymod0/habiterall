@@ -22,6 +22,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.error
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.habiterall.app.notify.ReminderTime
 
@@ -77,6 +79,7 @@ fun ReminderTimeField(
     val parsed = ReminderTime.parse(value)
     val valid = parsed != null
     val current = ReminderTime.split(parsed ?: "")
+    val complaint = "\"$value\" is not a time — try 08:30, 8:30 pm or 2030"
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
@@ -104,13 +107,21 @@ fun ReminderTimeField(
                 placeholder = { Text("08:30") },
                 singleLine = true,
                 isError = !valid,
-                modifier = Modifier.weight(1f),
+                // The complaint is a SIBLING of the field rather than its
+                // `supportingText`, because it describes the two menus as well
+                // — so the association a screen reader needs has to be made by
+                // hand. Without it `isError` announces Material's generic
+                // "Invalid input" and Save is disabled with no spoken reason,
+                // which is what the habit form lost when it gained the picker.
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { if (!valid) error(complaint) },
             )
         }
 
         Text(
             when {
-                !valid -> "\"$value\" is not a time — try 08:30, 8:30 pm or 2030."
+                !valid -> "$complaint."
                 parsed.isNullOrEmpty() -> "No reminder — nothing will be sent for this habit."
                 else -> ReminderTime.describe(parsed)
             },
