@@ -697,8 +697,10 @@ async function saveCount() {
   const { date } = counting;
   countDialog.close();
   counting = null;
-  // Deleted, or archived out of the list, while the dialog was open.
-  if (!habit) return;
+  // Deleted, or archived out of the list, while the dialog was open. Said out
+  // loud: the dialog has already closed, so returning quietly is a Save that
+  // looks exactly like one that worked.
+  if (!habit) return toast('That habit is no longer on the list — nothing was saved.');
 
   try {
     if (amount === '') await clearDay(habit, date);
@@ -813,7 +815,7 @@ export function init() {
     const { date } = counting;
     countDialog.close();
     counting = null;
-    if (!habit) return;
+    if (!habit) return toast('That habit is no longer on the list — nothing was cleared.');
     try {
       await clearDay(habit, date);
     } catch (e) {

@@ -145,10 +145,16 @@ try {
       `document.querySelector('#grid-count .countfield-hint').textContent`)));
 
   console.log('\n--- a limit of zero gets the button its whole point needs ---');
+  // Closed first. The section above leaves the dialog open, and clicking a grid
+  // cell under it drives `showModal()` on an already-modal dialog — a no-op in
+  // Chrome since 2022, so it worked, but it is a state no user can reach and a
+  // suite should not depend on.
   // `[0, target]` guarded on `target > 0` withheld the 0 preset from exactly
   // the habit the code's own comment says it is for — an at-most-0 limit, where
   // 0 is the day worth recording — and the goal line vanished from the hint for
   // the same reason. Checked against the fixture's own limit habit.
+  await ev(`document.getElementById('count-cancel').click(); true`);
+  await sleep(200);
   const limit = await ev(`(async()=>{
     const d = await (await fetch('/api/overview?days=7')).json();
     const h = d.habits.find(x => x.target_type === 'at_most');
@@ -167,6 +173,34 @@ try {
       `document.querySelector('#grid-count .countfield-hint').textContent`)),
     await ev(`document.querySelector('#grid-count .countfield-hint').textContent`));
   await ev(`document.getElementById('count-cancel').click(); true`);
+  await sleep(200);
+
+  console.log('\n--- a targetless habit is not told it has a goal of 0 ---');
+  // 0 is a real goal on a LIMIT and is what `parseHabit` stores for "no target"
+  // on an at-least habit — `stepFor` reads it as the second. Testing the number
+  // rather than the kind told every targetless measurable habit it had a target
+  // of zero, which is a goal it meets by doing nothing.
+  const none = await ev(`(async()=>{
+    const r = await fetch('/api/habits', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name:'Pages read', type:'numerical', unit:'pages',
+        target_value: 0, target_type:'at_least' }) });
+    return (await r.json()).id;})()`);
+  await ev(`(async()=>{ location.reload(); })()`);
+  for (let i = 0; i < 60; i++) {
+    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+    await sleep(250);
+  }
+  await ev(`(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
+    const row = rows.find(r => r.textContent.includes('Pages read'));
+    row.querySelector('.day-cell, .check, button[data-focus-key^="check:"]').click();
+    return true;})()`);
+  await sleep(400);
+  const noneHint = await ev(
+    `document.querySelector('#grid-count .countfield-hint').textContent`);
+  check('no target means no goal line', !/Target at least 0/.test(noneHint), noneHint);
+  await ev(`document.getElementById('count-cancel').click(); true`);
+  await ev(`fetch('/api/habits/' + ${none}, { method:'DELETE' })`);
   await sleep(200);
 
   console.log('\n--- zero is an answer; empty is not ---');

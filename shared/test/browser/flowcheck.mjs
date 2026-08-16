@@ -152,6 +152,16 @@ try {
   check('notes field is visible in the day editor',
     await ev(`getComputedStyle(document.getElementById('day-notes-wrap')).display !== 'none'`));
 
+  // The amount control's own label, which names the unit. It moved out of the
+  // day dialog into ui/count-field.js when the number input became a control,
+  // and `daydialog.mjs` can no longer see it — that suite builds a fake DOM and
+  // stubs the control, so the only place this can be read is a real browser.
+  // Without it, `Amount (pages)` could become `Amount` for every measurable
+  // habit and nothing would fail.
+  check('the amount field is labelled with the habit\'s unit',
+    await ev(`document.querySelector('#day-count legend').textContent`) === 'Amount (pages)',
+    await ev(`document.querySelector('#day-count legend').textContent`));
+
   const clickInfo = await ev(`(()=>{
     // The amount is a control now, not a bare number input — the box inside it
     // is what is read, which is the rule ui/count-field.js is built on.

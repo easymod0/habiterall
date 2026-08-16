@@ -48,10 +48,15 @@ function createCountField(root) {
 
   function defaultHint() {
     if (!habit) return '';
-    // A target of 0 is a real goal and the commonest one on a limit — "at most
-    // 0 cigarettes". Testing the NUMBER for truthiness dropped the goal line
-    // for exactly the habit whose goal is the whole point.
-    if (habit.target_value == null) return 'Leave empty to clear the day.';
+    // A target of 0 is a real goal on a LIMIT — "at most 0 cigarettes" — and
+    // testing the number for truthiness dropped the goal line for exactly the
+    // habit whose goal is the whole point. It is not a goal on an at-least
+    // habit, where 0 is what `parseHabit` stores for "no target" and what
+    // `stepFor` reads as one; `target_value == null` never fires at all, since
+    // the column is NOT NULL in both editions.
+    if (habit.target_type !== 'at_most' && goal() <= 0) {
+      return 'Leave empty to clear the day.';
+    }
     const direction = habit.target_type === 'at_most' ? 'at most' : 'at least';
     const unit = habit.unit ? ` ${habit.unit}` : '';
     return `Target ${direction} ${formatAmount(goal())}${unit}. Leave empty to clear.`;
@@ -77,14 +82,22 @@ function createCountField(root) {
     // record meant typing. Deduplicated, since on that habit they are the same
     // amount and two identical buttons read as one of them doing something
     // else.
-    const values = [...new Set([0, target])];
-    for (const value of values) {
+    // Deduplicated and filtered on the LABEL, not the number, because the
+    // label is what the button types. Two targets a millionth apart format
+    // identically, which produced two buttons that look the same and do the
+    // same — the thing the `Set` was there to prevent; and a target outside
+    // `parseAmount`'s domain gave a button that fills the box with a value
+    // Save then refuses. Neither is reachable with a sane target; both are one
+    // expression to rule out.
+    const labels = [...new Set([0, target].map(formatAmount))]
+      .filter((label) => typeof parseAmount(label) === 'number');
+    for (const label of labels) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'btn btn-sm';
-      button.textContent = formatAmount(value);
+      button.textContent = label;
       button.addEventListener('click', () => {
-        typed.value = formatAmount(value);
+        typed.value = label;
         hint('');
         typed.focus();
       });
