@@ -9,7 +9,8 @@
 import { api } from '/shared/ui/api.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import {
-  addDaysISO, datesEndingOn, freqLabel, fromISOLocal, iso, targetLabel, todayISO,
+  addDaysISO, datesEndingOn, freqLabel, fromISOLocal, iso, monthLabels,
+  targetLabel, todayISO, weekdayLetters,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
@@ -50,9 +51,12 @@ const GRID_DAYS = 14;         // most columns we will ever show
 const GRID_DAYS_NARROW = 7;   // phone layout: fewer, wider columns
 const GRID_DAYS_MEDIUM = 10;  // tablets, where 14 would crush the habit name
 
-const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// Weekday letters and month names come from `ui/dates.js`, which asks `Intl`.
+// There were two hardcoded English copies of both — one here and one in
+// charts.js — so the grid header and the calendar's captions were English
+// whatever the browser was set to, in an app whose amount dialog already used
+// the browser's own locale.
+
 
 /**
  * How many day columns fit without squeezing the habit name out of existence.
@@ -252,7 +256,7 @@ export function paint() {
 
       const day = document.createElement('span');
       day.className = 'check-day';
-      day.textContent = DAY_LETTERS[d.getDay()];
+      day.textContent = weekdayLetters()[d.getDay()];
 
       btn.append(box, day);
       btn.addEventListener('click', () => onCheckClick(habit, date));
@@ -389,7 +393,7 @@ function renderGridHeader(dates, todayIso) {
     dayNum.textContent = String(d.getDate());
     const mon = document.createElement('span');
     mon.className = 'grid-date-mon';
-    mon.textContent = d.getDate() === 1 || d === dates[0] ? MONTHS[d.getMonth()] : '';
+    mon.textContent = d.getDate() === 1 || d === dates[0] ? monthLabels()[d.getMonth()] : '';
     cell.append(mon, dayNum);
     cols.append(cell);
   }
@@ -404,8 +408,9 @@ function rangeLabel(dates) {
     ? [dates[0], dates[dates.length - 1]]
     : [dates[dates.length - 1], dates[0]];
   const sameMonth = a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear();
-  const left = sameMonth ? String(a.getDate()) : `${a.getDate()} ${MONTHS[a.getMonth()]}`;
-  return `${left} – ${b.getDate()} ${MONTHS[b.getMonth()]} ${b.getFullYear()}`;
+  const months = monthLabels();
+  const left = sameMonth ? String(a.getDate()) : `${a.getDate()} ${months[a.getMonth()]}`;
+  return `${left} – ${b.getDate()} ${months[b.getMonth()]} ${b.getFullYear()}`;
 }
 
 /** Move the visible window, clamped so it never runs past today. */

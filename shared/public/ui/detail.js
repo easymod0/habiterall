@@ -15,7 +15,9 @@ import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
 import {
   card, cardInnerWidth, segmented, subheading, windowedChart,
 } from '/shared/ui/components.js';
-import { addDaysISO, freqLabel, targetLabel, todayISO } from '/shared/ui/dates.js';
+import {
+  addDaysISO, formatDateShort, freqLabel, fromISOLocal, targetLabel, todayISO,
+} from '/shared/ui/dates.js';
 import { isAvoided } from '/shared/ui/toggle.js';
 import { openDayDialog } from '/shared/ui/day-dialog.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
@@ -267,7 +269,12 @@ function render(stats, entries) {
   // and answerable; the future cells are drawn but empty.
   const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
   const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
-  navLabel.textContent = `${calWindow.start} → ${calLast}`;
+  // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
+  // says "Completion calendar" reads as a serial number, and this was the last
+  // place in the app still showing one.
+  navLabel.textContent =
+    `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
+    `${formatDateShort(fromISOLocal(calLast))}`;
 
   const skipSet = new Set(entries.filter((e) => e.status === 'skip').map((e) => e.date));
   const notesByDate = Object.fromEntries(

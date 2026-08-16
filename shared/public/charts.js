@@ -11,12 +11,15 @@ import {
   DEFAULT_ZOOM,
 } from './ui/calendar.js';
 import { SKIP, YES } from './ui/values.js';
-// Dependency-free by design, so this module still loads under the offline
-// render suites' fake DOM. See the header of ui/toggle.js.
+// Relative, like the two above, and for the same reason: two suites import this
+// module in Node. Neither reaches for anything but `Date`, `Intl` and its own
+// constants, which is what keeps them loadable under the fake DOM.
+import {
+  formatDateShort, fromISOLocal, monthLabels, weekdayLetters, weekdayNames,
+} from './ui/dates.js';
 import { isAvoided } from './ui/toggle.js';
 
 const NS = 'http://www.w3.org/2000/svg';
-const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 /**
  * The seven `getDay()` indices in the order the rows are drawn.
@@ -33,8 +36,6 @@ const weekOrder = (weekStart) =>
 /** Those labels in row order. */
 const rotateWeek = (labels, weekStart) =>
   weekOrder(weekStart).map((i) => labels[i]);
-const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function el(name, attrs = {}, text) {
   const node = document.createElementNS(NS, name);
@@ -137,14 +138,18 @@ export function scoreChart(scores, color, { width = 720, height = 200 } = {}) {
     'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
   }));
 
-  // date labels at both ends
+  // Date labels at both ends, written the way the rest of the app writes a
+  // date. These were raw ISO, which under a heading that already says what the
+  // chart is reads as machine output — and it was English-neutral only by
+  // accident, since the two hardcoded month arrays beside it were not.
+  const axisDate = (isoDate) => formatDateShort(fromISOLocal(isoDate));
   svg.appendChild(el('text', {
     x: pad.left, y: height - 6, 'font-size': 10, fill: dim,
-  }, scores[0].date));
+  }, axisDate(scores[0].date)));
   svg.appendChild(el('text', {
     x: width - pad.right, y: height - 6, 'text-anchor': 'end',
     'font-size': 10, fill: dim,
-  }, scores[scores.length - 1].date));
+  }, axisDate(scores[scores.length - 1].date)));
 
   return svg;
 }
@@ -205,7 +210,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   // Two labels, at the first and third rows. They move with the setting: the
   // grid's rows are positional — row 0 is whatever `calendarWindow` started the
   // week on — so a fixed 'S' over row 0 captions Monday on a Monday-start week.
-  const calLabels = rotateWeek(WEEKDAY_LABELS, weekStart);
+  const calLabels = rotateWeek(weekdayLetters(), weekStart);
   for (let i = 0; i < 3; i += 2) {
     svg.appendChild(el('text', {
       x: 0, y: padTop + (i * step) + CELL - 2, 'font-size': 9, fill: dim,
@@ -422,7 +427,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         lastMonth = cursor.getMonth();
         svg.appendChild(el('text', {
           x, y: 9, 'font-size': 9.5, fill: dim,
-        }, MONTH_LABELS[lastMonth]));
+        }, monthLabels()[lastMonth]));
       }
 
       cursor.setDate(cursor.getDate() + 1);
@@ -745,7 +750,7 @@ export function weekdayMonthChart(months, color,
     const [yy, mm] = m.month.split('-').map(Number);
     svg.appendChild(el('text', {
       x: cx, y: 12, 'text-anchor': 'middle', 'font-size': 9.5, fill: dim,
-    }, MONTH_LABELS[mm - 1]));
+    }, monthLabels()[mm - 1]));
 
     // The year, once, wherever it changes — so a window spanning December
     // into January is not two ambiguous "Jan"s.
@@ -905,11 +910,6 @@ function shiftISO(isoDate, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
-/** Parse 'YYYY-MM-DD' as a local date (not UTC, which would shift westward). */
-function fromISOLocal(s) {
-  const [y, m, d] = s.split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
 
 /* ---------- history bar chart ---------- */
 
