@@ -75,4 +75,11 @@ coverage/
 # Claude Code working directory: agent worktrees and scratch notes.
 # Untracked and must stay so — a bare `git add -A` otherwise stages the
 # worktrees as broken gitlinks, which is exactly what happened twice.
-.claude/
+#
+# `.claude/*` rather than `.claude/`, so that ONE child can be excepted: git
+# does not descend into an excluded directory, so a negation under the bare
+# form matches nothing. `skills/` is tracked because a skill is read from the
+# checkout it runs in, and a review agent gets its own worktree — where an
+# ignored file does not exist at all. Everything else here stays scratch.
+.claude/*
+!.claude/skills/
