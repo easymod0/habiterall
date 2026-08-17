@@ -1049,8 +1049,9 @@ cigarettes" work.
 so an *at most* habit can be shown the other way up. Set **Show this habit as**
 to *Something to avoid* on its edit screen: a clean day then fills in the
 habit's colour while a slip paints red and shows how far over you went, and the
-buttons in the day editor and the Android notification read **Clean day** /
-**Slipped** rather than Done / Not done. Nothing about the storage moves. It is still an at-most
+buttons read **Clean day** / **Slipped** rather than Done / Not done — in the
+day editor, and in the Android shade, where the notification answers a limit
+without opening anything. Nothing about the storage moves. It is still an at-most
 target, the target still decides whether a day counts, and the Loop export
 carries exactly what it carried before — this is a way of *reading* a habit,
 not a different kind of habit. The tap cycle is unchanged too; only what a tap
