@@ -152,9 +152,35 @@ try {
 
   // A real past date: entries in the future are refused, so this one cannot be
   // a fixture like the days above — it has to be relative to the actual today.
-  const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+  //
+  // And it must fall OUTSIDE the fixture calendar, which is the half that was
+  // missing. Every other instant in this file is an absolute day in August 2026
+  // (`TODAY` through `TODAY + 5`), so "two days ago" walks into that window for
+  // six real dates a year — and ticking the habit on a fixture day makes that
+  // day's delivery `done_today`, so nothing is sent, no outcome is recorded,
+  // and the checks below read a status row that was never written. Measured on
+  // 2026-08-17: `twoDaysAgo` was 2026-08-15, which is `deliverOn(15, 500)`, and
+  // the three transient-failure checks failed with the feature working
+  // perfectly. Master was green the day before and red the day after, on a
+  // suite nobody had touched.
+  //
+  // So it is clamped to the day before the calendar starts. That is still a
+  // real past date whenever the clamp fires — it only fires once the real today
+  // has reached the window, which is after it.
+  const stamp = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const dayBefore = stamp(Date.parse(`${TODAY}T00:00:00Z`) - 86_400_000);
+  const twoDaysAgo = (() => {
+    const real = stamp(Date.now() - 2 * 86_400_000);
+    return real < TODAY ? real : dayBefore;
+  })();
   const [y, m, d] = twoDaysAgo.split('-').map(Number);
   const doneDay = new Date(Date.UTC(y, m - 1, d, 8, 0));
+
+  // Named, so a future edit that moves the fixture calendar fails HERE rather
+  // than as three confusing assertions about a delivery status two screens
+  // down. This is the invariant; the checks below only depend on it.
+  ck('the ticked day is outside the fixture calendar', twoDaysAgo < TODAY,
+    `${twoDaysAgo} must be before ${TODAY}`);
 
   const ticked = await api(`/api/habits/${habitId}/entries/${twoDaysAgo}`, {
     method: 'PUT', body: JSON.stringify({ value: 2 }),
