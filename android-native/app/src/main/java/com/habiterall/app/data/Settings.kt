@@ -65,6 +65,24 @@ class Settings(private val context: Context) {
      */
     private val skipDaysKey = booleanPreferencesKey("skip_days")
 
+    /**
+     * Whether the account shows question marks, mirrored for the home-screen
+     * widget.
+     *
+     * The pair of it and [skipDaysKey] is what `Grid.nextState` reads, and the
+     * widget cycles a day with no network at all — so a tap on the home screen
+     * and a tap in the app have to walk the same four states or the two clients
+     * disagree about what a tap does. Absent reads as off, which is both the
+     * server's default and Loop's.
+     */
+    private val questionMarksKey = booleanPreferencesKey("question_marks")
+
+    /**
+     * One line per home-screen widget: which habit it shows, and the day it
+     * last knew about. See [Widgets.encode] for the shape and why it is flat.
+     */
+    private val widgetCacheKey = stringPreferencesKey("widget_cache")
+
     val serverUrl: Flow<String?> =
         context.dataStore.data.map { it[serverUrlKey]?.ifBlank { null } }
 
@@ -90,11 +108,16 @@ class Settings(private val context: Context) {
                 listOf(
                     it.id.toString(),
                     it.reminderTime,
-                    it.name.replace('|', ' ').replace('\n', ' '),
+                    // `Widgets.flatten`, because a bare `\r` splits a line as
+                    // surely as a `\n` does and this cache is read with
+                    // `lineSequence` too: a habit named "Run\rfast" wrote one
+                    // record and read back as two unparseable halves, taking
+                    // its alarm with it. One reader's bug, two caches.
+                    Widgets.flatten(it.name),
                     it.type,
                     it.targetValue.toString(),
-                    it.unit.replace('|', ' ').replace('\n', ' '),
-                    it.reminderMessage.replace('|', ' ').replace('\n', ' '),
+                    Widgets.flatten(it.unit),
+                    Widgets.flatten(it.reminderMessage),
                     // Appended, never inserted: the reader below indexes by
                     // position and tolerates a SHORT line, so a cache written
                     // before this field existed still arms its alarms. Putting
@@ -124,6 +147,74 @@ class Settings(private val context: Context) {
     /** The cached answer; off until the server has said otherwise. */
     suspend fun cachedSkipDays(): Boolean =
         context.dataStore.data.first()[skipDaysKey] ?: false
+
+    /** Remember whether the account shows question marks. */
+    suspend fun cacheQuestionMarks(enabled: Boolean) {
+        context.dataStore.edit { it[questionMarksKey] = enabled }
+    }
+
+    /** The cached answer; off until the server has said otherwise. */
+    suspend fun cachedQuestionMarks(): Boolean =
+        context.dataStore.data.first()[questionMarksKey] ?: false
+
+    /* ---------- home-screen widgets ---------- */
+
+    suspend fun cachedWidgets(): List<Widgets.Record> =
+        Widgets.decodeAll(context.dataStore.data.first()[widgetCacheKey] ?: "")
+
+    suspend fun cachedWidget(widgetId: Int): Widgets.Record? =
+        cachedWidgets().firstOrNull { it.widgetId == widgetId }
+
+    /**
+     * Write these records, replacing any with the same widget id.
+     *
+     * Read and write inside one `edit`, because two widgets can be tapped in
+     * the same second and DataStore only serialises the transform — a
+     * read-then-write around it would lose one of the two taps.
+     */
+    suspend fun putWidgets(records: List<Widgets.Record>) {
+        if (records.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            val byId = Widgets.decodeAll(prefs[widgetCacheKey] ?: "")
+                .associateBy { it.widgetId }
+                .toMutableMap()
+            records.forEach { byId[it.widgetId] = it }
+            prefs[widgetCacheKey] = Widgets.encodeAll(byId.values.toList())
+        }
+    }
+
+    /**
+     * Read, change and write the whole set inside ONE `edit`.
+     *
+     * The shape every caller here wants: DataStore serialises the transform,
+     * so a tap landing between a read and a write cannot be lost, and values
+     * derived from what was read cannot be derived from a stale copy.
+     */
+    suspend fun updateWidgets(transform: (List<Widgets.Record>) -> List<Widgets.Record>) {
+        context.dataStore.edit { prefs ->
+            val current = Widgets.decodeAll(prefs[widgetCacheKey] ?: "")
+            prefs[widgetCacheKey] = Widgets.encodeAll(transform(current))
+        }
+    }
+
+    /**
+     * Replace the whole set, for the one caller that rewrites ids rather than
+     * values: a restore, where every record has to move at once and a
+     * key-by-key merge would leave both the old and the new id in the blob.
+     */
+    suspend fun replaceWidgets(records: List<Widgets.Record>) {
+        context.dataStore.edit { it[widgetCacheKey] = Widgets.encodeAll(records) }
+    }
+
+    /** Forget widgets the launcher has deleted. */
+    suspend fun removeWidgets(widgetIds: List<Int>) {
+        if (widgetIds.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            val kept = Widgets.decodeAll(prefs[widgetCacheKey] ?: "")
+                .filterNot { it.widgetId in widgetIds }
+            prefs[widgetCacheKey] = Widgets.encodeAll(kept)
+        }
+    }
 
     /**
      * The cached schedule. Enough to arm an alarm and post a usable

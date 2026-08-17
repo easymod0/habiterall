@@ -85,6 +85,45 @@ day, and a streak is the whole history.
 Which end today sits at is the account's `dayOrder` setting, not this app's, so
 changing it in the web app moves the phone too. Pull down to refresh.
 
+## The home-screen widget
+
+One habit, today, tap to record it. Drop it on the home screen, pick the habit
+once, and it never needs the app again: the tap cycles the same four states the
+grid does, a measurable habit asks for a number instead, and a habit shown as
+something to avoid paints a clean day in its own colour and a slip in red — the
+same way up as everywhere else, because it is the same two functions deciding.
+
+It works offline, which is most of the design. The habit and its day are kept on
+the device (`Widgets.Record`), the write goes to the outbox like a notification's
+does, and the cell repaints the moment you tap it rather than when the server
+agrees.
+
+Two things are worth knowing before changing it:
+
+- **The record says which DAY it is about.** A widget has no `onResume`, so a
+  record made yesterday would show a tick against today — and the next tap would
+  advance it to *not done* and record a miss on a day nobody touched. `stateOn`
+  answers "unanswered" for a stale record, and the tap resolves today when the
+  tap arrives.
+- **Nothing redraws a widget by itself.** The launcher keeps the last drawing
+  until something replaces it, so the rule above is only as good as its trigger:
+  the list's fetch, the six-hourly sync, an answer given in the shade, the tap
+  itself, and — for midnight — an **alarm** (`HabitWidget.armMidnight`).
+  `ACTION_DATE_CHANGED` looks like the answer and is not: it is not on Android's
+  implicit-broadcast exception list, so a manifest receiver is never sent it.
+  `TIME_SET` and `TIMEZONE_CHANGED` are, and are still registered.
+- **A widget that cannot be redrawn cannot be recovered**, which is why a record
+  that will not parse is a bug with teeth: the widget sits on its
+  `initialLayout` with no click intent, so it is blank AND dead to taps. Free
+  text is flattened through `Widgets.flatten` (`|`, `\n` and `\r` — a bare
+  carriage return splits a line too), and `onRestored` re-points records at the
+  ids a restore hands out.
+- **A habit that leaves the account marks its widget rather than freeing it.**
+  Archiving is enough — `/api/overview` carries neither archived nor deleted
+  habits — and a record simply dropped would leave the last cell on screen,
+  still tappable, recording writes that 404 forever. The widget says *Removed*
+  under the habit's name and its tap opens the app.
+
 ## Requirements
 
 - **Android 8.0 (API 26)** or newer — notification channels and exact alarms
@@ -346,11 +385,19 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   goes over the wire. A target of `0` is a legal habit meaning "no target", so
   text that fails to parse and falls back to zero stores cleanly, draws
   normally, and can never be met.
+- **`WidgetTest`** — what only the home-screen widget has: a record that names
+  the day it is about, a tap judged against TODAY rather than against whatever
+  the widget was last drawn with, a habit that has left the account, the ids a
+  restore hands out, and the three ways a record can become unreadable. The
+  cycle and the encoding are `GridTest`'s and are not repeated. Note what it
+  cannot prove — that anything redraws the widget at midnight. That is a
+  premise, and premises here are verified on an emulator.
 - **`HabitOrderTest`** — the reorder arithmetic, which fails invisibly: the
   phone posts the whole order and each index becomes a `position`, so an
   off-by-one stores a wrong order that the web app then faithfully agrees with.
 
 ## Roadmap
 
-- A home-screen widget
+- The other widgets Loop ships — frequency, score, history. The checkmark is
+  the one that replaces opening the app, and it is done
 - Porting individual screens from web to native where it clearly helps

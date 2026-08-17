@@ -53,6 +53,18 @@ object Notifications {
     const val EXTRA_SNOOZED = "snoozed"
 
     /**
+     * "Whichever day it is when this opens" — the home-screen widget's answer
+     * to [EXTRA_DATE], and never a reminder's.
+     *
+     * A reminder NAMES a day, because it is about one: pressing it at 00:01 on
+     * a notification posted at 23:59 answers the day it asked about. A widget's
+     * click intent is built when the widget is drawn and pressed whenever the
+     * user presses it, so a day baked into it would be yesterday's after a
+     * night on the home screen.
+     */
+    const val EXTRA_TODAY = "today"
+
+    /**
      * What the tapped action records, decided where the habit is in hand.
      *
      * [ActionReceiver] gets an id and a date and nothing else; loading the

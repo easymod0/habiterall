@@ -1028,6 +1028,153 @@ deferral after the interruption it was deferring; the day's own alarm still asks
 at its own time. Say it as a trade, because stating it as an absolute is how the
 first version of this paragraph came to be wrong.
 
+**A home-screen widget is a CACHE, not a sixth mirror — and the cache is what
+raises every question in it.** One habit, today, tap to cycle. Everything it
+decides was already written down: the cycle is `Grid.nextState`, the encoding
+`Grid.valueForState` (so an avoided habit's clean day is 0 and its slip is
+target + 1), what a stored day means is `Habit`'s, and the write is `Outbox`'s.
+What is new is `Widgets.Record` — the habit's SHAPE and one day's answer, on
+disk — because a tap on a home screen happens with no network and nothing about
+drawing or answering may wait for a server. That is the reminder cache's
+reasoning at a second surface, and a second record rather than a wider one:
+`cacheReminders` holds only the habits that carry a reminder, and a widget is
+for whichever habit you put on the home screen.
+
+**The record names the day it is about, and that is the whole of the midnight
+problem.** A widget has no `onResume` — `MainActivity` re-reads `LocalDate.now()`
+on every one, and nothing on a home screen can — so `stateOn` answers `unknown`
+for a record whose date is not today rather than showing yesterday's tick. The
+cost of getting that wrong is not a stale pixel: read as done, the next tap
+advances to *not done* and records a MISS against a day nobody has touched. The
+tap resolves today when the tap ARRIVES, never when the widget was drawn, which
+is also why a measurable habit's click intent carries `EXTRA_TODAY` instead of a
+date — a `getActivity` PendingIntent is built at draw time and pressed whenever
+the user presses it. It has to be `getActivity`: opening the number pad from the
+receiver instead would be a background activity launch, which Android 10 refuses.
+
+**What redraws it is the part that has to be arranged.** Measured on an
+emulator: the launcher keeps showing the last `RemoteViews` until something
+updates them, so the rule above is only ever as good as its trigger. Four are
+the ones that already existed — the list's own fetch (beside
+`Reminders.armFrom`, for the same reason), the six-hourly `ScheduleWorker` that
+already re-arms alarms, an answer given elsewhere on the phone
+(`WidgetSync.noteAnswer`, from the notification's buttons and its number pad),
+and the widget's own tap.
+
+**Midnight itself is an ALARM, and the obvious answer to it is dead code.**
+`ACTION_DATE_CHANGED` was the fifth trigger and the only one aimed at the
+problem, and it never once fired: it is not on Android's implicit-broadcast
+exception list, so a manifest-registered receiver is never sent it on any
+version this app supports. `TIME_SET` and `TIMEZONE_CHANGED` *are* on that list
+— which is exactly why the wrong version passes every test you can run from a
+shell, and why they are still registered. `HabitWidget.armMidnight` is the real
+one, through the same `Reminders.setAlarm` a reminder uses so the exact/inexact
+choice is made once. It is armed from `redraw` — every path that can create a
+widget draws it — and from `BootReceiver`, which is not one of those paths and
+was the hole: a reboot clears every alarm, and the system's own
+`APPWIDGET_UPDATE` is `updatePeriodMillis` away on an inexact alarm Doze defers,
+so a reboot at 23:50 left yesterday on the home screen until the phone was
+used. Inexact was the first attempt and `dumpsys alarm` refused
+it: an alarm set 23 hours out is given a window of an HOUR, on the one alarm
+whose whole purpose is a date boundary. `updatePeriodMillis` is 30 minutes
+underneath all of it and is NOT the midnight answer either — those updates ride
+an inexact alarm that Doze defers, so overnight the redraw lands on wake.
+
+**A widget that cannot be redrawn is a widget that cannot be RECOVERED, and
+three different things reached that state.** It is worth stating as one shape,
+because each looked local. A record that will not parse leaves the widget on its
+`initialLayout` — blank, and with no click PendingIntent at all — and the next
+write rewrites the blob without it: `Widgets.flatten` was stripping `|` and
+`\n` but not `\r`, and `lineSequence` splits on a bare carriage return too, so
+one habit named `Run<CR>fast` was enough. `parseHabit` only trims, so an
+interior `\r` arrives from a paste, a Loop import or the API, and `validate.js`
+already flattens `[\r\n]` out of `reminder_message` naming this very reader —
+the same hole was in `cacheReminders`, where it costs an alarm instead. A
+RESTORE reaches it from the other side: the ids in the backup are not the ids
+the launcher hands out, so without `onRestored` and `Widgets.remap` every record
+names a widget nobody holds. And a habit that leaves the account reaches a
+third version of it, where the drawing survives but is a lie.
+
+`onRestored` has a trap of its own that only shows up in combination: ids move,
+and a record the restore did not mention keeps the one it had, so
+`remap([7, 12], old=[7], new=[12])` returned **12 twice**. `replaceWidgets`
+wrote both, `redraw` drew one and `tap` resolved the other with `firstOrNull` —
+the home screen showing habit B while a tap recorded habit A, self-healing later
+to whichever `associateBy` kept. A fresh launcher hands out ids from a low
+counter and a backup's ids are low too, so the overlap is ordinary. A record
+whose id has just been given to somebody else is dropped.
+
+That last one is the interesting one, because doing nothing looked defensible.
+`/api/overview` carries neither an archived habit nor a deleted one, so both
+arrive as an absence, and the first version left the record alone rather than
+"claim the day is unanswered". The consequence it missed is that **the widget
+stays tappable**: the launcher goes on drawing the last cell with its click
+intent, a tap paints a tick, the write 404s, `isPermanent` drops it, and nothing
+ever repaints. `Widgets.refreshedOrGone` marks the record instead —
+`Reminders.armFrom` answers the same question the same way, by acting on what
+has disappeared rather than only on what remains — and a gone record refuses
+taps, drops its recording intent for one that opens the app, and comes back by
+itself if the habit is un-archived.
+
+**It also has to be VISIBLE, and the first version of it was not.** The
+explanation went to `setContentDescription` and nowhere else, so on the day the
+habit was archived the cell was pixel-identical to a live habit answered done —
+full colour, a tick — and the day after it was a blank cell under the habit's
+name. The only change a sighted user could see was that a tap opened the app,
+which reads as a bug rather than as an explanation. The layout has a third view
+for it now, hidden the rest of the time, because neither the name line nor the
+cell can say it without borrowing a meaning. The reason it looked finished is
+worth keeping: a `uiautomator dump` prints the accessibility tree, so the
+sentence was right there in the verification — **the dump is not the screen**,
+and a claim about what a user sees has to come from a screenshot.
+
+**Who wins while a write is in flight is asked of WorkManager, not remembered.**
+A refresh must not repaint the server's older answer over a tap that has not
+been delivered — the `pending` overlay of the list screen, at a surface that has
+nowhere to hold one: the tap happens in a broadcast receiver free to die the
+moment it returns. So `Outbox.isPending` reads the unique work's own state, which
+is durable, survives a reboot, and cannot get stuck the way a flag set by a
+process that then died would. `SyncWorker` also repaints on SUCCESS, which is the
+durable half of the same idea: the optimistic write happens in a receiver or a
+finishing activity, and the worker is the one place the answer is known to have
+landed.
+
+**And a write the server refuses for good is taken back where it is refused.**
+`SyncWorker` drops a 4xx as permanently inapplicable, so without
+`WidgetSync.noteRefused` the cell went on claiming an answer nothing had stored
+until some later refresh silently erased it — the defect `Outbox.awaitWrite`
+was written for, arriving at a surface with no undo. The day goes back to
+UNANSWERED rather than to what it held before, because the record keeps no
+previous value and inventing one would be a second claim about the same day.
+What this deliberately does NOT do is tell anybody, and that is the one
+position here argued rather than fixed: the shade's buttons are equally silent
+about a refused write, and the note line the widget does have is spent on the
+state that is permanent rather than on one that a refresh will explain. It is
+not free — the rollback blanks the day, so the user is left believing they never
+answered rather than that their answer was refused, which invites the identical
+second tap. The list screen remains the surface that reports one.
+
+Four smaller decisions. A measurable habit's tap opens the number pad rather
+than cycling, by the same predicate the notification uses (`isNumerical &&
+!isAvoided`) — cycling one would record `YES`, which is 2, as the amount. That
+pad now has `taskAffinity=""`, which is not cosmetic: it is launched
+`NEW_TASK|CLEAR_TASK`, and while it shared `MainActivity`'s affinity those flags
+finished every activity in the app's task and `noHistory` then emptied the task
+away — so answering a number threw away the running app, its scroll position and
+anything half-typed. Pre-existing, and reachable only from a reminder until the
+widget made it the ordinary path. The configuration activity is the one part
+that needs the server, deliberately: a widget names a habit and a phone that has
+never reached the account has none to name, while everything after that point
+works offline. And `questionMarks` joined `skipDays` in the local mirrors,
+because those two are what `Grid.nextState` reads and the widget must walk the
+same four states the app's grid does.
+
+One last asymmetry worth writing down: `Widgets.answered` ignores an answer
+about an OLDER day than the record holds. A reminder posted at 23:50 and
+answered at 00:05 names yesterday, and is right to — the notification is about
+that day — but the widget has moved on, and taking it would blank today to paint
+a day that is over.
+
 **A row's streak is the server's arithmetic, so recording a day re-asks for
 it.** The optimistic overlay knows one day and a streak is the whole history;
 without a refetch, ticking today left the number sitting still at the exact

@@ -2,4 +2,17 @@
 <resources>
     <!-- The same blue as the web app's icon, so the two match on a home screen. -->
     <color name="ic_launcher_background">#3B82F6</color>
+
+    <!--
+      The widget cannot use the Compose colour scheme — RemoteViews has no
+      theme of its own and is inflated by the launcher — so these are stated
+      here and overridden in values-night/. Kept to the same four roles the
+      day grid uses, so a cell on the home screen and a cell in the app read
+      as the same thing.
+    -->
+    <color name="widget_background">#FFFFFFFF</color>
+    <color name="widget_cell_empty">#FFE7E0EC</color>
+    <color name="widget_text">#FF1C1B1F</color>
+    <!-- On a filled cell, where the fill is the habit's own colour. -->
+    <color name="widget_on_fill">#FFFFFFFF</color>
 </resources>

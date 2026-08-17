@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  `updatePeriodMillis` is the floor Android allows (30 minutes) and it is a
+  BACKSTOP, not the refresh: it redraws from the cache with no network. Note
+  what it is NOT — it is not the midnight answer, because these updates ride an
+  inexact alarm that Doze defers, so overnight the redraw lands on wake rather
+  than on the half hour. `HabitWidget.armMidnight` is what aims at midnight.
+
+  `reconfigurable`, so a widget can be pointed at another habit without being
+  deleted and placed again.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="110dp"
+    android:minHeight="110dp"
+    android:targetCellWidth="2"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/widget_habit"
+    android:previewLayout="@layout/widget_habit"
+    android:configure="com.habiterall.app.widget.WidgetConfigActivity"
+    android:description="@string/widget_description"
+    android:resizeMode="horizontal|vertical"
+    android:widgetFeatures="reconfigurable"
+    android:widgetCategory="home_screen" />

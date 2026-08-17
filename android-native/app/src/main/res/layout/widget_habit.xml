@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One habit, one day. The whole widget is the tap target: a home screen is
+  used at arm's length with a thumb, and a cell inside a card would be a
+  smaller target than the thing around it.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="8dp"
+    android:background="@drawable/widget_background">
+
+    <TextView
+        android:id="@+id/widget_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="12sp"
+        android:textColor="@color/widget_text"
+        android:paddingBottom="6dp"
+        android:text="@string/app_name" />
+
+    <!--
+      Only ever visible when the habit has left the account. A widget has one
+      line for a name and one cell for a day, and neither can say "this habit
+      is gone" — the cell would have to borrow a state that means something
+      else. So there is a third view, hidden the rest of the time.
+    -->
+    <TextView
+        android:id="@+id/widget_note"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="10sp"
+        android:textColor="@color/widget_text"
+        android:paddingBottom="4dp"
+        android:visibility="gone" />
+
+    <FrameLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content">
+
+        <!--
+          The fill is an ImageView tinted at runtime rather than a background
+          colour on the label: `setBackgroundColor` from RemoteViews replaces
+          the drawable, which loses the rounded corners, and the tint list
+          methods that would not are API 31.
+        -->
+        <ImageView
+            android:id="@+id/widget_cell"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+
+        <TextView
+            android:id="@+id/widget_mark"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:gravity="center"
+            android:textSize="24sp"
+            android:textColor="@color/widget_text" />
+    </FrameLayout>
+</LinearLayout>

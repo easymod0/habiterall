@@ -10,6 +10,11 @@ import android.widget.Toast
 import com.habiterall.app.R
 import com.habiterall.app.data.Outbox
 import com.habiterall.app.notify.Notifications
+import com.habiterall.app.widget.WidgetSync
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.time.LocalDate
 
 /**
  * Collects a number for a measurable habit.
@@ -24,7 +29,15 @@ class CountEntryActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val habitId = intent.getLongExtra(Notifications.EXTRA_HABIT_ID, -1)
-        val date = intent.getStringExtra(Notifications.EXTRA_DATE)
+        // A reminder names its day; the home-screen widget asks for "today" and
+        // means whichever day it is now — see [Notifications.EXTRA_TODAY]. The
+        // flag rather than a missing date, because an absent field is not a
+        // statement and inventing a day from one would be exactly that.
+        val date = if (intent.getBooleanExtra(Notifications.EXTRA_TODAY, false)) {
+            LocalDate.now().toString()
+        } else {
+            intent.getStringExtra(Notifications.EXTRA_DATE)
+        }
         val name = intent.getStringExtra(Notifications.EXTRA_HABIT_NAME) ?: ""
         val unit = intent.getStringExtra(Notifications.EXTRA_UNIT).orEmpty()
         val target = intent.getDoubleExtra(Notifications.EXTRA_TARGET, 0.0)
@@ -60,6 +73,10 @@ class CountEntryActivity : Activity() {
                 } else {
                     Outbox.enqueue(this, habitId, date, value, skip = false)
                     Notifications.cancel(this, Notifications.notificationId(habitId))
+                    // A home-screen widget for this habit is showing the day
+                    // this just answered, and nothing else would tell it until
+                    // the next refresh — which offline is hours.
+                    noteWidgets(habitId, date, value)
                     Toast.makeText(this, R.string.recorded_yes, Toast.LENGTH_SHORT).show()
                 }
                 finish()
@@ -67,6 +84,20 @@ class CountEntryActivity : Activity() {
             .setNegativeButton(R.string.cancel) { _, _ -> finish() }
             .setOnCancelListener { finish() }
             .show()
+    }
+
+    /**
+     * Paint the amount onto any widget for this habit.
+     *
+     * Fire and forget on the application context, because this activity is
+     * finishing: the write itself is already durable in the outbox, and all
+     * this can lose is a repaint the next refresh makes anyway.
+     */
+    private fun noteWidgets(habitId: Long, date: String, value: Double) {
+        val app = applicationContext
+        CoroutineScope(Dispatchers.IO).launch {
+            WidgetSync.noteAnswer(app, habitId, date, value, skip = false)
+        }
     }
 
     /** 8.0 -> "8", 12.5 -> "12.5" — an integer target should not read as a decimal. */

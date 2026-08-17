@@ -47,6 +47,7 @@ import com.habiterall.app.data.*
 import com.habiterall.app.notify.Notifications
 import com.habiterall.app.notify.Reminders
 import com.habiterall.app.notify.ReminderTime
+import com.habiterall.app.widget.WidgetSync
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -916,6 +917,11 @@ class MainActivity : ComponentActivity() {
                 // that has been offline for a week, and a Skip action the account
                 // has switched off must not appear in the shade.
                 settings.cacheSkipDays(fetched.skipDaysEnabled)
+                // The other half of what `Grid.nextState` reads, mirrored for
+                // the home-screen widget: it cycles a day with no network, and
+                // the widget and this grid disagreeing about where a tap goes
+                // next is the drift these mirrors exist to prevent.
+                settings.cacheQuestionMarks(fetched.questionMarksEnabled)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -932,6 +938,11 @@ class MainActivity : ComponentActivity() {
                 // nothing about the alarms — see `Reminders.armFrom`, which is
                 // where the whole reason is written down.
                 Reminders.armFrom(this@MainActivity, data.habits)
+                // The home screen has the same problem for the same reason: a
+                // widget cannot ask, so the fetch somebody else made is how it
+                // learns. This one carries the DAYS, which is what a widget is
+                // about, so it is the best-informed of the four ways in.
+                WidgetSync.refreshFrom(this@MainActivity, data.habits)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

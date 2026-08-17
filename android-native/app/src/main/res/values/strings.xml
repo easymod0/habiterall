@@ -38,6 +38,25 @@
     <string name="snooze_too_late">Too late to snooze that day</string>
     <string name="invalid_amount">Enter a number of zero or more</string>
 
+    <!-- The home-screen widget. -->
+    <string name="widget_description">One habit, today. Tap to record it.</string>
+    <string name="widget_pick_habit">Which habit?</string>
+    <string name="widget_needs_server">Open habiterall and set your server first</string>
+    <string name="widget_needs_network">Could not reach the server. A widget has to be told which habit it is for.</string>
+    <string name="widget_no_habits">No habits yet</string>
+    <!-- Spoken, never drawn: the cell itself is a colour and a mark. -->
+    <string name="widget_done">done today</string>
+    <string name="widget_not_done">not done today</string>
+    <string name="widget_clean">clean today</string>
+    <string name="widget_slipped">slipped today</string>
+    <string name="widget_skipped">skipped today</string>
+    <string name="widget_unanswered">not answered yet</string>
+    <!-- %1$s is the habit's name. Spoken when the habit has been deleted or
+         archived: the widget stops recording and opens the app instead. -->
+    <string name="widget_gone">%1$s is no longer on this account</string>
+    <!-- The same thing, drawn: a 2x2 cell has room for one short line. -->
+    <string name="widget_gone_short">Removed</string>
+
     <string name="count_hint">Amount</string>
     <string name="save">Save</string>
     <string name="cancel">Cancel</string>
