@@ -16,7 +16,8 @@ import { SKIP, YES } from './ui/values.js';
 // constants, which is what keeps them loadable under the fake DOM.
 import {
   WIDTH_SAFETY, estimateTextWidth, formatDateShort, formatStamp, fromISOLocal,
-  formatDayRange, formatMonthShort, formatYear, gutterFor, weekdayLetters,
+  addDaysISO, formatDayRange, formatMonthShort, formatYear, gutterFor, iso,
+  weekdayLetters,
   weekdayNames,
 } from './ui/dates.js';
 import { isAvoided } from './ui/toggle.js';
@@ -194,8 +195,6 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   const dim = themed('--text-dim');
   const empty = themed('--grid-empty');
 
-  const iso = (d) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
   const realToday = new Date();
   realToday.setHours(0, 0, 0, 0);
@@ -237,7 +236,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       for (let dow = 0; dow < 7; dow++) {
         const date = iso(probe);
         probe.setDate(probe.getDate() + 1);
-        if (!inStreak.has(date) || !inStreak.has(shiftISO(date, 1))) continue;
+        if (!inStreak.has(date) || !inStreak.has(addDaysISO(date, 1))) continue;
 
         const x = padLeft + wk * step;
         const y = padTop + dow * step;
@@ -479,7 +478,7 @@ function streakDates(streaks, minStreak) {
     // Bounded by the streak's own length, so a malformed entry cannot spin.
     for (let i = 0; i < streak.length && cursor <= streak.end; i++) {
       dates.add(cursor);
-      cursor = shiftISO(cursor, 1);
+      cursor = addDaysISO(cursor, 1);
     }
   }
   return dates;
@@ -690,9 +689,9 @@ function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
     // before — off the top of the grid, where `byDate` finds nothing and the
     // key silently does nothing.
     const dow = weekdayIndex(fromISOLocal(date), weekStart);
-    targetDate = shiftISO(date, e.key === 'Home' ? -dow : 6 - dow);
+    targetDate = addDaysISO(date, e.key === 'Home' ? -dow : 6 - dow);
   } else {
-    targetDate = shiftISO(date, delta);
+    targetDate = addDaysISO(date, delta);
   }
 
   // Clamp to a real, focusable cell: the edges of the rendered window and
@@ -785,21 +784,55 @@ export function weekdayMonthChart(months, color,
   // 12 columns a 328px card allows, vi-VN overlapped on 11 of 12 pairs, by up
   // to 24.9px. Overlapping captions are not a denser axis, they are an
   // unreadable one, and the first and last are the two that orient a reader.
+  // No `WIDTH_SAFETY` in either the collision test or the clamp, and both for
+  // the reason `streakChart` states: the margin is for RESERVING space, and
+  // dropping a caption is a DEGRADATION. Applied here it made the chart
+  // pessimistic about its own labels — measured at a 328px card with 8
+  // columns, hi-IN kept 4 of 8 when the widest real caption was 21.3px against
+  // a 31.2px column, and 11 of 14 non-English locales dropped captions with
+  // room to spare. In the clamp the margin costs displacement rather than
+  // pixels: it pushed gu-IN's last caption 31.4px left of the column it names,
+  // which is a caption over the wrong column. `estimateTextWidth` is measured
+  // never to under-bill, so the raw estimate is already the safe side.
   const CAPTION_GAP = 4;
-  let lastRight = -Infinity;
-  shown.forEach((m, c) => {
-    const cx = pad.left + (c + 0.5) * colW;
-
+  const captions = shown.map((m, c) => {
     const [yy, mm] = m.month.split('-').map(Number);
     const monthDate = new Date(yy, mm - 1, 15);
     const monthText = formatMonthShort(monthDate);
-    const half = estimateTextWidth(monthText, 9.5) * WIDTH_SAFETY / 2;
+    const half = estimateTextWidth(monthText, 9.5) / 2;
+    const cx = pad.left + (c + 0.5) * colW;
     // Kept inside the viewBox: a centred caption on the first or last column
     // otherwise hangs off the edge once the month name is not three Latin
     // characters.
-    const x = Math.min(Math.max(cx, half), width - half);
-    if (x - half >= lastRight) {
-      lastRight = x + half + CAPTION_GAP;
+    return { monthDate, monthText, half, cx,
+             x: Math.min(Math.max(cx, half), width - half) };
+  });
+
+  // The LAST column is captioned first, then the rest fill in to its left.
+  //
+  // A single greedy left-to-right pass is what the comment above says it does
+  // not do: it drops whichever caption collides, and at the right-hand edge
+  // that is always the newest month — the one a reader is actually looking at.
+  // Measured at 328px with 12 columns, en-US drew `Jan Mar May Jul Sep Nov`
+  // and no December. Reserving the last one costs at most one caption further
+  // left, which is the older half of the axis.
+  const drawn = new Set();
+  if (captions.length) drawn.add(captions.length - 1);
+  const last = captions[captions.length - 1];
+  let lastRight = -Infinity;
+  for (let c = 0; c < captions.length - 1; c++) {
+    const cap = captions[c];
+    const clearsLeft = cap.x - cap.half >= lastRight;
+    const clearsLast = cap.x + cap.half + CAPTION_GAP <= last.x - last.half;
+    if (clearsLeft && clearsLast) {
+      drawn.add(c);
+      lastRight = cap.x + cap.half + CAPTION_GAP;
+    }
+  }
+
+  shown.forEach((m, c) => {
+    const { monthDate, monthText, half, cx, x } = captions[c];
+    if (drawn.has(c)) {
       svg.appendChild(el('text', {
         x, y: 12, 'text-anchor': 'middle', 'font-size': 9.5, fill: dim,
       }, monthText));
@@ -821,11 +854,17 @@ export function weekdayMonthChart(months, color,
       ? formatYear(new Date(Number(prev.month.slice(0, 4)),
                             Number(prev.month.slice(5, 7)) - 1, 15))
       : null;
-    if (yearText !== prevYear) {
+    // ...and only under a column that HAS its month caption. The year is here
+    // to tell two "Jan"s apart, so with no month name above it there is
+    // nothing for it to disambiguate — and a bare year over an unnamed column
+    // reads as a label for the column rather than for the run of them. This
+    // was visible in about 30 of 48 locales before the last column was
+    // reserved above, which is where it usually landed.
+    if (yearText !== prevYear && drawn.has(c)) {
       // Clamped like the month above it. That clamp exists because a centred
       // caption hangs off the edge once it is not three Latin characters, and
       // the year is localised now too — `\u0e1e.\u0e28. 2569`, `AP \u06f1\u06f4\u06f0\u06f5`, `2026\u5e74`.
-      const yearHalf = estimateTextWidth(yearText, 8.5) * WIDTH_SAFETY / 2;
+      const yearHalf = estimateTextWidth(yearText, 8.5) / 2;
       svg.appendChild(el('text', {
         x: Math.min(Math.max(cx, yearHalf), width - yearHalf),
         y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
@@ -973,15 +1012,7 @@ export function survivalChart(points, color, { width = 720, height = 190 } = {})
   return svg;
 }
 
-function shiftISO(isoDate, days) {
-  const [y, m, d] = isoDate.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  date.setDate(date.getDate() + days);
-  const yy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  return `${yy}-${mm}-${dd}`;
-}
+
 
 /* ---------- history bar chart ---------- */
 
@@ -1113,8 +1144,18 @@ export function weekdayChart(days, color,
   // four lines below said 11, so the fit was decided for a smaller label than
   // the one that appears — the gap was invisible in English, where both fit.
   const AXIS_SIZE = 11;
+  // No `WIDTH_SAFETY`, and that is the same rule `streakChart` states below:
+  // RESERVING space uses the margin, because a reservation that is short clips
+  // a word; DECIDING TO DEGRADE does not, because there the margin makes the
+  // chart pessimistic about itself and throws away a label that would have
+  // fitted. This is only ever asked to decide a degradation — short vs narrow,
+  // and then whether to shrink — and with the margin applied pt-PT gave up
+  // `segunda` for `S T Q Q S S D` at 438px, where the real crossover is about
+  // 360. An axis naming three S's and two Q's is not a denser axis; it is one
+  // you have to count along, which is the same argument the shrink loop below
+  // makes for preferring small type over thinning.
   const fits = (names, size) =>
-    names.every((t) => estimateTextWidth(t, size) * WIDTH_SAFETY <= slot);
+    names.every((t) => estimateTextWidth(t, size) <= slot);
 
   const shortNames = weekdayNames('short');
   const SHORT = fits(shortNames, AXIS_SIZE) ? shortNames : weekdayNames('narrow');
@@ -1126,7 +1167,7 @@ export function weekdayChart(days, color,
   // a floor below which it would not be readable anyway. Reached only at
   // widths no card uses; without it, ca-ES `dl. dt. dc.` and vi-VN `T2 T3`
   // overlap where English `M T W` has room to spare.
-  const LABEL_FLOOR = 7;
+  const LABEL_FLOOR = 8;
   let labelSize = AXIS_SIZE;
   while (labelSize > LABEL_FLOOR && !fits(SHORT, labelSize)) labelSize -= 0.5;
 
@@ -1214,10 +1255,16 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   // `2025. gada 28. dec. – 2026. gada 4. janv.` needs about 8px of type on a
   // phone; master painted 47.6px of it across the bar.
   const LABEL_GAP = 8;
-  // 7, as `weekdayChart`'s is: at 8 the Devanagari and Bengali numeric forms
-  // (ne-NP `\u0968\u0966\u0968\u096C-\u0966\u096A-\u0968\u0967 \u2013 \u0968\u0966\u0968\u096C-\u0966\u096B-\u0967\u096E`, as-IN the same shape) miss by two
-  // pixels and there is nothing below to catch them.
-  const LABEL_FLOOR = 7;
+  // 8, as `weekdayChart`'s is. It was briefly 7, on a measurement that said the
+  // Devanagari and Bengali numeric forms missed by two pixels at 8 — but that
+  // was `estimateTextWidth` billing their DIGITS at the Indic letter rate, 1.77x
+  // the same string in ASCII. With `dates.js` classifying a numeral as a numeral
+  // the overflow is gone, and the floor is back at the size chosen for
+  // legibility rather than one chosen around a defect. Re-measured after the
+  // fix: across 18 locales at five widths from 200px up, no label overflows the
+  // space reserved for it — the loop below is not reached at all, because the
+  // ISO fallback above has already made the label fit.
+  const LABEL_FLOOR = 8;
   const widestOf = (set, size) =>
     Math.max(0, ...set.map((t) => estimateTextWidth(t, size)));
 

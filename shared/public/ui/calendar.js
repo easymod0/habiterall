@@ -9,6 +9,12 @@
  * browser, and only public/ is served.
  */
 
+// A relative specifier, which is what lets `calendar.test.js` load this module
+// under Node — the absolute `/shared/...` form the rest of `public/ui` uses
+// does not resolve there. This module held a third byte-identical copy of
+// `iso`, which is one storage-key builder per file that needed one.
+import { iso as toISO } from './dates.js';
+
 /**
  * Cell geometry per zoom level.
  *
@@ -79,10 +85,7 @@ function fromISO(iso) {
   return new Date(y, m - 1, d);
 }
 
-/** 'YYYY-MM-DD' from a local Date. */
-function toISO(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
+
 
 /**
  * The date window a calendar of `weeks` columns ending at `endDate` covers.

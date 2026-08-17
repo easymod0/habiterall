@@ -99,6 +99,7 @@ const narrowWeekday = fmt({ weekday: 'narrow' });
 const shortWeekday = fmt({ weekday: 'short' });
 const longWeekday = fmt({ weekday: 'long' });
 const shortMonth = fmt({ month: 'short' });
+const dayOnly = fmt({ day: 'numeric' });
 const longDate = fmt({ weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const monthAndYear = fmt({ year: 'numeric', month: 'short' });
 const yearOnly = fmt({ year: 'numeric' });
@@ -168,6 +169,25 @@ export function weekdayLetters() {
  * @param {Date} d
  */
 export const formatMonthShort = (d) => shortMonth().format(d);
+
+/**
+ * The day-of-month of a REAL date, in this locale's calendar AND its digits.
+ *
+ * `String(d.getDate())` is the same defect as `monthLabels()` one field over,
+ * and the dashboard's own header is where it showed: `rangeLabel` was
+ * localised and the column captions under it were not, so fa-IR read
+ * `۱۹ تا ۲۵ مرداد ۱۴۰۵` above columns numbered `10 11 12 13 14 15 16`. That is
+ * "16 against 25 for the same day" — the comparison `formatMonthShort` exists
+ * to prevent — inside ONE header row rather than one tap apart. ar-EG is the
+ * same defect in digits alone: `١٠` above, `10` below.
+ *
+ * `getDate()` is a Gregorian field, and in a Persian or Hijri calendar the day
+ * number genuinely differs; even where the calendars agree, the DIGITS need
+ * not. `Intl` answers both at once.
+ *
+ * @param {Date} d
+ */
+export const formatDayNumber = (d) => dayOnly().format(d);
 
 /**
  * The year of a REAL date, as this locale's calendar numbers it.
@@ -346,7 +366,38 @@ const BROAD = /[\u1000-\u10FF\u1200-\u137F\u13A0-\u13FF\u1780-\u17FF\u0530-\u058
 const COMBINING = /\p{Mn}|\p{Me}/u;
 
 const SPACE = /\s/;
-const DIGIT = /[0-9]/;
+
+/**
+ * Digits, in every numbering system `Intl` can hand a date formatter — and
+ * they are TWO classes, because their widths do not agree.
+ *
+ * `/[0-9]/` was ASCII-only and sat BELOW the script tests, so a Devanagari or
+ * Bengali digit was billed at its script's LETTER rate: `२०२६-०४-२१ – २०२६-०५-१८`
+ * came out at 232.9px against 131.7px for the identical ASCII string, 1.77x
+ * for the same information. That is what put ne-NP and as-IN streak labels at
+ * a 7.5px font while en-US kept 11.5, and it is why the floor was dropped from
+ * 8 to 7 — the "two pixels of real overflow" was this, not overflow.
+ *
+ * But one digit rate would be wrong the other way. Measured per glyph, at
+ * three sizes, against `getComputedTextLength()`:
+ *
+ *   arab .459  guru .564  mymr .562  deva .566  gujr .579  ascii .572
+ *   tibt .596  orya .627  knda .678  khmr .683  beng .689  telu .757
+ *   thai .757  taml .800  mlym .849
+ *
+ * Malayalam is 1.85x Arabic. Billing them alike either clips the wide half or
+ * hands the narrow half a gutter half again too big, so there are two rates
+ * and the split is where the measurements leave a gap.
+ *
+ * The narrow list is EXPLICIT and everything else decimal falls to the wide
+ * rate, which is the safe direction for a script nobody has measured: this
+ * file's own rule is that unknowns are billed high and bounded by
+ * `gutterFor`'s ceiling. Tibetan is in the wide half on the strength of its
+ * LONE glyph (.734), not its joined one.
+ */
+const DIGIT = /\p{Nd}/u;
+const NARROW_DIGIT =
+  /[0-9\u0660-\u0669\u06F0-\u06F9\u0966-\u096F\u0A66-\u0A6F\u0AE6-\u0AEF\u1040-\u1049]/;
 // Split out from the letters because they are half their width and a date is
 // full of them: lumping `28.12.2025` in with lowercase is most of why a Latin
 // range was over-billed.
@@ -356,24 +407,29 @@ const UPPER = /[A-Z]/;
 /** Rates for a label of one or two characters, where every glyph stands alone. */
 const LONE = {
   wide: 1, semitic: 1.25, indic: 1.7, thaiLao: 0.7, broad: 1,
-  mark: 0.5, space: 0.3, digit: 0.7, punct: 0.4, upper: 0.95, other: 0.8,
+  mark: 0.5, space: 0.3, digit: 0.7, wideDigit: 0.96, punct: 0.4,
+  upper: 0.95, other: 0.8,
 };
 
 /** Rates inside a word, where glyphs shape, join and kern. */
 const JOINED = {
   wide: 1, semitic: 0.62, indic: 1.15, thaiLao: 0.55, broad: 0.95,
-  mark: 0.35, space: 0.3, digit: 0.6, punct: 0.25, upper: 0.95, other: 0.58,
+  mark: 0.35, space: 0.3, digit: 0.6, wideDigit: 0.88, punct: 0.25,
+  upper: 0.95, other: 0.58,
 };
 
 function classOf(ch) {
   if (COMBINING.test(ch)) return 'mark';
+  // BEFORE the script tests. Every non-Latin digit block sits inside one of
+  // them — Devanagari's are in INDIC's range, Thai's in THAI_LAO's, Khmer's in
+  // BROAD's — so asking about the script first bills a numeral as a letter.
+  if (DIGIT.test(ch)) return NARROW_DIGIT.test(ch) ? 'digit' : 'wideDigit';
   if (WIDE.test(ch)) return 'wide';
   if (SEMITIC.test(ch)) return 'semitic';
   if (INDIC.test(ch)) return 'indic';
   if (THAI_LAO.test(ch)) return 'thaiLao';
   if (BROAD.test(ch)) return 'broad';
   if (SPACE.test(ch)) return 'space';
-  if (DIGIT.test(ch)) return 'digit';
   if (PUNCT.test(ch)) return 'punct';
   if (UPPER.test(ch)) return 'upper';
   return 'other';

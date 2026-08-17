@@ -10,7 +10,8 @@ import { api } from '/shared/ui/api.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import {
   addDaysISO, datesEndingOn, formatDateLong, freqLabel, fromISOLocal, iso,
-  formatDayRange, formatMonthShort, targetLabel, todayISO, weekdayLetters,
+  formatDayNumber, formatDayRange, formatMonthShort, targetLabel, todayISO,
+  weekdayLetters,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
@@ -381,18 +382,26 @@ function renderGridHeader(dates, todayIso) {
   // Date row, aligned to the checkbox columns below.
   const cols = document.createElement('div');
   cols.className = 'grid-dates';
-  for (const d of dates) {
+  for (const [i, d] of dates.entries()) {
     const cell = document.createElement('div');
     const dIso = iso(d);
     cell.className = 'grid-date' + (dIso === todayIso ? ' is-today' : '');
-    // Only show the month on the first column and when it changes, so the
-    // row stays readable at seven columns on a phone.
+    // Only show the month on the first column and when it CHANGES, so the row
+    // stays readable at seven columns on a phone.
+    //
+    // The change is read from the month NAME, not from `getDate() === 1`.
+    // The first of the Gregorian month is not where a Persian or Hijri month
+    // turns, so keying the caption on it put `مرداد` about nine days into the
+    // month it names — the same mistake `formatYear`'s comment records for the
+    // year caption, which was fixed there and left here.
     const dayNum = document.createElement('span');
     dayNum.className = 'grid-date-num';
-    dayNum.textContent = String(d.getDate());
+    dayNum.textContent = formatDayNumber(d);
     const mon = document.createElement('span');
     mon.className = 'grid-date-mon';
-    mon.textContent = d.getDate() === 1 || d === dates[0] ? formatMonthShort(d) : '';
+    const monthText = formatMonthShort(d);
+    const prev = dates[i - 1];
+    mon.textContent = !prev || formatMonthShort(prev) !== monthText ? monthText : '';
     cell.append(mon, dayNum);
     cols.append(cell);
   }

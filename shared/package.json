@@ -29,7 +29,8 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
-    "test:browser": "node test/browser/run.mjs"
+    "test:browser": "node test/browser/run.mjs",
+    "test:locales": "node test/locales.mjs"
   },
   "engines": {
     "node": ">=26.0.0"

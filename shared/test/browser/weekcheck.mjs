@@ -40,7 +40,8 @@ globalThis.document = {
 const { frequencyChart, historyChart, streakChart, weekdayChart, weekdayMonthChart } =
   await import(sharedPublic('charts.js'));
 const { calendarWindow, weekdayIndex } = await import(sharedPublic('ui/calendar.js'));
-const { estimateTextWidth, formatStamp, formatYear, gutterFor, weekdayNames } =
+const { estimateTextWidth, formatMonthShort, formatStamp, formatYear, gutterFor,
+  weekdayNames } =
   await import(sharedPublic('ui/dates.js'));
 
 let fails = 0;
@@ -310,19 +311,30 @@ for (const [name, svg] of [
 // `Mon` clears a fixed 42px, so reverting `weekdayMonthChart` to one is
 // invisible here and clips in pt-PT. Asserting the drawn position IS what
 // `gutterFor` computes pins it in any locale, including the one CI runs in.
+//
+// Two widths, and the narrow one is the point. The charts pass a CEILING of
+// `width * 0.32`, and at 700px that is 224 — far above anything a weekday name
+// needs, so the argument was simply omitted here and the assertion still
+// passed. It was then not the call the chart makes: at 328px the ceiling binds
+// in ten locales, and what it does when it binds was pinned by nothing.
+for (const width of [700, 328]) {
 for (const [name, svg, labels, size, floor] of [
-  ['weekday by month', weekdayMonthChart(months, '#3b82f6', { width: 700, weekStart: 'monday' }),
+  ['weekday by month', weekdayMonthChart(months, '#3b82f6', { width, weekStart: 'monday' }),
     weekdayNames('short'), 10.5, 42],
   ['times per week', frequencyChart(
-    buckets.map((b) => ({ month: b.bucket, counts: { 3: 2 } })), '#3b82f6', { width: 700 }),
+    buckets.map((b) => ({ month: b.bucket, counts: { 3: 2 } })), '#3b82f6', { width }),
   buckets.map((b) => formatStamp(b.bucket)), 10.5, 58],
 ]) {
   const GAP = 8;
+  const CEILING = width * 0.32;
   const xs = axisTexts(svg).filter((t) => t.anchor === 'end' && t.size === size)
     .map((t) => t.x);
-  check(`${name}: the gutter is the one gutterFor computes`,
-    xs.length > 0 && xs.every((x) => x === gutterFor(labels, size, floor, GAP) - GAP),
-    `x=${[...new Set(xs)].join(',')} want ${gutterFor(labels, size, floor, GAP) - GAP}`);
+  check(`${name} at ${width}px: the gutter is the one gutterFor computes`,
+    xs.length > 0
+      && xs.every((x) => x === gutterFor(labels, size, floor, GAP, CEILING) - GAP),
+    `x=${[...new Set(xs)].join(',')} `
+    + `want ${gutterFor(labels, size, floor, GAP, CEILING) - GAP}`);
+}
 }
 
 // Seven captions across one card cannot grow to fit, so `weekdayChart` picks a
@@ -354,6 +366,36 @@ for (const width of [328, 358, 700, 1100]) {
   check(`weekday axis at ${width}px: captions do not overlap`,
     drawn.length === 7 && clash.length === 0,
     `${drawn.map((t) => t.text).join(',')} — ${clash.length} clashing`);
+}
+
+// ...and it does not give up a name it could have DRAWN. The check above only
+// asks that nothing overlaps, which a chart that always fell back to narrow
+// would satisfy perfectly while naming no day — `S T Q Q S S D` in pt-PT has
+// three S's and two Q's, and an axis you have to count along is what the
+// comment above calls the failure. So: wherever the short names fit, they are
+// what is drawn.
+//
+// This is the assertion the `WIDTH_SAFETY` rule turns on, and it is invisible
+// in English — `Mon` fits every slot at every width, so the margin changes
+// nothing here. It bites in pt-PT, where `segunda` fits from about 360px and
+// the margin pushed the crossover to 438: the locale sweep is what runs it
+// there, which is why this check lives in a suite that sweep includes.
+for (const width of [328, 358, 700, 1100]) {
+  const shortNames = weekdayNames('short');
+  const svg = weekdayChart(days, '#3b82f6', { width, weekStart: 'monday' });
+  const drawn = axisTexts(svg).filter((t) => t.anchor === 'middle');
+  const size = drawn[0]?.size ?? 11;
+
+  // The slot the chart itself computes: the plot width over seven.
+  const pad = { left: 34, right: 12 };
+  const slot = (width - pad.left - pad.right) / 7;
+  const shortFits = shortNames.every((t) => estimateTextWidth(t, size) <= slot);
+
+  if (shortFits) {
+    check(`weekday axis at ${width}px: the short names are used where they fit`,
+      drawn.every((t) => shortNames.includes(t.text)),
+      `slot ${slot.toFixed(1)}px, drew ${drawn.map((t) => t.text).join(',')}`);
+  }
 }
 
 // The fallback itself: squeezed to a width no card uses, the chart still draws
@@ -460,6 +502,86 @@ for (const width of [328, 358, 700, 1100]) {
       barX - left >= 168, `${barX - left}px`);
     check(`streaks at ${width}px: the label does not butt against the bar`,
       barX - (left + widest) >= 4, `${(barX - left - widest).toFixed(1)}px of gap`);
+  }
+}
+
+// The NEWEST column keeps its month caption, whatever has to go to make room.
+//
+// The drop is a left-to-right walk that skips whatever collides with the last
+// caption drawn, and at the right-hand edge that is always the newest month —
+// the one a reader is looking at. Measured at a 328px card with twelve
+// columns, en-US drew `Jan Mar May Jul Sep Nov` and no December, under a
+// comment saying "the first and last are the two that orient a reader".
+//
+// This bites in ENGLISH, which is what makes it worth having here rather than
+// only in the locale sweep: the labels are three Latin characters and the
+// column is 22px, so the collision is real at every width a phone uses.
+{
+  const twelveFrom = (year, month) => {
+    const out = [];
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(year, month + i, 15);
+      out.push({
+        month: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+        days: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({
+          weekday, completed: weekday, total: 6, rate: weekday / 6,
+        })),
+      });
+    }
+    return out;
+  };
+
+  // Two windows, because they ask different questions. A calendar year puts
+  // the year caption on the FIRST column, which is never thinned — so it can
+  // say nothing about a year left standing over a dropped one. A window across
+  // the boundary puts it in the middle, where the thinning reaches it.
+  for (const [what, start] of [['a calendar year', [2026, 0]],
+                               // August, not July: the year then changes at an ODD
+                               // column, which is one the thinning drops at 328px.
+                               // Starting in July put January on an even column,
+                               // where a year caption survives by luck and the
+                               // check below cannot fail.
+                               ['a year boundary', [2025, 7]]]) {
+  const twelve = twelveFrom(start[0], start[1]);
+  const first = new Date(start[0], start[1], 15);
+  const last = new Date(start[0], start[1] + 11, 15);
+  const lastMonth = formatMonthShort(last);
+  const firstMonth = formatMonthShort(first);
+
+  for (const width of [328, 358, 390, 700]) {
+    const svg = weekdayMonthChart(twelve, '#3b82f6', { width, weekStart: 'monday' });
+    const caps = collect(svg)
+      .filter((n) => n.name === 'text' && n.attrs['font-size'] === '9.5')
+      .map((n) => n.text);
+
+    check(`month captions at ${width}px over ${what}: the newest month is named`,
+      caps[caps.length - 1] === lastMonth,
+      `drew ${caps.length}/12, ending ${JSON.stringify(caps[caps.length - 1])}`);
+    check(`month captions at ${width}px over ${what}: and so is the oldest`,
+      caps[0] === firstMonth, JSON.stringify(caps[0]));
+
+    // Thinning is the point, so it must still thin — a check that only asked
+    // for the last caption would pass on a chart that drew all twelve on top
+    // of each other.
+    const drawn = collect(svg)
+      .filter((n) => n.name === 'text' && n.attrs['font-size'] === '9.5');
+    const overlaps = drawn.slice(1).filter((n, i) => {
+      const prev = drawn[i];
+      const prevRight = Number(prev.attrs.x) + estimateTextWidth(prev.text, 9.5) / 2;
+      return Number(n.attrs.x) - estimateTextWidth(n.text, 9.5) / 2 < prevRight;
+    });
+    check(`month captions at ${width}px over ${what}: none overlaps its neighbour`,
+      overlaps.length === 0, overlaps.map((n) => n.text).join(','));
+
+    // A year with no month above it labels nothing — it reads as a caption for
+    // the column rather than for the run of them.
+    const years = collect(svg)
+      .filter((n) => n.name === 'text' && n.attrs['font-size'] === '8.5');
+    const captionXs = new Set(drawn.map((n) => n.attrs.x));
+    check(`month captions at ${width}px over ${what}: no year stands over an unnamed column`,
+      years.every((y) => captionXs.has(y.attrs.x)),
+      years.map((y) => `${y.text}@${y.attrs.x}`).join(' '));
+  }
   }
 }
 

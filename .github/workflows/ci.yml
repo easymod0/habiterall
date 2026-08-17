@@ -162,6 +162,16 @@ jobs:
       - run: npm ci
       - run: npm test
 
+      # The date suites again, in somebody else's locale.
+      #
+      # Every defect found in ui/dates.js so far was invisible in en-US and was
+      # caught by a person changing their own machine: a `getMonth()`-indexed
+      # month table passes 12 of 12 here and only fails where the calendar is
+      # not Gregorian. `npm test` above runs in the runner's locale, which is
+      # the one locale that already works.
+      - name: The date rules hold in other calendars and digits
+        run: npm run test:locales
+
       # The three auth modes end to end, against the real server. In this job
       # rather than a browser one because it needs no browser and no services —
       # it re-execs itself per mode, since auth resolves once at startup.

@@ -232,10 +232,19 @@ try {
   }))()`);
 
   ck('only one popover exists', after.pops <= 1, `${after.pops}`);
-  // The last cell's own label, for the reason the check above uses one.
+  // Computed from the cell's DATE, exactly as the first popover check is — and
+  // its comment says why in full. This one was left comparing against
+  // `data-label`, the attribute the popover is built from, under a note
+  // claiming it followed that reasoning: it is the same expression on both
+  // sides of the assertion, so a popover shifted a day forward passes it. The
+  // first check catches that; this one asked nothing.
+  const wantLast = await ev(`(async()=>{
+    const { formatDateShort, fromISOLocal } = await import('/shared/ui/dates.js');
+    return formatDateShort(fromISOLocal(${JSON.stringify(neighbours.at(-1).date)}));
+  })()`);
   ck('the popover follows the cursor to the last cell',
-    (after.text ?? '') === (neighbours.at(-1).label ?? '\u0000'),
-    `${after.text} (expected ${neighbours.at(-1).label})`);
+    String(after.text ?? '').includes(wantLast),
+    `${after.text} (expected to contain ${wantLast})`);
   ck('only one cell is grown at a time', after.grown <= 1, `${after.grown} grown`);
 
   /* ---------- a re-render must not strand the popover ---------- */

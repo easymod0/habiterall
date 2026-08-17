@@ -47,7 +47,7 @@ Postgres one.
 | `public/ui/calendar.js` | calendar window/zoom maths, DOM-free so it is testable |
 | `public/ui/window.js` | how many columns a chart fits, and which slice to show |
 | `public/ui/resample.js` | thins the daily score series for the strength chart |
-| `public/ui/dates.js` | browser-side date helpers |
+| `public/ui/dates.js` | browser-side date helpers, and the label-width estimator every chart reserves space with |
 | `public/ui/time.js` | parsing and formatting a reminder time, DOM-free so it is testable |
 | `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, and what each state is WORTH for this habit. DOM-free, mirrored in Kotlin |
 | `public/ui/theme.js` | light/dark, with a redraw callback |
@@ -111,6 +111,54 @@ snapped to a round number, because 1 is right for "8 glasses" and useless for
 "10,000 steps". `test/browser/countcheck.mjs` follows a tap all the way to
 storage, which is the only thing that can catch the control and the database
 disagreeing about what was typed.
+
+**A localised name is never indexed by a Gregorian field.** `getMonth()`,
+`getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
+`MONTHS[d.getMonth()]` or `String(d.getDate())` silently assumes the locale's
+calendar is Gregorian — and for fa-IR, th-TH and ar-SA it is not. It has now
+been found five times in the same shape and each one looked local: a
+`monthLabels()` table, a year printed as `String(yy)`, a year caption keyed on
+the January column, a day number in the dashboard's grid header, and a month
+caption keyed on `getDate() === 1`. The last two shipped on the branch that
+fixed the first three. Hand the DATE to `Intl` — `formatMonthShort`,
+`formatYear`, `formatDayNumber` — and read a CHANGE of month or year from the
+formatted string, because a Persian year turns at Farvardin and a Persian month
+does not start on the Gregorian first.
+
+The tell is a header that disagrees with itself: `۱۹ تا ۲۵ مرداد ۱۴۰۵` over
+columns numbered `10 11 12`, one localised half and one not, in one row.
+
+**`WIDTH_SAFETY` reserves; it never decides to degrade.** `estimateTextWidth`
+answers "about how wide is this", and the 1.25 margin exists so a RESERVATION is
+never short — a gutter that is short clips a word. Applied instead to a decision
+about whether to *drop* a caption, *shrink* the type or *shorten* a label, it
+makes the chart pessimistic about itself and throws away a label that would have
+fitted: measured, `weekdayChart` gave up `segunda` for a `S T Q Q S S D` axis at
+438px when the real crossover is ~360, and `weekdayMonthChart` dropped half its
+month captions in 11 of 14 non-English locales with room to spare. Over-
+reserving costs pixels; over-degrading costs the label. Both call sites now name
+which they are doing.
+
+**A caption that is thinned away must not be the newest one.** The drop is a
+left-to-right walk, and at the right-hand edge the collision is always with the
+month a reader is actually looking at — en-US drew `Jan Mar May Jul Sep Nov` and
+no December, under a comment saying the first and last are what orient a reader.
+The last column is reserved first and the rest fill in to its left. The year
+caption follows the month it sits under, for the same reason: with no month name
+above it there is nothing for a year to disambiguate.
+
+**The date rules are invisible in en-US, so `npm run test:locales` runs them
+somewhere else.** Every defect above passes the whole unit suite in the locale
+CI runs in — a `getMonth()`-indexed table is 12 for 12 in English. The sweep is
+`LC_ALL` and a subprocess, so there is no test-only hook in the module under
+test, and it runs `dates.test.js`, `calendar.test.js`, `window.test.js` and
+`weekcheck.mjs` in ten locales chosen for a PROPERTY each (a non-Gregorian
+calendar, non-ASCII digits, a different era, long weekday names) rather than for
+coverage. It asserts the locale actually took, because ICU falls back silently
+for a name it does not know and ten runs of en-US report ten passes.
+`weekcheck` is in there because a LAYOUT is locale-shaped too: the row gutter's
+ceiling binds in ten locales at 328px and in none in English, so running it only
+in the runner's locale pinned the one case where the bound never applies.
 
 **A chart's labels and its data have to be asserted TOGETHER.** `weekcheck.mjs`
 exists because a review broke the week-start plumbing four ways at once — bars
