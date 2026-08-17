@@ -22,6 +22,12 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v15: the browser's own reminder. `ui/nudge.js` is a new shell asset that
+// `app.js` imports STATICALLY, so a stale v14 shell holding the revalidated
+// app.js and no nudge.js has to fetch it — which is fine online and a module
+// link failure offline, before `start()` and so outside the `#view-error`
+// surface. That is the v14 case verbatim; the precache is what makes the swap
+// all-or-nothing. Nothing in index.html or style.css moved.
 // v13: the habit search. `index.html` grew `#search-row`, `#habit-search`,
 // `#search-count` and `#empty-nomatch`, and dashboard.js looks all four up at
 // module scope and dereferences them in `paint()` — so a stale v12 shell with
@@ -71,7 +77,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v14';
+const CACHE_VERSION = 'v15';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -108,6 +114,7 @@ const SHELL = [
   '/shared/ui/day-dialog.js',
   '/shared/ui/detail.js',
   '/shared/ui/habit-dialog.js',
+  '/shared/ui/nudge.js',
   '/shared/ui/reminder-field.js',
   '/shared/ui/resample.js',
   '/shared/ui/routes.js',

@@ -1211,6 +1211,71 @@ browser could not post to it anyway (`connect-src 'self'`), so the server keeps
 time. Adding a destination means an entry in `CHANNELS`, a branch in
 `sendToChannel`, and an option in `ui/settings.js` — nothing per edition.
 
+**`delivery: 'device'` says who DECIDES, and the `web` channel keeps a time
+nobody promised.** It is the third destination and the second `device` one, and
+it differs from `android` in the one way that matters to a user: the phone arms
+an `AlarmManager` alarm and fires at 08:00, and a browser cannot. A page's
+timers run only while a tab is open and are clamped to about one a minute in the
+background, a service worker is terminated when idle and has no wake-at-time
+event, Notification Triggers ran as an origin trial and never shipped, and
+Periodic Background Sync picks its own interval. So a reminder at a MINUTE needs
+the server, which is #70's part 2 and is deliberately not built. What is built
+is the honest half: on boot and on `visibilitychange`, anything whose reminder
+time has passed and whose day is still unanswered says so. The word `device`
+still fits, because the only thing it decides is whether the notifier has
+anything to do — `serverChannels` filters on it, so an account with this and
+nothing else on costs the tick nothing and raises no `notify.unreachable`.
+
+Three things about it are load bearing and each is a rule stated elsewhere in
+this file, arriving from a new direction.
+
+**`isDayAnswered` in `shared/public/ui/nudge.js` is `answeredIds`,** and it is a
+mirror because the nudge runs from `state` with no network — the offline rule,
+paid for the way the others are: `shared/test/nudge.test.js` runs both over the
+same fixtures. The trap it is shaped to make unreachable is the at-most one. A
+nullish entry answers `false` before anything else is asked, and
+`atMostUnlogged` appears nowhere in the function, because `answeredIds` walks
+the rows that EXIST — so a day with no row is unanswered under either reading.
+Written the obvious way, a limit whose unlogged days count as staying under
+reports every untouched day as answered, and this destination goes quiet exactly
+where Discord and the phone do not. The fixture asserts
+`isCompleted(habit, undefined, 'success') === true` first, or the rest of it
+would pass for the wrong reason.
+
+**The watermark is localStorage and never a setting.** It is `notify_log`'s
+local counterpart — without it every `visibilitychange` re-notifies — and it is
+a DEVICE fact twice over: a notification was shown on THIS screen, so an
+account-level record would silence the laptop that has not been opened today;
+and settings are what `/api/export` carries, so a key there would end up in
+people's backups and in both round-trip suites. That is the argument that keeps
+`notify_status` out of the blob. The date is stored WITH the ids, so a new day
+replaces the record rather than appending to it.
+
+**The permission is asked for from the settings dialog, inside the click.** It
+cannot be asked for on boot — a prompt nobody invited is one browsers refuse
+outright, after which the destination can never be granted at all — so a `multi`
+option may carry `onEnable`, which the dialog runs when the box is ticked and
+redraws after. `denied` is unrecoverable from script, so `SECTION_NOTICES` says
+so; without that the box looks on, `channelConfigured` says yes (there are no
+keys), and nothing anywhere reports the one thing that is wrong. On Android
+Chrome `new Notification(...)` throws and only `registration.showNotification`
+works, so both are tried — and it is `getRegistration()` rather than `ready`,
+which never settles on a page with no worker and would hang holding the in-app
+fallback. That fallback is the destination's behaviour for everyone who said no,
+not a consolation prize.
+
+`ui/nudge.js` is a new file under `shared/public/`, which costs a
+`CACHE_VERSION` bump — the cost `deviceClockHeader` was kept out of a module of
+its own to avoid. It is paid here because this is a subsystem rather than one
+import, because no existing module owns it (the dashboard owns the grid,
+settings the preferences, connectivity the banner), and because the bump is
+load bearing anyway once `app.js` imports it statically: a stale shell with the
+new `app.js` and no `nudge.js` is a module link error offline, which is v14
+verbatim. It is **dependency-free**, as `ui/toggle.js` is and for the same
+reason — that is what lets the rule AND the call site be tested under Node — so
+everything it needs arrives through `init()`, including `todayISO`, because this
+app has one `iso()` and `test/dates.test.js` refuses a second.
+
 **Buttons in Discord need a bot; a webhook cannot carry them.** Discord accepts
 `components` on an *application-owned* webhook only, so the plain channel
 webhook anyone can create is text-only, permanently. Bot mode therefore exists

@@ -32,12 +32,18 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  *
  * `delivery` is the whole reason this registry exists:
  *
- *   'device' — the client schedules it locally. The server does nothing, and
- *              the reminder fires offline. Disabling the channel is a message
+ *   'device' — the client decides locally. The server does nothing, and the
+ *              destination works offline. Disabling the channel is a message
  *              to the client, which is why the *client* has to read it.
  *   'server' — the server posts it at the due minute. It needs configuring
  *              before it can do anything, so "enabled" and "ready" are two
  *              different questions — `ready` answers the second.
+ *
+ * 'device' says who DECIDES, not that a time is kept. `android` arms an alarm
+ * and fires at 08:00; `web` cannot, because no browser API will wake a page at
+ * a given minute — see the `web` entry. They are the same kind here because the
+ * only thing this word decides is whether the SERVER has anything to do, and
+ * for both of them it has nothing.
  *
  * Adding a destination means an entry here, a `send` in notify-send.js, and
  * an option in public/ui/settings.js. `test/notify.test.js` fails if the UI
@@ -53,6 +59,36 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  */
 export const CHANNELS = {
   android: { label: 'Android app', delivery: 'device', configKeys: [], interactive: true },
+  web: {
+    label: 'This browser',
+    // 'device', and the server must be able to see that at a glance: nothing
+    // here is scheduled, sent or logged by it. `serverChannels` filters on this
+    // word, so the notifier skips an account that has switched this on and
+    // nothing else — which is right, because there is nothing for it to do.
+    delivery: 'device',
+    // Nothing to configure, and deliberately nothing the server could be given.
+    // What this destination needs is a PERMISSION, which belongs to one browser
+    // and cannot be stored on an account: two machines signed into the same
+    // account have two different answers, and only the machine can be asked.
+    // So `channelConfigured` says yes for everybody and the settings dialog
+    // reports the permission itself — see `browserNudgeProblems` in
+    // public/ui/settings.js.
+    configKeys: [],
+    /**
+     * NOT interactive, and unlike ntfy's that is the platform rather than a
+     * decision with a security question behind it.
+     *
+     * `interactive` means a destination can carry buttons that RECORD an
+     * answer, which needs a handler running where the press lands — Discord's
+     * gateway socket, or the phone's `ActionReceiver`. A page-level
+     * `Notification` has a click and nothing else, and the click focuses the
+     * tab; the tab IS the app, so the answer is given in the app. Notification
+     * ACTIONS do exist, and they need a service worker `notificationclick`
+     * handler — which arrives with the web push that would justify it, in
+     * issue #70's part 2, and not before.
+     */
+    interactive: false,
+  },
   discord: {
     label: 'Discord',
     delivery: 'server',
@@ -113,6 +149,13 @@ export const CHANNEL_IDS = Object.freeze(Object.keys(CHANNELS));
  *
  * The Android app only, because it is the one that needs no configuration —
  * and because a fresh install that silently sent nowhere would look broken.
+ *
+ * `web` needs no configuration either and is still not here, because it needs
+ * something the account cannot hold: this browser's permission to raise a
+ * notification. Switching it on is what asks for that, from inside the click
+ * that did it — a prompt nobody invited is what browsers now refuse outright,
+ * and an account arriving with a destination it has never been able to use is
+ * the same silence in a different place.
  */
 export const DEFAULT_CHANNELS = Object.freeze(['android']);
 

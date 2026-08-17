@@ -147,6 +147,26 @@ function renderSettingsBody() {
               .map((o) => o.value)
               .filter((v) => (v === opt.value ? box.checked : chosen.includes(v)));
             stage(key, next);
+
+            // An option may need a USER GESTURE, and this click is the only one
+            // the dialog is going to get. The browser's notification permission
+            // can be asked for from nowhere else — a prompt raised on page load
+            // is one browsers now refuse outright.
+            //
+            // Named on the option rather than tested for by key here, so the
+            // dialog goes on rendering the registry without knowing what is in
+            // it. The redraw when it settles is what puts the answer on screen:
+            // a refusal is unrecoverable from script, so the section has to SAY
+            // so rather than leave a box that looks on and does nothing. Unlike
+            // the delivery notices this may redraw over a dirty draft, and
+            // should: it is the direct consequence of the click just made.
+            if (!box.checked) return;
+            const asked = opt.onEnable?.();
+            if (asked && typeof asked.then === 'function') {
+              asked
+                .then(() => { if (dialog.open) renderSettingsBody(); })
+                .catch(() => { /* a permission prompt must not break a draft */ });
+            }
           });
           const text = document.createElement('span');
           text.textContent = opt.label;

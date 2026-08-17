@@ -950,10 +950,21 @@ test('a 429 with no advice still asks for a wait, not zero', async () => {
 });
 
 test('a device channel is never posted anywhere', async () => {
-  const fetch = fakeFetch([{ status: 204 }]);
-  const result = await sendToChannel('android', { habit: habit(), settings: {} }, { fetch });
-  assert.equal(result.ok, false);
-  assert.equal(fetch.calls.length, 0);
+  // Every one of them, taken from the registry rather than named: `web` joined
+  // `android` here, and the next device destination joins it without anybody
+  // remembering to add a line. `serverChannels` is what normally keeps these
+  // out of `deliverAccount`; this is the backstop for a caller that names one
+  // directly.
+  const device = Object.keys(CHANNELS).filter((id) => CHANNELS[id].delivery === 'device');
+  assert.ok(device.length >= 2, 'expected at least android and web');
+
+  for (const channel of device) {
+    const fetch = fakeFetch([{ status: 204 }]);
+    const result = await sendToChannel(channel, { habit: habit(), settings: {} }, { fetch });
+    assert.equal(result.ok, false, channel);
+    assert.match(result.error, /delivered by the device/, channel);
+    assert.equal(fetch.calls.length, 0, `${channel} was posted somewhere`);
+  }
 });
 
 /* ---------- delivering to ntfy ---------- */

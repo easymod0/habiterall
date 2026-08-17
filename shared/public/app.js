@@ -13,9 +13,11 @@ import { setAuth } from '/shared/ui/api.js';
 import * as connectivity from '/shared/ui/connectivity.js';
 import * as dashboard from '/shared/ui/dashboard.js';
 import * as dataDialog from '/shared/ui/data-dialog.js';
+import { todayISO } from '/shared/ui/dates.js';
 import * as detail from '/shared/ui/detail.js';
 import * as dayDialog from '/shared/ui/day-dialog.js';
 import * as habitDialog from '/shared/ui/habit-dialog.js';
+import * as nudge from '/shared/ui/nudge.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settingsDialog from '/shared/ui/settings-dialog.js';
 import * as settings from '/shared/ui/settings.js';
@@ -127,6 +129,21 @@ export async function start(adapter) {
   initRouting();
   registerServiceWorker();
 
+  // The browser's own reminder. Wired here, with the other listeners, because
+  // its second trigger is `visibilitychange` and that has to be attached before
+  // the awaits below — a tab backgrounded during boot is exactly the case it is
+  // for. INJECTED rather than importing what it needs, which is what keeps
+  // `ui/nudge.js` free of imports and so testable under Node; all four things
+  // it wants belong to somebody else.
+  nudge.init({
+    habits: () => state.habits,
+    enabled: () => settings.get('notifyChannels') ?? [],
+    // The browser's own calendar day, from the app's one `iso()`. Never a
+    // named zone: this is the question `callerDay` answers for a write.
+    today: todayISO,
+    fallback: toast,
+  });
+
   // Read before anything paints. `dashboard.load()` below puts the app at the
   // list, which rewrites the fragment — so a link straight to a habit has to
   // be taken now or it is gone by the time there is somewhere to use it.
@@ -198,4 +215,11 @@ export async function start(adapter) {
   } catch (e) {
     toast(e.message);
   }
+
+  // ...and the same reasoning one step further: the nudge is the last thing
+  // boot does, after everything it reads has been painted. A deep link opens
+  // one habit and never loads the list, so `state.habits` is empty and this
+  // finds nothing — which is honest rather than a gap, and Back reloads the
+  // list. `check` swallows its own failures; nothing here depends on it.
+  nudge.check().catch(() => {});
 }
