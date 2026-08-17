@@ -7,6 +7,7 @@ import com.habiterall.app.data.Sentinels
 import com.habiterall.app.notify.Reminders
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalTime
@@ -129,6 +130,60 @@ class RemindersTest {
         val now = at(2026, 3, 10, 23, 50)
         val next = Reminders.nextOccurrence(LocalTime.of(0, 0), now)
         assertEquals(at(2026, 3, 11, 0, 0).toInstant().toEpochMilli(), next)
+    }
+
+    /* ---------- ask me later ---------- */
+
+    private fun snoozeGap(now: ZonedDateTime): Long? =
+        Reminders.snoozeUntil(now)?.let {
+            it.toInstant().toEpochMilli() - now.toInstant().toEpochMilli()
+        }
+
+    @Test
+    fun `a snooze fires an hour later on the same day`() {
+        val now = at(2026, 3, 10, 8, 0)
+        assertEquals(at(2026, 3, 10, 9, 0), Reminders.snoozeUntil(now))
+    }
+
+    @Test
+    fun `a snooze that would land after local midnight is refused`() {
+        // Never re-dated onto tomorrow: the notification names a date, and one
+        // posted at 00:30 would ask about a day the user has not lived while
+        // the day it was about goes unasked. `dueReminders` drops a straddling
+        // reminder for the same reason.
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 30)))
+        // Exactly midnight is already tomorrow, which is the boundary every
+        // "is it still today?" test gets wrong in the same direction.
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 0)))
+        // One minute of room is still room.
+        assertEquals(at(2026, 3, 10, 23, 59), Reminders.snoozeUntil(at(2026, 3, 10, 22, 59)))
+    }
+
+    @Test
+    fun `a snooze is an hour of real time, not an hour of wall clock`() {
+        // The opposite of `nextOccurrence`, which is a wall-clock promise —
+        // 08:30 must stay 08:30 across a clock change. "Ask me again in an
+        // hour" is a duration, so on the night the clocks go back it is ONE
+        // hour later and not two, and on the night they go forward it is one
+        // hour and not none.
+        //
+        // Toronto falls back on 2026-11-01: 01:30 EDT plus an hour is 01:30
+        // EST, the same local time and the same date, so the snooze stands.
+        assertEquals(3_600_000L, snoozeGap(at(2026, 11, 1, 1, 30)))
+        assertEquals(1, Reminders.snoozeUntil(at(2026, 11, 1, 1, 30))!!.dayOfMonth)
+
+        // And springs forward on 2026-03-08: 01:30 plus an hour is 03:30,
+        // because 02:30 does not exist that day.
+        assertEquals(3_600_000L, snoozeGap(at(2026, 3, 8, 1, 30)))
+        assertEquals(3, Reminders.snoozeUntil(at(2026, 3, 8, 1, 30))!!.hour)
+    }
+
+    @Test
+    fun `a snooze late on a day the clocks change is still judged by the date`() {
+        // The refusal asks whether the LOCAL DATE moved, which is the only
+        // form of the question that survives a day being 23 or 25 hours long.
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 8, 23, 30)))
+        assertNull(Reminders.snoozeUntil(at(2026, 11, 1, 23, 30)))
     }
 
     /* ---------- this device as a notification destination ---------- */

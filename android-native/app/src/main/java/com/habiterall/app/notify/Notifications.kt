@@ -15,6 +15,8 @@ import com.habiterall.app.data.Grid
 import com.habiterall.app.data.Habit
 import com.habiterall.app.ui.CountEntryActivity
 import com.habiterall.app.ui.MainActivity
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 /**
  * Builds the reminder notification and its actions.
@@ -37,9 +39,18 @@ object Notifications {
     const val ACTION_NO = "com.habiterall.app.NO"
     const val ACTION_SKIP = "com.habiterall.app.SKIP"
 
+    /**
+     * Ask again later. Not an answer, and deliberately not shaped like one: it
+     * records nothing, so it is the one action that leaves the day outstanding.
+     */
+    const val ACTION_SNOOZE = "com.habiterall.app.SNOOZE"
+
     const val EXTRA_HABIT_ID = "habit_id"
     const val EXTRA_HABIT_NAME = "habit_name"
     const val EXTRA_DATE = "date"
+
+    /** Set on the alarm a snooze arms, so the receiver can tell it apart. */
+    const val EXTRA_SNOOZED = "snoozed"
 
     /**
      * What the tapped action records, decided where the habit is in hand.
@@ -231,6 +242,27 @@ object Notifications {
                 0,
                 context.getString(R.string.action_skip),
                 actionIntent(context, ACTION_SKIP, habit, date),
+            )
+        }
+
+        // Last, and that ordering is the whole decision. The shade shows at
+        // most three action buttons, so on an account that uses skip days this
+        // is the fourth and the platform drops it from the collapsed view —
+        // which is the right one to lose. The other three ANSWER the day; this
+        // one only defers it, and an answer you cannot give is a worse loss
+        // than a deferral you cannot see. It is still added rather than
+        // omitted, because "at most three" is the phone's shade and not every
+        // surface: a watch or a car shows more, and this costs nothing there.
+        //
+        // Absent entirely when there is no room left in the day for one, which
+        // `Reminders.snoozeUntil` decides — a button that can only say "too
+        // late" is worse than no button. `ActionReceiver` asks again anyway,
+        // because a notification built at 20:00 can be pressed at 23:50.
+        if (Reminders.snoozeUntil(ZonedDateTime.now(ZoneId.systemDefault())) != null) {
+            builder.addAction(
+                0,
+                context.getString(R.string.action_snooze),
+                actionIntent(context, ACTION_SNOOZE, habit, date),
             )
         }
         return builder.build()

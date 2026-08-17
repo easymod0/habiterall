@@ -55,6 +55,46 @@ object Reminders {
     }
 
     /**
+     * The alarm a snooze arms — a SECOND alarm on the same habit, never the
+     * daily one re-pointed.
+     *
+     * The distinct `data` is what makes it a second one: `filterEquals` ignores
+     * extras, so without it `setExactAndAllowWhileIdle` would replace the
+     * habit's own reminder and "in an hour" would quietly become the new daily
+     * time. Two PendingIntents also mean the ordinary paths leave a snooze
+     * alone: [schedule] runs on every fetch and only ever touches the daily
+     * alarm, so a refresh cannot eat a snooze the user has just asked for.
+     *
+     * [Notifications.EXTRA_SNOOZED] rides along so the receiver knows not to
+     * arm tomorrow's from this firing — see [ReminderReceiver].
+     */
+    private fun snoozePendingIntent(context: Context, habitId: Long): PendingIntent {
+        val intent = Intent(context, ReminderReceiver::class.java).apply {
+            putExtra(Notifications.EXTRA_HABIT_ID, habitId)
+            putExtra(Notifications.EXTRA_SNOOZED, true)
+            data = android.net.Uri.parse("habiterall://snooze/$habitId")
+        }
+        return PendingIntent.getBroadcast(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    /**
+     * How long "later" is.
+     *
+     * One duration, in code rather than in the account's settings. A setting
+     * would have to exist in `SETTING_VALUES`, carry a default every client
+     * mirrors, and be argued about; a single "in an hour" answers the situation
+     * the button exists for — the reminder is right and the moment is wrong.
+     * A submenu of 15m / 1h / this evening is the usual expansion and needs
+     * nothing here but more of the same.
+     */
+    const val SNOOZE_MINUTES = 60L
+
+    /**
      * Next occurrence of [time] in the phone's own zone, in epoch millis.
      * Local time, not UTC: "remind me at 08:00" means eight in the morning
      * wherever you are, and must survive a flight and a DST boundary.
@@ -133,9 +173,11 @@ object Reminders {
         }
 
         val at = nextOccurrence(time, java.time.ZonedDateTime.now(ZoneId.systemDefault()))
-        val manager = alarmManager(context)
-        val intent = pendingIntent(context, habit.id)
+        setAlarm(context, at, pendingIntent(context, habit.id))
+    }
 
+    private fun setAlarm(context: Context, at: Long, intent: PendingIntent) {
+        val manager = alarmManager(context)
         // Exact alarms can be revoked by the user on API 31+. Falling back to
         // an inexact alarm keeps reminders working, just less punctually —
         // better than silently dropping them.
@@ -147,8 +189,66 @@ object Reminders {
         }
     }
 
+    /**
+     * When a snooze pressed at [now] should fire, or null if there is no room
+     * for one left today.
+     *
+     * Two rules, and both are about the DAY rather than about the hour.
+     *
+     * A snooze is a duration of real time — `plusMinutes` on a ZonedDateTime
+     * moves the instant, not the wall clock — so an hour is an hour whatever
+     * the clocks do that night. That is the opposite of [nextOccurrence], which
+     * is a wall-clock promise, and the two differ for exactly one night a year
+     * in each direction.
+     *
+     * And it is REFUSED rather than re-dated when it would land after local
+     * midnight. `dueReminders` in shared/src/notify.js already drops a reminder
+     * whose window straddles midnight for the same reason: the notification
+     * names a date, and one posted at 00:30 would ask about a day the user has
+     * not lived yet while the day it was about goes unasked. Refusing is not a
+     * silent loss — the daily alarm is untouched and fires again tomorrow, and
+     * the notification itself stays in the shade.
+     */
+    fun snoozeUntil(now: java.time.ZonedDateTime): java.time.ZonedDateTime? {
+        val at = now.plusMinutes(SNOOZE_MINUTES)
+        return if (at.toLocalDate() == now.toLocalDate()) at else null
+    }
+
+    /**
+     * Arm a snooze for this habit, and say whether one was armed.
+     *
+     * **A snooze consumes no watermark.** Nothing here writes `notify_log` —
+     * that table is the SERVER's record of having sent a reminder, and an
+     * Android reminder is a local alarm the server knows nothing about, so this
+     * is safe by construction rather than by care. It stops being safe the
+     * moment snooze is offered on a server-sent channel: the watermark is
+     * written after a send, so a snoozed reminder would already be filed as
+     * delivered for the day and the re-post would never go out. That is why
+     * Discord is out of scope here — a snooze there is a scheduled item with
+     * its own state, not a local timer.
+     *
+     * Pure AlarmManager, so it is safe inside a BroadcastReceiver's ten
+     * seconds: no DataStore read, no coroutine, nothing to race process death.
+     */
+    fun snooze(
+        context: Context,
+        habitId: Long,
+        now: java.time.ZonedDateTime = java.time.ZonedDateTime.now(ZoneId.systemDefault()),
+    ): Boolean {
+        val at = snoozeUntil(now) ?: return false
+        setAlarm(context, at.toInstant().toEpochMilli(), snoozePendingIntent(context, habitId))
+        return true
+    }
+
     fun cancel(context: Context, habitId: Long) {
-        alarmManager(context).cancel(pendingIntent(context, habitId))
+        val manager = alarmManager(context)
+        manager.cancel(pendingIntent(context, habitId))
+        // Both alarms, or a habit archived, deleted or switched away from this
+        // device keeps a snooze that fires once more with nothing behind it.
+        // This is the only place a pending snooze is dropped: answering does
+        // not need to, because a snooze takes the notification away and there
+        // is nothing left to answer from until the re-post.
+        manager.cancel(snoozePendingIntent(context, habitId))
     }
 
     /**

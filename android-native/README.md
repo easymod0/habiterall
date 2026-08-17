@@ -159,6 +159,18 @@ itself opens the app** on the habit it was about, which is what a notification
 body does everywhere else and what the reminder should do when the answer is
 "let me look at it".
 
+**"In 1 hour" is the answer to the reminder being right and the moment being
+wrong.** It records nothing — it takes the notification away and posts the same
+one an hour later, as a second alarm beside the habit's daily one. An hour of
+real time, not of wall clock, and never past local midnight: late in the evening
+there is no snooze to give, so the button is absent and the day's own reminder
+comes back tomorrow untouched. The re-post asks `needsReminder` again, so a day
+answered in between stays quiet.
+
+The shade shows three action buttons, so on an account that uses skip days this
+one is the fourth and the collapsed view drops it. That is deliberate — the
+other three answer the day and this one only defers it.
+
 Reminder times are stored **on the server** as a field on the habit, so they
 follow your account to a new phone and the web UI can set them too.
 
@@ -271,7 +283,11 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   mirrors `answeredIds` in `shared/src/notify.js` case for case: a completion or
   a skip is an answer, a partial amount or an explicit "no" is not. It used to
   ask whether a row existed for the day, which silenced the phone on days the
-  server was still asking about.
+  server was still asking about. And `snoozeUntil`, which is the other half of
+  the DST question: a reminder time is a wall-clock promise, while "in an hour"
+  is a duration — so on the night the clocks go back a snooze is one hour later
+  and not two. It refuses rather than re-dates when the hour would cross local
+  midnight.
 - **`ReminderTimeTest`** — the time parser, case for case with
   `shared/test/time.test.js`. Two parsers with one contract only stay honest if
   both are held to the same examples; `12 am` versus `12 pm` is the one that

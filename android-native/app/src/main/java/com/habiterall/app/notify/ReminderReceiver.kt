@@ -44,6 +44,13 @@ class ReminderReceiver : BroadcastReceiver() {
         WorkManager.getInstance(context)
             .enqueueUniqueWork("remind:$habitId", ExistingWorkPolicy.REPLACE, request)
 
+        // A snooze firing says nothing about the schedule, and the habit's own
+        // alarm is a separate PendingIntent that is still pending — so there is
+        // nothing to re-arm here, and doing it anyway would spend a network
+        // sync per press. The post above is the whole job; the worker re-asks
+        // `needsReminder` for it, so a day answered in the meantime stays quiet.
+        if (intent.getBooleanExtra(Notifications.EXTRA_SNOOZED, false)) return
+
         // Alarms are one-shot; the next day's must be armed now, and this must
         // happen regardless of whether the notification itself succeeds.
         //

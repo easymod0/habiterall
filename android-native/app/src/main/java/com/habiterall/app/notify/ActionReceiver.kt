@@ -23,6 +23,24 @@ class ActionReceiver : BroadcastReceiver() {
         val date = intent.getStringExtra(Notifications.EXTRA_DATE) ?: return
         if (habitId < 0) return
 
+        // Snooze answers nothing, so it leaves this receiver before the outbox
+        // is reached. It is asked again HERE rather than trusted from the
+        // button's existence: the notification was built when the alarm fired
+        // and may be pressed hours later, and by then the hour can have run out
+        // of the day. A refused snooze leaves the notification standing — the
+        // day is still unanswered, and taking it away would be the loss the
+        // button was pressed to avoid.
+        if (intent.action == Notifications.ACTION_SNOOZE) {
+            val armed = Reminders.snooze(context, habitId)
+            if (armed) Notifications.cancel(context, Notifications.notificationId(habitId))
+            Toast.makeText(
+                context,
+                if (armed) R.string.snoozed else R.string.snooze_too_late,
+                Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+
         // The value was decided when the notification was built, where the
         // habit was in hand — a habit shown as something to avoid records 0 for
         // a clean day and the smallest amount over for a slip, and this
@@ -41,6 +59,12 @@ class ActionReceiver : BroadcastReceiver() {
             else -> return
         }
 
+        // Note there is no snooze to cancel here, and that is a property of the
+        // shade rather than an oversight: a snooze takes the notification away,
+        // so from that moment there is nothing left to press until the re-post
+        // — by which time the snooze has already fired. A day answered
+        // ELSEWHERE while one is pending is the case that does exist, and
+        // `needsReminder` is what answers it, in the worker, once.
         Outbox.enqueue(context, habitId, date, value, skip)
         Notifications.cancel(context, Notifications.notificationId(habitId))
 

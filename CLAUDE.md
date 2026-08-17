@@ -684,6 +684,56 @@ list sat — so the snap defers while a tap is pending, and the focus is cleared
 once a fetch has landed whether or not the habit was found, or an archived habit
 would suppress the snap forever.
 
+**A snooze is a SECOND alarm, and the day it belongs to is what bounds it.**
+The reminder's "In 1 hour" button records nothing; it re-arms the same
+notification an hour on, which on a local channel costs one more
+`setExactAndAllowWhileIdle` and no state anywhere. `Reminders.snoozeUntil` is
+the rule and it says two things. An hour is an hour of REAL time —
+`plusMinutes` on a `ZonedDateTime` moves the instant — which is the exact
+opposite of `nextOccurrence` beside it, a wall-clock promise that must survive
+a DST boundary saying the same o'clock; the two differ on one night a year in
+each direction and both are pinned. And a snooze that would land after local
+midnight is **refused rather than re-dated**, for the reason `dueReminders`
+already drops a reminder whose window straddles midnight: the notification names
+a date, so one posted at 00:30 asks about a day nobody has lived yet while the
+day it was about goes unasked. Refusing costs nothing — the daily alarm is
+untouched, and the notification stays in the shade.
+
+The two alarms are two PendingIntents (`habiterall://snooze/<id>` against
+`habiterall://remind/<id>`), because `filterEquals` ignores extras and one
+intent for both would mean "in an hour" quietly became the habit's new daily
+time. That separation is also what lets a snooze survive `schedule`, which runs
+on every fetch and only ever touches the daily alarm. `EXTRA_SNOOZED` rides on
+the alarm so `ReminderReceiver` does not arm tomorrow's when a snooze fires:
+there is nothing to arm — the daily alarm is still pending — and doing it anyway
+would spend a network sync per press.
+
+**Nothing here touches `notify_log`, and that is by construction rather than by
+care.** The watermark is the SERVER's record of having sent a reminder, and an
+Android reminder is a local alarm the server knows nothing about. It stops being
+free the moment snooze is offered on a server-sent channel: the watermark is
+written after a send, so a snoozed Discord reminder would already be filed as
+delivered for the day and the re-post would never go out. That is why Discord is
+out of scope — a snooze there is a scheduled item with its own state, not a
+local timer — and why the reasoning is written on `Reminders.snooze`, where the
+next person to offer one will be standing.
+
+Three smaller decisions travel with it. The re-post re-asks `needsReminder`, so
+a day answered in the meantime stays quiet — the same rule, not a second one,
+and it is the ONLY thing that has to know: answering does not cancel a pending
+snooze, because a snooze takes the notification away and there is nothing left
+to answer from until the re-post, by which time the snooze has fired. (A
+cancel-on-answer was written first and removed as unreachable; `cancel` still
+drops both alarms, which archiving, deleting and switching the destination off
+all reach.) The duration is a Kotlin constant and not a
+setting: a setting would need a `SETTING_VALUES` entry, a default every client
+mirrors and a `notMirrored` decision, to answer a situation one duration already
+answers. And the button is added **last**, because the shade shows at most three
+actions — so on an account that uses skip days it is the fourth and the
+collapsed view drops it. That is the right one to lose: the other three ANSWER
+the day and this one only defers it. It is still added rather than omitted,
+since "three" is the phone's shade and a watch shows more.
+
 **A row's streak is the server's arithmetic, so recording a day re-asks for
 it.** The optimistic overlay knows one day and a streak is the whole history;
 without a refetch, ticking today left the number sitting still at the exact
