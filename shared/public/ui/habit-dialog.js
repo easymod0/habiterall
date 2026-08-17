@@ -9,7 +9,7 @@
 import { api } from '/shared/ui/api.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, state } from '/shared/ui/store.js';
+import { emit, matchesQuery, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -111,16 +111,33 @@ async function saveHabit(e) {
     // set because a modal dialog repaints nothing behind it. Creating from the
     // dashboard still needs 'reload': a repaint alone would draw the old list
     // without the habit that was just made.
-    // The list is being REPLACED — a habit created or renamed — so the
-    // dashboard's search filter goes with it: a habit created behind a live
-    // filter is one the user is told about and cannot see.
+    // The dashboard's search filter goes only when what was just saved would be
+    // INVISIBLE behind it: a habit the user is told about and cannot see is the
+    // thing #74 protects against, and clearing on anything else is the opposite
+    // failure — a filter wiped by something that replaced nothing.
+    //
+    // Two saves can do it and the second is the one that is easy to miss. A
+    // CREATE, because the new habit need not match the query. And an EDIT that
+    // changed the name or the description, because the habit you were looking at
+    // may no longer match — the same disappearance arriving from the other side.
+    // "This was a create" is the tempting simpler rule and it is wrong for
+    // exactly that case, which is reachable only from a habit's own page, where
+    // Edit lives.
+    //
+    // It re-tests the MATCH rather than comparing the name with what was there
+    // before, for two reasons. The filter reads the description as well, so
+    // "did the name change" is blind to a habit found by its second field. And
+    // the match answers the near-misses for free: an edit that leaves the habit
+    // matching clears nothing at all, where a name comparison would clear
+    // harmlessly but pointlessly, and a save with no query in the box is a
+    // no-op rather than a write and a repaint.
     //
     // Cleared at the mutators that actually replace the list rather than in the
     // dashboard's 'reload' listener. That event has ten emitters and only half
     // of them replace anything, so clearing there also wiped the box on Back
     // from a habit and on a background reconnect, mid-word. `dashboard.js`'s
     // archive toggle already works this way.
-    state.query = '';
+    if (!matchesQuery(payload)) state.query = '';
     emit(state.openHabitId != null ? 'change' : 'reload');
   } catch (err) {
     toast(err.message);
@@ -132,7 +149,11 @@ async function saveHabit(e) {
     // second one.
     if (err.indeterminate) {
       dialog.close();
-      state.query = '';   // the habit may exist; see above
+      // Unconditional, where the success path above asks whether the habit
+      // would be visible: nobody here knows what landed, so the payload is not
+      // evidence about the list. Showing everything is the only answer that is
+      // right whichever way the abandoned request went.
+      state.query = '';
       emit('reload');
     }
   }

@@ -49,6 +49,34 @@ export const state = {
   pending: 0,          // writes waiting in the outbox
 };
 
+/** Fold case and strip the accents, so "cafe" finds "Café". */
+const fold = (s) => String(s ?? '')
+  .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+
+/**
+ * Whether a habit is one the dashboard's filter is currently showing.
+ *
+ * It lives beside `query` rather than in `dashboard.js` because two modules
+ * ask it and only one of them paints: `habit-dialog` has to know whether the
+ * habit it just saved would be visible before deciding whether to clear the
+ * box, and `dashboard` imports `habit-dialog` already. This file touches no
+ * DOM and imports nothing, so both can have it.
+ *
+ * Name AND description, exactly as the list does — a habit called "Gym" whose
+ * description says "swimming Tuesdays" is one people look for by the second,
+ * which is also why editing only the description can move a row out of a
+ * filtered list. An empty query matches everything, so a caller asking about a
+ * list nobody is filtering gets `true` and needs no special case.
+ *
+ * @param {{name?: string, description?: string}} habit
+ * @param {string} [query]  defaults to the live one
+ */
+export function matchesQuery(habit, query = state.query) {
+  const q = fold(query).trim();
+  if (!q) return true;
+  return fold(habit.name).includes(q) || fold(habit.description).includes(q);
+}
+
 /** @type {Map<string, Set<Function>>} */
 const listeners = new Map();
 

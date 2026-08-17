@@ -430,16 +430,41 @@ word arrives with focus still in the box, because moving it inside `#grid` does
 not fail a check, it makes the element unreadable.
 
 Three rules travel with it. **The drag handle goes while a filter is on**: a drop
-against a subset computes a `position` from neighbours that are not the habit's,
-and `persistOrder` sends the RENDERED order. **The threshold reads the unfiltered
-count** (and the box also stays while it has focus), or it vanishes under the
-cursor at the moment a query narrows the list past it. And **the MUTATORS clear the query**, not the `'reload'` listener. Creating a
-habit or restoring a backup replaces the list, so a filter that hides the result
-is a thing the user is told about and cannot see — `habit-dialog` and
-`data-dialog` clear it where the archive toggle already does. Doing it in the
-listener looks equivalent and is not: `'reload'` has ten emitters and only half
-replace anything, so it also wiped the box on **Back from a habit** — the
-feature's main workflow — and on a background reconnect, mid-word.
+against a subset computes a `position` from neighbours that are not the habit's.
+Note what is NOT the reason — `persistOrder` sends `state.habits.map(h => h.id)`,
+the FULL list, so nothing is dropped from the write; what a drop against a subset
+gets wrong is where in that list the habit lands. **The threshold reads the
+unfiltered count** (and the box also stays while it has focus), or it vanishes
+under the cursor at the moment a query narrows the list past it. And **the
+MUTATORS clear the query**, not the `'reload'` listener. Doing it in the listener
+looks equivalent and is not: `'reload'` has ten emitters and only half replace
+anything, so it also wiped the box on **Back from a habit** — the feature's main
+workflow — and on a background reconnect, mid-word.
+
+**But a mutator clears it only when what it wrote would be INVISIBLE behind it**,
+which is one question and not a list of mutators. Clearing on every save was the
+same defect one road over: filter to a habit, open it, Edit, change only the
+COLOUR, Save, Back — and the box is empty with all eight rows showing, a filter
+wiped by something that replaced nothing. So `habit-dialog` asks
+`matchesQuery(payload)` and clears only on a no. That covers a create, whose
+habit need not match, and a rename, whose habit may no longer match — the same
+disappearance from the other side, and the reason "this was a create" is the
+tempting simpler rule and the wrong one.
+
+Two things about the shape of that. It re-tests the MATCH rather than comparing
+the name, because the filter reads the **description** too: a habit found by its
+second field is one a name comparison is blind to, and the match also makes an
+edit that still matches a no-op rather than a harmless pointless clear. And the
+predicate lives in `ui/store.js` beside `query` — a file that touches no DOM and
+imports nothing — because `dashboard` imports `habit-dialog` already, so a second
+copy of the rule was the alternative to a cycle. `data-dialog` still clears
+unconditionally: a restore replaces the whole account, and there is no one habit
+to ask about. The delete and undelete clears are unconditional for the same
+reason in reverse — the habit is gone, and "no habits match that" over an account
+that has plenty is the empty-result screen standing in for a successful delete.
+All four are pinned in `searchcheck.mjs` now; three of them were deletable in
+silence, and the restore is the one whose removal left the entire browser suite
+green.
 
 **A rebuilt control keeps focus via `data-focus-key`, not its position.**
 `dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single
