@@ -339,7 +339,7 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   the reminder is about, including the case that reads as a judgement call and
   is not: a press at 00:30 on a notification still in the shade from yesterday.
 - **`ReminderWiringTest`** — the wiring between those decisions and the
-  platform, and the only suite here that needs Robolectric. What AlarmManager
+  platform, and the first suite here to need Robolectric. What AlarmManager
   was actually handed (a snooze must ADD an alarm, never re-point the daily one)
   and what the Notification actually carries (the buttons, in order, each
   naming the day it is about). It exists because pinning the decision is not
@@ -395,6 +395,69 @@ with *Install unknown apps* enabled — no keystore needed to try it.
 - **`HabitOrderTest`** — the reorder arithmetic, which fails invisibly: the
   phone posts the whole order and each index becomes a `position`, so an
   off-by-one stores a wrong order that the web app then faithfully agrees with.
+
+### The ones that render a screen
+
+Three suites RENDER a composable, on the JVM, under Robolectric plus
+`androidx.compose.ui:ui-test-junit4`. They exist because everything above pins a
+decision and none of it can see a screen: a rule that lives in a `@Composable`
+was verified by a person on an emulator once and never again, which is issue
+\#110. `createComposeRule` needs `@Config(application = android.app.Application::class)`
+— `HabiterallApp.onCreate` initialises WorkManager and will not run under
+Robolectric — and the `isIncludeAndroidResources` the reminder suite already set.
+Omitting the `@Config` fails loudly rather than subtly: every test in the class
+throws from `WorkManagerImpl`, so there is no version of this that quietly tests
+a different application.
+
+One trap is worth knowing before you spend an hour on it: **a real `AlertDialog`
+under `createComposeRule` hangs `waitForIdle` indefinitely.** A dialog is its own
+window and the rule waits on a composition that never goes idle, so there is no
+timeout and no failure — the test simply never returns. That is why
+`ReminderTimeFieldTest` asserts the reminder field's layout at a fixed width
+standing in for a dialog's, rather than putting it in one.
+
+- **`SettingsScreenTest`** — that the chip drawn as selected is the ACCOUNT's
+  default rather than one written at the call site, that a chip already selected
+  writes nothing, and that a key the server answered 200 and then *ignored* is
+  explained instead of springing back. The first two are one defect: a wrong
+  default is not merely wrong, it is unreachable, because the control that would
+  fix it is the one that does not fire. `AppSettingsDefaultsTest` pins the
+  constant; only this can say the screen asks for it.
+- **`ReminderTimeFieldTest`** — the accessibility rule from #105 (an unparseable
+  time announces what a time looks like, rather than Material's generic "Invalid
+  input"), that blank is *no reminder* and not a mistake, that a typed odd minute
+  reaches the menu instead of being rounded, and that the quick picks wrap. That
+  last one is a LAYOUT rule and the only one here; read its comment before
+  changing it, because a `Row` does not overflow — it squeezes, so the button
+  that has been made unreachable is still inside the bounds and still 52dp tall.
+- **`ArchiveScreenTest`** — that a restore made before tapping Edit travels with
+  the hand-off (the form REPLACES this screen, so `onClose` never fires), and
+  that a load which failed does not go on to say the archive is empty.
+
+What these still cannot prove is a premise, exactly as `WebBackStackTest` and
+`WidgetTest` cannot: Robolectric renders and measures, it does not draw, and it
+is not a phone.
+
+The habit list is deliberately **not** among them, and the reason is worth
+knowing before reaching for a fourth suite. Its two rules worth pinning — that
+the resume snap-to-top defers while a notification tap is pending, and that the
+pending habit is cleared once a fetch lands whether or not the habit was *found*
+— live in `MainActivity.HabitListScreen`, which is `private` and reaches
+`settings`, `Reminders`, `WidgetSync` and `Outbox` through the activity: nine
+call sites, four on `settings` and five on `this@MainActivity`. Rendering it
+means first making it a top-level composable with all of that injected, which is
+a refactor of the screen under test in a change whose subject is tests. The rule
+is also a lifecycle race, so it wants a real RESUMED transition and not just a
+rendered tree.
+
+`Api` is deliberately **not** in that list, and it is the item that makes the
+extraction harder rather than easier. It is built inside the composable — `val
+api = remember(serverUrl, onUnauthorized) { Api(serverUrl, onUnauthorized) }` —
+out of two of the screen's own parameters, so there is no collaborator being
+reached for and no seam to inject one at. Whoever plans this by counting what
+the screen takes from the activity will find a fifth dependency that has to be
+*created* before it can be replaced. Worth doing, and worth doing as its own
+change.
 
 ## Roadmap
 
