@@ -106,6 +106,45 @@ export const MAX_AMOUNT = 1e12;
 export const MIN_AMOUNT = 1e-6;
 
 /**
+ * Why `parseAmount` refused, for somebody looking at the box.
+ *
+ * "Not an amount" is true of `eight` and unhelpful for `10,000`, which IS a
+ * number and a perfectly reasonable thing to type — it is refused because it is
+ * AMBIGUOUS, not because it is nonsense, and a refusal the user cannot act on is
+ * only half better than the silent ten it replaced. They typed their step goal
+ * the way their phone's keyboard and their own country write it, and were told
+ * it was not a number.
+ *
+ * The ADVICE is the Kotlin `amountComplaint`'s, verbatim — *type it without the
+ * thousands separator, 10000 rather than 10,000* — and a test reads it out of
+ * `HabitFormScreen.kt` rather than trusting this comment, because both clients
+ * refuse the same strings for the same reason and one of them explaining better
+ * than the other is a difference with nothing behind it. The SENTENCE around it
+ * is this file's, which quotes what was typed as its sibling message already
+ * does; that much is house style rather than a rule, and the test says which is
+ * which.
+ *
+ * Note this is the message only. `parseAmount` was already the mirror — the two
+ * refuse identical strings — and what had been left out of it was ever saying
+ * why.
+ *
+ * The predicate is the parser's own thousands test, restated here rather than
+ * exported from inside `parseAmount`, and the two are pinned together by a test:
+ * a complaint about a case the parser ACCEPTS is worse than a generic one, since
+ * it tells somebody to change an entry that was going to be stored correctly.
+ *
+ * @param {string} raw exactly what is in the box
+ * @returns {string} a sentence to show
+ */
+export function amountComplaint(raw) {
+  const text = String(raw ?? '').trim();
+  return /[1-9]\d*,\d{3}(?!\d)/.test(text)
+    ? `"${text}" could be ten thousand or ten and a half — type it without the `
+      + `thousands separator, like 10000.`
+    : `"${text}" is not an amount — type a number like 8 or 8.5.`;
+}
+
+/**
  * How much one press of − or + should move, for a habit with this target.
  *
  * A spinner that steps by 1 is right for "8 glasses" and useless for "10,000

@@ -144,6 +144,22 @@ try {
     /not an amount/.test(await ev(
       `document.querySelector('#grid-count .countfield-hint').textContent`)));
 
+  console.log('\n--- an AMBIGUOUS amount is told how to fix itself ---');
+  // "10,000" is refused because it could be ten thousand or ten and a half, not
+  // because it is nonsense — so "not an amount" is the wrong sentence for it,
+  // and it is the sentence somebody gets for typing their step goal the way
+  // their own keyboard and country write it. The phone has said the actionable
+  // thing since #111; this is the web catching up, followed to the row because
+  // the refusal and the non-deletion are one behaviour.
+  await typeAndSave('10,000');
+  row = await stored();
+  check('the ambiguous amount is not stored', row?.value === 8.5, JSON.stringify(row));
+  const hint = await ev(
+    `document.querySelector('#grid-count .countfield-hint').textContent`);
+  check('and the complaint says what to type instead', /10000/.test(hint), hint);
+  check('rather than only that it is not a number',
+    !/^\"10,000\" is not an amount/.test(hint), hint);
+
   console.log('\n--- a limit of zero gets the button its whole point needs ---');
   // Closed first. The section above leaves the dialog open, and clicking a grid
   // cell under it drives `showModal()` on an already-modal dialog — a no-op in

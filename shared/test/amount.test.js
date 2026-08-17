@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
-const { parseAmount, stepFor, formatAmount, stepAmount } =
+const { parseAmount, stepFor, formatAmount, stepAmount, amountComplaint } =
   await import('../public/ui/amount.js');
 
 /* ---------- reading what was typed ---------- */
@@ -232,4 +235,75 @@ test('an amount too small to show is never shown as nothing', () => {
   // Zero itself is still zero — a real answer, and not the case above.
   assert.equal(formatAmount(0), '0');
   assert.equal(parseAmount('0'), 0);
+});
+
+/* ---------- and saying WHY it was refused ---------- */
+
+test('a refusal about an ambiguous number says how to fix it', () => {
+  // The whole point of refusing "10,000" is that it is a real number somebody
+  // meant something by. Telling them it is "not an amount" is true of "eight"
+  // and useless here, and it is what they get for typing their step goal the
+  // way their own country writes it.
+  const ambiguous = amountComplaint('10,000');
+  assert.match(ambiguous, /10000/, 'it has to say what to type instead');
+  assert.doesNotMatch(ambiguous, /not an amount/,
+    'the generic sentence is the one this exists to replace');
+
+  // ...and nonsense still gets the generic sentence, because there is nothing
+  // more specific to say about it.
+  assert.match(amountComplaint('eight'), /not an amount/);
+});
+
+test('the complaint and the parser agree about which case is which', () => {
+  // A complaint about a case the parser ACCEPTS is worse than a generic one:
+  // it tells somebody to change an entry that was going to be stored correctly.
+  // So the two predicates are pinned against each other rather than trusted to
+  // stay in step, over the examples the Kotlin `amountComplaint` uses too.
+  const separator = ['10,000', '1,500', '10,000.5', '  2,000  '];
+  const notSeparator = ['8,5', '0,255', ',255', '0.500', '10.000', '8', ''];
+
+  for (const raw of separator) {
+    assert.equal(parseAmount(raw), null, `${raw} should be refused`);
+    assert.match(amountComplaint(raw), /without the thousands separator/,
+      `${raw} is the ambiguous case and should be told so`);
+  }
+  for (const raw of notSeparator) {
+    assert.doesNotMatch(amountComplaint(raw), /without the thousands separator/,
+      `${raw} is not a thousands group, so that advice is wrong for it`);
+  }
+});
+
+test('a dot group is still given the benefit of the doubt', () => {
+  // Pinned so that closing #108's remaining half is a deliberate change to a
+  // failing test rather than something that quietly starts happening. `10.000`
+  // is ten here, and to a de-DE reader it is ten thousand — but `0.500` and
+  // `1.250` are ordinary decimals, and a dot is the spelling this field itself
+  // writes. Whoever adds a locale changes this test on purpose.
+  assert.equal(parseAmount('10.000'), 10);
+  assert.equal(parseAmount('1.500'), 1.5);
+  assert.equal(parseAmount('0.500'), 0.5);
+});
+
+test('the advice is the phone\'s advice, read from the phone', () => {
+  // The two clients refuse identical strings — `parseAmount` and the Kotlin
+  // `parseAmount` are already a mirror — so one of them explaining better than
+  // the other is a difference with nothing behind it. Read out of the source
+  // rather than restated, the way `toggle.test.js` reads its own declaration:
+  // a comment claiming the two agree is exactly the thing that goes stale.
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const kotlin = readFileSync(join(root, 'android-native', 'app', 'src', 'main',
+    'java', 'com', 'habiterall', 'app', 'ui', 'HabitFormScreen.kt'), 'utf8');
+
+  const advice = /"(Type it without the thousands separator[^"]*)"/.exec(kotlin);
+  assert.ok(advice, 'the Kotlin complaint has moved or been reworded');
+
+  // The actionable core, not the whole sentence: the phone has no room to quote
+  // what was typed and the web does, which is house style rather than a rule.
+  assert.match(advice[1], /without the thousands separator/);
+  assert.match(advice[1], /10000/);
+
+  const web = amountComplaint('10,000');
+  assert.match(web, /without the thousands separator/,
+    'the web says something different from the phone about the same input');
+  assert.match(web, /10000/);
 });

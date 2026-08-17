@@ -25,7 +25,9 @@
  * classes inside them.
  */
 
-import { formatAmount, parseAmount, stepAmount, stepFor } from '/shared/ui/amount.js';
+import {
+  amountComplaint, formatAmount, parseAmount, stepAmount, stepFor,
+} from '/shared/ui/amount.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -112,7 +114,7 @@ function createCountField(root) {
       // stepping would throw away what was typed without saying why. Complain
       // and leave it alone — the same thing Save does with it.
       if (current === null) {
-        hint(`"${typed.value}" is not an amount — type a number like 8 or 8.5.`, true);
+        hint(amountComplaint(typed.value), true);
         return;
       }
       const direction = Number(button.dataset.step) < 0 ? -1 : 1;
@@ -145,7 +147,7 @@ function createCountField(root) {
     value: () => parseAmount(typed.value),
     /** Say what is wrong with what is in the box, in one place. */
     complain() {
-      hint(`"${typed.value}" is not an amount — type a number like 8 or 8.5.`, true);
+      hint(amountComplaint(typed.value), true);
       typed.focus();
     },
     focus: () => typed.focus(),
