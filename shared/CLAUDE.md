@@ -60,28 +60,544 @@ Postgres one.
 Parsers return plain data; the *writing* is per edition (`apply-import.js`),
 because one talks to SQLite and the other to Postgres under row-level
 security.
+The frontend has its own file: **`shared/public/CLAUDE.md`**. Long-form
+reasoning for everything below is in `docs/decisions/` — `day-states.md`,
+`awards.md`, `import-and-loop.md`, `reminders.md`, `timezones.md`,
+`discord.md`, `outbound-urls.md`.
 
-### How the frontend fits together
+## Day states and habit shape
 
-**Mutators announce; views listen.** Nothing calls another view's render
-function. `ui/store.js` carries the state and exactly two events: `'change'`
-means "the visible view's data moved, update it", and `'reload'` means "go to
-the dashboard and fetch it". Each view decides whether it is the one showing —
-the dashboard repaints from `state`, the detail view refetches, because none of
-what it shows can be recomputed locally.
+The four states and the ban on `?? UNSET` are in the root `CLAUDE.md`. What is
+specific here:
 
-That is not decoration. The day editor has to refresh the detail view, the
-settings dialog has to refresh both, and the detail view has to open the day
-editor. Written as direct calls those are circular imports; written as one
-2,100-line file — which is what this was — they are eleven scattered
-`renderDashboard()` calls and no way to split it.
+**What an unanswered day is worth on an at-most habit is asked at two levels.**
+"I didn't smoke today" is worth a tap and is the whole reward; "I had no soda" is
+not something anyone opens an app for. Both are ordinary, so there is the
+account's `atMostUnlogged` and the habit's own `at_most_unlogged`, which
+overrides it. `'default'` means the account's, and it is where an unmigrated row,
+a Loop import and an unrecognised value all land — falling back to `success`
+would hand a limit a perfect record on a typo. The account default is `miss`, or
+every limit arrives with a perfect record on the day it was created.
 
-**A module owns its subtree, and `test/ui-modules.test.js` enforces it.** No
-element id may be reached for by two modules; `ui/views.js` exists because
-`#view-list` and `#view-detail` genuinely have three claimants. The same test
-walks the imports from the entry point and fails when `SHELL` in `sw.js` has
-fallen behind — with twenty-three modules where there was one, a hand-maintained
-precache list drifts silently.
+**The precedence is resolved in `unansweredCounts` and nowhere else**, because
+every caller already has the habit in hand and none of them should have to
+remember it. It is exported for `awards.js`, which asks it rather than restating
+it.
+
+**A row holding 0 is still a success on an at-most habit** under either answer —
+that is the user saying "none today", which is the thing being asked for.
+
+**The rule is gated to at-most habits, and the gate is load bearing.** Ungated,
+`success` fell through to the ordinary predicate for every habit — and on an
+at-least habit with a target of **0**, `0 >= 0` is true while `dayCredit`'s
+`target <= 0` branch answers 0: a 30-day streak and 100% history beside a
+strength of 0. A target of 0 is reachable, and `at_most_unlogged` deliberately
+**outlives** a switch from At most to At least. The test asks the invariant
+directly rather than by example: across every habit shape and both answers, a
+full-credit day must be a completed day.
+
+**Under `success`, `totalCompleted` counts ANSWERS while the window-derived
+figures count DAYS** — a limit kept by saying nothing shows a streak, a strength
+and a full history bar beside a "total done" of zero. Both are right about their
+own question; the count is lifetime and computed in SQL, the rest are a window
+walked day by day. The **reminder still asks** about an unlogged day under either
+answer: `answeredIds` is about whether the day was ANSWERED, and under `success`
+the reminder is precisely how you record the exception.
+
+**A habit you are trying not to do is stored as what it is, and SHOWN the other
+way up.** `show_as` is `'amount'` or `'avoid'`, per habit, and it decides the
+rendering and nothing else — which is the whole reason it can exist. A flag
+inverting the JUDGEMENT has nowhere to live in Loop's schema, so losing it on a
+round trip would flip every verdict in the file; losing this loses a display
+preference. `YES` still means the thing occurred and `isCompleted` still comes
+from the target.
+
+The storage is an at-most target, so **the tap cycle did not change** — an
+avoided habit walks the same four states in the same order, and `nextDayState`
+and its Kotlin mirror were untouched. Only the ENCODING differs, in
+`valueForState`: a clean day is `0`, a slip is **`target + 1`** — the smallest
+amount that fails, so a limit of two coffees records three. Three surfaces invert
+(the grid's colours, the day editor's buttons, the notification's) and the
+ACTIONS deliberately do not: `ACTION_YES` is still the good answer.
+
+None of this is bad-habit support of the other kind. A limit of zero is how a bad
+habit is *expressible*; what is still missing is the interaction — answering by
+typing a number, a filled cell painting as an achievement.
+
+## Scoring, streaks and stats
+
+**The score is a trailing-window ratio**, not per-day credit scaled by frequency.
+The earlier formula overshot for every non-daily habit and was hidden by a clamp;
+a single checkmark on a 1×/365d habit reported 100%. The decay constant is Loop's
+own, `0.5^(sqrt(frequency)/13)`, read from its source. A fixed 30-day half-life
+made a perfect habit take four months to look strong instead of one.
+
+**Every date range is clamped**, and `computeStats` starts at
+`from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`). That
+window is derived inside `computeStats` and never returned, which is why anything
+needing a figure from it gets a returned field rather than walking the entries
+again — `computeRecovery` answers `longest` and `lastEnd` for that reason.
+
+**`onPaceSeries` pro-rates the requirement near the start** —
+`required = min(activeDays, num*activeDays/den)` — so a habit is not judged
+against history it does not have yet. Consequence worth knowing before touching
+it: moving the earliest entry EARLIER re-judges the first `den - 1` days against
+a full requirement they now fail, so *remembering something you did* can lower a
+figure. Daily habits (`num >= den`) have no leniency window and are immune, which
+is why a test suite built on one cannot see this.
+
+**`computeCoverage` reports only the months the window entirely CONTAINS**, and
+that one rule does two jobs. A partial first month can never legitimately be
+full, so reporting it is either unreachable or wrongly reached; and it settles
+monotonicity with no second rule, since on the 3rd a month is not contained at
+all. Containment is asked as "does the window hold all of this month's days",
+which needs no comparison against the window's ends and survives `boundedRange`
+clamping the far one.
+
+**Coverage is an opt-out, and the first field to be one.** It is its own pass —
+~10-11% of a call, measured — and both `/overview` routes pass `coverage: false`
+because they keep four fields per habit and would discard it. The key is then
+**absent** rather than empty: an empty array claims no month is fully answered,
+where this is the absence of a claim. Every other field here is either a pass the
+summary figures already need or a cheap read of one.
+
+**A streak's `skips` counts only the skipped days INSIDE `[start, end]` of the
+run.** Skips are transparent to the loop, so a trailing one sits after `runEnd`
+and belongs to nothing, and banking every skip on sight reports a rest the run
+never carried. There are **two** ways a skip lands outside a run: after the last
+on-pace day (kept out by the reset when the run closes) and before any run has
+STARTED (kept out by the guard on banking at all). The second was deletable with
+the whole suite green until `s x x x x x x x` was added.
+
+## Awards
+
+**An award is a READING of the stats response, computed on the SERVER because the
+ladder it reads is.** `SURVIVAL_THRESHOLDS` and `MISS_BUCKETS` live in `stats.js`
+and `shared/src` is not served to the browser, so computing awards in the browser
+meant a second copy of the streak ladder — a badge at 20 days beside a survival
+bar at 21. `awards.js` is pure and both editions' `/habits/:id/stats` call it.
+
+**It is called in the two routes and not inside `computeStats`**, which is the
+one place it looks like it belongs: `/overview` calls that once per habit and
+keeps four of its fields.
+
+**Nothing here is counted a second way.** Every award is a reading of figures
+already on the payload, so an award needing something new gets a stats FIELD
+rather than an entry map — a second derivation is a second answer waiting to
+disagree about what "ever" means.
+
+**An award can be taken away.** Not because the figures move — `currentStreak`
+and the score's current value are refused precisely because they fall on an
+ordinary bad week — but because the **window** does. Moving `firstEntry` earlier
+re-judges the leniency window above (measured: a 3×/week habit's badge went 21 →
+14 for logging one forgotten session), and `MAX_RANGE_DAYS` makes a habit older
+than ten years slide rather than grow (watched over simulated weeks, a whole card
+emptied itself). So the framing is **what this habit's history currently shows**:
+the card says so in its lead, the payload carries no `permanent` flag, and there
+is no second visual treatment implying some badges are safer. Durable awards mean
+a granted ledger with a first-earned date — **issue #141**, and the only thing
+that would change this.
+
+Reading a maximum does not make an award durable; it stops it twitching day to
+day. That is the smaller claim and the true one.
+
+**The gate: on an at-most habit resolved to `success`, the whole card is
+withheld** — ALL awards, not just the ones that would read oddly. An unanswered
+day counts as kept there, so a limit with a single stored row grows a streak, a
+strength band and a full weekday spread as the calendar moves. Right for a TILE,
+which states a number; wrong for a BADGE, which makes a claim in English. The
+gate is wider than its motivation on purpose — a limit with twelve typed-in slips
+loses honest claims too — because the alternative is a per-award judgement about
+which sentences survive, which is a second rule to keep in step. Coverage is the
+one award `success` cannot flatter and is still not hoisted; `awards.js` says so
+at the gate, and it is one `return` to undo.
+
+**`computeAwards` takes five arguments and three are optional**, which makes
+forgetting them silent on precisely the shape they exist for. The routes must
+hand it the **same** `habit` and `unlogged` they handed `computeStats`, plus
+`skipDays`. Two tests cover different halves: a source-text guard that demands
+five and names the fifth (mutation-tested against a comment naming the full call,
+a call spread over several lines, and a hard-coded `true`), and a **behavioural**
+test per edition that sets the setting through its own API and watches the badge
+appear and disappear — because a renamed binding or a `!==` for a `===` is not a
+text bug and no regex can see it.
+
+Wording rules that have each cost something:
+
+- **Only the rung reached is shown.** Nine badges for a hundred-day habit is one
+  fact said nine times, and the survival chart the card sits under answers "how
+  far do my streaks usually get" better.
+- **"No lapse over a day" is read from `missDistribution`, not
+  `recovery.rate === 1`.** The closed set excludes an ongoing lapse — rightly —
+  so three days into one the rate still says every lapse lasted a day. The
+  sentence says *so far*, and there is a test on it. Buckets are found by `min`,
+  never by `label`; the labels are prose.
+- **`fresh` marks the award whose value MOVED**, for `COMEBACK_FRESH_DAYS`, and
+  its test asserts a literal 7.
+- **A one-day lapse earns no comeback** (`COMEBACK_MIN_DAYS`) — "Back after 1
+  day" is what "Recovered N times" already said.
+- **A year is measured between the runs, not from `created_at`** — *created* a
+  year ago is true of a habit abandoned in its first week. It is the first run's
+  **start**; the fixtures straddle 365 days on purpose, because an earlier pair
+  gave 399 and 390 and left the distinction unpinned. It is honest about an
+  import, which earns it on the day it lands.
+- **Every day of the week is "at least once", deliberately not a RATE.**
+  `computeWeekdays` counts completions, so a 3×/week habit kept perfectly has
+  four weekdays at zero and any threshold over all seven is unreachable for every
+  non-daily habit.
+- **`STRENGTH_BANDS` is 50/80/95, and a perfect daily habit crosses them on days
+  13, 31 and 57** — measured. The first draft asserted 30 and 60. Both sides of
+  each crossing are pinned.
+- **The "New" pill takes `--accent`, never `--award-accent`** — a habit's colour
+  is one the user picked and nothing constrains its lightness, so `color: #fff`
+  gave white on white. The habit's colour stays on the chip's left edge, where it
+  needs no contrast ratio.
+
+**Refused, and each looked cheap:** *Beat your worst day* is a current-state
+claim over a lifetime rate, not monotone, its "stops being the lowest" half is
+satisfiable by another weekday getting WORSE, and its whole value is NAMING the
+day — which a server cannot do, since a weekday name is locale-dependent and
+`shared/src` has no locale. Portfolio awards read every habit at once and belong
+to an account-level route.
+
+**Nothing here is worded per habit shape**, and that was checked. An at-most
+habit and a `show_as: 'avoid'` one earn from the same vocabulary — lapse, streak,
+strength — because those are the words the cards either side already use.
+
+## Import, export and Loop
+
+**Loop compatibility is exact and verified against a real backup**: timestamps
+are epoch millis at UTC midnight, `YES_AUTO(1)` counts as done, `NO(0)` is a
+stated lapse and keeps its row while `UNKNOWN(-1)` has none, and identity is
+`(issuer, subject)`.
+
+**Only entry values scale by ×1000 — habit targets do not.** `Repetitions.value`
+of `2000` means 2, but `Habits.target_value` of `2` means 2. Scaling the target
+turned "at most 2 times" into "at most 0.002". Reading their source was not
+enough to catch this; it took a real export.
+
+**A merge may add an answer and must never delete one.** Both editions'
+`applyImport` yield to the existing row for a bare lapse in merge mode and count
+it as `entriesKept` — a Loop backup is full of explicit `NO` rows, so merging a
+phone export taken before the web history would have wiped every completion the
+two disagreed about. "Bare" is `!notes.trim()` and not `!notes`: content is what
+suspends the rule, and a note of one space bought a lapse the right to overwrite
+eight recorded glasses.
+
+**A skip does NOT yield**, deliberately and pinned by a test. It is an answer —
+`isCompleted` returns `null` for it — so a `SKIP` cell in a bare Checkmarks.csv
+does overwrite a recorded amount.
+
+**On a merge the FILE's type says how a value was written down; the ACCOUNT's
+says what may be stored.** Answering both with one type is how a file claiming
+`numerical` put an `8` on a boolean habit — a value `PUT /entries/:date` answers
+400 to, and one `isCompleted` reads as *not done* forever. But the file's type
+must still decide the ENCODING, because a `3` is Loop's skip sentinel in a
+boolean column and three-of-something in a numerical one. The yield above is
+gated on `type === 'boolean'`. Where the two genuinely disagree only a lapse and
+a skip cross; the rest are reported in `skipped` rather than invented.
+
+**A habit is matched by the name it is STORED under.** The lookup used the RAW
+name while the INSERT wrote `clean.name`, clamped to `LIMITS.name` — so past 100
+characters three merges of one backup left three habits with one visible name,
+and cloud's `willAdd` counted each against `MAX_HABITS_PER_USER`. Every reader of
+the name inside that loop moves together.
+
+**An absent value is not an answer.** `entryValue` is about the TYPE, because
+`Number(null)` and `Number('')` are `0` and a row holding zero is a stated lapse.
+`{date, value: null}` was written as a day the user said they missed while
+`{date}` was correctly refused. Harmless on a merge; in **replace** mode there is
+nothing to yield to, and an invented lapse extends the habit's history window
+back to its own date. Silence is reported in `skipped`. What goes with `Number()`
+is its generosity about the *form*: `'0x10'` and `'1e3'` read as 16 and 1000.
+
+**Every parse path has a row ceiling, and there are THREE of them.** An upload's
+size is not a bound on what it describes: a SQLite row count is *declared*, so
+`CREATE VIEW Habits AS WITH RECURSIVE …` makes 8KB claim five million rows; a CSV
+header is one line, so `Date,a,a,a,…` two million times is 7.6MB that deflates
+~1000:1; and `{"name":"a","entries":[]}` is 26 bytes. All three aborted the
+process — **inside V8**, so the `try`/`catch` that turns a bad upload into a 400
+cannot catch it. `MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` bound all three, and:
+
+- The bound goes **where the rows are produced** — `.iterate()` plus `LIMIT`,
+  the header length — because anything materialising the array first has already
+  spent the memory.
+- The entry budget is a **total** across the file, not per habit: a per-item cap
+  is no defence when the number of items is also the attacker's to choose.
+- They are **env-settable with generous defaults**, because personal's API caps
+  neither — a fixed ceiling would refuse a file its own API would accept one
+  habit at a time.
+- Note the name: `PARSE`, not `IMPORT`. Cloud's `MAX_HABITS_PER_IMPORT` is a
+  product limit on the parsed array. One is a defence, the other a policy.
+
+**The entry read is ONE pass over `Repetitions`, not one per habit.**
+`WHERE habit = ?` inside the loop looks cheap and is the opposite: Loop's schema
+indexes `habit`, an uploaded file need not, and then every execution is a full
+scan — cost habits × rows, invisible to a budget spent by rows RETURNED. A 6.4MB
+file of 2,000 habits and 300,000 orphan rows took 13.5 seconds and yielded zero
+entries. Read once ordered by `habit, timestamp` and bucket into a Map, and bill
+every row **before** it is looked up — there is a test on that clause.
+
+**Loop's `question` is `reminder_message`; its `reminder_hour`/`reminder_min` are
+`reminder_time`.** Both were dropped in both directions. `loopReminderToTime` and
+`timeToLoopReminder` are the pair, and the case that decides them is
+**midnight**: `00:00` is both columns holding 0, so any check for a truthy hour
+reports a real reminder as none. A half-filled row is no reminder rather than
+`HH:00`. Two traps: `Number('')` is `0`, so only digits count; and the three
+columns are selected as **TEXT**, because read as INTEGER a value above 2^53
+makes node:sqlite's row decoder throw for the whole `.all()`.
+
+The CSV's version was a *pair* of bugs concealing each other: the export wrote
+`description` into the `Question` column, and the import read
+`idx('description', 'question')`. Fixtures where description and prompt DIFFER
+are what catch it. Be precise about the import half: `idx` matches on
+**headers**, and a real Loop `Habits.csv` always has `Description`, so the
+fallback never fired there and the question was simply dropped. It fired only for
+a file with `Question` and no `Description` — and there it was arguably right,
+since Loop's migration 23 is `update Habits set question = description`.
+
+**Only an ALL-DAYS Loop reminder is imported.** `reminder_days` is a 7-bit
+weekday mask and habiterall has no concept of one. Taking the time alone turned a
+Monday-only reminder into seven a week AND wrote that widening back into the
+user's Loop app; a mask of `0` became daily. On export the mask is `127` with a
+reminder and `0` without, which is what Loop's own writer stores.
+
+**An export reports what it could not carry; it does not fail on it.**
+`isoToLoopTimestamp` is `Date.UTC`, which rolls a date over, so `2026-02-30` left
+as 2026-03-02 — and against a real row there, Loop's UNIQUE index made
+`/api/export-loop.db` answer **500 for as long as the row existed**. The
+collision is only the loud half: with no row on the day it rolled onto, the
+export SUCCEEDED and filed the entry under a day the user never recorded.
+`isLoopEncodableDate` asks the exporter's question — *does the timestamp read
+back as the day it came from* — which is narrower than `assertDate` on purpose,
+and weakens by itself as the encoder improves. Two surfaces report the skips:
+`X-Habiterall-Export-Skipped` for a client that made the request, and
+`export.rows_skipped` at warn for the browser, which downloads through an
+`<a download>` and reads no headers. Count-only in the header, because a habit
+name is free text and a `\r\n` in one throws inside the route; and the log report
+is `{habit, date, reason}` rather than a sentence, because its reader is a log,
+where names never go.
+
+**Loop's backup carries no preferences** — they live in SharedPreferences — so
+nothing from a Loop file can set one. habiterall's own JSON does carry settings,
+because two of them decide what the rows in the same file MEAN. `PORTABLE_SETTINGS`
+is the allowlist and `UNPORTABLE_SETTINGS` names what is held back: the
+notification keys, because a backup is a file people email to themselves and a
+webhook or an ntfy topic URL is a bearer capability. A **replace** applies what
+travels and a **merge** does not.
+
+**Loop's two tracking settings are `skipDays` and `questionMarks`,** both
+defaulting off as Loop's own do, read from its source (`pref_skip_enabled`,
+`pref_unknown_enabled`). Every surface that can record an answer reads
+`skipDays`: both grids, both day editors, the Discord buttons and the Android
+notification.
+
+## Reminders and destinations
+
+**A destination is either on-device or server-sent, and the difference is the
+whole design.** `CHANNELS` says which. An on-device channel is scheduled by the
+client, which is what keeps it working offline — so switching one *off* only has
+an effect if the client honours the setting. Adding a destination means an entry
+in `CHANNELS`, a branch in `sendToChannel`, and an option in `ui/settings.js` —
+nothing per edition.
+
+**A server-sent reminder is written down after it is sent** (`notify_log`, keyed
+on habit + channel + the user's *local* date). Without that watermark a
+minute-by-minute tick re-sends for the whole catch-up window. Keyed per channel,
+or a second destination is silenced for its first day; on the local date, or a
+user east of the server gets it filed under the wrong day.
+
+**...and under `auto` that local date can move.** An account used from two zones
+either side of a date boundary can have it crossed by a device checking in.
+**Forward** moves the date on and the gate opens: inside the catch-up window a
+second send, past it `too_late` at warn. **Backward** moves it onto a day the log
+already has, so the answer is `already_sent` — never `too_late`, because that
+gate is asked FIRST. The keying is deliberately left alone: adding the zone makes
+the duplicate certain instead of possible.
+
+**The two silences worth a warning**, both through the `once` dedupe.
+`notify.too_late` means a reminder was LOST, and that claim rests entirely on the
+ORDER of the gates: answered and sent are asked first, or every delivered
+reminder is reported as a lost one, once per habit per channel per healthy day.
+`notify.unreachable` covers a destination switched on but not configured, where
+`needsServerDelivery` is false and every visible surface looks correct — a
+Discord channel id on an instance with no `DISCORD_BOT_TOKEN`, silent forever.
+Everything else a tick decides is at debug; 1,440 lines a day is how a log stops
+being read.
+
+**How it WENT is written down too, and that one is for the user.** A permanent
+failure is marked as sent and logged at warn — and the log is the wrong surface,
+unreachable to the person it concerns. `notify_status` holds the LAST outcome per
+channel. Four things are load bearing: it is **not** in the settings blob (which
+`/api/export` carries); it says whether a destination **did** deliver, never
+whether it **can** (`channelConfigured` stays the only authority on the second);
+it is written on a **change of state**, not per send; and **the state is the
+REASON** — `stateKey` covers `ok`/`permanent`/`status`/`error`, because comparing
+`ok: false` alone froze the message at whichever failure came first. `date` is
+deliberately out of the key, so what is stored is the date the state BEGAN and
+the dialog says "not delivered **since**". The wording is the **sender's own**;
+re-phrasing it in the UI is how the dialog and the log come to disagree about one
+404. `sendTest` records unconditionally, because a press is one deliberate act.
+
+**A skip is an answer, and both destinations have to agree.** `answeredIds` and
+`Reminders.needsReminder` are mirrors, and the rule is
+`isCompleted(...) !== false` rather than a truthiness test: `isCompleted` returns
+`null` for a skip. The phone once had a third rule of its own — "does a row exist
+for today?" — which silenced six-of-eight-glasses while the server kept asking.
+
+**Whose clock resolves in ONE place, with three tiers.** `resolveTimeZone`: the
+zone the account NAMED, else the zone its last client reported, else the
+server's. `notifyTimezone` defaults to `auto` — the second tier — so an account
+that has never opened the dialog gets reminders on its own clock instead of a
+container's UTC.
+
+**The reported zone is stored APART from the setting.** It is an OBSERVATION the
+server makes from a header; `notifyTimezone` is a DECISION the user sent. Fold
+them and the first client to check in turns "follow my device" into a chosen
+value, after which nothing reaches automatic again. It is a `device_clock` table
+in personal and a `users` column in cloud rather than a settings key, because
+`/api/export` carries settings and restoring a backup abroad must not move when
+reminders arrive. It costs no extra request — `X-Habiterall-Timezone` rides on
+traffic both clients already make, and the server writes only on a CHANGE.
+
+**`callerDay` is the other question and reads the HEADER and nothing else.** See
+the root `CLAUDE.md`. What it is NOT is one day of slack: the spread is UTC−12 to
+UTC+14, and 26 hours is wide enough for **two** calendar days at once, so
+`today + 1` is both too narrow at the edges and too wide everywhere else.
+`shared/test/notify.test.js` asserts the two-day gap directly.
+
+**A zone has to be a NAME.** `parseTimeZone` returns the canonical name and
+refuses offset zones. `Intl` accepts far more spellings than there are zones, and
+`formatterFor` holds a built formatter and never evicts — measured, 16,384 case
+variants of one name retained 2.2MB after GC, per limiter key. Offsets go for a
+second reason: `+23:59` is two days ahead of `Etc/GMT+12`, and a fixed offset does
+not observe DST. Nothing can send one; the test is for a leading sign rather than
+a slash, because `UTC`, `GMT` and `Etc/UTC` all canonicalise to `UTC`.
+
+Two traps that bit while this was written: `deliverAccount` re-deriving the zone
+from `settings.notifyTimezone` was a SECOND place the clock was decided, and the
+two diverged the moment `auto` existed — the account carries its resolved
+`timeZone` now. And `new Intl.DateTimeFormat` THROWS for a zone it does not know,
+inside a loop that runs once per account, so `formatterFor` falls back.
+
+**`SETTING_VALUES` rules are an array *or* a normaliser** — a URL and a timezone
+cannot be enumerated. That is also why an accepted setting may differ from what
+was sent, and why `ui/settings.js` waits for the server's answer.
+
+### Discord
+
+**Buttons need a bot; a webhook cannot carry them.** Discord accepts `components`
+on an *application-owned* webhook only, so bot mode exists alongside the plain
+webhook rather than replacing it. `CHANNELS.discord.ready` is why "configured" is
+a predicate rather than a list of required keys.
+
+**Interactions arrive over a WebSocket, not an HTTP endpoint.** A self-hosted
+instance behind a router has no inbound port and no hostname; requiring one would
+mean interactive reminders only worked for people who had already solved a harder
+problem. It is also why no request-signature verification appears anywhere here —
+a socket is authenticated once, by the token.
+
+**The bot token is an environment variable, never a setting.** It can post to
+every channel the bot is in, and `GET /api/settings` hands settings to the
+browser. The channel id *is* a setting: per user, worth nothing on its own.
+
+**A press is authorised by the CHANNEL it came from, not by its `custom_id`.**
+The id carries a habit and a date because that is all Discord gives back, and is
+trusted for neither: `resolveChannel` decides whose data is written and the habit
+is looked up inside that account. `discordUserId` narrows it to one user.
+
+**A press is acknowledged before any storage is touched.** Three seconds, and
+answering used to be the LAST thing `handleInteraction` did — over the line on a
+cold pool, showing **"This interaction failed"** on a press that *was* written.
+`DEFER_UPDATE` (type **6**, not 5, which posts a visible placeholder) goes out
+first and the real answer follows on the same token, good for fifteen minutes.
+The `try` wraps **all** the storage and the defer itself, because a type-6 defer
+has no loading state to time out — an uncaught throw afterwards leaves the press
+looking like it did nothing. Two exceptions: a **modal cannot be deferred**, and
+the test button touches no storage. Deferring keeps the buttons live while the
+write is in flight; `record` is an upsert, so a double press is idempotent.
+
+**The gateway's own frames are remote input too.** `resume_gateway_url` says
+where the NEXT socket opens and the RESUME frame carries the bot token, so
+`resumeTarget` suffix-matches `*.discord.gg` / `*.discord.com` and rebuilds from
+the host alone — falling back to the published gateway costs a fresh session and
+nothing else. HELLO's `heartbeat_interval` sets a timer in this process, so
+anything outside 1s–10min takes the published default; ungated, a `1` is a busy
+loop starving the tick that shares the event loop.
+
+**One disconnect must produce exactly one reconnect.** Closing a socket ourselves
+fires its own `onclose`, so the handler left attached scheduled a second connect
+— two live sockets, of which only the newer was heartbeated. Three things stop it
+and the ordering of the first is load bearing: `ws` is nulled *before* the close,
+the socket is detached, and `scheduleReconnect` is idempotent. The regression
+test counts scheduled timers, because every wrong version still reports
+`state() === 'waiting'`.
+
+### ntfy
+
+**There is no host list anybody here could write** — ntfy's whole point is that
+most people run their own — so which networks this process may be aimed at is the
+OPERATOR's question: `NTFY_ALLOWED_HOSTS`, defaulting to `ntfy.sh` alone, naming
+your own **replaces** rather than adds, and `off` refuses every URL while still
+telling the user why.
+
+**An entry names a host and optionally a BASE PATH.** The property worth copying
+from `parseDiscordWebhook` is not "it checks the host", it is that allowlisting a
+destination allows one KIND of request — so it pins the path too. The first
+version allowed any 1–4 dotless segments and posted to all but the last, which
+under the reverse-proxy deployment our own docs recommend made
+`https://example.com/internal/admin/reset/x` a JSON POST with a chosen title,
+4000 characters of chosen body and a chosen bearer token, the status handed back
+as prose and repeatable from the test button. A user's URL may append **exactly
+one topic segment**; the depth is one and not configurable because the topic is
+the only part the operator cannot know in advance. It is a **whole-segment**
+match (`Set.has` on the joined base), never a prefix, or `/ntfy` allows
+`/ntfyadmin` — and the stored URL is rebuilt with the **entry's** spelling.
+
+The rest of the shape and every clause in it: **https only**; **no credentials**
+(`https://ntfy.sh@evil.test/x` has a host of `evil.test`); the host matched
+**whole and with its port**, never a suffix test (`evilntfy.sh` ends with
+`ntfy.sh`); segments containing **no dots at all**, which makes `..`
+unrepresentable rather than filtered; and the URL **rebuilt from the parts that
+were checked**. Deliberately not hostile: `https://ntfy.sh/a/../b` is accepted as
+`/b`, because `new URL` resolves traversal before any of this sees it.
+
+**DNS rebinding is closed by construction**, which is why no IP pinning appears
+here: every name in the allowlist was chosen by the operator. Pinning would buy
+nothing and break every ntfy behind a load balancer.
+
+**A malformed entry fails closed, and says so once.** `*`, `*.example.com`,
+`https://ntfy.sh`, a bare comma — none allow anything. Dropping it in silence was
+the wrong half: the only surface was a user's URL snapping back to blank, which
+gets reported as an app bug by somebody who cannot fix it.
+`notify.ntfy_allowlist_unusable` is the operator's copy. The one fail-OPEN value
+is **blank**, which is the `ntfy.sh` default and which the shipped compose files
+interpolate as `${NTFY_ALLOWED_HOSTS:-}`.
+
+**The stored value is not the last word.** `postNtfy` asks `ntfyTarget` again at
+send time — the WHOLE rule, base path included — because an operator can narrow
+the allowlist months after somebody saved a URL. The refusal is `permanent` and
+its sentence names the variable.
+
+**A reminder is published as JSON to the ntfy SERVER, not as headers to the
+topic.** Both are documented and only one is safe: publishing to the topic URL
+puts the title in a `Title:` header, and a habit name is free text. The only
+header built here is the optional `Authorization`, refused outright if it could
+not go in one.
+
+**It ships as `interactive: false`, and that is a decision.** ntfy's action
+buttons would work — as an HTTP request the SUBSCRIBER's device makes, from
+wherever that phone is. That is an unauthenticated inbound endpoint, exactly what
+the gateway exists to avoid, and the rule that saves the Discord buttons has no
+counterpart: an ntfy topic is a URL somebody typed, not a channel to resolve an
+account from. A test pins the flag.
+
+**The two server-sent channels are not alike about rate limits, and the tick is
+shared.** Discord limits per webhook, so a 429 is one account's own doing and the
+inline `Retry-After` sleep is paid by whoever caused it. ntfy.sh limits per
+**visitor IP**, which for a server-sent reminder is the instance — so on cloud one
+account can put that sequential loop to sleep on everybody else's behalf. Noted
+at the sleep rather than fixed there.
 
 ## Traps
 
@@ -89,113 +605,6 @@ precache list drifts silently.
 comes from stored data. `dateRange` is unbounded and a distant-past entry
 turns one request into ~700,000 iterations on a single-threaded server. Every
 aggregation in `stats.js` already uses the bounded form; keep it that way.
-
-**An amount is parsed, not typed into `<input type="number">`.** That input
-does not report what it cannot read — it filters the keystrokes it dislikes and
-hands back whatever survived. Measured in Chrome against the day editor's own
-attributes: typing `8,5` left `85` in the box, so eight and a half was recorded
-as eighty-five; typing `abc` left `''`, which the day editor read as "no entry"
-and answered with a DELETE. The decimal comma is the one that matters, because
-`inputmode="decimal"` is what shows it and most of Europe's keyboards offer it —
-`HabitFormScreen.parseAmount` on the phone has a comment about the same input.
-
-So the box is `type="text"` and `ui/amount.js` owns the reading, with the same
-three-answer convention `parseTimeInput` uses and the same trap in it: `''`
-(empty — a delete), `null` (unreadable — say so, write nothing) and a number, of
-which `0` is a real answer. Two of the three are falsy, so callers compare with
-`===`. `parseAmount` is also stricter than `Number()`, which the root CLAUDE.md
-already records as too generous about form — `1e3` is not a thing anyone types
-into a box asking how many glasses of water they drank.
-
-Which of the two separators is the decimal point is the account's
-`numberFormat`, resolved by `resolveNumberFormat` in three tiers — the stated
-answer, else the device's, else the app's own — and passed IN rather than looked
-up, because a DOM-free module has no business reaching for a settings cache or
-for `Intl`. Only a three-digit group depends on it (`10.000`), which is why the
-default costs no existing caller anything, and a group is refused under either
-convention rather than read. The root CLAUDE.md has the argument.
-
-It owns the reading for the SERVER too, which is what makes "DOM-free" a
-contract rather than a convenience: `src/discord.js` imports it, because a modal
-is the same box arriving over a socket and its own `Number()` reading recorded
-`10,000` as ten. The root CLAUDE.md has the direction and why it is not the
-usual two-declarations-and-a-test. `amountComplaint` lives beside the parser for
-the same reason — a refusal that cannot be acted on is barely better than the
-silent ten, and the phone and the web must not tell somebody to type different
-things about the same input.
-
-The step comes from the goal rather than being 1: an eighth of the target,
-snapped to a round number, because 1 is right for "8 glasses" and useless for
-"10,000 steps". `test/browser/countcheck.mjs` follows a tap all the way to
-storage, which is the only thing that can catch the control and the database
-disagreeing about what was typed.
-
-**A localised name is never indexed by a Gregorian field.** `getMonth()`,
-`getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
-`MONTHS[d.getMonth()]` or `String(d.getDate())` silently assumes the locale's
-calendar is Gregorian — and for fa-IR, th-TH and ar-SA it is not. It has now
-been found five times in the same shape and each one looked local: a
-`monthLabels()` table, a year printed as `String(yy)`, a year caption keyed on
-the January column, a day number in the dashboard's grid header, and a month
-caption keyed on `getDate() === 1`. The last two shipped on the branch that
-fixed the first three. Hand the DATE to `Intl` — `formatMonthShort`,
-`formatYear`, `formatDayNumber` — and read a CHANGE of month or year from the
-formatted string, because a Persian year turns at Farvardin and a Persian month
-does not start on the Gregorian first.
-
-The tell is a header that disagrees with itself: `۱۹ تا ۲۵ مرداد ۱۴۰۵` over
-columns numbered `10 11 12`, one localised half and one not, in one row.
-
-**`WIDTH_SAFETY` reserves; it never decides to degrade.** `estimateTextWidth`
-answers "about how wide is this", and the 1.25 margin exists so a RESERVATION is
-never short — a gutter that is short clips a word. Applied instead to a decision
-about whether to *drop* a caption, *shrink* the type or *shorten* a label, it
-makes the chart pessimistic about itself and throws away a label that would have
-fitted: measured, `weekdayChart` gave up `segunda` for a `S T Q Q S S D` axis at
-438px when the real crossover is ~360, and `weekdayMonthChart` dropped half its
-month captions in 11 of 14 non-English locales with room to spare. Over-
-reserving costs pixels; over-degrading costs the label. Both call sites now name
-which they are doing.
-
-**A caption that is thinned away must not be the newest one.** The drop is a
-left-to-right walk, and at the right-hand edge the collision is always with the
-month a reader is actually looking at — en-US drew `Jan Mar May Jul Sep Nov` and
-no December, under a comment saying the first and last are what orient a reader.
-The last column is reserved first and the rest fill in to its left. The year
-caption follows the month it sits under, for the same reason: with no month name
-above it there is nothing for a year to disambiguate.
-
-**The date rules are invisible in en-US, so `npm run test:locales` runs them
-somewhere else.** Every defect above passes the whole unit suite in the locale
-CI runs in — a `getMonth()`-indexed table is 12 for 12 in English. The sweep is
-`LC_ALL` and a subprocess, so there is no test-only hook in the module under
-test, and it runs `dates.test.js`, `calendar.test.js`, `window.test.js` and
-`weekcheck.mjs` in ten locales chosen for a PROPERTY each (a non-Gregorian
-calendar, non-ASCII digits, a different era, long weekday names) rather than for
-coverage. It asserts the locale actually took, because ICU falls back silently
-for a name it does not know and ten runs of en-US report ten passes.
-`weekcheck` is in there because a LAYOUT is locale-shaped too: the row gutter's
-ceiling binds in ten locales at 328px and in none in English, so running it only
-in the runner's locale pinned the one case where the bound never applies.
-
-**A chart's labels and its data have to be asserted TOGETHER.** `weekcheck.mjs`
-exists because a review broke the week-start plumbing four ways at once — bars
-read positionally while captions rotated, the calendar's row labels left
-unrotated, Home/End back on `getDay()`, the month grid reading rows by index —
-and the whole unit suite and every browser suite still passed. The arithmetic
-was covered; nothing looked at a rendered chart. The failure that matters is not
-"the wrong day is first", it is a caption and a datum moving independently,
-which reads as deliberate.
-
-Note where each half is pinned, because the split is forced rather than chosen.
-`weekcheck.mjs` is OFFLINE and covers the labels and the pairing. **Home/End is
-in `feat4.mjs`, in a real browser**, because the handler is reached through a
-`keydown` listener that only exists when the calendar is interactive and it
-reads `dataset`, which the offline fake DOM does not have — a first version of
-`weekcheck` claimed to cover it and did not, and the `getDay()` mutation passed
-every suite in the repo. The month chart needs BOTH its tooltip and its drawn
-caption asserted: they are built from different arrays, so checking one leaves
-the other free to move.
 
 **`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
 still works for boolean habits (where `3` is unambiguously a skip) but is
@@ -239,78 +648,6 @@ questions: which runs to show, and how to order them. A list ordered by length
 reads as a leaderboard and hides whether the good runs were recent. Note the
 bar scale must come from `Math.max(...top)`, not `top[0]` — that stopped being
 the longest row the moment the ordering changed.
-
-**Charts with a time axis page rather than shrink.** `slot = width / count`
-silently squeezes bars to hairlines once a habit has a year of daily data.
-`ui/window.js` decides how many columns fit from a minimum per-column width,
-and `windowedChart` in `ui/components.js` adds the ‹ Earlier / Later ›
-controls. Paging
-strides by one less than the window so a column of context is shared between
-screens — `test/window.test.js` asserts no column is ever strandable.
-
-**Connectivity needs more than the `online` event.** That event tracks the
-network interface, not the server, so a restarted server left the app stuck
-offline until a manual reload. `watchConnectivity` also re-probes on
-`visibilitychange` and polls with a backoff *while offline only* — it makes no
-requests at all once the server answers. It reports transitions, not polls, or
-reconnecting would re-render the dashboard every few seconds.
-
-Which leaves it blind to the outage it is most likely to meet, so the watcher
-takes an input as well: `reportOffline`, called by `ui/api.js` when a write has
-to be queued. A failed request of our own is better evidence than a probe — it
-is the actual traffic — and it must come in through there rather than as a
-`setOffline` from outside, or the watcher's `last` stays `true` and it neither
-polls nor reports the transition. See the root CLAUDE.md.
-
-And once it HAS said so, `api()` stops asking: a write finds `state.offline`
-already true and goes to the outbox without opening a socket. Tap one is what
-discovers an outage and there is no cheaper way to learn it — probing `/healthz`
-per write is what that endpoint's four callers make expensive — so the first tap
-pays the 10s bound and every tap after it costs ~100ms. Note this branch was
-unreachable before the watcher grew that input: nothing set the state on the
-write path, so "when the app already believes it is offline" described no state
-the app could be in, and the obvious-looking fix would have done nothing.
-
-And the write is staged BEFORE the attempt, not after it. `enqueue` returns its
-`seq`, `api()` holds it for the length of the fetch and `unstage`s it the moment
-any answer arrives. That closes the window the bound only shortened: the queue
-used to hold writes that had already failed, so between the tap and the fetch
-settling a check-off existed solely in a promise and closing the tab lost it
-from the outbox and the server alike.
-
-It is removed on ANY response, not just a good one. Leaving it staged on a 5xx
-would turn every failed write into a silent retry, which is a bigger change than
-this and not obviously wanted — the caller is told and the caller decides. What
-the staging covers is precisely the in-flight window, which is precisely what
-was lossy.
-
-Staging is limited to calls safe to arrive twice, because a concurrent `flush()`
-can send a staged write while the live attempt is still out: two identical
-upserts keyed on habit and date, and the second changes nothing.
-
-The predicate is `replayable()`, and it names one question — is this write safe
-to arrive twice? — because three rules turn on it: what may be staged, what may
-be pre-empted, and what may be queued on failure. All three end in a replay from
-the outbox, so all three need the same answer, and having them read one function
-is what stops the next change moving one and missing the others.
-
-`POST /habits` is the only write that answers no. It is **bounded but never
-queued**, which is not the obvious pairing and is the point: it used to be left
-unbounded on the reasoning that aborting a create the server had begun and then
-replaying it is two habits. The first half is true and is why it is not
-replayable — but not bounding it did not avoid the duplicate, it only made the
-dialog spin until the OS gave up while the create may or may not have landed.
-Abandoned, not replayed, and reported as *indeterminate* is the honest shape; the
-dialog closes and reloads the list on that error, so "check whether it was
-created" is something the user can see rather than a thing they are told to do.
-
-A GET still goes to the network, because
-the service worker may hold a cached copy and skipping the request throws that
-away — stale beats blank. And `POST /habits` is excluded **by the same
-`bounded()` predicate as the timeout**, not by a second opinion about the same
-call: pre-empting it would in fact be safe, since nothing is sent and nothing
-can arrive twice, but two rules disagreeing about which call is special is how
-the next person changes one and not the other.
 
 **The score formula is deliberate.** It feeds a trailing-window adherence
 ratio (always `[0,1]`) into an EWMA. Do not "simplify" it back to scaling a
@@ -374,132 +711,6 @@ grid fills sequentially from there. What it does need is the labels, and
 Home/End, which jumped to `getDay() === 0` and so walked off the top of a
 Monday-start grid.
 
-**The calendar is anchored on its END, not its start.** Going back
-`weeks*7` days and *then* snapping back to the week's first day shifts the whole
-grid earlier,
-so the last column stops short of today by however many days into the week it
-is — today's square was invisible on six days out of seven. `calendarWindow`
-owns this and `test/calendar.test.js` pins it.
-
-**Charts size themselves from the card, and must not overshoot it.**
-`svg.chart { max-width: 100% }` silently *scales* an oversized chart down, so
-one pixel too wide makes 13px cells render at 12.6px. `calendarWidth` drops
-the final column's trailing gap for exactly this reason, and `cardInnerWidth`
-measures a real `.card` rather than hardcoding padding that can drift from the
-stylesheet. Inside a `.chart-scroll` the cap is lifted so narrow screens
-scroll instead of shrinking.
-
-**A chart names a theme colour; it never resolves one.** Every fill and stroke
-that comes from the palette is emitted as `var(--grid-empty)` and friends, and
-a partial strength as `color-mix(in srgb, <habit colour> N%, var(--grid-empty))`
-— never a value read with `getComputedStyle` at draw time. An SVG attribute
-does not follow the theme, so a resolved colour freezes the palette the chart
-was drawn under, and the only thing that can correct it is a re-render. In the
-detail view a re-render is a *refetch*: switching to dark left every unrecorded
-calendar square holding the light `#e6e9ef` — near-white against the dark card
-— for two requests, and permanently if either failed. That is also why
-`toggleTheme` no longer takes a redraw callback, and why the fake DOM in
-`test/browser/atmost.mjs` and `rendercheck.mjs` no longer stubs
-`getComputedStyle`: reach for it again and those suites crash rather than
-quietly pass. `themecheck.mjs` blocks every request the detail view could make
-*before* switching the theme, so it can only pass if the colours followed with
-no redraw at all.
-
-**`charts.js` must survive the fake DOM.** `test/browser/atmost.mjs` and
-`rendercheck.mjs` import it directly with a ~15-line stand-in for `document`
-that implements `setAttribute`/`appendChild` and nothing else. Use
-`setAttribute('data-x')` rather than `.dataset.x`, pass `class` through the
-attribute object rather than `classList.add`, and guard anything that needs
-real event or `requestAnimationFrame` APIs. Reach for a browser API here and
-those two suites crash outright rather than fail a check.
-
-**Calendar cell hover has three non-obvious requirements.** `transform-box:
-fill-box` — without it the transform origin is the SVG's origin and a hovered
-cell flies across the grid instead of scaling in place. SVG has no `z-index`,
-so the hovered cell is moved to the end of its parent or its neighbours clip
-the growth. And the popover is positioned in JS because an SVG rect has no CSS
-box to anchor an HTML tooltip to. `<title>` stays in the markup for screen
-readers but is hidden with `display: none`, or the native bubble covers the
-popover.
-
-**The search box is OUTSIDE `#grid`, and that is the whole design.**
-`paint()` runs on every keystroke and rebuilds that subtree with
-`replaceChildren()`, so a control inside it would lose the caret mid-word.
-`data-focus-key` restores a control that IS rebuilt; the cheaper answer for one
-that need not be is to not rebuild it — and `searchcheck.mjs` asserts a whole
-word arrives with focus still in the box, because moving it inside `#grid` does
-not fail a check, it makes the element unreadable.
-
-Three rules travel with it. **The drag handle goes while a filter is on**: a drop
-against a subset computes a `position` from neighbours that are not the habit's.
-Note what is NOT the reason — `persistOrder` sends `state.habits.map(h => h.id)`,
-the FULL list, so nothing is dropped from the write; what a drop against a subset
-gets wrong is where in that list the habit lands. **The threshold reads the
-unfiltered count** (and the box also stays while it has focus), or it vanishes
-under the cursor at the moment a query narrows the list past it. And **the
-MUTATORS clear the query**, not the `'reload'` listener. Doing it in the listener
-looks equivalent and is not: `'reload'` has ten emitters and only half replace
-anything, so it also wiped the box on **Back from a habit** — the feature's main
-workflow — and on a background reconnect, mid-word.
-
-**But a mutator clears it only when what it wrote would be OFF THE LIST**, which
-is one question and not a list of mutators. Clearing on every save was the same
-defect one road over: filter to a habit, open it, Edit, change only the COLOUR,
-Save, Back — and the box is empty with all eight rows showing, a filter wiped by
-something that replaced nothing. So `habit-dialog` asks `staysOnList` and clears
-only on a no.
-
-**The question is `staysOnList` and not `matchesQuery`, and the gap between them
-is a whole route.** A create need not match the query and a rename may stop
-matching — that second one is the same disappearance from the other side, and the
-reason "this was a create" is the tempting simpler rule and the wrong one. But
-**archiving** touches neither matched field and removes the row anyway, because
-`load()` fetches the active habits or the archived ones and never both. Asking
-the filter alone left "No habits match that." over an archive that had just
-succeeded — the very sentence the rename case exists to prevent, arriving by the
-one route that predicate cannot see. `staysOnList` is `archived` and the match
-together, and it is what `deleteHabit`'s unconditional clear already IS: for a
-habit that no longer exists the answer is no however the account is set up, so
-the constant there is this rule resolved in advance rather than a second rule.
-`restoreHabit` asks it properly, since an undo is a create with the habit in
-hand. `data-dialog` is the one real exception — a restore replaces the whole
-account, and there is no one habit to ask about.
-
-Two things about the shape of it. It re-tests the MATCH rather than comparing the
-name, because the filter reads the **description** too: a habit found by its
-second field is one a name comparison is blind to, and the match also makes an
-edit that still matches a no-op rather than a harmless pointless clear. And it is
-asked of the **reply**, not of the request — `parseHabit` clamps `description` to
-`LIMITS.description`, so a mention of the query past the cut is in what was sent
-and not in what was stored, and the box then survives over a list the habit has
-just left. Both routes return the stored habit in both editions.
-
-The predicate lives in `ui/store.js` beside `query` — a file that touches no DOM
-and imports nothing — because `dashboard` imports `habit-dialog` already, so a
-second copy of the rule was the alternative to a cycle. All four clears are
-pinned in `searchcheck.mjs` now; three were deletable in silence, and the restore
-is the one whose removal left the entire browser suite green.
-
-**A rebuilt control keeps focus via `data-focus-key`, not its position.**
-`dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single
-check-off does it twice — optimistically, then again after the refetch. That
-destroys the focused element, so tabbing to a checkbox and pressing Enter used
-to drop focus to `<body>` and send the next Tab to the top of the page. The key
-names *what a control is* (`check:<habit>:<date>`, `handle:<habit>`,
-`nav:older`), never where it sat, so the restore still lands after a reorder
-moves the row. Two consequences worth knowing: a key that no longer exists
-simply does not match, which is the right answer for a column you paged away
-from; and a control that survives but is *disabled* — Today, once there is
-nowhere to jump to — hands focus to its nearest working neighbour, because
-`.focus()` on a disabled button is a silent no-op. `persistOrder` used to
-re-focus the drag handle by hand; that special case is gone. Pinned by
-`test/browser/gridcheck.mjs` and `dragtest.mjs`.
-
-**`detail.open()` preserves scroll position.** Every control in the detail view
-re-renders through it, and `replaceChildren()` collapses the page height,
-which sends the window to the top. Preserve it on redraw of the *same* habit
-only — opening a different one should start at the top.
-
 **The CSV export must ship both files.** `Checkmarks.csv` has one column per
 habit and nothing that says what a habit *is*, so parsed alone every column
 defaults to boolean — and a measurable habit's `3` is then read as Loop's SKIP
@@ -514,119 +725,6 @@ habits have no entries exported a lone header line and restored as
 `400 no habits found in the uploaded file`. Its own habits, fully described in
 the other file, were parsed and thrown away. `parseZipExport` unions the two
 now, which also covers a habit named in one file and not the other.
-
-**The settings dialog holds a draft; nothing is written until Done.** It edits
-a copy taken when it opens, so Cancel — and Escape, which `<dialog>` handles
-itself — throws the whole thing away. Three consequences worth knowing before
-changing it. The dependent controls (`requires`) read the *draft*, which is
-what lets switching Discord on reveal its webhook field before anything is
-stored. The body is rebuilt only when that visible set changes, so a `multi`
-handler must read `draft[key]` at event time and never a list captured during
-render — capture it and ticking a second box silently drops the first. A `multi`
-option may also carry `onEnable`, run when the box is TICKED and inside the click
-that ticked it: a notification permission can be asked for from nowhere else.
-Named on the option rather than tested for by key here, or the dialog stops
-being able to render a section without knowing what is in it. What follows the
-answer is `paintNotices` and never a rebuild — see the next paragraph — and
-`stage` paints them too, which is what covers an option whose `onEnable` returns
-no promise at all. And a section action like "send a test notification" asks the
-server to use the settings it *holds*, so it is disabled while the draft is
-dirty rather than quietly testing the old value.
-
-**A section can also SAY something, and that arrives late.**
-`SECTION_NOTICES` mirrors `SECTION_ACTIONS` — keyed by section, given the draft,
-returning prose — and the one entry is "your last reminder was not delivered",
-from `GET /api/notify/status`. Three things about how it is rendered. It is
-*not* awaited by `openSettings`: waiting on a request before showing the
-settings would make every open feel slow to spare the one that has something to
-report, and offline the dialog would never open at all. What lands when the
-answer does is **`paintNotices`, which repaints the prose and touches no
-control**, and that is the whole of why a late answer is safe. It used to be
-`renderSettingsBody`, hedged twice — only on a clean draft, and only when the
-set of notices had changed — because a rebuild tears every control out and takes
-a text field's focus and CONTENT with it: `change` never fires on a removed
-input, so a half-typed webhook URL was simply gone. Both guards are now
-unnecessary rather than merely absent, and removing them was the point: a clean
-draft is exactly the state nobody is in when they most need the sentence, so the
-old rule withheld it from the person mid-edit trying to work out why their
-reminders had stopped. Do not put the rebuild back; `test/browser/nudgecheck.mjs`
-holds `/api/notify/status` open, types into the webhook field and releases it, so
-it fails if you do. The notices read the **draft**, so switching a destination
-off makes its warning disappear immediately rather than after a save and a
-refetch. Pressing "send a test notification" re-asks, because a test is a real
-delivery attempt and is what clears the notice once a replacement webhook
-works.
-
-**A setting the server normalises cannot be judged here.** Whether a webhook
-URL is acceptable depends on a host allowlist that lives with the fetch, so the
-control has to show what was *stored* rather than what was typed. `saveAll`
-writes the draft in one request and reports `ignored`; on anything refused the
-dialog stays open, redraws from the server's values and names what did not
-land. Applying is therefore partial by design — the endpoint takes a patch and
-drops what it will not have rather than failing the lot. `set` (apply locally,
-write through, works offline) is still right for the in-place calendar zoom in
-the detail view, where there is no dialog to wait in.
-
-**A setting with an in-place toggle needs a session override.** `calendarZoom`,
-`historyGranularity` and `historyMode` all have controls in the detail view as
-well as entries in the dialog. The pattern: `state.X = null` means "use the
-saved value", the toggle sets it for the session, and `applyDraft` clears it
-for every key Done actually changed — otherwise the dialog appears to do
-nothing once a toggle has been touched. Read through the accessor, never
-`state.X` directly.
-
-**Saving a habit returns you to where the edit started.** `habit-dialog` emits
-`'change'` when `openHabitId` is set and `'reload'` otherwise, so editing from
-a habit's own page reloads that page and creating from the dashboard reloads
-the list. It cannot simply call the detail view — that is the import cycle the
-store exists to break — and it cannot always emit `'change'`, because on the
-dashboard that is a repaint from stale state and a newly created habit would
-not appear. Deleting still goes home: the page you were on is gone.
-
-**The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
-`android-native/.../ReminderTime.kt` accept the same inputs and produce the same
-`HH:MM`, because both clients write the same `reminder_time` on the same habit.
-`test/time.test.js` and `ReminderTimeTest` pin the same examples on purpose — if
-you add a form to one, add it to both. The two that catch people out: `12 am` is
-00:00 while `12 pm` is 12:00, and an empty box means "no reminder" while
-unparseable text is an error to report — the caller does different things with
-them, so they are `''` and `null` rather than both falsy.
-
-**A habit shown as something to avoid keeps the cycle and changes the
-encoding.** `show_as: 'avoid'` on an at-most habit walks the same four states —
-a clean day is `done`, a slip is `no` — so `nextDayState` is untouched and its
-Kotlin mirror did not have to learn anything. `valueForState` is what differs:
-`done` writes 0 and `no` writes `target + 1`, where an ordinary habit writes
-`YES` and `UNSET`. It is mirrored in `Grid.valueForState` for the reason the
-cycle is — a tap happens with no network — and `isAvoided` asks all THREE
-questions: avoid, at-most, and MEASURABLE. `show_as` is kept when a habit's type
-or goal is switched, so that switching back does not lose it, which means the
-predicate carries the whole rule. Asking two of the three put a habit somewhere
-it could not leave — boolean + at_most + avoid is reachable from the form in one
-sitting, and a tap meaning done then encoded as 0, which `isCompleted` reads as
-NOT done for a yes/no habit.
-
-`valueForState` **throws** for a skip rather than answering. A skip is the
-status column, and returning Loop's SKIP sentinel as a value stored three of the
-thing on a measurable habit — `parseEntry` reads 3 as a skip only for a boolean
-one. The dashboard's `recordSkip` writes `{status: 'skip'}`, which is what the
-day editor and the phone have always sent.
-
-Note `toggle.js` declares `UNSET`/`YES`/`SKIP` locally rather than importing
-`ui/values.js`. It is dependency-free on purpose — that is what lets
-`test/toggle.test.js` run it with no browser, since the absolute `/shared/...`
-specifiers the rest of `public/ui` uses do not resolve under Node — and
-`test/toggle.test.js` reads the declaration out of the source and pins it
-against `values.js` so the third copy cannot drift.
-
-**The tap cycle is mirrored in Kotlin too.** `public/ui/toggle.js` and
-`Grid.nextState` are Loop's `Entry.nextToggleValue`, and `test/toggle.test.js` and
-`GridTest` are pinned to the same examples for the same reason `ReminderTime`
-mirrors `ui/time.js`. Both read `skipDays` and `questionMarks`, so the phone and
-the browser cannot disagree about how many states a tap walks through. Note the
-one asymmetry Loop has and this keeps: `SKIP` always moves on to `no`, even with
-skips since switched off, because the setting does not erase the skips already
-recorded and a tap on one has to go somewhere.
 
 **A day that needs no reminder is one that has been ANSWERED, not one that has
 been completed.** `answeredIds` tests `isCompleted(...) !== false` because
@@ -659,26 +757,6 @@ second clock a millisecond the other side of local midnight.
 so `ui/settings.js` cannot import `notify.js` — the channel list is declared in
 both and pinned by `test/notify.test.js`, exactly as `SETTING_VALUES` is. Do not
 "fix" this by mounting `src/`.
-
-**Adding a setting means two files.** `public/ui/settings.js` declares what
-the dialog renders; `src/validate.js` declares what the server accepts. Both,
-or the control is either unenforced or dead — `test/settings.test.js` fails if
-they drift. Do not add a control before the behaviour it names actually works:
-`weekStart` sat commented out until the aggregation honoured it.
-
-**The UI is auth-agnostic.** No view mentions sign-in; `app.js` calls the
-injected adapter (`load` / `render` / `signOut` / `onUnauthorized`) and hands it
-to `ui/api.js`, which needs it only to tell an expired session from a bug.
-Adding an `if (cloud)` branch anywhere here is how the frontends drifted apart
-the first time.
-
-There is now one adapter rather than one per edition, and the branch it used to
-be lives on the server: `load()` reads `mode` from `/api/me`, **and from its
-401** — a signed-out client is the one that has to decide between a form and a
-link, and that response is all it gets. `mode === 'none'` renders nothing at all
-and lets a 401 through as the bug it would be. With no build step nothing could
-pick a module at package time, which is exactly what stopped the personal
-edition making auth a runtime choice.
 
 ## Tests
 

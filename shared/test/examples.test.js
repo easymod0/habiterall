@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { PRINTED, exampleFiles, render } from '../../scripts/sync-compose-docs.mjs';
+import { PRINTED, NOT_PRINTED, exampleFiles, render } from '../../scripts/sync-compose-docs.mjs';
 
 /**
  * What the README shows about `examples/`, and what those files must contain.
@@ -46,6 +46,17 @@ test('every file in examples/ is printed in the README', () => {
     `examples/${unprinted.join(', ')} is in the repository but in no README block. ` +
     'Add it to PRINTED in scripts/sync-compose-docs.mjs, with a marker pair in ' +
     'README.md.');
+});
+
+test('every excuse in NOT_PRINTED still names a file that is there', () => {
+  // An exclusion that outlives its file is a decision about nothing, and it
+  // silently widens: the next file to take that name inherits the excuse. Same
+  // rule as ELSEWHERE in compose.test.js and notMirrored on the Android side.
+  const present = new Set(readdirSync(join(root, 'examples')));
+  const stale = Object.keys(NOT_PRINTED).filter((f) => !present.has(f));
+  assert.deepEqual(stale, [],
+    `NOT_PRINTED excuses examples/${stale.join(', ')}, which no longer exists. ` +
+    'Remove it from scripts/sync-compose-docs.mjs.');
 });
 
 test('the examples pull the published images, not a local build', () => {

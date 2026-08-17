@@ -111,9 +111,22 @@ export function render() {
   return { text, changed };
 }
 
+/**
+ * Files in `examples/` that are deliberately not printed, and why.
+ *
+ * A map rather than a set, as `ELSEWHERE` in compose.test.js is, because "we
+ * thought about it" has to be written down or it cannot be told from "we forgot"
+ * — which is the silence the printed-block check exists to end.
+ */
+export const NOT_PRINTED = {
+  'CLAUDE.md': 'working notes for this directory, not something an operator runs',
+};
+
 /** Every file in `examples/`, for the test that none has been left unprinted. */
 export function exampleFiles() {
-  return readdirSync(join(ROOT, 'examples')).sort();
+  return readdirSync(join(ROOT, 'examples'))
+    .filter((f) => !Object.hasOwn(NOT_PRINTED, f))
+    .sort();
 }
 
 // ---------------------------------------------------------------------- CLI
