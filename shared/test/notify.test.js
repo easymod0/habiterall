@@ -40,13 +40,44 @@ test('every channel offered in the UI is one the server knows', () => {
   // ui/settings.js declares what the dialog renders and notify.js declares
   // what the server delivers. A channel in one and not the other is either a
   // dead control or a destination nobody can switch on.
+  // Anchored at column 0 with /m, so the literal that is read is the
+  // DECLARATION. Unanchored, the regex takes the first match anywhere in the
+  // file — and a JSDoc line quoting the correct list above a broken real
+  // declaration would satisfy it while the module exported the wrong thing.
+  // Nothing had done that; the hole was found by a review of the same pattern
+  // copied one test down, and both are closed by the same anchor.
   const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
-  const block = /const CHANNEL_OPTIONS = \[([\s\S]*?)\n\];/.exec(ui);
+  const block = /^const CHANNEL_OPTIONS = \[([\s\S]*?)\n\];/m.exec(ui);
   assert.ok(block, 'failed to find CHANNEL_OPTIONS in ui/settings.js');
 
   const offered = [...block[1].matchAll(/\{ value: '([^']+)'/g)].map((m) => m[1]);
   assert.deepEqual(offered, [...CHANNEL_IDS],
     'the UI channel list must match CHANNELS in shared/src/notify.js, in order');
+});
+
+test('the UI knows which destinations the DEVICE decides', () => {
+  // A second mirror of the same registry, needing a pin for the same reason the
+  // list above does: `shared/src` is not served, so the browser cannot read
+  // `delivery` and has to restate it. `DEVICE_CHANNELS` gates `notifyTimezone`,
+  // which names the clock the SERVER sends on — get it wrong and a preference
+  // that governs nothing is offered in the very section where "why am I not
+  // getting my reminders?" is answered.
+  //
+  // It shipped unpinned: mutating it to `['android']` left the whole unit run
+  // green, and only a browser suite noticed, only in Chrome, only for `web`. A
+  // third device destination added later would have been caught by nothing.
+  // Anchored at column 0, for the reason the test above says: an indented
+  // mention in a comment must not be able to answer for the declaration.
+  const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
+  const block = /^const DEVICE_CHANNELS = \[([^\]]*)\];/m.exec(ui);
+  assert.ok(block, 'failed to find DEVICE_CHANNELS in ui/settings.js');
+
+  const listed = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const device = CHANNEL_IDS.filter((id) => CHANNELS[id].delivery === 'device');
+  assert.ok(device.length > 0, 'no device-delivered channel in CHANNELS at all');
+  assert.deepEqual(listed, device,
+    'ui/settings.js must list exactly the channels CHANNELS marks '
+    + "delivery: 'device', in registry order");
 });
 
 test('every channel declares how it is delivered', () => {
@@ -950,10 +981,21 @@ test('a 429 with no advice still asks for a wait, not zero', async () => {
 });
 
 test('a device channel is never posted anywhere', async () => {
-  const fetch = fakeFetch([{ status: 204 }]);
-  const result = await sendToChannel('android', { habit: habit(), settings: {} }, { fetch });
-  assert.equal(result.ok, false);
-  assert.equal(fetch.calls.length, 0);
+  // Every one of them, taken from the registry rather than named: `web` joined
+  // `android` here, and the next device destination joins it without anybody
+  // remembering to add a line. `serverChannels` is what normally keeps these
+  // out of `deliverAccount`; this is the backstop for a caller that names one
+  // directly.
+  const device = Object.keys(CHANNELS).filter((id) => CHANNELS[id].delivery === 'device');
+  assert.ok(device.length >= 2, 'expected at least android and web');
+
+  for (const channel of device) {
+    const fetch = fakeFetch([{ status: 204 }]);
+    const result = await sendToChannel(channel, { habit: habit(), settings: {} }, { fetch });
+    assert.equal(result.ok, false, channel);
+    assert.match(result.error, /delivered by the device/, channel);
+    assert.equal(fetch.calls.length, 0, `${channel} was posted somewhere`);
+  }
 });
 
 /* ---------- delivering to ntfy ---------- */

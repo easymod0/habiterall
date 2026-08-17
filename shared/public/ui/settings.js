@@ -20,7 +20,12 @@ const CACHE_KEY = 'habiterall-settings';
  * @property {string} [help]     one-line explanation under the control
  * @property {'select'|'toggle'|'multi'|'text'} type
  * @property {any} default
- * @property {{value: string, label: string}[]} [options]  for `select` and `multi`
+ * @property {{value: string, label: string, onEnable?: () => any}[]} [options]
+ *   for `select` and `multi`. `onEnable` runs when a `multi` option is TICKED,
+ *   inside the click that ticked it — the settings dialog is the only place in
+ *   the app with a user gesture to spend, and a notification permission cannot
+ *   be asked for without one. Return a promise and the dialog redraws when it
+ *   settles, so the section can report what the browser answered.
  * @property {string} [placeholder]  for `text`
  * @property {string} [section]  groups controls in the dialog
  * @property {(values: Record<string, any>) => boolean} [requires]
@@ -40,9 +45,36 @@ const CACHE_KEY = 'habiterall-settings';
  */
 const CHANNEL_OPTIONS = [
   { value: 'android', label: 'Android app (on-device alarm, works offline)' },
+  // The label carries the whole truth about what this destination is, because
+  // the alternative is a bug report in six months: it cannot wake you at 08:30
+  // and nothing in a browser can — see the module comment in ui/nudge.js.
+  { value: 'web',
+    label: 'This browser (when you open the app, not at a set time)',
+    // A permission prompt only counts if it comes from a user GESTURE, and
+    // ticking this box is one. Asked here rather than on boot for exactly that
+    // reason: a page that asks on load is asking before there is anything to
+    // ask about, and browsers increasingly refuse such a prompt outright — after
+    // which the destination can never be granted from this app at all.
+    //
+    // The answer is not read here. `browserNudgeProblems` below reports
+    // whatever the browser ended up saying, including the one answer script
+    // cannot undo.
+    onEnable: () => globalThis.Notification?.requestPermission?.() },
   { value: 'discord', label: 'Discord channel (sent by the server)' },
   { value: 'ntfy', label: 'ntfy topic (sent by the server, nothing to click)' },
 ];
+
+/**
+ * Destinations the DEVICE decides, mirroring `delivery: 'device'` in
+ * shared/src/notify.js.
+ *
+ * Only `notifyTimezone`'s `requires` needs it, and it needs it to be right: that
+ * setting says which clock the SERVER's "08:00" is on, and neither of these is
+ * the server's. Offering the control because one of them is switched on is a
+ * preference that governs nothing, in the section where "why am I not getting
+ * my reminders?" is answered.
+ */
+const DEVICE_CHANNELS = ['android', 'web'];
 
 /** The zone the browser is in, e.g. 'Europe/Berlin'. */
 function deviceTimeZone() {
@@ -263,7 +295,9 @@ export const SETTINGS = {
   notifyChannels: {
     section: 'Notifications',
     label: 'Send reminders to',
-    help: 'A habit only sends anything if it has a reminder time set, on its own edit screen.',
+    help: 'A habit only sends anything if it has a reminder time set, on its own ' +
+      'edit screen. This browser is the exception to the times: it tells you what ' +
+      'is still outstanding when you open the app, and cannot wake you.',
     type: 'multi',
     // The phone alarm only. It is the one destination that needs no setup, and
     // the only one that still fires with no network.
@@ -342,7 +376,7 @@ export const SETTINGS = {
     // as the saved value instead of silently reading as the default.
     validate: knownTimeZone,
     requires: (values) => (values.notifyChannels ?? [])
-      .some((id) => id !== 'android'),
+      .some((id) => !DEVICE_CHANNELS.includes(id)),
   },
   confirmDelete: {
     section: 'Safety',
@@ -466,6 +500,75 @@ export function deliveryProblems(values = load()) {
 }
 
 /**
+ * What to tell the user about this browser's own permission, or nothing.
+ *
+ * The counterpart of `deliveryProblems` for the one destination the SERVER
+ * knows nothing about. `channelConfigured` says `web` is always configured —
+ * there are no keys to set — so without this a browser that refused the prompt
+ * would show a destination switched on, correct in every visible respect, and
+ * silent except for an in-app line nobody expects.
+ *
+ * `denied` is the state that makes this necessary rather than nice. It cannot
+ * be recovered from script: `requestPermission()` on a denied origin resolves
+ * `denied` again without showing anything, so pressing the box a second time is
+ * a control that does nothing. The only way back is the browser's own site
+ * settings, and this is the only place that can say so.
+ *
+ * Read from the browser at render time and not from a cached value, because the
+ * user may have gone and changed it in another tab — and reported only while
+ * the destination is switched ON, exactly as a delivery failure is.
+ *
+ * @param {Record<string, any>} [values] the draft
+ * @returns {string[]}
+ */
+export function browserNudgeProblems(values = load()) {
+  if (!(values.notifyChannels ?? []).includes('web')) return [];
+
+  // Asked FIRST, because on a non-secure origin the permission answers
+  // `denied` and cannot be anything else — so every branch below it would give
+  // advice that cannot work. Measured on `http://192.168.50.232:3249`:
+  // `isSecureContext` false, `typeof Notification === 'function'`,
+  // `permission === 'denied'`, `requestPermission()` resolving `denied`
+  // without a prompt, and `navigator.serviceWorker` undefined. Sending that
+  // user to their site settings is the one surface written to explain the
+  // silence, explaining it wrongly.
+  //
+  // It is the LAN half of `HABITERALL_UPGRADE_INSECURE` and not an exotic
+  // deployment: https from outside, plain http from inside, same database, and
+  // the root CLAUDE.md names it. `=== false` rather than falsy, so a runtime
+  // that does not define the flag at all (Node, an old browser) falls through
+  // to the permission questions instead of being told its origin is the
+  // problem.
+  if (globalThis.isSecureContext === false) {
+    return ['This page was loaded over plain http, and browsers only allow ' +
+      'notifications on a secure origin — no site setting can change that. ' +
+      'Reach this app over https (or via localhost) for notifications; until ' +
+      'then, anything still outstanding is shown inside the app.'];
+  }
+
+  // Read straight off the platform. This is not a mirrored RULE — there is
+  // nothing here to drift from — it is one browser being asked about itself,
+  // and `ui/nudge.js` asks it again at the moment it has something to show.
+  const permission = globalThis.Notification?.permission;
+
+  if (typeof permission !== 'string') {
+    return ['This browser cannot show notifications, so anything still ' +
+      'outstanding is shown inside the app instead.'];
+  }
+  if (permission === 'denied') {
+    return ['This browser is blocking notifications for this site, and it ' +
+      'cannot be asked again from here — allow them in the browser\'s own site ' +
+      'settings. Until then, anything still outstanding is shown inside the app.'];
+  }
+  if (permission !== 'granted') {
+    return ['Notifications are not allowed yet, so anything still outstanding ' +
+      'is shown inside the app. Switch this destination off and on again to be ' +
+      'asked.'];
+  }
+  return [];
+}
+
+/**
  * Things a section has to SAY, as opposed to things it can do.
  *
  * Declared here for the same reason `SECTION_ACTIONS` is: the dialog renders a
@@ -475,7 +578,11 @@ export function deliveryProblems(values = load()) {
  * @type {Record<string, (values: Record<string, any>) => string[]>}
  */
 export const SECTION_NOTICES = {
-  Notifications: deliveryProblems,
+  // Two questions, one section, and they are answered by different things: the
+  // server reports how the last send went, and the browser reports whether it
+  // will show anything at all. Composed here rather than as two entries because
+  // the dialog renders one list of notices per section.
+  Notifications: (values) => [...deliveryProblems(values), ...browserNudgeProblems(values)],
 };
 
 /**

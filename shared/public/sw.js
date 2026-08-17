@@ -22,6 +22,37 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v17: the browser's own reminder. `ui/nudge.js` is a new shell asset that
+// `app.js` imports STATICALLY, and it is BOTH earlier cases at once — this note
+// has now been written wrong in each direction, so both halves are set out.
+//
+// It is v9's: a brand-new module an installed PWA would otherwise fetch on
+// first use, which is to say be offline for at exactly the moment a nudge needs
+// it.
+//
+// And it is v14's after all, which a rewrite of this note wrongly denied on the
+// grounds that an old shell serving the old app.js links fine. It does — but
+// that is not the state the window produces. `shellFirst` is
+// stale-while-revalidate and it writes into the RUNNING worker's SHELL_CACHE,
+// so while a v16 worker is still in control (the v17 install fetches every
+// asset first), a request for `/shared/app.js` serves the old file and stores
+// the NEW one into `habiterall-shell-v16`, which has no nudge.js. Offline in
+// that window the static import is a module link error before `start()` — so
+// outside the `#view-error` surface, which is a blank page. That is the v14
+// note further below, verbatim: the revalidate is per request and not atomic.
+//
+// What the bump does about it is worth stating exactly, because it is not what
+// it looks like. `install` re-runs `SHELL.map(cache.add)` on any change to this
+// file, into whichever cache is NAMED — so unbumped, nudge.js would land in the
+// v16 shell sooner and with the data cache intact. The bump's actual effect is
+// that the new shell is built under a name of its own and the old one is
+// dropped on `activate`, so no request can mix the two. Note it is atomic at
+// the CACHE level and not at the asset level: `install` uses
+// `Promise.allSettled`, so a partly populated new shell is a normal outcome and
+// the old one is deleted regardless. It costs every installed client its data
+// cache, which is why the first offline boot afterwards gets the synthetic 503
+// that `#view-error` exists for. Nothing in index.html or style.css moved.
+//
 // v16: the search filter's predicate moved to ui/store.js, so dashboard.js and
 // habit-dialog.js both IMPORT `matchesQuery` from it — the v14 case exactly,
 // one module over. A shell holding the new dashboard.js and the old store.js
@@ -82,7 +113,11 @@ const sw = self;
 // per request and not atomic, so a shell holding the new theme.js and the old
 // settings.js is a module LINK error — `onApply` is not an export of that file
 // — and app-entry.js never evaluates. An installed PWA boots to a blank page.
-// The precache makes the swap all-or-nothing.
+// The precache stops a request mixing the two, because the new shell is built
+// under its own name. (This line used to read "makes the swap all-or-nothing",
+// which overstates it: `install` uses `Promise.allSettled`, so a partly
+// populated new shell is a normal outcome and `activate` deletes the old one
+// either way. Atomic at the cache NAME, not at the asset.)
 //
 // v6: the habit dialog gained the reminder time picker and the "what the
 // reminder asks" field. index.html is a shell asset, so without a bump an
@@ -91,7 +126,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v16';
+const CACHE_VERSION = 'v17';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -128,6 +163,7 @@ const SHELL = [
   '/shared/ui/day-dialog.js',
   '/shared/ui/detail.js',
   '/shared/ui/habit-dialog.js',
+  '/shared/ui/nudge.js',
   '/shared/ui/reminder-field.js',
   '/shared/ui/resample.js',
   '/shared/ui/routes.js',

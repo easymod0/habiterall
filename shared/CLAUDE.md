@@ -40,6 +40,7 @@ Postgres one.
 | `public/ui/api.js` | every request, and what to do when one cannot be made |
 | `public/ui/connectivity.js` | the offline banner, the outbox badge, reconnect handling |
 | `public/ui/toast.js` | the transient message strip |
+| `public/ui/nudge.js` | the browser's own reminder — what is still outstanding, when to say it and where. Dependency-free (one `document` listener, handed in), mirroring `answeredIds` |
 | `public/ui/reminder-field.js` | the reminder time picker inside the habit dialog |
 | `public/ui/amount.js` | reading, stepping and formatting an amount, DOM-free so it is testable |
 | `public/ui/count-field.js` | the amount control over those rules, in the day editor and over the grid |
@@ -521,10 +522,16 @@ changing it. The dependent controls (`requires`) read the *draft*, which is
 what lets switching Discord on reveal its webhook field before anything is
 stored. The body is rebuilt only when that visible set changes, so a `multi`
 handler must read `draft[key]` at event time and never a list captured during
-render — capture it and ticking a second box silently drops the first. And a
-section action like "send a test notification" asks the server to use the
-settings it *holds*, so it is disabled while the draft is dirty rather than
-quietly testing the old value.
+render — capture it and ticking a second box silently drops the first. A `multi`
+option may also carry `onEnable`, run when the box is TICKED and inside the click
+that ticked it: a notification permission can be asked for from nowhere else.
+Named on the option rather than tested for by key here, or the dialog stops
+being able to render a section without knowing what is in it. What follows the
+answer is `paintNotices` and never a rebuild — see the next paragraph — and
+`stage` paints them too, which is what covers an option whose `onEnable` returns
+no promise at all. And a section action like "send a test notification" asks the
+server to use the settings it *holds*, so it is disabled while the draft is
+dirty rather than quietly testing the old value.
 
 **A section can also SAY something, and that arrives late.**
 `SECTION_NOTICES` mirrors `SECTION_ACTIONS` — keyed by section, given the draft,
@@ -532,14 +539,22 @@ returning prose — and the one entry is "your last reminder was not delivered",
 from `GET /api/notify/status`. Three things about how it is rendered. It is
 *not* awaited by `openSettings`: waiting on a request before showing the
 settings would make every open feel slow to spare the one that has something to
-report, and offline the dialog would never open at all. The redraw when the
-answer lands is *conditional* — a clean draft and a changed set of notices —
-for the same reason `stage` rebuilds sparingly: a rebuild tears every control
-out and takes a text field's focus with it, and a late answer must not do that
-to someone already typing. And the notices read the **draft**, so switching a
-destination off makes its warning disappear immediately rather than after a save
-and a refetch. Pressing "send a test notification" re-asks, because a test is a
-real delivery attempt and is what clears the notice once a replacement webhook
+report, and offline the dialog would never open at all. What lands when the
+answer does is **`paintNotices`, which repaints the prose and touches no
+control**, and that is the whole of why a late answer is safe. It used to be
+`renderSettingsBody`, hedged twice — only on a clean draft, and only when the
+set of notices had changed — because a rebuild tears every control out and takes
+a text field's focus and CONTENT with it: `change` never fires on a removed
+input, so a half-typed webhook URL was simply gone. Both guards are now
+unnecessary rather than merely absent, and removing them was the point: a clean
+draft is exactly the state nobody is in when they most need the sentence, so the
+old rule withheld it from the person mid-edit trying to work out why their
+reminders had stopped. Do not put the rebuild back; `test/browser/nudgecheck.mjs`
+holds `/api/notify/status` open, types into the webhook field and releases it, so
+it fails if you do. The notices read the **draft**, so switching a destination
+off makes its warning disappear immediately rather than after a save and a
+refetch. Pressing "send a test notification" re-asks, because a test is a real
+delivery attempt and is what clears the notice once a replacement webhook
 works.
 
 **A setting the server normalises cannot be judged here.** Whether a webhook
@@ -620,6 +635,15 @@ about every day the user had explicitly skipped. `false` is a real miss and stil
 gets its nudge. The Kotlin `Reminders.needsReminder` is the mirror of this, for
 the same reason `ReminderTime` mirrors `ui/time.js`: two clients answering one
 question differently is indistinguishable from one of them being broken.
+
+There are **three** of them now: `isDayAnswered` in `public/ui/nudge.js` is the
+browser's, for the `web` destination, which decides from `state` with no
+network. It is pinned against `answeredIds` over shared fixtures in
+`test/nudge.test.js` rather than by reading, and its shape carries the rule the
+other two get for free — a nullish entry is `false` before anything else is
+asked, because `answeredIds` walks the rows that EXIST and an at-most habit
+whose unlogged days count as staying under would otherwise report every
+untouched day as answered.
 
 **The notifier reads its clock through `zonedClock`, never `new Date()`
 locally.** The zone decides two things, and the second is easy to miss: what

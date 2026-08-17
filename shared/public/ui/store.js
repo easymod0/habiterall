@@ -45,6 +45,15 @@ export const state = {
   showArchived: false, // dashboard is showing the archive rather than active
   hasArchived: false,  // any archived habits exist at all
   gridEnd: null,       // last day column shown; null = today
+  // The window `/overview` actually ANSWERED with, `{start, end}`, or null
+  // before anything has been loaded. `gridEnd` is what was ASKED for and says
+  // nothing about what came back: the server clamps a future `end` to the
+  // caller's own today, and a failed request leaves the previous habits in
+  // place. Anything reading `habit.entries` for a date needs this, because
+  // outside the range a missing key means "never fetched" — a FIFTH state,
+  // not one of the four. `outstanding` in ui/nudge.js refuses to judge a day
+  // outside it.
+  gridLoaded: null,
   offline: false,      // showing cached data / writes are being queued
   pending: 0,          // writes waiting in the outbox
 };
