@@ -152,6 +152,8 @@
  * @property {number} recovered
  * @property {number} lapses           closed lapses only
  * @property {number} openRun          length of an ongoing lapse, else 0
+ * @property {number} longest          longest CLOSED lapse, 0 when there is none
+ * @property {string|null} lastEnd     last day of the most recent closed lapse
  */
 
 /**

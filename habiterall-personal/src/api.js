@@ -8,6 +8,7 @@ import {
   computeStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   today, addDays, daysBetween, MAX_RANGE_DAYS,
 } from '@habiterall/shared/stats.js';
+import { computeAwards } from '@habiterall/shared/awards.js';
 
 /** Lookback used for the dashboard's score/current-streak summary. */
 const SUMMARY_WINDOW_DAYS = 400;
@@ -358,12 +359,15 @@ api.get('/habits/:id/stats', (req, res) => {
   const granularity = req.query.granularity ?? 'day';
 
   const entries = /** @type {any} */ (q.entriesFor.all(id));
-  res.json({
-    habit,
-    ...computeStats(habit, entries,
-      { start, end, granularity, weekStart: storedWeekStart(),
-        unlogged: storedUnlogged() }),
-  });
+  const stats = computeStats(habit, entries,
+    { start, end, granularity, weekStart: storedWeekStart(),
+      unlogged: storedUnlogged() });
+
+  // Awards are a reading of the figures above and are computed HERE rather
+  // than inside `computeStats`, because `/overview` calls that once per habit
+  // and throws all but four of its fields away. Same reason, same place, in
+  // both editions — see the awards section of the root CLAUDE.md.
+  res.json({ habit, ...stats, awards: computeAwards(stats, end) });
 });
 
 /**

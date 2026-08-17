@@ -571,6 +571,61 @@ svg.chart { display: block; max-width: 100%; height: auto; }
   .cal-pop { transition: none; }
 }
 
+/*
+ * The awards row.
+ *
+ * `auto-fit` with a minimum rather than a fixed count, for the reason the day
+ * grid's column count is a function of width: five badges at 360px in one row
+ * squeeze the label to nothing, and one per line at 1440px is a column of
+ * whitespace. `minmax(0, 1fr)` as the second half, or a long detail sentence
+ * makes the track wider than the card and the whole card scrolls sideways.
+ */
+.award-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+.award {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  /* The habit's own colour, set by detail.js as --award-accent. */
+  border-left: 3px solid var(--award-accent, var(--accent));
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+/*
+ * A record rather than a mark: true of the history so far, and a future lapse
+ * can end it. It declines the accent for exactly that reason — a coloured bar
+ * reads as something you were given, and this one can go away.
+ */
+.award.is-record {
+  border-left-color: var(--border);
+}
+.award-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.award-detail {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.award-fresh {
+  display: inline-block;
+  vertical-align: 1px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--award-accent, var(--accent));
+  color: #fff;
+}
+
 .legend {
   display: flex;
   align-items: center;

@@ -465,7 +465,15 @@ export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED
  * from "never missed" (rate null) to "0% recovery", the precise misreport this
  * function exists to avoid. `computeMissRuns` therefore marks the run itself.
  *
- * @returns {{rate: number|null, recovered: number, lapses: number, openRun: number}}
+ * `longest` and `lastEnd` are the same closed set read two other ways, and they
+ * are returned rather than recomputed because `awards.js` needs them and must
+ * not go back to the entries for them: the window every figure in a stats
+ * response is computed over (`from = start ?? firstEntry`, clamped) is derived
+ * inside `computeStats` and never returned, so a second derivation is a second
+ * answer waiting to disagree with this one.
+ *
+ * @returns {{rate: number|null, recovered: number, lapses: number, openRun: number,
+ *            longest: number, lastEnd: string|null}}
  *   `rate` is null when nothing has ever been missed — undefined, not 100%.
  */
 export function computeRecovery(missRuns, end) {
@@ -478,7 +486,7 @@ export function computeRecovery(missRuns, end) {
   const openRun = isOpen ? last.length : 0;
 
   if (!closed.length) {
-    return { rate: null, recovered: 0, lapses: 0, openRun };
+    return { rate: null, recovered: 0, lapses: 0, openRun, longest: 0, lastEnd: null };
   }
   const recovered = closed.filter((r) => r.length === 1).length;
   return {
@@ -486,6 +494,12 @@ export function computeRecovery(missRuns, end) {
     recovered,
     lapses: closed.length,
     openRun,
+    // The deepest hole this habit has climbed out of, and the last day it was
+    // in one. Both are over the CLOSED runs, so an ongoing lapse moves neither
+    // — being mid-slip is not a comeback, which is the line this function
+    // already draws for the rate.
+    longest: closed.reduce((max, r) => Math.max(max, r.length), 0),
+    lastEnd: closed[closed.length - 1].end,
   };
 }
 

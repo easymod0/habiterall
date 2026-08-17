@@ -319,6 +319,97 @@ in one would throw inside the route, which is the 500 all over again. For the
 same reason the report is `{habit, date, reason}` rather than `applyImport`'s
 sentence: its reader is a log, where names never go.
 
+**An award is a READING of the stats response, and it is computed on the
+SERVER because the ladder it reads is.** `SURVIVAL_THRESHOLDS` and
+`MISS_BUCKETS` live in `shared/src/stats.js`, and `shared/src` is not served to
+the browser — which is why `CHANNELS` and `SETTING_VALUES` are each declared
+twice and pinned by a test. Computing awards in the browser therefore meant a
+second copy of the streak ladder, which is exactly the drift issue #63 asked for
+it to be *reused* to avoid: a badge at 20 days beside a survival curve with a
+bar at 21 is two numbers about one question. It would also have cost a new file
+under `shared/public/`, which has to join `sw.js`'s `SHELL` and bump
+`CACHE_VERSION` — every installed client's data cache, to buy one import, which
+is the same price `deviceClockHeader` declined to pay. So `shared/src/awards.js`
+is pure and both editions' `/habits/:id/stats` call it. The phone gets awards
+without a sixth mirror, and `ui/detail.js` renders words it did not choose.
+
+It is called **in the two routes and not inside `computeStats`**, which is the
+one place it looks like it belongs: `/overview` calls `computeStats` once per
+habit and keeps four of its fields, so putting awards there is a per-habit
+computation the dashboard would throw away.
+
+**Only a MONOTONE reading may be dressed as a trophy.** Nothing is stored — no
+ledger, no first-earned date — so an award exists for exactly as long as the
+numbers say so, and re-deriving can *revoke* one. That is not hypothetical here:
+several ranges start at the earliest stored entry, so one imported Loop `NO` row
+extends a habit's window backwards and a habit with `recovery.rate === null`
+acquires a real lapse. `bestStreak`, the peak of the score series, the longest
+CLOSED lapse and the recovery count all only grow as the window does, so an
+award read off one of them cannot be taken away — and `shared/test/awards.test.js`
+asserts that as the invariant rather than by example, walking one history a day
+at a time and failing if any family disappears or any value drops.
+
+Two readings are deliberately refused for that reason and they are the obvious
+ones. `currentStreak` un-earns itself on the day the run ends. And the score's
+CURRENT value flickers: it is a trailing-window EWMA, so a badge on it goes out
+with a bad week, which is a badge that punishes the thing it exists to
+encourage. The strength band is the **peak of the series** — 50%, and one band,
+calibrated against the curve `test/stats.test.js` pins rather than against
+intuition: a perfect daily habit is at ~50% on day 13, so it is a fortnight of
+keeping it. 80% and 95% are months-long goals and want presenting as such.
+
+**The one award that is not monotone says so in the payload.** "No lapse over a
+day" is a claim about the whole record and a two-day lapse ends it; there is no
+honest way to make that permanent short of the ledger #63 defers. It is
+`permanent: false`, it is worded as a fact rather than as a prize, and
+`.award.is-record` declines the habit's accent so it does not *look* like one
+either. The flag is on the wire rather than implicit so the next award of that
+kind has to state which it is.
+
+That award is also read from `missDistribution` and **not** from
+`recovery.rate === 1`, which is the same fact one set smaller. The closed set
+excludes an ongoing lapse — rightly, that is what makes the recovery rate fair —
+so three days into a lapse the rate still says every lapse lasted one day, and
+printing that over a lapse the user is standing in is the cheerful wrongness
+this whole file is written to avoid. The bucket is found by `min` and never by
+`label`, because the labels are prose.
+
+**Where a number was computed and thrown away, it is now returned — not
+recounted.** The comeback award needs the longest lapse recovered FROM, which is
+not `worstLapse` (that counts the open one, so it congratulates you on a slip
+you are still in). `computeRecovery` already had the closed runs in hand and
+reported only counts, so it now also answers `longest` and `lastEnd`. The
+alternative was for `awards.js` to walk the entries again — and the window every
+figure in a stats response is computed over (`from = start ?? firstEntry`,
+clamped) is derived inside `computeStats` and never returned, so a second
+derivation is a second answer waiting to disagree.
+
+**Pure derivation has no "you just earned this" moment, and `fresh` is the
+cheapest honest substitute.** It marks the award whose value MOVED — the
+recovery count, which goes up every time a lapse closes, not the comeback tier,
+which only moves when you beat your worst one — for `COMEBACK_FRESH_DAYS`. The
+award is permanent; it is the emphasis that expires.
+
+Two smaller decisions, both of which read as omissions and are not. **Only the
+rung reached is shown**, not every rung passed: nine badges for a hundred-day
+habit is one fact said nine times, and "how far do my streaks usually get" is
+answered by the survival chart the awards card sits directly *under* — which is
+the ordering `computeSurvival`'s own docstring argues for, a probability you can
+act on beating a trophy. And a **one-day lapse earns no comeback**
+(`COMEBACK_MIN_DAYS`), because "Back after 1 day" is precisely what "Recovered N
+times" already said.
+
+**Nothing here is worded per habit shape, and that was checked rather than
+assumed.** An at-most habit and a `show_as: 'avoid'` one both earn from the same
+vocabulary — lapse, streak, strength — because those are the words the cards
+either side of the awards row already use for the same habit, and #113 inverted
+the RENDERING and no verdict. `show_as` is display-only, so the two award
+identically and a test pins that. What an unlogged day is worth reaches awards
+for free: `at_most_unlogged` is resolved in `unansweredCounts` before any of
+these numbers exist, so a limit kept by saying nothing shows the same streak
+award as it shows a streak tile. That is the model working as designed, and the
+awards agreeing with the tiles beside them is the point.
+
 **Every date range is clamped** (`boundedRange`, `MAX_RANGE_DAYS`). Ranges
 derived from *stored* data are attacker-controlled: one entry dated year 0100
 once made a single request block the event loop for 32 seconds. Never call
