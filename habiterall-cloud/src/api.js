@@ -359,7 +359,7 @@ api.get('/habits/:id/stats', route(async (req, res) => {
     }
   }
 
-  const { entries, weekStart, unlogged } = await withUser(uid(req), async (db) => {
+  const { entries, weekStart, unlogged, skipDays } = await withUser(uid(req), async (db) => {
     const { rows } = await db.query(
       `SELECT to_char(date, 'YYYY-MM-DD') AS date, value, status, notes
        FROM entries WHERE habit_id = $1 ORDER BY date`,
@@ -369,13 +369,21 @@ api.get('/habits/:id/stats', route(async (req, res) => {
     // times-per-week chart must be bucketed the way they read their calendar.
     const { rows: [u] } = await db.query(
       `SELECT settings ->> 'weekStart'      AS week_start,
-              settings ->> 'atMostUnlogged' AS unlogged
+              settings ->> 'atMostUnlogged' AS unlogged,
+              settings ->> 'skipDays'       AS skip_days
          FROM users WHERE id = $1`,
       [uid(req)]
     );
     const weekStart = /** @type {'monday'|'sunday'} */ (
       u?.week_start === 'sunday' ? 'sunday' : 'monday');
-    return { entries: rows, weekStart, unlogged: unloggedFrom(u) };
+    // `->>` is the TEXT accessor, so a JSON `true` arrives as the string
+    // 'true'. Reading it with `->` and a truthiness test would make the string
+    // "false" enable the setting, which is the shape of bug `unloggedFrom`
+    // avoids by comparing against the one value that means something.
+    return {
+      entries: rows, weekStart, unlogged: unloggedFrom(u),
+      skipDays: u?.skip_days === 'true',
+    };
   });
 
   const stats = computeStats(habit, entries, {
@@ -389,8 +397,13 @@ api.get('/habits/:id/stats', route(async (req, res) => {
   //
   // `habit` and `unlogged` are the SAME pair `computeStats` was given: awards
   // read them for one gate, and a different answer there than here would
-  // withhold a card whose figures say the opposite.
-  res.json({ habit, ...stats, awards: computeAwards(stats, end, habit, unlogged) });
+  // withhold a card whose figures say the opposite. `skipDays` is a third
+  // input of the same kind — it gates the rest award — and `computeStats` is
+  // not given it because the arithmetic has no opinion about it: a stored skip
+  // bridges a run whether or not this account can record a new one.
+  res.json({
+    habit, ...stats, awards: computeAwards(stats, end, habit, unlogged, skipDays),
+  });
 }));
 
 api.get('/overview', route(async (req, res) => {
@@ -496,7 +509,15 @@ api.get('/overview', route(async (req, res) => {
       habits: habits.map((h) => {
         const all = byHabit.get(h.id) ?? [];
         const recent = all.filter((e) => e.date >= cutoff);
-        const stats = computeStats(h, recent, { end: summaryEnd, unlogged });
+        // `coverage: false` for the same reason this block is bounded at all:
+        // two fields of the result are read below — `score` and
+        // `currentStreak` — and the rest is discarded, once per habit. It is
+        // the only field `computeStats` lets a caller decline, because it is
+        // the only one that is its own pass over the window and is read by
+        // nothing here. Awards are out of this route for the same reason,
+        // stated at the `/stats` call site above.
+        const stats = computeStats(h, recent,
+          { end: summaryEnd, unlogged, coverage: false });
 
         const totalCompleted = totals.get(h.id) ?? 0;
 

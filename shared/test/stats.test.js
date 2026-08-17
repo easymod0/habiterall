@@ -717,3 +717,98 @@ test('the score and the streak never disagree about an unanswered day', () => {
     }
   }
 });
+
+/* ---------- coverage ---------- */
+
+/**
+ * Rows for every day of `month` except the dates listed, all `value`.
+ * A row is a row whatever it says, which is the whole point of the figure.
+ */
+function monthRows(month, { skip = [], missing = [], lapse = [] } = {}) {
+  const rows = [];
+  const [y, m] = month.split('-').map(Number);
+  for (let d = 1; d <= new Date(y, m, 0).getDate(); d++) {
+    const date = `${month}-${String(d).padStart(2, '0')}`;
+    if (missing.includes(d)) continue;
+    if (skip.includes(d)) rows.push({ date, value: 0, status: 'skip' });
+    else if (lapse.includes(d)) rows.push({ date, value: 0, status: '' });
+    else rows.push({ date, value: YES, status: '' });
+  }
+  return rows;
+}
+
+const coverageOf = (rows, end, opts) =>
+  Object.fromEntries(
+    computeStats(boolHabit, rows, { end, ...opts }).coverage
+      .map((c) => [c.month, `${c.answered}/${c.days}`])
+  );
+
+test('coverage counts a day that has a ROW, whatever the row says', () => {
+  // done, skip and a stated lapse are three answers; a missing row is the
+  // fourth state and is not one. `entryMap.get(date) ?? UNSET` would make the
+  // last two identical, which is the collapse this figure exists to refuse.
+  const rows = monthRows('2026-01', { skip: [5, 6], lapse: [7, 8] });
+  assert.deepEqual(coverageOf(rows, '2026-01-31'), { '2026-01': '31/31' });
+
+  const holed = monthRows('2026-01', { skip: [5], lapse: [7], missing: [9] });
+  assert.deepEqual(coverageOf(holed, '2026-01-31'), { '2026-01': '30/31' });
+});
+
+test('one missing day is the difference between covered and not', () => {
+  // The fixture straddles the boundary by a DAY and not by a month: two
+  // Januaries, alike in every other respect.
+  const full = coverageOf(monthRows('2026-01'), '2026-01-31')['2026-01'];
+  const short = coverageOf(monthRows('2026-01', { missing: [17] }), '2026-01-31')['2026-01'];
+  assert.equal(full, '31/31');
+  assert.equal(short, '30/31');
+});
+
+test('only months the window entirely contains are reported', () => {
+  // A habit whose first row is the 10th cannot have covered January, so
+  // January is not in the list at all — a figure that could never be reached
+  // is worse than a missing one, and worse still if the denominator quietly
+  // became "days of the window".
+  const rows = [
+    ...monthRows('2026-01').slice(9),   // from the 10th
+    ...monthRows('2026-02'),
+  ];
+  assert.deepEqual(coverageOf(rows, '2026-02-28'), { '2026-02': '28/28' });
+});
+
+test('the month in progress is not reported, and the last day of it is', () => {
+  // The whole of the "closed month" requirement, settled by containment alone.
+  // On the 3rd March is not contained, so nothing about it can be shown — which
+  // is what stops a badge appearing on the 3rd and vanishing on the 4th. On the
+  // 31st it is contained, and what it says can no longer go down.
+  const rows = [...monthRows('2026-02'), ...monthRows('2026-03')];
+
+  const onThe3rd = coverageOf(rows, '2026-03-03');
+  assert.equal(onThe3rd['2026-03'], undefined, 'March is still in progress');
+  assert.equal(onThe3rd['2026-02'], '28/28', 'while February is closed and full');
+
+  const onThe31st = coverageOf(rows, '2026-03-31');
+  assert.equal(onThe31st['2026-03'], '31/31');
+
+  // And the day before the last is still not enough, which is the edge itself.
+  assert.equal(coverageOf(rows, '2026-03-30')['2026-03'], undefined);
+});
+
+test('coverage knows how long a month is, February and a leap year included', () => {
+  assert.deepEqual(coverageOf(monthRows('2026-02'), '2026-02-28'), { '2026-02': '28/28' });
+  assert.deepEqual(coverageOf(monthRows('2028-02'), '2028-02-29'), { '2028-02': '29/29' });
+  // 29 rows in a 28-day February is not a thing the data can hold, but 28 rows
+  // in a 29-day one is: the leap day left blank.
+  assert.deepEqual(coverageOf(monthRows('2028-02', { missing: [29] }), '2028-02-29'),
+    { '2028-02': '28/29' });
+});
+
+test('coverage is over the same window every other figure uses', () => {
+  // `from = start ?? firstEntry`, so an explicit start narrows this exactly as
+  // it narrows the history and the streaks — the awards beside it cannot come
+  // to disagree about what "ever" means.
+  const rows = [...monthRows('2026-01'), ...monthRows('2026-02')];
+  assert.deepEqual(coverageOf(rows, '2026-02-28'),
+    { '2026-01': '31/31', '2026-02': '28/28' });
+  assert.deepEqual(coverageOf(rows, '2026-02-28', { start: '2026-01-15' }),
+    { '2026-02': '28/28' });
+});
