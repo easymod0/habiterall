@@ -82,6 +82,11 @@ export async function load() {
   if (state.showArchived) params.set('archived', 'true');
   const data = await api(`/overview?${params}`);
   state.habits = data.habits;
+  // Recorded beside them, because `habit.entries` means anything only for the
+  // days this answer covered and nothing else in the payload says which those
+  // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
+  // the caller's own today, so asking is not knowing.
+  state.gridLoaded = { start: data.start, end: data.end };
 
   // The archive toggle is pointless until something has been archived.
   const archived = await api('/habits?archived=true');

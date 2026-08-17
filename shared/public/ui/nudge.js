@@ -17,14 +17,20 @@
  * works offline because the answer is already in `state`, and the settings help
  * text says in one clause when it fires so that nobody plans a morning on it.
  *
- * **Dependency-free and DOM-free on purpose**, for the reason `ui/toggle.js`
- * is: it is what lets `test/nudge.test.js` run the rule AND the call site under
- * Node, with no browser and no module resolution — the absolute `/shared/...`
- * specifiers the rest of `public/ui` uses do not resolve there. Everything this
- * needs from the app arrives through `init()`: where the habits are, which
- * destinations are on, and somewhere to say it when the browser will not. The
- * browser globals it does touch (`Notification`, `localStorage`, `document`)
- * are read off `globalThis` and guarded, so the module loads anywhere.
+ * **Dependency-free on purpose**, for the reason `ui/toggle.js` is: it is what
+ * lets `test/nudge.test.js` run the rule AND the call site under Node, with no
+ * browser and no module resolution — the absolute `/shared/...` specifiers the
+ * rest of `public/ui` uses do not resolve there. Everything this needs from the
+ * app arrives through `init()`: where the habits are and which days they can
+ * speak for, which destinations are on, what day it is, and somewhere to say it
+ * when the browser will not.
+ *
+ * It is NOT DOM-free, and the distinction is worth keeping straight: it owns no
+ * markup and reaches for no element, but `init` does register one listener on
+ * `document`, which is why `init` takes the document rather than only reading
+ * the global. The other browser globals it touches (`Notification`,
+ * `localStorage`) are read off `globalThis` and guarded, so the module loads
+ * anywhere.
  */
 
 /**
@@ -112,7 +118,36 @@ export function isDayAnswered(habit, entry) {
 }
 
 /**
+ * Could the payload in hand have held a row for this day AT ALL?
+ *
+ * The FIFTH state, and the one the four-state model has no square for: **not
+ * fetched**. `/overview` answers a window — `dashboard.load()` sends
+ * `end=state.gridEnd` — so paging the grid back a fortnight returns habits
+ * whose `entries` legitimately stop before today. Read without this, a missing
+ * key is "no row exists", which is the `?? UNSET` collapse arriving from the
+ * other side: measured, ticking today and then pressing "Previous 14 days"
+ * produced "1 habit still to answer today" about a habit answered an hour
+ * earlier.
+ *
+ * The answer is to refuse rather than to guess, and silence is the only safe
+ * direction — the alternative is nagging about a day the user has dealt with,
+ * which is exactly what gets a destination switched off, and the dashboard
+ * behind it is showing the truth either way. An unknown window refuses too:
+ * before the first load there is nothing to judge.
+ *
+ * @param {{start?: string, end?: string}|null|undefined} loaded
+ * @param {string} date
+ */
+function covers(loaded, date) {
+  if (!loaded?.start || !loaded?.end) return false;
+  return loaded.start <= date && date <= loaded.end;
+}
+
+/**
  * The row `/overview` reported for one habit on one date, or `undefined`.
+ *
+ * Only ever reached for a date `covers` has admitted, which is what lets
+ * `undefined` here mean "no row" rather than "no idea".
  *
  * `entries` is a plain object of date to value with a skip flattened onto the
  * SKIP wire value, and `skips` lists the skipped dates separately — because a
@@ -173,12 +208,19 @@ const minutesNow = (now) => now.getHours() * 60 + now.getMinutes();
  * window here would mean opening the app at 08:31 and being told nothing.
  *
  * @param {any[]} habits as `/overview` returned them, entries and all
- * @param {{date: string, minutes: number, already?: Set<number>|number[]}} clock
- *   `date` is the device's local day, `minutes` its local time, and `already`
- *   the habits this device has been told about on that day.
+ * @param {{date: string, minutes: number, loaded?: {start: string, end: string}|null,
+ *   already?: Set<number>|number[]}} clock
+ *   `date` is the device's local day, `minutes` its local time, `loaded` the
+ *   window those habits' entries actually came from, and `already` the habits
+ *   this device has been told about on that day.
  * @returns {any[]} in the order they were given
  */
-export function outstanding(habits, { date, minutes, already = [] }) {
+export function outstanding(habits, { date, minutes, loaded = null, already = [] }) {
+  // Whole payload or nothing: if the window does not reach today then no
+  // habit's entries can be read for it, so there is no per-habit answer to
+  // give. See `covers`.
+  if (!covers(loaded, date)) return [];
+
   const told = already instanceof Set ? already : new Set(already);
 
   return (habits ?? []).filter((habit) => {
@@ -346,12 +388,22 @@ export async function announce(message, fallback) {
  * no-op rather than a throw.
  *
  * @type {{habits: () => any[], enabled: () => string[], today: () => string,
+ *         loaded: () => {start: string, end: string}|null,
  *         fallback: (text: string) => void}|null}
  */
 let wiring = null;
 
 /**
  * Look, and say something if there is anything to say.
+ *
+ * It reads whatever the app has ALREADY fetched and never fetches itself, which
+ * is what makes it work offline and is also its one blind spot: answer a day on
+ * the phone and switch to a browser tab that has been open since the morning,
+ * and the answer is not in `state.habits` yet, so this can nudge about a day
+ * that has been dealt with. The watermark caps that at one per habit per day,
+ * the dashboard behind it shows the truth, and the alternative — a fetch on
+ * every `visibilitychange` — is traffic on a schedule the user did not ask for.
+ * `covers` is the same problem in its one form that can be answered locally.
  *
  * The watermark is written BEFORE the announcement rather than after it: a
  * `showNotification` that rejects has still, on some browsers, shown one, and
@@ -373,8 +425,12 @@ export async function check({ now = new Date() } = {}) {
 
     const date = wiring.today();
     const already = alreadyNudged(date);
-    const due = outstanding(wiring.habits() ?? [],
-      { date, minutes: minutesNow(now), already });
+    const due = outstanding(wiring.habits() ?? [], {
+      date,
+      minutes: minutesNow(now),
+      loaded: wiring.loaded?.() ?? null,
+      already,
+    });
     if (!due.length) return [];
 
     markNudged(date, [...already, ...due.map((h) => h.id)]);
@@ -389,11 +445,16 @@ export async function check({ now = new Date() } = {}) {
  * Wire it to the app.
  *
  * Injected rather than imported, which is what keeps this module loadable under
- * Node — see the note at the top. All four things it needs belong to somebody
- * else: `state.habits` is the dashboard's, `notifyChannels` is the settings
- * registry's, the toast is `ui/toast.js`'s, and `todayISO` is `ui/dates.js`'s —
- * that last one because this app has exactly one `iso()` and building a second
- * here is what `test/dates.test.js` refuses.
+ * Node — see the note at the top. All five things it needs belong to somebody
+ * else: `state.habits` and `state.gridLoaded` are the dashboard's,
+ * `notifyChannels` is the settings registry's, the toast is `ui/toast.js`'s,
+ * and `todayISO` is `ui/dates.js`'s — that last one because this app has
+ * exactly one `iso()` and building a second here is what `test/dates.test.js`
+ * refuses.
+ *
+ * `loaded` travels WITH `habits` because they are one answer: which habits, and
+ * which days their entries are able to speak for. Taking the first without the
+ * second is the defect `covers` is written about.
  *
  * `visibilitychange` is the second trigger and the reason the watermark exists.
  * It is a separate listener from `ui/connectivity.js`'s, deliberately: that one
@@ -401,11 +462,14 @@ export async function check({ now = new Date() } = {}) {
  * into one handler is how the next change to either breaks the other.
  *
  * @param {{habits: () => any[], enabled: () => string[], today: () => string,
+ *          loaded?: () => {start: string, end: string}|null,
  *          fallback: (text: string) => void,
  *          doc?: {addEventListener: Function, visibilityState?: string}}} deps
  */
-export function init({ habits, enabled, today, fallback, doc = globalThis.document }) {
-  wiring = { habits, enabled, today, fallback };
+export function init({
+  habits, enabled, today, loaded, fallback, doc = globalThis.document,
+}) {
+  wiring = { habits, enabled, today, loaded, fallback };
 
   doc?.addEventListener?.('visibilitychange', () => {
     if (doc.visibilityState !== 'visible') return;

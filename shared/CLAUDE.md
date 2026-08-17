@@ -40,7 +40,7 @@ Postgres one.
 | `public/ui/api.js` | every request, and what to do when one cannot be made |
 | `public/ui/connectivity.js` | the offline banner, the outbox badge, reconnect handling |
 | `public/ui/toast.js` | the transient message strip |
-| `public/ui/nudge.js` | the browser's own reminder — what is still outstanding, when to say it and where. DOM-free and dependency-free, mirroring `answeredIds` |
+| `public/ui/nudge.js` | the browser's own reminder — what is still outstanding, when to say it and where. Dependency-free (one `document` listener, handed in), mirroring `answeredIds` |
 | `public/ui/reminder-field.js` | the reminder time picker inside the habit dialog |
 | `public/ui/amount.js` | reading, stepping and formatting an amount, DOM-free so it is testable |
 | `public/ui/count-field.js` | the amount control over those rules, in the day editor and over the grid |

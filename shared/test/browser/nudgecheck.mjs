@@ -60,12 +60,34 @@ const STUB = `
 
   function FakeNotification(title, options) { record(title, options); }
   FakeNotification.permission = 'granted';
+
+  // A prompt is answered on the USER's schedule, not inside the click that
+  // raised it. With __defer set, the promise is held open until the suite calls
+  // __resolve, which is what makes the mid-edit hazard reproducible.
+  window.__defer = false;
+  window.__resolve = null;
   FakeNotification.requestPermission = function () {
     window.__asked++;
+    if (window.__defer) {
+      return new Promise((done) => {
+        window.__resolve = () => {
+          FakeNotification.permission = window.__answer;
+          done(window.__answer);
+        };
+      });
+    }
     FakeNotification.permission = window.__answer;
     return Promise.resolve(window.__answer);
   };
   window.Notification = FakeNotification;
+
+  // A secure context is what a browser demands before it will show any of
+  // this, and localhost qualifies — so the plain-http case has to be stubbed.
+  window.__insecure = false;
+  try {
+    Object.defineProperty(window, 'isSecureContext',
+      { get: () => (window.__insecure ? false : true), configurable: true });
+  } catch (e) { /* leave the real one alone if it will not budge */ }
 
   if (window.ServiceWorkerRegistration) {
     window.ServiceWorkerRegistration.prototype.showNotification =
@@ -199,6 +221,83 @@ try {
      await ev('window.__nudges.length') === 1,
      JSON.stringify(await ev('window.__nudges')));
 
+  console.log('--- a grid paged back cannot speak for today ---');
+  // The defect a review found in the first version of this, reproduced end to
+  // end because nothing smaller can see it: `/overview` answers a WINDOW, so
+  // paging back leaves `habit.entries` legitimately stopping before today, and
+  // a missing key there means "never fetched" rather than "no row". Measured as
+  // "1 habit still to answer today" about a habit answered an hour earlier.
+  //
+  // Two halves have to be true together, which is why the state is set up
+  // rather than assumed: the day IS answered, and the payload in hand does not
+  // carry it.
+  await ev(`(() => {
+    const d = new Date();
+    const iso = d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+    return fetch('/api/habits/${habits.Meditate.id}/entries/' + iso, {
+      method: 'PUT', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: 2}),
+    }).then(r => r.ok);
+  })()`);
+  await ev('localStorage.removeItem("habiterall-nudged")');
+  await load();
+  ck('with today recorded, a fresh load says nothing',
+     await ev('window.__nudges.length') === 0,
+     JSON.stringify(await ev('window.__nudges')));
+
+  // Page the grid back. The button is found by its aria-label rather than its
+  // glyph, which follows `dayOrder`.
+  const pagedBack = await ev(`(() => {
+    const b = [...document.querySelectorAll('.grid-nav button')]
+      .find(x => (x.getAttribute('aria-label') || '').startsWith('Previous'));
+    if (!b) return 'no button';
+    b.click();
+    return 'clicked';
+  })()`);
+  ck('the grid can be paged back', pagedBack === 'clicked', pagedBack);
+  await sleep(900);
+
+  // The premise, asserted rather than assumed: today must really be off the
+  // grid, or the check below passes for no reason at all.
+  ck('...and today is no longer a column, so the window really did move',
+     await ev(`document.querySelectorAll('.habit-row').length > 0 &&
+       !document.querySelector('.grid-date.is-today')`));
+
+  // Hidden by hand first, so "nothing was said in the app" cannot be satisfied
+  // by a leftover message from an earlier block.
+  await ev(`document.querySelector('#toast').hidden = true;
+    localStorage.removeItem('habiterall-nudged'); window.__nudges.length = 0;`);
+  await ev('document.dispatchEvent(new Event("visibilitychange"))');
+  await sleep(600);
+  ck('a day the loaded window does not reach is not judged at all',
+     await ev('window.__nudges.length') === 0,
+     JSON.stringify(await ev('window.__nudges')));
+  ck('and it is not said in the app either — silence, not a fallback',
+     await ev('document.querySelector("#toast").hidden') === true,
+     await ev('document.querySelector("#toast")?.textContent ?? ""'));
+
+  // Back to today, and it works again: the refusal is about the window, not
+  // about the habit having been quietly dropped.
+  await ev(`[...document.querySelectorAll('.grid-nav button')]
+    .find(b => b.textContent.trim() === 'Today')?.click()`);
+  await sleep(900);
+  await ev(`(() => {
+    const d = new Date();
+    const iso = d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+    return fetch('/api/habits/${habits.Meditate.id}/entries/' + iso, {
+      method: 'DELETE', credentials: 'same-origin',
+    }).then(r => r.ok);
+  })()`);
+  await ev('localStorage.removeItem("habiterall-nudged"); window.__nudges.length = 0;');
+  await load();
+  ck('paging back to today restores it', await ev('window.__nudges.length') === 1,
+     JSON.stringify(await ev('window.__nudges')));
+
   console.log('--- a refused permission is answered in the app ---');
   // The half issue #70 asks for by name. `hidden` beaten by a `display` rule is
   // the class of bug this directory exists for, so the toast is checked for
@@ -282,6 +381,91 @@ try {
   ck('switching on a device destination does not offer the server timezone',
      await ev('!document.getElementById("setting-notifyTimezone")'));
 
+  await ev('document.getElementById("settings-cancel").click()');
+  await sleep(300);
+
+  console.log('--- answering the prompt must not eat what is being typed ---');
+  // A permission prompt settles whenever the user gets round to it, so the
+  // repaint that follows lands on somebody mid-edit. Rebuilding the body there
+  // removes the input — and `change` never fires on a removed input, so the
+  // half-typed URL is gone with nothing to say so. This is the hazard `stage`
+  // and `refreshDeliveryNotices` were already written around; the fix is a
+  // repaint that touches no control.
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({notifyChannels:['android','discord']})}).then(r=>r.ok)`);
+  await load();
+  await ev('window.__defer = true; window.__answer = "granted"; window.__asked = 0;');
+  await ev('document.getElementById("btn-settings").click()');
+  await sleep(400);
+  ck('the webhook field is on screen to be typed into',
+     await ev('!!document.getElementById("setting-discordWebhook")'));
+
+  await ev(tickWeb);
+  await sleep(300);
+
+  const typed = 'https://discord.com/api/webhooks/123456789012345678/half-typed';
+  await ev(`(() => {
+    const input = document.getElementById('setting-discordWebhook');
+    input.focus();
+    input.value = ${JSON.stringify(typed)};
+    return input.value;
+  })()`);
+
+  // Now the user answers the prompt.
+  await ev('window.__resolve && window.__resolve()');
+  await sleep(500);
+
+  ck('the half-typed URL survives the answer',
+     await ev(`document.getElementById('setting-discordWebhook')?.value ?? ''`) === typed,
+     await ev(`document.getElementById('setting-discordWebhook')?.value ?? '(gone)'`));
+  ck('and so does the caret',
+     await ev(`document.activeElement?.id`) === 'setting-discordWebhook',
+     await ev(`document.activeElement?.tagName + '#' + document.activeElement?.id`));
+  ck('while the notice still updated',
+     await ev(`document.querySelectorAll('.setting-problem').length`) >= 0);
+
+  await ev('window.__defer = false;');
+  await ev('document.getElementById("settings-cancel").click()');
+  await sleep(300);
+
+  console.log('--- plain http is named as the reason, not a site setting ---');
+  // The branch that was unreachable when this shipped: on a non-secure origin
+  // Chrome still exposes the constructor and answers `denied`, so the advice
+  // below it cannot work. It is the LAN half of HABITERALL_UPGRADE_INSECURE.
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({notifyChannels:['android','web']})}).then(r=>r.ok)`);
+  await load();
+  await ev('window.__insecure = true;');
+  await ev('document.getElementById("btn-settings").click()');
+  await sleep(400);
+  const insecure = await ev(
+    '[...document.querySelectorAll(".setting-problem")].map(p=>p.textContent).join(" | ")');
+  ck('the origin is named', /secure origin|https/i.test(insecure), insecure);
+  ck('and a site setting is NOT offered as the fix',
+     !/site settings/i.test(insecure), insecure);
+  await ev('window.__insecure = false;');
+  await ev('document.getElementById("settings-cancel").click()');
+  await sleep(300);
+
+  console.log('--- a browser with no Notification API says so on the tick ---');
+  // `onEnable` returns undefined there, so hanging the only repaint off the
+  // promise left the one state the notice exists for unreachable.
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({notifyChannels:['android']})}).then(r=>r.ok)`);
+  await load();
+  await ev('delete window.Notification;');
+  await ev('document.getElementById("btn-settings").click()');
+  await sleep(400);
+  await ev(tickWeb);
+  await sleep(400);
+  const absent = await ev(
+    '[...document.querySelectorAll(".setting-problem")].map(p=>p.textContent).join(" | ")');
+  ck('ticking it says the browser cannot show one',
+     /cannot show notifications/i.test(absent), absent || '(no notice at all)');
+  ck('and says where the answer goes instead', /inside the app/i.test(absent), absent);
   await ev('document.getElementById("settings-cancel").click()');
   await sleep(300);
 

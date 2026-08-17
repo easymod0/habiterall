@@ -22,12 +22,25 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
-// v15: the browser's own reminder. `ui/nudge.js` is a new shell asset that
-// `app.js` imports STATICALLY, so a stale v14 shell holding the revalidated
-// app.js and no nudge.js has to fetch it — which is fine online and a module
-// link failure offline, before `start()` and so outside the `#view-error`
-// surface. That is the v14 case verbatim; the precache is what makes the swap
-// all-or-nothing. Nothing in index.html or style.css moved.
+// v15: the browser's own reminder. `ui/nudge.js` is a NEW shell asset, which is
+// the v9 case and not v14's — worth stating plainly, because the first version
+// of this note claimed v14 and was wrong. v14 was a LINK error between two
+// files both already in the shell, where a stale copy of one and a fresh copy
+// of the other could not resolve an import; here `app.js` imports nudge.js
+// statically, but an old shell serving the old app.js beside it links fine. So
+// there is no error to prevent. What a new asset costs is v9's: an installed
+// PWA fetches it on first use, and is offline exactly when a nudge needs it.
+//
+// And the bump is not the mechanism that fixes that. `install` re-runs
+// `SHELL.map(cache.add)` on any change to this file, into whichever cache is
+// named — so unbumped, nudge.js would land in the v14 shell the outgoing worker
+// is already serving from, sooner and with the data cache intact. What the bump
+// actually buys is that the whole shell is rebuilt under a NEW name and the old
+// one is dropped on activate, so the swap is all-or-nothing rather than
+// file-by-file. That is what every previous shell addition here did, and it
+// costs every installed client its data cache — which is why the first offline
+// boot afterwards gets the synthetic 503 that `#view-error` exists for.
+// Nothing in index.html or style.css moved.
 // v13: the habit search. `index.html` grew `#search-row`, `#habit-search`,
 // `#search-count` and `#empty-nomatch`, and dashboard.js looks all four up at
 // module scope and dereferences them in `paint()` — so a stale v12 shell with

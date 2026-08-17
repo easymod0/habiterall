@@ -1212,8 +1212,9 @@ time. Adding a destination means an entry in `CHANNELS`, a branch in
 `sendToChannel`, and an option in `ui/settings.js` — nothing per edition.
 
 **`delivery: 'device'` says who DECIDES, and the `web` channel keeps a time
-nobody promised.** It is the third destination and the second `device` one, and
-it differs from `android` in the one way that matters to a user: the phone arms
+nobody promised.** It is the fourth destination (after `android`, `discord` and
+`ntfy`) and the second `device` one, and it differs from `android` in the one
+way that matters to a user: the phone arms
 an `AlarmManager` alarm and fires at 08:00, and a browser cannot. A page's
 timers run only while a tab is open and are clamped to about one a minute in the
 background, a service worker is terminated when idle and has no wake-at-time
@@ -1251,30 +1252,84 @@ people's backups and in both round-trip suites. That is the argument that keeps
 `notify_status` out of the blob. The date is stored WITH the ids, so a new day
 replaces the record rather than appending to it.
 
+**Two things about that permission are the platform being unhelpful in ways the
+dialog has to explain.** On a **non-secure origin** the permission is `denied`
+and cannot be anything else — measured on a LAN address: `isSecureContext`
+false, `Notification` still a function, `requestPermission()` resolving `denied`
+with no prompt, `navigator.serviceWorker` undefined. That is the plain-http half
+of `HABITERALL_UPGRADE_INSECURE`, so it is an ordinary deployment here, and
+telling that user to change a site setting is the one surface written to explain
+the silence explaining it wrongly. `globalThis.isSecureContext === false` is
+asked first, and `=== false` rather than falsy so a runtime that does not define
+the flag falls through to the permission questions.
+
 **The permission is asked for from the settings dialog, inside the click.** It
 cannot be asked for on boot — a prompt nobody invited is one browsers refuse
 outright, after which the destination can never be granted at all — so a `multi`
-option may carry `onEnable`, which the dialog runs when the box is ticked and
-redraws after. `denied` is unrecoverable from script, so `SECTION_NOTICES` says
-so; without that the box looks on, `channelConfigured` says yes (there are no
-keys), and nothing anywhere reports the one thing that is wrong. On Android
+option may carry `onEnable`, which the dialog runs when the box is ticked.
+`denied` is unrecoverable from script, so `SECTION_NOTICES` says so; without
+that the box looks on, `channelConfigured` says yes (there are no keys), and
+nothing anywhere reports the one thing that is wrong.
+
+What must NOT follow that is a rebuild. A permission prompt is answered on the
+user's schedule, not inside the click, and `renderSettingsBody` tears every
+control out — measured: Discord on, tick the browser destination, type a webhook
+URL without blurring, answer the prompt, and the field is empty with focus on
+`<body>`, because `change` never fires on a removed input. `paintNotices`
+repaints what a section SAYS and touches no control, which is the same hazard
+`stage` and `refreshDeliveryNotices` were already written around — both now go
+through it, and the second lost two guards it only had because it used to
+rebuild. `stage` paints them too, which is what covers a browser with no
+`Notification` at all: `onEnable` returns `undefined` there, and hanging the only
+repaint off the promise left the one state the notice exists for unreachable. On Android
 Chrome `new Notification(...)` throws and only `registration.showNotification`
 works, so both are tried — and it is `getRegistration()` rather than `ready`,
 which never settles on a page with no worker and would hang holding the in-app
 fallback. That fallback is the destination's behaviour for everyone who said no,
 not a consolation prize.
 
+**What `state.habits` holds is an ANSWER TO A WINDOW, and reading it without
+one is the fifth state.** `/overview` returns the days it was asked for —
+`dashboard.load()` sends `end=state.gridEnd` — so a grid paged back a fortnight
+holds entries that legitimately stop before today, and a missing key there means
+*never fetched* rather than *no row*. That is the `?? UNSET` collapse arriving
+from the other side, and it shipped in the first version of this: measured in
+Chrome, ticking today and then pressing "Previous 14 days" produced "1 habit
+still to answer today" about a habit answered an hour earlier. `state.gridLoaded`
+is the window the server actually answered with — its `start`/`end`, never the
+request's, since `end` is clamped to the caller's own day — and `covers` in
+`ui/nudge.js` refuses the whole payload for a date outside it. Refuse rather than
+guess: nagging about a day already dealt with is what gets a destination switched
+off, and the dashboard behind it is showing the truth either way. Anything else
+that starts reading `habit.entries` for a date needs the same pair.
+
+The blind spot that remains is stated in `check` rather than fixed: it reads what
+the app has already fetched and never fetches itself — which is what makes it
+work offline — so answering on the phone and switching to a browser tab open
+since morning can nudge about an answered day. The watermark caps it at one per
+habit per day, and a fetch on every `visibilitychange` is traffic nobody asked
+for.
+
 `ui/nudge.js` is a new file under `shared/public/`, which costs a
 `CACHE_VERSION` bump — the cost `deviceClockHeader` was kept out of a module of
 its own to avoid. It is paid here because this is a subsystem rather than one
-import, because no existing module owns it (the dashboard owns the grid,
-settings the preferences, connectivity the banner), and because the bump is
-load bearing anyway once `app.js` imports it statically: a stale shell with the
-new `app.js` and no `nudge.js` is a module link error offline, which is v14
-verbatim. It is **dependency-free**, as `ui/toggle.js` is and for the same
-reason — that is what lets the rule AND the call site be tested under Node — so
-everything it needs arrives through `init()`, including `todayISO`, because this
-app has one `iso()` and `test/dates.test.js` refuses a second.
+import, and because no existing module owns it (the dashboard owns the grid,
+settings the preferences, connectivity the banner). Be exact about what the bump
+buys, because the first version of this paragraph was not: this is the **v9**
+case, a new asset an installed PWA would otherwise fetch on first use and be
+offline for, and NOT v14's link error between two files already in the shell.
+Nor is the bump the mechanism — `install` re-runs `SHELL.map(cache.add)` on any
+change to `sw.js`, into whichever cache is named, so unbumped the file would
+land in the outgoing worker's own cache sooner. What it buys is that the shell
+is rebuilt under a new name and the old one dropped on activate, so the swap is
+all-or-nothing; it costs every installed client its data cache, and it is what
+every previous shell addition here did. It is **dependency-free**, as
+`ui/toggle.js` is and for the same reason — that is what lets the rule AND the
+call site be tested under Node — so everything it needs arrives through
+`init()`, including `todayISO`, because this app has one `iso()` and
+`test/dates.test.js` refuses a second. It is not DOM-*free*: `init` registers
+one `visibilitychange` listener, and takes the document so a test can hand it
+one.
 
 **Buttons in Discord need a bot; a webhook cannot carry them.** Discord accepts
 `components` on an *application-owned* webhook only, so the plain channel

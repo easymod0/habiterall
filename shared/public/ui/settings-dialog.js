@@ -61,7 +61,57 @@ function stage(key, value) {
   const before = visibleKeys(draft);
   draft[key] = value;
   if (visibleKeys(draft) !== before) renderSettingsBody();
-  else refreshFooter();
+  else {
+    refreshFooter();
+    // ...and what a section SAYS follows the draft too, which a rebuild used to
+    // be the only way to reach. Some changes alter a notice without altering
+    // which controls are shown — switching the browser destination on is one,
+    // and it is the case where the notice is the entire answer — so those
+    // showed nothing at all until something else forced a rebuild.
+    paintNotices();
+  }
+}
+
+/**
+ * Repaint what the sections SAY, touching no control.
+ *
+ * Split out of `renderSettingsBody` because a notice arrives on somebody
+ * else's schedule — `GET /api/notify/status` answers when it answers, and a
+ * permission prompt is answered when the user gets round to it — and a full
+ * rebuild at those moments tears every control out and takes a text field's
+ * focus and CONTENT with it. Measured: Discord on, tick the browser
+ * destination, type a webhook URL without blurring, then answer the prompt, and
+ * the field is empty with focus on `<body>`. `change` never fires on a removed
+ * input, so the URL was gone with nothing to say so.
+ *
+ * The notices stay direct children of the section rather than moving into a
+ * wrapper, because the thing being asserted about them is their POSITION among
+ * the controls — see `settingscheck.mjs`.
+ */
+function paintSectionNotices(group) {
+  for (const stale of [...group.querySelectorAll(':scope > .setting-problem')]) {
+    stale.remove();
+  }
+
+  const heading = group.firstElementChild;
+  if (!heading) return;
+
+  // Read from the DRAFT, so switching a destination off makes its warning go
+  // away immediately rather than after a save and a refetch.
+  const lines = settings.SECTION_NOTICES[group.dataset.section]?.(draft) ?? [];
+  heading.after(...lines.map((problem) => {
+    const notice = document.createElement('p');
+    notice.className = 'hint setting-help setting-problem';
+    notice.textContent = problem;
+    return notice;
+  }));
+}
+
+/** Every section's notices. The backup block has none and is skipped. */
+function paintNotices() {
+  for (const group of body.querySelectorAll('.data-section[data-section]')) {
+    paintSectionNotices(group);
+  }
 }
 
 function renderSettingsBody() {
@@ -71,6 +121,8 @@ function renderSettingsBody() {
   for (const section of settings.sections()) {
     const group = document.createElement('section');
     group.className = 'data-section';
+    // Named so `paintNotices` can find its way back here without rebuilding.
+    group.dataset.section = section;
 
     const heading = document.createElement('h3');
     heading.textContent = section;
@@ -78,14 +130,7 @@ function renderSettingsBody() {
 
     // Above the controls, not below them: this is the answer to "why am I not
     // getting my reminders?", which is the question that brought the user here.
-    // Read from the DRAFT, so switching a destination off makes its warning go
-    // away immediately rather than after a save and a refetch.
-    for (const problem of settings.SECTION_NOTICES[section]?.(draft) ?? []) {
-      const notice = document.createElement('p');
-      notice.className = 'hint setting-help setting-problem';
-      notice.textContent = problem;
-      group.append(notice);
-    }
+    paintSectionNotices(group);
 
     for (const [key, def] of Object.entries(settings.SETTINGS)) {
       if ((def.section ?? 'General') !== section) continue;
@@ -155,16 +200,23 @@ function renderSettingsBody() {
             //
             // Named on the option rather than tested for by key here, so the
             // dialog goes on rendering the registry without knowing what is in
-            // it. The redraw when it settles is what puts the answer on screen:
-            // a refusal is unrecoverable from script, so the section has to SAY
-            // so rather than leave a box that looks on and does nothing. Unlike
-            // the delivery notices this may redraw over a dirty draft, and
-            // should: it is the direct consequence of the click just made.
+            // it.
+            //
+            // `stage` above has ALREADY painted the notices, which is what
+            // covers the case where there is no prompt to answer: a browser
+            // with no Notification API at all returns `undefined` here, and
+            // hanging the only repaint off the promise meant the one state the
+            // notice exists for was the one it never reached.
+            //
+            // The second paint is for the answer, which arrives whenever the
+            // user gets round to it — and it is `paintNotices` and not a
+            // rebuild, because by then they may be typing in a field two
+            // controls down. See `paintSectionNotices`.
             if (!box.checked) return;
             const asked = opt.onEnable?.();
             if (asked && typeof asked.then === 'function') {
               asked
-                .then(() => { if (dialog.open) renderSettingsBody(); })
+                .then(() => { if (dialog.open) paintNotices(); })
                 .catch(() => { /* a permission prompt must not break a draft */ });
             }
           });
@@ -326,30 +378,24 @@ export function openSettings() {
 }
 
 /**
- * Ask how the last reminder went, and redraw if the answer has anything to say.
+ * Ask how the last reminder went, and say so when the answer lands.
  *
  * Not awaited by `openSettings`: the dialog opens now and the notice appears a
  * moment later. Waiting on a request first would make every open feel slow to
  * spare the one that has something to report — and offline it would never open.
  *
- * The redraw is conditional for the reason `stage` rebuilds sparingly: rebuilding
- * the body tears every control out and takes a text field's focus with it, so a
- * late answer must not do that to someone already typing. A clean draft means
- * nobody has started.
+ * This used to call `renderSettingsBody`, and so had to be hedged twice — only
+ * on a clean draft, and only when the notices had actually changed — because a
+ * rebuild takes a text field's focus and content with it. `paintNotices` cannot
+ * do that to anybody, so both guards are gone and a late answer now reaches
+ * someone mid-edit, which is where the sentence was always most wanted.
  */
 function refreshDeliveryNotices() {
   // Every section's notices, not just the one that has any today: the body is
   // rendered from the whole registry, so reading a single key here would leave
   // a second entry drawn on open and never redrawn when its answer landed.
-  const snapshot = () => JSON.stringify(
-    Object.values(settings.SECTION_NOTICES).map((notices) => notices(draft))
-  );
-
-  const before = snapshot();
   settings.refreshDelivery().then(() => {
-    if (!dialog.open || isDirty()) return;
-    if (snapshot() === before) return;
-    renderSettingsBody();
+    if (dialog.open) paintNotices();
   });
 }
 

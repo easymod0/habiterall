@@ -18,6 +18,8 @@ const {
   nudgeMessage, outstanding, permissionState,
 } = await import('../public/ui/nudge.js');
 
+const { browserNudgeProblems } = await import('../public/ui/settings.js');
+
 const { answeredIds, CHANNELS, CHANNEL_IDS, DEFAULT_CHANNELS,
   channelConfigured, needsServerDelivery, serverChannels, unreachableChannels } =
   await import('../src/notify.js');
@@ -89,7 +91,16 @@ const HABITS = [
     at_most_unlogged: 'success' },
 ];
 
-/** Every row shape a day can hold, `null` meaning there is no row at all. */
+/**
+ * Every row shape a day can hold, `null` meaning there is no row at all.
+ *
+ * The two string rows are what make this fixture able to see a dropped
+ * coercion. With numbers alone, replacing `Number(entry.value) || 0` with a
+ * bare `entry.value` left every case here green while genuinely diverging from
+ * the server: `normalizeEntry` coerces, so on an at-most habit `'x' <= 2` is
+ * false in the browser and `0 <= 2` is true on the server. Not a live shape —
+ * `/overview` sends numbers — but the mirror rests entirely on this list.
+ */
 const ROWS = [
   null,
   { value: 0, status: '' },
@@ -97,6 +108,8 @@ const ROWS = [
   { value: 2, status: '' },
   { value: 3, status: '' },
   { value: 8, status: '' },
+  { value: '3', status: '' },
+  { value: 'x', status: '' },
   { value: 0, status: 'skip' },
   { value: 5, status: 'skip' },
 ];
@@ -174,8 +187,12 @@ const due = (over = {}) => ({
 
 const at = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
 
-const ask = (habits, time, already = []) =>
-  outstanding(habits, { date: TODAY, minutes: at(time), already }).map((h) => h.id);
+/** The window `/overview` answered with, ending on the day being judged. */
+const WINDOW = { start: '2026-08-04', end: TODAY };
+
+const ask = (habits, time, already = [], loaded = WINDOW) =>
+  outstanding(habits, { date: TODAY, minutes: at(time), loaded, already })
+    .map((h) => h.id);
 
 test('a reminder that has not come round yet says nothing', () => {
   assert.deepEqual(ask([due()], '07:59'), []);
@@ -251,6 +268,56 @@ test('a habit already nudged about today is not raised again', () => {
   assert.deepEqual(ask([due()], '09:00', [1]), []);
   assert.deepEqual(ask([due()], '09:00', new Set([1])), []);
   assert.deepEqual(ask([due()], '09:00', [2]), [1], 'and only that habit');
+});
+
+/* ---------- the fifth state: not fetched ---------- */
+
+test('a day outside the loaded window is not judged at all', () => {
+  // `/overview` answers a WINDOW, and `dashboard.load()` sends
+  // `end=state.gridEnd` — so paging the grid back a fortnight returns habits
+  // whose `entries` legitimately stop before today. Read without the window, a
+  // missing key is "no row exists": the `?? UNSET` collapse arriving from the
+  // other side, and measured in Chrome as "1 habit still to answer today"
+  // about a habit answered an hour earlier.
+  const paged = { start: '2026-07-21', end: '2026-08-03' };
+  assert.deepEqual(ask([due()], '09:00', [], paged), [],
+    'the payload cannot speak for today, so there is nothing to say');
+
+  // ...and the refusal is about the WINDOW, not about the habit: the same
+  // habit and the same clock, with a window that reaches today, is outstanding.
+  assert.deepEqual(ask([due()], '09:00', [], WINDOW), [1]);
+});
+
+test('an answered day inside a stale window is not read as unanswered', () => {
+  // The exact reproduction: today IS answered, and the payload in hand simply
+  // does not carry it. Judging it would nag about a day already dealt with.
+  const answered = due({ entries: { [TODAY]: values.YES } });
+  const stale = { ...answered, entries: { '2026-08-03': values.YES } };
+  const paged = { start: '2026-07-21', end: '2026-08-03' };
+
+  assert.deepEqual(ask([answered], '09:00'), [], 'the row is there: silent');
+  assert.deepEqual(ask([stale], '09:00', [], paged), [],
+    'the row is not there because it was never fetched: also silent');
+});
+
+test('nothing is judged before the first load, or after a failed one', () => {
+  // An unknown window refuses too. `state.gridLoaded` is null until
+  // `dashboard.load()` has answered, and a deep link never loads the list at
+  // all — so the honest answer there is silence rather than a guess made from
+  // an empty map.
+  // Called directly rather than through `ask`, whose default would substitute a
+  // good window for `undefined` and hide the case that matters most.
+  const clock = { date: TODAY, minutes: at('09:00') };
+  for (const loaded of [null, undefined, {}, { start: '2026-08-04' }, { end: TODAY }]) {
+    assert.deepEqual(outstanding([due()], { ...clock, loaded }), [],
+      `judged a day with loaded = ${JSON.stringify(loaded)}`);
+  }
+
+  // ...and omitting it entirely refuses too, which is the direction a new
+  // caller gets wrong: forgetting the window must cost silence, never a guess.
+  assert.deepEqual(outstanding([due()], clock), []);
+  assert.deepEqual(outstanding([due()], { ...clock, loaded: WINDOW }).map((h) => h.id), [1],
+    'and the fixture is one that WOULD be outstanding, or this proves nothing');
 });
 
 /* ---------- what it says ---------- */
@@ -457,6 +524,82 @@ test('an active service worker is preferred to the constructor', async () => {
     'ui/nudge.js awaits serviceWorker.ready, which never settles without one');
 });
 
+/* ---------- what the dialog says about the permission ---------- */
+
+/** The draft the settings dialog would hand `SECTION_NOTICES`. */
+const withWeb = { notifyChannels: ['android', WEB_CHANNEL] };
+
+test('nothing is reported for a destination that is switched off', async () => {
+  await withGlobals({ Notification: fakeNotification({ permission: 'denied' }) }, () => {
+    assert.deepEqual(browserNudgeProblems({ notifyChannels: ['android'] }), []);
+    assert.deepEqual(browserNudgeProblems({}), []);
+  });
+});
+
+test('a granted browser has nothing to say', async () => {
+  await withGlobals({ Notification: fakeNotification({ permission: 'granted' }) }, () => {
+    assert.deepEqual(browserNudgeProblems(withWeb), []);
+  });
+});
+
+test('each permission state gets its own sentence', async () => {
+  for (const [permission, expected] of [
+    ['denied', /site settings/i],
+    ['default', /not allowed yet/i],
+  ]) {
+    await withGlobals({ Notification: fakeNotification({ permission }) }, () => {
+      const said = browserNudgeProblems(withWeb).join(' ');
+      assert.match(said, expected, permission);
+      // Every one of them has to say where the answer goes instead, or the
+      // destination reads as broken rather than as degraded.
+      assert.match(said, /inside the app/i, permission);
+    });
+  }
+});
+
+test('a browser with no Notification API is told that, not told to allow it', async () => {
+  const said = browserNudgeProblems(withWeb).join(' ');
+  assert.match(said, /cannot show notifications/i);
+  assert.match(said, /inside the app/i);
+});
+
+test('an insecure origin is named as the reason, before the permission is read', async () => {
+  // The branch that was unreachable when this shipped. On plain http Chrome
+  // still exposes the constructor and answers `denied` — measured on
+  // `http://192.168.50.232:3249`: isSecureContext false, Notification a
+  // function, requestPermission() resolving denied with no prompt. So every
+  // check below it gives advice that cannot work, and the user is sent to a
+  // site setting that has nothing to do with it.
+  //
+  // It is the plain-http half of HABITERALL_UPGRADE_INSECURE: https from
+  // outside, http from the LAN, same database.
+  await withGlobals({
+    isSecureContext: false,
+    Notification: fakeNotification({ permission: 'denied' }),
+  }, () => {
+    const said = browserNudgeProblems(withWeb).join(' ');
+    assert.match(said, /secure origin|https/i, 'the origin must be named');
+    assert.doesNotMatch(said, /site settings/i,
+      'a site setting cannot fix a non-secure context, so it must not be offered');
+    assert.match(said, /inside the app/i);
+  });
+});
+
+test('a runtime with no isSecureContext at all falls through to the permission', async () => {
+  // `=== false` and not falsy. Node has no such flag, and neither does an old
+  // browser — reading `undefined` as insecure would tell a perfectly good
+  // origin that it is the problem.
+  await withGlobals({ Notification: fakeNotification({ permission: 'denied' }) }, () => {
+    assert.match(browserNudgeProblems(withWeb).join(' '), /site settings/i);
+  });
+  await withGlobals({
+    isSecureContext: true,
+    Notification: fakeNotification({ permission: 'denied' }),
+  }, () => {
+    assert.match(browserNudgeProblems(withWeb).join(' '), /site settings/i);
+  });
+});
+
 /* ---------- the call site ---------- */
 
 /**
@@ -467,7 +610,9 @@ test('an active service worker is preferred to the constructor', async () => {
  * and the sink — and every one of them is a place a correct predicate can be
  * called wrongly.
  */
-function wire({ habits = [], enabled = [WEB_CHANNEL], today = TODAY } = {}) {
+function wire({
+  habits = [], enabled = [WEB_CHANNEL], today = TODAY, loaded = WINDOW,
+} = {}) {
   const said = [];
   const events = new Map();
   const doc = {
@@ -478,6 +623,7 @@ function wire({ habits = [], enabled = [WEB_CHANNEL], today = TODAY } = {}) {
     habits: () => habits,
     enabled: () => enabled,
     today: () => today,
+    loaded: () => loaded,
     fallback: (text) => said.push(text),
     doc,
   });
@@ -544,7 +690,7 @@ test('check before init does nothing rather than throwing', async () => {
 
   await withGlobals({ localStorage: fakeStorage() }, async () => {
     const { said } = wire({ habits: [{ /* junk */ }, null, due()] });
-    assert.doesNotReject(check({ now: new Date(2026, 7, 17, 9, 0) }));
+    await assert.doesNotReject(check({ now: new Date(2026, 7, 17, 9, 0) }));
     assert.equal(said.length, 1, 'a malformed habit must not silence the rest');
   });
 });

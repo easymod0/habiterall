@@ -49,6 +49,29 @@ test('every channel offered in the UI is one the server knows', () => {
     'the UI channel list must match CHANNELS in shared/src/notify.js, in order');
 });
 
+test('the UI knows which destinations the DEVICE decides', () => {
+  // A second mirror of the same registry, needing a pin for the same reason the
+  // list above does: `shared/src` is not served, so the browser cannot read
+  // `delivery` and has to restate it. `DEVICE_CHANNELS` gates `notifyTimezone`,
+  // which names the clock the SERVER sends on — get it wrong and a preference
+  // that governs nothing is offered in the very section where "why am I not
+  // getting my reminders?" is answered.
+  //
+  // It shipped unpinned: mutating it to `['android']` left the whole unit run
+  // green, and only a browser suite noticed, only in Chrome, only for `web`. A
+  // third device destination added later would have been caught by nothing.
+  const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
+  const block = /const DEVICE_CHANNELS = \[([^\]]*)\];/.exec(ui);
+  assert.ok(block, 'failed to find DEVICE_CHANNELS in ui/settings.js');
+
+  const listed = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const device = CHANNEL_IDS.filter((id) => CHANNELS[id].delivery === 'device');
+  assert.ok(device.length > 0, 'no device-delivered channel in CHANNELS at all');
+  assert.deepEqual(listed, device,
+    'ui/settings.js must list exactly the channels CHANNELS marks '
+    + "delivery: 'device', in registry order");
+});
+
 test('every channel declares how it is delivered', () => {
   for (const [id, channel] of Object.entries(CHANNELS)) {
     assert.ok(['device', 'server'].includes(channel.delivery),

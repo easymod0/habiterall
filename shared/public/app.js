@@ -133,10 +133,14 @@ export async function start(adapter) {
   // its second trigger is `visibilitychange` and that has to be attached before
   // the awaits below — a tab backgrounded during boot is exactly the case it is
   // for. INJECTED rather than importing what it needs, which is what keeps
-  // `ui/nudge.js` free of imports and so testable under Node; all four things
+  // `ui/nudge.js` free of imports and so testable under Node; all five things
   // it wants belong to somebody else.
   nudge.init({
     habits: () => state.habits,
+    // ...and the window they came from, which is half of the same answer. A
+    // grid paged back a fortnight holds entries that stop before today, where
+    // a missing key means "never fetched" and not "no row".
+    loaded: () => state.gridLoaded,
     enabled: () => settings.get('notifyChannels') ?? [],
     // The browser's own calendar day, from the app's one `iso()`. Never a
     // named zone: this is the question `callerDay` answers for a write.

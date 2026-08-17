@@ -505,6 +505,28 @@ export function deliveryProblems(values = load()) {
 export function browserNudgeProblems(values = load()) {
   if (!(values.notifyChannels ?? []).includes('web')) return [];
 
+  // Asked FIRST, because on a non-secure origin the permission answers
+  // `denied` and cannot be anything else — so every branch below it would give
+  // advice that cannot work. Measured on `http://192.168.50.232:3249`:
+  // `isSecureContext` false, `typeof Notification === 'function'`,
+  // `permission === 'denied'`, `requestPermission()` resolving `denied`
+  // without a prompt, and `navigator.serviceWorker` undefined. Sending that
+  // user to their site settings is the one surface written to explain the
+  // silence, explaining it wrongly.
+  //
+  // It is the LAN half of `HABITERALL_UPGRADE_INSECURE` and not an exotic
+  // deployment: https from outside, plain http from inside, same database, and
+  // the root CLAUDE.md names it. `=== false` rather than falsy, so a runtime
+  // that does not define the flag at all (Node, an old browser) falls through
+  // to the permission questions instead of being told its origin is the
+  // problem.
+  if (globalThis.isSecureContext === false) {
+    return ['This page was loaded over plain http, and browsers only allow ' +
+      'notifications on a secure origin — no site setting can change that. ' +
+      'Reach this app over https (or via localhost) for notifications; until ' +
+      'then, anything still outstanding is shown inside the app.'];
+  }
+
   // Read straight off the platform. This is not a mirrored RULE — there is
   // nothing here to drift from — it is one browser being asked about itself,
   // and `ui/nudge.js` asks it again at the moment it has something to show.
