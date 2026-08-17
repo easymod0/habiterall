@@ -166,6 +166,62 @@ test('a 5xx keeps its place in the queue', async () => {
   assert.equal(r.calls, 1, 'or a later write overtakes the one that failed');
 });
 
+test('a replayed write says which clock the device is on', async () => {
+  // The bug this pins destroyed the write it was replaying, and only ever east
+  // of the server. Every route that asks "is this today?" now judges by the
+  // CALLER's day, read from this header — so a replay that omits it is judged
+  // by the container's clock, which is UTC in both compose files. Auckland at
+  // 11:00 on the 17th is the 16th in UTC: `assertNotFuture` answers 400, and a
+  // 400 is dropped as permanently inapplicable two tests above. The check-off
+  // is gone, and the only surface that says so is "1 change could not be
+  // synced".
+  //
+  // `Api.kt` sets this on every request from an OkHttp interceptor, so the
+  // identical offline tap has always survived on the phone. That asymmetry is
+  // what made this look like a browser flake rather than a rule with a hole.
+  await clearAll();
+  await enqueue({ url: '/api/habits/1/entries/2026-08-17', method: 'PUT', body: '{}' });
+
+  /** @type {any[]} */
+  const seen = [];
+  globalThis.fetch = async (_url, init) => {
+    seen.push(init.headers);
+    return { ok: true, status: 200 };
+  };
+  await flush();
+
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  assert.equal(seen[0]['X-Habiterall-Timezone'], zone,
+    'a replayed write carries the device zone, or the server dates it by its own clock');
+  assert.equal(seen[0]['Content-Type'], 'application/json',
+    'and still says what it is sending');
+});
+
+test('a queued record that states its own headers keeps them', async () => {
+  // The zone is added underneath what the record carries, never over it. No
+  // caller stores headers today — which is exactly why this is worth pinning,
+  // since `item.headers` is otherwise a branch nothing exercises and the
+  // spread order is invisible until the first caller that needs it.
+  await clearAll();
+  await enqueue({
+    url: '/api/habits/1/entries/2026-08-17',
+    method: 'PUT',
+    body: '{}',
+    headers: { 'Content-Type': 'text/plain', 'X-Habiterall-Timezone': 'Pacific/Auckland' },
+  });
+
+  /** @type {any[]} */
+  const seen = [];
+  globalThis.fetch = async (_url, init) => {
+    seen.push(init.headers);
+    return { ok: true, status: 200 };
+  };
+  await flush();
+
+  assert.equal(seen[0]['X-Habiterall-Timezone'], 'Pacific/Auckland');
+  assert.equal(seen[0]['Content-Type'], 'text/plain');
+});
+
 test('a network failure stops the replay, preserving order', async () => {
   await clearAll();
   await enqueue({ url: '/api/a', method: 'PUT', body: '{}' });

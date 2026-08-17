@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
-  answeredIds, channelConfigured, discordPayload, dueReminders, enabledChannels,
+  answeredIds, callerDay, channelConfigured, discordPayload, dueReminders, enabledChannels,
   minutesOfDay, needsServerDelivery, parseChannelList, parseDiscordWebhook,
   parseTimeZone, reminderMessage, reportedZone, resolveTimeZone, serverChannels,
   zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
@@ -16,6 +16,8 @@ const { deliverAccount, postWebhook, resetSaid, runTick, sendToChannel, warnUnre
   await import('../src/notify-send.js');
 
 const { parseSettings } = await import('../src/validate.js');
+
+const { daysBetween } = await import('../src/stats.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -188,6 +190,40 @@ test('which clock a reminder is on: named beats device beats server', () => {
     'a client echoing the setting back is an account asking itself');
 });
 
+test("the day a route judges by is the CALLER's, not the process's", () => {
+  // A fixed instant, so this says something about the rule rather than about
+  // the day it happens to be run on.
+  const instant = Date.UTC(2026, 7, 16, 10, 0);
+
+  assert.equal(callerDay('Pacific/Kiritimati', instant), '2026-08-17',
+    'UTC+14 has already started the next day');
+  assert.equal(callerDay('Etc/GMT+12', instant), '2026-08-15',
+    'UTC-12 has not yet finished the previous one');
+
+  // TWO calendar days apart, at one instant, between two real zone names —
+  // and the same holds for inhabited ones (Pacific/Niue at UTC-11 against
+  // Kiritimati at UTC+14 is 25 hours). This is why the fix is not "allow
+  // tomorrow": a `today + 1` rule is still wrong at the edges, and it is
+  // wrong in the permissive direction for every caller on Earth in between.
+  assert.equal(
+    daysBetween(callerDay('Etc/GMT+12', instant),
+      callerDay('Pacific/Kiritimati', instant)), 2);
+  assert.equal(
+    daysBetween(callerDay('Pacific/Niue', instant),
+      callerDay('Pacific/Kiritimati', instant)), 2);
+
+  // A caller that reports nothing is one we cannot place, so it gets the
+  // server's own clock — which is exactly what it got before this existed, so
+  // adding the rule moves no caller's day. Anything unusable is the same
+  // answer by the same reasoning, and `auto` is unusable here for the reason
+  // `reportedZone` gives: it is the setting's word for "ask the device".
+  const host = zonedClock(instant, '').date;
+  for (const nothing of ['', undefined, null, 'auto', 'Moon/Base', 42]) {
+    assert.equal(callerDay(nothing, instant), host,
+      `placed a caller by ${JSON.stringify(nothing)}`);
+  }
+});
+
 test('a reported zone is a header value, and is treated as one', () => {
   assert.equal(DEVICE_ZONE_HEADER, 'X-Habiterall-Timezone');
   assert.equal(reportedZone('Pacific/Auckland'), 'Pacific/Auckland');
@@ -216,6 +252,46 @@ test('a time zone is validated by asking Intl, not by pattern', () => {
   assert.equal(parseTimeZone('Europe/Atlantis'), undefined);
   assert.equal(parseTimeZone('Not/A/Zone'), undefined);
   assert.equal(parseTimeZone('a'.repeat(200)), undefined);
+});
+
+test('a zone is normalised to its canonical name, whatever spelling arrived', () => {
+  // Not tidiness — a BOUND. `formatterFor` caches a built formatter per key and
+  // never evicts, and `callerDay` reads its key off a request header, so the
+  // cache grows by whatever spellings a caller can mint. Intl matches
+  // case-insensitively and resolves aliases, so one zone has thousands of
+  // accepted spellings: 16,384 case variants of `America/New_York` measured at
+  // 2.2MB retained after GC, unreclaimable for the life of the process.
+  for (const spelling of ['america/new_york', 'AMERICA/NEW_YORK', 'AmErIcA/nEw_YoRk']) {
+    assert.equal(parseTimeZone(spelling), 'America/New_York', spelling);
+  }
+  assert.equal(parseTimeZone('US/Eastern'), 'America/New_York', 'an alias resolves');
+  assert.equal(parseTimeZone('Etc/UTC'), 'UTC');
+
+  // And it reaches the day, or the bound would sit in front of a cache the
+  // callers walk straight past.
+  const instant = new Date(Date.UTC(2026, 7, 17, 3, 0));
+  assert.equal(callerDay('pacific/kiritimati', instant), callerDay('Pacific/Kiritimati', instant));
+});
+
+test('an offset is not a zone name, and is refused', () => {
+  // The other unbounded family — ~2,900 accepted spellings, none of them a
+  // name — and a fixed offset does not observe DST, so a stored one would put
+  // a reminder an hour out for half the year. Neither client can send one:
+  // both report `resolvedOptions().timeZone`, which is always a name.
+  for (const offset of ['+05:30', '+23:59', '-12:00', '+2359', '+00:00']) {
+    assert.equal(parseTimeZone(offset), undefined, offset);
+  }
+  // `+23:59` is also the one that made CLAUDE.md's arithmetic wrong: the
+  // guard's window is reasoned over UTC-12..UTC+14, and an offset zone let a
+  // caller claim a day about two days ahead of it.
+  assert.equal(reportedZone('+23:59'), '', 'so it never reaches the day either');
+
+  // Named zones that merely look like offsets are untouched: these are real
+  // IANA entries, and `Etc/GMT+12` is what the personal suite pins the west
+  // side of the window with.
+  assert.equal(parseTimeZone('Etc/GMT+12'), 'Etc/GMT+12');
+  assert.equal(parseTimeZone('UTC'), 'UTC');
+  assert.equal(parseTimeZone('GMT'), 'UTC');
 });
 
 /* ---------- the settings surface ---------- */
