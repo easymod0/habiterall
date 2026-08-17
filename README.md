@@ -30,7 +30,7 @@ reconnect.
 
 - [Which edition do I want?](#which-edition-do-i-want)
 - [Quick start](#quick-start) · [personal](#personal-edition) · [cloud](#cloud-edition)
-- [Features](#features) · [Statistics](#statistics) · [Bouncing back](#bouncing-back)
+- [Features](#features) · [Statistics](#statistics) · [Bouncing back](#bouncing-back) · [Awards](#awards)
 - [Reminders and notifications](#reminders-and-notifications)
 - [Install on a phone](#install-on-a-phone)
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
@@ -1196,6 +1196,7 @@ the JSON backup.
 | **History** | Completions by day / week / month / quarter / year, as a percentage or a count |
 | **Best streaks** | Your ten longest runs, listed newest first with the dates |
 | **Bouncing back** | What happens *after* a miss — see below |
+| **Awards** | What the history has already earned — see below |
 | **By day of week** | Which days you reliably miss |
 | **Weekday consistency** | The same, month by month, so you can see a weekday slipping |
 | **Times per week** | How many weeks each month hit 1×, 2×, 3× … |
@@ -1238,6 +1239,44 @@ separates them.
 > a perfectly kept habit reported as lapsing continuously. A miss is now a day
 > the habit fell *below its rate*, which is a real failure whatever the
 > frequency, so there is nothing left to suppress.
+
+### Awards
+
+A short row of badges under *Bouncing back*, for what a habit's history
+currently shows:
+
+- **Streaks** — the longest run you have managed, against the same ladder the
+  survival curve uses: 2, 3, 5, 7, 14, 21, 30, 60, 100 days. It reads your
+  *best* run, not the one you are on, so it does not go out the day a run ends.
+- **Strength** — 50%, 80% or 95%, whichever your strength curve has reached.
+  50% is about a fortnight of keeping a daily habit, 95% about two months. It
+  reads the curve's high point, so an ordinary bad week does not take it.
+- **Comebacks** — how many times you were back the next day after a miss, and
+  the longest lapse you have climbed out of. A recent one is flagged as new for
+  a week, because coming back is the moment worth noticing.
+- **Every day of the week** — you have kept this on all seven weekdays at least
+  once.
+- **A year of keeping it** — your first good run and your most recent are a
+  year or more apart. Importing a backup that already covers a year earns it on
+  arrival, because the record really is that long.
+- **No lapse over a day** — every lapse so far has lasted a single day. The
+  next two-day one ends it, which is why it is worded as a record.
+
+They are **worked out from your entries each time, never stored.** That has one
+consequence worth knowing, because it can surprise you: a badge is a reading of
+the history *as it stands*, so editing your history can move one — including
+downwards. Filling in a session you forgot to log changes what the earlier part
+of the record looks like, and on a habit with a weekly or monthly goal that can
+lower a streak badge as easily as raise it. Nothing is miscounted; you are
+seeing a different history than you were.
+
+The upside of the same design is that there is nothing extra in your backup and
+nothing to keep in step: restore anywhere and the badges follow the entries.
+
+There is nothing to switch on, and no card at all until a habit has something to
+show. One case is deliberately quiet: an *at most* habit set to treat days you
+never logged as kept gets no badges, because with almost nothing recorded they
+would be claims you know to be untrue. Its charts and figures are unchanged.
 
 ---
 

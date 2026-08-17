@@ -6,6 +6,7 @@
   "private": true,
   "exports": {
     "./stats.js": "./src/stats.js",
+    "./awards.js": "./src/awards.js",
     "./validate.js": "./src/validate.js",
     "./import.js": "./src/import.js",
     "./export-loop.js": "./src/export-loop.js",

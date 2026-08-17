@@ -105,6 +105,9 @@ export const UNLOGGED_DEFAULT = 'miss';
  * Resolved HERE rather than at each entry point, because every caller already
  * has the habit in hand and none of them should have to remember the
  * precedence. Add a third level and this stays the only place that changes.
+ * `awards.js` is the one caller outside this file, and it asks the question
+ * rather than restating it for exactly that reason — see the awards section of
+ * the root CLAUDE.md for why an award is withheld where a tile is not.
  *
  * Note this is about the FOURTH state and not about zero. A row holding 0 is a
  * stated lapse — "I had none today" — and for an at-most habit that is a real
@@ -112,7 +115,7 @@ export const UNLOGGED_DEFAULT = 'miss';
  * answered and a day nobody has, which is the whole of `questionMarks` and the
  * reason `entryWrite` stopped deleting rows. See constants.js.
  */
-function unansweredCounts(habit, unlogged) {
+export function unansweredCounts(habit, unlogged) {
   // Gated on the case this exists for, and the gate is load bearing rather
   // than tidy. Ungated, `success` fell through to the ordinary predicate for
   // EVERY habit — and on an at-least habit with a target of 0, `0 >= 0` is
@@ -465,7 +468,15 @@ export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED
  * from "never missed" (rate null) to "0% recovery", the precise misreport this
  * function exists to avoid. `computeMissRuns` therefore marks the run itself.
  *
- * @returns {{rate: number|null, recovered: number, lapses: number, openRun: number}}
+ * `longest` and `lastEnd` are the same closed set read two other ways, and they
+ * are returned rather than recomputed because `awards.js` needs them and must
+ * not go back to the entries for them: the window every figure in a stats
+ * response is computed over (`from = start ?? firstEntry`, clamped) is derived
+ * inside `computeStats` and never returned, so a second derivation is a second
+ * answer waiting to disagree with this one.
+ *
+ * @returns {{rate: number|null, recovered: number, lapses: number, openRun: number,
+ *            longest: number, lastEnd: string|null}}
  *   `rate` is null when nothing has ever been missed — undefined, not 100%.
  */
 export function computeRecovery(missRuns, end) {
@@ -478,7 +489,7 @@ export function computeRecovery(missRuns, end) {
   const openRun = isOpen ? last.length : 0;
 
   if (!closed.length) {
-    return { rate: null, recovered: 0, lapses: 0, openRun };
+    return { rate: null, recovered: 0, lapses: 0, openRun, longest: 0, lastEnd: null };
   }
   const recovered = closed.filter((r) => r.length === 1).length;
   return {
@@ -486,6 +497,12 @@ export function computeRecovery(missRuns, end) {
     recovered,
     lapses: closed.length,
     openRun,
+    // The deepest hole this habit has climbed out of, and the last day it was
+    // in one. Both are over the CLOSED runs, so an ongoing lapse moves neither
+    // — being mid-slip is not a comeback, which is the line this function
+    // already draws for the rate.
+    longest: closed.reduce((max, r) => Math.max(max, r.length), 0),
+    lastEnd: closed[closed.length - 1].end,
   };
 }
 

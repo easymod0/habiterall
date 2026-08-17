@@ -571,6 +571,64 @@ svg.chart { display: block; max-width: 100%; height: auto; }
   .cal-pop { transition: none; }
 }
 
+/*
+ * The awards row.
+ *
+ * `auto-fit` with a minimum rather than a fixed count, for the reason the day
+ * grid's column count is a function of width: five badges at 360px in one row
+ * squeeze the label to nothing, and one per line at 1440px is a column of
+ * whitespace. `minmax(0, 1fr)` as the second half, or a long detail sentence
+ * makes the track wider than the card and the whole card scrolls sideways.
+ */
+.award-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+.award {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  /* The habit's own colour, set by detail.js as --award-accent. */
+  border-left: 3px solid var(--award-accent, var(--accent));
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.award-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.award-detail {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+/*
+ * The "New" pill, and it deliberately does NOT take the habit's colour.
+ *
+ * This is the one element here with text ON a fill, and `--award-accent` is a
+ * colour the user picked — nothing constrains its lightness, so a pale habit
+ * gave white-on-white and an unreadable pill. Every other coloured surface in
+ * this app either carries no text or mixes against a theme variable
+ * (`color-mix` in charts.js). `--accent` is the theme's own, and `#fff` on it
+ * is the pairing `.btn-primary` already ships in both themes. The habit's
+ * colour is on the chip's left edge, where it needs no contrast ratio.
+ */
+.award-fresh {
+  display: inline-block;
+  vertical-align: 1px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
 .legend {
   display: flex;
   align-items: center;
