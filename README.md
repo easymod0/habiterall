@@ -155,8 +155,10 @@ APP_PORT=3000
 # THIS host is the only thing that should reach it. Not 0.0.0.0 — IPv4 only.
 BIND_ADDR=
 
-# SET THIS. It decides when reminders fire and which day a check-off with no
-# explicit date belongs to; unset, a container is UTC.
+# The container's own clock, and a fallback for both things that need one: an
+# account no client has ever reported a zone from, and a request that names no
+# zone. Browsers and the Android app report their own, so a check-off is filed
+# under the day it is where you are. Unset, a container is UTC.
 TZ=Etc/UTC
 
 # ---- sign-in ----------------------------------------------------------------
@@ -572,8 +574,10 @@ BIND_ADDR=
 # Reverse-proxy hops in front, for correct client IPs. 0 if nothing proxies it.
 TRUST_PROXY=1
 
-# The container's clock. It decides when reminders fire and which day a
-# check-off with no explicit date belongs to; unset, a container is UTC.
+# The container's own clock, and a fallback for both things that need one: an
+# account no client has ever reported a zone from, and a request that names no
+# zone. Browsers and the Android app report their own, so a check-off is filed
+# under the day it is where you are. Unset, a container is UTC.
 TZ=Etc/UTC
 
 # Lets the app talk OIDC over plain http. LOCAL TESTING ONLY — never in a real
@@ -856,22 +860,37 @@ volumes:
 ```
 <!-- /generated -->
 
-Register **two** redirect URIs with your provider, not one:
-`${PUBLIC_URL}/auth/callback` for signing in, and `${PUBLIC_URL}/` as the
-*post-logout* redirect. `POST /auth/logout` sends the second as
-`post_logout_redirect_uri`, and a provider will only honour a value it has been
-told about. Keycloak, Authelia, Entra and Auth0 all keep the two lists
-separately, so filling in only the first is the easy mistake; the bundled
-Authentik stack registers both itself, which is why nobody on the quickstart
-path meets this.
+Register `${PUBLIC_URL}/auth/callback` as the redirect URI with your provider.
+**Register `${PUBLIC_URL}/` as the post-logout redirect too** — `POST
+/auth/logout` sends it as `post_logout_redirect_uri`, and a provider only
+honours a value it has been told about. Where that value goes is not the same
+question for each of the four above:
 
-What it costs depends on the provider and neither answer is good. The lenient
-ones drop the parameter and leave you stranded on their own page; the strict
-ones refuse the request outright, which ends the local session and leaves the
-provider's — the credential that silently recreates it — untouched. Either way
-the app returns to its sign-in screen and looks entirely correct. On a shared
-device that is the half that matters, and only being asked for a password again
-tells you which version you have.
+| Provider | Where the post-logout URI goes |
+|---|---|
+| **Keycloak** | *Valid post logout redirect URIs*, a list of its own. A literal `+` there means "reuse the sign-in list", and is the default for realms migrated from before Keycloak 19 — so some installs already work |
+| **Auth0** | *Allowed Logout URLs*, a list of its own, on the application or on the tenant |
+| **Entra ID** | The **same** list as the sign-in redirect URI; there is no second field. The *Front-channel logout URL* box is a different feature — single sign-out notification — and filling that in instead leaves a configuration that looks complete and is not |
+| **Authelia** | Nothing to register. It does not implement RP-initiated logout, so it advertises no `end_session_endpoint` |
+
+The bundled Authentik stack registers both entries itself, which is why nobody
+on the quickstart path meets any of this.
+
+What a missing registration costs depends on which way the provider refuses.
+Some ignore the unregistered value and end the session anyway: you are signed
+out, but the browser is left on the provider's page rather than back here. The
+other kind rejects the logout request, and that one is worth the trouble of
+avoiding — this app's own session has already gone, so it returns to its
+sign-in screen looking entirely correct, while the provider's session, the
+credential that silently recreates yours, is still there. On a shared device
+that is the half that matters, and only being asked for a password again tells
+the two apart.
+
+Authelia is the case with nothing to get wrong and nothing to fix. With no
+end-session endpoint to build a URL from, `/auth/logout` hands back this app's
+own root: the habiterall session ends and Authelia's own outlives it, by design
+rather than by misconfiguration. Signing out of Authelia is a separate act
+until [authelia#5057](https://github.com/authelia/authelia/issues/5057) lands.
 
 Users are provisioned the first time each one signs in.
 
@@ -1049,9 +1068,10 @@ cigarettes" work.
 so an *at most* habit can be shown the other way up. Set **Show this habit as**
 to *Something to avoid* on its edit screen: a clean day then fills in the
 habit's colour while a slip paints red and shows how far over you went, and the
-buttons read **Clean day** / **Slipped** rather than Done / Not done — in the
-day editor, and in the Android shade, where the notification answers a limit
-without opening anything. Nothing about the storage moves. It is still an at-most
+day editor's two buttons read **Clean day** / **Slipped** rather than Done / Not
+done. The Android notification inverts with it — **Clean** / **Slipped** in the
+shade, where a limit is answered without opening anything. Nothing about the
+storage moves. It is still an at-most
 target, the target still decides whether a day counts, and the Loop export
 carries exactly what it carried before — this is a way of *reading* a habit,
 not a different kind of habit. The tap cycle is unchanged too; only what a tap
@@ -1155,8 +1175,11 @@ separates them.
      alt="The Bouncing back card: back next day 100%, longest lapse 1 day, currently missed 1 day; a histogram showing all 14 lapses lasted a single day; and a survival curve ending at 93% of streaks reaching 7 days.">
 </div>
 
-> Shown for daily habits only. For a 3×/week habit an off-day is not a
-> failure, so these figures would be measuring the wrong thing.
+> Shown for **every** frequency. This used to be daily-only, because a miss
+> meant "a day it was not done" and a 3×/week habit has four of those a week —
+> a perfectly kept habit reported as lapsing continuously. A miss is now a day
+> the habit fell *below its rate*, which is a real failure whatever the
+> frequency, so there is nothing left to suppress.
 
 ---
 
@@ -1452,7 +1475,13 @@ does nothing.
 > If a habit really is "assume clean, record the exception", set **A day you
 > never log** to *Counts as staying under* on that habit's edit screen, or
 > change the account default under ⚙ → Tracking. Both are described in
-> [In-app settings](#in-app-settings), and both are carried in the JSON backup.
+> [In-app settings](#in-app-settings).
+>
+> One consequence of choosing that, so it does not read as a bug: **total done
+> counts answers, while the streak and the strength count days.** The total is
+> a count of rows and a day you never logged has none, so a limit kept by
+> saying nothing shows a streak, a strength and a full history bar beside a
+> total of zero. Both figures are right about their own question.
 
 ---
 
@@ -1488,7 +1517,7 @@ which the image already sets.
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HABITERALL_DB` | `./data/habiterall.db` | SQLite file path |
-| `TZ` | the host's, **`UTC` in a container** | The clock reminders fire on, and which day a check-off belongs to |
+| `TZ` | the host's, **`UTC` in a container** | The fallback clock. Reminders follow the account's own zone and a check-off follows the caller's; this is what either falls back to — see [the reminder scheduler](#both-editions-the-reminder-scheduler) |
 | `HABITERALL_AUTH` | on | Sign-in. Off only when set to **exactly** `off` |
 | `HABITERALL_USERNAME` | `admin` | The single account |
 | `HABITERALL_PASSWORD` | — | Its password. Set both before exposing the port, or the first visitor claims the instance. Nothing checks its length here — the 8-character minimum is on the in-app setup form only, so this is yours to get right |
@@ -1584,8 +1613,9 @@ see [`.github/workflows/README.md`](.github/workflows/README.md).
 > that either. Every route that asks *is this today?* now judges by the day it
 > is for the client making the request: the guard that refuses a check-off in
 > the future, the dashboard's row summary, and a habit's stats window. Both the
-> browser and the Android app report their own zone in a request header they
-> were already sending, so this costs nothing and needs no setting. Before it,
+> browser and the Android app report their own zone in a header, and it rides
+> on traffic they were already making — so this costs no extra request and
+> needs no setting. Before it,
 > a user east of a UTC container had the current column of their own grid
 > refused as a future date for as many hours a day as the offset — thirteen of
 > them in Auckland — and a day they *had* recorded was scored as of the
@@ -1690,7 +1720,7 @@ Switching skips off never touches skips you have already recorded — including
 those imported from Loop — and "Unskip" stays available on those days.
 
 Two more are worth spelling out. One has a third state people miss, and the
-other is the only setting here that changes your numbers:
+other decides what a day nobody answered is worth:
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -1713,9 +1743,16 @@ The account's answer is what most habits follow. A habit's own **A day you never
 log** field, on its edit screen beside the target, overrides it and ships set to
 *Use the account setting* — including on every habit that existed before this
 did, and on anything imported from Loop, whose backup carries no preferences at
-all. Both fields travel in habiterall's own JSON backup, and they have to:
-change what an unanswered day is worth and the same rows in the same file give
-back a different streak and a different strength.
+all.
+
+Both travel in habiterall's own JSON backup, and they have to: change what an
+unanswered day is worth and the same rows in the same file give back a
+different streak and a different strength. They come back by different routes,
+though. The habit's field is part of the habit, so it restores on a merge as
+well as a replace; the account setting is a *setting*, and only a **replace**
+applies those — a merge deliberately leaves your preferences alone. Merge a
+backup onto an account set the other way and the habits keep their own answers
+while the account keeps its.
 
 ---
 
@@ -1752,8 +1789,12 @@ measurable habit may legitimately record the number 3.
 `PUT {"value": 0}` records "not done" — a real answer, which is what makes
 question marks meaningful — so clearing a day is the `DELETE` above, not a `PUT`
 of zero. Four states in all: a row with `2` (done), a row with `status: "skip"`,
-a row with `0` (not done), and no row (nothing known). Only the display tells the
-last two apart; every statistic counts both as a miss.
+a row with `0` (not done), and no row (nothing known). On every habit but one
+the last two are told apart by the display alone, and every statistic counts
+both as a miss. The exception is an **at most** habit, where zero is under the
+limit: there a row holding `0` is a success, and whether a day with no row is
+one as well is what the *at most* setting in
+[In-app settings](#in-app-settings) decides.
 
 ```bash
 curl -X POST localhost:3000/api/habits -H 'Content-Type: application/json' \
