@@ -193,7 +193,16 @@ auth.example.com {
 Then set `PUBLIC_URL=https://habits.example.com`,
 `OIDC_ISSUER=https://auth.example.com/application/o/habiterall/` and
 `AUTHENTIK_PUBLIC_URL=https://auth.example.com`, and run `docker compose up -d`
-— the bootstrap re-registers the redirect URI to match.
+— the bootstrap re-registers the redirect URIs to match.
+
+There are **two** of them, and the bootstrap keeps both in step for you:
+`${PUBLIC_URL}/auth/callback` for signing in, and `${PUBLIC_URL}/` marked as a
+*logout* URI. The second is what `POST /auth/logout` sends as
+`post_logout_redirect_uri`; without it registered, Authentik discards that value
+in silence and signing out leaves the user sitting on Authentik's own page
+instead of coming home. If you are pointing habiterall at your **own** identity
+provider rather than this stack, register both by hand — see the redirect-URI
+note in the [README](../README.md#cloud-edition).
 
 ## 5. Branding (optional)
 

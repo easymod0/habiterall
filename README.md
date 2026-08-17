@@ -155,8 +155,10 @@ APP_PORT=3000
 # THIS host is the only thing that should reach it. Not 0.0.0.0 — IPv4 only.
 BIND_ADDR=
 
-# SET THIS. It decides when reminders fire and which day a check-off with no
-# explicit date belongs to; unset, a container is UTC.
+# The container's own clock, and a fallback for both things that need one: an
+# account no client has ever reported a zone from, and a request that names no
+# zone. Browsers and the Android app report their own, so a check-off is filed
+# under the day it is where you are. Unset, a container is UTC.
 TZ=Etc/UTC
 
 # ---- sign-in ----------------------------------------------------------------
@@ -572,8 +574,10 @@ BIND_ADDR=
 # Reverse-proxy hops in front, for correct client IPs. 0 if nothing proxies it.
 TRUST_PROXY=1
 
-# The container's clock. It decides when reminders fire and which day a
-# check-off with no explicit date belongs to; unset, a container is UTC.
+# The container's own clock, and a fallback for both things that need one: an
+# account no client has ever reported a zone from, and a request that names no
+# zone. Browsers and the Android app report their own, so a check-off is filed
+# under the day it is where you are. Unset, a container is UTC.
 TZ=Etc/UTC
 
 # Lets the app talk OIDC over plain http. LOCAL TESTING ONLY — never in a real
@@ -857,6 +861,37 @@ volumes:
 <!-- /generated -->
 
 Register `${PUBLIC_URL}/auth/callback` as the redirect URI with your provider.
+**Register `${PUBLIC_URL}/` as the post-logout redirect too** — `POST
+/auth/logout` sends it as `post_logout_redirect_uri`, and a provider only
+honours a value it has been told about. Where that value goes is not the same
+question for each of the four above:
+
+| Provider | Where the post-logout URI goes |
+|---|---|
+| **Keycloak** | *Valid post logout redirect URIs*, a list of its own. A literal `+` there means "reuse the sign-in list", and is the default for realms migrated from before Keycloak 19 — so some installs already work |
+| **Auth0** | *Allowed Logout URLs*, a list of its own, on the application or on the tenant |
+| **Entra ID** | The **same** list as the sign-in redirect URI; there is no second field. The *Front-channel logout URL* box is a different feature — single sign-out notification — and filling that in instead leaves a configuration that looks complete and is not |
+| **Authelia** | Nothing to register. It does not implement RP-initiated logout, so it advertises no `end_session_endpoint` |
+
+The bundled Authentik stack registers both entries itself, which is why nobody
+on the quickstart path meets any of this.
+
+What a missing registration costs depends on which way the provider refuses.
+Some ignore the unregistered value and end the session anyway: you are signed
+out, but the browser is left on the provider's page rather than back here. The
+other kind rejects the logout request, and that one is worth the trouble of
+avoiding — this app's own session has already gone, so it returns to its
+sign-in screen looking entirely correct, while the provider's session, the
+credential that silently recreates yours, is still there. On a shared device
+that is the half that matters, and only being asked for a password again tells
+the two apart.
+
+Authelia is the case with nothing to get wrong and nothing to fix. With no
+end-session endpoint to build a URL from, `/auth/logout` hands back this app's
+own root: the habiterall session ends and Authelia's own outlives it, by design
+rather than by misconfiguration. Signing out of Authelia is a separate act
+until [authelia#5057](https://github.com/authelia/authelia/issues/5057) lands.
+
 Users are provisioned the first time each one signs in.
 
 > **Pin the tag here.** `latest` is fine for the personal edition, where an
@@ -1029,6 +1064,21 @@ browser as a lever. Neither of those gets safer on a VPN.
 and an *at least* / *at most* goal, so both "drink 8 glasses" and "at most 0
 cigarettes" work.
 
+**Habits you are trying not to do** — that last one reads backwards by default,
+so an *at most* habit can be shown the other way up. Set **Show this habit as**
+to *Something to avoid* on its edit screen: a clean day then fills in the
+habit's colour while a slip paints red and shows how far over you went, and the
+day editor's two buttons read **Clean day** / **Slipped** rather than Done / Not
+done. The Android notification inverts with it — **Clean** / **Slipped** in the
+shade, where a limit is answered without opening anything. Nothing about the
+storage moves. It is still an at-most
+target, the target still decides whether a day counts, and the Loop export
+carries exactly what it carried before — this is a way of *reading* a habit,
+not a different kind of habit. The tap cycle is unchanged too; only what a tap
+writes differs, so a clean day records 0 and a slip records one over the limit,
+the least the app is willing to claim on your behalf. Type the real number in
+the day editor when it matters.
+
 **Any frequency** — *n* times per *m* days. A habit held at exactly its target
 reaches full strength whether that is daily or 3×/week.
 
@@ -1059,8 +1109,20 @@ rely on the browser noticing: the app re-checks when you come back to the tab
 and keeps probing while it is down, so restarting the server does not leave a
 page stranded.
 
-**Light and dark**, following your system preference — and a toggle for when it
-disagrees with you.
+**Find a habit** — once an account has six or more habits, a search box appears
+above the dashboard. It folds case and strips accents, so "cafe" finds "Café",
+and it matches the description as well as the name — a habit called "Gym" whose
+description says "swimming Tuesdays" is one people look for by the second. It
+filters what is already on screen, so it works offline and costs no request.
+
+**Light, dark, or whatever this device is set to** — three states, not two, and
+the header's ◐ / ☀ / ☾ button cycles between them. *Follow this device* is
+somewhere you can go back to, which is the actual change: the old toggle wrote
+one of two values and following the system was the absence of both, so pressing
+it once was irreversible and a machine that goes dark at sunset quietly stopped
+doing so with nothing on screen to say why. The choice is stored on the account
+rather than on the device, so it follows you between browsers, and it travels in
+the JSON backup.
 
 <div align="center">
 <img src="docs/screenshots/dashboard-dark.png" width="820"
@@ -1113,8 +1175,11 @@ separates them.
      alt="The Bouncing back card: back next day 100%, longest lapse 1 day, currently missed 1 day; a histogram showing all 14 lapses lasted a single day; and a survival curve ending at 93% of streaks reaching 7 days.">
 </div>
 
-> Shown for daily habits only. For a 3×/week habit an off-day is not a
-> failure, so these figures would be measuring the wrong thing.
+> Shown for **every** frequency. This used to be daily-only, because a miss
+> meant "a day it was not done" and a 3×/week habit has four of those a week —
+> a perfectly kept habit reported as lapsing continuously. A miss is now a day
+> the habit fell *below its rate*, which is a real failure whatever the
+> frequency, so there is nothing left to suppress.
 
 ---
 
@@ -1393,6 +1458,31 @@ docker compose pull && docker compose up -d   # runs migrate, then the app
 Migrations are numbered and recorded, so re-running is safe and applying twice
 does nothing.
 
+> **One upgrade moved numbers that were already on screen**, and this is where
+> to look if a streak vanished. Until this release, a day with **no row at all**
+> counted as a success on an *at most* habit — zero is under the limit, and an
+> unanswered day held no value — so a limit nobody had ever logged reported an
+> unbroken streak and a strength climbing toward 100%, both growing for as long
+> as it was ignored. An unanswered day now counts as a **miss**. Every at-most
+> habit you were keeping by saying nothing lost its streak and most of its
+> strength the moment you upgraded, with nothing on the row to say why.
+>
+> Nothing was miscounted in either direction; the days simply stopped being
+> credited to you for free. Days you had recorded as **0 are unaffected** —
+> that is a stated "none today", and it counts as staying under the limit under
+> either answer.
+>
+> If a habit really is "assume clean, record the exception", set **A day you
+> never log** to *Counts as staying under* on that habit's edit screen, or
+> change the account default under ⚙ → Tracking. Both are described in
+> [In-app settings](#in-app-settings).
+>
+> One consequence of choosing that, so it does not read as a bug: **total done
+> counts answers, while the streak and the strength count days.** The total is
+> a count of rows and a day you never logged has none, so a limit kept by
+> saying nothing shows a streak, a strength and a full history bar beside a
+> total of zero. Both figures are right about their own question.
+
 ---
 
 ## Releases
@@ -1427,7 +1517,7 @@ which the image already sets.
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HABITERALL_DB` | `./data/habiterall.db` | SQLite file path |
-| `TZ` | the host's, **`UTC` in a container** | The clock reminders fire on, and which day a check-off belongs to |
+| `TZ` | the host's, **`UTC` in a container** | The fallback clock. Reminders follow the account's own zone and a check-off follows the caller's; this is what either falls back to — see [the reminder scheduler](#both-editions-the-reminder-scheduler) |
 | `HABITERALL_AUTH` | on | Sign-in. Off only when set to **exactly** `off` |
 | `HABITERALL_USERNAME` | `admin` | The single account |
 | `HABITERALL_PASSWORD` | — | Its password. Set both before exposing the port, or the first visitor claims the instance. Nothing checks its length here — the 8-character minimum is on the in-app setup form only, so this is yours to get right |
@@ -1511,7 +1601,7 @@ see [`.github/workflows/README.md`](.github/workflows/README.md).
 | `HABITERALL_NOTIFY` | `on` | `off` disables server-sent reminders entirely |
 | `HABITERALL_NOTIFY_INTERVAL_MS` | `60000` | How often to check for due reminders |
 | `DISCORD_BOT_TOKEN` | — | Turns on buttons. One bot per instance; each user points it at their own channel |
-| `TZ` | the host's, **`UTC` in a container** | The fallback clock, for an account no client has used |
+| `TZ` | the host's, **`UTC` in a container** | The fallback clock — for an account no client has reported from, and for a request that names no zone |
 
 > **`TZ` is the fallback now, not the answer.** A reminder is sent on the
 > account's own clock: the zone it named, else the zone its last browser or
@@ -1519,10 +1609,29 @@ see [`.github/workflows/README.md`](.github/workflows/README.md).
 > client — one restored from a backup, or driven only by Discord buttons — and
 > nothing else about reminders.
 >
-> **It still decides which day a check-off lands on**, though, for a request
-> that names no date: left at UTC, an evening check-in after 21:00 three hours
-> west is filed under tomorrow. There is no per-user override for that one —
-> see issue #121, which is about giving it the same treatment.
+> **It is the fallback for the calendar day too**, and no longer the answer to
+> that either. Every route that asks *is this today?* now judges by the day it
+> is for the client making the request: the guard that refuses a check-off in
+> the future, the dashboard's row summary, and a habit's stats window. Both the
+> browser and the Android app report their own zone in a header, and it rides
+> on traffic they were already making — so this costs no extra request and
+> needs no setting. Before it,
+> a user east of a UTC container had the current column of their own grid
+> refused as a future date for as many hours a day as the offset — thirteen of
+> them in Auckland — and a day they *had* recorded was scored as of the
+> server's yesterday, so ticking today left the streak sitting still. `TZ` is
+> what a caller that reports no zone still gets, which is what every caller got
+> before. Export filenames go on stamping the server's day, deliberately:
+> nothing reads them back.
+>
+> This is not the same question as the one above, and folding the two together
+> breaks whichever loses. The reminder clock asks where an **account** is, so
+> that a reminder nobody is present for still goes out at the right hour — and
+> its first tier is a zone you can name, which is how somebody abroad keeps
+> reminders on home time. The calendar day asks what day it is for the **device
+> making this request**, which is the clock the grid draws its last column
+> from. Judging a tap against a named zone would re-break the write for exactly
+> the person who set one.
 >
 > Worth knowing when upgrading: before this, `TZ` was what reminders used for
 > every account that had not set the timezone setting, which was most of them.
@@ -1595,10 +1704,10 @@ day. `too_late` with a `zone` you did not expect is the `TZ` problem above.
 
 ### In-app settings
 
-Under the ⚙ button: day order (today on the left or right), which day the week
-starts on, chart resolutions, whether deleting asks first, and where reminders
-are sent. Preferences are stored server-side, so in the cloud edition they
-follow your account between devices — and they travel in the JSON backup.
+Under the ⚙ button: the theme, day order (today on the left or right), which day
+the week starts on, chart resolutions, whether deleting asks first, and where
+reminders are sent. Preferences are stored server-side, so in the cloud edition
+they follow your account between devices — and they travel in the JSON backup.
 
 Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 
@@ -1609,6 +1718,41 @@ Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 
 Switching skips off never touches skips you have already recorded — including
 those imported from Loop — and "Unskip" stays available on those days.
+
+Two more are worth spelling out. One has a third state people miss, and the
+other decides what a day nobody answered is worth:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Theme** (Dashboard) | Follow this device | *Follow this device*, *Light* or *Dark*. The ◐ / ☀ / ☾ button in the header cycles the same setting, and the glyph says which of the three it is on — the last step of the cycle is back to *Follow this device* from a value the device already matches, which is the same appearance by definition |
+| **On an "at most" habit, a day you never logged** (Tracking) | Counts as a miss | Whether a day with **no row at all** counts as having stayed under the limit. Read for an at-most habit and nothing else |
+
+That second one is the one place a *missing* answer is genuinely ambiguous. On
+an at-least habit an unanswered day is short of the target and there is nothing
+to ask; on a limit, zero is *under* the limit, so saying nothing could honestly
+mean either thing. "I didn't smoke today" is worth a tap and is most of the
+reward; "I had no soda" is not something anyone opens an app for, and recording
+the exception is the whole point of tracking it. Both are ordinary, so it is a
+setting rather than a rule.
+
+Note what is **not** in question: a day you recorded as **0 is staying under the
+limit either way**. That is you saying "none today", which is the thing being
+asked for. Only the day nobody answered is in doubt.
+
+The account's answer is what most habits follow. A habit's own **A day you never
+log** field, on its edit screen beside the target, overrides it and ships set to
+*Use the account setting* — including on every habit that existed before this
+did, and on anything imported from Loop, whose backup carries no preferences at
+all.
+
+Both travel in habiterall's own JSON backup, and they have to: change what an
+unanswered day is worth and the same rows in the same file give back a
+different streak and a different strength. They come back by different routes,
+though. The habit's field is part of the habit, so it restores on a merge as
+well as a replace; the account setting is a *setting*, and only a **replace**
+applies those — a merge deliberately leaves your preferences alone. Merge a
+backup onto an account set the other way and the habits keep their own answers
+while the account keeps its.
 
 ---
 
@@ -1645,8 +1789,12 @@ measurable habit may legitimately record the number 3.
 `PUT {"value": 0}` records "not done" — a real answer, which is what makes
 question marks meaningful — so clearing a day is the `DELETE` above, not a `PUT`
 of zero. Four states in all: a row with `2` (done), a row with `status: "skip"`,
-a row with `0` (not done), and no row (nothing known). Only the display tells the
-last two apart; every statistic counts both as a miss.
+a row with `0` (not done), and no row (nothing known). On every habit but one
+the last two are told apart by the display alone, and every statistic counts
+both as a miss. The exception is an **at most** habit, where zero is under the
+limit: there a row holding `0` is a success, and whether a day with no row is
+one as well is what the *at most* setting in
+[In-app settings](#in-app-settings) decides.
 
 ```bash
 curl -X POST localhost:3000/api/habits -H 'Content-Type: application/json' \
