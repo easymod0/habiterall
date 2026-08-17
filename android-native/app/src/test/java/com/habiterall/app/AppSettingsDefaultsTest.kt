@@ -166,6 +166,17 @@ class AppSettingsDefaultsTest {
         // (cache the colour the WebView last painted) and not a copy of the
         // setting — the distinction `notifyTimezone` already draws.
         "theme" to "the WebView paints it; native chrome follows Android",
+        // How many day columns the WEB dashboard draws. This client's grid does
+        // not page a fixed window at all — it starts at `Grid.INITIAL_DAYS`,
+        // grows by `PAGE_DAYS` as you scroll toward the edge up to `MAX_DAYS`,
+        // and sends `end = null` — so there is no count here for the setting to
+        // govern. Mirroring it would be a value nothing on this client reads.
+        "gridDays" to "the native grid scrolls and grows; it has no fixed count",
+        // The detail view IS the WebView (`#/habit/42`), so this client already
+        // honours the setting — through the web registry's own default, not a
+        // copy of it. One renderer, so a second default would be the drift this
+        // list exists to avoid rather than the mirror that prevents it.
+        "detailCards" to "the detail view is the WebView, which reads it already",
         // Server-sent destinations. The phone's own channel is `notifyChannels`,
         // which IS mirrored; these three configure Discord, which this client
         // neither posts to nor holds the credential for.

@@ -455,6 +455,12 @@ async function applyDraft() {
     if ('historyGranularity' in changed) overrides.granularity = null;
     if ('historyMode' in changed) overrides.historyMode = null;
     if ('scoreGranularity' in changed) overrides.scoreGranularity = null;
+    // Not a session override but the same shape: `windowedChart` keys its
+    // paging offsets by card (`score:<gran>`, `history:<gran>`,
+    // `weekdayByMonth`, `frequency`) and `detail.open()` clears them only when
+    // the HABIT changes. So a card hidden while paged back to 2024 would come
+    // back there when it is shown again, with nothing on screen to say why.
+    if ('detailCards' in changed) overrides.chartOffsets = {};
 
     if (ignored.length) {
       const names = ignored.map((key) => settings.SETTINGS[key]?.label ?? key);

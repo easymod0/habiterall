@@ -129,6 +129,122 @@ try{
   ck('corrupt storage does not break the app',
      await ev(`!!document.querySelector('#grid .habit-row')`) === true);
 
+  /* --- how many day columns the grid draws (#112 1.1) --- */
+  //
+  // The arithmetic is unit tested in shared/test/window.test.js. What only a
+  // browser can say is whether the setting reaches the grid at all, and whether
+  // the CAP survives a real stylesheet — under 640px the columns are CSS grid
+  // tracks rather than fixed 44px cells, which is a layout the pure function
+  // cannot see.
+  console.log('--- day columns ---');
+  const putSetting = (patch) => ev(`fetch('/api/settings',{method:'PUT',
+    credentials:'same-origin', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(${JSON.stringify(patch)})}).then(r=>r.ok)`);
+  const columns = () => ev(`document.querySelectorAll('.grid-date').length`);
+  const cellWidth = () => ev(`(()=>{const c=document.querySelector('.habit-row .check');
+    return c ? Math.round(c.getBoundingClientRect().width) : 0;})()`);
+  const nameWidth = () => ev(
+    `Math.round(document.querySelector('.habit-name').getBoundingClientRect().width)`);
+  const resize = (w, h, mobile) => send('Emulation.setDeviceMetricsOverride',
+    { width: w, height: h, deviceScaleFactor: 1, mobile }, sessionId);
+
+  await ev(`localStorage.removeItem('habiterall-settings')`);
+  await putSetting({ gridDays: 'auto' });
+  await resize(1440, 900, false);
+  await load();
+  const wideAuto = await columns();
+  const wideAutoName = await nameWidth();
+  ck('auto fills a desktop', wideAuto === 14, String(wideAuto));
+
+  await putSetting({ gridDays: '5' });
+  await load();
+  ck('choosing five draws five', await columns() === 5, String(await columns()));
+  // What fewer columns BUY, and it differs by width — measured rather than
+  // assumed, because the first version of this asserted fatter cells here and
+  // was wrong about the app. Above 640px `.check` is a fixed 44px, so a shorter
+  // strip is more room for the habit name; the fatter-target half is the phone's
+  // and is asserted below, where the CSS shares the row width evenly.
+  ck('and the habit name gets the room back',
+     await nameWidth() > wideAutoName, `${wideAutoName}px -> ${await nameWidth()}px`);
+
+  await resize(390, 844, true);
+  await putSetting({ gridDays: 'auto' });
+  await load();
+  const phoneAutoCell = await cellWidth();
+  ck('auto on a phone is a week', await columns() === 7, String(await columns()));
+
+  await putSetting({ gridDays: '5' });
+  await load();
+  ck('five fat columns you can hit with a thumb, which is the request',
+     await columns() === 5 && await cellWidth() > phoneAutoCell,
+     `${phoneAutoCell}px -> ${await cellWidth()}px`);
+
+  // The cap, in a real browser. `gridDays` may only ever ask for FEWER than the
+  // width allows — at 768px a 14-column layout needed 668px of a 698px row and
+  // squeezed the habit name to zero, which is the bug responsive.mjs exists for.
+  await putSetting({ gridDays: '14' });
+  await load();
+  const narrow = await columns();
+  ck('a phone asked for a fortnight still draws a week', narrow === 7, String(narrow));
+  ck('and the habit name still has room', await nameWidth() > 20);
+
+  await resize(1440, 900, false);
+  await putSetting({ gridDays: 'auto' });
+  await load();
+
+  /* --- which cards a habit's page shows (#112 1.2) --- */
+  //
+  // Nine appends read one Set, so this asserts on both sides: the cards asked
+  // for are there AND the ones not asked for are gone. Checking only the first
+  // passes against a version that ignores the setting entirely.
+  console.log('--- detail cards ---');
+  const openHabit = async () => {
+    await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);
+    for (let i = 0; i < 40; i++) {
+      if (await ev(`!!document.querySelector('#view-detail .card')`).catch(()=>0)) break;
+      await sleep(200);
+    }
+    await sleep(400);
+  };
+  const cardTitles = () => ev(
+    `[...document.querySelectorAll('#view-detail .card-title')].map(t=>t.textContent)`);
+
+  await putSetting({ detailCards: ['strength', 'calendar', 'streaks', 'resilience',
+    'awards', 'history', 'weekdays', 'weekdayMonths', 'frequency'] });
+  await load();
+  await openHabit();
+  const allCards = await cardTitles();
+  ck('the default shows the calendar, the strength curve and the history',
+     ['Habit strength', 'Calendar', 'History'].every((t) => allCards.includes(t)),
+     JSON.stringify(allCards));
+
+  await putSetting({ detailCards: ['calendar'] });
+  await load();
+  await openHabit();
+  const oneCard = await cardTitles();
+  ck('unticking a card removes it', !oneCard.includes('Habit strength')
+     && !oneCard.includes('History') && !oneCard.includes('By day of week'),
+     JSON.stringify(oneCard));
+  ck('and the one left is still drawn', oneCard.includes('Calendar'),
+     JSON.stringify(oneCard));
+  // The tiles are not cards and are never hidden, so unticking everything
+  // leaves a page rather than a blank one.
+  ck('the four figures at the top survive',
+     await ev(`document.querySelectorAll('#view-detail .stat-tile').length`) === 4);
+
+  await putSetting({ detailCards: [] });
+  await load();
+  await openHabit();
+  ck('unticking everything leaves no cards and does not break the page',
+     (await cardTitles()).length === 0 &&
+     await ev(`document.querySelectorAll('#view-detail .stat-tile').length`) === 4,
+     JSON.stringify(await cardTitles()));
+
+  await putSetting({ detailCards: ['strength', 'calendar', 'streaks', 'resilience',
+    'awards', 'history', 'weekdays', 'weekdayMonths', 'frequency'] });
+  await ev(`localStorage.removeItem('habiterall-settings')`);
+  await load();
+
   /* --- the dialog must override a session toggle --- */
   //
   // Settings with an in-place control keep a session override in `state`, so

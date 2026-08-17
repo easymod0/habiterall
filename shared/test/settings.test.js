@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 const {
   parseSettings, portableSettings, PORTABLE_SETTINGS, UNPORTABLE_SETTINGS,
-  SETTING_VALUES, ValidationError, entryWrite,
+  SETTING_VALUES, ValidationError, entryWrite, parseCardList, DETAIL_CARDS,
 } =
   await import('../src/validate.js');
 const { computeHistory, UNLOGGED_DEFAULT } = await import('../src/stats.js');
@@ -123,6 +123,53 @@ test('a setting whose values are not a list is still enforced', () => {
     discordWebhook: 'https://discord.com/api/webhooks/1/abc?wait=true',
   });
   assert.equal(accepted.discordWebhook, 'https://discord.com/api/webhooks/1/abc');
+});
+
+/* ---------- which detail cards a page shows ---------- */
+
+test('the card list is normalised to the order the page draws them in', () => {
+  // The order is not tidiness. `parseSettings` stores what this returns, and
+  // "every registry default is a value the SERVER accepts" below asserts the
+  // stored value deep-equals the registry's default — so a filter over `raw`
+  // would normalise the default away the first time a client sent the same
+  // nine ids in any other order, and the very first write of the key would
+  // come back reported as "Not saved".
+  const shuffled = [...DETAIL_CARDS].reverse();
+  assert.deepEqual(parseCardList(shuffled), [...DETAIL_CARDS]);
+  assert.deepEqual(parseCardList(['history', 'calendar']), ['calendar', 'history']);
+});
+
+test('an unknown card id is dropped rather than stored', () => {
+  // A card removed from the app leaves the id in every account that had it
+  // ticked, and `detail.js` gates on membership — so an id nothing draws is
+  // dead weight that would ride in every backup for as long as the account
+  // lived. Prototype keys go the same way, since this reads a request body.
+  assert.deepEqual(parseCardList(['calendar', 'nonsense', '__proto__']), ['calendar']);
+  assert.deepEqual(parseCardList([]), [], 'unticking everything is a real answer');
+  assert.equal(/** @type {any} */ ({}).polluted, undefined);
+});
+
+test('anything that is not a list of cards is refused outright', () => {
+  for (const bad of ['calendar', 42, null, undefined, {}]) {
+    assert.equal(parseCardList(/** @type {any} */ (bad)), undefined,
+      `accepted ${JSON.stringify(bad)}`);
+  }
+  // Obvious junk: a list far longer than there are cards is not a mistake.
+  assert.equal(parseCardList(new Array(200).fill('calendar')), undefined);
+});
+
+test('every id the dialog offers is one the page can actually draw', () => {
+  // The registry in ui/settings.js is a second copy of DETAIL_CARDS, because
+  // shared/src is not served to the browser — the same shape CHANNELS has. The
+  // key-parity test above cannot see this: it checks that `detailCards` exists
+  // on both sides, not that the nine ids agree.
+  const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
+  const block = uiSettingBlocks(ui).get('detailCards');
+  assert.ok(block, 'detailCards is not in the registry at all');
+
+  const offered = [...block.matchAll(/\{ value: '([^']*)'/g)].map((m) => m[1]);
+  assert.deepEqual(offered, [...DETAIL_CARDS],
+    'the dialog and the server disagree about which cards exist, or about their order');
 });
 
 /* ---------- server-side validation ---------- */

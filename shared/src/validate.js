@@ -255,6 +255,47 @@ export function entryWrite(habit, parsed, { UNSET, SKIP }) {
 }
 
 /**
+ * The cards the detail view can be asked to draw, in the order it draws them.
+ *
+ * IDS, not titles. A card carries no id of its own — `card()` in
+ * `ui/components.js` sets a class and nothing else, and the detail view
+ * deliberately owns none — so these exist purely as setting values, and
+ * `ui/detail.js` gates the *append* rather than hiding a node. Keying on the
+ * title instead is the version that looks like it works: those are English
+ * prose, and #144 is about to make them translatable.
+ *
+ * Declared here and again as the `multi` options in `ui/settings.js`, for the
+ * reason `CHANNELS` and `SETTING_VALUES` are: `shared/src` is not served to the
+ * browser. `test/settings.test.js` fails if the two lists drift.
+ */
+export const DETAIL_CARDS = Object.freeze([
+  'strength', 'calendar', 'streaks', 'resilience', 'awards',
+  'history', 'weekdays', 'weekdayMonths', 'frequency',
+]);
+
+/**
+ * Which detail cards to draw, normalised.
+ *
+ * The shape `parseChannelList` uses, and the canonical ORDER it returns is load
+ * bearing rather than tidiness: `parseSettings` stores what this returns, and
+ * `test/settings.test.js` asserts the server does not normalise the registry's
+ * own default away — which a filter over `raw` would, the moment a client sent
+ * the same nine ids in a different order.
+ *
+ * An empty list is legal. Unticking everything leaves the header and the four
+ * stat tiles, which is a page rather than a blank, and it is reversible from
+ * the same dialog.
+ *
+ * @param {unknown} raw
+ * @returns {string[]|undefined}
+ */
+export function parseCardList(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length > DETAIL_CARDS.length * 4) return undefined;   // obvious junk
+  return DETAIL_CARDS.filter((id) => raw.includes(id));
+}
+
+/**
  * The settable preferences and what each accepts.
  *
  * Duplicated deliberately from the browser's ui/settings.js registry: the
@@ -284,6 +325,18 @@ export const SETTING_VALUES = {
   dayOrder: ['newest-right', 'newest-left'],
   weekStart: ['monday', 'sunday'],
   confirmDelete: [true, false],
+  // How many day columns the dashboard grid shows. A CAP and not an absolute —
+  // `gridColumns` in ui/window.js takes the smaller of this and what the
+  // viewport fits, because the per-width ladder is the fix for a real layout
+  // bug and not a style choice. Strings, as every other enumerated setting is.
+  // Nothing above 14, which is the widest the grid has ever drawn: the app's
+  // container is capped at 1100px, so a wider monitor buys no room, and an
+  // option that always clamped to a number the user did not pick would be an
+  // option in name only.
+  gridDays: ['auto', '5', '7', '10', '14'],
+  // Which cards the detail view draws. See DETAIL_CARDS above for why these are
+  // invented ids rather than the titles on screen.
+  detailCards: parseCardList,
   // Calendar zoom: the *name* of a level, not a cell size in pixels. Storing
   // the level keeps the rendering free to retune the sizes later without
   // stranding a saved number that no longer means anything.
@@ -392,6 +445,11 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'weekStart',
   'confirmDelete',
   'calendarZoom',
+  // Both are display preferences carrying no capability, so they travel for the
+  // reason `theme` and `calendarZoom` do. Neither changes what a row MEANS —
+  // restoring them moves no figure, only how much of the page you are shown.
+  'gridDays',
+  'detailCards',
   'historyGranularity',
   'historyMode',
   'scoreGranularity',
