@@ -577,6 +577,12 @@ export function callerDay(reported, instant = Date.now()) {
  * has named a zone is unaffected by what its devices say — which is the whole
  * point of tier 1 being reachable.
  *
+ * Tier 2 is a zone that MOVES, and the one place that is visible is the
+ * reminder watermark, which is keyed on the local date this answer decides.
+ * Carrying one account across a date line can therefore cost a duplicate
+ * reminder or a skipped one — see `dueReminders`, which sets out why that is
+ * the trade `auto` is rather than a defect in the keying.
+ *
  * @param {Record<string, any>} [settings]
  * @param {string} [reported] the zone a client last sent, if any
  * @returns {string} an IANA name, or '' for the server's own clock
@@ -941,6 +947,33 @@ export function answeredIds(habits, rows) {
  * at 00:05) is dropped rather than re-dated: `late` goes hugely negative, so
  * it fails the window. Sending it under tomorrow's date would both misreport
  * the day and consume tomorrow's slot.
+ *
+ * **The watermark is keyed on the account's LOCAL date, and under `auto` that
+ * date can move.** Written down because it reads as a bug the day it happens,
+ * and it is not one.
+ *
+ * `notify_log` holds (habit, channel, local date), and the local date comes
+ * from `zonedClock` under whatever `resolveTimeZone` answered on this tick —
+ * which for an account set to `auto` is the zone its LAST CLIENT reported. So
+ * an account genuinely used from two zones either side of a date boundary can
+ * have that boundary crossed by a device checking in rather than by time
+ * passing, and the consequences run both ways. Reading the day FORWARD (a
+ * check-in from Tokyo while the log holds a row under Los Angeles' earlier
+ * date) finds no row and sends again: the same habit twice in one UTC day, one
+ * per zone. Reading it BACKWARD finds a row already there and suppresses, so
+ * the reminder waits for the new clock to reach that date — and if the catch-up
+ * window has closed by then it is reported `too_late` and skipped.
+ *
+ * That is the trade `auto` IS, not a defect in the keying, which is why the
+ * keying is left alone. The alternative — a UTC date — files every reminder
+ * under the wrong day for anyone east or west of the meridian, and gets a user
+ * in Auckland reminded again a few hours later, every day, which is the failure
+ * the local date was chosen to fix in the first place. Nor can a second key
+ * (say, the zone) help: it makes the duplicate certain rather than possible,
+ * because two zones would then never share a slot. The exposure is bounded by
+ * how often somebody actually carries one account across a date line, and the
+ * account that names its zone explicitly — tier one of `resolveTimeZone` — does
+ * not have it at all.
  *
  * @param {object} args
  * @param {import('./types.js').Habit[]} args.habits

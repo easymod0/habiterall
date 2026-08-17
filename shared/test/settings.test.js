@@ -343,22 +343,62 @@ test('every registry default is a value the registry itself accepts', () => {
   // Asked of every key rather than that one, because the shape recurs: any
   // `select` whose default is missing from `options`, any `toggle` defaulting
   // to a string, any `validate` that forgets a new state.
+  //
+  // **Every rule that APPLIES, not the first one that matches.** This was an
+  // `if/else if` chain with `def.validate` at its head, so a key carrying one
+  // never reached the option-membership check below — and `notifyTimezone` is
+  // the only key that carries one, which is to say the single entry this test
+  // was WRITTEN for was the single entry exempt from half of it. Measured:
+  // dropping the `{value: 'auto', …}` entry from `timeZoneOptions()` while
+  // leaving `default: 'auto'` passed the whole suite and every browser suite, a
+  // default its own control cannot offer. `validate` is an ADDITIONAL rule for
+  // a value whose legal set is not a list; it was never a substitute for the
+  // list. Two `if`s, no `else`.
+  //
+  // The consequence today is only cosmetic — `settings-dialog.js` prepends a
+  // synthetic option for a draft value the list does not carry, so nothing is
+  // silently rewritten — but a default the registry cannot express is exactly
+  // what this exists to catch, and normaliser-form settings are where new
+  // options are currently landing.
   for (const [key, def] of Object.entries(SETTINGS)) {
     const value = def.default;
     assert.notEqual(value, undefined, `${key} has no default`);
 
+    // 1. Its own validator, for a legal set that cannot be enumerated.
     if (def.validate) {
       assert.ok(def.validate(value),
         `${key}: the default ${JSON.stringify(value)} fails its own validate()`);
-    } else if (def.type === 'select') {
-      assert.ok(def.options.some((o) => o.value === value),
-        `${key}: the default ${JSON.stringify(value)} is not one of its options`);
-    } else if (def.type === 'toggle') {
+    }
+
+    // 2. Its type's rule.
+    if (def.type === 'toggle') {
       assert.equal(typeof value, 'boolean', `${key}: a toggle defaulting to ${typeof value}`);
-    } else if (def.type === 'multi') {
-      assert.ok(Array.isArray(value)
-        && value.every((v) => def.options.some((o) => o.value === v)),
-      `${key}: the default ${JSON.stringify(value)} is not a subset of its options`);
+    }
+
+    // 3. And membership, wherever there is a list to be a member of. Gated on
+    // the OPTIONS and not on the absence of a `validate`, which is the whole
+    // correction: the question is whether the control offers a list, and a
+    // `validate` says nothing about that. A `text` control — a webhook URL, an
+    // ntfy topic — has no list and is checked by the server, which is the only
+    // check that counts for it.
+    if (def.type === 'select' || def.type === 'multi') {
+      // ...and it must HAVE one, or the check above could be dodged by
+      // deleting the list rather than by fixing the default. `renderSettingsBody`
+      // dereferences `def.options` for both of these types anyway, so a missing
+      // list is a dialog that throws.
+      assert.ok(Array.isArray(def.options),
+        `${key}: a ${def.type} with no options — the dialog cannot render it`);
+    }
+
+    if (Array.isArray(def.options)) {
+      const offers = (v) => def.options.some((o) => o.value === v);
+      if (def.type === 'multi') {
+        assert.ok(Array.isArray(value) && value.every(offers),
+          `${key}: the default ${JSON.stringify(value)} is not a subset of its options`);
+      } else {
+        assert.ok(offers(value),
+          `${key}: the default ${JSON.stringify(value)} is not one of its options`);
+      }
     }
   }
 });

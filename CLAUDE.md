@@ -1429,6 +1429,21 @@ per channel, or enabling a second destination is silenced for its first day by
 the send to the first; keyed on the local date, or a user east of the server
 gets it filed under the wrong day and again a few hours later.
 
+**...and under `auto` that local date can move, which reads as a bug and is the
+trade.** `resolveTimeZone`'s second tier is the zone the account's LAST CLIENT
+reported, so an account genuinely used from two zones either side of a date
+boundary can have the boundary crossed by a device checking in rather than by
+time passing. Forward, the log's row sits under the other zone's earlier date and
+the send goes out again — the same habit twice in one UTC day, one per zone.
+Backward, a row is already there and the reminder waits for the new clock to
+reach that date, which past the catch-up window means `too_late`. The keying is
+deliberately left alone: a UTC date is the defect the local date was chosen to
+fix, and adding the zone to the key makes the duplicate certain instead of
+possible, since two zones would then never share a slot. It is bounded by how
+often somebody carries one account across a date line, and an account that NAMES
+its zone — tier one — does not have it at all. Written down in `dueReminders`
+because the day it happens it will be reported as a bug.
+
 **How it WENT is written down too, and that one is for the user.** A permanent
 failure — a deleted webhook, the bot kicked from its channel, a revoked token —
 is marked as sent (a 404 answers 404 forever, and retrying every minute until
