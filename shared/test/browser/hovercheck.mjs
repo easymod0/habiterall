@@ -117,7 +117,8 @@ try {
     const c=cells[Math.floor(cells.length*0.6)];
     const b=c.getBoundingClientRect();
     window.__cell=c;
-    return {date:c.dataset.date, x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2),
+    return {date:c.dataset.date, label:c.getAttribute('data-label'),
+            x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2),
             w:+b.width.toFixed(2), inView: b.top>0 && b.bottom<window.innerHeight};})()`);
 
   ck('the chosen cell is on screen', target.inView === true,
@@ -160,9 +161,21 @@ try {
   ck('the hovered cell is raised above its neighbours', hovered.isLast === true);
 
   ck('a popover appeared', hovered.popText != null, String(hovered.popText));
-  ck('the popover shows the hovered date',
-    (hovered.popText ?? '').includes(target.date),
-    `${hovered.popText} (expected ${target.date})`);
+  // Not the ISO date — the popover writes a date for a person now, and
+  // asserting the storage key would pin en-US. But not `data-label` either:
+  // comparing the popover against the attribute it is BUILT FROM asks nothing
+  // about which day it names. Mutated, with every calendar popover shifted a
+  // day forward, that version passed seven suites; the master version it
+  // replaced failed. So the expectation is computed from the cell's own DATE,
+  // through the same helper, which stays locale-free and still moves when the
+  // date does.
+  const wantLabel = await ev(`(async()=>{
+    const { formatDateShort, fromISOLocal } = await import('/shared/ui/dates.js');
+    return formatDateShort(fromISOLocal(${JSON.stringify(target.date)}));
+  })()`);
+  ck('the popover names the day the hovered cell is',
+    String(hovered.popText ?? '').includes(wantLabel),
+    `${hovered.popText} (expected to contain ${wantLabel})`);
   ck('the popover is fully visible', hovered.popOpacity === 1,
     String(hovered.popOpacity));
   // Deliberately absent: the cursor already says the cell is clickable, and
@@ -202,7 +215,8 @@ try {
     const cells=[...document.querySelectorAll('rect.cal-cell[data-date]')];
     const i=Math.floor(cells.length*0.6);
     return cells.slice(i, i+4).map(c=>{const b=c.getBoundingClientRect();
-      return {date:c.dataset.date, x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2)};});})()`);
+      return {date:c.dataset.date, label:c.getAttribute('data-label'),
+              x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2)};});})()`);
 
   for (const n of neighbours) {
     await move(n.x, n.y);
@@ -218,9 +232,19 @@ try {
   }))()`);
 
   ck('only one popover exists', after.pops <= 1, `${after.pops}`);
+  // Computed from the cell's DATE, exactly as the first popover check is — and
+  // its comment says why in full. This one was left comparing against
+  // `data-label`, the attribute the popover is built from, under a note
+  // claiming it followed that reasoning: it is the same expression on both
+  // sides of the assertion, so a popover shifted a day forward passes it. The
+  // first check catches that; this one asked nothing.
+  const wantLast = await ev(`(async()=>{
+    const { formatDateShort, fromISOLocal } = await import('/shared/ui/dates.js');
+    return formatDateShort(fromISOLocal(${JSON.stringify(neighbours.at(-1).date)}));
+  })()`);
   ck('the popover follows the cursor to the last cell',
-    (after.text ?? '').includes(neighbours.at(-1).date),
-    `${after.text} (expected ${neighbours.at(-1).date})`);
+    String(after.text ?? '').includes(wantLast),
+    `${after.text} (expected to contain ${wantLast})`);
   ck('only one cell is grown at a time', after.grown <= 1, `${after.grown} grown`);
 
   /* ---------- a re-render must not strand the popover ---------- */

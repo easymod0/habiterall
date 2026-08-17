@@ -1,3 +1,7 @@
+// A relative specifier, so this module still loads under Node. The fourth
+// byte-identical copy of `iso` lived here.
+import { iso } from './dates.js';
+
 /**
  * Display-time resampling for the strength chart.
  *
@@ -8,12 +12,12 @@
  */
 
 /** Start of the week containing `iso`, matching stats.js's bucketing. */
-function startOfWeek(iso, weekStart = 'monday') {
-  const [y, m, d] = iso.split('-').map(Number);
+function startOfWeek(stamp, weekStart = 'monday') {
+  const [y, m, d] = stamp.split('-').map(Number);
   const date = new Date(y, m - 1, d);
   const dow = weekStart === 'sunday' ? date.getDay() : (date.getDay() + 6) % 7;
   date.setDate(date.getDate() - dow);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  return iso(date);
 }
 
 /**

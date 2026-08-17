@@ -9,7 +9,9 @@
 import { api } from '/shared/ui/api.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import {
-  addDaysISO, datesEndingOn, freqLabel, fromISOLocal, iso, targetLabel, todayISO,
+  addDaysISO, datesEndingOn, formatDateLong, freqLabel, fromISOLocal, iso,
+  formatDayNumber, formatDayRange, formatMonthShort, targetLabel, todayISO,
+  weekdayLetters,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
@@ -50,9 +52,11 @@ const GRID_DAYS = 14;         // most columns we will ever show
 const GRID_DAYS_NARROW = 7;   // phone layout: fewer, wider columns
 const GRID_DAYS_MEDIUM = 10;  // tablets, where 14 would crush the habit name
 
-const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// Weekday letters and month names come from `ui/dates.js`, which asks `Intl`.
+// There were two hardcoded English copies of both — one here and one in
+// charts.js — so the grid header and the calendar's captions were English
+// whatever the browser was set to, in an app whose amount dialog already used
+// the browser's own locale.
 
 /**
  * How many day columns fit without squeezing the habit name out of existence.
@@ -252,7 +256,7 @@ export function paint() {
 
       const day = document.createElement('span');
       day.className = 'check-day';
-      day.textContent = DAY_LETTERS[d.getDay()];
+      day.textContent = weekdayLetters()[d.getDay()];
 
       btn.append(box, day);
       btn.addEventListener('click', () => onCheckClick(habit, date));
@@ -378,18 +382,26 @@ function renderGridHeader(dates, todayIso) {
   // Date row, aligned to the checkbox columns below.
   const cols = document.createElement('div');
   cols.className = 'grid-dates';
-  for (const d of dates) {
+  for (const [i, d] of dates.entries()) {
     const cell = document.createElement('div');
     const dIso = iso(d);
     cell.className = 'grid-date' + (dIso === todayIso ? ' is-today' : '');
-    // Only show the month on the first column and when it changes, so the
-    // row stays readable at seven columns on a phone.
+    // Only show the month on the first column and when it CHANGES, so the row
+    // stays readable at seven columns on a phone.
+    //
+    // The change is read from the month NAME, not from `getDate() === 1`.
+    // The first of the Gregorian month is not where a Persian or Hijri month
+    // turns, so keying the caption on it put `مرداد` about nine days into the
+    // month it names — the same mistake `formatYear`'s comment records for the
+    // year caption, which was fixed there and left here.
     const dayNum = document.createElement('span');
     dayNum.className = 'grid-date-num';
-    dayNum.textContent = String(d.getDate());
+    dayNum.textContent = formatDayNumber(d);
     const mon = document.createElement('span');
     mon.className = 'grid-date-mon';
-    mon.textContent = d.getDate() === 1 || d === dates[0] ? MONTHS[d.getMonth()] : '';
+    const monthText = formatMonthShort(d);
+    const prev = dates[i - 1];
+    mon.textContent = !prev || formatMonthShort(prev) !== monthText ? monthText : '';
     cell.append(mon, dayNum);
     cols.append(cell);
   }
@@ -397,15 +409,16 @@ function renderGridHeader(dates, todayIso) {
   gridHead.append(label, nav, cols);
 }
 
-/** "3 – 16 Aug 2026", collapsing the repeated month and year. */
+/** "3 – 16 Aug 2026" — `Intl` decides what the two ends share, and in which order. */
 function rangeLabel(dates) {
   // The label always reads oldest to newest, whichever way the row is drawn.
   const [a, b] = dates[0] <= dates[dates.length - 1]
     ? [dates[0], dates[dates.length - 1]]
     : [dates[dates.length - 1], dates[0]];
-  const sameMonth = a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear();
-  const left = sameMonth ? String(a.getDate()) : `${a.getDate()} ${MONTHS[a.getMonth()]}`;
-  return `${left} – ${b.getDate()} ${MONTHS[b.getMonth()]} ${b.getFullYear()}`;
+  // This composed `${day} ${month} ${year}` from a table indexed by
+  // `getMonth()` and elided the shared month itself. Both halves were wrong
+  // outside a Gregorian, day-first locale — see `formatMonthShort`.
+  return formatDayRange(a, b);
 }
 
 /** Move the visible window, clamped so it never runs past today. */
@@ -761,9 +774,8 @@ function openCountDialog(habit, date) {
   // The date in words. A grid cell is a square in a row of squares, so the
   // dialog has to say which day it is about — the ISO string reads as a serial
   // number, and the whole risk of an editable history is fixing the wrong one.
-  countSub.textContent = fromISOLocal(date).toLocaleDateString(undefined, {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  }) + (habit.unit ? ` · ${habit.unit}` : '');
+  countSub.textContent = formatDateLong(fromISOLocal(date))
+    + (habit.unit ? ` · ${habit.unit}` : '');
   // Whether a ROW exists, not whether there is an amount to show. A skipped
   // day has a row and `current` is nulled above so the SKIP sentinel is not
   // prefilled as an amount — deriving the button from that hid Clear on the

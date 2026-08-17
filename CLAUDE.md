@@ -1379,6 +1379,7 @@ Several layers, and they catch different things:
 |---|---|---|
 | Unit | `npm test` | nothing |
 | Types | `npm run typecheck` | nothing |
+| Dates in other calendars | `npm run test:locales` | nothing |
 | Browser | `npm run test:browser` | Chrome + a server with `HABITERALL_AUTH=off HABITERALL_RATE_LIMIT=off` |
 | Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
 | Credential change | `npm run test:credchange -w habiterall-personal` | nothing |

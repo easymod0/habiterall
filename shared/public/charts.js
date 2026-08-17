@@ -11,12 +11,18 @@ import {
   DEFAULT_ZOOM,
 } from './ui/calendar.js';
 import { SKIP, YES } from './ui/values.js';
-// Dependency-free by design, so this module still loads under the offline
-// render suites' fake DOM. See the header of ui/toggle.js.
+// Relative, like the two above, and for the same reason: two suites import this
+// module in Node. Neither reaches for anything but `Date`, `Intl` and its own
+// constants, which is what keeps them loadable under the fake DOM.
+import {
+  WIDTH_SAFETY, estimateTextWidth, formatDateShort, formatStamp, fromISOLocal,
+  addDaysISO, formatDayRange, formatMonthShort, formatYear, gutterFor, iso,
+  weekdayLetters,
+  weekdayNames,
+} from './ui/dates.js';
 import { isAvoided } from './ui/toggle.js';
 
 const NS = 'http://www.w3.org/2000/svg';
-const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 /**
  * The seven `getDay()` indices in the order the rows are drawn.
@@ -33,8 +39,6 @@ const weekOrder = (weekStart) =>
 /** Those labels in row order. */
 const rotateWeek = (labels, weekStart) =>
   weekOrder(weekStart).map((i) => labels[i]);
-const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function el(name, attrs = {}, text) {
   const node = document.createElementNS(NS, name);
@@ -137,14 +141,18 @@ export function scoreChart(scores, color, { width = 720, height = 200 } = {}) {
     'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
   }));
 
-  // date labels at both ends
+  // Date labels at both ends, written the way the rest of the app writes a
+  // date. These were raw ISO, which under a heading that already says what the
+  // chart is reads as machine output — and it was English-neutral only by
+  // accident, since the two hardcoded month arrays beside it were not.
+  const axisDate = (isoDate) => formatDateShort(fromISOLocal(isoDate));
   svg.appendChild(el('text', {
     x: pad.left, y: height - 6, 'font-size': 10, fill: dim,
-  }, scores[0].date));
+  }, axisDate(scores[0].date)));
   svg.appendChild(el('text', {
     x: width - pad.right, y: height - 6, 'text-anchor': 'end',
     'font-size': 10, fill: dim,
-  }, scores[scores.length - 1].date));
+  }, axisDate(scores[scores.length - 1].date)));
 
   return svg;
 }
@@ -187,8 +195,6 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   const dim = themed('--text-dim');
   const empty = themed('--grid-empty');
 
-  const iso = (d) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
   const realToday = new Date();
   realToday.setHours(0, 0, 0, 0);
@@ -205,7 +211,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   // Two labels, at the first and third rows. They move with the setting: the
   // grid's rows are positional — row 0 is whatever `calendarWindow` started the
   // week on — so a fixed 'S' over row 0 captions Monday on a Monday-start week.
-  const calLabels = rotateWeek(WEEKDAY_LABELS, weekStart);
+  const calLabels = rotateWeek(weekdayLetters(), weekStart);
   for (let i = 0; i < 3; i += 2) {
     svg.appendChild(el('text', {
       x: 0, y: padTop + (i * step) + CELL - 2, 'font-size': 9, fill: dim,
@@ -230,7 +236,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       for (let dow = 0; dow < 7; dow++) {
         const date = iso(probe);
         probe.setDate(probe.getDate() + 1);
-        if (!inStreak.has(date) || !inStreak.has(shiftISO(date, 1))) continue;
+        if (!inStreak.has(date) || !inStreak.has(addDaysISO(date, 1))) continue;
 
         const x = padLeft + wk * step;
         const y = padTop + dow * step;
@@ -274,7 +280,8 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     }
   }
 
-  let lastMonth = -1;
+  // The month NAME last captioned, not `getMonth()`. See the caption below.
+  let lastMonthText = null;
   const cursor = new Date(start);
   const cells = [];
 
@@ -287,6 +294,11 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // Future days relative to the real today are not editable and are drawn
       // faintly so the grid keeps its shape.
       const isFuture = date > todayISO;
+      // What the cell SAYS, as against the key it is stored under. The popover
+      // and the <title> are read by a person and by a screen reader; the range
+      // label directly above them is formatted, so these were the last raw ISO
+      // left on the card.
+      const shown = formatDateShort(fromISOLocal(date));
       const value = entriesByDate[date];
       // `skips` when the caller supplied it — it is the only thing that can be
       // trusted, since 3 is a legitimate amount for a measurable habit. The
@@ -301,18 +313,18 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         : habit.type === 'boolean' && value === SKIP;
 
       let fill = empty;
-      let label = `${date}: no entry`;
+      let label = `${shown}: no entry`;
 
       if (isFuture) {
         fill = 'transparent';
-        label = `${date}: in the future`;
+        label = `${shown}: in the future`;
       } else if (value != null) {
         if (isSkip) {
           fill = themed('--surface-2');
-          label = `${date}: skipped`;
+          label = `${shown}: skipped`;
         } else if (habit.type === 'boolean') {
-          if (value === YES) { fill = shade(color, 1); label = `${date}: done`; }
-          else label = `${date}: not done`;
+          if (value === YES) { fill = shade(color, 1); label = `${shown}: done`; }
+          else label = `${shown}: not done`;
         } else if (isAvoided(habit)) {
           // Shown as something to avoid, so the colours are the other way up —
           // the same inversion `dashboard.js` makes, and for the same reason it
@@ -328,10 +340,10 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
           const amount = `${value}${habit.unit ? ' ' + habit.unit : ''}`;
           if (value <= target) {
             fill = shade(color, 1);
-            label = target > 0 ? `${date}: clean — ${amount}` : `${date}: clean`;
+            label = target > 0 ? `${shown}: clean — ${amount}` : `${shown}: clean`;
           } else {
             fill = themed('--danger');
-            label = `${date}: slipped — ${amount}`;
+            label = `${shown}: slipped — ${amount}`;
           }
         } else {
           // For an "at most" habit a low number is the good outcome, so 0 is a
@@ -351,7 +363,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
             const ratio = Math.min(1, value / target);
             if (value > 0) fill = shade(color, Math.max(0.2, ratio));
           }
-          label = `${date}: ${value}${habit.unit ? ' ' + habit.unit : ''}`;
+          label = `${shown}: ${value}${habit.unit ? ' ' + habit.unit : ''}`;
         }
       }
 
@@ -369,12 +381,6 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       if (onPick && !isFuture) {
         rect.setAttribute('cursor', 'pointer');
         rect.setAttribute('role', 'gridcell');
-        // setAttribute, not .dataset — the offline render suites drive this
-        // module against a fake DOM that implements attributes only, so
-        // `.dataset.date` threw and made the clickable calendar untestable
-        // there. Reading it back still works via `rect.dataset.date` in a
-        // real browser, which is where the keyboard handler runs.
-        rect.setAttribute('data-date', date);
         // Roving tabindex: only one cell is a tab stop, so tabbing past the
         // calendar takes one press rather than ~180. Arrows move within it.
         rect.setAttribute('tabindex', '-1');
@@ -392,6 +398,16 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       //
       // setAttribute, not .dataset: the offline render tests use a fake DOM
       // that implements attributes but not the dataset proxy.
+      // Which day this cell IS, always — not only when it is clickable.
+      //
+      // setAttribute, not .dataset: the offline render suites drive this module
+      // against a fake DOM that implements attributes only. Unconditional
+      // because it is the cell's identity rather than part of its interaction,
+      // and because `data-label` beside it is now human copy — "Aug 9, 2026:
+      // clean" — so anything that needs the DAY has to have somewhere stable to
+      // read it. Two suites were parsing the label's first colon-separated
+      // field, which tied them to the wording and to the runner's locale.
+      rect.setAttribute('data-date', date);
       rect.setAttribute('data-label', label);
       svg.appendChild(title(rect, onPick && !isFuture ? `${label} — click to edit` : label));
 
@@ -418,11 +434,35 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       }
 
       // month label above the first week containing a new month
-      if (dow === 0 && cursor.getMonth() !== lastMonth) {
-        lastMonth = cursor.getMonth();
+      //
+      // The change is read from the month NAME, never from `getMonth()`. That
+      // is a field of the GREGORIAN calendar, and this caption's text comes
+      // from `Intl` — so keying the position on one while taking the words
+      // from the other captions a Persian month above the week the Gregorian
+      // one happens to start in. Measured over 30 weeks from 2026-01-04 in
+      // fa-IR: `بهمن` drawn above week 4 against a real week 2, `اسفند` above
+      // week 8 against week 6, `فروردین` above week 13 against week 10 — every
+      // caption two to three weeks from the month it names. In English the two
+      // agree, which is why this survived the branch that fixed the same shape
+      // in `renderGridHeader` and in `weekdayMonthChart`'s year caption.
+      const monthText = dow === 0 ? formatMonthShort(cursor) : null;
+      if (monthText !== null && monthText !== lastMonthText) {
+        lastMonthText = monthText;
+        // Nudged left if it would run off the end. The caption is left
+        // anchored above a week column, and `Intl`'s short month is `Aug` in
+        // English and `أغسطس` in Arabic — measured overflowing the viewBox by
+        // 6px on the final column, which an SVG clips rather than wraps.
+        //
+        // No `WIDTH_SAFETY`, for the reason `weekdayMonthChart` states about
+        // its own clamp: in a clamp the margin costs DISPLACEMENT rather than
+        // pixels, so it shifts the last caption further left than the overflow
+        // it is correcting for — a caption over the wrong column, which is the
+        // defect this whole block is about. `estimateTextWidth` is measured
+        // never to under-bill, so the raw estimate is already the safe side.
         svg.appendChild(el('text', {
-          x, y: 9, 'font-size': 9.5, fill: dim,
-        }, MONTH_LABELS[lastMonth]));
+          x: Math.min(x, width - estimateTextWidth(monthText, 9.5)),
+          y: 9, 'font-size': 9.5, fill: dim,
+        }, monthText));
       }
 
       cursor.setDate(cursor.getDate() + 1);
@@ -457,7 +497,7 @@ function streakDates(streaks, minStreak) {
     // Bounded by the streak's own length, so a malformed entry cannot spin.
     for (let i = 0; i < streak.length && cursor <= streak.end; i++) {
       dates.add(cursor);
-      cursor = shiftISO(cursor, 1);
+      cursor = addDaysISO(cursor, 1);
     }
   }
   return dates;
@@ -668,9 +708,9 @@ function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
     // before — off the top of the grid, where `byDate` finds nothing and the
     // key silently does nothing.
     const dow = weekdayIndex(fromISOLocal(date), weekStart);
-    targetDate = shiftISO(date, e.key === 'Home' ? -dow : 6 - dow);
+    targetDate = addDaysISO(date, e.key === 'Home' ? -dow : 6 - dow);
   } else {
-    targetDate = shiftISO(date, delta);
+    targetDate = addDaysISO(date, delta);
   }
 
   // Clamp to a real, focusable cell: the edges of the rendered window and
@@ -697,8 +737,22 @@ function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
 export function weekdayMonthChart(months, color,
                                   { width = 720, weekStart = 'monday' } = {}) {
   const rowH = 26;
-  // Two lines of header: the month on every column, the year where it changes.
-  const pad = { top: 30, right: 12, bottom: 8, left: 42 };
+  const ROW_LABEL_SIZE = 10.5;
+  const ROW_LABEL_GAP = 8;
+  // The row captions are `Intl`'s short weekday names, and those are `Mon` in
+  // English, `niedz.` in Polish, `domingo` in pt-PT and `Jumamosi` in sw-KE. A
+  // fixed 42px gutter fitted the first two and clipped the others mid-word —
+  // measured in Chrome, pt-PT rendered `omingo`, `egunda`, `ábado`.
+  //
+  // So the gutter is sized from the labels rather than the labels chosen to fit
+  // the gutter. `narrow` would fit everywhere and is what this deliberately
+  // does NOT use: S/S and T/T are ambiguous and this axis is the whole point of
+  // the chart. 42 stays the floor, so nothing narrows in the common case.
+  const rowLabels = weekdayNames('short');
+  const pad = {
+    top: 30, right: 12, bottom: 8,
+    left: gutterFor(rowLabels, ROW_LABEL_SIZE, 42, ROW_LABEL_GAP, width * 0.32),
+  };
   const height = pad.top + 7 * rowH + pad.bottom;
 
   const svg = svgRoot(width, height);
@@ -722,38 +776,127 @@ export function weekdayMonthChart(months, color,
   const maxR = Math.min(11, colW / 2 - 2, rowH / 2 - 2);
 
   // Weekday rows in the same order as the calendar heatmap above — which is
-  // the account's `weekStart`, not always Sunday. Two letters, not one: S/S and
-  // T/T are ambiguous, and this axis is the whole point of the chart.
-  const FULL = rotateWeek(
-    ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
-    weekStart);
-  const SHORT = rotateWeek(['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'], weekStart);
+  // the account's `weekStart`, not always Sunday. NOT one letter: S/S and T/T
+  // are ambiguous and this axis is the whole point of the chart, which is why
+  // the hardcoded version wrote `Su`/`Mo`.
+  //
+  // `Intl` has no two-letter width, so this is `short` — three characters in
+  // English, and whatever the locale's own abbreviation is elsewhere. Wider
+  // than `Su` by about 6px against a 42px left pad, measured; `narrow` was the
+  // other option and would have undone the sentence above.
+  const FULL = rotateWeek(weekdayNames('long'), weekStart);
+  const SHORT = rotateWeek(rowLabels, weekStart);
   const order = weekOrder(weekStart);
   for (let d = 0; d < 7; d++) {
     svg.appendChild(el('text', {
-      x: pad.left - 8, y: pad.top + d * rowH + rowH / 2 + 4,
-      'text-anchor': 'end', 'font-size': 10.5, fill: dim,
+      x: pad.left - ROW_LABEL_GAP, y: pad.top + d * rowH + rowH / 2 + 4,
+      'text-anchor': 'end', 'font-size': ROW_LABEL_SIZE, fill: dim,
+      // The unambiguous name, for a reader who cannot tell two abbreviations
+      // apart and for a screen reader.
     }, SHORT[d]));
   }
 
-  shown.forEach((m, c) => {
-    const cx = pad.left + (c + 0.5) * colW;
-
-    // Every column gets its month. The columns are now paged rather than
-    // squeezed, so there is always room — and a chart whose axis labels only
-    // some columns makes you count to work out which one you are looking at.
+  // A caption is drawn only where it clears the last one drawn. "Every column
+  // gets its month" was the rule here and its justification — "the columns are
+  // paged rather than squeezed, so there is always room" — is false in any
+  // locale whose month names are not three Latin characters: measured at the
+  // 12 columns a 328px card allows, vi-VN overlapped on 11 of 12 pairs, by up
+  // to 24.9px. Overlapping captions are not a denser axis, they are an
+  // unreadable one, and the first and last are the two that orient a reader.
+  // No `WIDTH_SAFETY` in either the collision test or the clamp, and both for
+  // the reason `streakChart` states: the margin is for RESERVING space, and
+  // dropping a caption is a DEGRADATION. Applied here it made the chart
+  // pessimistic about its own labels — measured at a 328px card with 8
+  // columns, hi-IN kept 4 of 8 when the widest real caption was 21.3px against
+  // a 31.2px column, and 11 of 14 non-English locales dropped captions with
+  // room to spare. In the clamp the margin costs displacement rather than
+  // pixels: it pushed gu-IN's last caption 31.4px left of the column it names,
+  // which is a caption over the wrong column. `estimateTextWidth` is measured
+  // never to under-bill, so the raw estimate is already the safe side.
+  const CAPTION_GAP = 4;
+  const captions = shown.map((m, c) => {
     const [yy, mm] = m.month.split('-').map(Number);
-    svg.appendChild(el('text', {
-      x: cx, y: 12, 'text-anchor': 'middle', 'font-size': 9.5, fill: dim,
-    }, MONTH_LABELS[mm - 1]));
+    const monthDate = new Date(yy, mm - 1, 15);
+    const monthText = formatMonthShort(monthDate);
+    const half = estimateTextWidth(monthText, 9.5) / 2;
+    const cx = pad.left + (c + 0.5) * colW;
+    // Kept inside the viewBox: a centred caption on the first or last column
+    // otherwise hangs off the edge once the month name is not three Latin
+    // characters.
+    return { monthDate, monthText, half, cx,
+             x: Math.min(Math.max(cx, half), width - half) };
+  });
+
+  // The LAST column is captioned first, then the rest fill in to its left.
+  //
+  // A single greedy left-to-right pass is what the comment above says it does
+  // not do: it drops whichever caption collides, and at the right-hand edge
+  // that is always the newest month — the one a reader is actually looking at.
+  // Measured at 328px with 12 columns, en-US drew `Jan Mar May Jul Sep Nov`
+  // and no December. Reserving the last one costs at most one caption further
+  // left, which is the older half of the axis.
+  const drawn = new Set();
+  if (captions.length) drawn.add(captions.length - 1);
+  const last = captions[captions.length - 1];
+  let lastRight = -Infinity;
+  for (let c = 0; c < captions.length - 1; c++) {
+    const cap = captions[c];
+    const clearsLeft = cap.x - cap.half >= lastRight;
+    const clearsLast = cap.x + cap.half + CAPTION_GAP <= last.x - last.half;
+    if (clearsLeft && clearsLast) {
+      drawn.add(c);
+      lastRight = cap.x + cap.half + CAPTION_GAP;
+    }
+  }
+
+  shown.forEach((m, c) => {
+    const { monthDate, monthText, half, cx, x } = captions[c];
+    if (drawn.has(c)) {
+      svg.appendChild(el('text', {
+        x, y: 12, 'text-anchor': 'middle', 'font-size': 9.5, fill: dim,
+      }, monthText));
+    }
 
     // The year, once, wherever it changes — so a window spanning December
     // into January is not two ambiguous "Jan"s.
-    if (c === 0 || yy !== Number(shown[c - 1].month.split('-')[0])) {
+    //
+    // Both halves read the FORMATTED year and not `yy`. Printing `String(yy)`
+    // put a Gregorian number under a localised month name: `مرداد` above
+    // `2026`, with this same chart's tooltip 20px away saying `مرداد ۱۴۰۵` —
+    // one column, two calendars, 621 years apart. And the change of year is
+    // the formatted one too, because a Persian year turns at Farvardin: keyed
+    // on `yy` the caption appeared at the January column, which is the middle
+    // of a Persian year and not the start of anything.
+    const yearText = formatYear(monthDate);
+    const prev = shown[c - 1];
+    const prevYear = prev
+      ? formatYear(new Date(Number(prev.month.slice(0, 4)),
+                            Number(prev.month.slice(5, 7)) - 1, 15))
+      : null;
+    // ...and only under a column that HAS its month caption. The year is here
+    // to tell two "Jan"s apart, so with no month name above it there is
+    // nothing for it to disambiguate — and a bare year over an unnamed column
+    // reads as a label for the column rather than for the run of them. This
+    // was visible in about 30 of 48 locales before the last column was
+    // reserved above, which is where it usually landed.
+    if (yearText !== prevYear && drawn.has(c)) {
+      // Placed by the month above it. The month is clamped because a centred
+      // caption hangs off the edge once it is not three Latin characters, and
+      // the year is localised now too — `พ.ศ. 2569`, `AP ۱۴۰۵`, `2026年`.
+      //
+      // It takes the MONTH's x rather than clamping itself. Clamped
+      // separately it is clamped against its OWN width at its own 8.5px, so
+      // wherever either clamp binds the two land on different x and the year
+      // stops sitting under the month it qualifies. That is also the one thing
+      // the `no year stands over an unnamed column` check compares exactly, so
+      // it would have surfaced as a confusing failure of a check about
+      // something else. A year here is an annotation on a month caption; it
+      // has no position of its own.
       svg.appendChild(el('text', {
-        x: cx, y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
+        x,
+        y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
         fill: dim, 'fill-opacity': 0.75,
-      }, String(yy)));
+      }, yearText));
     }
 
     // Through the row order, not `forEach`'s index: `computeWeekdayByMonth`
@@ -772,14 +915,15 @@ export function weekdayMonthChart(months, color,
         svg.appendChild(title(el('circle', {
           cx, cy, r: 3, fill: 'none', stroke: dim, 'stroke-width': 1,
           'stroke-opacity': 0.5,
-        }), `${m.month} ${FULL[r]}: 0 of ${d.total}`));
+        }), `${formatStamp(m.month)} ${FULL[r]}: 0 of ${d.total}`));
         return;
       }
 
       svg.appendChild(title(el('circle', {
         cx, cy, r: 3 + d.rate * (maxR - 3),
         fill: color, 'fill-opacity': 0.3 + 0.7 * d.rate,
-      }), `${m.month} ${FULL[r]}: ${d.completed} of ${d.total} (${Math.round(d.rate * 100)}%)`));
+      }), `${formatStamp(m.month)} ${FULL[r]}: ${d.completed} of ${d.total} `
+        + `(${Math.round(d.rate * 100)}%)`));
     });
   });
 
@@ -895,21 +1039,7 @@ export function survivalChart(points, color, { width = 720, height = 190 } = {})
   return svg;
 }
 
-function shiftISO(isoDate, days) {
-  const [y, m, d] = isoDate.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  date.setDate(date.getDate() + days);
-  const yy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  return `${yy}-${mm}-${dd}`;
-}
 
-/** Parse 'YYYY-MM-DD' as a local date (not UTC, which would shift westward). */
-function fromISOLocal(s) {
-  const [y, m, d] = s.split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
 
 /* ---------- history bar chart ---------- */
 
@@ -950,8 +1080,8 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
     const y = pad.top + h - barH;
 
     const label = showPercent
-      ? `${b.bucket}: ${b.completed}/${b.total} (${Math.round(v * 100)}%)`
-      : `${b.bucket}: ${b.completed}`;
+      ? `${formatStamp(b.bucket)}: ${b.completed}/${b.total} (${Math.round(v * 100)}%)`
+      : `${formatStamp(b.bucket)}: ${b.completed}`;
 
     svg.appendChild(title(el('rect', {
       x, y, width: barW, height: Math.max(barH, v > 0 ? 2 : 0), rx: 3, fill: color,
@@ -959,16 +1089,42 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
   });
 
   // Label a subset of buckets so text never overlaps.
-  const every = Math.ceil(buckets.length / Math.max(1, Math.floor(w / 62)));
+  //
+  // The budget is MEASURED from the labels rather than the fixed 62px that
+  // stood here. 62 was safe while this drew the raw `2026-08-01` — 49.6px, the
+  // same in every locale — and stopped being safe the moment the label became
+  // `formatStamp`'s output, which is unbounded: `26 de dez. de 2026` is 78.9px
+  // in pt-BR and overlapped its neighbour by 4.5px at a 328px card, which is a
+  // card on a phone. Same estimator the row gutters use, for the same reason.
+  // No `WIDTH_SAFETY`, and this is the third call site to say so — it decides
+  // how many labels to DROP, which is a degradation, not a reservation. The
+  // margin makes the chart pessimistic about its own text and thins an axis
+  // that had room: at a 328px card with `Jun 2026`-shaped labels it costs
+  // about one label slot, so the axis labels one bucket in three where one in
+  // two fits. Over-reserving costs pixels; over-degrading costs the label.
+  const AXIS_SIZE = 9.5;
+  const axisLabels = buckets.map((b) => formatStamp(b.bucket));
+  const widestAxis = Math.max(
+    1, ...axisLabels.map((t) => estimateTextWidth(t, AXIS_SIZE))
+  );
+  const every = Math.ceil(
+    buckets.length / Math.max(1, Math.floor(w / (widestAxis + 10)))
+  );
   buckets.forEach((b, i) => {
     if (i % every !== 0) return;
     svg.appendChild(el('text', {
       x: pad.left + i * slot + slot / 2,
       y: height - 12,
       'text-anchor': 'middle',
-      'font-size': 9.5,
+      'font-size': AXIS_SIZE,
       fill: dim,
-    }, b.bucket));
+      // The same `formatStamp` the card's own range readout uses. These were
+      // the raw bucket key while the header above them was formatted, so one
+      // card read `Jul 21, 2026 → Aug 16, 2026` over an axis of `2026-07-21` —
+      // which is the "one card, two conventions" this whole change exists to
+      // end, reintroduced one card over. On master both halves were raw and
+      // at least AGREED.
+    }, axisLabels[i]));
   });
 
   return svg;
@@ -1007,8 +1163,47 @@ export function weekdayChart(days, color,
   const slot = w / 7;
   const barW = Math.min(46, slot * 0.6);
 
-  const FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const FULL = weekdayNames('long');
+  // Seven captions across one card, so unlike the row gutters this cannot grow
+  // to fit — it has to choose a label that does. `Sun Mon Tue` fits anywhere;
+  // `domingo segunda terça` and `Jumatatu Jumanne Jumatano` do not, and
+  // measured at 360px in pt-PT and sw-KE they overlapped their neighbours.
+  //
+  // Narrow always fits (one or two characters in every locale checked) and its
+  // ambiguity is resolved by the tooltip, which carries the full name — the
+  // same trade the calendar heatmap's rows already make. Preferring short
+  // where it fits means English and most of Europe are unchanged.
+  // The size the labels are DRAWN at, and the size the fit below is decided
+  // for. These are one constant because they are one number: measure at 10 and
+  // paint at 11 and the chart has chosen a label for a smaller text than the
+  // one that appears, which fits in English either way and clips elsewhere.
+  const AXIS_SIZE = 11;
+  // No `WIDTH_SAFETY`, and that is the same rule `streakChart` states below:
+  // RESERVING space uses the margin, because a reservation that is short clips
+  // a word; DECIDING TO DEGRADE does not, because there the margin makes the
+  // chart pessimistic about itself and throws away a label that would have
+  // fitted. This is only ever asked to decide a degradation — short vs narrow,
+  // and then whether to shrink — and with the margin applied pt-PT gave up
+  // `segunda` for `S T Q Q S S D` at 438px, where the real crossover is about
+  // 360. An axis naming three S's and two Q's is not a denser axis; it is one
+  // you have to count along, which is the same argument the shrink loop below
+  // makes for preferring small type over thinning.
+  const fits = (names, size) =>
+    names.every((t) => estimateTextWidth(t, size) <= slot);
+
+  const shortNames = weekdayNames('short');
+  const SHORT = fits(shortNames, AXIS_SIZE) ? shortNames : weekdayNames('narrow');
+
+  // ...and if even the narrow names do not fit, shrink rather than overlap.
+  // Seven captions across one card cannot be thinned the way a time axis can —
+  // a weekday axis with three of its seven days labelled is not a denser axis,
+  // it is one you have to count along — so the last resort is type size, with
+  // a floor below which it would not be readable anyway. Reached only at
+  // widths no card uses; without it, ca-ES `dl. dt. dc.` and vi-VN `T2 T3`
+  // overlap where English `M T W` has room to spare.
+  const LABEL_FLOOR = 8;
+  let labelSize = AXIS_SIZE;
+  while (labelSize > LABEL_FLOOR && !fits(SHORT, labelSize)) labelSize -= 0.5;
 
   order.forEach((weekday, i) => {
     const d = days[weekday];
@@ -1024,7 +1219,7 @@ export function weekdayChart(days, color,
 
     svg.appendChild(el('text', {
       x: pad.left + i * slot + slot / 2, y: height - 10,
-      'text-anchor': 'middle', 'font-size': 11, fill: dim,
+      'text-anchor': 'middle', 'font-size': labelSize, fill: dim,
     }, SHORT[weekday]));
   });
 
@@ -1040,8 +1235,8 @@ export function weekdayChart(days, color,
 export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   const rowH = 30;
   const pad = { top: 6, right: 8, bottom: 6, left: 8 };
-  const LABEL_W = 168;   // room for "12 Mar – 24 Mar"
   const COUNT_W = 42;
+  const LABEL_SIZE = 11.5;
 
   // Select by length, then present by date, newest first. Two different
   // questions: "which were my best runs" picks the rows, "when were they"
@@ -1071,6 +1266,65 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   // now, so the first row is the most recent streak rather than the biggest,
   // and scaling the bars to it would push longer ones off the chart.
   const max = Math.max(...top.map((s) => s.length));
+
+  // Measured, not fixed. This was `168 // room for "12 Mar – 24 Mar"`, written
+  // when the label was English and never revisited when it was localised:
+  // vi-VN's `28 Tháng 12 2025 – 5 Tháng 1 2026` measures 189.8px on a 328px
+  // card and painted 14px INTO the bar it is supposed to sit beside. The same
+  // fixed-gutter-against-a-localised-label defect this file fixes in three
+  // other charts, left standing in the fourth.
+  //
+  // `gutterFor` is the wrong tool here and the arithmetic says why: on a 328px
+  // card its ceiling — 60% of the plot — is 166.8, BELOW this 168 floor. A
+  // ceiling under a floor is not a bound; the floor simply wins, the
+  // measurement is discarded, and the gap comes off the top, leaving a label
+  // narrower than a fixed number would have given it at the one width this
+  // matters most. Reach for it here again and check that pair first.
+  //
+  // So the label gets what the card can spare and never less than it had, and
+  // where that is still not enough the TYPE shrinks — the same last resort
+  // `weekdayChart` uses, for the same reason: a label painted over its own bar
+  // is worse than a small one. lv-LV's
+  // `2025. gada 28. dec. – 2026. gada 4. janv.` needs about 8px of type on a
+  // phone; master painted 47.6px of it across the bar.
+  const LABEL_GAP = 8;
+  // 8, as `weekdayChart`'s is — a size chosen for legibility, and it must not
+  // be lowered to accommodate an overflow. The Devanagari and Bengali numeric
+  // forms appear to miss by two pixels here, and that is `estimateTextWidth`
+  // billing their DIGITS at the Indic letter rate, 1.77x the same string in
+  // ASCII; the answer is to classify a numeral as a numeral, which `dates.js`
+  // now does. Measured across 18 locales at five widths from 200px up, no
+  // label overflows its reservation — the loop below is not reached at all,
+  // because the ISO fallback above has already made the label fit.
+  const LABEL_FLOOR = 8;
+  const widestOf = (set, size) =>
+    Math.max(0, ...set.map((t) => estimateTextWidth(t, size)));
+
+  // RESERVING uses the safety margin, because a reservation that is short
+  // clips a word.
+  const wordy = top.map((s) => rangeLabel(s.start, s.end));
+  const LABEL_W = Math.max(168,
+    Math.min(Math.ceil(widestOf(wordy, LABEL_SIZE) * WIDTH_SAFETY) + LABEL_GAP,
+             (width - pad.left - pad.right - COUNT_W) * 0.55));
+
+  // The FORMAT is chosen before the type size, because writing the same dates
+  // in digits is a smaller loss than making them unreadable. lv-LV's
+  // `2025. gada 28. dec. – 2026. gada 4. janv.` fits no card at any legible
+  // size; `2025-12-28 – 2026-01-04` says the same thing and fits.
+  const labels = widestOf(wordy, LABEL_SIZE) <= LABEL_W - LABEL_GAP
+    ? wordy
+    : top.map((s) => rangeLabel(s.start, s.end, 'short'));
+
+  // DEGRADING does not. The margin is there so a reservation is never short;
+  // applied to a decision about whether to shrink the type it makes the chart
+  // pessimistic about itself and shrinks labels that would have fitted — en-US
+  // went to the 8px floor over about two pixels of real overflow. Over-
+  // reserving a gutter costs pixels; over-reserving here costs legibility.
+  let labelSize = LABEL_SIZE;
+  while (labelSize > LABEL_FLOOR && widestOf(labels, labelSize) > LABEL_W - LABEL_GAP) {
+    labelSize -= 0.5;
+  }
+
   const barX = pad.left + LABEL_W;
   const barMax = width - pad.right - COUNT_W - barX;
 
@@ -1081,8 +1335,8 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
 
     // date range, e.g. "21 Apr – 18 May 2026"
     svg.appendChild(el('text', {
-      x: pad.left, y: cy + 4, 'font-size': 11.5, fill: dim,
-    }, formatRange(s.start, s.end)));
+      x: pad.left, y: cy + 4, 'font-size': labelSize, fill: dim,
+    }, labels[i]));
 
     // track + bar
     svg.appendChild(el('rect', {
@@ -1091,7 +1345,7 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
     svg.appendChild(title(el('rect', {
       x: barX, y: cy - 7, width: w, height: 14, rx: 4, fill: color,
       'fill-opacity': 0.45 + 0.55 * (s.length / max),
-    }), `${s.length} days: ${s.start} to ${s.end}`));
+    }), `${s.length} days: ${formatStamp(s.start)} to ${formatStamp(s.end)}`));
 
     // length
     svg.appendChild(el('text', {
@@ -1103,30 +1357,31 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   return svg;
 }
 
-const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
 /**
- * "21 Apr – 18 May 2026", collapsing to a single date for one-day streaks and
- * dropping the repeated year.
+ * "21 Apr – 18 May 2026" — what the two ends share is `Intl`'s decision, not
+ * ours, and so is the field order and the calendar.
  */
-function formatRange(startISO, endISO) {
-  const [sy, sm, sd] = startISO.split('-').map(Number);
-  const [ey, em, ed] = endISO.split('-').map(Number);
-
-  const s = `${sd} ${MONTH_SHORT[sm - 1]}`;
-  const e = `${ed} ${MONTH_SHORT[em - 1]}`;
-
-  if (startISO === endISO) return `${s} ${sy}`;
-  if (sy !== ey) return `${s} ${sy} – ${e} ${ey}`;
-  return `${s} – ${e} ${ey}`;
+function rangeLabel(startISO, endISO, style) {
+  return formatDayRange(fromISOLocal(startISO), fromISOLocal(endISO), style);
 }
 
 /* ---------- frequency bubble chart ---------- */
 
 export function frequencyChart(months, color, { width = 720 } = {}) {
   const rowH = 26;
-  const pad = { top: 18, right: 12, bottom: 8, left: 58 };
+  const ROW_LABEL_SIZE = 10.5;
+  const ROW_LABEL_GAP = 8;
+  // Sized from the labels, like `weekdayMonthChart`'s. These rows used to read
+  // the raw `2026-06`, which is seven characters in every language; they read
+  // `formatStamp` now, and that is `Jun 2026` in English, `2026年6月` in
+  // Japanese, `2026. g. jūn.` in Latvian and `أغسطس ٢٠٢٦` in Arabic. Measured
+  // in Chrome at 360px: the last three overflowed a fixed 58px gutter by up to
+  // 13px, which is a label running off the left of the card.
+  const rowLabels = months.map((m) => formatStamp(m.month));
+  const pad = {
+    top: 18, right: 12, bottom: 8,
+    left: gutterFor(rowLabels, ROW_LABEL_SIZE, 58, ROW_LABEL_GAP, width * 0.32),
+  };
 
   const maxPerWeek = Math.max(
     1,
@@ -1163,8 +1418,9 @@ export function frequencyChart(months, color, { width = 720 } = {}) {
   shown.forEach((m, r) => {
     const cy = pad.top + r * rowH + rowH / 2;
     svg.appendChild(el('text', {
-      x: pad.left - 8, y: cy + 4, 'text-anchor': 'end', 'font-size': 10.5, fill: dim,
-    }, m.month));
+      x: pad.left - ROW_LABEL_GAP, y: cy + 4, 'text-anchor': 'end',
+      'font-size': ROW_LABEL_SIZE, fill: dim,
+    }, rowLabels[r]));
 
     for (let n = 1; n <= maxPerWeek; n++) {
       const count = m.counts[n] ?? 0;
@@ -1173,7 +1429,7 @@ export function frequencyChart(months, color, { width = 720 } = {}) {
       svg.appendChild(title(el('circle', {
         cx: pad.left + (n - 0.5) * colW, cy, r: radius,
         fill: color, 'fill-opacity': 0.35 + 0.65 * (count / maxCount),
-      }), `${m.month}: ${count} week(s) with ${n} completion(s)`));
+      }), `${rowLabels[r]}: ${count} week(s) with ${n} completion(s)`));
     }
   });
 

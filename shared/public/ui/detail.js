@@ -15,7 +15,10 @@ import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
 import {
   card, cardInnerWidth, segmented, subheading, windowedChart,
 } from '/shared/ui/components.js';
-import { addDaysISO, freqLabel, targetLabel, todayISO } from '/shared/ui/dates.js';
+import {
+  addDaysISO, formatDateShort, formatStamp, freqLabel, fromISOLocal,
+  targetLabel, todayISO,
+} from '/shared/ui/dates.js';
 import { isAvoided } from '/shared/ui/toggle.js';
 import { openDayDialog } from '/shared/ui/day-dialog.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
@@ -180,7 +183,7 @@ function render(stats, entries) {
     // only pages once the vertices would overlap.
     density: 'point',
     width: chartWidth,
-    labelOf: (p) => p.date,
+    labelOf: (p) => formatStamp(p.date),
     redraw: () => open(habit.id),
     render: (slice) => scoreChart(slice, color, { width: chartWidth }),
   });
@@ -267,7 +270,16 @@ function render(stats, entries) {
   // and answerable; the future cells are drawn but empty.
   const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
   const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
-  navLabel.textContent = `${calWindow.start} → ${calLast}`;
+  // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
+  // says "Completion calendar" reads as a serial number.
+  //
+  // Written, not ISO. Every range readout goes through one of the two
+  // formatters now, including `windowedChart`'s — which used to show the raw
+  // bucket key, so a card's header read `2026-07-03 → 2026-08-16` above an axis
+  // saying `Jul 3, 2026`.
+  navLabel.textContent =
+    `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
+    `${formatDateShort(fromISOLocal(calLast))}`;
 
   const skipSet = new Set(entries.filter((e) => e.status === 'skip').map((e) => e.date));
   const notesByDate = Object.fromEntries(
@@ -355,7 +367,7 @@ function render(stats, entries) {
     items: stats.history,
     density: 'bar',
     width: chartWidth,
-    labelOf: (b) => b.bucket,
+    labelOf: (b) => formatStamp(b.bucket),
     redraw: () => open(habit.id),
     render: (slice) => historyChart(slice, color, {
       showPercent: historyMode() === 'percent',
@@ -386,7 +398,7 @@ function render(stats, entries) {
       items: stats.weekdayByMonth,
       density: 'circle',
       width: chartWidth,
-      labelOf: (m) => m.month,
+      labelOf: (m) => formatStamp(m.month),
       redraw: () => open(habit.id),
       render: (slice) => weekdayMonthChart(slice, color,
         { width: chartWidth, weekStart: settings.get('weekStart') }),
@@ -406,7 +418,7 @@ function render(stats, entries) {
       items: stats.frequency,
       density: 60,   // ~12 rows on a typical card
       width: chartWidth,
-      labelOf: (m) => m.month,
+      labelOf: (m) => formatStamp(m.month),
       redraw: () => open(habit.id),
       render: (slice) => frequencyChart(slice, color, { width: chartWidth }),
     });
