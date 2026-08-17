@@ -25,13 +25,20 @@ class ActionReceiver : BroadcastReceiver() {
 
         // Snooze answers nothing, so it leaves this receiver before the outbox
         // is reached. It is asked again HERE rather than trusted from the
-        // button's existence: the notification was built when the alarm fired
-        // and may be pressed hours later, and by then the hour can have run out
-        // of the day. A refused snooze leaves the notification standing — the
-        // day is still unanswered, and taking it away would be the loss the
-        // button was pressed to avoid.
+        // button's existence, and it is asked about `date` — the day this
+        // notification is about — rather than about the day of the press. A
+        // notification is not removed by pressing an action and has no timeout,
+        // so this one can be pressed at 00:30 the next morning; judged by the
+        // press alone, an hour "fits" and the re-post then asks about a day
+        // nobody has lived while the day it named leaves the shade unanswered.
+        // Yes / No / Skip below write to `date`, so snooze was the one action
+        // that could change the subject.
+        //
+        // A refused snooze leaves the notification standing — the day is still
+        // unanswered, its other three buttons are still correct about it, and
+        // taking it away would be the loss the press was meant to avoid.
         if (intent.action == Notifications.ACTION_SNOOZE) {
-            val armed = Reminders.snooze(context, habitId)
+            val armed = Reminders.snooze(context, habitId, date)
             if (armed) Notifications.cancel(context, Notifications.notificationId(habitId))
             Toast.makeText(
                 context,

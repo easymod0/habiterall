@@ -37,8 +37,16 @@ class ReminderReceiver : BroadcastReceiver() {
         // requiring connectivity meant an offline morning silently produced no
         // reminder at all. The worker falls back to the cached habit and, if
         // it cannot check today's entries, errs toward notifying.
+        //
+        // The day travels with it when there is one. A snooze names the day it
+        // was armed for; the daily alarm names none, because it means whichever
+        // day it arrives on. See `Reminders.stillAboutToday`.
+        val data = Data.Builder().putLong(Notifications.EXTRA_HABIT_ID, habitId)
+        intent.getStringExtra(Notifications.EXTRA_DATE)
+            ?.let { data.putString(Notifications.EXTRA_DATE, it) }
+
         val request = OneTimeWorkRequestBuilder<NotifyWorker>()
-            .setInputData(Data.Builder().putLong(Notifications.EXTRA_HABIT_ID, habitId).build())
+            .setInputData(data.build())
             .build()
 
         WorkManager.getInstance(context)
@@ -106,6 +114,21 @@ class ReminderReceiver : BroadcastReceiver() {
             }
 
             val today = LocalDate.now().toString()
+            // A snoozed alarm names the day it was armed for, and by the time it
+            // arrives that may no longer be today. Arming is not the last chance
+            // to be wrong here: `setAlarm` falls back to `setAndAllowWhileIdle`
+            // when exact alarms are not permitted — the ordinary case on Android
+            // 14+, where `SCHEDULE_EXACT_ALARM` is not granted by default — and
+            // an inexact alarm armed at 22:52 for 23:52 can be delivered at
+            // 00:03. Posting then would ask about a day nobody has lived, under
+            // a date the press never meant. Dropped rather than re-dated, which
+            // is the same answer `dueReminders` gives a reminder whose window
+            // has straddled midnight; the habit's own alarm asks again at its
+            // own time.
+            val about = inputData.getString(Notifications.EXTRA_DATE)
+            if (!Reminders.stillAboutToday(about, today)) {
+                return drop(habitId, "a snoozed reminder arrived after the day it was for")
+            }
             // Already answered today — a reminder would be noise. If the check
             // itself fails we notify anyway: a redundant reminder is a far
             // smaller harm than a missed one.

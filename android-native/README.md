@@ -162,14 +162,24 @@ body does everywhere else and what the reminder should do when the answer is
 **"In 1 hour" is the answer to the reminder being right and the moment being
 wrong.** It records nothing — it takes the notification away and posts the same
 one an hour later, as a second alarm beside the habit's daily one. An hour of
-real time, not of wall clock, and never past local midnight: late in the evening
-there is no snooze to give, so the button is absent and the day's own reminder
-comes back tomorrow untouched. The re-post asks `needsReminder` again, so a day
-answered in between stays quiet.
+real time, not of wall clock, and always inside **the day the reminder is
+about**: late in the evening, or on a notification left over from yesterday,
+there is no snooze to give, so the button is absent (and a press is refused, in
+case it was drawn hours earlier). The day rides on the alarm and is checked
+again at the moment of posting, because an inexact alarm — the ordinary case on
+Android 14+ — can be delivered minutes into the next day. The re-post asks
+`needsReminder` again, so a day answered in between stays quiet.
 
-The shade shows three action buttons, so on an account that uses skip days this
-one is the fourth and the collapsed view drops it. That is deliberate — the
-other three answer the day and this one only defers it.
+The collapsed shade shows three action buttons and drops the tail, which is why
+snooze is added last. A yes/no habit and an avoided one spend two buttons on Yes
+and No, so with skip days on they have four and lose the snooze; a measurable
+habit spends one on the number pad and keeps all three. Deliberate — the others
+answer the day and this one only defers it.
+
+A pending snooze does not survive a reboot or a force-stop: `rescheduleAll`
+re-arms the daily alarms from the cache and nothing re-arms a snooze. That is
+the trade rather than an omission — the alternative is persisting scheduled
+state to deliver a deferral after the interruption it deferred.
 
 Reminder times are stored **on the server** as a field on the habit, so they
 follow your account to a new phone and the web UI can set them too.
@@ -286,8 +296,14 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   server was still asking about. And `snoozeUntil`, which is the other half of
   the DST question: a reminder time is a wall-clock promise, while "in an hour"
   is a duration — so on the night the clocks go back a snooze is one hour later
-  and not two. It refuses rather than re-dates when the hour would cross local
-  midnight.
+  and not two. It refuses rather than re-dates when the hour would leave the day
+  the reminder is about, including the case that reads as a judgement call and
+  is not: a press at 00:30 on a notification still in the shade from yesterday.
+- **`ReminderActionsTest`** — which buttons a reminder offers and in what order.
+  Pulled out of the builder because a decision that exists only inside
+  `addAction` calls cannot be tested, and every wrong arrangement of it still
+  posts a perfectly good notification. The tail is what the shade drops, so the
+  order decides which button a user does not get.
 - **`ReminderTimeTest`** — the time parser, case for case with
   `shared/test/time.test.js`. Two parsers with one contract only stay honest if
   both are held to the same examples; `12 am` versus `12 pm` is the one that

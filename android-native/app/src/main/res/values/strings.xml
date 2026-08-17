@@ -31,9 +31,11 @@
     <string name="recorded_slipped">Marked as a slip</string>
     <string name="recorded_skip">Skipped</string>
     <string name="snoozed">Asking again in an hour</string>
-    <!-- A snooze is never re-dated onto tomorrow, so late in the evening there
-         is none to give. The day's own reminder is untouched. -->
-    <string name="snooze_too_late">Too late to snooze — asking again tomorrow</string>
+    <!-- A snooze is never re-dated onto another day, so there is none to give
+         either late in the evening or on a notification left over from
+         yesterday. One sentence covers both: the day's own reminder is
+         untouched either way. -->
+    <string name="snooze_too_late">Too late to snooze that day</string>
     <string name="invalid_amount">Enter a number of zero or more</string>
 
     <string name="count_hint">Amount</string>
