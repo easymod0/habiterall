@@ -59,7 +59,11 @@ function initTopBar() {
   // which made a colour change cost two requests and, when they did not land,
   // leave the old theme's colours on screen. The charts now name the CSS
   // variables instead, so the cascade does this.
-  $('#btn-theme').addEventListener('click', () => toggleTheme());
+  $('#btn-theme').addEventListener('click', () => {
+    // Reported, not discarded: `save` drops a 429, a 500 or a 403, and the
+    // button used to write localStorage and could not fail at all.
+    toggleTheme().then((r) => { if (!r?.ok) toast(r?.error ?? 'Could not save the theme'); });
+  });
 }
 
 /**
@@ -128,7 +132,22 @@ export async function start(adapter) {
   // be taken now or it is gone by the time there is somewhere to use it.
   const opening = routes.current();
 
-  initTheme();
+  // The button is this module's, so the label is written here; `theme.js`
+  // only says what it should read. Two modules reaching for one id is what
+  // `test/ui-modules.test.js` refuses.
+  initTheme({
+    onLabel: (text, glyph) => {
+      const button = $('#btn-theme');
+      button.title = text;
+      button.setAttribute('aria-label', text);
+      // The VISIBLE half, and the only one a phone has: `title` needs a
+      // pointer to hover and `aria-label` needs a screen reader. With a
+      // static glyph the one press that cannot change the pixels — back to
+      // `system` from a value the device already matches — looked like a
+      // dead control on the app's primary target.
+      button.textContent = glyph;
+    },
+  });
   connectivity.refreshOfflineBadge();
 
   try {
@@ -139,6 +158,10 @@ export async function start(adapter) {
 
     // Preferences are server-side, so they must arrive before the first
     // render or the dashboard paints with the wrong day order and flips.
+    // `ui/theme.js` reconciles itself from the reply this makes: the route
+    // says which keys the account actually HOLDS, which is the one question a
+    // cached value cannot answer. There used to be a `migrateTheme()` call
+    // here that re-asked the same route a second time.
     await settings.init();
 
     if (opening.view === 'habit') {

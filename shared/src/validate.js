@@ -275,6 +275,11 @@ export function entryWrite(habit, parsed, { UNSET, SKIP }) {
  * trusted, and a normaliser keeps it that way.
  */
 export const SETTING_VALUES = {
+  // `system` follows the OS, and is the default. It has to be a real value
+  // rather than the absence of one: once the toggle had been pressed there was
+  // no way back to following the system, so a machine that goes dark at sunset
+  // stopped doing so with no control that said why.
+  theme: ['system', 'light', 'dark'],
   dayOrder: ['newest-right', 'newest-left'],
   weekStart: ['monday', 'sunday'],
   confirmDelete: [true, false],
@@ -360,6 +365,7 @@ export const SETTING_VALUES = {
  * the reason any of this exists — what the rows in the same file MEAN.
  */
 export const PORTABLE_SETTINGS = Object.freeze([
+  'theme',
   'dayOrder',
   'weekStart',
   'confirmDelete',

@@ -108,6 +108,23 @@ function timeZoneOptions() {
  * @type {Record<string, SettingDef>}
  */
 export const SETTINGS = {
+  theme: {
+    section: 'Dashboard',
+    label: 'Theme',
+    help: 'Light, dark, or whatever this device is set to.',
+    type: 'select',
+    // `system` rather than a light/dark pair, because "follow the device" is a
+    // state and not the absence of one. The old two-way toggle wrote
+    // localStorage, so pressing it once was irreversible: there was no way back
+    // to following the system, and a machine that goes dark at sunset stopped
+    // doing so with nothing on screen to say why.
+    default: 'system',
+    options: [
+      { value: 'system', label: 'Follow this device' },
+      { value: 'light', label: 'Light' },
+      { value: 'dark', label: 'Dark' },
+    ],
+  },
   dayOrder: {
     section: 'Dashboard',
     label: 'Day order',
@@ -469,11 +486,148 @@ function readCache() {
   }
 }
 
-function writeCache(values) {
+/**
+ * @param {Record<string, any>} values
+ * @param {import('./settings.js').ApplyMeta} [meta]
+ */
+function writeCache(values, meta) {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(values));
   } catch {
     // Private browsing or a full quota; the server copy still stands.
+  }
+  // After the store, and outside its try: a setting the browser APPLIES to
+  // itself has to follow the value whether or not localStorage would take it.
+  //
+  // Each one guarded, for the reason `adopt`'s listener loop gives two
+  // functions down — "a listener must not break a save". This loop sits on the
+  // chokepoint EVERY write goes through, so without it an applier that threw
+  // turned a successful server write into a rejected `save()` or `set()`,
+  // and `app.js`'s theme handler has no `.catch()`, so it would be an
+  // unhandled rejection with no toast.
+  notifyAppliers(values, meta);
+}
+
+/**
+ * Hand the values to everything that paints itself from them.
+ *
+ * `meta.stored` is the server's OWN reply — the keys it says it holds, before
+ * `sanitise` fills the gaps — and it is present only when this update came
+ * from a response. That distinction cannot be recovered downstream and one
+ * applier genuinely needs it: `ui/theme.js` keeps a durable note of what this
+ * device last said, and the only thing that may retire that note is the server
+ * confirming it. A cache write is not confirmation; an offline save performs
+ * one, which is how a press made on a train was undone by reopening the app.
+ *
+ * Guarded for the reason the loop it replaced was: this runs on the chokepoint
+ * every write goes through, so an applier that throws must not turn a
+ * successful server write into a rejected `save()`.
+ */
+/**
+ * @param {Record<string, any>} values
+ * @param {ApplyMeta} [meta]
+ */
+function notifyAppliers(values, meta) {
+  for (const fn of appliers) {
+    try {
+      fn(values, meta);
+    } catch {
+      /* an applier must not break a save either */
+    }
+  }
+}
+
+/**
+ * @typedef {{stored?: Record<string, unknown>, full?: boolean, wrote?: string[]}} ApplyMeta
+ *   `stored` is the server's own reply — the keys it names, before `sanitise`
+ *   fills the gaps — and is present only when the update came from a response
+ *   rather than from a cache write. `full` says that reply was the account's
+ *   WHOLE state (the boot GET) rather than one write's accepted patch, which
+ *   is the only thing that can answer "does the account hold this key at all".
+ *   `wrote` is the keys THIS DEVICE just sent, which is not recoverable from
+ *   `stored`: the cloud edition answers a write with the whole blob, so a
+ *   reply naming `theme` says nothing about whether this write was about it.
+ *   `ui/theme.js` needs the difference — a local write that named the theme
+ *   is newer than an unconfirmed press, and one that did not is not.
+ */
+/** @type {((values: Record<string, any>, meta?: ApplyMeta) => void)[]} */
+const appliers = [];
+
+/**
+ * Follow a setting the browser applies to ITSELF, rather than reading at render
+ * time.
+ *
+ * Distinct from `onChange`, which fires only when the server disagreed with
+ * what was sent — that is the dialog's cue to redraw, and it says nothing about
+ * an ordinary save. A theme has to follow every path the cache moves by: the
+ * first read from localStorage, the answer to `init()`, a `set`, a `save`, a
+ * `saveAll` and a `reset`. Six call sites, or one chokepoint, and `writeCache`
+ * is already on all six.
+ *
+ * The callback is invoked immediately with the values in hand, because the
+ * caller registering before the first paint is the whole point.
+ */
+/**
+ * How long a settings request may take before it counts as unreachable.
+ *
+ * Taken from `ui/api.js`'s bound rather than invented, because it is the same
+ * question — and these calls do NOT go through `api()`, which is how they came
+ * to have no bound at all. Measured: a PUT accepted and never answered (a
+ * stale tunnel, a container that has stopped replying) left `save()` pending
+ * indefinitely, so a caller awaiting it waited forever and the write reached
+ * neither the server nor the outbox. Chrome imposes no ceiling of its own.
+ *
+ * A settings write is a patch of key to value, so it is safe to arrive twice —
+ * which is what makes abandoning one and queueing it a sound answer, where
+ * `POST /habits` would yield a second habit. See `replayable()` in ui/api.js.
+ */
+const REQUEST_MS = 10_000;
+
+/**
+ * An abort signal for one request.
+ *
+ * `AbortSignal.timeout` is Chrome 103 / Firefox 100 / Safari 16, and returning
+ * `undefined` below it does not degrade gracefully — `ui/theme.js` serialises
+ * its writes, so ONE unbounded link wedges every write after it for the life of
+ * the page. `offline.js`'s `isReachable` already hand-rolls this; so does this.
+ */
+const bound = () => {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(REQUEST_MS);
+  }
+  if (typeof AbortController === 'undefined') return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')),
+             REQUEST_MS);
+  return controller.signal;
+};
+
+/**
+ * Did this request run out of time, rather than fail to leave the machine?
+ *
+ * The difference decides whether the write is QUEUED, and getting it wrong is
+ * a data loss with no offline state anywhere near it. Aborting does not recall
+ * a request the server may already have begun, so an abandoned write is of
+ * unknown outcome — filing it in the outbox means replaying it later, over
+ * whatever the user has done since. Measured: a press whose write was
+ * black-holed, then a second press that succeeded, and the next boot painted
+ * the FIRST value because the outbox replayed it. A genuine network failure is
+ * different: nothing left, so nothing can have landed, and queueing is right.
+ *
+ * @param {unknown} err
+ */
+const timedOut = (err) =>
+  err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+
+export function onApply(fn) {
+  appliers.push(fn);
+  // Guarded like the loop in `writeCache`, and for the same reason: this is a
+  // registration made during boot, so a throw here escapes `start()` and takes
+  // the whole app to the error view over a preference that failed to paint.
+  try {
+    fn(load());
+  } catch {
+    /* an applier must not break the boot either */
   }
 }
 
@@ -484,10 +638,28 @@ function writeCache(values) {
 export async function init() {
   cache = readCache();          // so a slow request never flashes defaults
   try {
-    const res = await fetch('/api/settings', { credentials: 'same-origin' });
+    const res = await fetch('/api/settings',
+      { credentials: 'same-origin', signal: bound() });
     if (res.ok) {
-      cache = sanitise(await res.json());
-      writeCache(cache);
+      // The RAW reply travels with the sanitised one. `sanitise` fills every
+      // gap from `defaults()`, so by the time it is cache the difference
+      // between "the account is set to follow the device" and "the account has
+      // never had a theme" is gone — and that difference is the whole of what
+      // `ui/theme.js` needs to know here. It used to re-ask this same route
+      // after boot to recover it.
+      const stored = await res.json();
+      cache = sanitise(stored);
+      // `full: true` — this reply is the account's WHOLE state, which a PUT's
+      // is not. The personal edition answers a write with the accepted PATCH
+      // (`res.json({settings: accepted})`), so a reply that does not mention
+      // `theme` means "this write did not set one", never "the account has
+      // none". Read as the latter it let a device push its own pre-setting
+      // theme over an account another device had already set — on a write
+      // about the calendar zoom. Cloud returns the whole blob, so the bug was
+      // one edition only, which is worse rather than better: the rule has to
+      // hold for both.
+      writeCache(cache, stored && typeof stored === 'object'
+        ? { stored, full: true } : undefined);
     }
   } catch {
     // Offline: keep the cached values.
@@ -530,13 +702,20 @@ export function onChange(fn) {
  * The two editions answer slightly differently (one returns the accepted
  * patch, the other the whole merged object); merging covers both.
  */
-function adopt(serverValues) {
+function adopt(serverValues, wrote = []) {
   if (!serverValues || typeof serverValues !== 'object') return;
   const merged = sanitise({ ...load(), ...serverValues });
-  if (JSON.stringify(merged) === JSON.stringify(load())) return;
+  if (JSON.stringify(merged) === JSON.stringify(load())) {
+    // Nothing MOVED, and the appliers are still told — because "the server
+    // holds this value" is news even when it is the value we already had. It
+    // is what retires `ui/theme.js`'s device note, and the commonest shape of
+    // that is a press whose write the server accepts unchanged.
+    notifyAppliers(load(), { stored: serverValues, wrote });
+    return;
+  }
 
   cache = merged;
-  writeCache(cache);
+  writeCache(cache, { stored: serverValues, wrote });
   for (const fn of listeners) {
     try { fn(cache); } catch { /* a listener must not break a save */ }
   }
@@ -577,11 +756,32 @@ export function set(key, value) {
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body,
+    signal: bound(),
   }).then(async (res) => {
     if (!res.ok) return;
     const payload = await res.json().catch(() => null);
-    adopt(payload?.settings);
-  }).catch(async () => {
+    // `[key]`, exactly as `save` and `saveAll` pass theirs. `wrote` is how an
+    // applier tells "the account says this" from "this device just said this",
+    // and defaulting it to `[]` here says the write came from somewhere else —
+    // so an in-place control for a key any applier watches would reinstate the
+    // defect `reconcile`'s `wrote` check exists to prevent. No caller uses
+    // `set` for such a key today, which is exactly why it is worth being right
+    // about now rather than at the point one does.
+    adopt(payload?.settings, [key]);
+  }).catch(async (err) => {
+    // Out of time is not offline, and this one is fire-and-forget: nobody is
+    // waiting to be told, so an abandoned write is simply dropped rather than
+    // queued to replay over whatever the user does next.
+    //
+    // Note this covers EVERY key `set` writes — `calendarZoom`,
+    // `historyGranularity`, `historyMode` — and not only the theme that
+    // motivated it. The cache has already been written, so the device keeps a
+    // value the server never received and it reverts at the next `init()`.
+    // That is the deliberate trade: a bounded write that may still land must
+    // not also be queued, or the replay lands on top of whatever the user
+    // chose in the meantime, and these are all in-place toggles somebody is
+    // actively working. `save` is the path for a value that must be confirmed.
+    if (timedOut(err)) return;
     // Offline. Queue the write so the choice reaches the server rather than
     // living on this device only — otherwise a preference set on a train
     // silently fails to follow the account.
@@ -600,7 +800,9 @@ export function set(key, value) {
  * control has to be able to say "that was refused" and show what is actually
  * stored, which needs the round trip.
  *
- * @returns {Promise<{ok: boolean, value?: any, error?: string, offline?: boolean}>}
+ * @returns {Promise<{ok: boolean, value?: any, error?: string, offline?: boolean,
+ *   indeterminate?: boolean}>} `indeterminate` means the write ran out of
+ *   time: it may have landed, so it is neither a success nor a verdict.
  */
 export async function save(key, value) {
   const def = SETTINGS[key];
@@ -614,8 +816,22 @@ export async function save(key, value) {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body,
+      signal: bound(),
     });
-  } catch {
+  } catch (err) {
+    // Out of time is NOT offline. See `timedOut`: the request may have landed,
+    // so queueing it means replaying an unknown outcome over whatever came
+    // next. The caller is told instead, and for the theme the durable device
+    // record means the answer survives and is re-sent on the next reconcile.
+    //
+    // `indeterminate` is what lets the caller honour that. Without it a
+    // black-holed write is one undiscriminated `{ok: false}` alongside a 429
+    // and a refused value — so `toggleTheme` deleted the very record this
+    // comment promises will survive, and reverted the theme ten seconds after
+    // the press. A refusal is a VERDICT and this is the absence of one.
+    if (timedOut(err)) {
+      return { ok: false, indeterminate: true, error: 'the server did not answer' };
+    }
     // Offline: keep it here and send it later. Accepting it locally is the
     // lesser evil — the alternative is silently discarding what was typed.
     if (!isValid(def, value)) return { ok: false, error: 'not a valid value' };
@@ -633,7 +849,7 @@ export async function save(key, value) {
     return { ok: false, error: 'the server would not accept that value' };
   }
 
-  adopt(payload.settings);
+  adopt(payload.settings, [key]);
   return { ok: true, value: get(key) };
 }
 
@@ -649,7 +865,9 @@ export async function save(key, value) {
  * refused, instead of finding out at 08:00 tomorrow.
  *
  * @param {Record<string, any>} patch
- * @returns {Promise<{ok: boolean, ignored: string[], error?: string, offline?: boolean}>}
+ * @returns {Promise<{ok: boolean, ignored: string[], error?: string,
+ *   offline?: boolean, indeterminate?: boolean}>} `indeterminate` as in
+ *   `save`: out of time, and so no answer either way.
  */
 export async function saveAll(patch) {
   const keys = Object.keys(patch).filter((key) => SETTINGS[key]);
@@ -664,8 +882,16 @@ export async function saveAll(patch) {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body,
+      signal: bound(),
     });
-  } catch {
+  } catch (err) {
+    // Out of time is not offline — see `timedOut` above `save`.
+    if (timedOut(err)) {
+      return {
+        ok: false, ignored: [], indeterminate: true,
+        error: 'the server did not answer',
+      };
+    }
     // Offline: keep what this browser can judge and send it later, exactly as
     // `save` does. Anything only the server can rule on is accepted here too —
     // discarding what was typed is the worse of the two wrongs, and the queued
@@ -693,16 +919,33 @@ export async function saveAll(patch) {
     };
   }
 
-  adopt(payload.settings);
+  adopt(payload.settings, keys);
   return { ok: true, ignored: payload.ignored ?? [] };
 }
 
-/** Restore every setting to its default, on the server and locally. */
+/**
+ * Restore every setting to its default, on the server and locally.
+ *
+ * The server's answer is announced as a write of EVERY key, which it is: the
+ * account now holds nothing, and a `stored` of `{}` with `full` is how that is
+ * said. Without it this was the one write path that passed no meta at all, so
+ * `ui/theme.js` never reconciled — Restore defaults reset everything except
+ * the theme, whose device record then survived to be pushed back onto the
+ * account it had just been cleared from.
+ *
+ * Only on a reply. Offline the defaults still apply here, but nothing has been
+ * confirmed, and a record retired on a DELETE that never left the machine is
+ * an answer thrown away for nothing.
+ */
 export async function reset() {
   cache = defaults();
   writeCache(cache);
   try {
-    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    const res = await fetch('/api/settings',
+      { method: 'DELETE', credentials: 'same-origin', signal: bound() });
+    if (res.ok) {
+      notifyAppliers(cache, { stored: {}, full: true, wrote: Object.keys(SETTINGS) });
+    }
   } catch { /* offline; defaults still apply here */ }
   return cache;
 }

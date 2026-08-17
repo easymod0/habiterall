@@ -55,6 +55,15 @@ const sw = self;
 // cache also holds `/api/me` answers from before `mode` existed, which the
 // adapter would read as "this instance has no auth".
 //
+// v14: the theme became a setting, which moved app.js, ui/settings.js and
+// ui/theme.js together — and ui/theme.js now IMPORTS `onApply` from
+// ui/settings.js. That makes the bump load bearing rather than tidy: the only
+// refresh a stale shell gets otherwise is `shellFirst`'s revalidate, which is
+// per request and not atomic, so a shell holding the new theme.js and the old
+// settings.js is a module LINK error — `onApply` is not an export of that file
+// — and app-entry.js never evaluates. An installed PWA boots to a blank page.
+// The precache makes the swap all-or-nothing.
+//
 // v6: the habit dialog gained the reminder time picker and the "what the
 // reminder asks" field. index.html is a shell asset, so without a bump an
 // already-installed PWA would keep serving the old markup — and app.js, which
@@ -62,7 +71,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v13';
+const CACHE_VERSION = 'v14';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

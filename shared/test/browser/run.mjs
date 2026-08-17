@@ -63,6 +63,27 @@ if (suites.some((s) => !OFFLINE_SUITES.has(s))) {
 const SUITE_TIMEOUT_MS = Number(process.env.SUITE_TIMEOUT_MS) || 120_000;
 
 /**
+ * The exceptions, and each one is a suite that WAITS on a real bound rather
+ * than on a machine.
+ *
+ * `themecheck` blocks a settings write and then sleeps past `ui/settings.js`'s
+ * ten-second ceiling — twice, because the write that is abandoned and the
+ * write that is refused are different answers and both have to be seen. That
+ * is 25 seconds of deliberate waiting in a suite measured at 93, which leaves
+ * no margin under the shared limit: the kill would land on a healthy run, and
+ * a suite killed mid-flight reads as a failure with no output to say why.
+ *
+ * Raising the shared default instead would buy that margin by removing it from
+ * every other suite, which is the wrong way round — a stuck browser in
+ * `gridcheck` should still be noticed inside a minute.
+ */
+const SUITE_TIMEOUT_OVERRIDES = { themecheck: 180_000 };
+
+const timeoutFor = (suite) =>
+  Number(process.env.SUITE_TIMEOUT_MS) || SUITE_TIMEOUT_OVERRIDES[suite] ||
+  SUITE_TIMEOUT_MS;
+
+/**
  * Run one suite, killing it — and the browser it launched — if it overruns.
  *
  * `detached: true` puts the suite in its own process group, so the kill below
@@ -77,13 +98,14 @@ function runSuite(suite) {
       detached: process.platform !== 'win32',
     });
 
+    const limit = timeoutFor(suite);
     const timer = setTimeout(() => {
-      console.error(`  TIMEOUT after ${SUITE_TIMEOUT_MS / 1000}s — killing ${suite}`);
+      console.error(`  TIMEOUT after ${limit / 1000}s — killing ${suite}`);
       try {
         if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
         else child.kill();
       } catch { /* already gone */ }
-    }, SUITE_TIMEOUT_MS);
+    }, limit);
 
     child.on('exit', (code) => {
       clearTimeout(timer);

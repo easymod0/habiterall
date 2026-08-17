@@ -17,6 +17,7 @@
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, set, state } from '/shared/ui/store.js';
+import { currentTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -281,6 +282,21 @@ function settingHelp(textContent) {
 
 export function openSettings() {
   draft = structuredClone(settings.load());
+
+  // The theme is the one setting this device can hold an answer to that the
+  // account does not have yet, so it is read from `theme.js` rather than from
+  // the cache: `settings.load()` sanitises from defaults and cannot tell "the
+  // account follows the device" from "this device pressed dark and the write
+  // has not been confirmed". Showing the account's view there put "Follow this
+  // device" on the control while the page was painted dark — the dialog
+  // disagreeing with the screen, in the one place you go to find out what the
+  // theme is.
+  //
+  // Seeded BEFORE the baseline, so this does not by itself make the draft
+  // dirty: `applyDraft` writes only keys that changed, and the theme still
+  // reaches the server only if the user touches this control.
+  draft.theme = currentTheme();
+
   baseline = JSON.stringify(draft);
   pendingReset = false;
   renderSettingsBody();

@@ -128,6 +128,120 @@ class AppSettingsDefaultsTest {
         assertTrue(AppSettings().androidRemindersEnabled)
     }
 
+    /**
+     * Every key the registry has is one somebody decided about.
+     *
+     * The tests above name their keys, so a key ADDED to the registry could not
+     * fail any of them — and the mirror it needs would go missing in exactly
+     * the silence this whole file exists to end. `theme` is what showed it up:
+     * it landed as a real setting, the WebView this app embeds now paints from
+     * the account, and nothing here noticed there was no default for it.
+     *
+     * So the registry is enumerated and every key must be in one list or the
+     * other. [notMirrored] is the deliberate half, and each entry carries its
+     * reason — the same shape as `ELSEWHERE` in shared/test/compose.test.js,
+     * and for the same purpose: "we thought about it" has to be written down,
+     * or it is indistinguishable from "we forgot".
+     */
+    private val mirrored = setOf(
+        "dayOrder", "weekStart", "calendarZoom", "skipDays", "questionMarks",
+        "atMostUnlogged", "scoreGranularity", "historyGranularity", "historyMode",
+        "notifyChannels", "confirmDelete",
+    )
+
+    private val notMirrored = mapOf(
+        // Painted by the WebView from the account, through the same cascade the
+        // browser uses. The native chrome around it follows the system theme,
+        // which is Android's own setting and not this account's — so a default
+        // here would be a value nothing on this client reads.
+        //
+        // Two costs come with that and are accepted rather than unnoticed. A
+        // phone in light mode with the account set to dark shows light chrome
+        // around a dark page; and `WebScreen`'s pre-paint background is the
+        // Material one, so that combination flashes light on the way into each
+        // habit — the very flash that colour is set to prevent, corrected for
+        // the wrong theme. Fixing either properly means the phone knowing the
+        // account's theme, which is a mirror, and this list is where that is
+        // refused. If it is ever worth it, the honest shape is an OBSERVATION
+        // (cache the colour the WebView last painted) and not a copy of the
+        // setting — the distinction `notifyTimezone` already draws.
+        "theme" to "the WebView paints it; native chrome follows Android",
+        // Server-sent destinations. The phone's own channel is `notifyChannels`,
+        // which IS mirrored; these three configure Discord, which this client
+        // neither posts to nor holds the credential for.
+        "discordChannelId" to "a server-sent destination this client never posts to",
+        "discordUserId" to "a server-sent destination this client never posts to",
+        "discordWebhook" to "a server-sent destination this client never posts to",
+        // The phone's alarms are local and already on the device's own clock,
+        // so there is nothing here for this to govern. `resolveTimeZone` reads
+        // it for the SERVER's sends only.
+        "notifyTimezone" to "the local alarm is already on this device's clock",
+    )
+
+    /**
+     * The text of the `SETTINGS` object literal, and nothing else in the file.
+     *
+     * Scoped rather than scanned whole. The key pattern is "two spaces, a name,
+     * a brace", which inside this literal means a setting and outside it means
+     * any two-space-indented object — a `CHANNELS`-shaped map, an options
+     * table, a nested literal in some later function — so a scan over the file
+     * would invent settings and demand a mirror decision for each. The floor
+     * below catches the opposite failure and could not catch this one.
+     */
+    private val settingsLiteral: String by lazy {
+        val open = registry.indexOf("\nexport const SETTINGS = {")
+        assertTrue("no `export const SETTINGS = {` in the registry", open >= 0)
+        val close = registry.indexOf("\n};", open)
+        assertTrue("`export const SETTINGS` is not closed by a `};` at column 0", close > open)
+        registry.substring(open, close)
+    }
+
+    @Test
+    fun `every registry key is mirrored or deliberately not`() {
+        val keys = Regex("""\n {2}([a-zA-Z][a-zA-Z0-9]*): \{""")
+            .findAll(settingsLiteral)
+            .map { it.groupValues[1] }
+            .toList()
+
+        // A registry that suddenly parses as nothing would pass every assertion
+        // below it, so the count is checked before the contents.
+        assertTrue(
+            "found ${keys.size} keys in the registry — the shape it is read by " +
+                "must have changed",
+            keys.size >= 12,
+        )
+
+        // ...and the other direction: a name in either list that the registry no
+        // longer has. Without this a setting could be REMOVED from the web and
+        // its entry here would sit on, reading as a decision about something
+        // that does not exist — and if the scan ever widened to match too much,
+        // the lists would still be satisfied and only this would notice.
+        for (listed in mirrored + notMirrored.keys) {
+            assertTrue(
+                "`$listed` is listed here but is not a key in SETTINGS. Either it " +
+                    "was renamed or removed from shared/public/ui/settings.js, or " +
+                    "this list has outlived it.",
+                listed in keys,
+            )
+        }
+
+        for (key in keys) {
+            assertTrue(
+                "`$key` is in SETTINGS and is neither mirrored in AppSettings nor " +
+                    "listed in notMirrored with a reason. Decide which it is: a " +
+                    "setting this client should honour needs a default here, and " +
+                    "one it should not needs a line saying so.",
+                key in mirrored || key in notMirrored,
+            )
+        }
+
+        // And the other direction, so a key REMOVED from the registry does not
+        // leave a mirror behind claiming to track something that is gone.
+        for (key in mirrored + notMirrored.keys) {
+            assertTrue("`$key` is listed here but is no longer in SETTINGS", key in keys)
+        }
+    }
+
     @Test
     fun `a stored value wins over every default`() {
         // The other half of the contract: null means untouched, and anything

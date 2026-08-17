@@ -509,6 +509,93 @@ That combination is nastier than it sounds: the screen showed a value the charts
 were not using, and a chip already drawn as selected does not fire, so the value
 it claimed was set was the one value it would not store.
 
+**...but "every client" is not every setting, and the exception now has a
+list.** A default is a mirror because two clients must agree about what an
+account is set to — which presumes both clients READ the key. Some do not, and
+copying a value nothing consults is a mirror with no second reader: cost with no
+property. `notMirrored` in `AppSettingsDefaultsTest` is that half, and it is a
+map rather than a set because each entry carries its reason, exactly as
+`ELSEWHERE` in `compose.test.js` does — "we thought about it" has to be written
+down or it cannot be told from "we forgot". The test enumerates the registry and
+fails on any key in neither list, so the escape hatch costs a decision rather
+than an omission, and it checks the other direction too: a name listed here that
+the registry no longer has is a decision about nothing. The scan is scoped to
+the `SETTINGS` literal rather than run over the file, or the next two-space
+object at module scope becomes a setting demanding a mirror.
+
+The four Discord keys and `notifyTimezone` are there because the phone neither
+posts to a server-sent destination nor schedules from a server's clock. `theme`
+is the interesting one, and it is honest about a cost rather than free: the
+WebView paints the account's theme through the same cascade the browser uses,
+while the native chrome around it follows Android's own setting — so a light
+phone with a dark account shows light chrome around a dark page, and
+`WebScreen`'s pre-paint colour flashes light on the way into each habit. Fixing
+that means the phone knowing the account's theme, which is the mirror this list
+refuses; if it is ever worth paying for, the shape is an OBSERVATION (cache the
+colour the WebView last painted) rather than a copy of the setting.
+
+**A theme is a DECISION, and "follow this device" is one of the three.** The
+setting is `theme`, defaulting to `system`, and `system` is a stored value
+rather than the absence of one — the same distinction `notifyTimezone: 'auto'`
+and `at_most_unlogged: 'default'` already draw, for the same reason. It used to
+live in localStorage alone, where `initTheme` read `saved ?? (prefersDark ?
+'dark' : 'light')` while the button wrote one of two values: once pressed there
+was no way back, so a machine that goes dark at sunset stopped doing so with no
+control that said why. `apply()` resolves `system` against the device at paint
+time and never writes the resolved value back, which is what keeps it
+reversible.
+
+What the device keeps is one record (`habiterall-theme`), and it is an
+unconfirmed WRITE rather than a second opinion about the setting. It holds the
+newest answer and says which kind it is — a bare `light` is what the pre-setting
+build wrote and is superseded the moment the server names any theme, while
+`press:light` is this device's own and is NOT retired by the account
+disagreeing, because the write may still be in the outbox and the account is
+then the older answer of the two. There were three carriers here at one point
+and each fix added a fourth guard, because the durable member held the OLDEST
+answer: a reload preferred a stale key over the press just made and quietly
+undid it.
+
+Three things about the reply that retires it. Only a **full** reply may be read
+as "the account has no theme" — personal answers a write with the accepted
+PATCH, so `{calendarZoom: 'wide'}` says nothing about the theme, and read as
+though it did, a device whose settings GET had been refused pushed its own value
+over another device's the moment an unrelated preference changed. **`wrote`**
+names the keys THIS device just sent, which is how a choice made in the settings
+dialog beats a press made on the same device — `stored` cannot answer it,
+because cloud returns the whole blob on every write. And a write that ran out of
+time is **neither** a refusal nor offline: the request is bounded and cannot be
+recalled, so there is no verdict, and deleting the record there loses the answer
+while the write may still land.
+
+`theme` is portable — it is in `PORTABLE_SETTINGS`, because it is a preference
+like the rest and carries no capability, unlike the notification keys. The
+fixtures set it to `dark` against a `system` default in both round-trip suites,
+for the reason `reminder_message` taught the cloud suite: a field holding its
+default everywhere compares equal to itself and passes with the field dropped.
+
+**Two surfaces read that record rather than the account, and both had to be
+told.** The settings dialog seeds its draft from `settings.load()`, which
+sanitises from defaults and so cannot tell "the account follows the device" from
+"this device pressed dark and the write is unconfirmed" — it showed *Follow this
+device* over a page painted dark, in the one place you go to find out what the
+theme is. It reads `currentTheme()` now, seeded before the baseline so it does
+not by itself make the draft dirty. And the button SHOWS which of the three it
+is on (`◐` / `☀` / `☾`), because the cycle's last step — back to `system` from a
+value the device already matches — is the same appearance by definition. The
+label was the whole answer to that and is not one on a phone: a `title` needs a
+pointer to hover and an `aria-label` needs a screen reader, so the third press
+did nothing observable at all on the app's primary target.
+
+Two smaller rules travel with it. `set()` passes `[key]` as `wrote`, as `save`
+and `saveAll` do — defaulting it to `[]` says a write came from somewhere else,
+which is exactly the signal `reconcile` turns on. And a `set()` write that runs
+out of time is **dropped rather than queued**, for every key it writes and not
+only the theme: the cache already holds the value, the request may still land,
+and replaying it later would put it on top of whatever the user chose in the
+meantime. These are all in-place toggles somebody is actively working; `save` is
+the path for a value that has to be confirmed.
+
 **The two habit routes disagree about what a write means, on purpose.**
 `PUT /habits/:id` REPLACES — the body goes through `parseHabit`, which supplies a
 default for every absent field, so a partial write resets what it omits rather
