@@ -173,32 +173,11 @@ object Reminders {
         }
 
         val at = nextOccurrence(time, java.time.ZonedDateTime.now(ZoneId.systemDefault()))
-        setAlarm(context, at, habit.id, Alarm.DAILY)
+        setAlarm(context, at, pendingIntent(context, habit.id))
     }
 
-    /** Which of a habit's two alarms — see [snoozePendingIntent]. */
-    private enum class Alarm { DAILY, SNOOZE }
-
-    /**
-     * Arm one of a habit's two alarms.
-     *
-     * The PendingIntent is built HERE rather than handed in, which looks like a
-     * pointless narrowing and is not one. Taking a `PendingIntent` parameter
-     * severs the link between the explicit `Intent(context, …::class.java)` and
-     * the `AlarmManager.set*` call below, and CodeQL's
-     * `java/android/implicit-pendingintents` then cannot prove a component is
-     * set: it reports a high-severity implicit PendingIntent — an alarm any app
-     * could intercept — about two intents that are explicit and `FLAG_IMMUTABLE`
-     * and always were. Only the shape had hidden it, and the honest fix is to
-     * make the explicitness visible at the call rather than to dismiss the
-     * query. Keep the construction and the `set` in one function.
-     */
-    private fun setAlarm(context: Context, at: Long, habitId: Long, which: Alarm) {
+    private fun setAlarm(context: Context, at: Long, intent: PendingIntent) {
         val manager = alarmManager(context)
-        val intent = when (which) {
-            Alarm.DAILY -> pendingIntent(context, habitId)
-            Alarm.SNOOZE -> snoozePendingIntent(context, habitId)
-        }
         // Exact alarms can be revoked by the user on API 31+. Falling back to
         // an inexact alarm keeps reminders working, just less punctually —
         // better than silently dropping them.
@@ -257,7 +236,7 @@ object Reminders {
         now: java.time.ZonedDateTime = java.time.ZonedDateTime.now(ZoneId.systemDefault()),
     ): Boolean {
         val at = snoozeUntil(now) ?: return false
-        setAlarm(context, at.toInstant().toEpochMilli(), habitId, Alarm.SNOOZE)
+        setAlarm(context, at.toInstant().toEpochMilli(), snoozePendingIntent(context, habitId))
         return true
     }
 
