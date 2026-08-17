@@ -405,6 +405,16 @@ was verified by a person on an emulator once and never again, which is issue
 \#110. `createComposeRule` needs `@Config(application = android.app.Application::class)`
 — `HabiterallApp.onCreate` initialises WorkManager and will not run under
 Robolectric — and the `isIncludeAndroidResources` the reminder suite already set.
+Omitting the `@Config` fails loudly rather than subtly: every test in the class
+throws from `WorkManagerImpl`, so there is no version of this that quietly tests
+a different application.
+
+One trap is worth knowing before you spend an hour on it: **a real `AlertDialog`
+under `createComposeRule` hangs `waitForIdle` indefinitely.** A dialog is its own
+window and the rule waits on a composition that never goes idle, so there is no
+timeout and no failure — the test simply never returns. That is why
+`ReminderTimeFieldTest` asserts the reminder field's layout at a fixed width
+standing in for a dialog's, rather than putting it in one.
 
 - **`SettingsScreenTest`** — that the chip drawn as selected is the ACCOUNT's
   default rather than one written at the call site, that a chip already selected
@@ -433,11 +443,21 @@ knowing before reaching for a fourth suite. Its two rules worth pinning — that
 the resume snap-to-top defers while a notification tap is pending, and that the
 pending habit is cleared once a fetch lands whether or not the habit was *found*
 — live in `MainActivity.HabitListScreen`, which is `private` and reaches
-`settings`, `Api`, `Reminders`, `WidgetSync` and `Outbox` through the activity.
-Rendering it means first making it a top-level composable with all of that
-injected: a refactor of the screen under test, in a PR whose subject is tests.
-The rule is also a lifecycle race, so it wants a real RESUMED transition and not
-just a rendered tree. Worth doing, and worth doing as its own change.
+`settings`, `Reminders`, `WidgetSync` and `Outbox` through the activity: nine
+call sites, four on `settings` and five on `this@MainActivity`. Rendering it
+means first making it a top-level composable with all of that injected, which is
+a refactor of the screen under test in a change whose subject is tests. The rule
+is also a lifecycle race, so it wants a real RESUMED transition and not just a
+rendered tree.
+
+`Api` is deliberately **not** in that list, and it is the item that makes the
+extraction harder rather than easier. It is built inside the composable — `val
+api = remember(serverUrl, onUnauthorized) { Api(serverUrl, onUnauthorized) }` —
+out of two of the screen's own parameters, so there is no collaborator being
+reached for and no seam to inject one at. Whoever plans this by counting what
+the screen takes from the activity will find a fifth dependency that has to be
+*created* before it can be replaced. Worth doing, and worth doing as its own
+change.
 
 ## Roadmap
 

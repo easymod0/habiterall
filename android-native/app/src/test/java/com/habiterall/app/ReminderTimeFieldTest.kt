@@ -51,7 +51,14 @@ class ReminderTimeFieldTest {
 
     @get:Rule val compose = createComposeRule()
 
-    /** Renders the field over a fixed value, as both its callers do. */
+    /**
+     * Renders the field over a fixed value.
+     *
+     * [quickPicks] adds one caller-supplied button. It is labelled as the habit
+     * form's is, since that is the only caller that passes one at all — the
+     * reminder dialog passes none, and the form passes this one only when the
+     * draft already holds a time.
+     */
     private fun show(value: String, quickPicks: Boolean = false, width: Dp? = null) {
         compose.setContent {
             ReminderTimeField(
@@ -59,7 +66,7 @@ class ReminderTimeFieldTest {
                 onValueChange = {},
                 modifier = if (width == null) Modifier.fillMaxWidth() else Modifier.width(width),
                 quickPicks = {
-                    if (quickPicks) TextButton(onClick = {}) { Text("Clear") }
+                    if (quickPicks) TextButton(onClick = {}) { Text(CALLER_PICK) }
                 },
             )
         }
@@ -186,8 +193,16 @@ class ReminderTimeFieldTest {
      *
      * So the rule is asserted as what it says: they WRAP (more than one line) and
      * are not CLIPPED (nothing is narrower than its identical siblings). Either
-     * assertion alone kills the `Row`; both are here because they are two claims,
-     * and a future layout could satisfy one without the other.
+     * assertion alone kills the `Row` — verified separately, by deleting each and
+     * re-running against the mutation — and both are here because they are two
+     * claims, and a future layout could satisfy one without the other.
+     *
+     * What this does NOT catch, so that nobody discovers it as a surprise:
+     * `FlowRow(maxItemsInEachRow = 1)` passes. Six picks one per line have
+     * differing tops, identical widths and a non-zero caller's pick. That is
+     * correct rather than a hole — the property being asserted is that no pick is
+     * made unreachable, and one per line makes none of them so. It is ugly, and
+     * ugly is not what this test is about.
      */
     @Test
     fun `the quick picks wrap rather than being squeezed`() {
@@ -195,9 +210,26 @@ class ReminderTimeFieldTest {
         // text is a second node with the same string and the search is ambiguous.
         show("09:15", quickPicks = true, width = DIALOG_CONTENT)
 
-        // Six: the five common ones plus the caller's own, which is what both
-        // callers actually show. Five alone fit one line even at this width.
-        val picks = (ReminderTime.COMMON + "Clear").associateWith {
+        // Six picks: the five common ones plus the caller's own.
+        //
+        // Be precise about what that is and is not, because the obvious reading
+        // is wrong in a way that would invite weakening this test. Six at this
+        // width is NOT a configuration either caller renders — the dialog passes
+        // no quick pick at all, and the habit form passes one but is full-screen.
+        // Nor is the sixth needed to trip anything. Measured at 264dp with the
+        // five common picks ALONE:
+        //
+        //   FlowRow  four at top 125, `21:00` at top 177, every width 58
+        //   Row      all five at top 125, `21:00` squeezed 58 -> 8
+        //
+        // So five alone fails both assertions under the mutation, and five is the
+        // configuration the dialog actually renders — which is where `21:00` was
+        // unreachable in the first place. The sixth is here because it exercises
+        // the `quickPicks` slot and because it is the pick that reaches zero
+        // width, which is a distinct failure mode from being squeezed to a sliver.
+        // Dropping it costs that second mode and nothing else; the test goes on
+        // pinning the rule.
+        val picks = (ReminderTime.COMMON + CALLER_PICK).associateWith {
             compose.onNodeWithText(it).fetchSemanticsNode()
         }
 
@@ -206,9 +238,9 @@ class ReminderTimeFieldTest {
         //
         // Read from the COMMON five and not from all six, which is a trap this
         // test fell into: an unplaced node reports its bounds at the ORIGIN, so
-        // the squeezed-to-nothing "Clear" sat at top 0 against everything else's
-        // 125 and made a single-line layout look like two. A node that was never
-        // given a size must not be allowed to answer a question about lines.
+        // the squeezed-to-nothing caller's pick sat at top 0 against everything
+        // else's 125 and made a single-line layout look like two. A node that was
+        // never given a size must not be allowed to answer a question about lines.
         val lines = ReminderTime.COMMON.map { picks.getValue(it).boundsInRoot.top }.distinct()
         assertTrue(
             "the common quick picks are all on one line at ${DIALOG_CONTENT.value}dp, " +
@@ -230,19 +262,37 @@ class ReminderTimeFieldTest {
         // origin, which no assertion about the others would have noticed.
         assertTrue(
             "the caller's quick pick was given no width at all",
-            picks.getValue("Clear").size.width > 0,
+            picks.getValue(CALLER_PICK).size.width > 0,
         )
     }
 
     private companion object {
         /**
-         * What a Material dialog leaves for its content on a 360dp phone.
+         * Roughly what a Material dialog leaves its content on a 360dp phone.
          *
-         * The dialog insets itself from the screen and pads its own content, so
-         * the field is meaningfully narrower than the window it sits in — which
-         * is why the clipping showed up there and not in the full-screen habit
-         * form.
+         * **Derived, not measured**, and worth saying so plainly because the
+         * number reads like a measurement: 360 less the dialog's window inset
+         * either side, less its own content padding either side. Nothing in this
+         * suite renders a dialog, so it is arithmetic that agrees with Material's
+         * defaults rather than an observation of one.
+         *
+         * There is real margin, which is why it can be approximate without the
+         * test becoming luck: the five common picks need 314px to sit on one line
+         * (5 x 58 plus 4 x 6 of spacing), so anything meaningfully under that
+         * forces the wrap this asserts, and the full 360dp screen does not.
+         *
+         * Measuring it properly is a trap rather than a chore — see the README:
+         * a real `AlertDialog` under `createComposeRule` hangs `waitForIdle`.
          */
         val DIALOG_CONTENT = 264.dp
+
+        /**
+         * The habit form's own quick pick, verbatim.
+         *
+         * The only caller that passes one, and only when the draft already holds
+         * a time. The reminder dialog passes none — its "Remove" is a dialog
+         * button, because it saves rather than editing the field.
+         */
+        const val CALLER_PICK = "None"
     }
 }
