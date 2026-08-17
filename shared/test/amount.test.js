@@ -254,11 +254,46 @@ test('a refusal about an ambiguous number says how to fix it', () => {
   assert.match(amountComplaint('eight'), /not an amount/);
 });
 
+test('the complaint says nothing about the quoted text that is untrue of it', () => {
+  // The sentence used to name the readings — "could be ten thousand or ten and
+  // a half" — beside whatever had been typed, so somebody entering 1,500 was
+  // told it might be ten thousand. The ambiguity is what is the same for every
+  // input; the numbers are not, and naming them is what made it false.
+  for (const raw of ['1,500', '2,000', '10,000.5']) {
+    assert.doesNotMatch(amountComplaint(raw), /ten thousand|ten and a half/,
+      `${raw} is not ten thousand and must not be told that it might be`);
+  }
+});
+
+test('the complaint offers an example the box would accept', () => {
+  // "like 10000" is an example; "like 1500" is an instruction, and it is the
+  // user's own number. Which makes the suggestion itself something that can be
+  // wrong — so it is run through the parser before being offered, and an input
+  // whose de-comma'd form would be refused again is not this case at all.
+  assert.match(amountComplaint('1,500'), /like 1500\./);
+  assert.match(amountComplaint('1,000.5'), /like 1000\.5\./);
+
+  // De-comma'd, this is "1500 steps" — still not an amount, so the comma was
+  // never the problem and the whole branch is wrong for it. It gets the generic
+  // sentence: a box may not suggest something it would then refuse.
+  assert.match(amountComplaint('1,500 steps'), /not an amount/);
+
+  // The property behind the three examples, over every ambiguous input the
+  // suite knows: whatever is offered, typing it works.
+  for (const raw of ['10,000', '1,500', '2,000', '10,000.5', '1,000,000']) {
+    const offered = /like ([^ ]+)\.$/.exec(amountComplaint(raw));
+    assert.ok(offered, `${raw} was given no example to follow`);
+    assert.equal(typeof parseAmount(offered[1]), 'number',
+      `${raw} was told to type "${offered[1]}", which this box refuses`);
+  }
+});
+
 test('the complaint and the parser agree about which case is which', () => {
   // A complaint about a case the parser ACCEPTS is worse than a generic one:
   // it tells somebody to change an entry that was going to be stored correctly.
-  // So the two predicates are pinned against each other rather than trusted to
-  // stay in step, over the examples the Kotlin `amountComplaint` uses too.
+  // `THOUSANDS` is one declaration read by both, so that is unrepresentable
+  // rather than merely untrue today — this pins the BEHAVIOUR either way, over
+  // the examples the Kotlin `amountComplaint` uses too.
   const separator = ['10,000', '1,500', '10,000.5', '  2,000  '];
   // '10,0000' is the one that pins the lookahead: four digits after the comma
   // is not a thousands group, `parseAmount` reads it as 10, and a complaint
@@ -290,11 +325,12 @@ test('a dot group is still given the benefit of the doubt', () => {
 });
 
 test('the advice is the phone\'s advice, read from the phone', () => {
-  // The two clients refuse identical strings — `parseAmount` and the Kotlin
-  // `parseAmount` are already a mirror — so one of them explaining better than
-  // the other is a difference with nothing behind it. Read out of the source
-  // rather than restated, the way `toggle.test.js` reads its own declaration:
-  // a comment claiming the two agree is exactly the thing that goes stale.
+  // The two clients refuse a thousands group identically — they are not mirrors
+  // and agree only about the form, which is exactly the part this is about — so
+  // one of them explaining better than the other is a difference with nothing
+  // behind it. Read out of the source rather than restated, the way
+  // `toggle.test.js` reads its own declaration: a comment claiming the two
+  // agree is exactly the thing that goes stale.
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const kotlin = readFileSync(join(root, 'android-native', 'app', 'src', 'main',
     'java', 'com', 'habiterall', 'app', 'ui', 'HabitFormScreen.kt'), 'utf8');

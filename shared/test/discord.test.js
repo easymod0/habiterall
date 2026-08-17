@@ -588,6 +588,47 @@ test('a decimal comma is accepted, and nonsense is not', async () => {
   }
 });
 
+test('the modal reads an amount by the same rule the app does', async () => {
+  // A modal is a box somebody types an amount into, so `parseAmount` decides
+  // here as it does in the day editor. This file used to have its own reading —
+  // `Number()` after a comma-to-dot replace — and `Number` is generous about
+  // form in ways the root CLAUDE.md records twice: "0x10" is sixteen and "1e3"
+  // is a thousand. Neither is a thing anyone types into a box asking how many
+  // glasses of water they drank, and both were recorded.
+  const submit = (value) => ({
+    ...click(),
+    type: INTERACTION.MODAL,
+    data: {
+      custom_id: `hab|7|${TODAY}|amount`,
+      components: [{ type: 1, components: [{ custom_id: 'amount', value }] }],
+    },
+  });
+
+  const bad = adapter();
+  // "10,000" is the one that matters and the reason this moved. It is ten
+  // thousand to one reader and ten to another, and the old reading took the
+  // second silently: a thousandfold under-record, on the surface with the least
+  // to show for it — there is no box left open afterwards saying what happened.
+  // Nothing downstream can catch it, since ten is a perfectly valid amount.
+  for (const value of ['10,000', '1e3', '0x10', 'Infinity']) {
+    await handleInteraction(submit(value), bad);
+  }
+  assert.deepEqual(bad.recorded, [], 'none of these is an amount somebody typed');
+
+  // And the refusal is the app's own sentence, so the one destination that can
+  // only answer in prose says the actionable thing rather than the generic one.
+  assert.match(answers(bad)[0].data.content, /without the thousands separator/);
+  assert.match(answers(bad)[0].data.content, /like 10000/);
+  assert.match(answers(bad)[1].data.content, /not an amount/);
+
+  // What still works, unchanged: a decimal comma, a whole number, and zero —
+  // which is a stated lapse and not an empty box, the distinction `parseAmount`
+  // returns three answers for.
+  const good = adapter();
+  for (const value of ['1,5', '8', '0']) await handleInteraction(submit(value), good);
+  assert.deepEqual(good.recorded.map((r) => r.value), [1.5, 8, 0]);
+});
+
 test('a habit that no longer exists is reported, not written', async () => {
   const a = adapter({
     record: async () => ({ ok: false, error: 'That habit no longer exists.' }),

@@ -20,15 +20,28 @@
  * and dropping it multiplies the answer by ten. `HabitFormScreen.parseAmount`
  * on the phone has a comment about the same input — and note it is NOT a mirror
  * of this and does not try to be: it reads a habit's TARGET where this reads a
- * DAY's amount, and the two have different domains (this one bounds and
- * quantises to what `formatAmount` can show back; that one does not need to).
- * They agree about the thousands separator since #111, and about nothing else
- * on purpose.
+ * DAY's amount. Be exact about where they part, because "not a mirror" is easy
+ * to say too strongly. They agree about the FORM: the same thousands refusal
+ * since #111, the same digits-and-at-most-one-separator shape, the same refusal
+ * of a sign, an exponent or hex. They part at the DOMAIN, and only there — this
+ * one bounds and quantises to what `formatAmount` can show back, so
+ * `3.14159265` is 3.141593 here and itself there; that one answers to no
+ * display and needs neither.
  *
  * The web's own target box is the gap that leaves. `index.html`'s
  * `target_value` is still an `<input type="number">` — the very control this
  * comment opens by measuring — so `8,5` typed into a habit's goal is still 85.
- * That is a separate issue and not this module's to fix from here.
+ * That is issue #156 and not this module's to fix from here.
+ *
+ * **The server imports this**, which is the one thing here with a cost. A
+ * Discord modal is a box somebody types an amount into, arriving over a socket
+ * rather than off a keyboard, and `shared/src/discord.js` had its own reading
+ * of one until it read "10,000" as ten. Nothing in `shared/public` may import
+ * from `shared/src` — the browser cannot see it — but node can read this, so
+ * the rule is imported rather than mirrored. What that costs is the first line
+ * of this file: "DOM-free" was a convenience for the tests and is now a
+ * CONTRACT with a server. A `document` reached for anywhere in here takes the
+ * reminder path down with it.
  */
 
 /**
@@ -78,7 +91,7 @@ export function parseAmount(raw) {
   // dot is the spelling this field itself writes (`formatAmount`) and shows
   // (the placeholder), so it gets the benefit of the doubt. Closing that
   // properly needs a locale, not a regex.
-  if (/[1-9]\d*,\d{3}(?!\d)/.test(text)) return null;
+  if (THOUSANDS.test(text)) return null;
 
   const decimal = text.replace(/,/g, '.');
   if (!/^(\d+(\.\d*)?|\.\d+)$/.test(decimal)) return null;
@@ -113,6 +126,19 @@ export const MAX_AMOUNT = 1e12;
 export const MIN_AMOUNT = 1e-6;
 
 /**
+ * "10,000" and "1,500", but not "0,255" or ",255" — see `parseAmount`, which
+ * is the only place the reasoning is written down.
+ *
+ * ONE declaration, read by the parser and by `amountComplaint`, exactly as the
+ * Kotlin `THOUSANDS` is. Written twice it drifts: dropping the `(?!\d)` from
+ * the complaint's copy alone offered separator advice about "10,0000", which
+ * the parser reads as 10 — telling somebody to change an entry that was going
+ * to be stored correctly. That is now unrepresentable rather than tested for.
+ * No `g` flag, deliberately: a shared regex with one is stateful across calls.
+ */
+const THOUSANDS = /[1-9]\d*,\d{3}(?!\d)/;
+
+/**
  * Why `parseAmount` refused, for somebody looking at the box.
  *
  * "Not an amount" is true of `eight` and unhelpful for `10,000`, which IS a
@@ -123,10 +149,11 @@ export const MIN_AMOUNT = 1e-6;
  * it was not a number.
  *
  * The ADVICE agrees with the Kotlin `amountComplaint`'s — both say to type it
- * without the thousands separator, and both name 10000 — and a test reads that
- * string out of `HabitFormScreen.kt` rather than trusting this comment, because
- * two clients telling somebody to type different things about the same input is
- * a difference with nothing behind it. It is agreement and not identity: the
+ * without the thousands separator, and about `10,000`, which is the input the
+ * test uses, both name 10000 — and a test reads that string out of
+ * `HabitFormScreen.kt` rather than trusting this comment, because two clients
+ * telling somebody to type different things about the same input is a
+ * difference with nothing behind it. It is agreement and not identity: the
  * phone has no room to quote what was typed and this box does, so the sentences
  * differ and the test checks the actionable core rather than the wording.
  *
@@ -135,19 +162,38 @@ export const MIN_AMOUNT = 1e-6;
  * about a thousands group, and this makes them SAY the same thing about it.
  * Nothing about the rest of their domains is claimed.
  *
- * The predicate is the parser's own thousands test, restated here rather than
- * exported from inside `parseAmount`, and the two are pinned together by a test:
- * a complaint about a case the parser ACCEPTS is worse than a generic one, since
- * it tells somebody to change an entry that was going to be stored correctly.
+ * The predicate is `THOUSANDS`, the parser's own and not a copy of it, so a
+ * complaint about a case the parser ACCEPTS cannot be written — it would tell
+ * somebody to change an entry that was going to be stored correctly.
+ *
+ * **What is quoted must be true of what was quoted.** The first version of this
+ * named the two readings — *could be ten thousand or ten and a half* — beside
+ * whatever the user had typed, so "1,500" was told it might be ten thousand.
+ * That is the module's own example of the ambiguity (`parseAmount` says
+ * fifteen hundred or one and a half, correctly, forty lines up) with the wrong
+ * number attached to it. Naming the reading is what made it specific and is
+ * what made it false, so the sentence names the AMBIGUITY, which is the same
+ * whatever the digits are, and the ADVICE carries the specifics instead.
+ *
+ * That advice is the user's own number with the commas taken out, because
+ * "like 10000" is an example where "like 1500" is an instruction. Which makes
+ * the suggestion something that can itself be wrong, so it is RUN THROUGH THE
+ * PARSER before it is offered — and that decides the whole branch, not just the
+ * number in it: `1,500 steps` holds a thousands group and is not ambiguous, it
+ * is not an amount, and telling somebody to drop a comma that is not their
+ * problem sends them round the loop again. A box may not suggest something it
+ * would refuse. So the group is necessary and the suggestion working is what
+ * makes it sufficient.
  *
  * @param {string} raw exactly what is in the box
  * @returns {string} a sentence to show
  */
 export function amountComplaint(raw) {
   const text = String(raw ?? '').trim();
-  return /[1-9]\d*,\d{3}(?!\d)/.test(text)
-    ? `"${text}" could be ten thousand or ten and a half — type it without the `
-      + `thousands separator, like 10000.`
+  const plain = text.replace(/,/g, '');
+  return THOUSANDS.test(text) && typeof parseAmount(plain) === 'number'
+    ? `"${text}" is ambiguous — a comma can separate thousands or stand for a `
+      + `decimal point. Type it without the thousands separator, like ${plain}.`
     : `"${text}" is not an amount — type a number like 8 or 8.5.`;
 }
 

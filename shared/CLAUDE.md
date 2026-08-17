@@ -106,6 +106,15 @@ which `0` is a real answer. Two of the three are falsy, so callers compare with
 already records as too generous about form — `1e3` is not a thing anyone types
 into a box asking how many glasses of water they drank.
 
+It owns the reading for the SERVER too, which is what makes "DOM-free" a
+contract rather than a convenience: `src/discord.js` imports it, because a modal
+is the same box arriving over a socket and its own `Number()` reading recorded
+`10,000` as ten. The root CLAUDE.md has the direction and why it is not the
+usual two-declarations-and-a-test. `amountComplaint` lives beside the parser for
+the same reason — a refusal that cannot be acted on is barely better than the
+silent ten, and the phone and the web must not tell somebody to type different
+things about the same input.
+
 The step comes from the goal rather than being 1: an eighth of the target,
 snapped to a round number, because 1 is right for "8 glasses" and useless for
 "10,000 steps". `test/browser/countcheck.mjs` follows a tap all the way to
