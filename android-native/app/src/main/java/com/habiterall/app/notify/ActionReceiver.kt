@@ -66,12 +66,16 @@ class ActionReceiver : BroadcastReceiver() {
             else -> return
         }
 
-        // Note there is no snooze to cancel here, and that is a property of the
-        // shade rather than an oversight: a snooze takes the notification away,
-        // so from that moment there is nothing left to press until the re-post
-        // — by which time the snooze has already fired. A day answered
-        // ELSEWHERE while one is pending is the case that does exist, and
-        // `needsReminder` is what answers it, in the worker, once.
+        // No snooze is cancelled here, and the reason is `needsReminder` on the
+        // re-post rather than anything about reachability: a pending snooze
+        // that fires on an answered day posts nothing, so the cost of leaving
+        // it is a wake-up, never a wrong write. An earlier version of this
+        // comment claimed there was nothing left to answer from once a snooze
+        // had taken the notification away, and that was false twice over —
+        // "Enter count" opens the number pad and only cancels the notification
+        // on SUBMIT, so the shade holds a live snooze button while it is open,
+        // and the day is answerable from the web app, another phone, Discord,
+        // this app's own grid and its day editor besides.
         Outbox.enqueue(context, habitId, date, value, skip)
         Notifications.cancel(context, Notifications.notificationId(habitId))
 
