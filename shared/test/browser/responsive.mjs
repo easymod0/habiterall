@@ -26,6 +26,36 @@ const VIEWPORTS = [
 /** 44px is the accessibility minimum for a touch target. */
 const MIN_TOUCH = 44;
 
+/**
+ * How many habits this suite needs before there is a search row to measure.
+ *
+ * `dashboard.js`'s `SEARCH_FROM` is 6 and the shared fixtures are 4, so the
+ * control was never on screen here at all: every check below ran against a
+ * dashboard that structurally could not have one, and the row could have
+ * overflowed a 360px phone in silence.
+ *
+ * Seeded here rather than by growing `fixtures.mjs`, deliberately. That file is
+ * the input to every browser suite — the runner resets it before each — and
+ * several of them assert counts or index rows positionally, so raising it past
+ * six to serve this suite changes what nine others are looking at.
+ */
+const SEEDED_HABITS = 8;
+
+/** Names long enough to compete with the grid for width on a small phone. */
+async function seedForSearch() {
+  const have = await (await fetch(`${APP}/api/habits`)).json();
+  for (let i = have.length; i < SEEDED_HABITS; i++) {
+    await fetch(`${APP}/api/habits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: `Seeded habit number ${i + 1}`, type: 'boolean',
+        description: 'seeded by responsive.mjs to raise the habit count',
+      }),
+    });
+  }
+}
+
 const profile = mkdtempSync(join(tmpdir(), 'habresp-'));
 const chrome = launchChrome(PORT, profile);
 
@@ -44,6 +74,7 @@ const send = (m, p = {}, s) => new Promise((res, rej) => {
 });
 
 try {
+  await seedForSearch();
   const url = await devtoolsUrl(PORT, chrome);
   ws = new globalThis.WebSocket(url);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
@@ -128,6 +159,28 @@ try {
     ck(`${vp.label}: date header lines up with the checkboxes`,
       grid.headerOffset <= 2, `${grid.headerOffset}px`);
     ck(`${vp.label}: habit name is not squashed away`, grid.nameVisible === true);
+
+    // The search row sits above the grid and competes with nothing, which is
+    // exactly why it is worth measuring rather than assuming: it is the one
+    // control that appears only once an account is big enough, so it would
+    // otherwise reach a phone having been laid out on a desktop alone. The
+    // probe above sees it too now, for free, since it is on screen at all.
+    const search = await ev(`(() => {
+      const row = document.getElementById('search-row');
+      const box = document.getElementById('habit-search');
+      const b = box.getBoundingClientRect();
+      const de = document.documentElement;
+      return {
+        shown: !row.hidden,
+        height: Math.round(b.height),
+        width: Math.round(b.width),
+        inside: b.left >= -1 && b.right <= de.clientWidth + 1,
+      };
+    })()`);
+    ck(`${vp.label}: the search box is on screen and inside the viewport`,
+      search.shown && search.inside, JSON.stringify(search));
+    ck(`${vp.label}: the search box clears ${MIN_TOUCH}px`,
+      search.height >= MIN_TOUCH, `${search.height}px`);
 
     /* ---- detail view ---- */
     await ev(`document.querySelector('.habit-row .habit-meta').click()`);
