@@ -160,6 +160,22 @@ try {
   check('rather than only that it is not a number',
     !/^\"10,000\" is not an amount/.test(hint), hint);
 
+  // ...and the STEPPER says it too. Both refusal sites in `count-field.js` go
+  // through `amountComplaint`, and only this one is reachable without saving —
+  // a review found the Save site pinned and this one not, which is the "fixed
+  // two of three call sites" shape the repo keeps paying for.
+  await ev(`(()=>{
+    const i = document.getElementById('grid-count-typed');
+    i.value = '10,000';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#grid-count .countfield-step[data-step="1"]').click();
+    return true;})()`);
+  await sleep(300);
+  const stepHint = await ev(
+    `document.querySelector('#grid-count .countfield-hint').textContent`);
+  check('the stepper refuses it with the same sentence',
+    /without the thousands separator/.test(stepHint), stepHint);
+
   console.log('\n--- a limit of zero gets the button its whole point needs ---');
   // Closed first. The section above leaves the dialog open, and clicking a grid
   // cell under it drives `showModal()` on an already-modal dialog — a no-op in

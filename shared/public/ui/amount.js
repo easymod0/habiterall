@@ -18,10 +18,17 @@
  * different amount, or nothing. The decimal comma is the one that matters: it
  * is what most of Europe's keyboards invite, `inputmode="decimal"` shows it,
  * and dropping it multiplies the answer by ten. `HabitFormScreen.parseAmount`
- * on the phone has a comment about the same input — note it is NOT a mirror of
- * this and does not try to be: it reads a habit's TARGET, does a blanket
- * comma-to-dot replace, and so still reads "10,000" as ten. Worth fixing there,
- * separately.
+ * on the phone has a comment about the same input — and note it is NOT a mirror
+ * of this and does not try to be: it reads a habit's TARGET where this reads a
+ * DAY's amount, and the two have different domains (this one bounds and
+ * quantises to what `formatAmount` can show back; that one does not need to).
+ * They agree about the thousands separator since #111, and about nothing else
+ * on purpose.
+ *
+ * The web's own target box is the gap that leaves. `index.html`'s
+ * `target_value` is still an `<input type="number">` — the very control this
+ * comment opens by measuring — so `8,5` typed into a habit's goal is still 85.
+ * That is a separate issue and not this module's to fix from here.
  */
 
 /**
@@ -115,18 +122,18 @@ export const MIN_AMOUNT = 1e-6;
  * the way their phone's keyboard and their own country write it, and were told
  * it was not a number.
  *
- * The ADVICE is the Kotlin `amountComplaint`'s, verbatim — *type it without the
- * thousands separator, 10000 rather than 10,000* — and a test reads it out of
- * `HabitFormScreen.kt` rather than trusting this comment, because both clients
- * refuse the same strings for the same reason and one of them explaining better
- * than the other is a difference with nothing behind it. The SENTENCE around it
- * is this file's, which quotes what was typed as its sibling message already
- * does; that much is house style rather than a rule, and the test says which is
- * which.
+ * The ADVICE agrees with the Kotlin `amountComplaint`'s — both say to type it
+ * without the thousands separator, and both name 10000 — and a test reads that
+ * string out of `HabitFormScreen.kt` rather than trusting this comment, because
+ * two clients telling somebody to type different things about the same input is
+ * a difference with nothing behind it. It is agreement and not identity: the
+ * phone has no room to quote what was typed and this box does, so the sentences
+ * differ and the test checks the actionable core rather than the wording.
  *
- * Note this is the message only. `parseAmount` was already the mirror — the two
- * refuse identical strings — and what had been left out of it was ever saying
- * why.
+ * Note the two parsers are NOT mirrors — see this module's header — so what is
+ * pinned here is narrower than it looks: they happen to answer the same way
+ * about a thousands group, and this makes them SAY the same thing about it.
+ * Nothing about the rest of their domains is claimed.
  *
  * The predicate is the parser's own thousands test, restated here rather than
  * exported from inside `parseAmount`, and the two are pinned together by a test:

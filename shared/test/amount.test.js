@@ -260,7 +260,12 @@ test('the complaint and the parser agree about which case is which', () => {
   // So the two predicates are pinned against each other rather than trusted to
   // stay in step, over the examples the Kotlin `amountComplaint` uses too.
   const separator = ['10,000', '1,500', '10,000.5', '  2,000  '];
-  const notSeparator = ['8,5', '0,255', ',255', '0.500', '10.000', '8', ''];
+  // '10,0000' is the one that pins the lookahead: four digits after the comma
+  // is not a thousands group, `parseAmount` reads it as 10, and a complaint
+  // that offered separator advice about it would be telling somebody to change
+  // an entry that was going to be stored correctly.
+  const notSeparator = ['8,5', '0,255', ',255', '0.500', '10.000', '8', '',
+    '10,0000'];
 
   for (const raw of separator) {
     assert.equal(parseAmount(raw), null, `${raw} should be refused`);
@@ -300,10 +305,14 @@ test('the advice is the phone\'s advice, read from the phone', () => {
   // The actionable core, not the whole sentence: the phone has no room to quote
   // what was typed and the web does, which is house style rather than a rule.
   assert.match(advice[1], /without the thousands separator/);
-  assert.match(advice[1], /10000/);
+  // Digit-bounded on both sides. Matched loosely, `/10000/` is satisfied by
+  // "100000" — so an edit to the example number leaves this green while the two
+  // clients tell somebody to type different numbers, which is the exact
+  // divergence this test exists for.
+  assert.match(advice[1], /(?<!\d)10000(?!\d)/);
 
   const web = amountComplaint('10,000');
   assert.match(web, /without the thousands separator/,
     'the web says something different from the phone about the same input');
-  assert.match(web, /10000/);
+  assert.match(web, /(?<!\d)10000(?!\d)/);
 });
