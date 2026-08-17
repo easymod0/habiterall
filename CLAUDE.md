@@ -501,9 +501,21 @@ about them depends on how silence is read. They go because the alternative is a
 per-award judgement about which sentences survive the setting, which is a second
 rule to keep in step with the first and would have to be re-decided for every
 award added later. One gate that is occasionally too broad beats seven that
-drift apart. The narrower version wants a coverage measure — how much of the
-window is actually answered — which is the deferred award from #63, and if that
-ever lands this gate should be revisited with it.
+drift apart.
+
+That last sentence used to end "the narrower version wants a coverage measure,
+and if that ever lands this gate should be revisited with it". Coverage has
+landed and the revisit reached the **same** answer, which is worth recording
+because the reasoning moved even though the code did not. Coverage is the one
+award `success` genuinely cannot flatter — it counts ROWS, and the whole of
+`success` is crediting a day that has none, so a limit logged once covers no
+month and its sentence would be true either side of the gate. Hoisting it is
+therefore *safe* and not merely tempting, and it is still not hoisted: the
+exemption would exist for an account that has been told silence is the answer
+and has answered every day of a month regardless, and the price of serving that
+account is the second rule this paragraph refuses. The cost is a false NEGATIVE,
+which is the direction this file prefers everywhere else. It is one `return` to
+undo, and `awards.js` says so at the gate.
 
 The gate asks `unansweredCounts` rather than restating it, so the habit's
 `at_most_unlogged` beating the account's `atMostUnlogged` stays resolved in the
@@ -515,22 +527,71 @@ optional — a caller with neither should get awards rather than an exception �
 which makes forgetting them silent on precisely the shape this exists for, so a
 test reads both editions' `api.js` and fails if either call loses them.
 
+**The award nobody else can offer is about ANSWERING, and it arrives as a stats
+FIELD rather than as an entry map.** *A month with no blanks* counts the days
+that hold a row — `done`, `skip` and `no` all count, `unknown` does not — which
+is the four-state model read as an achievement, and #63's strongest argument:
+every gamified tracker rewards success only, so the moment you slip you stop
+logging and the data dies exactly where it would be most useful. This is the
+badge that is reachable on a bad month.
+
+It is not a reading of `computeStats`'s output, which is why it was deferred
+once. The two ways to fix that were to hand `computeAwards` the entries or to
+add a field, and the field wins on two counts. `awards.js`'s header states the
+property that every award is a reading of the figures already on the payload and
+that nothing is counted a second way — an entry map breaks that for one award,
+and once broken there is nothing to point the next one at. And a field inherits
+the window every other figure already uses (`from = start ?? firstEntry`,
+clamped to `MAX_RANGE_DAYS`), where a second derivation is a second answer
+waiting to disagree about what "ever" means — the same reason `computeRecovery`
+returns `longest` and `lastEnd` rather than letting awards recount them.
+
+**`computeCoverage` reports only the months the window entirely CONTAINS, and
+that one rule does two jobs.** A partial first month — the habit was created on
+the 10th — can never legitimately be full, so reporting it is either a figure
+nothing can reach or, if the denominator were the days of the window rather than
+the days of the month, one reached wrongly. And it settles #146's monotonicity
+requirement with no second rule: on the last day of a month the month is
+contained and can no longer go down, while on the 3rd it is not contained at
+all, so the badge cannot appear on the 3rd and vanish on the 4th. Containment is
+asked as "does the window hold all of this month's days", which needs no
+comparison against the window's ends and survives `boundedRange` clamping the
+far one. Both edges have tests, and the coverage fixture straddles the boundary
+by a **day and not by a month** — two Januaries alike but for one row — because
+a fixture with a full month and an empty one passes against `answered > 0`,
+which is exactly how #137's tenure fixture went unpinned.
+
+**Rest taken deliberately reads a number `computeStreaks` was already standing
+next to.** A skip bridges a run rather than breaking it, so a long run may
+contain planned rest, and "you rested and did not fall off" is a different claim
+from "you did not stop" — which is why the award is read from a new `skips` on
+each streak and not from the streak award's own rung. The subtlety is that
+`skips` must count only the skipped days INSIDE `[start, end]` of the run: skips
+are transparent to the loop, so a trailing one sits after `runEnd` and belongs
+to nothing, and banking every skip on sight reports a rest the run never
+carried. `x x s .` is the fixture — one skip, and a run of two days that does
+not contain it — beside the same skip one day earlier, which does.
+
+It is gated on the account's `skipDays`, which defaults **off**: with the
+setting off there is no Skip control on either grid or in either day editor, so
+the only skips are imported ones and the badge congratulates somebody on using
+something they do not have. That gate is a **fifth argument** to `computeAwards`
+and it inherits the trap the fourth had — optional, so dropping it turns the
+award off for a whole edition in silence. The call-site guard now demands five
+and names the fifth, and it was mutation-tested against the two shapes that have
+fooled it before: a comment naming the full call, and the call spread over
+several lines. It also refuses a hard-coded `true`, which passes every other
+assertion in that test and hands the award to everybody.
+
 **What is NOT here, and why, because each looked cheap and was not.**
-*Coverage* — "every day this month has an answer, whatever it was" — is the
-best award in #63 and the one this app can do that almost nothing else can, but
-it is a count of dates the entry map HOLDS and `computeAwards` receives no entry
-map. That is a signature decision (admit the entries, and say exactly which
-questions may use them) or a stats-shape one, not a few lines, and it is left
-for its own change. *Beat your worst day* is refused for a harder reason: it is
+*Beat your worst day* is refused for a harder reason: it is
 a current-state claim over a lifetime rate, so it is not monotone; its "stops
 being the lowest" half can be satisfied by another weekday getting WORSE, which
 is an award for regression; and its entire value is NAMING the day, which the
 server cannot do — a weekday name is locale-dependent and `shared/src` has no
 locale, so it would have to hand the client a number to compose prose around,
-which is the one thing computing awards on the server exists to prevent. *Rest
-taken deliberately* is gated on `skipDays`, which defaults off, and #63's own
-warning applies: an award nobody can see is worse than no award. Portfolio
-awards read every habit at once and belong to an account-level route.
+which is the one thing computing awards on the server exists to prevent.
+Portfolio awards read every habit at once and belong to an account-level route.
 
 `?start=` narrows the window and lowers any of these, which is the same
 mechanism as the two above and the one case where it is unambiguously right:

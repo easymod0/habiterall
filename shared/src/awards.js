@@ -102,6 +102,19 @@ const LONG_HAUL_DAYS = 365;
 const COMEBACK_MIN_DAYS = 2;
 
 /**
+ * How long a run has to be before the rest days inside it are a story.
+ *
+ * A week — a rung the survival ladder already has, rather than a number chosen
+ * here. The rest award is a claim about a run that HELD, and a run of three days
+ * that happens to contain a skip is not one: below this the badge fires for
+ * anybody who has ever pressed Skip twice in a row, which is a badge for using
+ * a control. Written as a literal for the reason `COMEBACK_FRESH_DAYS` is
+ * asserted as one — indexing into the ladder pins the position and not the
+ * boundary, and the position is what would silently move.
+ */
+const REST_MIN_RUN = 7;
+
+/**
  * @typedef {object} Award
  * @property {string} id        stable within a family; the tier moves with it
  * @property {string} family    'streak' | 'strength' | 'comeback' | 'recovered' |
@@ -134,9 +147,14 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
  *   comes off `stats`.
  * @param {string} [unlogged] the account's `atMostUnlogged`, as passed to
  *   `computeStats`. Same value, or the gate and the arithmetic disagree.
+ * @param {boolean} [skipDays] the account's `skipDays`. Read for ONE award and
+ *   never for a figure: it decides whether this account can record a rest at
+ *   all, and it defaults OFF, so the rest award would otherwise be a badge
+ *   nobody could see. Not passed to `computeStats`, which does not have an
+ *   opinion about it — a stored skip bridges a run whatever the setting says.
  * @returns {Award[]}
  */
-export function computeAwards(stats, end, habit, unlogged) {
+export function computeAwards(stats, end, habit, unlogged, skipDays) {
   /** @type {Award[]} */
   const out = [];
   if (!stats) return out;
@@ -158,6 +176,18 @@ export function computeAwards(stats, end, habit, unlogged) {
   // Asked through `unansweredCounts` rather than restated, so the habit's
   // `at_most_unlogged` beating the account's `atMostUnlogged` stays resolved in
   // the one place that knows the precedence.
+  //
+  // **What this does to COVERAGE, checked rather than assumed.** Coverage is the
+  // one award here that `success` cannot flatter: it counts ROWS, and the whole
+  // of `success` is that a day with no row is credited without one, so a limit
+  // logged once has one answered day and covers no month. Its sentence would
+  // therefore be true under the gate as well as outside it, and hoisting it
+  // above this line would be safe. It is deliberately NOT hoisted. The gate is
+  // one rule about one habit shape — the card is withheld, whole — and a
+  // per-award exemption is a second rule to keep in step with the first for the
+  // sake of a case nobody is in: an account told that silence is the answer,
+  // answering every day of a month anyway. The cost is a false NEGATIVE, which
+  // is the direction this file already prefers, and it is one `return` to undo.
   if (unansweredCounts(habit, unlogged ?? UNLOGGED_DEFAULT)) return out;
 
   /* ---- streaks: the ladder the survival curve already uses ---- */
@@ -323,6 +353,76 @@ export function computeAwards(stats, end, habit, unlogged) {
       label: 'No lapse over a day',
       detail: `All ${plural(lapses, 'lapse')} so far have lasted a single day.`,
     }));
+  }
+
+  /* ---- coverage: the one award about ANSWERING rather than about doing ---- */
+
+  // Every other award here reads what a day said. This one reads whether the day
+  // was answered at all, which is the four-state model's whole point: `done`,
+  // `skip`, `no` and `unknown` are four things, and almost no tracker can tell
+  // the last two apart. Every gamified tracker rewards success only, so the
+  // moment you slip you stop logging and the data dies exactly where it would
+  // be most useful. This is the badge that is reachable on a bad month.
+  //
+  // Off `stats.coverage`, which `computeStats` builds over the same
+  // `[from, end]` window as everything else and which only reports months that
+  // window entirely CONTAINS — see `computeCoverage`. Two consequences worth
+  // reading here rather than there: the month in progress is not in the list, so
+  // this cannot appear on the 3rd and vanish on the 4th; and the habit's first,
+  // partial month is not in it either, so nothing is judged against days before
+  // it existed.
+  const covered = (stats.coverage ?? []).filter((m) => m.answered === m.days);
+  if (covered.length) {
+    out.push(award({
+      id: `coverage:${covered.length}`,
+      family: 'coverage',
+      value: covered.length,
+      label: covered.length === 1
+        ? 'A month with no blanks'
+        : `${covered.length} months with no blanks`,
+      // "In this window", like every other detail here — `covered` is over the
+      // contained months of the computed window and not over all time.
+      detail:
+        `Every day of ${plural(covered.length, 'month')} here has an answer — `
+        + `the bad days as well as the good.`,
+    }));
+  }
+
+  /* ---- rest taken deliberately, and only where a rest can be recorded ---- */
+
+  // A skip is an answer, not a gap, and `computeStreaks` bridges one rather than
+  // breaking on it. So a long run may contain planned rest, and "you rested and
+  // did not fall off" is a different claim from "you did not stop" — which is
+  // why it is read from `streaks[].skips` and not from the streak award's rung.
+  //
+  // Gated on the account's `skipDays`, which defaults OFF. Ungated this is a
+  // badge most accounts have no control for: with the setting off there is no
+  // Skip on either grid or in either day editor, so the only skips are imported
+  // ones, and congratulating somebody on resting deliberately when they cannot
+  // is the cheerful wrongness this file exists to avoid.
+  if (skipDays) {
+    const rested = streaks
+      .filter((s) => s.length >= REST_MIN_RUN && (s.skips ?? 0) > 0)
+      // The most rest carried, and the longer run when two carried the same.
+      .reduce((best, s) => {
+        if (!best) return s;
+        if (s.skips !== best.skips) return s.skips > best.skips ? s : best;
+        return s.length > best.length ? s : best;
+      }, null);
+
+    if (rested) {
+      out.push(award({
+        id: `rest:${rested.skips}`,
+        family: 'rest',
+        value: rested.skips,
+        label: rested.skips === 1
+          ? 'A rest day inside a run'
+          : `${rested.skips} rest days inside a run`,
+        detail:
+          `A run of ${plural(rested.length, 'day')} held together across `
+          + `${plural(rested.skips, 'skipped day')}.`,
+      }));
+    }
   }
 
   return out;

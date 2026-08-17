@@ -642,15 +642,26 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
       + calls.join(' | '));
 
     const args = calls[0].split(',').map((s) => s.trim());
-    assert.equal(args.length, 4,
+    assert.equal(args.length, 5,
       `${edition} calls computeAwards with ${args.length} arguments: ${calls[0]}`);
     assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
     assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
+    // The fifth is the same trap one argument further along: `skipDays` is
+    // optional, so dropping it turns the rest award off for every account in
+    // that edition and nothing anywhere else changes.
+    assert.equal(args[4], 'skipDays', `${edition} passes ${args[4]} as skipDays`);
 
     // And it must be the SAME value computeStats was given, or the gate and the
     // arithmetic answer different questions about one habit.
     assert.match(stripComments(src), /computeStats\([\s\S]{0,400}?unlogged[,\s}]/,
       `${edition} does not hand the same unlogged to computeStats`);
+
+    // `skipDays` is not one of computeStats' inputs — the arithmetic has no
+    // opinion about it — so what has to be checked instead is that the name is
+    // bound to the ACCOUNT's setting and not to a literal. A hard-coded `true`
+    // passes every assertion above and hands the award to everybody.
+    assert.match(stripComments(src), /skipDays\s*[:=][^;\n]*(storedSkipDays|skip_days)/,
+      `${edition} does not derive skipDays from the account's setting`);
   }
 });
 
@@ -797,4 +808,176 @@ test('an avoided habit is judged on what is stored, not on how it is shown', () 
 
   assert.deepEqual(shown, stored);
   assert.equal(byFamily(shown).comeback.value, 2, 'two days over the limit is a two-day lapse');
+});
+
+/* ---------- coverage: the award about ANSWERING ---------- */
+
+/**
+ * A full month of rows, minus the days listed. `kind` decides what the rows
+ * SAY, which coverage must be indifferent to.
+ */
+function fullMonth(month, { missing = [], skip = [], lapse = [] } = {}) {
+  const rows = [];
+  const [y, m] = month.split('-').map(Number);
+  for (let d = 1; d <= new Date(y, m, 0).getDate(); d++) {
+    const date = `${month}-${String(d).padStart(2, '0')}`;
+    if (missing.includes(d)) continue;
+    if (skip.includes(d)) rows.push({ date, value: 0, status: 'skip' });
+    else if (lapse.includes(d)) rows.push({ date, value: 0, status: '' });
+    else rows.push({ date, value: YES, status: '' });
+  }
+  return rows;
+}
+
+const coverageAward = (rows, end, ...rest) => {
+  const stats = computeStats(DAILY, rows, { end });
+  return byFamily(computeAwards(stats, end, DAILY, 'miss', ...rest)).coverage;
+};
+
+test('a month with an answer on every day earns it, and one blank day does not', () => {
+  // The fixture straddles the boundary by a DAY and not by a month: the same
+  // January either side, differing in one row. A version of this with a covered
+  // month and an EMPTY month would pass against `answered > 0`, which is the
+  // fixture mistake #137's tenure award was written up for.
+  const full = coverageAward(fullMonth('2026-01'), '2026-01-31');
+  assert.equal(full.value, 1);
+  assert.equal(full.label, 'A month with no blanks');
+  assert.match(full.detail, /Every day of 1 month/);
+
+  assert.equal(coverageAward(fullMonth('2026-01', { missing: [17] }), '2026-01-31'),
+    undefined, 'one unanswered day in thirty-one is not a covered month');
+});
+
+test('a lapse and a skip are answers; the missing row is not', () => {
+  // The whole reason this award is worth having. A month where a third of the
+  // days went badly and every one of them was recorded is a covered month —
+  // which is the badge that is reachable when the habit is not going well, and
+  // the behaviour the app's data depends on.
+  const bad = fullMonth('2026-01', {
+    lapse: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+    skip: [22, 24, 26],
+  });
+  assert.equal(coverageAward(bad, '2026-01-31').value, 1);
+
+  // ...and it is the ROW that counts, so removing one of the bad days — the
+  // ones the user had least reason to log — takes the badge away.
+  const quiet = bad.filter((r) => r.date !== '2026-01-10');
+  assert.equal(coverageAward(quiet, '2026-01-31'), undefined);
+});
+
+test('the month in progress cannot earn it, and the last day of a month can', () => {
+  // #146's monotonicity requirement, settled by containment and no second rule:
+  // the badge cannot appear on the 3rd and be gone on the 4th, because on the
+  // 3rd March is not a month this window contains.
+  const rows = [...fullMonth('2026-02'), ...fullMonth('2026-03')];
+
+  assert.equal(coverageAward(rows, '2026-03-03').value, 1, 'February only');
+  assert.equal(coverageAward(rows, '2026-03-30').value, 1, 'still February only');
+  assert.equal(coverageAward(rows, '2026-03-31').value, 2,
+    'March closes and is counted on its last day');
+  assert.equal(coverageAward(rows, '2026-03-31').label, '2 months with no blanks');
+});
+
+test('the habit\'s own first, partial month is never held against it', () => {
+  // Created on the 10th, answered every day since. January can never be covered
+  // and is not reported as uncovered either — a figure unreachable by
+  // construction is not a rung, it is a permanently unlit badge.
+  const rows = [...fullMonth('2026-01').slice(9), ...fullMonth('2026-02')];
+  const a = coverageAward(rows, '2026-02-28');
+  assert.equal(a.value, 1);
+  assert.equal(a.label, 'A month with no blanks');
+});
+
+test('the coverage detail is a claim about the window, not about all time', () => {
+  const rows = [...fullMonth('2026-01'), ...fullMonth('2026-02')];
+  const a = coverageAward(rows, '2026-02-28');
+  assert.equal(a.value, 2);
+  assert.match(a.detail, /here/, 'the sentence has to be scoped to the window');
+  assert.doesNotMatch(a.detail, /\bever\b|\balways\b|completed|done/i);
+});
+
+test('coverage is withheld by the at-most gate, as every award here is', () => {
+  // Checked rather than assumed, and the conclusion is written up in
+  // `computeAwards`: coverage counts ROWS, so `success` — which credits days
+  // that have none — cannot flatter it, and the sentence would be true outside
+  // the gate too. It is still inside it, because the gate is one rule about one
+  // habit shape and a per-award exemption is a second one to keep in step. What
+  // that costs is a false negative on an account that answers every day of a
+  // habit it has been told it need not answer.
+  const habit = {
+    type: 'numerical', target_value: 0, target_type: 'at_most',
+    freq_numerator: 1, freq_denominator: 1, at_most_unlogged: 'success',
+  };
+  const rows = fullMonth('2026-01', { lapse: [1, 2, 3] });
+  const stats = computeStats(habit, rows, { end: '2026-01-31' });
+
+  // The figure is there on the payload for anything else that wants it...
+  assert.equal(stats.coverage.find((c) => c.month === '2026-01').answered, 31);
+  // ...and the card is empty, whole, exactly as it is for every other award.
+  assert.deepEqual(computeAwards(stats, '2026-01-31', habit, 'miss', true), []);
+});
+
+/* ---------- rest taken deliberately ---------- */
+
+const restAward = (str, skipDays) => {
+  const end = endOf(str);
+  const stats = computeStats(DAILY, entries(str), { end });
+  return byFamily(computeAwards(stats, end, DAILY, 'miss', skipDays)).rest;
+};
+
+test('a rest inside a long run is an award, and it needs skipDays to be on', () => {
+  // The setting defaults OFF, and #63's warning is that an award nobody can see
+  // is worse than no award: with it off there is no Skip control on either grid
+  // or in either day editor, so this would congratulate people on using
+  // something they do not have.
+  const str = 'xxxsxxxxxx';
+  const on = restAward(str, true);
+  assert.equal(on.value, 1);
+  assert.equal(on.label, 'A rest day inside a run');
+  assert.match(on.detail, /run of 10 days held together across 1 skipped day/);
+
+  assert.equal(restAward(str, false), undefined, 'off is off');
+  assert.equal(restAward(str, undefined), undefined,
+    'and a caller that never asked gets the same answer as one that said no');
+});
+
+test('the rest award needs a run that HELD, and a week is the line', () => {
+  // Straddled by a day, not by a shape: the same pattern one character longer.
+  // Below the line this fires for anybody who has pressed Skip once, which is a
+  // badge for using a control.
+  assert.equal(restAward('xxsxxx', true), undefined, 'six days is not a run that held');
+  assert.equal(restAward('xxxsxxx', true).value, 1, 'seven is');
+});
+
+test('a run with no rest in it earns nothing, however long', () => {
+  assert.equal(restAward('x'.repeat(60), true), undefined);
+});
+
+test('the rest award reads the run that carried the MOST rest, not the longest', () => {
+  // A 20-day run with one skip, then a 10-day run with three. The streak award
+  // beside this one already reports the longest run; saying the same thing here
+  // would be one fact twice, and the claim is about rest and not about length.
+  const str = 'xxxxxxxxxsxxxxxxxxxx' + '..' + 'xxsxxsxxsxx';
+  const a = restAward(str, true);
+  assert.equal(a.value, 3);
+  assert.match(a.detail, /run of 11 days held together across 3 skipped days/);
+});
+
+test('a skip that fell outside every run cannot be claimed as rest', () => {
+  // `computeStreaks` counts only the skips INSIDE `[start, end]` of a run, so a
+  // skip taken while the habit was already off pace is not rest that anything
+  // was carried through. Ten on-pace days either side and the skip between them
+  // belongs to neither.
+  assert.equal(restAward('xxxxxxxxxxs.xxxxxxxxxx', true), undefined);
+});
+
+test('the rest award is withheld by the at-most gate too', () => {
+  const habit = {
+    type: 'numerical', target_value: 0, target_type: 'at_most',
+    freq_numerator: 1, freq_denominator: 1, at_most_unlogged: 'success',
+  };
+  const rows = [{ date: '2026-01-01', value: 0, status: '' },
+                { date: '2026-01-05', value: 0, status: 'skip' }];
+  const stats = computeStats(habit, rows, { end: '2026-02-15' });
+  assert.deepEqual(computeAwards(stats, '2026-02-15', habit, 'miss', true), []);
 });

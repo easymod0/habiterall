@@ -22,8 +22,10 @@ test('streaks carry the dates they were achieved', () => {
   ]);
   const streaks = computeStreaks(boolHabit, entries, '2026-01-01', '2026-01-05');
 
-  assert.deepEqual(streaks[0], { start: '2026-01-01', end: '2026-01-03', length: 3 });
-  assert.deepEqual(streaks[1], { start: '2026-01-05', end: '2026-01-05', length: 1 });
+  assert.deepEqual(streaks[0],
+    { start: '2026-01-01', end: '2026-01-03', length: 3, skips: 0 });
+  assert.deepEqual(streaks[1],
+    { start: '2026-01-05', end: '2026-01-05', length: 1, skips: 0 });
 });
 
 test('top streaks are ranked longest first', () => {
@@ -71,6 +73,46 @@ test('a streak bridged by a skip reports the full span', () => {
   assert.equal(streak.start, '2026-03-01');
   assert.equal(streak.end, '2026-03-03');
   assert.equal(streak.length, 3, 'span includes the skipped day');
+  assert.equal(streak.skips, 1, 'and counts it as rest carried inside the run');
+});
+
+test('a skip is counted only where it lies INSIDE the run it bridged', () => {
+  // The case a running total gets wrong. A skip after the last on-pace day sits
+  // beyond `end`, so the run it appears to belong to never carried it — and a
+  // skip before any run has started belongs to nothing at all. Both patterns
+  // here have exactly one skip and the runs either side of it must report 0.
+  const trailing = new Map([
+    ['2026-05-01', YES], ['2026-05-02', YES], ['2026-05-03', SKIP],
+    ['2026-05-04', UNSET],
+    ['2026-05-05', YES], ['2026-05-06', YES],
+  ]);
+  const runs = computeStreaks(boolHabit, trailing, '2026-05-01', '2026-05-06');
+  assert.deepEqual(runs.map((s) => s.length), [2, 2]);
+  assert.deepEqual(runs.map((s) => s.skips), [0, 0],
+    'the skip is outside both runs: after the first ends, before the second starts');
+
+  // ...and the same skip one day later IS inside the first run, because a
+  // success follows it. One day apart, opposite answers — which is the whole
+  // distinction, and a fixture that did not move it would pin nothing.
+  const inside = new Map([
+    ['2026-05-01', YES], ['2026-05-02', YES], ['2026-05-03', SKIP],
+    ['2026-05-04', YES],
+    ['2026-05-05', UNSET],
+    ['2026-05-06', YES],
+  ]);
+  const bridged = computeStreaks(boolHabit, inside, '2026-05-01', '2026-05-06');
+  assert.deepEqual(bridged.map((s) => s.length), [4, 1]);
+  assert.deepEqual(bridged.map((s) => s.skips), [1, 0]);
+});
+
+test('two skips inside one run are both carried', () => {
+  const entries = new Map([
+    ['2026-06-01', YES], ['2026-06-02', SKIP], ['2026-06-03', YES],
+    ['2026-06-04', SKIP], ['2026-06-05', YES],
+  ]);
+  const [streak] = computeStreaks(boolHabit, entries, '2026-06-01', '2026-06-05');
+  assert.equal(streak.length, 5);
+  assert.equal(streak.skips, 2);
 });
 
 test('a streak spanning a year boundary keeps both dates', () => {

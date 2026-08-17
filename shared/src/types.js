@@ -72,6 +72,7 @@
  * @property {string} start
  * @property {string} end
  * @property {number} length           inclusive day count
+ * @property {number} skips            skipped days bridged inside [start, end]
  */
 
 /**
@@ -116,6 +117,18 @@
  * @property {WeekdayMonthBucket[]} weekdayByMonth
  * @property {FrequencyBucket[]} frequency
  * @property {Resilience} resilience
+ * @property {CoverageMonth[]} coverage
+ */
+
+/**
+ * One month the stats window entirely contains, and how much of it was
+ * ANSWERED — a row of any kind, including a skip and a stated lapse. `days` is
+ * always the length of the month; see `computeCoverage` for why only contained
+ * months are reported.
+ * @typedef {object} CoverageMonth
+ * @property {string} month            'YYYY-MM'
+ * @property {number} answered         days holding a row
+ * @property {number} days             days in the month
  */
 
 /**

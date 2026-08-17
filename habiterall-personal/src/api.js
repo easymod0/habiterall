@@ -360,6 +360,7 @@ api.get('/habits/:id/stats', (req, res) => {
 
   const entries = /** @type {any} */ (q.entriesFor.all(id));
   const unlogged = storedUnlogged();
+  const skipDays = storedSkipDays();
   const stats = computeStats(habit, entries,
     { start, end, granularity, weekStart: storedWeekStart(), unlogged });
 
@@ -370,8 +371,13 @@ api.get('/habits/:id/stats', (req, res) => {
   //
   // `habit` and `unlogged` are the SAME pair `computeStats` was given: awards
   // read them for one gate, and a different answer there than here would
-  // withhold a card whose figures say the opposite.
-  res.json({ habit, ...stats, awards: computeAwards(stats, end, habit, unlogged) });
+  // withhold a card whose figures say the opposite. `skipDays` is a third
+  // input of the same kind — it gates the rest award — and `computeStats` is
+  // not given it because the arithmetic has no opinion about it: a stored skip
+  // bridges a run whether or not this account can record a new one.
+  res.json({
+    habit, ...stats, awards: computeAwards(stats, end, habit, unlogged, skipDays),
+  });
 });
 
 /**
@@ -505,6 +511,19 @@ function storedWeekStart() {
  */
 function storedUnlogged() {
   return storedSetting('atMostUnlogged') === 'success' ? 'success' : UNLOGGED_DEFAULT;
+}
+
+/**
+ * Whether this account records skipped days at all.
+ *
+ * Loop's own default is off and so is ours, which is why the strict `=== true`:
+ * anything but the stored boolean is the default, exactly as the two above
+ * treat theirs. Read for the awards gate only — nothing in `computeStats`
+ * consults it, because a skip already stored bridges a run whatever the setting
+ * says today.
+ */
+function storedSkipDays() {
+  return storedSetting('skipDays') === true;
 }
 
 /* ---------- settings ---------- */

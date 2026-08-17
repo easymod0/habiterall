@@ -1261,6 +1261,16 @@ currently shows:
   arrival, because the record really is that long.
 - **No lapse over a day** — every lapse so far has lasted a single day. The
   next two-day one ends it, which is why it is worded as a record.
+- **A month with no blanks** — every day of a whole month has an *answer*,
+  whatever it said. A day you did it, a day you skipped and a day you recorded
+  as missed all count; only a day you never touched does not. It is the one
+  badge here that a bad month can earn, which is the point of it — and it is
+  a reason to log the days that went badly. Only months that are over are
+  counted, so it never appears on the 3rd and vanishes on the 4th.
+- **A rest day inside a run** — a run of a week or more that held together
+  across days you deliberately skipped. Only shown if you have skipped days
+  switched on under ⚙, since that is what puts Skip on the grid in the first
+  place.
 
 They are **worked out from your entries each time, never stored.** That has one
 consequence worth knowing, because it can surprise you: a badge is a reading of
