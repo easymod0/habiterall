@@ -50,8 +50,57 @@ try {
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
     return r.result.value;
   };
+  /**
+   * Wait for a row belonging to THIS habit, never for any row.
+   *
+   * The dashboard paints from `state.habits` and repaints on every change, so
+   * "a `.habit-row` exists" becomes true before the habit this section is about
+   * is necessarily among them — the fixtures ship four habits, and the first
+   * paint after a reload is enough to satisfy the weaker condition. Worse, the
+   * PRE-reload document satisfies it too, since those rows are already painted:
+   * a poll landing before the navigation commits breaks the loop on a document
+   * that is about to be thrown away. The `rows.find(...)` that follows then ran
+   * `.querySelector(...)` on `undefined`, and the suite died with `Cannot read
+   * properties of undefined (reading 'querySelector')` — naming neither the
+   * habit nor the wait that was too weak.
+   *
+   * Seen in CI: this suite failed in 1.3s, passed on a re-run, and cost an
+   * unrelated pull request a red tick. A wait that can be satisfied by somebody
+   * else's row — or by the previous document's — is not a wait for yours.
+   *
+   * The margin is thinner than "it flaked once" suggests, and this reports it:
+   * the row lands on the SECOND poll (`after 250ms`) on an idle local machine,
+   * every run. The old condition was true a quarter of a second before the one
+   * that matters, and CI only has to be slower than that once. The pre-reload
+   * window is narrower still — measured under a tight CDP poll, the old
+   * document was gone by the first round trip in 6 of 6 trials, so it is under
+   * ~8ms. That is not a reason to leave it: a runner under load is exactly
+   * where an 8ms window opens.
+   *
+   * @param {string} name the habit's name, as it appears in the row
+   * @param {string} label what to call the check in the output
+   */
+  const waitForRow = async (name, label) => {
+    let painted = false;
+    let waited = 0;
+    for (let i = 0; i < 80; i++) {
+      painted = await ev(`[...document.querySelectorAll('#grid .habit-row')]
+        .some(r => r.textContent.includes(${JSON.stringify(name)}))`)
+        .catch(() => false) === true;
+      if (painted) break;
+      waited += 250;
+      await sleep(250);
+    }
+    check(label, painted,
+      painted ? `after ${waited}ms` : `no row containing "${name}" after 20s`);
+    return painted;
+  };
+
   await send('Page.enable', {}, sessionId);
   await send('Page.navigate', { url: BASE }, sessionId);
+  // The first wait is the only one that legitimately takes any row: nothing of
+  // this suite's own exists yet, and what it is waiting for is the dashboard
+  // having painted at all.
   for (let i = 0; i < 80; i++) {
     if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
     await sleep(250);
@@ -71,38 +120,7 @@ try {
   check('the server stores the rendering choice', made.show_as === 'avoid', made.show_as);
 
   await ev(`location.reload()`);
-
-  // Wait for THIS habit's row, not for any row.
-  //
-  // The dashboard paints from `state.habits` and repaints on every change, so
-  // "a `.habit-row` exists" becomes true before the habit created two lines
-  // above is necessarily among them — the fixtures ship four habits, and the
-  // first paint after a reload is enough to satisfy the weaker condition. The
-  // `cell` expression below then ran `rows.find(...).querySelector(...)` on
-  // `undefined` and the suite died with `Cannot read properties of undefined
-  // (reading 'querySelector')`, which names neither the habit nor the wait
-  // that was too weak.
-  //
-  // Seen in CI: this suite failed in 1.3s, passed on a re-run, and cost an
-  // unrelated pull request a red tick. A wait that can be satisfied by
-  // somebody else's row is not a wait for yours.
-  //
-  // The margin is thinner than "it flaked once" suggests, and the check below
-  // reports it: the row lands on the SECOND poll (`after 250ms`) on an idle
-  // local machine, every run. So the old condition was true a quarter of a
-  // second before the one that matters, and CI only has to be slower than that
-  // once.
-  let painted = false;
-  let waited = 0;
-  for (let i = 0; i < 80; i++) {
-    painted = await ev(`[...document.querySelectorAll('#grid .habit-row')]
-      .some(r => r.textContent.includes('Smoking'))`).catch(() => false) === true;
-    if (painted) break;
-    waited += 250;
-    await sleep(250);
-  }
-  check('the habit painted on the dashboard', painted,
-    painted ? `after ${waited}ms` : 'no row containing "Smoking" after 20s');
+  await waitForRow('Smoking', 'the habit painted on the dashboard');
 
   const cell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Smoking'));
@@ -163,10 +181,7 @@ try {
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ skipDays: true }) }); })()`);
   await ev(`location.reload()`);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await waitForRow('Smoking', 'the row is back after the skips reload');
   // The day is at `no` when these run, so this is slip -> clean -> skip. The
   // cycle itself is Loop's DONE -> SKIP -> NO, which the rendering does not
   // reorder — stated again at the limit-of-two section below.
@@ -186,12 +201,14 @@ try {
         target_value: 2, target_type:'at_most', show_as:'avoid' }) });
     return (await r.json()).id;})()`);
   await ev(`location.reload()`);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await waitForRow('Coffee', 'the limit-of-two habit painted');
   const twoCell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Coffee'));
+    // Named, for the reason the Smoking cell above is: a regression here
+    // reports the missing ROW rather than a TypeError from the property
+    // access that follows it. No backticks in here — this is a template
+    // literal, and one closes it mid-comment.
+    if (!row) throw new Error('no dashboard row for "Coffee"');
     return row.querySelector('.day-cell, .check, button[data-focus-key^="check:"]');})()`;
   const twoStored = async () => ev(`(async()=>{
     const es = await (await fetch('/api/habits/${two}/entries')).json();
@@ -227,10 +244,7 @@ try {
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ ...h, show_as:'amount' }) });})()`);
   await ev(`location.reload()`);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await waitForRow('Smoking', 'the row is back after the switch to amount');
   row = await stored();
   // Both non-null, or "unchanged" is two absences agreeing and the check says
   // nothing at all.

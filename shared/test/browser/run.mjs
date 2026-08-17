@@ -10,6 +10,22 @@
  *   node shared/test/browser/run.mjs                    # against :3000
  *   BASE=http://localhost:3100 node .../run.mjs         # against the cloud app
  *   node shared/test/browser/run.mjs pwatest browsercheck
+ *
+ * **The runner OWNS the account it points at.** `fixtures.reset()` runs before
+ * every suite and DELETEs every habit in it, so two runners against one server
+ * destroy each other's data mid-run — and nothing in the output says so.
+ * Observed in a server log while two processes shared a port:
+ *
+ *     PUT    /api/habits/283/entries/2026-08-16   200   <- suite's first tap
+ *     DELETE /api/settings                        200   \  the other runner's
+ *     DELETE /api/habits/279 … /283               204   /  fixtures.reset()
+ *     GET    /api/habits/283/entries              404   {"error":"habit not found"}
+ *
+ * What a suite reports is a row that has vanished — historically a bare
+ * `Cannot read properties of undefined`, which is also exactly what a wait too
+ * weak to see its own row produces (see `waitForRow` in avoidcheck.mjs). Two
+ * causes, one signature, and only one of them is in the code. Use a fresh port
+ * and a fresh database per run rather than sharing an instance.
  */
 
 import { spawn } from 'node:child_process';
