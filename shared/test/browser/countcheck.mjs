@@ -18,9 +18,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
 
-const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = 9236;
+const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9236);
 const profile = mkdtempSync(join(tmpdir(), 'habcount-'));
 const chrome = launchChrome(PORT, profile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -16,11 +16,11 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
 import { habitsByName, reset, useBase } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
-const PORT = 9297;
+const PORT = devtoolsPort(9299);
 useBase(APP);
 
 const profile = mkdtempSync(join(tmpdir(), 'habnudge-'));

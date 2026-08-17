@@ -12,7 +12,16 @@
 
 let BASE = process.env.BASE ?? 'http://localhost:3000';
 
-/** Point the fixtures at a specific instance (the runner does this). */
+/**
+ * Point the fixtures at a specific instance, for a suite run standalone.
+ *
+ * **The runner does NOT use this** — it passes `base` to `reset` directly.
+ * Module-level state cannot be shared by parallel workers: `reset` awaits ~240
+ * times and `api` reads this binding at each call, so a second worker's
+ * `useBase` lands in the middle of the first one's reset and the rest of it
+ * deletes the wrong instance's habits. That is exactly the failure this file's
+ * runner documents at length, arrived at from the other direction.
+ */
 export function useBase(url) { BASE = url; }
 
 /** Covers every habit shape the UI renders differently. */
@@ -39,8 +48,8 @@ export const FIXTURE_HABITS = [
   },
 ];
 
-const api = async (path, options = {}) => {
-  const res = await fetch(`${BASE}/api${path}`, {
+const api = async (path, options = {}, base = BASE) => {
+  const res = await fetch(`${base}/api${path}`, {
     headers: { 'Content-Type': 'application/json' },
     credentials: 'same-origin',
     ...options,
@@ -65,23 +74,29 @@ const daysAgo = (n) => {
  * Wipe and recreate the fixture set, with ~60 days of history so the charts
  * and streak views have something real to render.
  *
+ * `base` is read ONCE, here, and threaded through every request below — never
+ * re-read from module state, which parallel workers share. See `useBase`.
+ *
+ * @param {{days?: number, base?: string}} [opts]
  * @returns {Promise<object[]>} the created habits, in fixture order
  */
-export async function reset({ days = 60 } = {}) {
+export async function reset({ days = 60, base = BASE } = {}) {
+  const at = (path, options) => api(path, options, base);
+
   // Preferences are server-side now, so a suite that changed one would leak
   // into every suite after it — the dashboard would render in the wrong day
   // order and alignment assertions would fail for no visible reason.
-  await api('/settings', { method: 'DELETE' }).catch(() => {});
+  await at('/settings', { method: 'DELETE' }).catch(() => {});
 
   for (const q of ['', '?archived=true']) {
-    for (const h of await api(`/habits${q}`)) {
-      await api(`/habits/${h.id}`, { method: 'DELETE' });
+    for (const h of await at(`/habits${q}`)) {
+      await at(`/habits/${h.id}`, { method: 'DELETE' });
     }
   }
 
   const created = [];
   for (const spec of FIXTURE_HABITS) {
-    created.push(await api('/habits', { method: 'POST', body: JSON.stringify(spec) }));
+    created.push(await at('/habits', { method: 'POST', body: JSON.stringify(spec) }));
   }
 
   const [meditate, gym, read, snacks] = created;
@@ -92,17 +107,17 @@ export async function reset({ days = 60 } = {}) {
 
     // Deterministic, not random: a failing suite must be reproducible.
     if (i % 9 !== 0) {
-      await api(`/habits/${meditate.id}/entries/${date}`,
+      await at(`/habits/${meditate.id}/entries/${date}`,
         { method: 'PUT', body: JSON.stringify({ value: 2 }) });
     }
     if ([1, 3, 5].includes(dow)) {
-      await api(`/habits/${gym.id}/entries/${date}`,
+      await at(`/habits/${gym.id}/entries/${date}`,
         { method: 'PUT', body: JSON.stringify({ value: 2 }) });
     }
-    await api(`/habits/${read.id}/entries/${date}`,
+    await at(`/habits/${read.id}/entries/${date}`,
       { method: 'PUT', body: JSON.stringify({ value: 10 + (i % 21) }) });
     // 0, 1 and 2 snacks all appear, so shading differences are visible.
-    await api(`/habits/${snacks.id}/entries/${date}`,
+    await at(`/habits/${snacks.id}/entries/${date}`,
       { method: 'PUT', body: JSON.stringify({ value: i % 4 === 0 ? i % 3 : 0 }) });
   }
 

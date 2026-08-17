@@ -9,9 +9,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
 const APP = process.env.BASE ?? 'http://localhost:3000';
-const PORT = 9250;
+const PORT = devtoolsPort(9250);
 
 const profile = mkdtempSync(join(tmpdir(), 'habpwa-'));
 const chrome = launchChrome(PORT, profile);

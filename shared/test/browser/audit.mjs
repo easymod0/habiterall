@@ -13,8 +13,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
-const BASE = process.env.BASE ?? 'http://localhost:3000', PORT=9226;
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9226);
 const profile=mkdtempSync(join(tmpdir(),'habaudit-'));
 const chrome=launchChrome(PORT, profile);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
