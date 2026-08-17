@@ -43,7 +43,7 @@ if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
  *
  * Deliberately oversubscribed, because these suites are not CPU-bound. The
  * slowest of them are mostly idle — `hangcheck` holds a request open for 38s,
- * `themecheck` waits 13s on a write that never answers — so a worker per core
+ * `themesync` waits 13s on a write that never answers — so a worker per core
  * leaves the box waiting rather than working. Swept on a 4-core CI runner, two
  * runs each, wall clock:
  *
@@ -57,9 +57,9 @@ if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
  * this sweep is what found. They are pre-existing and reproduce on master; fix
  * them before raising this.
  *
- * Eight is also right on a bigger box: 16 cores locally gives 46.6–47.0s over
- * three runs, against 86.4s at four, and that is `themecheck` alone — so the
- * bound is the longest suite again and more workers cannot help until it splits.
+ * Eight is also right on a bigger box: 16 cores locally gives 44.7s against
+ * 86.4s at four. That figure is `settingscheck`'s own 44.3s — the bound is the
+ * longest suite, not the worker count, so more workers cannot help it.
  *
  * An EXPLICIT `-j` or `HABITERALL_BROWSER_JOBS` is honoured as given, above the
  * cap and above the core count. The cap is a guard on a value nobody chose;
