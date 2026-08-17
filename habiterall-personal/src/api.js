@@ -53,7 +53,16 @@ export const api = express.Router();
 /** The last zone written, so an unchanged one costs not even a SELECT. */
 let lastReportedZone = null;
 
-api.use((req, _res, next) => {
+api.use((req, res, next) => {
+  // Say that the answer depends on it. `/overview` and `/stats` now derive
+  // their window from this header, so two clients in different zones asking
+  // the same URL want different bodies — and a response that does not admit
+  // that is one a shared cache may hand to the wrong one. Set for every /api
+  // response rather than at the three routes that read it: it is the honest
+  // direction to be wrong in, and the alternative is remembering to add it to
+  // the fourth.
+  res.vary(DEVICE_ZONE_HEADER);
+
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
   if (zone && zone !== lastReportedZone) {
     try {

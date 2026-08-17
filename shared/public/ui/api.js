@@ -5,7 +5,7 @@
  * than touching the banner themselves.
  */
 
-import { enqueue, unstage } from '/shared/offline.js';
+import { deviceClockHeader, enqueue, unstage } from '/shared/offline.js';
 import {
   refreshOfflineBadge, reportUnreachable, setOffline,
 } from '/shared/ui/connectivity.js';
@@ -87,31 +87,6 @@ export function setAuth(adapter) {
 async function queueWrite(url, method, options) {
   await enqueue({ url, method, body: options.body ?? null });
   return announceQueued();
-}
-
-/**
- * Tell the server which clock this device is on.
- *
- * A header on requests that already happen, rather than a call of its own —
- * the whole point is that following your zone costs no extra traffic. ~30 bytes
- * on each request; the server compares it to what it holds and writes only when
- * it differs, which for a settled account is never.
- *
- * It is read for exactly one thing: a server-sent reminder for an account whose
- * `notifyTimezone` is `auto`. An account that has NAMED a zone ignores this
- * entirely, which is what makes "keep my reminders on home time while I travel"
- * a thing you can still ask for. See `resolveTimeZone` in shared/src/notify.js.
- *
- * Silent on a runtime that will not answer: this is an optimisation of the
- * default, never a requirement.
- */
-function deviceClockHeader() {
-  try {
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return zone ? { 'X-Habiterall-Timezone': zone } : {};
-  } catch {
-    return {};
-  }
 }
 
 /**

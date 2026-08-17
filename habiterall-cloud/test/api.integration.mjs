@@ -297,6 +297,18 @@ ck('one account\'s device says nothing about another\'s',
 //
 // Etc/GMT+12 and Pacific/Kiritimati are 26 hours apart — the whole spread of
 // the Earth — so their calendar days ALWAYS differ, whatever the server's is.
+//
+// The four checks below are load bearing AS A SET, and no single one of them
+// is. Which one catches the unfixed code depends on the hour the suite runs
+// at: before 10:00 UTC the two `end` checks fail, from 10:00 to 12:00 only the
+// west one does, and from 12:00 the write guard's `unreached` check is the
+// only one left. So `a caller may record the day it is on` passes against a
+// server judging by its own clock for fourteen hours out of twenty-four, and
+// trimming any of these later would silently narrow the coverage to whenever
+// CI happens to run. Personal's `test/callerday.integration.mjs` is the one
+// that mutation-tests cleanly at every hour, because it can pin the process
+// clock west; this suite cannot, and buys the same certainty by asking four
+// questions instead of one.
 const WEST = 'Etc/GMT+12';
 const EAST = 'Pacific/Kiritimati';
 const dayIn = (zone) => new Intl.DateTimeFormat('en-CA', {

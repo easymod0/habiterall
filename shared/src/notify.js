@@ -269,6 +269,30 @@ export function resolveTimeZone(settings = {}, reported = '') {
  * `zonedClock` can later format. A name this rejects would otherwise throw
  * inside the notifier tick, on a schedule, for one user only.
  *
+ * What it returns is the CANONICAL name, not the string it was handed, and
+ * that is a bound rather than a tidiness. `Intl` matches a zone
+ * case-insensitively and resolves aliases, so `america/new_york`,
+ * `AMERICA/NEW_YORK`, `AmErIcA/nEw_YoRk` and `US/Eastern` are four spellings
+ * it accepts and `formatterFor` would cache under four keys — and that cache
+ * is keyed on whatever arrives, holds a built formatter, and is never evicted.
+ * That was harmless while the only caller was the notifier tick reading a
+ * STORED setting; `callerDay` put a request header on the same path, so a
+ * client could mint distinct valid spellings for as long as it cared to.
+ * Measured: 16,384 case variants of one name retain 2.2MB after GC, and
+ * nothing ever takes them back. Canonicalising collapses them to one key and
+ * caps the cache at the ICU zone table, whoever is calling.
+ *
+ * Offset zones (`+05:30`, and up to `+23:59`) are refused for the same reason
+ * twice over. They are the other unbounded family — ~2,900 of them, none a
+ * name — and a fixed offset does not observe DST, so an account that somehow
+ * stored one would get its reminders an hour out for half the year. Nothing
+ * sends them: both clients report `resolvedOptions().timeZone`, which is
+ * always a name, and Java's fallback spelling (`GMT+05:30`) `Intl` rejects
+ * outright. `Etc/GMT+12` is a real IANA name and is unaffected — it survives
+ * canonicalisation as itself, which is what the leading-sign test is testing
+ * FOR rather than a slash: `UTC`, `GMT` and `Etc/UTC` all canonicalise to
+ * `UTC`, and a slash test would have thrown those away.
+ *
  * @param {unknown} raw
  * @returns {string|undefined}
  */
@@ -278,8 +302,10 @@ export function parseTimeZone(raw) {
   if (value === AUTO_ZONE) return AUTO_ZONE;
   if (value.length > 64) return undefined;
   try {
-    new Intl.DateTimeFormat('en-US', { timeZone: value });
-    return value;
+    const canonical = new Intl.DateTimeFormat('en-US', { timeZone: value })
+      .resolvedOptions().timeZone;
+    if (/^[+-]/.test(canonical)) return undefined;
+    return canonical;
   } catch {
     return undefined;
   }
@@ -392,7 +418,15 @@ export function parseSnowflake(raw) {
  */
 export const CATCH_UP_MINUTES = 30;
 
-/** Cached formatters: building one per user per tick is not free. */
+/**
+ * Cached formatters: building one per user per tick is not free.
+ *
+ * Never evicted, which is only safe because every key that reaches here has
+ * been through `parseTimeZone` and is therefore CANONICAL — so the key space
+ * is the ICU zone table rather than the set of strings a caller can spell.
+ * `callerDay` is what made that load bearing: before it, the only zones in
+ * here came from stored settings.
+ */
 const formatters = new Map();
 
 function formatterFor(timeZone) {

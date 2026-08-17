@@ -83,6 +83,42 @@ function remove(seq) {
   return tx('readwrite', (store) => store.delete(seq));
 }
 
+/* ---------- talking to the server ---------- */
+
+/**
+ * Tell the server which clock this device is on.
+ *
+ * A header on requests that already happen, rather than a call of its own —
+ * the whole point is that following your zone costs no extra traffic. ~30 bytes
+ * on each request; the server compares it to what it holds and writes only when
+ * it differs, which for a settled account is never.
+ *
+ * It is read for two things, and the second is why this lives HERE rather than
+ * beside the live `fetch` in `ui/api.js`. The first is a server-sent reminder
+ * for an account whose `notifyTimezone` is `auto` (see `resolveTimeZone` in
+ * shared/src/notify.js). The second is what day the CALLER is on, which every
+ * route that asks "is this today?" now judges by — so a request that omits this
+ * is judged by the container's clock, which is UTC in both compose files.
+ *
+ * A replayed write is such a request. `flush()` below rebuilds it from the
+ * queued record, and the record holds a url, a method and a body — so before
+ * this, a check-off tapped offline east of the server came back with no zone
+ * on it, was refused as a future date, and was DELETED from the queue as
+ * permanently inapplicable. The window is every hour between the user's local
+ * midnight and the server's: thirteen hours a day at UTC+13.
+ *
+ * Silent on a runtime that will not answer: this is an optimisation of the
+ * default, never a requirement.
+ */
+export function deviceClockHeader() {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zone ? { 'X-Habiterall-Timezone': zone } : {};
+  } catch {
+    return {};
+  }
+}
+
 /* ---------- replay ---------- */
 
 let flushing = false;
@@ -113,7 +149,21 @@ export async function flush() {
       try {
         res = await fetch(item.url, {
           method: item.method,
-          headers: item.headers ?? { 'Content-Type': 'application/json' },
+          // The zone is read NOW rather than stored on the queued record, and
+          // that is the difference between one rule and three: `api()` stages
+          // every replayable write and `ui/settings.js` enqueues one directly,
+          // so a header captured at submission would have to be captured at
+          // each of them. Replay time is also the better answer for the case
+          // that motivates it — the queue drains seconds after connectivity
+          // returns, on the same device, in the same zone.
+          //
+          // `item.headers` still wins where a record carries them, so nothing
+          // a caller stated about its own request is overwritten here.
+          headers: {
+            'Content-Type': 'application/json',
+            ...deviceClockHeader(),
+            ...(item.headers ?? {}),
+          },
           body: item.body,
           credentials: 'same-origin',
         });

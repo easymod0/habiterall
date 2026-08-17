@@ -238,11 +238,17 @@ try {
 
   /* ---- 8. every request says which clock this device is on ---- */
   //
-  // `ui/api.js` sets `X-Habiterall-Timezone` at its single fetch chokepoint, so
-  // an account following its device costs no extra request. Deleting that one
-  // spread left `npm test` and all 26 browser suites green — the server rule
-  // was covered and neither client's half was — which is how a reminder would
-  // quietly go back to arriving on the container's clock.
+  // `ui/api.js` sets `X-Habiterall-Timezone` on the live request, so an account
+  // following its device costs no extra request. Deleting that one spread left
+  // `npm test` and all 26 browser suites green — the server rule was covered
+  // and neither client's half was — which is how a reminder would quietly go
+  // back to arriving on the container's clock.
+  //
+  // Two senders, not one chokepoint: `flush()` in offline.js sets it on a
+  // REPLAYED write, which is a request `api()` never sees. That half is pinned
+  // in `shared/test/outbox.test.js`, where the fake fetch can read the headers
+  // without a server — and it matters more than this one, because a replay the
+  // server dates by its own clock is refused and then DROPPED.
   //
   // Read off the wire with CDP rather than from the code: what matters is that
   // the header ARRIVES, and the service worker sits between the two.

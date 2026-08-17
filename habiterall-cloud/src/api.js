@@ -111,7 +111,12 @@ const ZONE_CHECK_MS = 60_000;
 /** userId -> {zone, at}. Bounded by the accounts seen this process lifetime. */
 const lastReportedZone = new Map();
 
-api.use(route(async (req, _res, next) => {
+api.use(route(async (req, res, next) => {
+  // Say that the answer depends on it — see the note on personal's copy. It
+  // matters more here: one origin serves every account, so the zones asking
+  // the same URL are as many as the instance has users.
+  res.vary(DEVICE_ZONE_HEADER);
+
   const user = uid(req);
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
   const hit = lastReportedZone.get(user);
