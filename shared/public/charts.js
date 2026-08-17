@@ -280,7 +280,8 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     }
   }
 
-  let lastMonth = -1;
+  // The month NAME last captioned, not `getMonth()`. See the caption below.
+  let lastMonthText = null;
   const cursor = new Date(start);
   const cells = [];
 
@@ -433,15 +434,33 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       }
 
       // month label above the first week containing a new month
-      if (dow === 0 && cursor.getMonth() !== lastMonth) {
-        lastMonth = cursor.getMonth();
+      //
+      // The change is read from the month NAME, never from `getMonth()`. That
+      // is a field of the GREGORIAN calendar, and this caption's text comes
+      // from `Intl` — so keying the position on one while taking the words
+      // from the other captions a Persian month above the week the Gregorian
+      // one happens to start in. Measured over 30 weeks from 2026-01-04 in
+      // fa-IR: `بهمن` drawn above week 4 against a real week 2, `اسفند` above
+      // week 8 against week 6, `فروردین` above week 13 against week 10 — every
+      // caption two to three weeks from the month it names. In English the two
+      // agree, which is why this survived the branch that fixed the same shape
+      // in `renderGridHeader` and in `weekdayMonthChart`'s year caption.
+      const monthText = dow === 0 ? formatMonthShort(cursor) : null;
+      if (monthText !== null && monthText !== lastMonthText) {
+        lastMonthText = monthText;
         // Nudged left if it would run off the end. The caption is left
         // anchored above a week column, and `Intl`'s short month is `Aug` in
         // English and `أغسطس` in Arabic — measured overflowing the viewBox by
         // 6px on the final column, which an SVG clips rather than wraps.
-        const monthText = formatMonthShort(cursor);
+        //
+        // No `WIDTH_SAFETY`, for the reason `weekdayMonthChart` states about
+        // its own clamp: in a clamp the margin costs DISPLACEMENT rather than
+        // pixels, so it shifts the last caption further left than the overflow
+        // it is correcting for — a caption over the wrong column, which is the
+        // defect this whole block is about. `estimateTextWidth` is measured
+        // never to under-bill, so the raw estimate is already the safe side.
         svg.appendChild(el('text', {
-          x: Math.min(x, width - estimateTextWidth(monthText, 9.5) * WIDTH_SAFETY),
+          x: Math.min(x, width - estimateTextWidth(monthText, 9.5)),
           y: 9, 'font-size': 9.5, fill: dim,
         }, monthText));
       }
@@ -861,12 +880,20 @@ export function weekdayMonthChart(months, color,
     // was visible in about 30 of 48 locales before the last column was
     // reserved above, which is where it usually landed.
     if (yearText !== prevYear && drawn.has(c)) {
-      // Clamped like the month above it. That clamp exists because a centred
+      // Placed by the month above it. The month is clamped because a centred
       // caption hangs off the edge once it is not three Latin characters, and
-      // the year is localised now too — `\u0e1e.\u0e28. 2569`, `AP \u06f1\u06f4\u06f0\u06f5`, `2026\u5e74`.
-      const yearHalf = estimateTextWidth(yearText, 8.5) / 2;
+      // the year is localised now too — `พ.ศ. 2569`, `AP ۱۴۰۵`, `2026年`.
+      //
+      // It takes the MONTH's x rather than clamping itself. Clamped
+      // separately it is clamped against its OWN width at its own 8.5px, so
+      // wherever either clamp binds the two land on different x and the year
+      // stops sitting under the month it qualifies. That is also the one thing
+      // the `no year stands over an unnamed column` check compares exactly, so
+      // it would have surfaced as a confusing failure of a check about
+      // something else. A year here is an annotation on a month caption; it
+      // has no position of its own.
       svg.appendChild(el('text', {
-        x: Math.min(Math.max(cx, yearHalf), width - yearHalf),
+        x,
         y: 22, 'text-anchor': 'middle', 'font-size': 8.5,
         fill: dim, 'fill-opacity': 0.75,
       }, yearText));
@@ -1069,10 +1096,16 @@ export function historyChart(buckets, color, { width = 720, height = 190, showPe
   // `formatStamp`'s output, which is unbounded: `26 de dez. de 2026` is 78.9px
   // in pt-BR and overlapped its neighbour by 4.5px at a 328px card, which is a
   // card on a phone. Same estimator the row gutters use, for the same reason.
+  // No `WIDTH_SAFETY`, and this is the third call site to say so — it decides
+  // how many labels to DROP, which is a degradation, not a reservation. The
+  // margin makes the chart pessimistic about its own text and thins an axis
+  // that had room: at a 328px card with `Jun 2026`-shaped labels it costs
+  // about one label slot, so the axis labels one bucket in three where one in
+  // two fits. Over-reserving costs pixels; over-degrading costs the label.
   const AXIS_SIZE = 9.5;
   const axisLabels = buckets.map((b) => formatStamp(b.bucket));
   const widestAxis = Math.max(
-    1, ...axisLabels.map((t) => estimateTextWidth(t, AXIS_SIZE) * WIDTH_SAFETY)
+    1, ...axisLabels.map((t) => estimateTextWidth(t, AXIS_SIZE))
   );
   const every = Math.ceil(
     buckets.length / Math.max(1, Math.floor(w / (widestAxis + 10)))
@@ -1140,9 +1173,10 @@ export function weekdayChart(days, color,
   // ambiguity is resolved by the tooltip, which carries the full name — the
   // same trade the calendar heatmap's rows already make. Preferring short
   // where it fits means English and most of Europe are unchanged.
-  // The size the labels are DRAWN at. It read 10 here while the text element
-  // four lines below said 11, so the fit was decided for a smaller label than
-  // the one that appears — the gap was invisible in English, where both fit.
+  // The size the labels are DRAWN at, and the size the fit below is decided
+  // for. These are one constant because they are one number: measure at 10 and
+  // paint at 11 and the chart has chosen a label for a smaller text than the
+  // one that appears, which fits in English either way and clips elsewhere.
   const AXIS_SIZE = 11;
   // No `WIDTH_SAFETY`, and that is the same rule `streakChart` states below:
   // RESERVING space uses the margin, because a reservation that is short clips
@@ -1240,13 +1274,12 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   // fixed-gutter-against-a-localised-label defect this file fixes in three
   // other charts, left standing in the fourth.
   //
-  // A first version asked `gutterFor` for the answer and came out WORSE than
-  // the fixed number it replaced. On a 328px card the ceiling it passed — 60%
-  // of the plot — works out at 166.8, which is BELOW the 168 floor, so the
-  // floor won, the measurement was discarded, and subtracting the gap left
-  // 160: eight pixels narrower than master, unconditionally, at the width this
-  // whole change is motivated by. A ceiling under a floor is not a bound, it
-  // is an off-by-one with a rationale.
+  // `gutterFor` is the wrong tool here and the arithmetic says why: on a 328px
+  // card its ceiling — 60% of the plot — is 166.8, BELOW this 168 floor. A
+  // ceiling under a floor is not a bound; the floor simply wins, the
+  // measurement is discarded, and the gap comes off the top, leaving a label
+  // narrower than a fixed number would have given it at the one width this
+  // matters most. Reach for it here again and check that pair first.
   //
   // So the label gets what the card can spare and never less than it had, and
   // where that is still not enough the TYPE shrinks — the same last resort
@@ -1255,15 +1288,14 @@ export function streakChart(streaks, color, { width = 720, limit = 5 } = {}) {
   // `2025. gada 28. dec. – 2026. gada 4. janv.` needs about 8px of type on a
   // phone; master painted 47.6px of it across the bar.
   const LABEL_GAP = 8;
-  // 8, as `weekdayChart`'s is. It was briefly 7, on a measurement that said the
-  // Devanagari and Bengali numeric forms missed by two pixels at 8 — but that
-  // was `estimateTextWidth` billing their DIGITS at the Indic letter rate, 1.77x
-  // the same string in ASCII. With `dates.js` classifying a numeral as a numeral
-  // the overflow is gone, and the floor is back at the size chosen for
-  // legibility rather than one chosen around a defect. Re-measured after the
-  // fix: across 18 locales at five widths from 200px up, no label overflows the
-  // space reserved for it — the loop below is not reached at all, because the
-  // ISO fallback above has already made the label fit.
+  // 8, as `weekdayChart`'s is — a size chosen for legibility, and it must not
+  // be lowered to accommodate an overflow. The Devanagari and Bengali numeric
+  // forms appear to miss by two pixels here, and that is `estimateTextWidth`
+  // billing their DIGITS at the Indic letter rate, 1.77x the same string in
+  // ASCII; the answer is to classify a numeral as a numeral, which `dates.js`
+  // now does. Measured across 18 locales at five widths from 200px up, no
+  // label overflows its reservation — the loop below is not reached at all,
+  // because the ISO fallback above has already made the label fit.
   const LABEL_FLOOR = 8;
   const widestOf = (set, size) =>
     Math.max(0, ...set.map((t) => estimateTextWidth(t, size)));

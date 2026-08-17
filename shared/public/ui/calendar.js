@@ -11,9 +11,12 @@
 
 // A relative specifier, which is what lets `calendar.test.js` load this module
 // under Node — the absolute `/shared/...` form the rest of `public/ui` uses
-// does not resolve there. This module held a third byte-identical copy of
-// `iso`, which is one storage-key builder per file that needed one.
-import { iso as toISO } from './dates.js';
+// does not resolve there. This module held byte-identical copies of BOTH
+// halves: a third `iso`, and a `fromISO` that was `fromISOLocal` under another
+// name. Taking only the writer left the parser behind, which is the shape a
+// half-finished dedupe leaves — one storage-key builder per file that needed
+// one, and its inverse still local.
+import { fromISOLocal, iso as toISO } from './dates.js';
 
 /**
  * Cell geometry per zoom level.
@@ -79,14 +82,6 @@ export function zoomLevel(name) {
     : CALENDAR_ZOOM[DEFAULT_ZOOM];
 }
 
-/** Local-midnight Date from 'YYYY-MM-DD', avoiding UTC parsing drift. */
-function fromISO(iso) {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-
-
-
 /**
  * The date window a calendar of `weeks` columns ending at `endDate` covers.
  *
@@ -116,7 +111,7 @@ function fromISO(iso) {
  * @returns {{start: string, end: string}} first and last cell in the grid
  */
 export function calendarWindow(endDate, weeks, weekStart = 'monday') {
-  const end = fromISO(endDate);
+  const end = fromISOLocal(endDate);
 
   // The last day of endDate's week — Saturday for a Sunday-start week, Sunday
   // for a Monday-start one. `weekdayIndex` is the offset from the first day.

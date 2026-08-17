@@ -223,6 +223,111 @@ for (const [weekStart, rows] of [['sunday', [0, 2]], ['monday', [1, 3]]]) {
     labels.join(',') === want.join(','), `${labels.join(',')} (want ${want.join(',')})`);
 }
 
+/* ---------- the calendar's month captions name the column they sit over ---------- */
+
+// The sixth appearance of "a localised name indexed by a Gregorian field", and
+// the one the new source scanner cannot see: the caption's TEXT comes from
+// `Intl` and its POSITION came from `cursor.getMonth() !== lastMonth`, which is
+// a comparison rather than a text sink. In en-US the two agree, so this is
+// green in the runner's locale and the sweep is what makes it mean anything —
+// `locales.mjs` runs this file under fa_IR, where a Persian month does not
+// start on the Gregorian first. Measured against the unfixed code over 30
+// weeks from 2026-01-04: `بهمن` above week 4 against a real week 2, `اسفند`
+// above week 8 against week 6, `فروردین` above week 13 against week 10.
+//
+// The oracle is the grid itself rather than a table of expected names: a
+// caption belongs above the first week column whose opening day `Intl` calls
+// by that month name. That phrasing is what makes the check locale-agnostic —
+// it asserts the two halves AGREE, which is the failure mode, rather than
+// asserting what either one says.
+{
+  const WEEKS = 30;
+  const END = '2026-07-25';
+  const weekStart = 'monday';
+  const svg = calendarChart({}, '#3b82f6',
+    { type: 'boolean', target_type: 'at_least', target_value: 0 },
+    { weeks: WEEKS, endDate: END, weekStart });
+
+  // Rebuild the column dates the chart walked, from the same window helper it
+  // uses — so this cannot drift from the grid by re-deriving the start.
+  const { start } = calendarWindow(END, WEEKS, weekStart);
+  const [sy, sm, sd] = start.split('-').map(Number);
+  const columnOpens = [];
+  for (let wk = 0; wk < WEEKS; wk++) {
+    columnOpens.push(new Date(sy, sm - 1, sd + wk * 7));
+  }
+
+  // What the captions SHOULD be: walk the columns, and caption one whenever
+  // the formatted month name differs from the last one captioned.
+  const wanted = [];
+  let seen = null;
+  columnOpens.forEach((d, wk) => {
+    const text = formatMonthShort(d);
+    if (text !== seen) { seen = text; wanted.push({ wk, text }); }
+  });
+
+  // What was drawn. The month captions are the 9.5px texts on the top line;
+  // the row labels sit at x=0 with a different y, and the '?' marks are a
+  // different size, so the y is what identifies this row.
+  const drawn = collect(svg)
+    .filter((n) => n.name === 'text' && n.attrs['font-size'] === '9.5'
+      && n.attrs.y === '9')
+    .map((n) => n.text);
+
+  check('the calendar captions one column per month name',
+    drawn.length === wanted.length,
+    `drew ${drawn.length} (${drawn.join(',')}), wanted ${wanted.length} (${wanted.map((w) => w.text).join(',')})`);
+
+  check('and each caption names the month its column opens in',
+    drawn.join('|') === wanted.map((w) => w.text).join('|'),
+    `${drawn.join(',')} vs ${wanted.map((w) => w.text).join(',')}`);
+
+  // The clamp keeps the last caption inside the viewBox, and must not push it
+  // FURTHER than that. `WIDTH_SAFETY` here cost displacement rather than
+  // pixels — the same defect `weekdayMonthChart`'s clamp comment records, one
+  // chart over — and it is only visible when the clamp actually binds, which
+  // is when the final column opens a month. A window is searched for that
+  // case rather than assumed, because whether it arises depends on the length
+  // of the month names and so on the locale: pinning a fixed `weeks` would
+  // pass vacuously wherever it did not bind, which is how a clamp test comes
+  // to assert nothing at all.
+  // The END is what moves, not `weeks`: the window is anchored on its end, so
+  // the final column opens the same week whatever the width — which is also
+  // the trap that makes a naive search here find nothing and pass.
+  let bound = null;
+  for (let off = 0; off < 70 && !bound; off++) {
+    const cand = new Date(2026, 0, 5 + off);
+    const candISO = `${cand.getFullYear()}-${String(cand.getMonth() + 1).padStart(2, '0')}-${String(cand.getDate()).padStart(2, '0')}`;
+    const w2 = calendarWindow(candISO, 12, weekStart);
+    const [y2, m2, d2] = w2.start.split('-').map(Number);
+    const lastOpen = new Date(y2, m2 - 1, d2 + 11 * 7);
+    const prevOpen = new Date(y2, m2 - 1, d2 + 10 * 7);
+    if (formatMonthShort(lastOpen) === formatMonthShort(prevOpen)) continue;
+
+    const s2 = calendarChart({}, '#3b82f6',
+      { type: 'boolean', target_type: 'at_least', target_value: 0 },
+      { weeks: 12, endDate: candISO, weekStart });
+    const caps = collect(s2)
+      .filter((n) => n.name === 'text' && n.attrs['font-size'] === '9.5'
+        && n.attrs.y === '9');
+    bound = { endISO: candISO, cap: caps[caps.length - 1], width: Number(s2.attrs.width) };
+  }
+
+  if (bound) {
+    const w = estimateTextWidth(bound.cap.text, 9.5);
+    const edge = bound.width - w;
+    // Exactly at the edge. With the margin applied the caption sits a further
+    // `w * 0.25` px left of it — for `أغسطس` at 9.5px that is ~7.4px, about
+    // half a column, on a caption whose whole job is to name one column.
+    check('the last month caption is clamped to the edge, not past it',
+      Math.abs(Number(bound.cap.attrs.x) - edge) < 0.51,
+      `${bound.cap.text}@${bound.cap.attrs.x}, edge at ${edge.toFixed(1)} (end=${bound.endISO})`);
+  } else {
+    check('a window was found where the last caption clamps', false,
+      'no end date in 70 tried put a month opening on the final column');
+  }
+}
+
 /* ---------- a label is written for a person, and fits where it is drawn ---------- */
 
 // Two properties a browser measurement caught and no test did.
@@ -386,9 +491,15 @@ for (const width of [328, 358, 700, 1100]) {
   const drawn = axisTexts(svg).filter((t) => t.anchor === 'middle');
   const size = drawn[0]?.size ?? 11;
 
-  // The slot the chart itself computes: the plot width over seven.
-  const pad = { left: 34, right: 12 };
-  const slot = (width - pad.left - pad.right) / 7;
+  // The slot the chart itself computes: the plot width over seven. READ off
+  // the rendered gridlines rather than re-declared here — a copy of
+  // `weekdayChart`'s padding is a mirror that fails quiet, since a change to
+  // the real one would leave this computing a slot the chart is not using and
+  // the check would either skip itself or assert against the wrong threshold.
+  // The gridlines span exactly the plot, which is what `slot` is seven of.
+  const rules = collect(svg).filter((n) => n.name === 'line');
+  const plot = Math.max(...rules.map((n) => Number(n.attrs.x2) - Number(n.attrs.x1)));
+  const slot = plot / 7;
   const shortFits = shortNames.every((t) => estimateTextWidth(t, size) <= slot);
 
   if (shortFits) {

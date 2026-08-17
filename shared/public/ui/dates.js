@@ -293,20 +293,12 @@ export function formatStamp(stamp) {
 
 
 /*
- * A rough width in pixels for a short label, at a given font size.
+ * Why the rates below are what they are.
  *
- * There is no text metric without a DOM, and two suites drive `charts.js` with
- * a fake one — so a chart that must reserve room for a label it cannot measure
- * has to estimate. The alternative was to pick a label width that fits
- * everywhere, and there isn't one: `Intl`'s short weekday is `Mon` in English,
- * `domingo` in pt-PT and `Jumamosi` in sw-KE. Measured in Chrome, the last two
- * overflowed a fixed 34px gutter and rendered as `omingo` and `umamosi` — a
- * truncation that is not a word.
- *
- * The rates below are MEASURED, against `getComputedTextLength()` over 22,512
- * label renderings — every weekday, month, month-and-year and date range this
- * app draws, in 67 locales at the six font sizes the charts use. The previous
- * set was reasoned rather than measured and was wrong in both directions:
+ * `estimateTextWidth` states what they ARE and how they were measured; this is
+ * the part worth keeping out of its signature — what the previous set got
+ * wrong, which is what says why a reasoned table is not good enough. It was
+ * wrong in both directions:
  *
  *   - a capital was billed at 0.65em and measures **0.91**, so `W` — the
  *     commonest narrow weekday label in English — was under-reserved by 1.43x,
