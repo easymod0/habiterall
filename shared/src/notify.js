@@ -579,9 +579,10 @@ export function callerDay(reported, instant = Date.now()) {
  *
  * Tier 2 is a zone that MOVES, and the one place that is visible is the
  * reminder watermark, which is keyed on the local date this answer decides.
- * Carrying one account across a date line can therefore cost a duplicate
- * reminder or a skipped one — see `dueReminders`, which sets out why that is
- * the trade `auto` is rather than a defect in the keying.
+ * Carrying one account across a date line therefore costs a duplicate reminder
+ * one way (warned about, as `too_late`) and a silently suppressed one the other
+ * (`already_sent`, at debug) — see `dueReminders`, which sets out both and why
+ * it is the trade `auto` is rather than a defect in the keying.
  *
  * @param {Record<string, any>} [settings]
  * @param {string} [reported] the zone a client last sent, if any
@@ -957,12 +958,24 @@ export function answeredIds(habits, rows) {
  * which for an account set to `auto` is the zone its LAST CLIENT reported. So
  * an account genuinely used from two zones either side of a date boundary can
  * have that boundary crossed by a device checking in rather than by time
- * passing, and the consequences run both ways. Reading the day FORWARD (a
- * check-in from Tokyo while the log holds a row under Los Angeles' earlier
- * date) finds no row and sends again: the same habit twice in one UTC day, one
- * per zone. Reading it BACKWARD finds a row already there and suppresses, so
- * the reminder waits for the new clock to reach that date — and if the catch-up
- * window has closed by then it is reported `too_late` and skipped.
+ * passing, and the two directions fail differently.
+ *
+ * **Forward** — a check-in from the later zone, Los Angeles to Tokyo — moves the
+ * local date on. The log's row sits under the earlier date, so nothing is found
+ * and the gate opens. Inside the catch-up window that is a second send: the same
+ * habit twice in one UTC day, one per zone. Past it, this reports `too_late`,
+ * which is a WARN — so the noisy half of this is here, and it is the one
+ * direction that produces a line an operator will see.
+ *
+ * **Backward** — Tokyo to Los Angeles — moves the local date back onto a day the
+ * log already has a row for, and the answer is `already_sent` on every tick. Not
+ * `too_late`: the two gates are eight lines apart and `already_sent` is asked
+ * FIRST, deliberately (see the comment on the gate order below), so a present
+ * row wins however late the minute is. The arrival day's reminder is therefore
+ * suppressed — it was spent on the old clock, at what is the wrong hour on the
+ * new one — and `already_sent` logs at DEBUG, so nothing above it says a word.
+ * That is the shape somebody would be trying to diagnose: not a warning to look
+ * for, but the absence of one.
  *
  * That is the trade `auto` IS, not a defect in the keying, which is why the
  * keying is left alone. The alternative — a UTC date — files every reminder
