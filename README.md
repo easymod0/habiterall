@@ -219,12 +219,23 @@ DISCORD_BOT_TOKEN=
 # that THIS SERVER makes, so whatever is here is what it can be aimed at — a URL
 # typed into Settings is only ever fetched if its host is on this list.
 #
-# Empty means ntfy.sh and nothing else. Naming your own REPLACES that rather
-# than adding to it, so write both if you want both. An entry is a hostname, or
-# `host:port` if your ntfy is not on 443; https is required either way. `off`
-# refuses every URL, which is how you switch the destination off instance-wide.
+# An entry is a host, and optionally a BASE PATH under it:
 #
-#   NTFY_ALLOWED_HOSTS=ntfy.sh,ntfy.example.com:8443
+#   ntfy.sh                     https://ntfy.sh/<topic>
+#   ntfy.example.com:8443       a port, when your ntfy is not on 443
+#   example.com/ntfy            https://example.com/ntfy/<topic>
+#
+# A user's URL may add exactly ONE topic segment to what you name here, and
+# nothing else — so naming `example.com` alone does NOT allow
+# `https://example.com/anything/else`. Name the base path if your ntfy is
+# reverse-proxied under one. https is required either way.
+#
+# LEAVING THIS EMPTY MEANS ntfy.sh — it is the default, not "nothing allowed".
+# Naming your own REPLACES that rather than adding to it, so write both if you
+# want both. `off` refuses every URL, which is how you switch the destination
+# off instance-wide.
+#
+#   NTFY_ALLOWED_HOSTS=ntfy.sh,example.com/ntfy
 NTFY_ALLOWED_HOSTS=
 
 # ---- limits -----------------------------------------------------------------
@@ -704,12 +715,24 @@ DISCORD_BOT_TOKEN=
 # can point your instance at. Without it a topic URL is a request-forgery
 # primitive aimed at your private network or your cloud metadata endpoint.
 #
-# Empty means ntfy.sh and nothing else. Naming your own REPLACES that rather
-# than adding to it, so write both if you want both. An entry is a hostname, or
-# `host:port` if your ntfy is not on 443; https is required either way. `off`
-# refuses every URL, which is how you switch the destination off instance-wide.
+# An entry is a host, and optionally a BASE PATH under it:
 #
-#   NTFY_ALLOWED_HOSTS=ntfy.sh,ntfy.example.com:8443
+#   ntfy.sh                     https://ntfy.sh/<topic>
+#   ntfy.example.com:8443       a port, when your ntfy is not on 443
+#   example.com/ntfy            https://example.com/ntfy/<topic>
+#
+# A user's URL may add exactly ONE topic segment to what you name here, and
+# nothing else. That is the point of the base path rather than a convenience:
+# naming `example.com` alone would let any account on this instance make the
+# server POST to any shallow path on that host, and read the status back.
+# Name the base path if your ntfy is reverse-proxied under one. https either way.
+#
+# LEAVING THIS EMPTY MEANS ntfy.sh — it is the default, not "nothing allowed".
+# Naming your own REPLACES that rather than adding to it, so write both if you
+# want both. `off` refuses every URL, which is how you switch the destination
+# off instance-wide.
+#
+#   NTFY_ALLOWED_HOSTS=ntfy.sh,example.com/ntfy
 NTFY_ALLOWED_HOSTS=
 
 # ---- limits -----------------------------------------------------------------
@@ -1084,9 +1107,9 @@ and note intact.
 
 **Reminders, where you want them** — set a time on a habit, choose what the
 reminder *asks* ("Did you exercise today?"), and pick where it goes under ⚙ →
-Notifications: the Android app, a Discord channel, or both. In Discord you can
-answer with a button without leaving the chat. See
-[Reminders and notifications](#reminders-and-notifications).
+Notifications: the Android app, a Discord channel, an ntfy topic, or any
+combination of them. In Discord you can answer with a button without leaving
+the chat. See [Reminders and notifications](#reminders-and-notifications).
 
 **Works offline** — check off habits with no signal; they queue on the device
 and sync, in order, when you reconnect. Reconnection is automatic, and does not
@@ -1178,6 +1201,7 @@ A reminder has two halves, set in two places:
 | **Android app** | the phone, as a local alarm | Yes / No / a count, from the shade — or tap the notification itself to open the app on that habit | yes | the [native app](android-native/README.md) |
 | **Discord (bot)** | your server | Yes / No / Skip buttons, and a box for an amount | no | a Discord application |
 | **Discord (webhook)** | your server | nothing — text only | no | a webhook URL |
+| **ntfy** | your server | nothing — it is notify-only, by design (see below) | no | a topic URL on a host whoever runs the instance allows |
 
 Nothing is sent for a habit you have already recorded that day.
 
@@ -1251,6 +1275,37 @@ Two settings that matter here:
   otherwise. That is deliberate: your server is what makes the request, so
   accepting any URL would turn this field into a way to make it fetch things on
   the private network it sits in.
+
+### ntfy
+
+[ntfy](https://ntfy.sh) is the destination that asks least of you: **no
+account, no bot, and no inbound port.** Your server POSTs the reminder to a
+topic, and your phone or desktop subscribes to that topic — which is the same
+property that makes the Discord bot an outbound socket rather than a webhook
+endpoint, arrived at from the other side. There is nothing to register and
+nothing to forward, and it works against ntfy.sh or against an ntfy the
+operator runs themselves.
+
+Paste the topic URL into ⚙ → Notifications → **ntfy topic URL**, subscribe to
+the same topic in the ntfy app, and press **Send a test notification**. A
+protected topic also takes an **ntfy access token**; a public one needs none.
+
+**You cannot choose the host freely, and that is the real difference from
+pasting in a Discord webhook.** Your server is what makes the request, so
+whoever runs the instance decides which ntfy hosts it may be aimed at
+(`NTFY_ALLOWED_HOSTS` — see [Configuration](#configuration)); out of the box
+that is ntfy.sh alone. A URL on any other host is refused and the field snaps
+back to blank, so on a shared instance the host — and the base path, if the
+ntfy sits behind a reverse proxy under one — is something to ask your operator
+for. Everything after it is yours: the topic is the one part of the URL you
+choose.
+
+**There is nothing to press on an ntfy notification, deliberately.** ntfy can
+carry action buttons, and answering with one would mean this server exposing an
+HTTP endpoint that anything able to reach it could call — the inbound endpoint
+the Discord integration goes to some length to avoid. So the reminder tells you
+and the app is where you answer. If answering from the notification is what you
+want, the Android app and the Discord bot both do it.
 
 The server checks once a minute. A reminder the server slept through is still
 sent if it is less than half an hour late, and dropped if it is more — waking
@@ -1473,6 +1528,7 @@ which the image already sets.
 | `HABITERALL_UPGRADE_INSECURE` | off | `on` tells browsers to rewrite http to https. Only for an instance reached over TLS and nothing else |
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
+| `NTFY_ALLOWED_HOSTS` | `ntfy.sh` | Where an ntfy topic URL may point. An entry is `host`, `host:port` or `host/base/path`, and a user's URL may add exactly one topic segment to it. Naming your own replaces the default; `off` refuses every URL. Your server makes the request, so this is the whole guard |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
 | `BIND_ADDR` | empty | Which interface the published port appears on. Empty is every interface; `127.0.0.1` restricts it to a reverse proxy on this host. Not `0.0.0.0`, which is IPv4 only |
 | `NODE_ENV` | `production` in both images | `production` turns on HSTS. See [Turning the guards off](#turning-the-guards-off) before unsetting it |
@@ -1492,7 +1548,9 @@ docker run --rm ghcr.io/easymod0/habiterall-personal:latest node -e \
 
 [`examples/cloud.env.example`](examples/cloud.env.example) is the whole list,
 with a comment on each — the database and OIDC credentials, `TRUST_PROXY`,
-`TZ`, `NOTIFY_MAX_ACCOUNTS`, the four import limits, and
+`TZ`, `NOTIFY_MAX_ACCOUNTS`, `NTFY_ALLOWED_HOSTS` (which decides where a user
+may point an ntfy topic URL, and matters more here than on a single-user box:
+the person typing it is not you), the four import limits, and
 `ALLOW_INSECURE_OIDC`, which is for local HTTP testing and never a real
 deployment. It is the file both cloud compose files read, and a test fails if
 the server grows a variable it does not mention.

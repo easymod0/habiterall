@@ -1068,27 +1068,83 @@ naming your own **replaces** that rather than adding to it, and `off` refuses
 every URL — a way to switch the destination off for a whole instance that still
 tells the user why rather than silently doing nothing.
 
+**An allowlist entry names a host and optionally a BASE PATH, and that second
+half is what makes this equivalent to the Discord rule rather than merely
+similar to it.** The property worth copying from `parseDiscordWebhook` is not
+"it checks the host", it is that allowlisting a destination allows **one KIND of
+request** — because it pins the path too. The first version of this allowed any
+1–4 dotless segments and posted to everything but the last, which with the
+reverse-proxy deployment our own docs recommend meant
+`https://example.com/internal/admin/reset/x` was a JSON POST to
+`https://example.com/internal/admin/reset/`, carrying a chosen title, 4000
+characters of chosen body and a chosen bearer token, with the response status
+handed back to the user as prose through `notify_status` and repeatable on
+demand from the test button. A path and service enumeration oracle, for any
+account, on the operator's own network. So `example.com/ntfy` is an entry, a
+user's URL may append **exactly one topic segment** to what the operator named,
+and a bare `ntfy.sh` permits `https://ntfy.sh/<topic>` and nothing deeper. The
+depth is one and not configurable because the topic is the only part of the URL
+the operator cannot know in advance; a deployment that needs more says so by
+naming more base.
+
+Two details in that comparison are load bearing and neither is the obvious one.
+It is a **whole-segment** match — `Set.has` on the joined base — never a string
+prefix, or `example.com/ntfy` would also allow `/ntfyadmin`. And the stored URL
+is rebuilt with the **entry's** spelling of the base path, so what gets fetched
+is the path the operator wrote and the caller's casing decides nothing but the
+topic's.
+
 The rest of the shape is the same and each clause is load bearing: **https
 only**, because a reminder carries a habit's name and a token would ride beside
 it; **no credentials**, since `https://ntfy.sh@evil.test/x` has a host of
-`evil.test` and reads as the opposite to a person; the host matched **with its
-port**, so allowing a host does not allow every service on it; a path of
-segments containing **no dots at all**, which makes `..` unrepresentable rather
-than filtered; and the URL **rebuilt from the parts that were checked**. Note
-what is deliberately not on the hostile list: `https://ntfy.sh/a/../b` is
-accepted as `https://ntfy.sh/b`, because `new URL` resolves traversal before any
-of this sees it — the resolved path is on an allowed host and is shaped like a
-topic, so there is nothing to escape from, and the dotless segments are what
-guarantee no second normalisation can follow the check.
+`evil.test` and reads as the opposite to a person; the host matched **whole and
+with its port** — never a suffix test, because `evilntfy.sh` ends with `ntfy.sh`
+— so allowing a host does not allow every service on it or every host that ends
+like it; segments containing **no dots at all**, which makes `..`
+unrepresentable rather than filtered; and the URL **rebuilt from the parts that
+were checked**. Note what is deliberately not on the hostile list:
+`https://ntfy.sh/a/../b` is accepted as `https://ntfy.sh/b`, because `new URL`
+resolves traversal before any of this sees it — the resolved path is one segment
+on an allowed host, so there is nothing to escape from, and the dotless segments
+are what guarantee no second normalisation can follow the check.
+
+**DNS rebinding is closed by construction, which is why no IP pinning appears
+here.** The gap between checking a name and connecting to it is only reachable
+by an attacker who can introduce a name whose resolution they control, and every
+name in this allowlist was chosen by the OPERATOR. Pinning an address would buy
+nothing and break every ntfy behind a load balancer.
+
+**A malformed entry fails closed, and says so once.** `*`, `*.example.com`,
+`.example.com`, `https://ntfy.sh`, a bare comma — none of them allow anything,
+which is the right direction and was worth pinning rather than assuming, since a
+wildcard nobody implemented must not read as one that works. Dropping it in
+silence was the wrong half: the only surface for the typo was a user's URL
+snapping back to blank, which reads as an app bug and gets reported as one, by
+somebody who cannot fix it. `notify.ntfy_allowlist_unusable` is the operator's
+copy of that news, through the same `once` dedupe as `too_late`. The one
+fail-OPEN value is **blank**, which is the `ntfy.sh` default — deliberate, and
+worth knowing because the shipped compose files interpolate
+`${NTFY_ALLOWED_HOSTS:-}`, so an operator who leaves the template line empty
+gets it. Both `.env` templates say so in capitals.
 
 **The stored value is not the last word, because the allowlist is not the
-user's.** `postNtfy` asks `ntfyTarget` again at the moment of sending: an
-operator can narrow `NTFY_ALLOWED_HOSTS` months after somebody saved a URL, and
-a check that only ran at write time would leave this process connecting
-somewhere it has since been told not to. The refusal is `permanent`, since
-nothing about it changes until a setting or the environment does, and its
-sentence names the variable — that string is what the settings dialog shows,
-under the rule that the wording is the sender's own.
+user's.** `postNtfy` asks `ntfyTarget` again at the moment of sending — the
+WHOLE rule, base path included, not just the host: an operator can narrow
+`NTFY_ALLOWED_HOSTS` months after somebody saved a URL, and a check that only
+ran at write time would leave this process connecting somewhere it has since
+been told not to. The refusal is `permanent`, since nothing about it changes
+until a setting or the environment does, and its sentence names the variable —
+that string is what the settings dialog shows, under the rule that the wording
+is the sender's own.
+
+**The two server-sent channels are not alike about rate limits, and the tick is
+shared.** Discord limits per webhook, so a 429 is one account's own doing and
+the inline `Retry-After` sleep in `deliverAccount` is paid by whoever caused it.
+ntfy.sh limits per **visitor IP**, which for a server-sent reminder is the
+instance — one bucket for every tenant on it — so on the cloud edition one
+account can put that sequential loop to sleep on everybody else's behalf. Noted
+at the sleep rather than fixed there: the tick's shape predates this and
+restructuring it is its own change.
 
 **A reminder is published as JSON to the ntfy SERVER, not as headers to the
 topic.** The two are equally documented and only one is safe: publishing to the

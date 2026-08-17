@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
   answeredIds, callerDay, channelConfigured, discordPayload, dueReminders, enabledChannels,
-  minutesOfDay, needsServerDelivery, ntfyAllowedHosts, ntfyPayload, ntfyTarget,
+  minutesOfDay, needsServerDelivery, ntfyAllowlist, ntfyAllowlistProblems,
+  ntfyPayload, ntfyTarget,
   parseChannelList, parseDiscordWebhook, parseNtfyToken, parseNtfyUrl,
   parseTimeZone, reminderMessage, reportedZone, resolveTimeZone, serverChannels,
   zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
@@ -94,9 +95,22 @@ test('the webhook host allowlist closes off request forgery', () => {
     'https://localhost/api/webhooks/1/abc',
     'https://127.0.0.1:5432/api/webhooks/1/abc',
     'https://10.0.0.5/api/webhooks/1/abc',
-    'https://discord.com.evil.test/api/webhooks/1/abc', // suffix trick
+    'https://discord.com.evil.test/api/webhooks/1/abc', // the host as a PREFIX
     'https://evil.test/api/webhooks/1/abc',
+    // ...and as a SUFFIX, which is the case a `host.endsWith(allowed)` check
+    // lets through and a whole-host comparison does not. `notdiscord.com`
+    // happens to have the same property; both are spelled out because the
+    // ntfy guard next door needed the case added and this one only had it by
+    // accident. Neither host is ours; both would be somebody's to register.
     'https://notdiscord.com/api/webhooks/1/abc',
+    'https://evildiscord.com/api/webhooks/1/abc',
+    'https://xdiscordapp.com/api/webhooks/1/abc',
+    // An unlisted SUBDOMAIN of a listed host. The list is exact, and this is
+    // the case that survives `endsWith('.' + allowed)` — the plausible-looking
+    // relaxation, which is exactly why it is written down. Suffix matching is
+    // done deliberately in one place only, `resumeTarget`, where the value is
+    // regional and the regions are not enumerable.
+    'https://evil.discord.com/api/webhooks/1/abc',
     'https://user:pass@discord.com/api/webhooks/1/abc', // credentials
     'file:///etc/passwd',
     'gopher://discord.com/api/webhooks/1/abc',
@@ -124,8 +138,10 @@ test('an embedded-credential URL cannot smuggle a host past the allowlist', () =
 
 /** The operator has allowed nothing but the public service. */
 const PUBLIC_NTFY = {};
-/** ...and one who runs their own, on a port. */
+/** ...one who runs their own, on a port. */
 const OWN_NTFY = { NTFY_ALLOWED_HOSTS: 'ntfy.example.com,inside.example.com:8443' };
+/** ...and one whose ntfy is reverse-proxied under a path on a shared host. */
+const PROXIED_NTFY = { NTFY_ALLOWED_HOSTS: 'example.com/ntfy' };
 
 test('a topic URL is accepted and canonicalised', () => {
   assert.equal(parseNtfyUrl('https://ntfy.sh/my-habits', PUBLIC_NTFY),
@@ -141,9 +157,9 @@ test('a topic URL is accepted and canonicalised', () => {
     'the query string must be dropped, not stored for the server to fetch');
   assert.equal(parseNtfyUrl('https://ntfy.sh/my-habits#frag', PUBLIC_NTFY),
     'https://ntfy.sh/my-habits');
-  // A reverse-proxied ntfy lives under a base path, and its topics are under it.
-  assert.equal(parseNtfyUrl('https://ntfy.example.com/ntfy/habits', OWN_NTFY),
-    'https://ntfy.example.com/ntfy/habits');
+  // A reverse-proxied ntfy lives under a base path — one the OPERATOR named.
+  assert.equal(parseNtfyUrl('https://example.com/ntfy/habits', PROXIED_NTFY),
+    'https://example.com/ntfy/habits');
 });
 
 test('an empty topic URL means "not configured", not an error', () => {
@@ -155,8 +171,8 @@ test('an empty topic URL means "not configured", not an error', () => {
 test('the ntfy URL guard closes off request forgery', () => {
   // The SERVER fetches this, so anything it will follow is somewhere it can be
   // aimed. There is no Discord-shaped host list to write here — the whole point
-  // of ntfy is a self-hosted one — so the shape of the check is: https, a host
-  // the OPERATOR allowed, a path made of segments we recognise, rebuilt.
+  // of ntfy is a self-hosted one — so the shape of the check is: https, a
+  // destination the OPERATOR named, and exactly one topic segment after it.
   const hostile = [
     'http://ntfy.sh/habits',                       // plaintext, on an allowed host
     'http://169.254.169.254/habits',               // both at once
@@ -164,7 +180,10 @@ test('the ntfy URL guard closes off request forgery', () => {
     'https://localhost/habits',
     'https://127.0.0.1:5432/habits',
     'https://10.0.0.5/habits',
-    'https://ntfy.sh.evil.test/habits',            // suffix trick
+    'https://ntfy.sh.evil.test/habits',            // the allowed host as a PREFIX
+    'https://evilntfy.sh/habits',                  // ...and as a SUFFIX
+    'https://xntfy.sh/habits',
+    'https://evil.ntfy.sh/habits',                 // ...and as a SUBDOMAIN
     'https://evil.test/habits',
     'https://ntfy.sh:8443/habits',                 // a port the operator did not name
     'https://ntfy.sh./habits',                     // a trailing dot is a different host
@@ -173,7 +192,8 @@ test('the ntfy URL guard closes off request forgery', () => {
     'file:///etc/passwd',
     'gopher://ntfy.sh/habits',
     'javascript:alert(1)',
-    'https://ntfy.sh/a/b/c/d/e',                   // deeper than a base path plus topic
+    'https://ntfy.sh//habits',                     // an empty segment
+    'https://ntfy.sh/a/b/c/d/e',
     'https://ntfy.sh/',                            // names no topic at all
     'https://ntfy.sh',
     'not a url at all',
@@ -185,19 +205,63 @@ test('the ntfy URL guard closes off request forgery', () => {
 
   // Traversal is not on that list, and stating why is the point: `new URL`
   // resolves `..` before this sees it, so what is checked and what is stored is
-  // the RESOLVED path — still on an allowed host, still shaped like a topic,
-  // and therefore not an escape from anything. What makes that safe is that the
-  // segment pattern has no dots in it at all, so there is nothing to normalise
-  // AFTER the check.
+  // the RESOLVED path — one segment, on an allowed host, and therefore not an
+  // escape from anything. What makes that safe is that the segment pattern has
+  // no dots in it at all, so there is nothing to normalise AFTER the check.
   assert.equal(parseNtfyUrl('https://ntfy.sh/habits/../admin', PUBLIC_NTFY),
     'https://ntfy.sh/admin');
 });
 
-test('which hosts are reachable is the OPERATOR\'s answer, not the user\'s', () => {
+test('the operator names the base path, and a user may add ONE topic to it', () => {
+  // The half that makes this equivalent to `parseDiscordWebhook` rather than
+  // merely similar to it. That one pins the path, so allowlisting a host allows
+  // one KIND of request; allowing any shallow path did not. With the
+  // reverse-proxy deployment our own docs recommend,
+  // `https://example.com/internal/admin/reset/x` used to be a JSON POST to
+  // `https://example.com/internal/admin/reset/` — chosen title, chosen body,
+  // chosen bearer token, and the status handed back to the user as prose.
+  assert.equal(parseNtfyUrl('https://example.com/internal/admin/reset/x', PROXIED_NTFY),
+    undefined, 'a base path the operator never named');
+  assert.equal(parseNtfyUrl('https://example.com/api/v1/users/delete', PROXIED_NTFY),
+    undefined);
+
+  // A sibling of the named base is not the named base.
+  assert.equal(parseNtfyUrl('https://example.com/other/habits', PROXIED_NTFY), undefined);
+  // Nor is a deeper path under it: exactly one topic segment, no more.
+  assert.equal(parseNtfyUrl('https://example.com/ntfy/deeper/habits', PROXIED_NTFY),
+    undefined);
+  // Nor is the base itself with nothing after it.
+  assert.equal(parseNtfyUrl('https://example.com/ntfy', PROXIED_NTFY), undefined);
+  // And an entry with no base path permits no base path at all.
+  assert.equal(parseNtfyUrl('https://ntfy.sh/team/habits', PUBLIC_NTFY), undefined);
+
+  // Whole segments, never a string prefix — `startsWith` would let this pass.
+  assert.equal(parseNtfyUrl('https://example.com/ntfyadmin/habits', PROXIED_NTFY),
+    undefined);
+  assert.equal(parseNtfyUrl('https://example.com/ntfy-internal/habits', PROXIED_NTFY),
+    undefined);
+
+  // What the operator DID name works, and the stored URL is spelled with the
+  // entry's own base path rather than the caller's — so the request goes to the
+  // path the operator wrote and the caller's casing decides only the topic's.
+  assert.equal(parseNtfyUrl('https://example.com/ntfy/habits', PROXIED_NTFY),
+    'https://example.com/ntfy/habits');
+  assert.equal(parseNtfyUrl('https://example.com/NTFY/Habits', PROXIED_NTFY),
+    'https://example.com/ntfy/Habits');
+  assert.equal(parseNtfyUrl('https://example.com/ntfy/habits/', PROXIED_NTFY),
+    'https://example.com/ntfy/habits');
+  // A deeper base, named as such, is allowed to be deep.
+  assert.equal(
+    parseNtfyUrl('https://example.com/a/b/c/topic', { NTFY_ALLOWED_HOSTS: 'example.com/a/b/c' }),
+    'https://example.com/a/b/c/topic'
+  );
+});
+
+test('which destinations are reachable is the OPERATOR\'s answer, not the user\'s', () => {
   // The difference from parseDiscordWebhook, and the reason this cannot be a
   // list in the source: the host that matters is the one running THIS ntfy.
   assert.equal(parseNtfyUrl('https://ntfy.example.com/habits', PUBLIC_NTFY), undefined,
-    'an instance that has named no hosts reaches the public service only');
+    'an instance that has named nothing reaches the public service only');
   assert.equal(parseNtfyUrl('https://ntfy.example.com/habits', OWN_NTFY),
     'https://ntfy.example.com/habits');
   assert.equal(parseNtfyUrl('https://ntfy.sh/habits', OWN_NTFY), undefined,
@@ -214,8 +278,45 @@ test('which hosts are reachable is the OPERATOR\'s answer, not the user\'s', () 
     assert.equal(parseNtfyUrl('https://ntfy.sh/habits', { NTFY_ALLOWED_HOSTS: off }),
       undefined, `${off} should refuse every host`);
   }
-  assert.deepEqual([...ntfyAllowedHosts(PUBLIC_NTFY)], ['ntfy.sh'],
+  assert.deepEqual([...ntfyAllowlist(PUBLIC_NTFY)], ['ntfy.sh'],
     'the documented default is the public service and nothing else');
+});
+
+test('an allowlist entry nothing can be made of allows nothing, and says so', () => {
+  // Every one of these fails CLOSED, which is the direction that has to be
+  // pinned rather than assumed: a wildcard nobody implemented must not read as
+  // one that works, and a scheme somebody pasted in must not become a hostname.
+  const useless = [
+    ',', ',,,', '*', '*.example.com', '.example.com', 'example.com.',
+    'https://ntfy.sh', 'http://ntfy.sh', 'ntfy.sh:', 'ntfy.sh:not-a-port',
+    'ntfy sh', 'ntfy.sh/../admin', 'ntfy.sh/a/b/c/d/e', '-ntfy.sh', 'ntfy..sh',
+  ];
+  for (const entry of useless) {
+    assert.equal(parseNtfyUrl('https://ntfy.sh/habits', { NTFY_ALLOWED_HOSTS: entry }),
+      undefined, `${entry} allowed something`);
+    assert.deepEqual([...ntfyAllowlist({ NTFY_ALLOWED_HOSTS: entry })], [],
+      `${entry} produced an entry`);
+  }
+
+  // ...and each is REPORTED, because dropping it in silence leaves a user's URL
+  // snapping back to blank as the only surface for an operator's typo.
+  assert.deepEqual(ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: '*.example.com' }),
+    ['*.example.com']);
+  assert.deepEqual(
+    ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: 'ntfy.sh, *.example.com , https://x.test' }),
+    ['*.example.com', 'https://x.test'],
+    'a good entry beside two bad ones is not a reason to say nothing');
+  // The two values that are not typos: unset (the ntfy.sh default) and `off`.
+  assert.deepEqual(ntfyAllowlistProblems({}), []);
+  assert.deepEqual(ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: 'off' }), []);
+  assert.deepEqual(ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: 'ntfy.sh,,example.com/ntfy' }), [],
+    'an empty entry between two commas is punctuation, not a mistake');
+
+  // The one fail-OPEN case, deliberately: blank is the default, which is what
+  // the shipped compose files interpolate when an operator leaves the template
+  // line empty. Pinned here so changing it is a decision rather than a slip.
+  assert.equal(parseNtfyUrl('https://ntfy.sh/habits', { NTFY_ALLOWED_HOSTS: '' }),
+    'https://ntfy.sh/habits');
 });
 
 test('an ntfy token is bounded and cannot carry a header break', () => {
@@ -242,9 +343,11 @@ test('a topic URL is split into the endpoint to post to and the topic to name', 
   // JSON to the topic URL would file the JSON itself as the message text.
   assert.deepEqual(ntfyTarget('https://ntfy.sh/habits', PUBLIC_NTFY),
     { endpoint: 'https://ntfy.sh/', topic: 'habits' });
-  assert.deepEqual(ntfyTarget('https://ntfy.example.com/ntfy/habits', OWN_NTFY),
-    { endpoint: 'https://ntfy.example.com/ntfy/', topic: 'habits' });
+  assert.deepEqual(ntfyTarget('https://example.com/ntfy/habits', PROXIED_NTFY),
+    { endpoint: 'https://example.com/ntfy/', topic: 'habits' });
   assert.equal(ntfyTarget('https://evil.test/habits', PUBLIC_NTFY), null);
+  assert.equal(ntfyTarget('https://example.com/other/habits', PROXIED_NTFY), null,
+    'the endpoint this builds is always a base the operator named');
   assert.equal(ntfyTarget('', PUBLIC_NTFY), null);
 });
 
@@ -972,6 +1075,33 @@ test('a tick delivers what is due and records it', async () => {
   assert.deepEqual(marked, [[7, 1, 'discord', '2026-08-13']]);
   assert.equal(fetch.calls.length, 1);
   assert.match(fetch.calls[0].url, /^https:\/\/discord\.com\/api\/webhooks\//);
+});
+
+test('an allowlist entry that can never match is reported to the operator', async () => {
+  // The only other surface for this typo is a user's topic URL snapping back to
+  // blank, which reads as an app bug and is reported as one — while the person
+  // who can fix it sees nothing at all.
+  resetSaid();
+  const warned = [];
+  const ctx = {
+    collect: () => [],
+    mark: () => {},
+    instant: utc(2026, 8, 13, 8, 0),
+    env: { NTFY_ALLOWED_HOSTS: 'ntfy.sh,*.example.com' },
+    log: { warn: (event, detail) => warned.push([event, detail]) },
+  };
+
+  await runTick(ctx);
+  assert.deepEqual(warned.map(([event, d]) => [event, d.entry]),
+    [['notify.ntfy_allowlist_unusable', '*.example.com']],
+    'the good entry is not news and the bad one is');
+  assert.match(warned[0][1].reason, /host\/base\/path/,
+    'the line has to say what a usable entry looks like');
+
+  // Once per process, not once a minute: this is a configuration, and it stays
+  // wrong until somebody edits it.
+  await runTick(ctx);
+  assert.equal(warned.length, 1);
 });
 
 test('a second server destination is delivered, and watermarked, on its own', async () => {

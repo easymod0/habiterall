@@ -19,9 +19,9 @@
  */
 
 import {
-  CHANNELS, dueReminders, discordPayload, isNtfyToken, ntfyPayload, ntfyTarget,
-  reminderMessage, resolveTimeZone, serverChannels, takeUnusableZones,
-  unreachableChannels,
+  CHANNELS, dueReminders, discordPayload, isNtfyToken, ntfyAllowlistProblems,
+  ntfyPayload, ntfyTarget, reminderMessage, resolveTimeZone, serverChannels,
+  takeUnusableZones, unreachableChannels,
 } from './notify.js';
 import { postReminder } from './discord.js';
 
@@ -163,6 +163,10 @@ function stateKey(o) {
  * @property {string} [appUrl] this deployment's public address, for the link
  * @property {string} [botToken] DISCORD_BOT_TOKEN, when the instance has one
  * @property {typeof globalThis.fetch} [fetch]
+ * @property {Record<string, string|undefined>} [env] the process environment,
+ *   for the one rule that lives there: which ntfy hosts this instance may post
+ *   to. Injectable so a test needs no ambient state; unset means `process.env`,
+ *   which is what both editions pass by not passing it.
  * @property {{debug?: Function, info?: Function, warn?: Function, error?: Function}} [log]
  * @property {number} [intervalMs]
  */
@@ -566,6 +570,15 @@ export async function deliverAccount(account, ctx) {
       // wait it asks for turns that into a delivered reminder; leaving it to
       // the next tick would trip the same limit again a minute later. Once
       // only — a second 429 means something else is wrong.
+      //
+      // The two channels are NOT alike here, and this sleep is in the tick that
+      // every account shares. Discord rate-limits per webhook, so a 429 is one
+      // account's own doing and the wait is paid by the account that caused it.
+      // ntfy.sh limits per VISITOR IP, which for a server-sent reminder is the
+      // instance — one bucket for every tenant on it — so on the cloud edition
+      // one account can put this sequential loop to sleep on everybody else's
+      // behalf. Written down rather than fixed here: the tick's shape is
+      // pre-existing and restructuring it is its own change.
       let throttled = false;
       if (result.retryAfterMs) {
         throttled = true;
@@ -670,6 +683,21 @@ export async function runTick(ctx) {
   // the wrong clock forever with nothing to say so. Drained once per tick and
   // deduped, because it is a configuration rather than an event: it stays wrong
   // until somebody fixes the value.
+  // An allowlist entry nothing can be made of is a configuration that stays
+  // wrong until somebody fixes it, so it is said once and deduped like the rest.
+  // Dropping it is right — a wildcard nobody implemented must not read as one
+  // that works — but in silence the only surface is a user's topic URL snapping
+  // back to blank in the settings dialog, which reads as an app bug and gets
+  // reported as one. This is the operator's copy of that news.
+  for (const entry of ntfyAllowlistProblems(ctx.env)) {
+    if (!once(`ntfy_entry:${entry}`)) continue;
+    log.warn?.('notify.ntfy_allowlist_unusable', {
+      entry,
+      reason: 'NTFY_ALLOWED_HOSTS entries are `host`, `host:port` or '
+        + '`host/base/path` — no scheme, no wildcard — and this one allows nothing',
+    });
+  }
+
   for (const zone of takeUnusableZones()) {
     if (!once(`unusable_zone:${zone}`)) continue;
     log.warn?.('notify.zone_unusable', {
