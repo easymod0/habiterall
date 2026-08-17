@@ -133,14 +133,34 @@ export async function start(adapter) {
   // its second trigger is `visibilitychange` and that has to be attached before
   // the awaits below — a tab backgrounded during boot is exactly the case it is
   // for. INJECTED rather than importing what it needs, which is what keeps
-  // `ui/nudge.js` free of imports and so testable under Node; all five things
-  // it wants belong to somebody else.
+  // `ui/nudge.js` free of imports and so testable under Node; every one of
+  // these belongs to somebody else.
   nudge.init({
     habits: () => state.habits,
     // ...and the window they came from, which is half of the same answer. A
     // grid paged back a fortnight holds entries that stop before today, where
     // a missing key means "never fetched" and not "no row".
     loaded: () => state.gridLoaded,
+    // What to do when that window falls short of today. The POLICY is here and
+    // not in `ui/nudge.js`, because it turns on what the user is looking at and
+    // that is `state`'s to know.
+    //
+    // Two refusals, each of them a thing that would otherwise go wrong. A grid
+    // the user PAGED back is meant to exclude today, so reloading it would undo
+    // a deliberate act — pressing Today is how they undo it themselves. And a
+    // habit open over the dashboard must not have the list reloaded underneath
+    // it: `dashboard.paint()` clears `openHabitId` and shows the list, so a
+    // nudge would navigate away from the page somebody is reading. That is the
+    // same guard, for the same reason, as the `'reload'` in settings-dialog.js.
+    //
+    // What is left is the case with no other cure: a tab open across local
+    // midnight, holding a window that ends yesterday because nothing in the app
+    // refreshes on `visibilitychange` — `syncNow` returns early on an empty
+    // queue, and `'reload'` fires only on an offline→online transition.
+    refresh: async () => {
+      if (state.gridEnd || state.openHabitId != null) return;
+      await dashboard.load();
+    },
     enabled: () => settings.get('notifyChannels') ?? [],
     // The browser's own calendar day, from the app's one `iso()`. Never a
     // named zone: this is the question `callerDay` answers for a write.

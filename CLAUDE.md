@@ -1212,9 +1212,10 @@ time. Adding a destination means an entry in `CHANNELS`, a branch in
 `sendToChannel`, and an option in `ui/settings.js` — nothing per edition.
 
 **`delivery: 'device'` says who DECIDES, and the `web` channel keeps a time
-nobody promised.** It is the fourth destination (after `android`, `discord` and
-`ntfy`) and the second `device` one, and it differs from `android` in the one
-way that matters to a user: the phone arms
+nobody promised.** It is the fourth destination to be BUILT and the second
+`device` one — it sits second in `CHANNEL_IDS`, beside `android`, which is worth
+knowing because the `DEVICE_CHANNELS` pin below compares in registry order. It
+differs from `android` in the one way that matters to a user: the phone arms
 an `AlarmManager` alarm and fires at 08:00, and a browser cannot. A page's
 timers run only while a tab is open and are clamped to about one a minute in the
 background, a service worker is terminated when idle and has no wake-at-time
@@ -1303,33 +1304,60 @@ guess: nagging about a day already dealt with is what gets a destination switche
 off, and the dashboard behind it is showing the truth either way. Anything else
 that starts reading `habit.entries` for a date needs the same pair.
 
+**A window falls short of today for TWO reasons, and refusing was the whole
+answer to only one of them.** Paging back is the user's own act, undone by
+pressing Today. The other is the clock: nothing in the app refreshes on
+`visibilitychange` — `syncNow` returns early on an empty queue and `'reload'`
+fires only on an offline→online transition — so a tab left open across local
+midnight holds yesterday's window for ever, and refusing there silenced every
+habit at 09:00 the next morning, which is the one moment this exists for. That
+was a regression the fix above introduced and a review caught. `check` now asks
+once for a fresh window before it gives up, and WHAT counts as fresh is the
+caller's policy rather than the module's: `app.js` declines when the grid has
+been paged back (a deliberate exclusion) and when a habit is open over the
+dashboard (`dashboard.paint()` clears `openHabitId`, so a reload would navigate
+away from the page being read — the same guard `settings-dialog.js` uses on its
+`'reload'`). A refusal leaves the window alone and `outstanding` says nothing,
+which is the paged-back answer and is correct.
+
+`covers`' lower bound is unreachable rather than unpinned, and is worth
+remembering when this changes: `end` is server-clamped to the caller's own day,
+so `today < start` needs a backwards clock. Nothing above makes it reachable.
+
 The blind spot that remains is stated in `check` rather than fixed: it reads what
-the app has already fetched and never fetches itself — which is what makes it
-work offline — so answering on the phone and switching to a browser tab open
-since morning can nudge about an answered day. The watermark caps it at one per
-habit per day, and a fetch on every `visibilitychange` is traffic nobody asked
-for.
+the app has already fetched rather than fetching on a schedule — which is what
+makes it work offline — so answering on the phone and switching to a browser tab
+open since morning can nudge about an answered day. The watermark caps it at one
+per habit per day, and a fetch on every `visibilitychange` is traffic nobody
+asked for. The one fetch it does ask for is the case above, where the payload
+cannot answer at all rather than answering stalely.
 
 `ui/nudge.js` is a new file under `shared/public/`, which costs a
 `CACHE_VERSION` bump — the cost `deviceClockHeader` was kept out of a module of
 its own to avoid. It is paid here because this is a subsystem rather than one
 import, and because no existing module owns it (the dashboard owns the grid,
 settings the preferences, connectivity the banner). Be exact about what the bump
-buys, because the first version of this paragraph was not: this is the **v9**
-case, a new asset an installed PWA would otherwise fetch on first use and be
-offline for, and NOT v14's link error between two files already in the shell.
-Nor is the bump the mechanism — `install` re-runs `SHELL.map(cache.add)` on any
-change to `sw.js`, into whichever cache is named, so unbumped the file would
-land in the outgoing worker's own cache sooner. What it buys is that the shell
-is rebuilt under a new name and the old one dropped on activate, so the swap is
-all-or-nothing; it costs every installed client its data cache, and it is what
-every previous shell addition here did. It is **dependency-free**, as
-`ui/toggle.js` is and for the same reason — that is what lets the rule AND the
-call site be tested under Node — so everything it needs arrives through
-`init()`, including `todayISO`, because this app has one `iso()` and
-`test/dates.test.js` refuses a second. It is not DOM-*free*: `init` registers
-one `visibilitychange` listener, and takes the document so a test can hand it
-one.
+buys; this note has been written wrong in BOTH directions and the true answer is
+that it is v9's case and v14's at once. v9's, because a brand-new module is one
+an installed PWA fetches on first use and is offline for. And v14's, which a
+rewrite denied on the reasoning that an old shell serving the old `app.js`
+alongside it links fine — true, and not the state the window produces:
+`shellFirst` is stale-while-revalidate and writes into the RUNNING worker's
+cache, so while the outgoing worker is still in control it can store the NEW
+`app.js` into a shell that has no `nudge.js`, and offline that is a module link
+error before `start()` and so outside `#view-error`.
+
+What the bump then does is narrower than "all-or-nothing", which is an
+overstatement inherited from the v14 note and now corrected in both: `install`
+uses `Promise.allSettled`, so a partly populated new shell is a normal outcome
+and `activate` deletes the old one regardless. It is atomic at the cache NAME —
+no request can mix the two shells — and not at the asset. It costs every
+installed client its data cache. It is **dependency-free**, as `ui/toggle.js` is
+and for the same reason — that is what lets the rule AND the call site be tested
+under Node — so everything it needs arrives through `init()`, including
+`todayISO`, because this app has one `iso()` and `test/dates.test.js` refuses a
+second. It is not DOM-*free*: `init` registers one `visibilitychange` listener,
+and takes the document so a test can hand it one.
 
 **Buttons in Discord need a bot; a webhook cannot carry them.** Discord accepts
 `components` on an *application-owned* webhook only, so the plain channel

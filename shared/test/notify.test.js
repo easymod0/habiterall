@@ -40,8 +40,14 @@ test('every channel offered in the UI is one the server knows', () => {
   // ui/settings.js declares what the dialog renders and notify.js declares
   // what the server delivers. A channel in one and not the other is either a
   // dead control or a destination nobody can switch on.
+  // Anchored at column 0 with /m, so the literal that is read is the
+  // DECLARATION. Unanchored, the regex takes the first match anywhere in the
+  // file — and a JSDoc line quoting the correct list above a broken real
+  // declaration would satisfy it while the module exported the wrong thing.
+  // Nothing had done that; the hole was found by a review of the same pattern
+  // copied one test down, and both are closed by the same anchor.
   const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
-  const block = /const CHANNEL_OPTIONS = \[([\s\S]*?)\n\];/.exec(ui);
+  const block = /^const CHANNEL_OPTIONS = \[([\s\S]*?)\n\];/m.exec(ui);
   assert.ok(block, 'failed to find CHANNEL_OPTIONS in ui/settings.js');
 
   const offered = [...block[1].matchAll(/\{ value: '([^']+)'/g)].map((m) => m[1]);
@@ -60,8 +66,10 @@ test('the UI knows which destinations the DEVICE decides', () => {
   // It shipped unpinned: mutating it to `['android']` left the whole unit run
   // green, and only a browser suite noticed, only in Chrome, only for `web`. A
   // third device destination added later would have been caught by nothing.
+  // Anchored at column 0, for the reason the test above says: an indented
+  // mention in a comment must not be able to answer for the declaration.
   const ui = readFileSync(join(root, 'public', 'ui', 'settings.js'), 'utf8');
-  const block = /const DEVICE_CHANNELS = \[([^\]]*)\];/.exec(ui);
+  const block = /^const DEVICE_CHANNELS = \[([^\]]*)\];/m.exec(ui);
   assert.ok(block, 'failed to find DEVICE_CHANNELS in ui/settings.js');
 
   const listed = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);

@@ -135,6 +135,17 @@ export function isDayAnswered(habit, entry) {
  * behind it is showing the truth either way. An unknown window refuses too:
  * before the first load there is nothing to judge.
  *
+ * **A window falls short of today for two different reasons, and refusing is
+ * the whole answer to only one of them.** Paging back is the user's own act and
+ * is undone by pressing Today. The other is the CLOCK: a tab left open across
+ * local midnight holds yesterday's window with nothing in the app refreshing it,
+ * so refusing there silenced the nudge permanently — at 09:00 the next morning,
+ * which is precisely the moment this exists for. That is a regression this
+ * predicate caused and `check` now answers, by asking for a fresh window before
+ * it gives up. This function is unchanged by that and stays the strict test:
+ * it says what the payload can SPEAK FOR, and it is the caller's business to go
+ * and get a better one.
+ *
  * @param {{start?: string, end?: string}|null|undefined} loaded
  * @param {string} date
  */
@@ -389,6 +400,7 @@ export async function announce(message, fallback) {
  *
  * @type {{habits: () => any[], enabled: () => string[], today: () => string,
  *         loaded: () => {start: string, end: string}|null,
+ *         refresh?: () => Promise<void>,
  *         fallback: (text: string) => void}|null}
  */
 let wiring = null;
@@ -396,14 +408,19 @@ let wiring = null;
 /**
  * Look, and say something if there is anything to say.
  *
- * It reads whatever the app has ALREADY fetched and never fetches itself, which
- * is what makes it work offline and is also its one blind spot: answer a day on
- * the phone and switch to a browser tab that has been open since the morning,
- * and the answer is not in `state.habits` yet, so this can nudge about a day
- * that has been dealt with. The watermark caps that at one per habit per day,
- * the dashboard behind it shows the truth, and the alternative — a fetch on
- * every `visibilitychange` — is traffic on a schedule the user did not ask for.
- * `covers` is the same problem in its one form that can be answered locally.
+ * It reads whatever the app has ALREADY fetched rather than fetching on a
+ * schedule, which is what makes it work offline and is also its one blind spot:
+ * answer a day on the phone and switch to a browser tab that has been open
+ * since the morning, and the answer is not in `state.habits` yet, so this can
+ * nudge about a day that has been dealt with. The watermark caps that at one
+ * per habit per day and the dashboard behind it shows the truth; fetching on
+ * every `visibilitychange` to close it would be traffic on a schedule the user
+ * did not ask for.
+ *
+ * The one fetch it DOES ask for is the other case — see the comment on `covers`
+ * below — and the difference is that there the payload cannot answer at all
+ * rather than answering staly. That is once per check and only while the window
+ * falls short, which for a tab that is up to date is never.
  *
  * The watermark is written BEFORE the announcement rather than after it: a
  * `showNotification` that rejects has still, on some browsers, shown one, and
@@ -425,10 +442,32 @@ export async function check({ now = new Date() } = {}) {
 
     const date = wiring.today();
     const already = alreadyNudged(date);
+
+    // A window that does not reach today has TWO causes, and only one of them
+    // is the user's. Paging the grid back is deliberate and is undone by
+    // pressing Today. The CLOCK moving is undone by nothing — nothing refreshes
+    // the dashboard on `visibilitychange`, since `syncNow` returns early on an
+    // empty queue and `reload` fires only on an offline→online transition — so
+    // a tab left open across local midnight held yesterday's window for ever
+    // and refused every habit on it. That silenced this at 09:00 the next
+    // morning, which is the one moment it was written for.
+    //
+    // So ask once for a fresh window and read again. What "fresh" means is the
+    // CALLER's to decide rather than this module's: `app.js` declines when the
+    // grid has been paged back, and when a habit is open over the dashboard,
+    // because reloading the list there would navigate away from the page
+    // somebody is on. A refresh that declines leaves the window where it was
+    // and `outstanding` refuses — which is the paged-back answer, and correct.
+    let loaded = wiring.loaded?.() ?? null;
+    if (!covers(loaded, date)) {
+      await wiring.refresh?.();
+      loaded = wiring.loaded?.() ?? null;
+    }
+
     const due = outstanding(wiring.habits() ?? [], {
       date,
       minutes: minutesNow(now),
-      loaded: wiring.loaded?.() ?? null,
+      loaded,
       already,
     });
     if (!due.length) return [];
@@ -456,6 +495,12 @@ export async function check({ now = new Date() } = {}) {
  * which days their entries are able to speak for. Taking the first without the
  * second is the defect `covers` is written about.
  *
+ * `refresh` is the other half of that, and it is optional because it is a
+ * POLICY: "the window falls short — can you get a better one?" is this module's
+ * question, and whether the answer is a reload depends on what the user is
+ * looking at, which lives in `state` and not here. Omit it and `check` behaves
+ * exactly as it did: it refuses.
+ *
  * `visibilitychange` is the second trigger and the reason the watermark exists.
  * It is a separate listener from `ui/connectivity.js`'s, deliberately: that one
  * drains the outbox, this one reads state, and folding two unrelated concerns
@@ -463,13 +508,14 @@ export async function check({ now = new Date() } = {}) {
  *
  * @param {{habits: () => any[], enabled: () => string[], today: () => string,
  *          loaded?: () => {start: string, end: string}|null,
+ *          refresh?: () => Promise<void>,
  *          fallback: (text: string) => void,
  *          doc?: {addEventListener: Function, visibilityState?: string}}} deps
  */
 export function init({
-  habits, enabled, today, loaded, fallback, doc = globalThis.document,
+  habits, enabled, today, loaded, refresh, fallback, doc = globalThis.document,
 }) {
-  wiring = { habits, enabled, today, loaded, fallback };
+  wiring = { habits, enabled, today, loaded, refresh, fallback };
 
   doc?.addEventListener?.('visibilitychange', () => {
     if (doc.visibilityState !== 'visible') return;

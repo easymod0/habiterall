@@ -81,6 +81,54 @@ const STUB = `
   };
   window.Notification = FakeNotification;
 
+  // Two request shims, installed once so they survive every navigation.
+  //
+  // __staleWindow rewrites the "end" of an /api/overview answer to a past day,
+  // which is what a tab left open across local midnight is holding: the window
+  // no longer reaches today, and nothing in the app refreshes it. Only that one
+  // field moves, so the grid draws from its own clock exactly as it would.
+  //
+  // __holdStatus keeps /api/notify/status pending until __releaseStatus is
+  // called, so the late answer can be made to land while somebody is typing.
+  // The stale-window flag lives in localStorage rather than on window, because
+  // this whole stub is re-run on every navigation and would reset it.
+  window.__holdStatus = false;
+  window.__releaseStatus = null;
+  window.__overviewLoads = 0;
+  const realFetch = window.fetch.bind(window);
+  window.fetch = function (input, opts) {
+    const url = String(input && input.url ? input.url : input);
+
+    if (url.indexOf('/api/notify/status') !== -1 && window.__holdStatus) {
+      return new Promise((resolve) => {
+        window.__releaseStatus = () => resolve(new Response(JSON.stringify({
+          channels: [{
+            channel: 'discord', ok: false, status: 404, permanent: true,
+            error: 'the webhook was deleted or is no longer accepted',
+            date: '2026-08-15', mode: 'webhook', at: '',
+          }],
+        }), { headers: { 'Content-Type': 'application/json' } }));
+      });
+    }
+
+    if (url.indexOf('/api/overview') !== -1) {
+      window.__overviewLoads++;
+      let pretend = null;
+      try { pretend = localStorage.getItem('habtest-stale-window'); } catch (e) { /* none */ }
+      if (pretend) {
+        return realFetch(input, opts).then(async (res) => {
+          if (!res.ok) return res;
+          const body = await res.json();
+          body.end = pretend;
+          return new Response(JSON.stringify(body),
+            { status: res.status, headers: { 'Content-Type': 'application/json' } });
+        });
+      }
+    }
+
+    return realFetch(input, opts);
+  };
+
   // A secure context is what a browser demands before it will show any of
   // this, and localhost qualifies — so the plain-http case has to be stubbed.
   window.__insecure = false;
@@ -466,6 +514,165 @@ try {
   ck('ticking it says the browser cannot show one',
      /cannot show notifications/i.test(absent), absent || '(no notice at all)');
   ck('and says where the answer goes instead', /inside the app/i.test(absent), absent);
+  await ev('document.getElementById("settings-cancel").click()');
+  await sleep(300);
+
+  console.log('--- a tab left open across midnight still nudges ---');
+  // The regression the first version of the window fix introduced. Nothing in
+  // the app refreshes on `visibilitychange` — `syncNow` returns early on an
+  // empty queue and `reload` fires only on an offline→online transition — so a
+  // tab loaded yesterday holds yesterday's window for ever, and refusing there
+  // silences this at 09:00 the next morning: the one moment it exists for.
+  //
+  // Simulated by rewriting `end` in the /overview answer to a past day, which
+  // is exactly the state the clock produces, and then letting the refresh fetch
+  // an honest one. Distinguished from the paged-back case by `gridEnd` alone,
+  // which is what `app.js` reads.
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({notifyChannels:['android','web']})}).then(r=>r.ok)`);
+  // Today's answer is cleared first: an earlier block recorded it, and a habit
+  // that IS answered would make every assertion below pass for the wrong reason.
+  await ev(`(() => {
+    const d = new Date();
+    const iso = d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+    return fetch('/api/habits/${habits.Meditate.id}/entries/' + iso, {
+      method: 'DELETE', credentials: 'same-origin',
+    }).then(r => r.ok);
+  })()`);
+  await ev(`(() => {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    localStorage.setItem('habtest-stale-window', d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0'));
+    localStorage.removeItem('habiterall-nudged');
+  })()`);
+  await load();
+
+  // The premise, and it is also the refusal still doing its job: while every
+  // answer stops before today, nothing can be judged and nothing is said —
+  // even though the refresh is asked for and made.
+  ck('a window that cannot reach today says nothing at all',
+     await ev('window.__nudges.length') === 0,
+     JSON.stringify(await ev('window.__nudges')));
+  ck('the grid is NOT paged back — this is the clock, not the user',
+     await ev(`!!document.querySelector('.grid-date.is-today')`));
+
+  // Now the tab comes back, and the server's answers are honest again — which
+  // is what a refresh would fetch, and what obeying the held window would not.
+  await ev(`localStorage.removeItem('habtest-stale-window');
+    localStorage.removeItem('habiterall-nudged');
+    window.__nudges.length = 0;`);
+  const before = await ev('window.__overviewLoads');
+  await ev('document.dispatchEvent(new Event("visibilitychange"))');
+  await sleep(900);
+
+  ck('the stale window is refreshed rather than obeyed',
+     await ev('window.__overviewLoads') > before,
+     `loads ${before} -> ${await ev('window.__overviewLoads')}`);
+  ck('...and the outstanding habit is announced',
+     await ev('window.__nudges.length') === 1,
+     JSON.stringify(await ev('window.__nudges')));
+
+  console.log('--- ...but a grid the user paged back is left alone ---');
+  // The other cause of a short window, and the one refusing is right about: a
+  // deliberate act, undone by pressing Today and not by a nudge.
+  await ev(`[...document.querySelectorAll('.grid-nav button')]
+    .find(b => (b.getAttribute('aria-label') || '').startsWith('Previous'))?.click()`);
+  await sleep(900);
+  await ev('localStorage.removeItem("habiterall-nudged"); window.__nudges.length = 0;');
+  const pagedLoads = await ev('window.__overviewLoads');
+  await ev('document.dispatchEvent(new Event("visibilitychange"))');
+  await sleep(700);
+  ck('no refetch is made behind the user\'s back',
+     await ev('window.__overviewLoads') === pagedLoads,
+     `loads ${pagedLoads} -> ${await ev('window.__overviewLoads')}`);
+  ck('and nothing is announced', await ev('window.__nudges.length') === 0,
+     JSON.stringify(await ev('window.__nudges')));
+
+  console.log('--- ...and a habit open over the dashboard is not navigated away from ---');
+  // `dashboard.paint()` clears `openHabitId` and shows the list, so a reload
+  // fired by a nudge would take the user off the page they are reading. Same
+  // guard, same reason, as the 'reload' in settings-dialog.js.
+  await ev(`(() => {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    localStorage.setItem('habtest-stale-window', d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0'));
+  })()`);
+  await ev(`[...document.querySelectorAll('.grid-nav button')]
+    .find(b => b.textContent.trim() === 'Today')?.click()`);
+  await sleep(900);
+  await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);
+  for (let i = 0; i < 40; i++) {
+    if ((await ev('location.hash') || '').startsWith('#/habit/')) break;
+    await sleep(200);
+  }
+  await sleep(400);
+  ck('a habit is open', (await ev('location.hash') || '').startsWith('#/habit/'),
+     await ev('location.hash'));
+
+  await ev(`localStorage.removeItem('habtest-stale-window');
+    localStorage.removeItem('habiterall-nudged');
+    window.__nudges.length = 0;`);
+  const openLoads = await ev('window.__overviewLoads');
+  await ev('document.dispatchEvent(new Event("visibilitychange"))');
+  await sleep(800);
+  ck('the list is not reloaded underneath it',
+     await ev('window.__overviewLoads') === openLoads,
+     `loads ${openLoads} -> ${await ev('window.__overviewLoads')}`);
+  ck('and the habit is still what is on screen',
+     (await ev('location.hash') || '').startsWith('#/habit/'),
+     await ev('location.hash'));
+
+  await ev('history.back()');
+  await sleep(900);
+
+  console.log('--- a late delivery answer must not eat what is being typed ---');
+  // The other half of the notice repaint, and the one nothing pinned: reverting
+  // `refreshDeliveryNotices` to an unguarded `renderSettingsBody()` passed every
+  // suite. The status request is held open and released mid-edit, which is the
+  // shape the guards used to exist for and the shape `paintNotices` makes safe.
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({notifyChannels:['android','discord']})}).then(r=>r.ok)`);
+  await load();
+  await ev('window.__holdStatus = true; window.__releaseStatus = null;');
+  await ev('document.getElementById("btn-settings").click()');
+  await sleep(500);
+  ck('the dialog opens without waiting for the status request',
+     await ev('document.getElementById("settings-dialog").open') === true);
+  ck('and its notice has not arrived yet',
+     await ev('document.querySelectorAll(".setting-problem").length') === 0);
+
+  const midEdit = 'https://discord.com/api/webhooks/123456789012345678/mid-edit';
+  await ev(`(() => {
+    const input = document.getElementById('setting-discordWebhook');
+    input.focus();
+    input.value = ${JSON.stringify(midEdit)};
+    input.setSelectionRange(4, 9);
+    return input.value;
+  })()`);
+
+  await ev('window.__releaseStatus && window.__releaseStatus()');
+  await sleep(600);
+
+  ck('the late answer arrives', /webhook was deleted/i.test(
+     await ev('[...document.querySelectorAll(".setting-problem")].map(p=>p.textContent).join(" ")')),
+     await ev('[...document.querySelectorAll(".setting-problem")].map(p=>p.textContent).join(" ")'));
+  ck('and the half-typed URL is untouched',
+     await ev(`document.getElementById('setting-discordWebhook')?.value ?? ''`) === midEdit,
+     await ev(`document.getElementById('setting-discordWebhook')?.value ?? '(gone)'`));
+  ck('...along with the caret and the selection',
+     await ev(`document.activeElement?.id`) === 'setting-discordWebhook' &&
+     await ev(`document.activeElement?.selectionStart`) === 4 &&
+     await ev(`document.activeElement?.selectionEnd`) === 9,
+     await ev(`document.activeElement?.id + ':' + document.activeElement?.selectionStart
+       + '-' + document.activeElement?.selectionEnd`));
+
+  await ev('window.__holdStatus = false;');
   await ev('document.getElementById("settings-cancel").click()');
   await sleep(300);
 

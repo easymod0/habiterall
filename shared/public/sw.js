@@ -22,25 +22,37 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
-// v15: the browser's own reminder. `ui/nudge.js` is a NEW shell asset, which is
-// the v9 case and not v14's — worth stating plainly, because the first version
-// of this note claimed v14 and was wrong. v14 was a LINK error between two
-// files both already in the shell, where a stale copy of one and a fresh copy
-// of the other could not resolve an import; here `app.js` imports nudge.js
-// statically, but an old shell serving the old app.js beside it links fine. So
-// there is no error to prevent. What a new asset costs is v9's: an installed
-// PWA fetches it on first use, and is offline exactly when a nudge needs it.
+// v15: the browser's own reminder. `ui/nudge.js` is a new shell asset that
+// `app.js` imports STATICALLY, and it is BOTH earlier cases at once — this note
+// has now been written wrong in each direction, so both halves are set out.
 //
-// And the bump is not the mechanism that fixes that. `install` re-runs
-// `SHELL.map(cache.add)` on any change to this file, into whichever cache is
-// named — so unbumped, nudge.js would land in the v14 shell the outgoing worker
-// is already serving from, sooner and with the data cache intact. What the bump
-// actually buys is that the whole shell is rebuilt under a NEW name and the old
-// one is dropped on activate, so the swap is all-or-nothing rather than
-// file-by-file. That is what every previous shell addition here did, and it
-// costs every installed client its data cache — which is why the first offline
-// boot afterwards gets the synthetic 503 that `#view-error` exists for.
-// Nothing in index.html or style.css moved.
+// It is v9's: a brand-new module an installed PWA would otherwise fetch on
+// first use, which is to say be offline for at exactly the moment a nudge needs
+// it.
+//
+// And it is v14's after all, which a rewrite of this note wrongly denied on the
+// grounds that an old shell serving the old app.js links fine. It does — but
+// that is not the state the window produces. `shellFirst` is
+// stale-while-revalidate and it writes into the RUNNING worker's SHELL_CACHE,
+// so while a v14 worker is still in control (the v15 install fetches every
+// asset first), a request for `/shared/app.js` serves the old file and stores
+// the NEW one into `habiterall-shell-v14`, which has no nudge.js. Offline in
+// that window the static import is a module link error before `start()` — so
+// outside the `#view-error` surface, which is a blank page. That is the v14
+// note fifty lines below, verbatim: the revalidate is per request and not
+// atomic.
+//
+// What the bump does about it is worth stating exactly, because it is not what
+// it looks like. `install` re-runs `SHELL.map(cache.add)` on any change to this
+// file, into whichever cache is NAMED — so unbumped, nudge.js would land in the
+// v14 shell sooner and with the data cache intact. The bump's actual effect is
+// that the new shell is built under a name of its own and the old one is
+// dropped on `activate`, so no request can mix the two. Note it is atomic at
+// the CACHE level and not at the asset level: `install` uses
+// `Promise.allSettled`, so a partly populated new shell is a normal outcome and
+// the old one is deleted regardless. It costs every installed client its data
+// cache, which is why the first offline boot afterwards gets the synthetic 503
+// that `#view-error` exists for. Nothing in index.html or style.css moved.
 // v13: the habit search. `index.html` grew `#search-row`, `#habit-search`,
 // `#search-count` and `#empty-nomatch`, and dashboard.js looks all four up at
 // module scope and dereferences them in `paint()` — so a stale v12 shell with
@@ -81,7 +93,11 @@ const sw = self;
 // per request and not atomic, so a shell holding the new theme.js and the old
 // settings.js is a module LINK error — `onApply` is not an export of that file
 // — and app-entry.js never evaluates. An installed PWA boots to a blank page.
-// The precache makes the swap all-or-nothing.
+// The precache stops a request mixing the two, because the new shell is built
+// under its own name. (This line used to read "makes the swap all-or-nothing",
+// which overstates it: `install` uses `Promise.allSettled`, so a partly
+// populated new shell is a normal outcome and `activate` deletes the old one
+// either way. Atomic at the cache NAME, not at the asset.)
 //
 // v6: the habit dialog gained the reminder time picker and the "what the
 // reminder asks" field. index.html is a shell asset, so without a bump an

@@ -612,22 +612,31 @@ test('a runtime with no isSecureContext at all falls through to the permission',
  */
 function wire({
   habits = [], enabled = [WEB_CHANNEL], today = TODAY, loaded = WINDOW,
+  refresh = undefined,
 } = {}) {
   const said = [];
   const events = new Map();
+  const refreshes = [];
   const doc = {
     visibilityState: 'visible',
     addEventListener: (name, fn) => events.set(name, fn),
   };
+  // The window is read through a box rather than captured, so a `refresh` can
+  // change it exactly as `dashboard.load()` changes `state.gridLoaded`.
+  const box = { loaded };
   init({
     habits: () => habits,
     enabled: () => enabled,
     today: () => today,
-    loaded: () => loaded,
+    loaded: () => box.loaded,
+    refresh: refresh && (async () => {
+      refreshes.push(Date.now());
+      await refresh(box);
+    }),
     fallback: (text) => said.push(text),
     doc,
   });
-  return { said, events, doc };
+  return { said, events, doc, box, refreshes };
 }
 
 test('nothing is said unless the destination is switched on', async () => {
@@ -679,6 +688,87 @@ test('the trigger is `visibilitychange`, and only when visible', async () => {
     doc.visibilityState = 'visible';
     await events.get('visibilitychange')();
     assert.equal(said.length, 1);
+  });
+});
+
+test('a window that has fallen behind the clock is refreshed, not refused', async () => {
+  // The regression the first fix introduced, and the reason `covers` is not the
+  // whole answer. Nothing in the app refreshes on `visibilitychange`, so a tab
+  // left open across local midnight holds yesterday's window for ever — and
+  // refusing there silenced this at 09:00 the next morning, which is the one
+  // moment it was written for.
+  await withGlobals({ localStorage: fakeStorage() }, async () => {
+    const yesterday = { start: '2026-08-03', end: '2026-08-16' };
+    const { said, box, refreshes } = wire({
+      habits: [due()],
+      loaded: yesterday,
+      // What `dashboard.load()` does: fetch, and put the new window in state.
+      refresh: (b) => { b.loaded = WINDOW; },
+    });
+
+    assert.deepEqual((await check({ now: new Date(2026, 7, 17, 9, 0) })).map((h) => h.id), [1]);
+    assert.deepEqual(said, ['1 habit still to answer today: Meditate']);
+    assert.equal(refreshes.length, 1, 'asked for a fresh window exactly once');
+  });
+});
+
+test('a refresh that declines leaves the refusal standing', async () => {
+  // The paged-back case: `app.js` returns without loading when the user chose
+  // this window, so the second read finds it unchanged and nothing is said.
+  // That is the same code path as the test above, distinguished only by what
+  // the caller does — which is the whole point of the policy living there.
+  await withGlobals({ localStorage: fakeStorage() }, async () => {
+    const paged = { start: '2026-07-21', end: '2026-08-03' };
+    const { said, refreshes } = wire({
+      habits: [due()],
+      loaded: paged,
+      refresh: () => { /* declined: the user paged here on purpose */ },
+    });
+
+    assert.deepEqual(await check({ now: new Date(2026, 7, 17, 9, 0) }), []);
+    assert.deepEqual(said, []);
+    assert.equal(refreshes.length, 1);
+  });
+});
+
+test('a window that already reaches today is never refetched', async () => {
+  // The bound on this: it is one request only while the window falls short,
+  // which for an up-to-date tab is never. Without it, every visibilitychange
+  // would cost a fetch nobody asked for.
+  await withGlobals({ localStorage: fakeStorage() }, async () => {
+    const { refreshes } = wire({
+      habits: [due()],
+      refresh: () => { throw new Error('must not be called'); },
+    });
+    assert.deepEqual((await check({ now: new Date(2026, 7, 17, 9, 0) })).map((h) => h.id), [1]);
+    assert.deepEqual(refreshes, []);
+  });
+});
+
+test('with no refresh wired at all, it simply refuses', async () => {
+  // `refresh` is optional, so a caller that supplies none behaves exactly as
+  // this did before it existed.
+  await withGlobals({ localStorage: fakeStorage() }, async () => {
+    const { said } = wire({
+      habits: [due()],
+      loaded: { start: '2026-08-03', end: '2026-08-16' },
+    });
+    assert.deepEqual(await check({ now: new Date(2026, 7, 17, 9, 0) }), []);
+    assert.deepEqual(said, []);
+  });
+});
+
+test('a refresh that throws is not a nudge that throws', async () => {
+  // It reaches the network, so it fails whenever the network does. `check` is
+  // wired to an event handler and to the tail of boot.
+  await withGlobals({ localStorage: fakeStorage() }, async () => {
+    const { said } = wire({
+      habits: [due()],
+      loaded: { start: '2026-08-03', end: '2026-08-16' },
+      refresh: () => { throw new Error('offline'); },
+    });
+    await assert.doesNotReject(check({ now: new Date(2026, 7, 17, 9, 0) }));
+    assert.deepEqual(said, []);
   });
 });
 
