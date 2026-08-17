@@ -240,8 +240,48 @@ try{
      await ev(`document.querySelectorAll('#view-detail .stat-tile').length`) === 4,
      JSON.stringify(await cardTitles()));
 
+  // A card that comes back must not come back where it was left. Driven
+  // through the DIALOG with the habit open, because that is the only path
+  // `applyDraft`'s clearing runs on — set the value through the API and the
+  // page reloads, which starts everything at today for free and would pass
+  // against a version that clears nothing at all.
+  //
+  // The calendar rather than a `windowedChart` card on purpose: its position is
+  // `state.calEnd` and not `state.chartOffsets`, so a fix that clears only the
+  // offsets passes every other assertion here and fails this one.
   await putSetting({ detailCards: ['strength', 'calendar', 'streaks', 'resilience',
     'awards', 'history', 'weekdays', 'weekdayMonths', 'frequency'] });
+  await load();
+  await openHabit();
+  const calRange = () => ev(`document.querySelector('.cal-range')?.textContent ?? ''`);
+  const atToday = await calRange();
+  for (const _ of [0, 1]) {
+    await ev(`[...document.querySelectorAll('.cal-nav button')]
+      .find(b=>b.textContent.includes('Earlier'))?.click()`);
+    await sleep(700);
+  }
+  const pagedBack = await calRange();
+  ck('the calendar pages back', pagedBack !== atToday && pagedBack !== '',
+     `${atToday} -> ${pagedBack}`);
+
+  const tickCalendar = async (on) => {
+    await ev(`document.getElementById('btn-settings').click()`); await sleep(600);
+    await ev(`(()=>{const b=document.getElementById('setting-detailCards-calendar');
+      b.checked=${on}; b.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await ev(`document.getElementById('settings-close').click()`); await sleep(1200);
+  };
+  await tickCalendar(false);
+  ck('unticking it in the dialog removes it from the open habit',
+     await calRange() === '');
+  await tickCalendar(true);
+  for (let i = 0; i < 40; i++) {
+    if (await ev(`!!document.querySelector('.cal-range')`).catch(()=>0)) break;
+    await sleep(200);
+  }
+  await sleep(500);
+  ck('and ticking it back reopens it at today, not where it was hidden',
+     await calRange() === atToday, `expected ${atToday}, got ${await calRange()}`);
+
   await ev(`localStorage.removeItem('habiterall-settings')`);
   await load();
 

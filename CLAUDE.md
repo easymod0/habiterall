@@ -873,11 +873,23 @@ view into a synthetic 503 with a toast, rather than one missing card. The
 payload is worth attacking through the WINDOW instead (`scores` is 139KB and a
 day-granularity `history` 250KB of that 464KB), which is a different change.
 
-One consequence that is not about drawing. `windowedChart` keys its paging
-offsets by card and `detail.open()` clears them only when the HABIT changes, so
-hiding a card paged back to 2024 would bring it back there. `applyDraft` clears
-`state.chartOffsets` when `detailCards` changes, beside where it clears the
-session overrides for `calendarZoom` and the two granularities.
+One consequence that is not about drawing, **and the detail view keeps a paging
+position in two places rather than one.** `detail.open()` clears a position only
+when the HABIT changes, so a card hidden while paged into 2023 comes back there
+with nothing on screen to say why. `applyDraft` therefore clears both when
+`detailCards` changes, beside where it clears the session overrides for
+`calendarZoom` and the two granularities: `state.chartOffsets`, which
+`windowedChart` keys per card, **and `state.calEnd`, which is the calendar's**.
+Clearing only the first is what the self-review caught — measured hiding a
+calendar at `30 Jan 2023 → 7 Apr 2024` and showing it again at exactly that, on
+the one card anybody actually pages. The test drives it through the DIALOG with
+the habit open, because setting the value through the API reloads the page,
+which starts everything at today for free and would pass against a version that
+clears nothing.
+
+That halfness has an older half of its own, left alone here: `open()`'s comment
+says "Opening a different habit starts at 'now'", and it clears `chartOffsets`
+only — so `calEnd` already survives opening a different habit today.
 
 Neither setting is mirrored on the phone, and the two reasons differ. The native
 grid does not page a fixed window at all — it grows by scrolling and sends

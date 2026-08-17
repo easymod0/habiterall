@@ -455,12 +455,22 @@ async function applyDraft() {
     if ('historyGranularity' in changed) overrides.granularity = null;
     if ('historyMode' in changed) overrides.historyMode = null;
     if ('scoreGranularity' in changed) overrides.scoreGranularity = null;
-    // Not a session override but the same shape: `windowedChart` keys its
-    // paging offsets by card (`score:<gran>`, `history:<gran>`,
-    // `weekdayByMonth`, `frequency`) and `detail.open()` clears them only when
-    // the HABIT changes. So a card hidden while paged back to 2024 would come
-    // back there when it is shown again, with nothing on screen to say why.
-    if ('detailCards' in changed) overrides.chartOffsets = {};
+    // Not session overrides but the same shape: a card that comes back must not
+    // come back where it was left. `detail.open()` clears a paging position only
+    // when the HABIT changes, so without this a card hidden while paged into
+    // 2023 reopens there, with nothing on screen to say why.
+    //
+    // BOTH, because the detail view keeps that position in two places and only
+    // one of them is `windowedChart`'s. That keys an offset per card
+    // (`score:<gran>`, `history:<gran>`, `weekdayByMonth`, `frequency`); the
+    // calendar — the one card anybody actually pages — keeps `calEnd` instead.
+    // Clearing only the offsets was measured hiding a calendar at
+    // `30 Jan 2023 → 7 Apr 2024` and showing it again at exactly that, which is
+    // this rule failing on the card it most obviously applies to.
+    if ('detailCards' in changed) {
+      overrides.chartOffsets = {};
+      overrides.calEnd = null;
+    }
 
     if (ignored.length) {
       const names = ignored.map((key) => settings.SETTINGS[key]?.label ?? key);
