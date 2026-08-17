@@ -1056,6 +1056,67 @@ rebuilds the URL from the parts it checked, and the sender refuses redirects.
 Without the host check, `discordWebhook` aims the server at cloud metadata or a
 port on its own network and reports the result as a status code.
 
+**...and the second destination could not reuse that check, because there is no
+host list anybody here could write.** ntfy's whole point is that most people run
+their own, so `parseNtfyUrl` cannot name four hosts the way
+`parseDiscordWebhook` names Discord's. What it can do is notice that there are
+two people in this — one who runs the server and one who types the URL — and
+that on the cloud edition they are **not the same person**. Which networks this
+process may be aimed at is the operator's question, so it is answered where
+operators answer things: `NTFY_ALLOWED_HOSTS`, defaulting to `ntfy.sh` alone,
+naming your own **replaces** that rather than adding to it, and `off` refuses
+every URL — a way to switch the destination off for a whole instance that still
+tells the user why rather than silently doing nothing.
+
+The rest of the shape is the same and each clause is load bearing: **https
+only**, because a reminder carries a habit's name and a token would ride beside
+it; **no credentials**, since `https://ntfy.sh@evil.test/x` has a host of
+`evil.test` and reads as the opposite to a person; the host matched **with its
+port**, so allowing a host does not allow every service on it; a path of
+segments containing **no dots at all**, which makes `..` unrepresentable rather
+than filtered; and the URL **rebuilt from the parts that were checked**. Note
+what is deliberately not on the hostile list: `https://ntfy.sh/a/../b` is
+accepted as `https://ntfy.sh/b`, because `new URL` resolves traversal before any
+of this sees it — the resolved path is on an allowed host and is shaped like a
+topic, so there is nothing to escape from, and the dotless segments are what
+guarantee no second normalisation can follow the check.
+
+**The stored value is not the last word, because the allowlist is not the
+user's.** `postNtfy` asks `ntfyTarget` again at the moment of sending: an
+operator can narrow `NTFY_ALLOWED_HOSTS` months after somebody saved a URL, and
+a check that only ran at write time would leave this process connecting
+somewhere it has since been told not to. The refusal is `permanent`, since
+nothing about it changes until a setting or the environment does, and its
+sentence names the variable — that string is what the settings dialog shows,
+under the rule that the wording is the sender's own.
+
+**A reminder is published as JSON to the ntfy SERVER, not as headers to the
+topic.** The two are equally documented and only one is safe: publishing to the
+topic URL puts the title in a `Title:` header, and a habit name is free text —
+the same `\r\n` that made a Loop export's `X-Habiterall-Export-Skipped`
+count-only, with a worse sink. So `ntfyTarget` splits the stored URL into the
+endpoint and the topic (which is also what lets an ntfy proxied under
+`/ntfy/` work), and the only header this builds is the optional `Authorization`,
+whose value is refused outright if it could not go in one.
+
+**It ships as `interactive: false`, and that is a decision rather than a gap.**
+ntfy can carry action buttons and they would work — as an HTTP request the
+SUBSCRIBER's device makes at this server, from wherever that phone is, carrying
+what the notification told it to. That is an unauthenticated inbound endpoint,
+which is exactly what `discord-gateway.js` exists to avoid, and the rule that
+saves the Discord buttons has no counterpart: *a press is authorised by the
+CHANNEL it came from* needs a channel to resolve an account from, and an ntfy
+topic is a URL somebody typed. A test pins the flag so turning it on has to be
+deliberate.
+
+Two smaller consequences. Both keys are **unportable** — a topic URL is a bearer
+capability exactly as a webhook is, and on a public ntfy it is a bearer
+capability to *subscribe*, so a backup carrying one hands over every future
+reminder. And the phone's `notMirrored` gained both with a reason that is
+sharper than Discord's: ntfy HAS an Android app, so "the phone is involved" is
+true and still does not make this a value habiterall's own client reads — the
+subscriber is ntfy's app and the publisher is the server.
+
 **The gateway's own frames are remote input too, and two of them steer this
 process.** A settings URL is the obvious case; the socket is the one that reads
 as trusted because it was authenticated. It is not: `resume_gateway_url` in READY

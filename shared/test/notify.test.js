@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
   answeredIds, callerDay, channelConfigured, discordPayload, dueReminders, enabledChannels,
-  minutesOfDay, needsServerDelivery, parseChannelList, parseDiscordWebhook,
+  minutesOfDay, needsServerDelivery, ntfyAllowedHosts, ntfyPayload, ntfyTarget,
+  parseChannelList, parseDiscordWebhook, parseNtfyToken, parseNtfyUrl,
   parseTimeZone, reminderMessage, reportedZone, resolveTimeZone, serverChannels,
   zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
 } = await import('../src/notify.js');
@@ -117,6 +118,171 @@ test('an embedded-credential URL cannot smuggle a host past the allowlist', () =
     parseDiscordWebhook('https://discord.com@evil.test/api/webhooks/1/abc'),
     undefined
   );
+});
+
+/* ---------- ntfy topic URLs ---------- */
+
+/** The operator has allowed nothing but the public service. */
+const PUBLIC_NTFY = {};
+/** ...and one who runs their own, on a port. */
+const OWN_NTFY = { NTFY_ALLOWED_HOSTS: 'ntfy.example.com,inside.example.com:8443' };
+
+test('a topic URL is accepted and canonicalised', () => {
+  assert.equal(parseNtfyUrl('https://ntfy.sh/my-habits', PUBLIC_NTFY),
+    'https://ntfy.sh/my-habits');
+  assert.equal(parseNtfyUrl('  https://ntfy.sh/my-habits  ', PUBLIC_NTFY),
+    'https://ntfy.sh/my-habits');
+  assert.equal(parseNtfyUrl('https://NTFY.SH/my-habits', PUBLIC_NTFY),
+    'https://ntfy.sh/my-habits');
+  assert.equal(parseNtfyUrl('https://ntfy.sh/my-habits/', PUBLIC_NTFY),
+    'https://ntfy.sh/my-habits', 'a pasted trailing slash is forgiven');
+  assert.equal(parseNtfyUrl('https://ntfy.sh/my-habits?auth=abc', PUBLIC_NTFY),
+    'https://ntfy.sh/my-habits',
+    'the query string must be dropped, not stored for the server to fetch');
+  assert.equal(parseNtfyUrl('https://ntfy.sh/my-habits#frag', PUBLIC_NTFY),
+    'https://ntfy.sh/my-habits');
+  // A reverse-proxied ntfy lives under a base path, and its topics are under it.
+  assert.equal(parseNtfyUrl('https://ntfy.example.com/ntfy/habits', OWN_NTFY),
+    'https://ntfy.example.com/ntfy/habits');
+});
+
+test('an empty topic URL means "not configured", not an error', () => {
+  for (const blank of ['', '   ', null, undefined]) {
+    assert.equal(parseNtfyUrl(blank, PUBLIC_NTFY), '');
+  }
+});
+
+test('the ntfy URL guard closes off request forgery', () => {
+  // The SERVER fetches this, so anything it will follow is somewhere it can be
+  // aimed. There is no Discord-shaped host list to write here — the whole point
+  // of ntfy is a self-hosted one — so the shape of the check is: https, a host
+  // the OPERATOR allowed, a path made of segments we recognise, rebuilt.
+  const hostile = [
+    'http://ntfy.sh/habits',                       // plaintext, on an allowed host
+    'http://169.254.169.254/habits',               // both at once
+    'https://169.254.169.254/habits',              // cloud metadata
+    'https://localhost/habits',
+    'https://127.0.0.1:5432/habits',
+    'https://10.0.0.5/habits',
+    'https://ntfy.sh.evil.test/habits',            // suffix trick
+    'https://evil.test/habits',
+    'https://ntfy.sh:8443/habits',                 // a port the operator did not name
+    'https://ntfy.sh./habits',                     // a trailing dot is a different host
+    'https://user:pass@ntfy.sh/habits',            // credentials
+    'https://ntfy.sh@evil.test/habits',            // the classic: the host is evil.test
+    'file:///etc/passwd',
+    'gopher://ntfy.sh/habits',
+    'javascript:alert(1)',
+    'https://ntfy.sh/a/b/c/d/e',                   // deeper than a base path plus topic
+    'https://ntfy.sh/',                            // names no topic at all
+    'https://ntfy.sh',
+    'not a url at all',
+    `https://ntfy.sh/${'a'.repeat(300)}`,          // over the length cap
+  ];
+  for (const url of hostile) {
+    assert.equal(parseNtfyUrl(url, PUBLIC_NTFY), undefined, `accepted ${url}`);
+  }
+
+  // Traversal is not on that list, and stating why is the point: `new URL`
+  // resolves `..` before this sees it, so what is checked and what is stored is
+  // the RESOLVED path — still on an allowed host, still shaped like a topic,
+  // and therefore not an escape from anything. What makes that safe is that the
+  // segment pattern has no dots in it at all, so there is nothing to normalise
+  // AFTER the check.
+  assert.equal(parseNtfyUrl('https://ntfy.sh/habits/../admin', PUBLIC_NTFY),
+    'https://ntfy.sh/admin');
+});
+
+test('which hosts are reachable is the OPERATOR\'s answer, not the user\'s', () => {
+  // The difference from parseDiscordWebhook, and the reason this cannot be a
+  // list in the source: the host that matters is the one running THIS ntfy.
+  assert.equal(parseNtfyUrl('https://ntfy.example.com/habits', PUBLIC_NTFY), undefined,
+    'an instance that has named no hosts reaches the public service only');
+  assert.equal(parseNtfyUrl('https://ntfy.example.com/habits', OWN_NTFY),
+    'https://ntfy.example.com/habits');
+  assert.equal(parseNtfyUrl('https://ntfy.sh/habits', OWN_NTFY), undefined,
+    'naming your own REPLACES the default rather than adding to it');
+  // A port is part of the decision: allowing a host must not allow every
+  // service on it.
+  assert.equal(parseNtfyUrl('https://inside.example.com:8443/habits', OWN_NTFY),
+    'https://inside.example.com:8443/habits');
+  assert.equal(parseNtfyUrl('https://inside.example.com/habits', OWN_NTFY), undefined);
+  assert.equal(parseNtfyUrl('https://ntfy.example.com:8443/habits', OWN_NTFY), undefined);
+
+  // ...and the whole destination can be refused for an instance.
+  for (const off of ['off', 'OFF', ' off ']) {
+    assert.equal(parseNtfyUrl('https://ntfy.sh/habits', { NTFY_ALLOWED_HOSTS: off }),
+      undefined, `${off} should refuse every host`);
+  }
+  assert.deepEqual([...ntfyAllowedHosts(PUBLIC_NTFY)], ['ntfy.sh'],
+    'the documented default is the public service and nothing else');
+});
+
+test('an ntfy token is bounded and cannot carry a header break', () => {
+  assert.equal(parseNtfyToken('tk_AgQdq7mVBoFD37zQVN29RhuMzNIz2'),
+    'tk_AgQdq7mVBoFD37zQVN29RhuMzNIz2');
+  assert.equal(parseNtfyToken('  tk_abc  '), 'tk_abc');
+  for (const blank of ['', '   ', null, undefined]) {
+    assert.equal(parseNtfyToken(blank), '');
+  }
+  for (const bad of [
+    'tk_abc\r\nX-Evil: 1',       // request splitting, into an Authorization header
+    'tk_abc\nX-Evil: 1',
+    'tk abc',                     // a space ends the credential
+    'tk_é',                  // outside printable ASCII
+    'tk_\u0000',             // a control byte is not a credential
+    'a'.repeat(129),
+  ]) {
+    assert.equal(parseNtfyToken(bad), undefined, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test('a topic URL is split into the endpoint to post to and the topic to name', () => {
+  // ntfy publishes JSON to the SERVER, naming the topic in the body — posting
+  // JSON to the topic URL would file the JSON itself as the message text.
+  assert.deepEqual(ntfyTarget('https://ntfy.sh/habits', PUBLIC_NTFY),
+    { endpoint: 'https://ntfy.sh/', topic: 'habits' });
+  assert.deepEqual(ntfyTarget('https://ntfy.example.com/ntfy/habits', OWN_NTFY),
+    { endpoint: 'https://ntfy.example.com/ntfy/', topic: 'habits' });
+  assert.equal(ntfyTarget('https://evil.test/habits', PUBLIC_NTFY), null);
+  assert.equal(ntfyTarget('', PUBLIC_NTFY), null);
+});
+
+test('ntfy is not interactive, and that is a decision', () => {
+  // Its action buttons would fire HTTP AT THIS SERVER from a subscriber's
+  // device, authorised by nothing but the request — the inbound endpoint
+  // discord-gateway.js exists to avoid. Pinned so that turning it on is a
+  // change somebody has to make deliberately.
+  assert.equal(CHANNELS.ntfy.interactive, false);
+  assert.equal(CHANNELS.ntfy.delivery, 'server');
+  assert.deepEqual(CHANNELS.ntfy.configKeys, ['ntfyTopicUrl'],
+    'the token is optional — a public topic needs none');
+  assert.equal(channelConfigured('ntfy', {}), false);
+  assert.equal(channelConfigured('ntfy', { ntfyTopicUrl: 'https://ntfy.sh/x' }), true);
+});
+
+test('the ntfy payload carries what the embed does, and no free text in a header', () => {
+  const payload = ntfyPayload({
+    habit: habit({ name: 'Meditate', description: 'ten minutes' }),
+    message: reminderMessage(habit({ name: 'Meditate', description: 'ten minutes' })),
+    topic: 'habits',
+    date: '2026-08-13',
+    appUrl: 'https://habits.example.com///',
+  });
+  assert.equal(payload.topic, 'habits');
+  assert.equal(payload.title, 'Meditate');
+  assert.match(payload.message, /ten minutes/);
+  assert.match(payload.message, /2026-08-13/);
+  assert.equal(payload.click, 'https://habits.example.com/');
+
+  // Long values are clamped rather than rejected, as the Discord embed's are.
+  const big = ntfyPayload({
+    habit: habit({ name: 'n'.repeat(400), description: 'd'.repeat(9000) }),
+    message: reminderMessage(habit({ name: 'n'.repeat(400) })),
+    topic: 'habits',
+  });
+  assert.equal(big.title.length, 250);
+  assert.ok(big.message.length <= 4000);
 });
 
 /* ---------- channel lists and time zones ---------- */
@@ -687,6 +853,95 @@ test('a device channel is never posted anywhere', async () => {
   assert.equal(fetch.calls.length, 0);
 });
 
+/* ---------- delivering to ntfy ---------- */
+
+const ntfySettings = (over = {}) => ({
+  notifyChannels: ['ntfy'],
+  ntfyTopicUrl: 'https://ntfy.sh/my-habits',
+  ...over,
+});
+
+const toNtfy = (fetch, settings = ntfySettings(), env = PUBLIC_NTFY, over = {}) =>
+  sendToChannel('ntfy', { habit: habit(), settings, date: '2026-08-13', ...over },
+    { fetch, env });
+
+test('an ntfy reminder is published as JSON to the server, not as headers', async () => {
+  const fetch = fakeFetch([{ status: 200 }]);
+  const result = await toNtfy(fetch);
+
+  assert.deepEqual(result, { ok: true, status: 200 });
+  assert.equal(fetch.calls[0].url, 'https://ntfy.sh/',
+    'the JSON API posts to the server and names the topic in the body');
+  assert.equal(fetch.calls[0].body.topic, 'my-habits');
+  assert.equal(fetch.calls[0].body.title, 'Meditate');
+  assert.equal(fetch.calls[0].init.method, 'POST');
+  assert.equal(fetch.calls[0].init.redirect, 'manual',
+    'a redirect is how an allowed host walks this request onto one that is not');
+
+  // The whole reason for the JSON shape: a habit name is free text, and the
+  // other way of publishing puts it in a `Title:` header.
+  const headers = Object.entries(fetch.calls[0].init.headers);
+  assert.ok(!headers.some(([, v]) => String(v).includes('Meditate')),
+    'no habit text may reach a header');
+  assert.ok(!headers.some(([k]) => k.toLowerCase() === 'authorization'),
+    'a public topic sends no credential');
+});
+
+test('a token rides in the Authorization header, and only if it could', async () => {
+  const fetch = fakeFetch([{ status: 200 }]);
+  await toNtfy(fetch, ntfySettings({ ntfyToken: 'tk_secret' }));
+  assert.equal(fetch.calls[0].init.headers.Authorization, 'Bearer tk_secret');
+
+  // parseNtfyToken cannot let this through; a hand-edited settings row can, and
+  // the sink is where a header break has to be stopped rather than trimmed.
+  const split = fakeFetch([{ status: 200 }]);
+  const result = await toNtfy(split, ntfySettings({ ntfyToken: 'tk\r\nX-Evil: 1' }));
+  assert.equal(result.ok, false);
+  assert.equal(result.permanent, true);
+  assert.equal(split.calls.length, 0, 'nothing may be sent with an unusable token');
+});
+
+test('a URL the operator no longer allows is refused at the moment of sending', async () => {
+  // The stored value was legal when it was saved: `NTFY_ALLOWED_HOSTS` is the
+  // operator's and can be narrowed afterwards, so `parseNtfyUrl` at write time
+  // is not the last word about what this process may connect to.
+  const fetch = fakeFetch([{ status: 200 }]);
+  const result = await toNtfy(fetch, ntfySettings(), OWN_NTFY);
+
+  assert.equal(result.ok, false);
+  assert.equal(fetch.calls.length, 0, 'no request may leave for a host that is not allowed');
+  assert.equal(result.permanent, true,
+    'nothing about this changes until a setting or the environment does');
+  assert.match(result.error, /NTFY_ALLOWED_HOSTS/,
+    'the sender says why, because that sentence is what the settings dialog shows');
+});
+
+test('ntfy failures are told apart, in ntfy\'s own words', async () => {
+  for (const status of [401, 403, 404]) {
+    const result = await toNtfy(fakeFetch([{ status }]));
+    assert.equal(result.ok, false);
+    assert.equal(result.permanent, true, `${status} should be permanent`);
+    assert.ok(!/webhook/i.test(result.error),
+      'the Discord sender\'s advice is for a thing an ntfy user does not have');
+  }
+
+  const server = await toNtfy(fakeFetch([{ status: 500 }]));
+  assert.equal(server.ok, false);
+  assert.ok(!server.permanent);
+  assert.match(server.error, /ntfy returned 500/);
+
+  const limited = await toNtfy(
+    fakeFetch([{ status: 429, headers: { 'retry-after': '2.5' } }]));
+  assert.equal(limited.retryAfterMs, 2500);
+  assert.ok(!limited.permanent);
+
+  const aborted = Object.assign(new Error('aborted'), { name: 'AbortError' });
+  const timeout = await toNtfy(fakeFetch([aborted]));
+  assert.equal(timeout.ok, false);
+  assert.ok(!timeout.permanent);
+  assert.match(timeout.error, /no response within/);
+});
+
 /* ---------- a whole tick ---------- */
 
 const account = (over = {}) => ({
@@ -717,6 +972,47 @@ test('a tick delivers what is due and records it', async () => {
   assert.deepEqual(marked, [[7, 1, 'discord', '2026-08-13']]);
   assert.equal(fetch.calls.length, 1);
   assert.match(fetch.calls[0].url, /^https:\/\/discord\.com\/api\/webhooks\//);
+});
+
+test('a second server destination is delivered, and watermarked, on its own', async () => {
+  // `notify_log` is keyed on habit + channel + local date, so switching ntfy on
+  // must not be silenced for its first day by the send that already went to
+  // Discord. Adding a destination is exactly the case that key exists for, and
+  // this is the first time there has been a second one to prove it with.
+  const before = process.env.NTFY_ALLOWED_HOSTS;
+  // The tick reaches `postNtfy` without a `deps.env`, which is the real path:
+  // the allowlist comes from the process it is running in.
+  process.env.NTFY_ALLOWED_HOSTS = 'ntfy.sh';
+  try {
+    const marked = [];
+    const fetch = fakeFetch([{ status: 204 }]);
+    const both = account({
+      settings: {
+        notifyChannels: ['android', 'discord', 'ntfy'],
+        discordWebhook: 'https://discord.com/api/webhooks/1/abc',
+        ntfyTopicUrl: 'https://ntfy.sh/my-habits',
+        notifyTimezone: 'UTC',
+      },
+    });
+
+    const result = await runTick({
+      collect: () => [both],
+      mark: (acc, habitId, channel, date) => marked.push([habitId, channel, date]),
+      instant: utc(2026, 8, 13, 8, 0),
+      fetch,
+    });
+
+    assert.deepEqual(result.sent, 2);
+    assert.deepEqual(marked, [
+      [1, 'discord', '2026-08-13'],
+      [1, 'ntfy', '2026-08-13'],
+    ]);
+    assert.deepEqual(fetch.calls.map((c) => c.url),
+      ['https://discord.com/api/webhooks/1/abc', 'https://ntfy.sh/']);
+  } finally {
+    if (before === undefined) delete process.env.NTFY_ALLOWED_HOSTS;
+    else process.env.NTFY_ALLOWED_HOSTS = before;
+  }
 });
 
 test('a collect that throws is named, not left to a printf', async () => {

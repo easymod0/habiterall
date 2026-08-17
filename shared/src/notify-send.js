@@ -19,8 +19,9 @@
  */
 
 import {
-  CHANNELS, dueReminders, discordPayload, reminderMessage, resolveTimeZone,
-  serverChannels, takeUnusableZones, unreachableChannels,
+  CHANNELS, dueReminders, discordPayload, isNtfyToken, ntfyPayload, ntfyTarget,
+  reminderMessage, resolveTimeZone, serverChannels, takeUnusableZones,
+  unreachableChannels,
 } from './notify.js';
 import { postReminder } from './discord.js';
 
@@ -239,6 +240,124 @@ export async function postWebhook(url, payload, deps = {}) {
 }
 
 /**
+ * Publish one reminder to an ntfy topic.
+ *
+ * Its own function rather than `postWebhook` with another URL, and the wording
+ * is why: `notify_status` shows the SENDER's sentence in the settings dialog,
+ * so "the webhook was deleted or is no longer accepted — create a new one" said
+ * about ntfy would be advice for a thing the user does not have. Every string
+ * below is what the user will read when their reminders stop.
+ *
+ * @param {object} args
+ * @param {import('./types.js').Habit} args.habit
+ * @param {Record<string, any>} args.settings
+ * @param {string} [args.date]
+ * @param {string} [args.appUrl]
+ * @param {boolean} [args.test]
+ * @param {{fetch?: typeof globalThis.fetch, timeoutMs?: number,
+ *   env?: Record<string, string|undefined>}} [deps]
+ * @returns {Promise<SendResult>}
+ */
+export async function postNtfy(args, deps = {}) {
+  const { habit, settings, date = '', appUrl = '', test = false } = args;
+  const doFetch = deps.fetch ?? globalThis.fetch;
+  const timeoutMs = deps.timeoutMs ?? SEND_TIMEOUT_MS;
+
+  // Asked again HERE, and not only when the value was stored. `parseNtfyUrl`
+  // reads the operator's allowlist, and an operator can narrow it long after a
+  // user has saved a URL — so the check that decides what this process connects
+  // to belongs at the moment it connects. Permanent, because nothing about
+  // this changes until somebody edits a setting or the environment: retrying
+  // every minute until midnight would be a minute-by-minute request at a host
+  // this instance has been told not to talk to.
+  const target = ntfyTarget(settings.ntfyTopicUrl, deps.env);
+  if (!target) {
+    return {
+      ok: false,
+      status: 0,
+      permanent: true,
+      error: 'this topic URL is not one this server may post to — it must be '
+        + 'https and on a host named in NTFY_ALLOWED_HOSTS',
+    };
+  }
+
+  const token = String(settings.ntfyToken ?? '');
+  // A token reaches an `Authorization` header, so a value that could not go in
+  // one is refused rather than trimmed into something that could. Nothing that
+  // came through `parseNtfyToken` can fail this; a hand-edited settings row can.
+  if (token && !isNtfyToken(token)) {
+    return {
+      ok: false,
+      status: 0,
+      permanent: true,
+      error: 'the ntfy access token has characters that cannot go in a request header',
+    };
+  }
+
+  const message = reminderMessage(habit, { test });
+  const payload = ntfyPayload({ habit, message, topic: target.topic, date, appUrl });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await doFetch(target.endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+      // As the Discord sender does, and for a sharper reason: a redirect is
+      // how an allowed host walks this request onto one that is not, and the
+      // token would go with it.
+      redirect: 'manual',
+    });
+
+    if (res.status === 429) {
+      const seconds = Number(res.headers?.get?.('retry-after'));
+      const wait = Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 60) : 1;
+      return { ok: false, status: 429, error: 'rate limited by the ntfy server', retryAfterMs: wait * 1000 };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return {
+        ok: false,
+        status: res.status,
+        permanent: true,
+        error: 'ntfy refused the request — this topic needs an access token, or '
+          + 'the one saved here is no longer valid',
+      };
+    }
+
+    if (res.status === 404) {
+      return {
+        ok: false,
+        status: 404,
+        permanent: true,
+        error: 'the ntfy server has nothing at that address — check the topic URL',
+      };
+    }
+
+    if (res.status < 200 || res.status >= 300) {
+      return { ok: false, status: res.status, error: `ntfy returned ${res.status}` };
+    }
+
+    return { ok: true, status: res.status };
+  } catch (err) {
+    const aborted = err?.name === 'AbortError';
+    return {
+      ok: false,
+      status: 0,
+      error: aborted ? `no response within ${timeoutMs}ms` : String(err?.message ?? err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Send one habit's reminder to one channel.
  *
  * @param {string} channel
@@ -289,6 +408,10 @@ export async function sendToChannel(channel, args, deps = {}) {
       deps
     );
     return { mode: 'webhook', ...result };
+  }
+
+  if (channel === 'ntfy') {
+    return postNtfy({ habit, settings, date, appUrl, test }, deps);
   }
 
   return { ok: false, status: 0, error: `unknown channel ${channel}` };

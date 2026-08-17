@@ -118,6 +118,7 @@ services:
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       HABITERALL_PUBLIC_URL: ${HABITERALL_PUBLIC_URL:-}          # https://habits.example.com
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
+      NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}                # ntfy.sh; name your own to replace it
 
       # Limits and logging. Empty means the default, so these are here to make
       # the knob reachable from .env rather than to set anything — a variable
@@ -213,6 +214,18 @@ HABITERALL_PUBLIC_URL=
 # app opens ONE outbound WebSocket to Discord; no inbound port is needed.
 # Without it, Discord reminders are webhook text.
 DISCORD_BOT_TOKEN=
+
+# Which hosts an ntfy topic URL may name. Reminders go out as an ntfy publish
+# that THIS SERVER makes, so whatever is here is what it can be aimed at — a URL
+# typed into Settings is only ever fetched if its host is on this list.
+#
+# Empty means ntfy.sh and nothing else. Naming your own REPLACES that rather
+# than adding to it, so write both if you want both. An entry is a hostname, or
+# `host:port` if your ntfy is not on 443; https is required either way. `off`
+# refuses every URL, which is how you switch the destination off instance-wide.
+#
+#   NTFY_ALLOWED_HOSTS=ntfy.sh,ntfy.example.com:8443
+NTFY_ALLOWED_HOSTS=
 
 # ---- limits -----------------------------------------------------------------
 # Ceiling on a backup being restored.
@@ -465,6 +478,10 @@ services:
       HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
+      # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
+      # your own ntfy REPLACES that, and `off` refuses every one. The server
+      # fetches whatever is here, so this is the whole guard.
+      NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}          # ntfy.sh, or your own
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
@@ -681,6 +698,20 @@ NOTIFY_MAX_ACCOUNTS=500
 # app opens ONE outbound WebSocket to Discord; no inbound port is needed.
 DISCORD_BOT_TOKEN=
 
+# Which hosts an ntfy topic URL may name. Reminders go out as an ntfy publish
+# that THIS SERVER makes, and on this edition the person typing the URL is not
+# the person running the server — so this is the line that decides what a user
+# can point your instance at. Without it a topic URL is a request-forgery
+# primitive aimed at your private network or your cloud metadata endpoint.
+#
+# Empty means ntfy.sh and nothing else. Naming your own REPLACES that rather
+# than adding to it, so write both if you want both. An entry is a hostname, or
+# `host:port` if your ntfy is not on 443; https is required either way. `off`
+# refuses every URL, which is how you switch the destination off instance-wide.
+#
+#   NTFY_ALLOWED_HOSTS=ntfy.sh,ntfy.example.com:8443
+NTFY_ALLOWED_HOSTS=
+
 # ---- limits -----------------------------------------------------------------
 # Shown at their code defaults, so an unedited copy changes nothing.
 MAX_HABITS_PER_USER=200
@@ -828,6 +859,10 @@ services:
       HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
+      # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
+      # your own ntfy REPLACES that, and `off` refuses every one. The server
+      # fetches whatever is here, so this is the whole guard.
+      NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}          # ntfy.sh, or your own
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}

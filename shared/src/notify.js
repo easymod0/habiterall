@@ -75,6 +75,34 @@ export const CHANNELS = {
       settings.discordWebhook || (ctx.bot && settings.discordChannelId)
     ),
   },
+  ntfy: {
+    label: 'ntfy',
+    delivery: 'server',
+    // A topic URL is the whole configuration. The token is optional — a public
+    // topic needs none — so it is not a config key and its absence is not a
+    // reason to call this destination unconfigured.
+    configKeys: ['ntfyTopicUrl'],
+    /**
+     * NOT interactive, and that is a decision rather than a gap.
+     *
+     * ntfy can carry action buttons, and an ntfy action is an HTTP request the
+     * SUBSCRIBING DEVICE makes — to a URL written into the notification, from
+     * wherever that phone happens to be, carrying whatever the message told it
+     * to carry. Answering a reminder that way means this server standing up an
+     * inbound endpoint that anything able to reach it may call, authorised by
+     * nothing but the contents of the request. That is precisely the shape
+     * `discord-gateway.js` exists to avoid — a self-hosted instance behind a
+     * router has no inbound port and no hostname — and the rule that saves the
+     * Discord buttons has no counterpart here: "a press is authorised by the
+     * CHANNEL it came from, not by its `custom_id`" needs a channel to resolve
+     * an account from, and an ntfy topic is a URL somebody typed.
+     *
+     * So this destination TELLS you and the app is where you answer. Making it
+     * interactive is a separate decision with a real authorisation question
+     * attached, and the paragraph above is the one to re-read first.
+     */
+    interactive: false,
+  },
 };
 
 /** Channel ids in registry order, which is also the order the UI lists them. */
@@ -140,6 +168,229 @@ export function parseDiscordWebhook(raw) {
   // thread, or simply junk would otherwise survive into a URL the server
   // later fetches.
   return `https://${url.hostname.toLowerCase()}${url.pathname}`;
+}
+
+/* ---------- ntfy ---------- */
+
+/** A topic URL is `https://host/topic`; this is generous and bounded. */
+export const MAX_NTFY_URL = 200;
+
+/**
+ * The hosts an ntfy topic may live on, when the operator has named none.
+ *
+ * The public service, because it is the one host that is universally reachable
+ * and is nobody's private network. An operator who runs their own ntfy names it
+ * in `NTFY_ALLOWED_HOSTS`, which REPLACES this rather than adding to it — so
+ * "only my own ntfy" is expressible, and so is "none at all" (`off`).
+ */
+const NTFY_DEFAULT_HOSTS = 'ntfy.sh';
+
+/**
+ * Where this instance is willing to post an ntfy message.
+ *
+ * An OPERATOR decision, read from the environment, and that is the whole shape
+ * of the difference from `parseDiscordWebhook`. That one can allowlist Discord's
+ * four hosts in this file because there is exactly one Discord; the entire point
+ * of ntfy is that most people run their own, so there is no host list anybody
+ * here could write. What there IS, on both editions, is somebody who runs the
+ * server and somebody who types the URL — and on the cloud edition they are not
+ * the same person. Whose network the server may be aimed at is the first one's
+ * question, so it is answered where they answer things.
+ *
+ * Comma-separated hosts, matched against `URL.host` — so an entry is a bare
+ * hostname (default port only) or `host:port`, and a port the operator has not
+ * named is not reachable even on a host they have. Lowercased on both sides
+ * because `URL.host` is; a trailing dot is a different host and is simply not
+ * in the list.
+ *
+ * `off` is an empty set: every URL refused, which is how an operator switches
+ * the destination off for a whole instance without it disappearing from the
+ * settings dialog and looking broken — the refusal says why.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {Set<string>}
+ */
+export function ntfyAllowedHosts(env = globalThis.process?.env ?? {}) {
+  const raw = String(env.NTFY_ALLOWED_HOSTS ?? '').trim();
+  if (raw.toLowerCase() === 'off') return new Set();
+  return new Set(
+    (raw || NTFY_DEFAULT_HOSTS)
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+/**
+ * One path segment of a topic URL. No dots at all, which is what makes `..`,
+ * `.` and every encoded spelling of them unrepresentable rather than filtered.
+ */
+const NTFY_SEGMENT = '[A-Za-z0-9_-]{1,64}';
+
+/**
+ * The path of a topic URL: a topic, optionally under a base path.
+ *
+ * Up to four segments, because ntfy behind a reverse proxy commonly lives at
+ * `https://example.com/ntfy/` and its topics are then `/ntfy/<topic>`. The last
+ * segment is the topic and everything before it is the base path — see
+ * `ntfyTarget`, which needs the split because the JSON publish API posts to the
+ * base and names the topic in the body.
+ */
+const NTFY_PATH_RE = new RegExp(`^(?:/${NTFY_SEGMENT}){1,4}$`);
+
+/**
+ * An ntfy access token, bounded and safe to put in a header.
+ *
+ * Printable ASCII with no spaces, so nothing here can carry a `\r\n` and split
+ * the request — the same trap the Loop export's `X-Habiterall-Export-Skipped`
+ * records, with a nastier sink: this value goes into an `Authorization` header
+ * on a request the SERVER makes.
+ */
+const NTFY_TOKEN_RE = /^[\x21-\x7e]{1,128}$/;
+
+/**
+ * Normalise an ntfy topic URL.
+ *
+ * The server fetches this, so it is a request-forgery primitive and the
+ * reasoning is `parseDiscordWebhook`'s. What could not be copied is the host
+ * allowlist — see `ntfyAllowedHosts` — so the rest of the check carries more
+ * weight than it does there, and every part of it is load bearing:
+ *
+ *   - **https only.** Plain http is refused even for a host the operator has
+ *     allowed: a reminder carries a habit's name and prompt, and an ntfy token
+ *     would ride on the same request in clear.
+ *   - **no credentials**, because `https://ntfy.sh@evil.example/x` has a host
+ *     of `evil.example` and reads as the opposite to a person.
+ *   - **the host, WITH its port**, against the operator's list.
+ *   - **a path made of the segments we recognise**, so there is no traversal to
+ *     normalise and no query to smuggle anything in.
+ *   - **rebuilt from the parts that were checked**, exactly as the Discord one
+ *     is, which is what drops a query string and a fragment rather than storing
+ *     them for the server to fetch later.
+ *
+ * And `postNtfy` asks again at the moment of sending, because this answer
+ * depends on the environment and the environment can change under a value that
+ * is already stored.
+ *
+ * @param {unknown} raw
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string|undefined} the canonical URL, `''` for "not configured",
+ *   or `undefined` if the value must be rejected
+ */
+export function parseNtfyUrl(raw, env = globalThis.process?.env ?? {}) {
+  const value = String(raw ?? '').trim();
+  if (!value) return '';
+  if (value.length > MAX_NTFY_URL) return undefined;
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+
+  if (url.protocol !== 'https:') return undefined;
+  if (url.username || url.password) return undefined;
+
+  const host = url.host.toLowerCase();
+  if (!ntfyAllowedHosts(env).has(host)) return undefined;
+
+  // One trailing slash is forgiven — it is what people paste — and then the
+  // path has to be segments we recognise and nothing else. A bare host becomes
+  // '' here, which fails the pattern: a URL naming no topic is not a topic URL.
+  const path = url.pathname.replace(/\/$/, '');
+  if (!NTFY_PATH_RE.test(path)) return undefined;
+
+  return `https://${host}${path}`;
+}
+
+/**
+ * An ntfy access token, or `''` for a public topic.
+ *
+ * @param {unknown} raw
+ * @returns {string|undefined}
+ */
+export function parseNtfyToken(raw) {
+  const value = String(raw ?? '').trim();
+  if (!value) return '';
+  return NTFY_TOKEN_RE.test(value) ? value : undefined;
+}
+
+/** Whether a token is one that can be put in a header at all. */
+export function isNtfyToken(value) {
+  return NTFY_TOKEN_RE.test(String(value ?? ''));
+}
+
+/**
+ * Split a stored topic URL into the endpoint to post to and the topic to name.
+ *
+ * ntfy publishes JSON to the SERVER root with `{topic, ...}` in the body, not
+ * to the topic URL — posting JSON there would file the raw JSON as the message
+ * text. The alternative shape, POSTing to the topic URL with `Title` and
+ * friends as headers, is what this deliberately avoids: a habit's name is free
+ * text, and free text in a header is a request-splitting bug waiting for
+ * somebody to name a habit with a newline in it.
+ *
+ * Re-validates rather than trusting the stored string, because
+ * `NTFY_ALLOWED_HOSTS` is the operator's and can be narrowed after a user has
+ * saved a URL. `null` means "do not send this".
+ *
+ * @param {unknown} raw
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {{endpoint: string, topic: string}|null}
+ */
+export function ntfyTarget(raw, env = globalThis.process?.env ?? {}) {
+  const clean = parseNtfyUrl(raw, env);
+  if (!clean) return null;
+
+  const url = new URL(clean);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const topic = /** @type {string} */ (parts.pop());
+  const base = parts.length ? `/${parts.join('/')}/` : '/';
+  return { endpoint: `https://${url.host}${base}`, topic };
+}
+
+/**
+ * The body of an ntfy publish.
+ *
+ * Everything the Discord embed carries, flattened: ntfy has a title and a
+ * message and no fields, so the habit name, the goal and the description become
+ * lines rather than being dropped.
+ *
+ * @param {object} args
+ * @param {import('./types.js').Habit} args.habit
+ * @param {{title: string, subtitle?: string, body: string}} args.message
+ * @param {string} args.topic
+ * @param {string} [args.date] local date the reminder is for
+ * @param {string} [args.appUrl] public URL of this habiterall, if known
+ */
+export function ntfyPayload({ habit, message, topic, date = '', appUrl = '' }) {
+  const lines = [];
+  if (message.subtitle) lines.push(message.subtitle);
+  if (message.body) lines.push(message.body);
+
+  const description = String(habit.description ?? '').trim();
+  if (description) lines.push(description);
+  if (date) lines.push(date);
+
+  const payload = {
+    topic,
+    title: message.title.slice(0, 250),
+    // ntfy substitutes a placeholder for an empty message, so a habit with a
+    // custom prompt and no goal still says something under its own title.
+    message: (lines.join('\n') || message.title).slice(0, 4000),
+  };
+
+  // Tapping the notification opens the app, when the deployment has told us
+  // where it is. Counted off rather than matched with `/\/+$/`, for the reason
+  // `discordPayload` gives: that pattern is quadratic on a string of slashes.
+  if (/^https?:\/\//.test(appUrl)) {
+    let end = appUrl.length;
+    while (end > 0 && appUrl[end - 1] === '/') end--;
+    payload.click = `${appUrl.slice(0, end)}/`;
+  }
+
+  return payload;
 }
 
 /**
