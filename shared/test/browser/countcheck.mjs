@@ -18,7 +18,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9236);
 const profile = mkdtempSync(join(tmpdir(), 'habcount-'));
@@ -69,8 +69,26 @@ try {
   })()`);
   console.log(`    habit: ${target.name} (target ${target.target} ${target.unit})`);
 
-  /** Tap today's cell for that habit, and wait for the dialog. */
+  /**
+   * Tap today's cell for that habit, and wait for the dialog.
+   *
+   * The wait for the row is INSIDE here, and it names the habit. Every caller
+   * after a reload used to poll for any `#grid .habit-row` and then come
+   * straight here, which is a weaker condition than the next line needs: the
+   * grid can hold rows while THIS habit's is still to come. What that produced
+   * was `row.querySelector` on an undefined `row` — a bare
+   * `Cannot read properties of undefined`, which is the same output a suite
+   * gives when another runner has deleted its data, and is why run.mjs's header
+   * calls it one signature with two causes. Reproduced on a contended CI runner
+   * at six workers on four cores; the poll below is the half that was missing.
+   */
+  const rowReady = (name) => waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row')]`
+    + `.some(r => r.textContent.includes(${JSON.stringify(name)}))`,
+    { what: `the "${name}" row` });
+
   const openToday = async () => {
+    await rowReady(target.name);
     await ev(`(()=>{
       const rows = [...document.querySelectorAll('#grid .habit-row')];
       const row = rows.find(r => r.textContent.includes(${JSON.stringify(target.name)}));
@@ -219,10 +237,10 @@ try {
         target_value: 0, target_type:'at_least' }) });
     return (await r.json()).id;})()`);
   await ev(`(async()=>{ location.reload(); })()`);
-  for (let i = 0; i < 60; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  // This one finds its row by hand rather than through `openToday`, so it needs
+  // the wait spelled out. It is a habit created moments ago, so "the grid has
+  // rows" is emphatically not the same question as "the grid has THIS row".
+  await rowReady('Pages read');
   await ev(`(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Pages read'));
     row.querySelector('.day-cell, .check, button[data-focus-key^="check:"]').click();
@@ -259,10 +277,6 @@ try {
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ numberFormat: 'comma' }) }); })()`);
   await ev(`location.reload(); true`);
-  for (let i = 0; i < 60; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
 
   check('reopened', await openToday());
   await typeAndSave('10.000');

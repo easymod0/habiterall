@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT = devtoolsPort(9291);
 const profile=mkdtempSync(join(tmpdir(),'habset-'));
 const chrome=launchChrome(PORT, profile);
@@ -34,8 +34,12 @@ try{
   // worker, so measuring now would report the stale stylesheet.
   await send('Page.navigate',{url:APP},sessionId); await sleep(1500);
 
+  // The trailing settle stays: a rendered row is not a settled LAYOUT, and this
+  // suite measures alignment and widths. Only the poll granularity changes —
+  // 250ms steps against a boot measured at ~55ms spent most of a step waiting
+  // for nothing.
   const load=async()=>{await send('Page.navigate',{url:APP},sessionId);
-    for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+    await waitUntil(ev,`!!document.querySelector('#grid .habit-row')`,{what:'the dashboard'});
     await sleep(500);};
   await load();
 

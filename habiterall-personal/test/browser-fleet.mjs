@@ -39,21 +39,37 @@ const jobsFlag = argv.indexOf('-j');
 if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
 
 /**
- * How many instances to run.
+ * How many instances to run: TWICE the core count, capped at eight.
  *
- * Four by default rather than one-per-core: each worker is a node server plus a
- * headless Chrome, and the ceiling on what this buys is the LONGEST suite, not
- * the core count. Measured in CI, the suites are 399s of work whose slowest
- * member is themecheck at 99s — so four workers land at ~100s and a fifth
- * changes nothing until themecheck itself gets faster. Raise it when that is no
- * longer true.
+ * Deliberately oversubscribed, because these suites are not CPU-bound. The
+ * slowest of them are mostly idle — `hangcheck` holds a request open for 38s,
+ * `themecheck` waits 13s on a write that never answers — so a worker per core
+ * leaves the box waiting rather than working. Swept on a 4-core CI runner, two
+ * runs each, wall clock:
+ *
+ *     j=4   126s, 128s      j=8    90s,  91s   <- fastest, and stable
+ *     j=6   102s, 107s      j=12  104s,  98s   <- pwatest fails
+ *                           j=16  104s, 114s   <- awardcheck, calcheck, pwatest
+ *
+ * Past eight it gets slower AND starts failing, so the cap is where the curve
+ * turns rather than an arbitrary ceiling. The failures are contention exposing
+ * waits weaker than what follows them — the same defect `countcheck` had, which
+ * this sweep is what found. They are pre-existing and reproduce on master; fix
+ * them before raising this.
+ *
+ * Eight is also right on a bigger box: 16 cores locally gives 46.6–47.0s over
+ * three runs, against 86.4s at four, and that is `themecheck` alone — so the
+ * bound is the longest suite again and more workers cannot help until it splits.
+ *
+ * An EXPLICIT `-j` or `HABITERALL_BROWSER_JOBS` is honoured as given, above the
+ * cap and above the core count. The cap is a guard on a value nobody chose;
+ * silently rewriting one somebody did choose makes the setting untestable —
+ * asking for 16 and being handed 8 looks like "16 was no faster".
  */
-const jobs = Math.max(1, Math.min(
-  Number(jobsFlag !== -1 ? process.argv[jobsFlag + 1] : 0)
-    || Number(process.env.HABITERALL_BROWSER_JOBS)
-    || 4,
-  availableParallelism(),
-));
+const asked = Number(jobsFlag !== -1 ? process.argv[jobsFlag + 1] : 0)
+  || Number(process.env.HABITERALL_BROWSER_JOBS)
+  || 0;
+const jobs = Math.max(1, asked || Math.min(8, availableParallelism() * 2));
 
 // Not :3000 — a dev server or a stale one from an earlier session squatting
 // there is a thing that has actually happened here, and the failure it produces
@@ -125,8 +141,8 @@ try {
   process.exit(2);
 }
 
-console.log(`${jobs} instance${jobs > 1 ? 's' : ''} on ${PORT_BASE}–${PORT_BASE + jobs - 1},`
-  + ` databases under ${dataDir}`);
+console.log(`${jobs} instance${jobs > 1 ? 's' : ''} on ${PORT_BASE}–${PORT_BASE + jobs - 1}`
+  + ` (${availableParallelism()} cores), databases under ${dataDir}`);
 
 const run = spawn(process.execPath, [runner, '--bases', bases.join(','), ...argv], {
   stdio: 'inherit',

@@ -294,10 +294,29 @@ The browser suites reset to known fixtures before each run
 (`shared/test/browser/fixtures.mjs`). If one fails, check the fixtures before
 suspecting the app — several "failures" have been stale test data.
 
+**Wait for the app, never for a duration.** `waitUntil` (`chrome.mjs`) polls a
+predicate and THROWS naming what it wanted; a `sleep` after `Page.navigate` is
+a guess in both directions. Measured on the personal edition: a boot is ready in
+**52–95ms**, and the settings reconcile it performs lands within **7ms** of that,
+because `start()` awaits `settings.init()` before it renders — so a rendered
+dashboard is downstream of the whole of it, and it holds under a stubbed-out
+`/api/settings` too (49–67ms, *faster*). `themecheck` carried 26 fixed sleeps of
+1.2–3s against that: 53.8s, 56% of its runtime, and it now runs in 46s instead of
+99s. The predicate has to be everything the block depends on — a poll on a weak
+condition returns the instant the DOM has anything in it, which is worse than the
+sleep it replaced. Post-action settles are a different thing and stay: waiting to
+see that something did NOT happen has no predicate to poll.
+
 **The browser suites run in parallel, and a worker OWNS the instance it points
 at.** `fixtures.reset()` deletes every habit on its server, so the parallelism is
 the number of `--bases` and there is no flag that can put two workers on one
-instance. `npm run test:browser` is personal's fleet script — N servers, N
+instance. The default is **twice the core count, capped at eight** — these suites
+are mostly idle, not CPU-bound (`hangcheck` holds a request open for 38s), so a
+worker per core leaves the box waiting. Swept on a 4-core runner: 126s at j=4,
+90s at j=8, and past that both slower and FAILING, because contention exposes
+waits weaker than what follows them (`pwatest`, then `awardcheck` and
+`calcheck` — all pre-existing, all reproducing on master). Fix those before
+raising it. `npm run test:browser` is personal's fleet script — N servers, N
 throwaway SQLite files, N bases — while `run.mjs` stays edition-agnostic so cloud
 is pointed at the same way. Two consequences that have already cost something:
 the base must be threaded through `reset({base})` rather than left in module

@@ -86,6 +86,46 @@ export const devtoolsPort = (fallback) =>
 
 
 /**
+ * Poll the page until an expression is truthy, and THROW if it never is.
+ *
+ * This replaces `await sleep(2500)` after a `Page.navigate`. Measured against
+ * the personal edition: a boot is ready in **52–95ms**, and the settings
+ * reconcile that boot performs lands **1–7ms after that** — because `start()`
+ * awaits `settings.init()` before it renders anything, so a rendered dashboard
+ * is downstream of the whole of it. A fixed 2.5s was thirty to fifty times the
+ * real figure, and 26 of them were 56% of `themecheck`'s runtime.
+ *
+ * Throwing rather than returning false is the point of the shape. A sleep that
+ * was too short carries on into the assertions and fails somewhere else, with
+ * output describing a row that has vanished rather than a page that never
+ * loaded — the same one-signature-two-causes trap `reloadAndWaitForRow` is
+ * about. This names what it was waiting for.
+ *
+ * The predicate has to be everything the caller depends on, not merely
+ * something that appears early. `sleep` at least waited a fixed length; a poll
+ * on a weak condition returns the instant the DOM has anything in it, which is
+ * strictly worse. Pass the strongest condition the block needs.
+ *
+ * @param {(expression: string) => Promise<any>} ev  the caller's evaluator
+ * @param {string} expression  evaluated in the page until truthy
+ * @param {{timeoutMs?: number, intervalMs?: number, what?: string}} [opts]
+ */
+export async function waitUntil(ev, expression, {
+  timeoutMs = 20_000, intervalMs = 25, what,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // A navigation in flight makes `Runtime.evaluate` throw rather than answer
+    // falsely; that is a "not yet", not a failure.
+    if (await ev(expression).catch(() => false)) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `timed out after ${timeoutMs / 1000}s waiting for ${what ?? expression}`
+  );
+}
+
+/**
  * Wait for the browser to expose a DevTools endpoint, and say so plainly if it
  * never does.
  *

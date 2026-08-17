@@ -16,7 +16,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 import { habitsByName, reset, useBase } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
@@ -198,12 +198,13 @@ try {
   await send('Runtime.enable', {}, sessionId);
   await send('Page.addScriptToEvaluateOnNewDocument', { source: STUB }, sessionId);
 
+  // The trailing settle stays: what this suite waits on after a render is the
+  // nudge being SCHEDULED, which a painted row does not imply. Only the poll
+  // granularity changes — 250ms steps against a boot measured at ~55ms.
   const load = async () => {
     await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev('!!document.querySelector("#grid .habit-row")').catch(() => 0)) break;
-      await sleep(250);
-    }
+    await waitUntil(ev, '!!document.querySelector("#grid .habit-row")',
+      { what: 'the dashboard' });
     await sleep(600);
   };
 
