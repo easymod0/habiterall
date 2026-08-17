@@ -19,8 +19,9 @@
  */
 
 import {
-  CHANNELS, dueReminders, discordPayload, reminderMessage, resolveTimeZone,
-  serverChannels, takeUnusableZones, unreachableChannels,
+  CHANNELS, dueReminders, discordPayload, isNtfyToken, ntfyAllowlistProblems,
+  ntfyPayload, ntfyTarget, reminderMessage, resolveTimeZone, serverChannels,
+  takeUnusableZones, unreachableChannels,
 } from './notify.js';
 import { postReminder } from './discord.js';
 
@@ -162,6 +163,10 @@ function stateKey(o) {
  * @property {string} [appUrl] this deployment's public address, for the link
  * @property {string} [botToken] DISCORD_BOT_TOKEN, when the instance has one
  * @property {typeof globalThis.fetch} [fetch]
+ * @property {Record<string, string|undefined>} [env] the process environment,
+ *   for the one rule that lives there: which ntfy hosts this instance may post
+ *   to. Injectable so a test needs no ambient state; unset means `process.env`,
+ *   which is what both editions pass by not passing it.
  * @property {{debug?: Function, info?: Function, warn?: Function, error?: Function}} [log]
  * @property {number} [intervalMs]
  */
@@ -239,6 +244,124 @@ export async function postWebhook(url, payload, deps = {}) {
 }
 
 /**
+ * Publish one reminder to an ntfy topic.
+ *
+ * Its own function rather than `postWebhook` with another URL, and the wording
+ * is why: `notify_status` shows the SENDER's sentence in the settings dialog,
+ * so "the webhook was deleted or is no longer accepted — create a new one" said
+ * about ntfy would be advice for a thing the user does not have. Every string
+ * below is what the user will read when their reminders stop.
+ *
+ * @param {object} args
+ * @param {import('./types.js').Habit} args.habit
+ * @param {Record<string, any>} args.settings
+ * @param {string} [args.date]
+ * @param {string} [args.appUrl]
+ * @param {boolean} [args.test]
+ * @param {{fetch?: typeof globalThis.fetch, timeoutMs?: number,
+ *   env?: Record<string, string|undefined>}} [deps]
+ * @returns {Promise<SendResult>}
+ */
+export async function postNtfy(args, deps = {}) {
+  const { habit, settings, date = '', appUrl = '', test = false } = args;
+  const doFetch = deps.fetch ?? globalThis.fetch;
+  const timeoutMs = deps.timeoutMs ?? SEND_TIMEOUT_MS;
+
+  // Asked again HERE, and not only when the value was stored. `parseNtfyUrl`
+  // reads the operator's allowlist, and an operator can narrow it long after a
+  // user has saved a URL — so the check that decides what this process connects
+  // to belongs at the moment it connects. Permanent, because nothing about
+  // this changes until somebody edits a setting or the environment: retrying
+  // every minute until midnight would be a minute-by-minute request at a host
+  // this instance has been told not to talk to.
+  const target = ntfyTarget(settings.ntfyTopicUrl, deps.env);
+  if (!target) {
+    return {
+      ok: false,
+      status: 0,
+      permanent: true,
+      error: 'this topic URL is not one this server may post to — it must be '
+        + 'https and on a host named in NTFY_ALLOWED_HOSTS',
+    };
+  }
+
+  const token = String(settings.ntfyToken ?? '');
+  // A token reaches an `Authorization` header, so a value that could not go in
+  // one is refused rather than trimmed into something that could. Nothing that
+  // came through `parseNtfyToken` can fail this; a hand-edited settings row can.
+  if (token && !isNtfyToken(token)) {
+    return {
+      ok: false,
+      status: 0,
+      permanent: true,
+      error: 'the ntfy access token has characters that cannot go in a request header',
+    };
+  }
+
+  const message = reminderMessage(habit, { test });
+  const payload = ntfyPayload({ habit, message, topic: target.topic, date, appUrl });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await doFetch(target.endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+      // As the Discord sender does, and for a sharper reason: a redirect is
+      // how an allowed host walks this request onto one that is not, and the
+      // token would go with it.
+      redirect: 'manual',
+    });
+
+    if (res.status === 429) {
+      const seconds = Number(res.headers?.get?.('retry-after'));
+      const wait = Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 60) : 1;
+      return { ok: false, status: 429, error: 'rate limited by the ntfy server', retryAfterMs: wait * 1000 };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return {
+        ok: false,
+        status: res.status,
+        permanent: true,
+        error: 'ntfy refused the request — this topic needs an access token, or '
+          + 'the one saved here is no longer valid',
+      };
+    }
+
+    if (res.status === 404) {
+      return {
+        ok: false,
+        status: 404,
+        permanent: true,
+        error: 'the ntfy server has nothing at that address — check the topic URL',
+      };
+    }
+
+    if (res.status < 200 || res.status >= 300) {
+      return { ok: false, status: res.status, error: `ntfy returned ${res.status}` };
+    }
+
+    return { ok: true, status: res.status };
+  } catch (err) {
+    const aborted = err?.name === 'AbortError';
+    return {
+      ok: false,
+      status: 0,
+      error: aborted ? `no response within ${timeoutMs}ms` : String(err?.message ?? err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Send one habit's reminder to one channel.
  *
  * @param {string} channel
@@ -289,6 +412,10 @@ export async function sendToChannel(channel, args, deps = {}) {
       deps
     );
     return { mode: 'webhook', ...result };
+  }
+
+  if (channel === 'ntfy') {
+    return postNtfy({ habit, settings, date, appUrl, test }, deps);
   }
 
   return { ok: false, status: 0, error: `unknown channel ${channel}` };
@@ -443,6 +570,15 @@ export async function deliverAccount(account, ctx) {
       // wait it asks for turns that into a delivered reminder; leaving it to
       // the next tick would trip the same limit again a minute later. Once
       // only — a second 429 means something else is wrong.
+      //
+      // The two channels are NOT alike here, and this sleep is in the tick that
+      // every account shares. Discord rate-limits per webhook, so a 429 is one
+      // account's own doing and the wait is paid by the account that caused it.
+      // ntfy.sh limits per VISITOR IP, which for a server-sent reminder is the
+      // instance — one bucket for every tenant on it — so on the cloud edition
+      // one account can put this sequential loop to sleep on everybody else's
+      // behalf. Written down rather than fixed here: the tick's shape is
+      // pre-existing and restructuring it is its own change.
       let throttled = false;
       if (result.retryAfterMs) {
         throttled = true;
@@ -547,6 +683,21 @@ export async function runTick(ctx) {
   // the wrong clock forever with nothing to say so. Drained once per tick and
   // deduped, because it is a configuration rather than an event: it stays wrong
   // until somebody fixes the value.
+  // An allowlist entry nothing can be made of is a configuration that stays
+  // wrong until somebody fixes it, so it is said once and deduped like the rest.
+  // Dropping it is right — a wildcard nobody implemented must not read as one
+  // that works — but in silence the only surface is a user's topic URL snapping
+  // back to blank in the settings dialog, which reads as an app bug and gets
+  // reported as one. This is the operator's copy of that news.
+  for (const entry of ntfyAllowlistProblems(ctx.env)) {
+    if (!once(`ntfy_entry:${entry}`)) continue;
+    log.warn?.('notify.ntfy_allowlist_unusable', {
+      entry,
+      reason: 'NTFY_ALLOWED_HOSTS entries are `host`, `host:port` or '
+        + '`host/base/path` — no scheme, no wildcard — and this one allows nothing',
+    });
+  }
+
   for (const zone of takeUnusableZones()) {
     if (!once(`unusable_zone:${zone}`)) continue;
     log.warn?.('notify.zone_unusable', {

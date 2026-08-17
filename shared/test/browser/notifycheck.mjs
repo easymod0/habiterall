@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { CHANNEL_IDS } from '@habiterall/shared/notify.js';
 const APP=process.env.BASE??'http://localhost:3000', PORT=9297;
 const profile=mkdtempSync(join(tmpdir(),'habnotify-'));
 const chrome=launchChrome(PORT, profile);
@@ -66,8 +67,12 @@ try{
   console.log('--- the section renders from the registry ---');
   const sections=await ev(`[...document.querySelectorAll('#settings-body h3')].map(h=>h.textContent).join(',')`);
   ck('a Notifications section exists', sections.includes('Notifications'), sections);
-  ck('both destinations are offered',
-     await ev(`document.querySelectorAll('.setting-multi input[type=checkbox]').length`)===2);
+  // Counted against the registry rather than a literal: the list is CHANNEL_IDS
+  // and it grows, so a hardcoded number turns adding a destination into a
+  // failing test that says nothing about what broke.
+  ck('every destination in the registry is offered',
+     await ev(`document.querySelectorAll('.setting-multi input[type=checkbox]').length`)
+       ===CHANNEL_IDS.length);
   ck('the on-device destination is on by default',
      await ev(`${channelBox('android')}.checked`)===true);
   ck('and Discord is not', await ev(`${channelBox('discord')}.checked`)===false);
