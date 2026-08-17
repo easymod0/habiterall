@@ -236,10 +236,11 @@ npm run test:signin       # the sign-in view in Chrome; starts its own server
 docker compose up -d      # containerised
 ```
 
-The browser suites in `shared/test/browser/` need a server started with
-`HABITERALL_AUTH=off HABITERALL_RATE_LIMIT=off` — they drive the app rather than
-the login, and twenty-two suites resetting fixtures from one address is exactly
-the traffic shape the API limit exists to stop.
+`npm run test:browser` here starts the fleet the browser suites run on — one
+server per worker, each with a throwaway SQLite file, auth and the limiter off.
+They drive the app rather than the login, and twenty-nine suites resetting
+fixtures from one address is exactly the traffic shape the API limit exists to
+stop. `test/browser-fleet.mjs` is the script; the runner itself is shared.
 
 Your data is a single file at `data/habiterall.db` — back it up by copying it,
 or use `GET /api/export`.

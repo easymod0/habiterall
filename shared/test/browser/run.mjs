@@ -140,13 +140,13 @@ const SUITE_TIMEOUT_MS = Number(process.env.SUITE_TIMEOUT_MS) || 120_000;
  * `themecheck` blocks a settings write and then sleeps past `ui/settings.js`'s
  * ten-second ceiling — twice, because the write that is abandoned and the
  * write that is refused are different answers and both have to be seen. That
- * is 25 seconds of deliberate waiting in a suite measured at 99, which leaves
+ * is 25 seconds of deliberate waiting in a suite measured at 46, which leaves
  * no margin under the shared limit: the kill would land on a healthy run, and
  * a suite killed mid-flight reads as a failure with no output to say why.
  *
- * (Measured: 55.6s of that 99 is straight-line `sleep()`, so the ~25s above is
- * the defensible half and the rest is blind waiting on app boot rather than on
- * a bound. Not defended here, and not yet fixed.)
+ * It was 99s, of which 53.8s was 26 fixed sleeps waiting on app boot — against
+ * a boot measured at 52–95ms. Those are polls now (`waitUntil`), and what is
+ * left is the deliberate half.
  *
  * Raising the shared default instead would buy that margin by removing it from
  * every other suite, which is the wrong way round — a stuck browser in

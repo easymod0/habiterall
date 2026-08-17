@@ -19,7 +19,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9317);
@@ -57,14 +57,36 @@ try {
   await send('Page.enable', {}, sessionId);
   await send('Network.enable', {}, sessionId);
 
+  /**
+   * A boot this suite is ready to act on.
+   *
+   * Both halves are needed and neither is decoration. `.habit-row` is
+   * downstream of `settings.init()` — `start()` awaits it before it renders —
+   * so a rendered row means the account's settings have arrived AND the
+   * reconcile they drive has run; measured, the migration's own write lands
+   * within 7ms of the row appearing. `dataset.theme` is what nearly every
+   * assertion below reads, so waiting for the row without it would be a poll
+   * that returns before the thing under test exists.
+   *
+   * It holds under every stub in this file, including the ones that refuse
+   * `/api/settings` outright: `init()` catches, boot continues, and the
+   * dashboard renders from cache — measured at 49–67ms, faster than the
+   * healthy path rather than slower.
+   */
+  const READY = `!!(document.querySelector('.habit-row')`
+    + ` && document.documentElement.dataset.theme)`;
+
+  /** Load the app and wait for it, in place of a fixed sleep. */
+  const boot = async (url = `${APP}/`, until = READY) => {
+    await send('Page.navigate', { url }, sessionId);
+    await waitUntil(ev, until, { what: `the app to boot at ${url}` });
+  };
+
   const habits = await (await fetch(`${APP}/api/habits`)).json();
   const habit = habits[0];
 
-  await send('Page.navigate', { url: `${APP}/#/habit/${habit.id}` }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('.cal-cell')`).catch(() => 0)) break;
-    await sleep(200);
-  }
+  // The detail view, so the predicate is its calendar rather than a habit row.
+  await boot(`${APP}/#/habit/${habit.id}`, `!!document.querySelector('.cal-cell')`);
   await sleep(400);
 
   /**
@@ -216,8 +238,7 @@ try {
     await save('theme', 'dark');
     return 1;
   })()`);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const survived = await ev(`document.documentElement.dataset.theme`);
   ck('a stored theme survives a reload', survived === 'dark', String(survived));
 
@@ -272,8 +293,7 @@ try {
     localStorage.setItem('habiterall-theme', 'dark');
     return 1;
   })()`);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(3000);
+  await boot();
 
   const migrated = await ev(`(async()=>{
     const stored = await (await fetch('/api/settings',
@@ -322,8 +342,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(3000);
+  await boot();
 
   const refused = await ev(`(async()=>{
     const painted = document.documentElement.dataset.theme;
@@ -425,8 +444,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(3000);
+  await boot();
 
   const refusedWrite = await ev(`(async()=>{
     const painted = document.documentElement.dataset.theme;
@@ -480,8 +498,10 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);        // inside the migration's held PUT
+  // Ready in ~55ms, which is well inside the migration's 2s held PUT — the
+  // window the press below has to land in for this to test anything. The fixed
+  // 1200ms this replaces had 800ms of margin; the poll has nearly all of it.
+  await boot();
 
   const raced = await ev(`(async()=>{
     const { toggleTheme } = await import('/shared/ui/theme.js');
@@ -535,8 +555,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
 
   const offlinePress = await ev(`(async()=>{
     const { toggleTheme } = await import('/shared/ui/theme.js');
@@ -567,8 +586,7 @@ try {
   // A clean document first: removing an `addScriptToEvaluateOnNewDocument`
   // registration does not undo the stub already installed in the page that is
   // showing, and the setup below needs a working `fetch`.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await ev(`(async()=>{
     await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
     localStorage.removeItem('habiterall-settings');
@@ -587,8 +605,7 @@ try {
     })();`,
   }, sessionId);
 
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const offBefore = await ev(`(async()=>{
     const { toggleTheme } = await import('/shared/ui/theme.js');
     const before = document.documentElement.dataset.theme;
@@ -597,8 +614,7 @@ try {
              note: localStorage.getItem('habiterall-theme') };
   })()`);
   // Reload, still offline. Nothing has reached the server.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const offAfter = await ev(`document.documentElement.dataset.theme`);
   ck('an offline press survives a reload made while still offline',
     offBefore.painted !== offBefore.before && offAfter === offBefore.painted,
@@ -620,8 +636,7 @@ try {
   // A clean document first: removing an `addScriptToEvaluateOnNewDocument`
   // registration does not undo the stub already installed in the page that is
   // showing, and the setup below needs a working `fetch`.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await ev(`(async()=>{
     await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
     localStorage.removeItem('habiterall-settings');
@@ -652,8 +667,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const hung = await ev(`(async()=>{
     const { toggleTheme } = await import('/shared/ui/theme.js');
     const before = document.documentElement.dataset.theme;
@@ -718,8 +732,7 @@ try {
   // A clean document first: removing an `addScriptToEvaluateOnNewDocument`
   // registration does not undo the stub already installed in the page that is
   // showing, and the setup below needs a working `fetch`.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await ev(`(async()=>{
     await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
     localStorage.removeItem('habiterall-settings');
@@ -737,8 +750,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const viaDialog = await ev(`(async()=>{
     const { saveAll } = await import('/shared/ui/settings.js');
     const before = document.documentElement.dataset.theme;
@@ -764,8 +776,7 @@ try {
   // since", so it would have to guess; a press is known to be owed, and is
   // re-sent on the next reconcile. Without this a press that missed once is
   // stranded on one device forever, invisible everywhere else.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await fetch(`${APP}/api/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -776,8 +787,7 @@ try {
     localStorage.setItem('habiterall-theme', 'press:light');
     return 1;
   })()`);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2600);
+  await boot();
   const healed = await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
   const healedPaint = await ev(`document.documentElement.dataset.theme`);
   ck('a press the account never received is sent again',
@@ -797,8 +807,7 @@ try {
   // their phone yesterday, on a write about something else entirely. Cloud
   // returns the whole blob and was unaffected, which is worse rather than
   // better: an edition deciding a correctness rule is the bug.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await fetch(`${APP}/api/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -820,8 +829,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   await ev(`(async()=>{
     const { set } = await import('/shared/ui/settings.js');
     set('calendarZoom', 'wide');
@@ -844,8 +852,7 @@ try {
   // black-holed, then a second press that succeeded, and the next boot painted
   // the FIRST value because the outbox replayed it. Both presses had answered
   // `{ok: true}`, so nothing was ever said.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await ev(`(async()=>{
     await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
     localStorage.removeItem('habiterall-settings');
@@ -869,8 +876,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const timedOut = await ev(`(async()=>{
     const { toggleTheme } = await import('/shared/ui/theme.js');
     const first = await toggleTheme();
@@ -917,8 +923,7 @@ try {
   // the dialog runs. Offline is how it happens for real (the press is in the
   // outbox), and a 429 from the IP-keyed read limiter is how it happens on a
   // household behind one NAT.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await ev(`(async()=>{
     await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
     localStorage.removeItem('habiterall-settings');
@@ -936,8 +941,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const overPress = await ev(`(async()=>{
     const { saveAll } = await import('/shared/ui/settings.js');
     const before = document.documentElement.dataset.theme;
@@ -963,8 +967,7 @@ try {
   // them is where the account ENDS UP, here and after a reload.
   await send('Page.removeScriptToEvaluateOnNewDocument',
     { identifier: noReadPress.identifier }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2600);
+  await boot();
   const overPressLater =
     await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
   ck('...and a reload does not hand the press a second chance at it',
@@ -981,8 +984,7 @@ try {
   // The read is refused here too, and for the same reason: a boot GET that
   // succeeds retires the record before Restore defaults is ever pressed, so
   // every wrong version passes.
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(1200);
+  await boot();
   await ev(`(async()=>{
     await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
     localStorage.removeItem('habiterall-settings');
@@ -1000,8 +1002,7 @@ try {
       };
     })();`,
   }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2500);
+  await boot();
   const afterReset = await ev(`(async()=>{
     const { reset } = await import('/shared/ui/settings.js');
     await reset();
@@ -1016,8 +1017,7 @@ try {
   // no theme, and a surviving record reads that as "send mine".
   await send('Page.removeScriptToEvaluateOnNewDocument',
     { identifier: noReadReset.identifier }, sessionId);
-  await send('Page.navigate', { url: `${APP}/` }, sessionId);
-  await sleep(2600);
+  await boot();
   const resetAccount =
     await (await fetch(`${APP}/api/settings`)).json().catch(() => ({}));
   ck('...and the next boot does not put it back on the account',

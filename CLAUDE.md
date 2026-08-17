@@ -294,6 +294,19 @@ The browser suites reset to known fixtures before each run
 (`shared/test/browser/fixtures.mjs`). If one fails, check the fixtures before
 suspecting the app — several "failures" have been stale test data.
 
+**Wait for the app, never for a duration.** `waitUntil` (`chrome.mjs`) polls a
+predicate and THROWS naming what it wanted; a `sleep` after `Page.navigate` is
+a guess in both directions. Measured on the personal edition: a boot is ready in
+**52–95ms**, and the settings reconcile it performs lands within **7ms** of that,
+because `start()` awaits `settings.init()` before it renders — so a rendered
+dashboard is downstream of the whole of it, and it holds under a stubbed-out
+`/api/settings` too (49–67ms, *faster*). `themecheck` carried 26 fixed sleeps of
+1.2–3s against that: 53.8s, 56% of its runtime, and it now runs in 46s instead of
+99s. The predicate has to be everything the block depends on — a poll on a weak
+condition returns the instant the DOM has anything in it, which is worse than the
+sleep it replaced. Post-action settles are a different thing and stay: waiting to
+see that something did NOT happen has no predicate to poll.
+
 **The browser suites run in parallel, and a worker OWNS the instance it points
 at.** `fixtures.reset()` deletes every habit on its server, so the parallelism is
 the number of `--bases` and there is no flag that can put two workers on one
