@@ -917,6 +917,117 @@ list sat — so the snap defers while a tap is pending, and the focus is cleared
 once a fetch has landed whether or not the habit was found, or an archived habit
 would suppress the snap forever.
 
+**A snooze is a SECOND alarm, and the day the REMINDER is about is what bounds
+it.** The "In 1 hour" button records nothing; it re-arms the same notification
+an hour on, which on a local channel costs one more `setExactAndAllowWhileIdle`
+and no state anywhere. `Reminders.snoozeUntil` is the rule and it says two
+things. An hour is an hour of REAL time — `plusMinutes` on a `ZonedDateTime`
+moves the instant — which is the exact opposite of `nextOccurrence` beside it, a
+wall-clock promise that must survive a DST boundary saying the same o'clock; the
+two differ on one night a year in each direction and both are pinned. And the
+target must land on **the day the reminder names**, never on a later one, for
+the reason `dueReminders` already drops a reminder whose window straddles
+midnight: a notification names a date, so one posted at 00:30 asks about a day
+nobody has lived yet while the day it was about goes unasked.
+
+The first version asked whether an hour fitted inside **the day of the press**,
+which is the same question only until the moment it matters. A notification is
+not removed by pressing an action — `setAutoCancel` fires on a body tap — and
+carries no `setTimeoutAfter`, so the 16th's reminder is still in the shade at
+00:30 on the 17th, and there an hour fits perfectly. The re-post then read
+`LocalDate.now()` and asked about the 17th, while the 16th left the shade
+unanswered. The asymmetry is what made it a bug rather than a judgement: Yes /
+No / Skip on that same stale notification write to the date it names, so snooze
+was the one action that silently changed the subject. Refusing costs nothing —
+the daily alarm is untouched, and the notification stays in the shade with its
+three answers still correct about the day it names.
+
+**Arming is not the last chance to be wrong, which is why the day rides on the
+alarm.** `setAlarm` falls back to `setAndAllowWhileIdle` when exact alarms are
+not permitted, and on Android 14+ that is the ORDINARY path rather than the
+exception: `SCHEDULE_EXACT_ALARM` is not granted by default. An inexact alarm is
+loose by minutes, so one armed at 22:52 for 23:52 can arrive at 00:03 with
+nobody having pressed anything late. The snooze intent therefore carries
+`EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday` before posting; a
+delivery that has outlived its day is dropped and logged, exactly as the other
+six silences there are. The daily alarm carries no date, deliberately — it names
+no day and means whichever one it arrives on, so a check that refused a null
+would silence every reminder there is.
+
+The two alarms are two PendingIntents (`habiterall://snooze/<id>` against
+`habiterall://remind/<id>`), because `filterEquals` ignores extras and one
+intent for both would mean "in an hour" quietly became the habit's new daily
+time. That separation is also what lets a snooze survive `schedule`, which runs
+on every fetch and only ever touches the daily alarm. `EXTRA_SNOOZED` rides on
+the alarm so `ReminderReceiver` does not arm tomorrow's when a snooze fires:
+there is nothing to arm — the daily alarm is still pending — and doing it anyway
+would spend a network sync per press.
+
+**Pinning the DECISION is not pinning the WIRING, and this file is where that
+was learned twice.** A review broke four things at once here — the
+`EXTRA_SNOOZED` early return, the second cancel, the snooze's own data uri, and
+the button's position — and every test passed, because every mutation that had
+ever been run was aimed at a three-line pure function. `alarmUri` and
+`Notifications.reminderActions` were extracted in answer to that, and the second
+review then broke `snoozePendingIntent` to call `alarmUri(id, snoozed = false)`
+and `buildReminder` to iterate `actions.reversed()` — and every test passed
+again. Both bugs live ONE LINE BELOW the function that pins them, which is where
+all four of the originals lived too: a string being right does not make its
+caller use it, and a list being in order does not make its consumer read it that
+way.
+
+So `ReminderWiringTest` asserts the OUTPUTS — what AlarmManager was handed and
+what the Notification carries — and it is the one place in this repo that uses
+Robolectric. That dependency is the price of the lesson: this package's bugs are
+all in the wiring, the wiring is Android, and a JVM test that cannot see an
+`Intent` cannot see any of them. It expresses no rules; it only asks whether the
+rules reached the platform, which is the same question `test/browser/` exists to
+ask of the web app.
+
+**Nothing here touches `notify_log`, and that is by construction rather than by
+care.** The watermark is the SERVER's record of having sent a reminder, and an
+Android reminder is a local alarm the server knows nothing about. It stops being
+free the moment snooze is offered on a server-sent channel: the watermark is
+written after a send, so a snoozed Discord reminder would already be filed as
+delivered for the day and the re-post would never go out. That is why Discord is
+out of scope — a snooze there is a scheduled item with its own state, not a
+local timer — and why the reasoning is written on `Reminders.snooze`, where the
+next person to offer one will be standing.
+
+Three smaller decisions travel with it, and the first was written down wrong
+once already. **A pending snooze is not cancelled when the day is answered**,
+and the reason is `needsReminder` on the re-post rather than anything about
+reachability: the outcome of an answer arriving from anywhere else is a
+notification that is never posted, not a wrong write. The earlier claim here —
+"a snooze takes the notification away, so there is nothing left to answer from"
+— was false on its own surface, since "Enter count" opens `CountEntryActivity`
+and only cancels the notification on SUBMIT, so the shade holds a live snooze
+button while the number pad is open; and it ignored every other way a day gets
+answered, which is the web app, another phone, Discord, this app's own grid and
+its day editor. Worth being exact about, because the home-screen widget is
+another surface that answers without touching the notification.
+
+The duration is a Kotlin constant and not a setting: a setting would need a
+`SETTING_VALUES` entry, a default every client mirrors and a `notMirrored`
+decision, to answer a situation one duration already answers. And the button is
+added **last**, because the collapsed shade shows three actions and the tail is
+what it drops — the right one to lose, since the other three ANSWER the day and
+this one only defers it. Which habits pay that is narrower than "an account that
+uses skip days": a yes/no habit and an avoided one spend two buttons on Yes and
+No, so with skips on they have four and snooze falls off, while a MEASURABLE
+habit spends one on the number pad and keeps all three. It is still added rather
+than omitted, since three is the phone's shade and a watch shows more.
+
+**A pending snooze does not survive a reboot, and that is a decision rather than
+an oversight.** `cancel` is the only place the app drops one; a reboot, a
+force-stop or an OEM battery kill drops every alarm, and `rescheduleAll` re-arms
+the DAILY alarm from the reminder cache and nothing else — so the nudge the user
+asked for silently does not arrive, with no surface saying so. Persisting it
+would mean storing exactly the scheduled state this design avoids, to deliver a
+deferral after the interruption it was deferring; the day's own alarm still asks
+at its own time. Say it as a trade, because stating it as an absolute is how the
+first version of this paragraph came to be wrong.
+
 **A row's streak is the server's arithmetic, so recording a day re-asks for
 it.** The optimistic overlay knows one day and a streak is the whole history;
 without a refetch, ticking today left the number sitting still at the exact

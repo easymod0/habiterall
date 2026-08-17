@@ -7,6 +7,7 @@ import com.habiterall.app.data.Sentinels
 import com.habiterall.app.notify.Reminders
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalTime
@@ -129,6 +130,123 @@ class RemindersTest {
         val now = at(2026, 3, 10, 23, 50)
         val next = Reminders.nextOccurrence(LocalTime.of(0, 0), now)
         assertEquals(at(2026, 3, 11, 0, 0).toInstant().toEpochMilli(), next)
+    }
+
+    /* ---------- ask me later ---------- */
+
+    private fun snoozeGap(now: ZonedDateTime, date: String): Long? =
+        Reminders.snoozeUntil(now, date)?.let {
+            it.toInstant().toEpochMilli() - now.toInstant().toEpochMilli()
+        }
+
+    @Test
+    fun `a snooze fires an hour later on the same day`() {
+        val now = at(2026, 3, 10, 8, 0)
+        assertEquals(at(2026, 3, 10, 9, 0), Reminders.snoozeUntil(now, "2026-03-10"))
+    }
+
+    @Test
+    fun `a snooze that would land after local midnight is refused`() {
+        // Never re-dated onto tomorrow: the notification names a date, and one
+        // posted at 00:30 would ask about a day the user has not lived while
+        // the day it was about goes unasked. `dueReminders` drops a straddling
+        // reminder for the same reason.
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 30), "2026-03-10"))
+        // Exactly midnight is already tomorrow, which is the boundary every
+        // "is it still today?" test gets wrong in the same direction.
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 0), "2026-03-10"))
+        // One minute of room is still room.
+        assertEquals(
+            at(2026, 3, 10, 23, 59),
+            Reminders.snoozeUntil(at(2026, 3, 10, 22, 59), "2026-03-10"),
+        )
+    }
+
+    @Test
+    fun `a snooze pressed after midnight on yesterday's reminder is refused`() {
+        // The case the rule is named after, and the one asking about the day of
+        // the PRESS gets wrong. A notification is not removed by pressing an
+        // action and has no timeout, so the 16th's reminder is still in the
+        // shade at 00:30 on the 17th. An hour fits inside the 17th — which is
+        // why the press-only question armed one — and the re-post reads
+        // `LocalDate.now()`, so it would have asked about the 17th while the
+        // 16th left the shade unanswered.
+        assertNull(Reminders.snoozeUntil(at(2026, 8, 17, 0, 30), "2026-08-16"))
+        // Hours later on the wrong day is the same answer, not a nearer miss.
+        assertNull(Reminders.snoozeUntil(at(2026, 8, 17, 9, 0), "2026-08-16"))
+        // And the same day is unaffected: this is one question, not two guards.
+        assertEquals(
+            at(2026, 8, 17, 10, 0),
+            Reminders.snoozeUntil(at(2026, 8, 17, 9, 0), "2026-08-17"),
+        )
+    }
+
+    @Test
+    fun `a delivery that names a day may only be posted on that day`() {
+        // The other half, because arming is not the last chance to be wrong: an
+        // inexact alarm — the ordinary case on Android 14+, where
+        // SCHEDULE_EXACT_ALARM is not granted by default — armed at 22:52 for
+        // 23:52 can arrive at 00:03 with nobody having pressed anything late.
+        assertTrue(Reminders.stillAboutToday("2026-08-16", "2026-08-16"))
+        assertFalse(Reminders.stillAboutToday("2026-08-16", "2026-08-17"))
+        // The DAILY alarm names no day and means whichever one it arrives on,
+        // so a check that refused a null would silence every reminder.
+        assertTrue(Reminders.stillAboutToday(null, "2026-08-16"))
+    }
+
+    @Test
+    fun `a snooze is an hour of real time, not an hour of wall clock`() {
+        // The opposite of `nextOccurrence`, which is a wall-clock promise —
+        // 08:30 must stay 08:30 across a clock change. "Ask me again in an
+        // hour" is a duration, so on the night the clocks go back it is ONE
+        // hour later and not two, and on the night they go forward it is one
+        // hour and not none.
+        //
+        // Toronto falls back on 2026-11-01: 01:30 EDT plus an hour is 01:30
+        // EST, the same local time and the same date, so the snooze stands.
+        assertEquals(3_600_000L, snoozeGap(at(2026, 11, 1, 1, 30), "2026-11-01"))
+        assertEquals(
+            1,
+            Reminders.snoozeUntil(at(2026, 11, 1, 1, 30), "2026-11-01")!!.dayOfMonth,
+        )
+
+        // And springs forward on 2026-03-08: 01:30 plus an hour is 03:30,
+        // because 02:30 does not exist that day.
+        assertEquals(3_600_000L, snoozeGap(at(2026, 3, 8, 1, 30), "2026-03-08"))
+        assertEquals(3, Reminders.snoozeUntil(at(2026, 3, 8, 1, 30), "2026-03-08")!!.hour)
+    }
+
+    @Test
+    fun `a snooze late on a day the clocks change is still judged by the date`() {
+        // The refusal asks whether the target lands on the reminder's own DATE,
+        // which is the only form of the question that survives a day being 23
+        // or 25 hours long — and the only one that holds where the transition
+        // is at midnight itself, as it is in America/Santiago, where "before
+        // 24:00" is not even a time that exists.
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 8, 23, 30), "2026-03-08"))
+        assertNull(Reminders.snoozeUntil(at(2026, 11, 1, 23, 30), "2026-11-01"))
+
+        val santiago = ZoneId.of("America/Santiago")
+        // 2026-09-06 has no 00:00 in Santiago: the clocks go straight to 01:00.
+        val eve = ZonedDateTime.of(2026, 9, 5, 23, 30, 0, 0, santiago)
+        assertNull(Reminders.snoozeUntil(eve, "2026-09-05"))
+    }
+
+    /* ---------- the plumbing, which unit tests cannot reach through Android ---------- */
+
+    @Test
+    fun `a habit's two alarms are two alarms`() {
+        // A PendingIntent's identity is `filterEquals`, which ignores extras —
+        // so this string is the whole of the difference. Point both at the
+        // daily uri and `setExactAndAllowWhileIdle` REPLACES: "in an hour"
+        // becomes the habit's new daily time, tomorrow's reminder never fires,
+        // and nothing in the app looks wrong until the next morning.
+        val daily = Reminders.alarmUri(1, snoozed = false)
+        val snooze = Reminders.alarmUri(1, snoozed = true)
+        assertTrue("the two alarms must not share a uri", daily != snooze)
+        // And one habit's alarms are not another's.
+        assertTrue(daily != Reminders.alarmUri(2, snoozed = false))
+        assertTrue(snooze != Reminders.alarmUri(2, snoozed = true))
     }
 
     /* ---------- this device as a notification destination ---------- */

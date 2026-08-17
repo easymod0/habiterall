@@ -76,6 +76,14 @@ android {
         compose = true
         buildConfig = true
     }
+    testOptions {
+        unitTests {
+            // Robolectric needs the merged resources to inflate anything, and
+            // the strings the notification's buttons are labelled with are
+            // resources.
+            isIncludeAndroidResources = true
+        }
+    }
     // No composeOptions block: from Kotlin 2.0 the Compose compiler version is
     // determined by the org.jetbrains.kotlin.plugin.compose plugin, and
     // `kotlinCompilerExtensionVersion` is both ignored and a configuration
@@ -143,5 +151,14 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     testImplementation("junit:junit:4.13.2")
+    // Real Intents, real PendingIntents, a real AlarmManager and a real
+    // Notification, on the JVM. Added because the plumbing between a decision
+    // and its effect is where every bug in this package has been, and a pure
+    // function cannot reach it: `alarmUri` returning the right string does not
+    // prove the snooze intent uses it.
+    testImplementation("org.robolectric:robolectric:4.16")
+    // Lets a test ask what work a receiver enqueued, which is the only way to
+    // see the difference between a snoozed delivery and a daily one.
+    testImplementation("androidx.work:work-testing:2.10.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }

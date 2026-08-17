@@ -21,12 +21,21 @@
     <string name="action_slipped">Slipped</string>
     <string name="action_skip">Skip</string>
     <string name="action_enter_count">Enter count</string>
+    <!-- Says the duration rather than "Snooze", because there is only one and
+         the button is the only place it is written down. -->
+    <string name="action_snooze">In 1 hour</string>
 
     <string name="recorded_yes">Recorded</string>
     <string name="recorded_no">Marked not done</string>
     <string name="recorded_clean">Marked clean</string>
     <string name="recorded_slipped">Marked as a slip</string>
     <string name="recorded_skip">Skipped</string>
+    <string name="snoozed">Asking again in an hour</string>
+    <!-- A snooze is never re-dated onto another day, so there is none to give
+         either late in the evening or on a notification left over from
+         yesterday. One sentence covers both: the day's own reminder is
+         untouched either way. -->
+    <string name="snooze_too_late">Too late to snooze that day</string>
     <string name="invalid_amount">Enter a number of zero or more</string>
 
     <string name="count_hint">Amount</string>

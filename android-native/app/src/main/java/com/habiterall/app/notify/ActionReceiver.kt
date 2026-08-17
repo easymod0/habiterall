@@ -23,6 +23,31 @@ class ActionReceiver : BroadcastReceiver() {
         val date = intent.getStringExtra(Notifications.EXTRA_DATE) ?: return
         if (habitId < 0) return
 
+        // Snooze answers nothing, so it leaves this receiver before the outbox
+        // is reached. It is asked again HERE rather than trusted from the
+        // button's existence, and it is asked about `date` — the day this
+        // notification is about — rather than about the day of the press. A
+        // notification is not removed by pressing an action and has no timeout,
+        // so this one can be pressed at 00:30 the next morning; judged by the
+        // press alone, an hour "fits" and the re-post then asks about a day
+        // nobody has lived while the day it named leaves the shade unanswered.
+        // Yes / No / Skip below write to `date`, so snooze was the one action
+        // that could change the subject.
+        //
+        // A refused snooze leaves the notification standing — the day is still
+        // unanswered, its other three buttons are still correct about it, and
+        // taking it away would be the loss the press was meant to avoid.
+        if (intent.action == Notifications.ACTION_SNOOZE) {
+            val armed = Reminders.snooze(context, habitId, date)
+            if (armed) Notifications.cancel(context, Notifications.notificationId(habitId))
+            Toast.makeText(
+                context,
+                if (armed) R.string.snoozed else R.string.snooze_too_late,
+                Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+
         // The value was decided when the notification was built, where the
         // habit was in hand — a habit shown as something to avoid records 0 for
         // a clean day and the smallest amount over for a slip, and this
@@ -41,6 +66,16 @@ class ActionReceiver : BroadcastReceiver() {
             else -> return
         }
 
+        // No snooze is cancelled here, and the reason is `needsReminder` on the
+        // re-post rather than anything about reachability: a pending snooze
+        // that fires on an answered day posts nothing, so the cost of leaving
+        // it is a wake-up, never a wrong write. An earlier version of this
+        // comment claimed there was nothing left to answer from once a snooze
+        // had taken the notification away, and that was false twice over —
+        // "Enter count" opens the number pad and only cancels the notification
+        // on SUBMIT, so the shade holds a live snooze button while it is open,
+        // and the day is answerable from the web app, another phone, Discord,
+        // this app's own grid and its day editor besides.
         Outbox.enqueue(context, habitId, date, value, skip)
         Notifications.cancel(context, Notifications.notificationId(habitId))
 

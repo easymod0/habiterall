@@ -15,6 +15,8 @@ import com.habiterall.app.data.Grid
 import com.habiterall.app.data.Habit
 import com.habiterall.app.ui.CountEntryActivity
 import com.habiterall.app.ui.MainActivity
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 /**
  * Builds the reminder notification and its actions.
@@ -37,9 +39,18 @@ object Notifications {
     const val ACTION_NO = "com.habiterall.app.NO"
     const val ACTION_SKIP = "com.habiterall.app.SKIP"
 
+    /**
+     * Ask again later. Not an answer, and deliberately not shaped like one: it
+     * records nothing, so it is the one action that leaves the day outstanding.
+     */
+    const val ACTION_SNOOZE = "com.habiterall.app.SNOOZE"
+
     const val EXTRA_HABIT_ID = "habit_id"
     const val EXTRA_HABIT_NAME = "habit_name"
     const val EXTRA_DATE = "date"
+
+    /** Set on the alarm a snooze arms, so the receiver can tell it apart. */
+    const val EXTRA_SNOOZED = "snoozed"
 
     /**
      * What the tapped action records, decided where the habit is in hand.
@@ -159,11 +170,60 @@ object Notifications {
      *   not reached the server in a week and the shade must still agree with the
      *   grid about which answers exist.
      */
+    /**
+     * The buttons a reminder can offer, in the order they are added.
+     *
+     * A list rather than a sequence of `addAction` calls, because the ORDER is
+     * a decision and a decision that only exists inside a builder cannot be
+     * tested: every wrong arrangement of it still posts a notification.
+     */
+    enum class ReminderAction { YES, NO, COUNT, SKIP, SNOOZE }
+
+    /**
+     * How many buttons the collapsed shade shows. Android's own cap, not ours.
+     */
+    const val VISIBLE_ACTIONS = 3
+
+    /**
+     * Which buttons this reminder gets, in order.
+     *
+     * Snooze is LAST, and that is the whole decision. Where the list runs past
+     * [VISIBLE_ACTIONS] the collapsed shade drops the tail, and snooze is the
+     * right one to lose: the others ANSWER the day and it only defers one, so
+     * an answer you cannot give would be the worse loss. It is still offered
+     * rather than omitted, because three is the phone's shade and not every
+     * surface — a watch or a car shows more.
+     *
+     * Note which habits that costs, because it is narrower than "an account
+     * that uses skip days": a yes/no habit and one shown as something to avoid
+     * both spend two buttons on Yes and No, so with skips on they have four and
+     * snooze falls off. A MEASURABLE habit spends one on the number pad, so it
+     * has three and keeps its snooze.
+     */
+    fun reminderActions(
+        habit: Habit,
+        skipEnabled: Boolean,
+        snoozeAvailable: Boolean,
+    ): List<ReminderAction> = buildList {
+        // A habit shown as something to avoid is answered yes-or-no even though
+        // it is stored as a measurable one — offering a number pad for "did you
+        // smoke?" is the friction the rendering exists to remove.
+        if (habit.isNumerical && !habit.isAvoided) {
+            add(ReminderAction.COUNT)
+        } else {
+            add(ReminderAction.YES)
+            add(ReminderAction.NO)
+        }
+        if (skipEnabled) add(ReminderAction.SKIP)
+        if (snoozeAvailable) add(ReminderAction.SNOOZE)
+    }
+
     fun buildReminder(
         context: Context,
         habit: Habit,
         date: String,
         skipEnabled: Boolean = false,
+        now: ZonedDateTime = ZonedDateTime.now(ZoneId.systemDefault()),
     ): Notification {
         // A custom prompt leads, because "Did you exercise today?" is a question
         // where the habit's name is a label. The name then becomes the second
@@ -182,12 +242,8 @@ object Notifications {
             // notification, was a dead spot on two thirds of the shade.
             .setContentIntent(openIntent(context, habit, date))
 
-        // A habit shown as something to avoid is answered yes-or-no even
-        // though it is stored as a measurable one — offering a number pad for
-        // "did you smoke?" is the friction the rendering exists to remove, and
-        // the buttons below already say Yes / No / Skip. `isAvoided` reads the
-        // cached fields, because this notification is built with no network.
-        if (habit.isNumerical && !habit.isAvoided) {
+        val avoided = habit.isAvoided
+        if (habit.isNumerical && !avoided) {
             val target = formatTarget(habit)
             builder.setContentText(
                 if (prompt.isEmpty()) {
@@ -198,40 +254,57 @@ object Notifications {
                     "${habit.name} · ${context.getString(R.string.reminder_measurable, target)}"
                 }
             )
-            builder.addAction(
-                0,
-                context.getString(R.string.action_enter_count),
-                countIntent(context, habit, date),
-            )
         } else {
-            val avoided = habit.isAvoided
             builder.setContentText(
                 if (prompt.isNotEmpty()) habit.name
                 else if (avoided) context.getString(R.string.reminder_avoid)
                 else context.getString(R.string.reminder_boolean)
             )
-            // "Yes" on "did you smoke?" records the opposite of what it looks
-            // like, so the labels invert with the rendering. The ACTIONS do not
-            // — YES is still the good answer and NO the bad one, and what each
-            // records is decided once, above.
-            builder.addAction(
-                0,
-                context.getString(if (avoided) R.string.action_clean else R.string.action_yes),
-                actionIntent(context, ACTION_YES, habit, date),
-            )
-            builder.addAction(
-                0,
-                context.getString(if (avoided) R.string.action_slipped else R.string.action_no),
-                actionIntent(context, ACTION_NO, habit, date),
-            )
         }
 
-        if (skipEnabled) {
-            builder.addAction(
-                0,
-                context.getString(R.string.action_skip),
-                actionIntent(context, ACTION_SKIP, habit, date),
-            )
+        // Snooze is absent entirely when there is no room left in the reminder's
+        // own day for one, which `Reminders.snoozeUntil` decides — a button that
+        // can only say "too late" is worse than no button. `ActionReceiver` asks
+        // the same question again on the press, because a notification built at
+        // 20:00 is still there at 00:30 the next morning.
+        val actions = reminderActions(
+            habit,
+            skipEnabled,
+            snoozeAvailable = Reminders.snoozeUntil(now, date) != null,
+        )
+
+        actions.forEach { action ->
+            when (action) {
+                // "Yes" on "did you smoke?" records the opposite of what it
+                // looks like, so the labels invert with the rendering. The
+                // ACTIONS do not — YES is still the good answer and NO the bad
+                // one, and what each records is decided once, in `actionIntent`.
+                ReminderAction.YES -> builder.addAction(
+                    0,
+                    context.getString(if (avoided) R.string.action_clean else R.string.action_yes),
+                    actionIntent(context, ACTION_YES, habit, date),
+                )
+                ReminderAction.NO -> builder.addAction(
+                    0,
+                    context.getString(if (avoided) R.string.action_slipped else R.string.action_no),
+                    actionIntent(context, ACTION_NO, habit, date),
+                )
+                ReminderAction.COUNT -> builder.addAction(
+                    0,
+                    context.getString(R.string.action_enter_count),
+                    countIntent(context, habit, date),
+                )
+                ReminderAction.SKIP -> builder.addAction(
+                    0,
+                    context.getString(R.string.action_skip),
+                    actionIntent(context, ACTION_SKIP, habit, date),
+                )
+                ReminderAction.SNOOZE -> builder.addAction(
+                    0,
+                    context.getString(R.string.action_snooze),
+                    actionIntent(context, ACTION_SNOOZE, habit, date),
+                )
+            }
         }
         return builder.build()
     }
