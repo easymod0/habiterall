@@ -67,12 +67,20 @@ try{
   console.log('--- the section renders from the registry ---');
   const sections=await ev(`[...document.querySelectorAll('#settings-body h3')].map(h=>h.textContent).join(',')`);
   ck('a Notifications section exists', sections.includes('Notifications'), sections);
-  // Counted against the registry rather than a literal: the list is CHANNEL_IDS
-  // and it grows, so a hardcoded number turns adding a destination into a
-  // failing test that says nothing about what broke.
+  // Asked of CHANNEL_IDS rather than a literal: the list grows, so a hardcoded
+  // number turns adding a destination into a failing test that says nothing
+  // about what broke.
+  //
+  // Each box is looked up BY ID rather than counted. This used to count every
+  // `.setting-multi input[type=checkbox]` in the dialog, which was the same
+  // question only while `notifyChannels` was the one `multi` in the registry —
+  // `detailCards` (#112) added nine more and broke it. A count was the weaker
+  // check anyway: three boxes for the wrong three channels satisfied it.
   ck('every destination in the registry is offered',
-     await ev(`document.querySelectorAll('.setting-multi input[type=checkbox]').length`)
-       ===CHANNEL_IDS.length);
+     await ev(`${JSON.stringify(CHANNEL_IDS)}.every(id =>
+       !!document.getElementById('setting-notifyChannels-' + id))`) === true,
+     await ev(`${JSON.stringify(CHANNEL_IDS)}.filter(id =>
+       !document.getElementById('setting-notifyChannels-' + id)).join(',')`));
   ck('the on-device destination is on by default',
      await ev(`${channelBox('android')}.checked`)===true);
   ck('and Discord is not', await ev(`${channelBox('discord')}.checked`)===false);

@@ -251,6 +251,70 @@ try {
     }
   }
 
+  /* ---- the day-column setting at its maximum, at every width ---- */
+  //
+  // #112 asked for this pass by name: `gridDays` can only ever request FEWER
+  // columns than the viewport fits, so at its largest value every assertion
+  // above must still hold. Without it the option reintroduces exactly the
+  // layout bug this suite was written to catch — a 14-column strip needing
+  // 668px of a 698px row, with nothing left for the habit name.
+  //
+  // The maximum is read from SETTING_VALUES rather than written as '14', so
+  // widening the option list has to come back through here.
+  console.log('\n--- gridDays at its maximum ---');
+  const { SETTING_VALUES } = await import('../../src/validate.js');
+  const maxDays = SETTING_VALUES.gridDays
+    .filter((v) => v !== 'auto')
+    .reduce((max, v) => (Number(v) > Number(max) ? v : max));
+
+  await send('Page.navigate', { url: APP }, sessionId);
+  await sleep(800);
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({gridDays:'${maxDays}'})}).then(r=>r.ok)`);
+
+  for (const vp of VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
+    await send('Page.navigate', { url: APP }, sessionId);
+    for (let i = 0; i < 80; i++) {
+      if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+      await sleep(200);
+    }
+    await sleep(500);
+
+    const probe = await ev(LAYOUT_PROBE);
+    ck(`${vp.label} @ gridDays=${maxDays}: nothing overflows the viewport`,
+      probe.overflowing.length === 0 && probe.pageScrollsSideways === false,
+      JSON.stringify(probe.overflowing));
+
+    const grid = await ev(`(() => {
+      const checks = [...document.querySelectorAll('.habit-row:first-child .check')];
+      const sizes = checks.map(c => c.getBoundingClientRect().height);
+      const row = document.querySelector('.habit-row').getBoundingClientRect();
+      const strip = document.querySelector('.habit-row:first-child .checks').getBoundingClientRect();
+      return {
+        columns: checks.length,
+        tooSmall: sizes.filter(h => h < ${MIN_TOUCH}).length,
+        stripOverflowsRow: Math.round(strip.right - row.right) > 0,
+        nameWidth: Math.round(document.querySelector('.habit-name').getBoundingClientRect().width),
+      };
+    })()`);
+
+    ck(`${vp.label} @ gridDays=${maxDays}: day cells clear ${MIN_TOUCH}px`,
+      grid.tooSmall === 0, `${grid.tooSmall} of ${grid.columns} too short`);
+    ck(`${vp.label} @ gridDays=${maxDays}: day strip stays inside its card`,
+      grid.stripOverflowsRow === false);
+    // The failure the cap exists to prevent, asserted directly: the setting
+    // must not be able to squeeze the name out of the row.
+    ck(`${vp.label} @ gridDays=${maxDays}: habit name is not squashed away`,
+      grid.nameWidth > 20, `${grid.nameWidth}px`);
+  }
+
+  await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({gridDays:'auto'})}).then(r=>r.ok)`);
+
   console.log(fails === 0 ? '\nALL RESPONSIVE CHECKS PASSED' : `\n${fails} RESPONSIVE CHECK(S) FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

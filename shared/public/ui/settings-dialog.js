@@ -455,6 +455,14 @@ async function applyDraft() {
     if ('historyGranularity' in changed) overrides.granularity = null;
     if ('historyMode' in changed) overrides.historyMode = null;
     if ('scoreGranularity' in changed) overrides.scoreGranularity = null;
+    // `detailCards` is deliberately NOT here. A card that comes back must not
+    // come back where it was left, but which key a card pages under is
+    // `ui/detail.js`'s knowledge — `score:<gran>` and `history:<gran>` are
+    // built from the granularity being cleared two lines above — so the rule is
+    // `forgetHiddenPositions` there, scoped to the cards actually hidden. Doing
+    // it here meant clearing every card's position whenever the setting changed
+    // at all, which sent a History card paged back to 2019 to today because a
+    // different card was unticked.
 
     if (ignored.length) {
       const names = ignored.map((key) => settings.SETTINGS[key]?.label ?? key);

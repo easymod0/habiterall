@@ -171,6 +171,25 @@ export const SETTINGS = {
       { value: 'newest-right', label: 'Oldest first (today on the right)' },
     ],
   },
+  gridDays: {
+    section: 'Dashboard',
+    label: 'Day columns',
+    // Says "at most" in the help, because that is what it is: `gridColumns` in
+    // ui/window.js takes the smaller of this and what the viewport fits, so a
+    // phone asked for fourteen still draws seven. Without the sentence the
+    // setting looks broken on the device most of this app is used on.
+    help: 'How many days the dashboard grid shows at most. Fewer are drawn ' +
+      'when the screen is too narrow for the number you pick.',
+    type: 'select',
+    default: 'auto',
+    options: [
+      { value: 'auto', label: 'Fit the screen (7, 10 or 14)' },
+      { value: '5', label: '5 — biggest targets' },
+      { value: '7', label: '7 — a week' },
+      { value: '10', label: '10' },
+      { value: '14', label: '14 — a fortnight' },
+    ],
+  },
   weekStart: {
     section: 'Dashboard',
     label: 'Week starts on',
@@ -279,6 +298,36 @@ export const SETTINGS = {
       { value: 'month', label: 'Month' },
       { value: 'quarter', label: 'Quarter' },
       { value: 'year', label: 'Year' },
+    ],
+  },
+  detailCards: {
+    section: 'Statistics',
+    label: 'Cards on a habit’s page',
+    help: 'A card with nothing in it yet is hidden whatever you choose here. ' +
+      'The four figures at the top of the page are always shown.',
+    type: 'multi',
+    // All of them: this is a way to make the page shorter, not a page you have
+    // to assemble before it says anything.
+    //
+    // The values and their ORDER mirror `DETAIL_CARDS` in
+    // shared/src/validate.js, which the browser cannot import — and the order
+    // is load bearing, not tidiness: `parseCardList` stores the canonical order,
+    // so a default written in any other one would be normalised on its first
+    // write. test/settings.test.js is what catches that.
+    default: ['strength', 'calendar', 'streaks', 'resilience', 'awards',
+      'history', 'weekdays', 'weekdayMonths', 'frequency'],
+    // The labels are the card titles as they appear on the page, so the dialog
+    // and the page name the same thing.
+    options: [
+      { value: 'strength', label: 'Habit strength' },
+      { value: 'calendar', label: 'Calendar' },
+      { value: 'streaks', label: 'Best streaks' },
+      { value: 'resilience', label: 'Bouncing back' },
+      { value: 'awards', label: 'Awards' },
+      { value: 'history', label: 'History' },
+      { value: 'weekdays', label: 'By day of week' },
+      { value: 'weekdayMonths', label: 'Weekday consistency' },
+      { value: 'frequency', label: 'Times per week' },
     ],
   },
   historyMode: {

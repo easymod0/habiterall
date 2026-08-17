@@ -1848,9 +1848,20 @@ day. `too_late` with a `zone` you did not expect is the `TZ` problem above.
 ### In-app settings
 
 Under the ⚙ button: the theme, day order (today on the left or right), which day
-the week starts on, chart resolutions, whether deleting asks first, and where
-reminders are sent. Preferences are stored server-side, so in the cloud edition
-they follow your account between devices — and they travel in the JSON backup.
+the week starts on, how much of the dashboard and of a habit's page you want to
+see, chart resolutions, whether deleting asks first, and where reminders are
+sent. Preferences are stored server-side, so in the cloud edition they follow
+your account between devices — and they travel in the JSON backup.
+
+Two of them decide how much there is to look at:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Day columns** (Dashboard) | Fit the screen | How many days the dashboard grid shows **at most** — 5, 7, 10, 14, or as many as fit. It is a maximum and never a minimum: a phone asked for a fortnight still draws a week, because fourteen columns on a narrow screen leave nothing for the habit's name. Choosing fewer on a phone is how you get five fat columns you can hit with a thumb |
+| **Cards on a habit's page** (Statistics) | All of them | Which of the nine cards a habit's page draws: the strength curve, the calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency and times per week. The four figures at the top are always shown, so unticking everything leaves a page rather than a blank one |
+
+A card with nothing in it yet — bouncing back on a habit with no history, awards
+on one that has not earned any — stays hidden whichever way this is set.
 
 Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 

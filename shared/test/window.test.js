@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  columnsForWidth, windowSlice, MIN_SLOT,
+  columnsForWidth, gridColumns, windowSlice,
+  GRID_DAYS, GRID_DAYS_MEDIUM, GRID_DAYS_NARROW, MIN_SLOT,
 } from '../public/ui/window.js';
+import { SETTING_VALUES } from '../src/validate.js';
 
 /* ---------- capacity ---------- */
 
@@ -132,4 +134,78 @@ test('a real card width produces a usable window', () => {
   assert.ok(w.slice.length <= items.length);
   assert.ok(MIN_SLOT.bar * w.slice.length <= 1026,
     'the columns should fit in the width they were sized for');
+});
+
+/* ---------- the dashboard's day columns ---------- */
+
+/** Widths either side of each ladder step, plus the four the suites emulate. */
+const WIDTHS = [320, 360, 390, 640, 641, 768, 900, 901, 1024, 1100, 1440, 2560];
+
+/** What the grid drew before `gridDays` existed, restated independently. */
+const ladder = (w) =>
+  (w <= 640 ? GRID_DAYS_NARROW : w <= 900 ? GRID_DAYS_MEDIUM : GRID_DAYS);
+
+test('auto draws exactly what the grid drew before the setting existed', () => {
+  // The default must move nobody's dashboard. Restated here rather than
+  // imported, so a change to the ladder has to be made twice on purpose.
+  for (const w of WIDTHS) {
+    assert.equal(gridColumns('auto', w), ladder(w), `at ${w}px`);
+  }
+});
+
+test('an absent or unrecognised value is auto, not a number', () => {
+  // `GET /settings` returns only the keys that have been STORED, so almost
+  // every account arrives here with nothing at all — and a stale value from an
+  // older build must degrade to the ladder rather than to 0 columns or NaN.
+  for (const bad of [undefined, null, '', 'thirty', 'auto', {}, [], -3, 0, 1.5]) {
+    assert.equal(gridColumns(/** @type {any} */ (bad), 1440), GRID_DAYS,
+      `${JSON.stringify(bad)} should fall back to the ladder`);
+  }
+});
+
+test('the setting is a CAP: it never draws more than the width fits', () => {
+  // The per-width ladder is the fix for a real layout bug — at 768px the
+  // 14-column layout needed 668px of a 698px row and squeezed the habit name
+  // to nothing. Drop the Math.min and this is back, on the device this app is
+  // mostly used on.
+  for (const w of WIDTHS) {
+    for (const chosen of ['5', '7', '10', '14', '30', '365']) {
+      assert.ok(gridColumns(chosen, w) <= ladder(w),
+        `${chosen} at ${w}px drew ${gridColumns(chosen, w)}, over the ${ladder(w)} that fit`);
+    }
+  }
+});
+
+test('a phone asked for a fortnight still draws a week', () => {
+  // The case above, named — this is the pass responsive.mjs makes in a real
+  // browser, and the one an option list allowing MORE than 14 could not have.
+  assert.equal(gridColumns('14', 390), GRID_DAYS_NARROW);
+  assert.equal(gridColumns('14', 768), GRID_DAYS_MEDIUM);
+  assert.equal(gridColumns('14', 1440), GRID_DAYS);
+});
+
+test('a choice below the ladder is honoured at every width', () => {
+  // The other half, and the half the issue is actually about: someone with
+  // four habits wanting five fat columns they can hit with a thumb. Ignore
+  // `chosen` and this is the only test that notices.
+  for (const w of WIDTHS) {
+    assert.equal(gridColumns('5', w), 5, `at ${w}px`);
+  }
+});
+
+test('every offered value is at most GRID_DAYS, which is what keeps /overview out of this', () => {
+  // `load()` asks the server for GRID_DAYS days and nothing else — the widest
+  // the grid can ever show — so changing the setting needs no refetch and no
+  // route in either edition knows this exists. Offer a value above 14 and that
+  // reasoning silently stops holding: the grid would page into days that were
+  // never fetched and paint them as unrecorded.
+  //
+  // Read from SETTING_VALUES rather than restated, which is the whole point —
+  // a restated list passes forever however the real one grows.
+  for (const chosen of SETTING_VALUES.gridDays) {
+    if (chosen === 'auto') continue;
+    assert.ok(Number(chosen) <= GRID_DAYS,
+      `"${chosen}" exceeds the ${GRID_DAYS}-day window load() fetches — either ` +
+      'lower it, or teach load() to ask for more');
+  }
 });

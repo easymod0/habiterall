@@ -24,6 +24,7 @@ import {
 import { toast } from '/shared/ui/toast.js';
 import { SKIP, UNSET, YES } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
+import { GRID_DAYS, gridColumns } from '/shared/ui/window.js';
 import { open as openHabit } from '/shared/ui/detail.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -48,10 +49,6 @@ const emptyOnboarding = /** @type {HTMLElement[]} */ ([...document.querySelector
   + ' #starters, .empty-actions, .empty-note'
 )]);
 
-const GRID_DAYS = 14;         // most columns we will ever show
-const GRID_DAYS_NARROW = 7;   // phone layout: fewer, wider columns
-const GRID_DAYS_MEDIUM = 10;  // tablets, where 14 would crush the habit name
-
 // Weekday letters and month names come from `ui/dates.js`, which asks `Intl`.
 // There were two hardcoded English copies of both — one here and one in
 // charts.js — so the grid header and the calendar's captions were English
@@ -59,24 +56,26 @@ const GRID_DAYS_MEDIUM = 10;  // tablets, where 14 would crush the habit name
 // the browser's own locale.
 
 /**
- * How many day columns fit without squeezing the habit name out of existence.
+ * How many day columns to draw: the account's choice, capped by what fits.
  *
- * Chosen from the actual viewport width rather than a single breakpoint: at
- * 768px the 14-column desktop layout needed 668px of a 698px row, leaving
- * nothing for the name. Under 640px the CSS switches to flexible columns, so
- * the narrow count applies there.
+ * The arithmetic and the reasoning are in `ui/window.js`, which is DOM-free and
+ * therefore unit testable — the cap is the part worth pinning, and a function
+ * reading `window.innerWidth` and the settings cache is not.
  */
 function gridDays() {
-  const w = window.innerWidth;
-  if (w <= 640) return GRID_DAYS_NARROW;
-  if (w <= 900) return GRID_DAYS_MEDIUM;
-  return GRID_DAYS;
+  return gridColumns(settings.get('gridDays'), window.innerWidth);
 }
 
 export async function load() {
   // Always request the widest column count so a rotation to landscape needs
   // no refetch, and the window the user is actually looking at — paging back
   // must bring its entries with it.
+  //
+  // GRID_DAYS and not `gridDays()`, which is the whole reason `gridDays` needed
+  // no route change in either edition: every value the setting offers is at
+  // most this, so the fetched window is still the widest the grid can ever
+  // show and changing the setting cannot outrun it. A repaint on 'change' is
+  // enough; there is nothing to refetch.
   const params = new URLSearchParams({ days: String(GRID_DAYS) });
   if (state.gridEnd) params.set('end', state.gridEnd);
   if (state.showArchived) params.set('archived', 'true');
