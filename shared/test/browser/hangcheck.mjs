@@ -20,10 +20,10 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
-const PORT = 9256;
+const PORT = devtoolsPort(9256);
 
 // The bound in ui/api.js, plus room for a slow machine to notice it.
 const BOUND_MS = 10_000;

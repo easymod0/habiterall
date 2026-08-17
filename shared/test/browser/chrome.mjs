@@ -62,6 +62,30 @@ export const CHROME = findChrome();
 
 
 /**
+ * The DevTools port this suite should launch its browser on.
+ *
+ * Every suite used to pin its own literal, which worked only because the runner
+ * was strictly serial — and even then not quite: `searchcheck` and
+ * `unknowncheck` both claimed 9296, and `notifycheck` and `nudgecheck` both
+ * claimed 9297. Serially the first browser is dead before the second launches,
+ * so the collision is invisible. Run those two pairs at the same time and the
+ * second suite attaches to the FIRST one's browser — a DevTools socket that
+ * answers, on a page belonging to another test, which presents as an
+ * inexplicable assertion failure rather than as a port clash.
+ *
+ * So the runner assigns instead, from a counter that never repeats within a
+ * run. The literal stays as the fallback, because a suite run directly —
+ * `node shared/test/browser/themecheck.mjs` — has no runner to assign it one,
+ * and that is the normal way to debug a failure.
+ *
+ * @param {number} fallback  the suite's own port, used when run standalone
+ * @returns {number}
+ */
+export const devtoolsPort = (fallback) =>
+  Number(process.env.DEVTOOLS_PORT) || fallback;
+
+
+/**
  * Wait for the browser to expose a DevTools endpoint, and say so plainly if it
  * never does.
  *

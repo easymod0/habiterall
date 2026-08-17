@@ -34,7 +34,7 @@ Rules learned the hard way:
 |---|---|
 | anything | `npm test` and `npm run typecheck` (fast, no deps) |
 | dates, labels, charts | `npm run test:locales` |
-| a rendered surface | `npm run test:browser` (Chrome + server, see below) |
+| a rendered surface | `npm run test:browser` (Chrome; starts its own fleet) |
 | reminders | `npm run test:notify` |
 | import/export | `npm run test:roundtrip -w habiterall-personal` |
 | `/overview` anchors | `npm run test:overview -w habiterall-personal` |
@@ -54,10 +54,12 @@ Rules learned the hard way:
   files in `app/build/test-results/`.
 - **Chrome for Testing is at `~/.local/chrome/chrome-linux64/chrome`.** Set no
   `CHROME_PATH`; never the Flatpak.
-- **Browser suites need a server** started with `HABITERALL_AUTH=off
-  HABITERALL_RATE_LIMIT=off`. Use a fresh port and a fresh DB under `/tmp` — a
-  stale server holding the port answers with old code and looks like a missing
-  column.
+- **Browser suites start their own fleet** — `npm run test:browser` brings up N
+  servers on 3200+ with fresh `/tmp` databases, auth and the limiter off, and
+  tears them down after. Nothing to start by hand, and no stale database: a
+  reused one answers with old state and looks like a missing column. Pointing
+  the shared runner at a server you started yourself still works
+  (`BASE=... node shared/test/browser/run.mjs`), and is how cloud is tested.
 - **Killing that server**: `pkill -f .../server.js` matches its own shell (exit
   144) and swallows whatever was chained after it. Kill by PID and confirm with
   `ss -lptn` that nothing is still listening — `npm start` leaves a child bound.

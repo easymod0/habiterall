@@ -14,10 +14,10 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
-const PORT = 9312;
+const PORT = devtoolsPort(9312);
 const profile = mkdtempSync(join(tmpdir(), 'habroute-'));
 const chrome = launchChrome(PORT, profile);
 

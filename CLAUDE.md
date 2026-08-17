@@ -44,7 +44,7 @@ once (~1,750 lines of frontend drifted apart before being merged back).
 ```bash
 npm install                 # once, at the root
 npm test                    # unit tests, all workspaces
-npm run test:browser        # UI suites — needs Chrome + a running server
+npm run test:browser        # UI suites — needs Chrome; starts its own servers
 npm run test:tenancy        # cloud isolation attacks — needs Postgres
 
 npm run typecheck           # JSDoc types via tsc --noEmit
@@ -250,7 +250,7 @@ Several layers, and they catch different things:
 | Unit | `npm test` | nothing |
 | Types | `npm run typecheck` | nothing |
 | Dates in other calendars | `npm run test:locales` | nothing |
-| Browser | `npm run test:browser` | Chrome + a server with `HABITERALL_AUTH=off HABITERALL_RATE_LIMIT=off` |
+| Browser | `npm run test:browser` | Chrome (starts its own fleet) |
 | Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
 | Credential change | `npm run test:credchange -w habiterall-personal` | nothing |
 | Sign-in view | `npm run test:signin -w habiterall-personal` | Chrome (starts its own server) |
@@ -293,6 +293,21 @@ timeout in it at all. `responsive.mjs` checks every major view at 360 / 390 /
 The browser suites reset to known fixtures before each run
 (`shared/test/browser/fixtures.mjs`). If one fails, check the fixtures before
 suspecting the app — several "failures" have been stale test data.
+
+**The browser suites run in parallel, and a worker OWNS the instance it points
+at.** `fixtures.reset()` deletes every habit on its server, so the parallelism is
+the number of `--bases` and there is no flag that can put two workers on one
+instance. `npm run test:browser` is personal's fleet script — N servers, N
+throwaway SQLite files, N bases — while `run.mjs` stays edition-agnostic so cloud
+is pointed at the same way. Two consequences that have already cost something:
+the base must be threaded through `reset({base})` rather than left in module
+state, because `reset` awaits ~240 times and a second worker's `useBase` lands
+in the middle of the first one's (measured: one instance holding both workers'
+fixtures, eight habits); and a suite's DevTools port is **assigned by the
+runner**, because two suites sharing a literal made the second attach to the
+first's browser and hang — `searchcheck`/`unknowncheck` and
+`notifycheck`/`nudgecheck` both did, invisibly, for as long as the run was
+serial.
 
 ## Before you ship
 

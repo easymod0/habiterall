@@ -2055,7 +2055,7 @@ The charts are hand-rolled SVG — no charting library, no bundler, no
 ```bash
 npm test              # unit tests, all workspaces
 npm run typecheck     # JSDoc types via tsc --noEmit (no build step)
-npm run test:browser  # real-browser UI suites — needs Chrome + a running server
+npm run test:browser  # real-browser UI suites — needs Chrome; starts its own servers
 npm run test:cloud    # cloud API + Loop round trip — needs Postgres
 npm run test:roundtrip -w habiterall-personal   # backup fidelity, all formats
 npm run test:tenancy  # multi-tenant isolation attacks — needs Postgres

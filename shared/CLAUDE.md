@@ -762,8 +762,14 @@ both and pinned by `test/notify.test.js`, exactly as `SETTING_VALUES` is. Do not
 
 ```bash
 npm test              # unit — fast, no dependencies
-npm run test:browser  # real Chrome against a running server
+npm run test:browser  # real Chrome, against a fleet it starts itself
 ```
+
+`test/browser/run.mjs` takes `--bases` and shards the suites across them, one
+worker per instance — it knows about no edition, which is how cloud is pointed
+at it too. Starting the servers belongs to the caller;
+`habiterall-personal`'s `npm run test:browser` is what does it for the ordinary
+case. See the root `CLAUDE.md` for what a worker owning its instance implies.
 
 `test/roundtrip-fixture.mjs` is shared by both editions' round-trip suites
 (`npm run test:roundtrip -w habiterall-personal`, and the same in
