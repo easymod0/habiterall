@@ -313,6 +313,43 @@ test('the complaint and the parser agree about which case is which', () => {
   }
 });
 
+test('a thousands group is refused however it is dressed', () => {
+  // The predicate is anchored, which is what makes it linear (below) — and the
+  // anchors are only safe because everything the loose form also caught is
+  // refused one line later by the decimal test. These are the four shapes that
+  // argument turns on, so they are pinned rather than reasoned about.
+  assert.equal(parseAmount('10,000'), null);
+  assert.equal(parseAmount('12,345,678'), null, 'more than one group');
+  assert.equal(parseAmount('10,000.5'), null, 'a group and a decimal point');
+  // The `0*` clause. Without it "01,000" is not a group, and "01.000" IS a
+  // number to the decimal test — so a leading zero would buy a silent 1 where
+  // ten thousand was meant.
+  assert.equal(parseAmount('01,000'), null, 'a leading zero is still a group');
+
+  // And all four are still told what to type, because the complaint asks the
+  // parser rather than the anchored predicate.
+  for (const raw of ['10,000', '12,345,678', '10,000.5', '01,000']) {
+    assert.match(amountComplaint(raw), /without the thousands separator/, raw);
+  }
+});
+
+test('a long string of digits is not a way to spend the event loop', () => {
+  // `src/discord.js` hands this a modal field off a socket, so the parser reads
+  // remote input now and its cost has to be bounded. Unanchored — which is what
+  // this was, and what the Kotlin still is on input that never leaves the phone
+  // — `[1-9]\d*,\d{3}(?!\d)` is quadratic on digits with no comma among them:
+  // measured at 2.6ms for 2,000 characters, 42ms for 8,000 and 655ms for
+  // 32,000, which extrapolates to ~6s here. CodeQL called it js/polynomial-redos
+  // on exactly that path. The bound is loose because CI machines vary; the two
+  // implementations are four orders of magnitude apart, so it does not need to
+  // be tight to be decisive.
+  const hostile = '1'.repeat(100_000);
+  const started = performance.now();
+  assert.equal(parseAmount(hostile), null);
+  assert.ok(performance.now() - started < 2000,
+    'the thousands test has stopped being linear');
+});
+
 test('a dot group is still given the benefit of the doubt', () => {
   // Pinned so that closing #108's remaining half is a deliberate change to a
   // failing test rather than something that quietly starts happening. `10.000`

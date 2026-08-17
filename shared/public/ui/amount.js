@@ -129,14 +129,30 @@ export const MIN_AMOUNT = 1e-6;
  * "10,000" and "1,500", but not "0,255" or ",255" — see `parseAmount`, which
  * is the only place the reasoning is written down.
  *
- * ONE declaration, read by the parser and by `amountComplaint`, exactly as the
- * Kotlin `THOUSANDS` is. Written twice it drifts: dropping the `(?!\d)` from
- * the complaint's copy alone offered separator advice about "10,0000", which
- * the parser reads as 10 — telling somebody to change an entry that was going
- * to be stored correctly. That is now unrepresentable rather than tested for.
- * No `g` flag, deliberately: a shared regex with one is stateful across calls.
+ * **Anchored, because a SERVER reads this now.** The Kotlin mirror and this
+ * file's own first version were `[1-9]\d*,\d{3}(?!\d)` unanchored, which is
+ * quadratic on a string of digits with no comma in it: every start position
+ * scans to the end looking for one. Measured here — 2.6ms at 2,000 characters,
+ * 42ms at 8,000, 655ms at 32,000 — which was nobody's problem while the only
+ * caller was a keystroke in a text box, and became one the moment
+ * `src/discord.js` began handing it a modal field off a socket. CodeQL called
+ * it (js/polynomial-redos) on precisely that new path.
+ *
+ * The anchors are not a narrowing. Everything the loose form caught that this
+ * does not — "12,345,678", "10,000.5", "1,500 steps" — has more than one
+ * separator or a non-digit in it, so the decimal test below refuses it one line
+ * later and `parseAmount` answers null either way. Checked rather than argued:
+ * 38,416 concatenations of digit and separator fragments, zero disagreements.
+ * The `0*` is the one clause that is load bearing rather than cosmetic: without
+ * it "01,000" is not a group here, and "01.000" IS a number to the decimal
+ * test, so a leading zero would have bought a silent 1.
+ *
+ * ONE declaration, read by the parser and by nothing else now — `amountComplaint`
+ * asks the parser instead of copying this. Written twice it drifted: dropping
+ * the `(?!\d)` from the complaint's copy alone offered separator advice about
+ * "10,0000", which the parser reads as 10.
  */
-const THOUSANDS = /[1-9]\d*,\d{3}(?!\d)/;
+const THOUSANDS = /^0*[1-9]\d*,\d{3}$/;
 
 /**
  * Why `parseAmount` refused, for somebody looking at the box.
@@ -162,9 +178,12 @@ const THOUSANDS = /[1-9]\d*,\d{3}(?!\d)/;
  * about a thousands group, and this makes them SAY the same thing about it.
  * Nothing about the rest of their domains is claimed.
  *
- * The predicate is `THOUSANDS`, the parser's own and not a copy of it, so a
- * complaint about a case the parser ACCEPTS cannot be written — it would tell
- * somebody to change an entry that was going to be stored correctly.
+ * The predicate is `parseAmount` itself, twice, and not a copy of anything: the
+ * box was refused, and taking the commas out makes it an amount. That is what
+ * the advice CLAIMS, so it is the honest thing to test — and it cannot fire on
+ * a case the parser accepts, which would tell somebody to change an entry that
+ * was going to be stored correctly. It replaced a second copy of the parser's
+ * thousands regex, which had already drifted from it once.
  *
  * **What is quoted must be true of what was quoted.** The first version of this
  * named the two readings — *could be ten thousand or ten and a half* — beside
@@ -191,7 +210,7 @@ const THOUSANDS = /[1-9]\d*,\d{3}(?!\d)/;
 export function amountComplaint(raw) {
   const text = String(raw ?? '').trim();
   const plain = text.replace(/,/g, '');
-  return THOUSANDS.test(text) && typeof parseAmount(plain) === 'number'
+  return parseAmount(text) === null && typeof parseAmount(plain) === 'number'
     ? `"${text}" is ambiguous — a comma can separate thousands or stand for a `
       + `decimal point. Type it without the thousands separator, like ${plain}.`
     : `"${text}" is not an amount — type a number like 8 or 8.5.`;
