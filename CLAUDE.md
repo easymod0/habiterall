@@ -546,6 +546,24 @@ clamped to `MAX_RANGE_DAYS`), where a second derivation is a second answer
 waiting to disagree about what "ever" means — the same reason `computeRecovery`
 returns `longest` and `lastEnd` rather than letting awards recount them.
 
+**A field is not free, though, and this one is the first to say so out loud.**
+The paragraph three above — awards are computed at `/stats` and never inside
+`computeStats`, because `/overview` calls that once per habit and keeps `score`
+and `currentStreak` — applies word for word to a FIELD of `computeStats` that
+only the detail view reads. Coverage is its own pass over the window, measured
+at ~10-11% of a call (2,000 iterations of a 400-day habit: 12.1s against 10.8s),
+and it was being paid per habit on the dashboard's hot path and discarded. Every
+other field there is either a pass the summary figures already need or a cheap
+read of one, which is why this is the first opt-out and not a general one:
+`coverage: false`, passed by both `/overview` routes, and the key is then
+**absent** rather than empty — an empty array claims no month is fully answered,
+where this is the absence of a claim. `computeAwards` reads `stats.coverage ??
+[]` and withholds the badge, which is the right answer for a caller that did not
+ask. A test pins the call sites by COUNT as well as by content, so a third route
+cannot quietly start paying for it, and asserts the declining call is the one
+NOT feeding awards — declining it on `/stats` would withhold the badge from the
+only surface that shows it.
+
 **`computeCoverage` reports only the months the window entirely CONTAINS, and
 that one rule does two jobs.** A partial first month — the habit was created on
 the 10th — can never legitimately be full, so reporting it is either a figure
@@ -570,7 +588,19 @@ each streak and not from the streak award's own rung. The subtlety is that
 are transparent to the loop, so a trailing one sits after `runEnd` and belongs
 to nothing, and banking every skip on sight reports a rest the run never
 carried. `x x s .` is the fixture — one skip, and a run of two days that does
-not contain it — beside the same skip one day earlier, which does.
+not contain it — beside `x x s x`, where the MISS has moved and the same skip is
+now inside the run. Note which token moves: the skip is on the same date in
+both, and what changes is whether anything closed the run before the skip could
+be banked into it.
+
+There are **two** ways a skip lands outside a run and the pair above only
+reaches one of them. A skip after the run's last on-pace day is kept out by the
+reset when the run closes; a skip before any run has STARTED is kept out by the
+guard on banking at all, and nothing exercised that — the guard was deletable
+with the whole suite green until `s x x x x x x x` was added. It is not a tidy
+case: seven days on pace with a rest the day before them is a badge reading
+"held together across 1 skipped day" about a day the run does not contain.
+A third fixture puts a skip in the gap between two runs, which needs both.
 
 It is gated on the account's `skipDays`, which defaults **off**: with the
 setting off there is no Skip control on either grid or in either day editor, so
@@ -582,6 +612,21 @@ and names the fifth, and it was mutation-tested against the two shapes that have
 fooled it before: a comment naming the full call, and the call spread over
 several lines. It also refuses a hard-coded `true`, which passes every other
 assertion in that test and hands the award to everybody.
+
+**But that guard reads SOURCE TEXT, and the class of bug one argument along is
+not a text bug.** It matches the file rather than the binding that reaches the
+call, so `settings ->> 'skipdays'` with the column alias left alone, and
+`=== true` written as `!== true`, both pass it — and each one silently costs
+every account in that edition the award, in opposite directions. No regex over
+source can close that; the second one is not even wrong-looking. So each edition
+has a **behavioural** test that sets the setting through its own API and watches
+the badge appear and disappear: `test:awards` in personal, the `--- awards ---`
+block in cloud's API suite. Both were confirmed by mutation to catch exactly
+those two while the unit suite stayed green at 55 of 55. The text guard is kept
+because it catches the different thing they cannot — a call site that reads no
+setting at all — and the two are written up as covering different halves so
+neither is deleted as redundant. Both also pin `coverage` to `/stats` and its
+absence from `/overview`, which is the opt-out above seen from the wire.
 
 **What is NOT here, and why, because each looked cheap and was not.**
 *Beat your worst day* is refused for a harder reason: it is
@@ -2145,6 +2190,7 @@ Several layers, and they catch different things:
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
+| Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |
 | Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
 | Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |

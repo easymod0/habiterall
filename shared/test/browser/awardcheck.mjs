@@ -189,6 +189,17 @@ try {
     // page shows, and they must be the same count. Asserted as a relationship
     // rather than as a number, because whether a 60-day fixture window contains
     // a whole calendar month depends on the day the suite is run.
+    //
+    // The at-most `success` gate looks as though it should break the second
+    // half of that relationship — it withholds the badge while `stats.coverage`
+    // still reports a full month, which would read as a correct suppression
+    // being called a failure. It cannot reach here: the gate empties the card
+    // ENTIRELY, so such a habit leaves this loop at the `!api.awards.length`
+    // branch above. Verified rather than argued, by setting
+    // `at_most_unlogged: 'success'` on the fixtures' at-most habit and
+    // re-running — it takes the "earns nothing, so there is no empty card"
+    // branch and passes. Move that early `continue` and this check needs the
+    // gate written into it.
     const full = (api.coverage ?? []).filter((m) => m.answered === m.days).length;
     const badge = api.awards.find((a) => a.family === 'coverage');
     ck(`  coverage: ${full} fully-answered month(s) in the window`,

@@ -509,7 +509,15 @@ api.get('/overview', route(async (req, res) => {
       habits: habits.map((h) => {
         const all = byHabit.get(h.id) ?? [];
         const recent = all.filter((e) => e.date >= cutoff);
-        const stats = computeStats(h, recent, { end: summaryEnd, unlogged });
+        // `coverage: false` for the same reason this block is bounded at all:
+        // two fields of the result are read below — `score` and
+        // `currentStreak` — and the rest is discarded, once per habit. It is
+        // the only field `computeStats` lets a caller decline, because it is
+        // the only one that is its own pass over the window and is read by
+        // nothing here. Awards are out of this route for the same reason,
+        // stated at the `/stats` call site above.
+        const stats = computeStats(h, recent,
+          { end: summaryEnd, unlogged, coverage: false });
 
         const totalCompleted = totals.get(h.id) ?? 0;
 

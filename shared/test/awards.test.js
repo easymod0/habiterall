@@ -586,11 +586,11 @@ function stripComments(src) {
   return out;
 }
 
-/** The argument text of every `computeAwards(...)` call, comments removed. */
-function awardCallsIn(src) {
+/** The argument text of every `name(...)` call in `src`, comments removed. */
+function callsIn(src, name) {
   const code = stripComments(src);
   const calls = [];
-  for (const m of code.matchAll(/\bcomputeAwards\s*\(/g)) {
+  for (const m of code.matchAll(new RegExp(`\\b${name}\\s*\\(`, 'g'))) {
     let depth = 1;
     let i = m.index + m[0].length;
     const from = i;
@@ -603,6 +603,9 @@ function awardCallsIn(src) {
   }
   return calls;
 }
+
+/** The argument text of every `computeAwards(...)` call, comments removed. */
+const awardCallsIn = (src) => callsIn(src, 'computeAwards');
 
 test('the comment stripper is not fooled by the two things it must not be', () => {
   // A test on the test, because everything below trusts it.
@@ -658,11 +661,58 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
 
     // `skipDays` is not one of computeStats' inputs — the arithmetic has no
     // opinion about it — so what has to be checked instead is that the name is
-    // bound to the ACCOUNT's setting and not to a literal. A hard-coded `true`
-    // passes every assertion above and hands the award to everybody.
+    // bound to something and not to a literal. A hard-coded `true` passes every
+    // assertion above and hands the award to everybody.
+    //
+    // This is the WEAKEST check in the file and is deliberately kept anyway.
+    // It matches the file rather than the binding that reaches the call, so a
+    // misspelt JSON key (`settings ->> 'skipdays'`, the alias unchanged) and an
+    // inverted comparison both slip past it, and no regex over source text can
+    // close that. What closes it is behaviour: each edition has an integration
+    // test that sets the setting through its own API and asserts the award
+    // appears and disappears — `test:awards` in personal, the `--- awards ---`
+    // block in cloud's API suite. This one catches the different thing those
+    // cannot, which is a call site that never reads a setting at all.
     assert.match(stripComments(src), /skipDays\s*[:=][^;\n]*(storedSkipDays|skip_days)/,
       `${edition} does not derive skipDays from the account's setting`);
+
+    // The other route calls `computeStats` too and throws all but four fields
+    // away, which is why `coverage` is declinable and why `/overview` declines
+    // it. Pinned by COUNT as well as by content: a third call site added later
+    // would otherwise pay for a pass nothing on that route reads, silently and
+    // once per habit.
+    const statsCalls = callsIn(src, 'computeStats');
+    assert.equal(statsCalls.length, 2,
+      `${edition} has ${statsCalls.length} computeStats call sites, expected 2 `
+      + `(/stats and /overview): ${statsCalls.join(' | ')}`);
+    const declining = statsCalls.filter((c) => /coverage\s*:\s*false/.test(c));
+    assert.equal(declining.length, 1,
+      `${edition} should have exactly one computeStats call declining coverage, `
+      + `found ${declining.length}`);
+    // ...and it must be the one that is NOT feeding awards, or the badge is
+    // withheld from the only route that shows it.
+    assert.ok(!/granularity/.test(declining[0]),
+      `${edition} declined coverage on the route that computes awards: ${declining[0]}`);
   }
+});
+
+test('the Award typedef lists every family the file can actually produce', () => {
+  // `family` is typed `string`, so a stale union costs nothing at typecheck —
+  // which is exactly how 'coverage' and 'rest' were added without it. The doc
+  // comment is the only place a reader learns what the families are, so it is
+  // enumerated against the code rather than trusted.
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const src = readFileSync(join(root, 'shared', 'src', 'awards.js'), 'utf8');
+
+  const produced = [...src.matchAll(/\bfamily:\s*'([a-z]+)'/g)].map((m) => m[1]);
+  const doc = src.slice(
+    src.indexOf('@typedef {object} Award'),
+    src.indexOf('@property {string} label')
+  );
+  const documented = [...doc.matchAll(/'([a-z]+)'/g)].map((m) => m[1]);
+
+  assert.ok(produced.length >= 9, `expected the full set, found ${produced.length}`);
+  assert.deepEqual([...new Set(documented)].sort(), [...new Set(produced)].sort());
 });
 
 /* ---------- the two habit shapes that read differently ---------- */
@@ -969,6 +1019,18 @@ test('a skip that fell outside every run cannot be claimed as rest', () => {
   // was carried through. Ten on-pace days either side and the skip between them
   // belongs to neither.
   assert.equal(restAward('xxxxxxxxxxs.xxxxxxxxxx', true), undefined);
+});
+
+test('a rest the day BEFORE a run began is not rest that run carried', () => {
+  // The user-visible half of `streaks.test.js`'s leading-skip fixture, and why
+  // that guard is not cosmetic. Seven on-pace days clear `REST_MIN_RUN`, so
+  // nothing else is withholding this: bank the skip that precedes them and the
+  // card reads "held together across 1 skipped day" about a day the run does
+  // not contain.
+  assert.equal(restAward('sxxxxxxx', true), undefined);
+  // The same skip one day in — now inside the run — is the award. Both runs are
+  // seven days long, so the difference is the skip's position and nothing else.
+  assert.equal(restAward('xsxxxxxxx', true).value, 1);
 });
 
 test('the rest award is withheld by the at-most gate too', () => {

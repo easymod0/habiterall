@@ -117,7 +117,10 @@
  * @property {WeekdayMonthBucket[]} weekdayByMonth
  * @property {FrequencyBucket[]} frequency
  * @property {Resilience} resilience
- * @property {CoverageMonth[]} coverage
+ * @property {CoverageMonth[]} [coverage] absent when the caller declined it.
+ *   `/overview` does, in both editions: it calls `computeStats` once per habit
+ *   and keeps `score` and `currentStreak`, and coverage is its own pass over
+ *   the window. See `computeStats`.
  */
 
 /**

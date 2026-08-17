@@ -345,6 +345,63 @@ ck('a caller may record the day it is on', ownDay.status === 200,
 ck('...and may not record a day it has not reached', unreached.status === 400,
   `HTTP ${unreached.status} for ${eastToday}`);
 
+/* ---------- what the awards read out of the settings blob ---------- */
+
+console.log('\n--- awards ---');
+// `shared/test/awards.test.js` reads this edition's api.js as TEXT to check
+// that `computeAwards` is handed the account's `skipDays`. That matches the
+// FILE rather than the binding that reaches the call, so a misspelt JSONB key
+// — `->> 'skipdays'`, with the column alias left alone — sails past it while
+// every account silently loses the award. Cloud is where that is easiest to get
+// wrong, because the key is a string inside SQL and not an identifier anything
+// checks. Only a request through the router can tell the two apart.
+//
+// The habit already has a run of `RECENT_DAYS` ending today. One of those days
+// becomes a deliberate rest, with on-pace days either side of it so it lies
+// INSIDE `[start, end]` of the run rather than beside it.
+await withUser(alice, (db) => db.query(
+  `UPDATE entries SET value = 0, status = 'skip' WHERE habit_id = $1 AND date = $2`,
+  [habitId, isoDaysAgo(4)]
+));
+
+const restAwardFor = async () => {
+  const s = await fetch(`${overviewBase}/api/habits/${habitId}/stats`).then((r) => r.json());
+  return (s.awards ?? []).find((a) => a.family === 'rest');
+};
+const setSkipDays = (v) => withUser(alice, (db) => db.query(
+  `UPDATE users SET settings = settings || $1::jsonb WHERE id = $2`,
+  [JSON.stringify({ skipDays: v }), alice]
+));
+
+await setSkipDays(false);
+ck('with skipDays off there is no rest award',
+  (await restAwardFor()) === undefined, JSON.stringify(await restAwardFor()));
+
+await setSkipDays(true);
+const restOn = await restAwardFor();
+ck('storing skipDays: true turns it on', restOn !== undefined, JSON.stringify(restOn));
+ck('  and it reports the run\'s own rest', restOn?.value === 1, JSON.stringify(restOn));
+
+// The direction a hard-coded `true` cannot survive, and the one no check over
+// source text can see at all.
+await setSkipDays(false);
+ck('and storing it off again withdraws it',
+  (await restAwardFor()) === undefined, JSON.stringify(await restAwardFor()));
+
+// `coverage` is on `/stats` and deliberately not on `/overview`, which runs
+// `computeStats` once per habit for four fields and would otherwise pay for a
+// whole extra pass over the window on the dashboard's hot path.
+const statsBody = await fetch(`${overviewBase}/api/habits/${habitId}/stats`)
+  .then((r) => r.json());
+ck('/stats carries the coverage field', Array.isArray(statsBody.coverage),
+  JSON.stringify(statsBody.coverage));
+const coverageRow = (await getOverview({ days: 7 })).habits.find((h) => h.id === habitId);
+ck('/overview does not compute it per habit', coverageRow.coverage === undefined,
+  JSON.stringify(coverageRow.coverage));
+ck('  while still carrying the summary figures it is for',
+  typeof coverageRow.score === 'number' && typeof coverageRow.currentStreak === 'number',
+  `${coverageRow.score} / ${coverageRow.currentStreak}`);
+
 overviewServer.close();
 // The rows above would otherwise be counted by the checks that follow.
 await withUser(alice, (db) =>

@@ -452,7 +452,15 @@ api.get('/overview', (req, res) => {
       const windowed = /** @type {any} */ (
         q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
       );
-      const stats = computeStats(h, windowed, { end: summaryEnd, unlogged });
+      // `coverage: false` for the same reason this block is bounded at all:
+      // two fields of the result are read below — `score` and `currentStreak` —
+      // and the rest is discarded, once per habit. It is the only field
+      // `computeStats` lets a caller decline, because it is the only one that
+      // is its own pass over the window and is read by nothing here. Awards are
+      // out of this route for the same reason, stated at the `/stats` call site
+      // above.
+      const stats = computeStats(h, windowed,
+        { end: summaryEnd, unlogged, coverage: false });
 
       // Counted in SQLite rather than by walking every row in JS. The
       // expression mirrors isCompleted exactly, including that a skip is

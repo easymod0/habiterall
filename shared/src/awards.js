@@ -118,7 +118,12 @@ const REST_MIN_RUN = 7;
  * @typedef {object} Award
  * @property {string} id        stable within a family; the tier moves with it
  * @property {string} family    'streak' | 'strength' | 'comeback' | 'recovered' |
- *                              'week' | 'tenure' | 'lapses'
+ *                              'week' | 'tenure' | 'lapses' | 'coverage' | 'rest'
+ *                              — the order they are pushed in, which is the
+ *                              order they are shown in. Typed `string` rather
+ *                              than as this union, so nothing here fails
+ *                              typecheck when the list goes stale; a test
+ *                              enumerates it instead.
  * @property {string} label     the badge itself
  * @property {string} detail    the number behind it, in a sentence
  * @property {number} value     the figure the award was read from

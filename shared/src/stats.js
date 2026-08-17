@@ -865,16 +865,38 @@ export function computeCoverage(entryMap, start, end) {
 /* ---------- top-level summary ---------- */
 
 /**
+ * Every figure the detail view draws, over one window.
+ *
+ * **`coverage` is the one field a caller may decline, and the rule is the same
+ * one that keeps `computeAwards` out of here.** Awards are computed at
+ * `/habits/:id/stats` and nowhere else, because `/overview` calls this once per
+ * habit and keeps `score` and `currentStreak` — so work that only the detail
+ * view reads is paid for per habit on the dashboard's hot path and thrown away.
+ * Coverage is the first field to make that cost visible rather than free: it is
+ * its own pass over the window, measured at ~10% of a call, where every other
+ * field here is either a pass the summary figures already need (`scores`,
+ * `streaks`) or a cheap read of one. So `/overview` passes `coverage: false` in
+ * both editions and the key is then ABSENT rather than empty — an empty array
+ * would say "no month is fully answered", which is a claim, and this is the
+ * absence of one. `computeAwards` reads `stats.coverage ?? []` and so degrades
+ * to withholding the badge, which is the right answer for a caller that did not
+ * ask for the figure.
+ *
+ * A test pins both editions' call sites, because a third route added later
+ * would otherwise pay this quietly.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, granularity?: string,
- *           weekStart?: 'monday'|'sunday', unlogged?: string}} [opts]
+ *           weekStart?: 'monday'|'sunday', unlogged?: string,
+ *           coverage?: boolean}} [opts]
  * @returns {import('./types.js').Stats}
  */
 export function computeStats(habit, entries,
                              { start, end, granularity = 'day',
                                weekStart = 'monday',
-                               unlogged = UNLOGGED_DEFAULT } = {}) {
+                               unlogged = UNLOGGED_DEFAULT,
+                               coverage = true } = {}) {
   // Preserve `status` alongside the value so skips stay distinguishable from
   // a numerical habit legitimately recording the value 3.
   const entryMap = new Map(
@@ -923,6 +945,9 @@ export function computeStats(habit, entries,
     // also inherits `[from, end]` — `start ?? firstEntry`, clamped to
     // MAX_RANGE_DAYS — so coverage cannot disagree with the awards beside it
     // about what "ever" means.
-    coverage: computeCoverage(entryMap, from, end),
+    //
+    // ...and spread rather than assigned, so a caller that declined it gets no
+    // key at all. See the note on the parameter.
+    ...(coverage ? { coverage: computeCoverage(entryMap, from, end) } : {}),
   };
 }
