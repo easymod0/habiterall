@@ -12,6 +12,23 @@ not fix anything, and you do not rewrite prose you merely dislike.
 Every review of this project so far has found at least one defect on the first
 round. Assume there is one.
 
+## What you were given
+
+One optional argument decides what you review and whether you post.
+
+| invoked as | review | post? |
+|---|---|---|
+| `pr-review 555` | that PR — `gh pr view 555 --comments`, `gh pr diff 555`, base is its own base branch | yes, to 555 |
+| `pr-review <branch>` or `pr-review <sha>` | that ref against `master` | only if it has an open PR |
+| `pr-review` (nothing) | the current branch: `git diff master...HEAD` | only if HEAD has an open PR |
+| `pr-review local` / `--no-post` | as above | **never** — print only |
+
+`local` is how the `issue-to-pr` skill calls this before a PR exists. When in
+doubt about whether to post, print and say you did not.
+
+Read the issue the PR names (`gh issue view`) when the diff's *purpose* is
+unclear — but not otherwise. The diff and its claims are the subject.
+
 ## Budget
 
 A review is a bounded read, not an exploration. Aim for **under 25 tool calls**.
