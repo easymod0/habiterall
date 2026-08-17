@@ -41,19 +41,20 @@ if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
 /**
  * How many instances to run.
  *
- * Four by default rather than one-per-core: each worker is a node server plus a
- * headless Chrome, and the ceiling on what this buys is the LONGEST suite, not
- * the core count. Measured in CI, the suites are 399s of work whose slowest
- * member is themecheck at 99s — so four workers land at ~100s and a fifth
- * changes nothing until themecheck itself gets faster. Raise it when that is no
- * longer true.
+ * Four by DEFAULT rather than one-per-core: each worker is a node server plus a
+ * headless Chrome, so the processes already outnumber the cores, and the ceiling
+ * on what more of them buys is the longest suite rather than the core count.
+ * The default is clamped to the core count for that reason.
+ *
+ * An EXPLICIT `-j` or `HABITERALL_BROWSER_JOBS` is honoured as given, and is
+ * deliberately allowed above it. The clamp is a guard on a value nobody chose;
+ * silently rewriting one somebody did choose makes the setting untestable —
+ * asking for 6 on a 4-core box and being handed 4 looks like "6 was no faster".
  */
-const jobs = Math.max(1, Math.min(
-  Number(jobsFlag !== -1 ? process.argv[jobsFlag + 1] : 0)
-    || Number(process.env.HABITERALL_BROWSER_JOBS)
-    || 4,
-  availableParallelism(),
-));
+const asked = Number(jobsFlag !== -1 ? process.argv[jobsFlag + 1] : 0)
+  || Number(process.env.HABITERALL_BROWSER_JOBS)
+  || 0;
+const jobs = Math.max(1, asked || Math.min(4, availableParallelism()));
 
 // Not :3000 — a dev server or a stale one from an earlier session squatting
 // there is a thing that has actually happened here, and the failure it produces
@@ -125,8 +126,8 @@ try {
   process.exit(2);
 }
 
-console.log(`${jobs} instance${jobs > 1 ? 's' : ''} on ${PORT_BASE}–${PORT_BASE + jobs - 1},`
-  + ` databases under ${dataDir}`);
+console.log(`${jobs} instance${jobs > 1 ? 's' : ''} on ${PORT_BASE}–${PORT_BASE + jobs - 1}`
+  + ` (${availableParallelism()} cores), databases under ${dataDir}`);
 
 const run = spawn(process.execPath, [runner, '--bases', bases.join(','), ...argv], {
   stdio: 'inherit',
