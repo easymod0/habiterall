@@ -57,17 +57,16 @@ object Reminders {
     fun alarmUri(habitId: Long, snoozed: Boolean): String =
         if (snoozed) "habiterall://snooze/$habitId" else "habiterall://remind/$habitId"
 
-    private fun pendingIntent(context: Context, habitId: Long): PendingIntent {
+    private fun pendingIntent(
+        context: Context,
+        habitId: Long,
+        flags: Int = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    ): PendingIntent? {
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             putExtra(Notifications.EXTRA_HABIT_ID, habitId)
             data = android.net.Uri.parse(alarmUri(habitId, snoozed = false))
         }
-        return PendingIntent.getBroadcast(
-            context,
-            0,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        return PendingIntent.getBroadcast(context, 0, intent, flags)
     }
 
     /**
@@ -197,7 +196,8 @@ object Reminders {
         }
 
         val at = nextOccurrence(time, java.time.ZonedDateTime.now(ZoneId.systemDefault()))
-        setAlarm(context, at, pendingIntent(context, habit.id))
+        // Non-null: this call creates.
+        setAlarm(context, at, pendingIntent(context, habit.id)!!)
     }
 
     private fun setAlarm(context: Context, at: Long, intent: PendingIntent) {
@@ -302,10 +302,11 @@ object Reminders {
     /**
      * Drop both of a habit's alarms.
      *
-     * `FLAG_NO_CREATE` on each: cancelling asks for the PendingIntent that
+     * `FLAG_NO_CREATE` on BOTH: cancelling asks for the PendingIntent that
      * already exists, and `FLAG_UPDATE_CURRENT` would MAKE one in order to
      * cancel nothing. Null means there was none, which is the ordinary case for
-     * the snooze.
+     * the snooze. The daily one said this and did the other thing for a while,
+     * which is a comment describing its own counter-example.
      *
      * This is the only place the app drops a pending snooze, and it is
      * deliberately not the only way one is lost: a reboot, a force-stop or an
@@ -318,15 +319,12 @@ object Reminders {
      */
     fun cancel(context: Context, habitId: Long) {
         val manager = alarmManager(context)
-        manager.cancel(pendingIntent(context, habitId))
+        val noCreate = PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+        pendingIntent(context, habitId, noCreate)?.let { manager.cancel(it) }
         // Or a habit archived, deleted or switched away from this device keeps
         // a snooze that fires once more with nothing behind it.
-        snoozePendingIntent(
-            context,
-            habitId,
-            date = null,
-            flags = PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE,
-        )?.let { manager.cancel(it) }
+        snoozePendingIntent(context, habitId, date = null, flags = noCreate)
+            ?.let { manager.cancel(it) }
     }
 
     /**

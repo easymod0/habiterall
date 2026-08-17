@@ -730,17 +730,26 @@ the alarm so `ReminderReceiver` does not arm tomorrow's when a snooze fires:
 there is nothing to arm — the daily alarm is still pending — and doing it anyway
 would spend a network sync per press.
 
-Note what a unit test can and cannot say about that paragraph. `alarmUri` is
-public and pure precisely so the two can be held apart without a Context, and
-`Notifications.reminderActions` returns the button ORDER as a list for the same
-reason — a decision that exists only inside `addAction` calls is one every wrong
-version of still posts a perfectly good notification. A review broke four things
-at once here (the `EXTRA_SNOOZED` early return, the second cancel, the snooze's
-own uri, and the button's position) and every test still passed, which is the
-`WebBackStack` lesson arriving on a different file: the mutations that bit were
-all aimed at the three-line pure function, and none of them could reach the
-plumbing. Two of the four are pinned now; the receiver's early return and the
-cancel are still premises, and premises here are verified on an emulator.
+**Pinning the DECISION is not pinning the WIRING, and this file is where that
+was learned twice.** A review broke four things at once here — the
+`EXTRA_SNOOZED` early return, the second cancel, the snooze's own data uri, and
+the button's position — and every test passed, because every mutation that had
+ever been run was aimed at a three-line pure function. `alarmUri` and
+`Notifications.reminderActions` were extracted in answer to that, and the second
+review then broke `snoozePendingIntent` to call `alarmUri(id, snoozed = false)`
+and `buildReminder` to iterate `actions.reversed()` — and every test passed
+again. Both bugs live ONE LINE BELOW the function that pins them, which is where
+all four of the originals lived too: a string being right does not make its
+caller use it, and a list being in order does not make its consumer read it that
+way.
+
+So `ReminderWiringTest` asserts the OUTPUTS — what AlarmManager was handed and
+what the Notification carries — and it is the one place in this repo that uses
+Robolectric. That dependency is the price of the lesson: this package's bugs are
+all in the wiring, the wiring is Android, and a JVM test that cannot see an
+`Intent` cannot see any of them. It expresses no rules; it only asks whether the
+rules reached the platform, which is the same question `test/browser/` exists to
+ask of the web app.
 
 **Nothing here touches `notify_log`, and that is by construction rather than by
 care.** The watermark is the SERVER's record of having sent a reminder, and an

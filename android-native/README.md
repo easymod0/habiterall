@@ -299,6 +299,13 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   and not two. It refuses rather than re-dates when the hour would leave the day
   the reminder is about, including the case that reads as a judgement call and
   is not: a press at 00:30 on a notification still in the shade from yesterday.
+- **`ReminderWiringTest`** — the wiring between those decisions and the
+  platform, and the only suite here that needs Robolectric. What AlarmManager
+  was actually handed (a snooze must ADD an alarm, never re-point the daily one)
+  and what the Notification actually carries (the buttons, in order, each
+  naming the day it is about). It exists because pinning the decision is not
+  pinning the wiring: two reviews broke four rules apiece one line below the
+  pure functions that pin them, with every other test green.
 - **`ReminderActionsTest`** — which buttons a reminder offers and in what order.
   Pulled out of the builder because a decision that exists only inside
   `addAction` calls cannot be tested, and every wrong arrangement of it still
