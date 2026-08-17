@@ -201,7 +201,17 @@ object Reminders {
         setAlarm(context, at, pendingIntent(context, habit.id)!!)
     }
 
-    private fun setAlarm(context: Context, at: Long, intent: PendingIntent) {
+    /**
+     * Set one alarm, as punctually as this install is allowed to.
+     *
+     * Public because the home-screen widget's midnight redraw wants the same
+     * answer and the same fallback: an inexact alarm 23 hours out is given a
+     * window of an HOUR, which on the one alarm whose whole point is a date
+     * boundary means the widget can show yesterday until 01:00. The permission
+     * is already declared and already asked about here; a second, quieter copy
+     * of the exact/inexact choice is how the two would drift.
+     */
+    fun setAlarm(context: Context, at: Long, intent: PendingIntent) {
         val manager = alarmManager(context)
         // Exact alarms can be revoked by the user on API 31+. Falling back to
         // an inexact alarm keeps reminders working, just less punctually —

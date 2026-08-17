@@ -6,9 +6,12 @@ import com.habiterall.app.data.Sentinels
 import com.habiterall.app.data.Widgets
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 /**
  * The home-screen widget's own arithmetic.
@@ -48,7 +51,7 @@ class WidgetTest {
     private fun waterHabit() =
         Habit(id = 2, name = "Water", type = "numerical", targetValue = 8.0)
 
-    private fun avoidedHabit() = Habit(
+    private fun avoidedHabit(): Habit = Habit(
         id = 3,
         name = "Smoking",
         type = "numerical",
@@ -75,7 +78,7 @@ class WidgetTest {
         // the tap would advance to "not done" and record a MISS against a day
         // nobody has touched.
         val done = record(boolHabit(), date = yesterday, value = Sentinels.YES)
-        val tap = Widgets.tap(done, today, skipDays = false, questionMarks = false)
+        val tap = Widgets.tap(done, today, skipDays = false, questionMarks = false)!!
         assertEquals(Grid.DayState.DONE, tap.next)
         assertEquals(Sentinels.YES, tap.value)
     }
@@ -114,7 +117,8 @@ class WidgetTest {
         // is none of the thing and a slip is the smallest amount that fails.
         // Encoding it here instead — YES for done — would paint a red cell for
         // a day the user just said was clean.
-        val clean = Widgets.tap(record(avoidedHabit()), today, skipDays = false, questionMarks = false)
+        val clean =
+            Widgets.tap(record(avoidedHabit()), today, skipDays = false, questionMarks = false)!!
         assertEquals(Grid.DayState.DONE, clean.next)
         assertEquals(Sentinels.UNSET, clean.value)
 
@@ -123,7 +127,7 @@ class WidgetTest {
             today,
             skipDays = false,
             questionMarks = false,
-        )
+        )!!
         assertEquals(Grid.DayState.NO, slip.next)
         assertEquals(3.0, slip.value!!, 0.0)
     }
@@ -135,7 +139,7 @@ class WidgetTest {
             today,
             skipDays = true,
             questionMarks = false,
-        )
+        )!!
         assertEquals(Grid.DayState.SKIPPED, skipped.next)
         assertTrue(skipped.skip)
         assertNull("a skip never carries a value", skipped.value)
@@ -147,7 +151,7 @@ class WidgetTest {
             today,
             skipDays = false,
             questionMarks = true,
-        )
+        )!!
         assertEquals(Grid.DayState.UNKNOWN, cleared.next)
         assertFalse(cleared.skip)
         assertNull(cleared.value)
@@ -190,6 +194,144 @@ class WidgetTest {
         assertEquals(Grid.DayState.UNKNOWN, Widgets.stateOn(fresh, today))
     }
 
+    /* ---------- a habit that is no longer there ---------- */
+
+    @Test
+    fun `a habit that has left the account stops accepting taps`() {
+        // `/api/overview` carries neither a deleted habit nor an archived one,
+        // so both arrive here as an absence. Leaving the record alone was the
+        // first version and it left the widget TAPPABLE: the launcher goes on
+        // drawing the last cell with its click intent, a tap paints a tick, the
+        // write 404s, `isPermanent` drops it, and nothing ever repaints — a
+        // tick that stays up for good on a habit that does not exist.
+        val live = record(boolHabit())
+        val gone = Widgets.refreshedOrGone(live, null, today)
+        assertTrue(gone.gone)
+        assertNull(Widgets.tap(gone, today, skipDays = false, questionMarks = false))
+        // The name is kept, because it is what the widget still says.
+        assertEquals("Meditate", gone.name)
+    }
+
+    @Test
+    fun `un-archiving a habit brings its widget back`() {
+        val gone = record(boolHabit()).copy(gone = true)
+        val back = Widgets.refreshedOrGone(gone, boolHabit(), today)
+        assertFalse(back.gone)
+        assertNotNull(Widgets.tap(back, today, skipDays = false, questionMarks = false))
+    }
+
+    /* ---------- midnight, and the restore ---------- */
+
+    @Test
+    fun `the next midnight is the start of tomorrow, in the phone's own zone`() {
+        val toronto = ZoneId.of("America/Toronto")
+        val at = Widgets.nextMidnight(ZonedDateTime.of(2026, 8, 16, 22, 30, 0, 0, toronto))
+        assertEquals(ZonedDateTime.of(2026, 8, 17, 0, 0, 0, 0, toronto), at)
+    }
+
+    @Test
+    fun `a day with no midnight still has a next midnight`() {
+        // Santiago springs forward AT midnight: 2026-09-06 has no 00:00 at all.
+        // `atTime(0, 0).atZone(...)` is the obvious spelling and it resolves
+        // forward to 01:00 too — but `atStartOfDay` is the one that SAYS so,
+        // and a zone that ever goes backward over midnight is why the two are
+        // not the same function.
+        val santiago = ZoneId.of("America/Santiago")
+        val at = Widgets.nextMidnight(ZonedDateTime.of(2026, 9, 5, 22, 0, 0, 0, santiago))
+        assertEquals(6, at.dayOfMonth)
+        assertEquals(1, at.hour)
+        assertTrue(at.toInstant().isAfter(
+            ZonedDateTime.of(2026, 9, 5, 22, 0, 0, 0, santiago).toInstant()
+        ))
+    }
+
+    @Test
+    fun `a restore re-points records at the ids the launcher now holds`() {
+        // A backup restores the DataStore and the widgets separately and the
+        // ids do not survive. Without the remap every record names an id nobody
+        // holds, `redraw` matches none of them, and every widget on the new
+        // phone is blank and unpressable for good.
+        val records = listOf(
+            record(boolHabit()).copy(widgetId = 7),
+            record(waterHabit()).copy(widgetId = 9),
+        )
+        val moved = Widgets.remap(records, intArrayOf(7, 9), intArrayOf(21, 22))
+        assertEquals(listOf(21, 22), moved.map { it.widgetId })
+        // Everything else is untouched, and an id the restore did not mention
+        // stays as it is.
+        assertEquals(records[0].habitId, moved[0].habitId)
+        assertEquals(
+            listOf(7),
+            Widgets.remap(listOf(records[0]), intArrayOf(99), intArrayOf(100)).map { it.widgetId },
+        )
+    }
+
+    /* ---------- what the cell says ---------- */
+
+    @Test
+    fun `an avoided habit over a limit shows how far over`() {
+        // `DayCell` shows the COUNT for a slip on a limit above zero, because
+        // how far over matters on a limit of two — and a bare cross only where
+        // the count would add nothing. The widget said "✗" for both under a
+        // comment claiming it mirrored the grid state for state.
+        val slip = record(avoidedHabit(), value = 3.0)
+        assertEquals("3", Widgets.markFor(slip, Grid.DayState.NO, questionMarks = false))
+
+        val limitOfNone = avoidedHabit().copy(targetValue = 0.0)
+        val once = record(limitOfNone, value = 1.0)
+        assertEquals("✗", Widgets.markFor(once, Grid.DayState.NO, questionMarks = false))
+        // Two on a limit of none is still worth counting.
+        assertEquals(
+            "2",
+            Widgets.markFor(record(limitOfNone, value = 2.0), Grid.DayState.NO, false),
+        )
+        // A clean day is a tick either way: the number says nothing on a limit.
+        assertEquals(
+            "✓",
+            Widgets.markFor(record(avoidedHabit(), value = 0.0), Grid.DayState.DONE, false),
+        )
+    }
+
+    @Test
+    fun `the other three states say what the grid says`() {
+        assertEquals("–", Widgets.markFor(record(boolHabit()), Grid.DayState.SKIPPED, false))
+        assertEquals("", Widgets.markFor(record(boolHabit()), Grid.DayState.UNKNOWN, false))
+        assertEquals("?", Widgets.markFor(record(boolHabit()), Grid.DayState.UNKNOWN, true))
+        assertEquals("✓", Widgets.markFor(record(boolHabit()), Grid.DayState.DONE, false))
+        // A yes/no "no" is an empty cell, exactly as the grid leaves it — with
+        // question marks off it is the same square as a day with no row, which
+        // is the whole reason the cycle has no step between them.
+        assertEquals("", Widgets.markFor(record(boolHabit(), value = 0.0), Grid.DayState.NO, false))
+        // A measurable habit shows its amount rather than a tick.
+        assertEquals(
+            "6",
+            Widgets.markFor(record(waterHabit(), value = 6.0), Grid.DayState.NO, false),
+        )
+    }
+
+    /* ---------- an answer that arrives about an older day ---------- */
+
+    @Test
+    fun `an answer about an older day does not rewind the record`() {
+        // A reminder posted at 23:50 and answered at 00:05 names YESTERDAY, and
+        // it is right to: the notification is about that day. But the widget
+        // has already moved on, and taking the older answer would blank today
+        // and paint a day that is over.
+        val onToday = record(boolHabit(), value = Sentinels.YES)
+        val stale = Widgets.answered(onToday, yesterday, Sentinels.YES, skip = false)
+        assertEquals(today, stale.date)
+        assertEquals(Sentinels.YES, stale.value)
+        // The same day, and a later one, are taken as they always were.
+        assertEquals(
+            Sentinels.UNSET,
+            Widgets.answered(onToday, today, Sentinels.UNSET, false).value,
+        )
+        assertEquals(
+            "2026-08-17",
+            Widgets.answered(onToday, "2026-08-17", Sentinels.YES, false).date,
+        )
+    }
+
     /* ---------- the record on disk ---------- */
 
     @Test
@@ -211,6 +353,21 @@ class WidgetTest {
 
         val lapse = record(boolHabit(), value = 0.0)
         assertEquals(0.0, Widgets.decode(Widgets.encode(lapse))!!.value!!, 0.0)
+    }
+
+    @Test
+    fun `a carriage return in a habit name does not destroy the record`() {
+        // Kotlin's `lineSequence` splits on a bare \r as well as a \n, so a
+        // habit named "Run\rfast" wrote ONE line and read back as two
+        // unparseable halves — and a widget with no record draws its
+        // `initialLayout` with no click intent, so it is blank, dead to taps,
+        // and cannot recover. `parseHabit` only trims, so an interior \r
+        // reaches storage from a paste, a Loop import or the API.
+        val record = record(boolHabit()).copy(name = "Run\rfast", unit = "km\rper day")
+        val back = Widgets.decodeAll(Widgets.encodeAll(listOf(record)))
+        assertEquals(1, back.size)
+        assertEquals("Run fast", back[0].name)
+        assertEquals("km per day", back[0].unit)
     }
 
     @Test

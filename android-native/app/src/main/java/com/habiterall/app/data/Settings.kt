@@ -108,11 +108,16 @@ class Settings(private val context: Context) {
                 listOf(
                     it.id.toString(),
                     it.reminderTime,
-                    it.name.replace('|', ' ').replace('\n', ' '),
+                    // `Widgets.flatten`, because a bare `\r` splits a line as
+                    // surely as a `\n` does and this cache is read with
+                    // `lineSequence` too: a habit named "Run\rfast" wrote one
+                    // record and read back as two unparseable halves, taking
+                    // its alarm with it. One reader's bug, two caches.
+                    Widgets.flatten(it.name),
                     it.type,
                     it.targetValue.toString(),
-                    it.unit.replace('|', ' ').replace('\n', ' '),
-                    it.reminderMessage.replace('|', ' ').replace('\n', ' '),
+                    Widgets.flatten(it.unit),
+                    Widgets.flatten(it.reminderMessage),
                     // Appended, never inserted: the reader below indexes by
                     // position and tolerates a SHORT line, so a cache written
                     // before this field existed still arms its alarms. Putting
@@ -176,6 +181,15 @@ class Settings(private val context: Context) {
             records.forEach { byId[it.widgetId] = it }
             prefs[widgetCacheKey] = Widgets.encodeAll(byId.values.toList())
         }
+    }
+
+    /**
+     * Replace the whole set, for the one caller that rewrites ids rather than
+     * values: a restore, where every record has to move at once and a
+     * key-by-key merge would leave both the old and the new id in the blob.
+     */
+    suspend fun replaceWidgets(records: List<Widgets.Record>) {
+        context.dataStore.edit { it[widgetCacheKey] = Widgets.encodeAll(records) }
     }
 
     /** Forget widgets the launcher has deleted. */

@@ -108,8 +108,20 @@ Two things are worth knowing before changing it:
 - **Nothing redraws a widget by itself.** The launcher keeps the last drawing
   until something replaces it, so the rule above is only as good as its trigger:
   the list's fetch, the six-hourly sync, an answer given in the shade, the tap
-  itself, and `ACTION_DATE_CHANGED` — with a 30-minute `updatePeriodMillis`
-  underneath in case that broadcast never comes.
+  itself, and — for midnight — an **alarm** (`HabitWidget.armMidnight`).
+  `ACTION_DATE_CHANGED` looks like the answer and is not: it is not on Android's
+  implicit-broadcast exception list, so a manifest receiver is never sent it.
+  `TIME_SET` and `TIMEZONE_CHANGED` are, and are still registered.
+- **A widget that cannot be redrawn cannot be recovered**, which is why a record
+  that will not parse is a bug with teeth: the widget sits on its
+  `initialLayout` with no click intent, so it is blank AND dead to taps. Free
+  text is flattened through `Widgets.flatten` (`|`, `\n` and `\r` — a bare
+  carriage return splits a line too), and `onRestored` re-points records at the
+  ids a restore hands out.
+- **A habit that leaves the account marks its widget rather than freeing it.**
+  Archiving is enough — `/api/overview` carries neither archived nor deleted
+  habits — and a record simply dropped would leave the last cell on screen,
+  still tappable, recording writes that 404 forever.
 
 ## Requirements
 
@@ -373,11 +385,12 @@ with *Install unknown apps* enabled — no keystore needed to try it.
   text that fails to parse and falls back to zero stores cleanly, draws
   normally, and can never be met.
 - **`WidgetTest`** — what only the home-screen widget has: a record that names
-  the day it is about, and a tap judged against TODAY rather than against
-  whatever the widget was last drawn with. The cycle and the encoding are
-  `GridTest`'s and are not repeated. Note what it cannot prove — that anything
-  redraws the widget at midnight. That is a premise, and premises here are
-  verified on an emulator.
+  the day it is about, a tap judged against TODAY rather than against whatever
+  the widget was last drawn with, a habit that has left the account, the ids a
+  restore hands out, and the three ways a record can become unreadable. The
+  cycle and the encoding are `GridTest`'s and are not repeated. Note what it
+  cannot prove — that anything redraws the widget at midnight. That is a
+  premise, and premises here are verified on an emulator.
 - **`HabitOrderTest`** — the reorder arithmetic, which fails invisibly: the
   phone posts the whole order and each index becomes a `position`, so an
   off-by-one stores a wrong order that the web app then faithfully agrees with.

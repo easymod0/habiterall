@@ -51,6 +51,9 @@
     <string name="widget_slipped">slipped today</string>
     <string name="widget_skipped">skipped today</string>
     <string name="widget_unanswered">not answered yet</string>
+    <!-- %1$s is the habit's name. Shown when the habit has been deleted or
+         archived: the widget stops recording and opens the app instead. -->
+    <string name="widget_gone">%1$s is no longer on this account</string>
 
     <string name="count_hint">Amount</string>
     <string name="save">Save</string>

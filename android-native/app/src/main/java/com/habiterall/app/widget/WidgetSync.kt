@@ -42,22 +42,29 @@ object WidgetSync {
                 val today = LocalDate.now().toString()
 
                 val updated = records.mapNotNull { record ->
-                    // A habit that is not in this list — deleted, or archived —
-                    // keeps whatever it last showed. Blanking it would claim the
-                    // day is unanswered, which is a different and louder lie
-                    // than a name that has stopped moving.
                     val habit = habits.firstOrNull { it.id == record.habitId }
-                        ?: return@mapNotNull null
                     // A tap still on its way wins over the server's answer,
                     // which is by definition older than it. This is the
                     // `pending` overlay of the list screen, asked of the outbox
                     // instead of held in memory: a widget's tap happens in a
                     // broadcast receiver that may not outlive the write, so
                     // there is nowhere in this process to hold it.
-                    if (record.date == today && Outbox.isPending(app, record.habitId, today)) {
+                    //
+                    // A habit that has disappeared is the exception: whether
+                    // its widget still accepts taps is not a question about the
+                    // day, and it has to be answered even while one is queued.
+                    if (habit != null &&
+                        record.date == today &&
+                        Outbox.isPending(app, record.habitId, today)
+                    ) {
                         return@mapNotNull null
                     }
-                    Widgets.refreshed(record, habit, today)
+                    // Marked gone, or brought back — `Widgets.refreshedOrGone`
+                    // is the rule, and it is there rather than here so a test
+                    // can reach it. Unchanged records are dropped so a refresh
+                    // that decided nothing writes nothing.
+                    Widgets.refreshedOrGone(record, habit, today)
+                        .takeIf { it != record }
                 }
 
                 settings.putWidgets(updated)
@@ -78,6 +85,40 @@ object WidgetSync {
         if (runCatching { Settings(app).cachedWidgets() }.getOrDefault(emptyList()).isEmpty()) return
         val data = runCatching { api.overview(days = 1) }.getOrNull() ?: return
         refreshFrom(app, data.habits)
+    }
+
+    /**
+     * A write the server refused for good, taken back off the home screen.
+     *
+     * The widget paints a tap before it is delivered, and `SyncWorker` drops a
+     * 4xx as permanently inapplicable — so without this the cell goes on
+     * claiming an answer that was never stored, until some later refresh
+     * silently repaints the server's version hours afterwards. The reliable way
+     * to produce one is a phone whose local date is ahead of the server's,
+     * which `Outbox.awaitWrite` already records as the case that cost the list
+     * screen a wrong cell.
+     *
+     * The day is returned to UNANSWERED rather than to what it held before,
+     * because the record does not keep a previous value and inventing one would
+     * be a second claim about the same day. A refresh replaces it with the
+     * server's answer as soon as there is a network.
+     *
+     * What this does NOT do is tell the user. The shade's buttons are equally
+     * silent about a refused write and there is nowhere on a 2x2 cell to say
+     * it; the list screen is the surface that reports one.
+     */
+    suspend fun noteRefused(context: Context, habitId: Long, date: String) {
+        val app = context.applicationContext
+        withContext(NonCancellable + Dispatchers.IO) {
+            runCatching {
+                val settings = Settings(app)
+                val mine = settings.cachedWidgets()
+                    .filter { it.habitId == habitId && it.date == date }
+                if (mine.isEmpty()) return@runCatching
+                settings.putWidgets(mine.map { it.copy(value = null, skip = false) })
+                HabitWidget.redraw(app)
+            }
+        }
     }
 
     /**

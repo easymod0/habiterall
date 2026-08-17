@@ -1,5 +1,6 @@
 package com.habiterall.app.widget
 
+import android.app.AlarmManager
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
@@ -16,10 +17,13 @@ import com.habiterall.app.data.Widgets
 import com.habiterall.app.notify.Notifications
 import com.habiterall.app.notify.Reminders
 import com.habiterall.app.ui.CountEntryActivity
+import com.habiterall.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 /**
  * One habit, today, tap to record — without opening anything.
@@ -51,11 +55,35 @@ class HabitWidget : AppWidgetProvider() {
     }
 
     override fun onDeleted(context: Context, appWidgetIds: IntArray) {
-        async { Settings(context.applicationContext).removeWidgets(appWidgetIds.toList()) }
+        async {
+            Settings(context.applicationContext).removeWidgets(appWidgetIds.toList())
+            // Which may have been the last one, and `redraw` gives the midnight
+            // alarm back to the system when none are left.
+            redraw(context)
+        }
+    }
+
+    /**
+     * A restore has handed this app's widgets new ids.
+     *
+     * The default implementation does nothing, and doing nothing is fatal: the
+     * DataStore comes back from the backup naming the ids of the phone it left,
+     * `redraw` matches none of them, and every widget on the new device is
+     * permanently blank and unpressable. This is the one place the system says
+     * which old id became which new one.
+     */
+    override fun onRestored(context: Context, oldWidgetIds: IntArray, newWidgetIds: IntArray) {
+        async {
+            val settings = Settings(context.applicationContext)
+            val moved = Widgets.remap(settings.cachedWidgets(), oldWidgetIds, newWidgetIds)
+            settings.replaceWidgets(moved)
+            redraw(context)
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        // Dispatches APPWIDGET_UPDATE and APPWIDGET_DELETED to the two above.
+        // Dispatches APPWIDGET_UPDATE, APPWIDGET_DELETED and APPWIDGET_RESTORED
+        // to the three above.
         super.onReceive(context, intent)
 
         when (intent.action) {
@@ -67,20 +95,34 @@ class HabitWidget : AppWidgetProvider() {
                 if (widgetId != AppWidgetManager.INVALID_APPWIDGET_ID) async { tap(context, widgetId) }
             }
 
-            // Midnight, and the two ways a phone can arrive at a different day
-            // without one passing. The record says which day it is about, so
-            // the drawing corrects itself the moment anything redraws it —
-            // this is what makes something redraw it. `rescheduleAll` is
-            // deliberate reuse: it enqueues the sync that also refreshes
-            // widgets, and re-arming alarms on a date change is idempotent.
-            Intent.ACTION_DATE_CHANGED,
+            // Midnight, from our own alarm — and it has to be an alarm.
+            // `ACTION_DATE_CHANGED` was here and is NOT on Android's
+            // implicit-broadcast exception list, so a manifest-registered
+            // receiver has never once been told about midnight on any device
+            // this app supports: the only trigger aimed at the problem was dead
+            // code that looked right. `redraw` re-arms, because an alarm is
+            // one-shot.
+            //
+            // The other two ARE on the list and are kept: they change what
+            // "today" is without a midnight passing, and they invalidate the
+            // alarm that was armed for the old clock.
+            ACTION_MIDNIGHT,
             Intent.ACTION_TIME_CHANGED,
-            Intent.ACTION_TIMEZONE_CHANGED -> {
-                async { redraw(context) }
-                Reminders.rescheduleAll(context)
+            Intent.ACTION_TIMEZONE_CHANGED -> async {
+                redraw(context)
+                // A clock change moves the reminders too, and this receiver is
+                // the one that hears about it. Held open by the same `async`,
+                // where before it was launched into a process free to die.
+                suspendCancellableReschedule(context)
             }
         }
     }
+
+    /** `Reminders.rescheduleAll` with its callback bridged into a suspend. */
+    private suspend fun suspendCancellableReschedule(context: Context) =
+        kotlin.coroutines.suspendCoroutine { cont ->
+            Reminders.rescheduleAll(context) { cont.resumeWith(Result.success(Unit)) }
+        }
 
     /**
      * Hold the process open while a DataStore read finishes.
@@ -110,12 +152,15 @@ class HabitWidget : AppWidgetProvider() {
         // date baked into the click intent would record the tap against
         // yesterday, which is the one mistake a widget is uniquely able to make.
         val today = LocalDate.now().toString()
+        // Null for a habit that has left the account: the click intent is
+        // already gone, but a PendingIntent the launcher took a copy of
+        // outlives the drawing it came with, so the rule is asked again here.
         val tap = Widgets.tap(
             record,
             today,
             skipDays = settings.cachedSkipDays(),
             questionMarks = settings.cachedQuestionMarks(),
-        )
+        ) ?: return
 
         // Queue first, paint second: the queue is what makes the answer true,
         // and a paint that got ahead of a throw would show one that is not.
@@ -128,15 +173,23 @@ class HabitWidget : AppWidgetProvider() {
 
         private const val ACTION_TAP = "com.habiterall.app.WIDGET_TAP"
 
+        /** Our own midnight, because the platform's broadcast never arrives. */
+        const val ACTION_MIDNIGHT = "com.habiterall.app.WIDGET_MIDNIGHT"
+
         /** A slip, in the same red the day grid paints one. */
         private const val SLIP = 0xFFDC2626.toInt()
 
         /**
-         * Redraw every widget from the cache.
+         * Redraw every widget from the cache, and arm the next midnight.
          *
          * Only the ids the launcher still has: a record can outlive its widget
          * if the process died between the deletion and [onDeleted], and
          * updating an id nobody holds throws.
+         *
+         * The alarm is armed HERE rather than at each of the places that can
+         * create a widget, because every one of them redraws and an alarm that
+         * re-arms from the drawing cannot drift out of step with what is on the
+         * screen. With no widgets left it is given back instead of renewed.
          */
         suspend fun redraw(context: Context) {
             val app = context.applicationContext
@@ -144,6 +197,7 @@ class HabitWidget : AppWidgetProvider() {
             val live = manager
                 .getAppWidgetIds(ComponentName(app, HabitWidget::class.java))
                 .toSet()
+            armMidnight(app, wanted = live.isNotEmpty())
             if (live.isEmpty()) return
 
             val settings = Settings(app)
@@ -157,6 +211,59 @@ class HabitWidget : AppWidgetProvider() {
                         render(app, record, today, questionMarks),
                     )
                 }
+        }
+
+        /**
+         * Arm — or give back — the alarm that redraws at the next local
+         * midnight.
+         *
+         * A widget's day goes stale at midnight and nothing tells it. The
+         * platform's `ACTION_DATE_CHANGED` looks like the answer and is not:
+         * it is not on the implicit-broadcast exception list, so a
+         * manifest-registered receiver is never sent it on any version this app
+         * supports. `TIME_SET` and `TIMEZONE_CHANGED` *are* on the list, which
+         * is exactly why the wrong version of this passes a shell test.
+         *
+         * So it is an alarm, through the same `Reminders.setAlarm` a reminder
+         * uses: exact where the user has allowed exact alarms, inexact where
+         * they have not. Measured, because the inexact form looked good enough
+         * and is not — an alarm set 23 hours out gets a window of an HOUR, on
+         * the one alarm whose entire purpose is a date boundary, so the widget
+         * would go on showing yesterday until 01:00. Where exact alarms are
+         * refused that is still the behaviour, and the other triggers below are
+         * what bound it.
+         *
+         * `updatePeriodMillis` in the provider XML is underneath it and is NOT
+         * a substitute: those updates ride an inexact alarm too and Doze defers
+         * them across the night, so overnight the redraw lands on wake.
+         */
+        fun armMidnight(context: Context, wanted: Boolean) {
+            val app = context.applicationContext
+            val manager = app.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val intent = Intent(app, HabitWidget::class.java).apply {
+                action = ACTION_MIDNIGHT
+                data = android.net.Uri.parse("habiterall://widget/midnight")
+            }
+            if (!wanted) {
+                PendingIntent.getBroadcast(
+                    app,
+                    0,
+                    intent,
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE,
+                )?.let { manager.cancel(it) }
+                return
+            }
+            val at = Widgets.nextMidnight(ZonedDateTime.now(ZoneId.systemDefault()))
+            Reminders.setAlarm(
+                app,
+                at.toInstant().toEpochMilli(),
+                PendingIntent.getBroadcast(
+                    app,
+                    0,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
         }
 
         /**
@@ -182,7 +289,7 @@ class HabitWidget : AppWidgetProvider() {
 
             val views = RemoteViews(context.packageName, R.layout.widget_habit)
             views.setTextViewText(R.id.widget_name, record.name)
-            views.setTextViewText(R.id.widget_mark, label(record, state, questionMarks))
+            views.setTextViewText(R.id.widget_mark, Widgets.markFor(record, state, questionMarks))
             views.setInt(R.id.widget_cell, "setColorFilter", fill(context, record, state))
             views.setTextColor(
                 R.id.widget_mark,
@@ -194,30 +301,6 @@ class HabitWidget : AppWidgetProvider() {
             views.setContentDescription(R.id.widget_root, describe(context, record, state))
             views.setOnClickPendingIntent(R.id.widget_root, clickIntent(context, record))
             return views
-        }
-
-        /**
-         * The label, mirroring `DayCell` state for state.
-         *
-         * A measurable habit shows its amount, because "6" against a target of
-         * 8 is the answer and a tick is not. An avoided one shows a tick for a
-         * clean day and a cross for a slip — the count says nothing useful on a
-         * limit of none, and this widget is one cell rather than a row.
-         */
-        private fun label(
-            record: Widgets.Record,
-            state: Grid.DayState,
-            questionMarks: Boolean,
-        ): String {
-            val habit = record.habit
-            return when {
-                state == Grid.DayState.SKIPPED -> "–"
-                state == Grid.DayState.UNKNOWN -> if (questionMarks) "?" else ""
-                habit.isAvoided -> if (state == Grid.DayState.DONE) "✓" else "✗"
-                habit.isNumerical -> record.value?.let { trimNumber(it) } ?: ""
-                state == Grid.DayState.DONE -> "✓"
-                else -> ""
-            }
         }
 
         private fun fill(
@@ -245,15 +328,12 @@ class HabitWidget : AppWidgetProvider() {
         private fun habitColor(hex: String): Int =
             runCatching { android.graphics.Color.parseColor(hex) }.getOrElse { 0xFF3B82F6.toInt() }
 
-        /** 2.0 -> "2", 2.5 -> "2.5". */
-        private fun trimNumber(n: Double): String =
-            if (n == n.toLong().toDouble()) n.toLong().toString() else n.toString()
-
         private fun describe(
             context: Context,
             record: Widgets.Record,
             state: Grid.DayState,
         ): String {
+            if (record.gone) return context.getString(R.string.widget_gone, record.name)
             val word = context.getString(
                 when (state) {
                     Grid.DayState.DONE ->
@@ -285,6 +365,21 @@ class HabitWidget : AppWidgetProvider() {
          */
         private fun clickIntent(context: Context, record: Widgets.Record): PendingIntent {
             val pi = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+
+            // A habit that has left the account cannot be answered, so the tap
+            // opens the app instead of recording — where the user can see that
+            // it is gone and take the widget off. Doing nothing would be worse
+            // than either: the launcher goes on drawing a live-looking cell,
+            // and a tap that produces no effect at all reads as a broken app
+            // rather than as a removed habit.
+            if (record.gone) {
+                val intent = Intent(context, MainActivity::class.java).apply {
+                    data = android.net.Uri.parse("habiterall://widget/${record.widgetId}/gone")
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                return PendingIntent.getActivity(context, 0, intent, pi)
+            }
+
             if (Widgets.needsAmount(record)) {
                 val intent = Intent(context, CountEntryActivity::class.java).apply {
                     putExtra(Notifications.EXTRA_HABIT_ID, record.habitId)

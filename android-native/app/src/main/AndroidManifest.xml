@@ -53,11 +53,21 @@
           Transparent and excluded from recents so it feels like part of the
           shade rather than a detour into the app.
         -->
+        <!--
+          `taskAffinity=""` puts it in a task of its OWN, and that is not
+          cosmetic: it is launched with NEW_TASK|CLEAR_TASK, and while it shared
+          MainActivity's affinity those flags finished every activity in the
+          app's task — so answering a measurable habit from the shade, or from
+          the home-screen widget, silently threw away the running app, its
+          scroll position and anything half-typed, leaving a cold start behind.
+          With `noHistory` the task then emptied and vanished too.
+        -->
         <activity
             android:name=".ui.CountEntryActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
+            android:taskAffinity=""
             android:theme="@style/Theme.Habiterall.Transparent" />
 
         <!-- Handles Yes / No / Skip taps without bringing the app forward. -->
@@ -73,16 +83,23 @@
         <!--
           One habit on the home screen, today, tap to record.
 
-          The three date actions are what stands in for the `onResume` a widget
+          The two clock actions stand in for part of the `onResume` a widget
           does not have: the record says which day it is about, so a redraw is
           all it takes to stop showing yesterday's answer.
+
+          `DATE_CHANGED` is deliberately NOT here, though it is the one that
+          sounds right. It is not on Android's implicit-broadcast exception
+          list, so a manifest-registered receiver is never sent it on any
+          version this app supports — the trigger aimed at midnight has to be
+          an alarm, and `HabitWidget.armMidnight` is it. TIME_SET and
+          TIMEZONE_CHANGED *are* on the list, which is exactly why the wrong
+          version of this passes every test you can run from a shell.
         -->
         <receiver
             android:name=".widget.HabitWidget"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="android.intent.action.DATE_CHANGED" />
                 <action android:name="android.intent.action.TIME_SET" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>

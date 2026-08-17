@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.habiterall.app.widget.WidgetSync
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -143,6 +144,12 @@ object Outbox {
                 } else {
                     api.setEntry(habitId, date, value = value, skip = skip)
                 }
+                // The durable half of the home screen's optimistic paint. The
+                // tap already wrote the record, but that happened in a
+                // broadcast receiver or a finishing activity, either of which
+                // the system may kill first; this runs where the answer is
+                // known to have landed. Idempotent, and a no-op with no widget.
+                runCatching { WidgetSync.noteAnswer(applicationContext, habitId, date, value, skip) }
                 Result.success()
             } catch (e: ApiException) {
                 // `isPermanent` is the whole rule, and it lives on the exception
@@ -153,7 +160,16 @@ object Outbox {
                 // gave, silently, which is the one failure an outbox exists to
                 // prevent. Both come back when they sign in again, and
                 // WorkManager's exponential backoff is what keeps the wait cheap.
-                if (e.isPermanent) Result.failure() else Result.retry()
+                if (e.isPermanent) {
+                    // Nothing will ever store this, so a home screen still
+                    // showing it is showing a claim that is false. Taken back
+                    // here rather than left for a refresh hours later to erase
+                    // without explanation.
+                    runCatching { WidgetSync.noteRefused(applicationContext, habitId, date) }
+                    Result.failure()
+                } else {
+                    Result.retry()
+                }
             } catch (e: Exception) {
                 Result.retry()
             }

@@ -32,6 +32,13 @@ import java.time.LocalDate
  */
 class WidgetConfigActivity : ComponentActivity() {
 
+    /**
+     * Held so it can be dismissed in [onDestroy]: a dialog belonging to an
+     * activity that is going away leaks its window, and a rotation is enough to
+     * do it.
+     */
+    private var dialog: AlertDialog? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -77,7 +84,7 @@ class WidgetConfigActivity : ComponentActivity() {
 
     private fun choose(widgetId: Int, habits: List<Habit>) {
         val names = habits.map { it.name }.toTypedArray()
-        AlertDialog.Builder(this)
+        dialog = AlertDialog.Builder(this)
             .setTitle(R.string.widget_pick_habit)
             .setItems(names) { _, which ->
                 lifecycleScope.launch {
@@ -96,6 +103,12 @@ class WidgetConfigActivity : ComponentActivity() {
             }
             .setOnCancelListener { finish() }
             .show()
+    }
+
+    override fun onDestroy() {
+        dialog?.dismiss()
+        dialog = null
+        super.onDestroy()
     }
 
     /**
