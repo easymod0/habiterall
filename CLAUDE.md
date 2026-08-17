@@ -1069,7 +1069,12 @@ version this app supports. `TIME_SET` and `TIMEZONE_CHANGED` *are* on that list
 — which is exactly why the wrong version passes every test you can run from a
 shell, and why they are still registered. `HabitWidget.armMidnight` is the real
 one, through the same `Reminders.setAlarm` a reminder uses so the exact/inexact
-choice is made once. Inexact was the first attempt and `dumpsys alarm` refused
+choice is made once. It is armed from `redraw` — every path that can create a
+widget draws it — and from `BootReceiver`, which is not one of those paths and
+was the hole: a reboot clears every alarm, and the system's own
+`APPWIDGET_UPDATE` is `updatePeriodMillis` away on an inexact alarm Doze defers,
+so a reboot at 23:50 left yesterday on the home screen until the phone was
+used. Inexact was the first attempt and `dumpsys alarm` refused
 it: an alarm set 23 hours out is given a window of an HOUR, on the one alarm
 whose whole purpose is a date boundary. `updatePeriodMillis` is 30 minutes
 underneath all of it and is NOT the midnight answer either — those updates ride
@@ -1090,6 +1095,15 @@ the launcher hands out, so without `onRestored` and `Widgets.remap` every record
 names a widget nobody holds. And a habit that leaves the account reaches a
 third version of it, where the drawing survives but is a lie.
 
+`onRestored` has a trap of its own that only shows up in combination: ids move,
+and a record the restore did not mention keeps the one it had, so
+`remap([7, 12], old=[7], new=[12])` returned **12 twice**. `replaceWidgets`
+wrote both, `redraw` drew one and `tap` resolved the other with `firstOrNull` —
+the home screen showing habit B while a tap recorded habit A, self-healing later
+to whichever `associateBy` kept. A fresh launcher hands out ids from a low
+counter and a backup's ids are low too, so the overlap is ordinary. A record
+whose id has just been given to somebody else is dropped.
+
 That last one is the interesting one, because doing nothing looked defensible.
 `/api/overview` carries neither an archived habit nor a deleted one, so both
 arrive as an absence, and the first version left the record alone rather than
@@ -1101,6 +1115,18 @@ ever repaints. `Widgets.refreshedOrGone` marks the record instead —
 has disappeared rather than only on what remains — and a gone record refuses
 taps, drops its recording intent for one that opens the app, and comes back by
 itself if the habit is un-archived.
+
+**It also has to be VISIBLE, and the first version of it was not.** The
+explanation went to `setContentDescription` and nowhere else, so on the day the
+habit was archived the cell was pixel-identical to a live habit answered done —
+full colour, a tick — and the day after it was a blank cell under the habit's
+name. The only change a sighted user could see was that a tap opened the app,
+which reads as a bug rather than as an explanation. The layout has a third view
+for it now, hidden the rest of the time, because neither the name line nor the
+cell can say it without borrowing a meaning. The reason it looked finished is
+worth keeping: a `uiautomator dump` prints the accessibility tree, so the
+sentence was right there in the verification — **the dump is not the screen**,
+and a claim about what a user sees has to come from a screenshot.
 
 **Who wins while a write is in flight is asked of WorkManager, not remembered.**
 A refresh must not repaint the server's older answer over a tap that has not
@@ -1120,9 +1146,13 @@ until some later refresh silently erased it — the defect `Outbox.awaitWrite`
 was written for, arriving at a surface with no undo. The day goes back to
 UNANSWERED rather than to what it held before, because the record keeps no
 previous value and inventing one would be a second claim about the same day.
-What this deliberately does NOT do is tell anybody: the shade's buttons are
-equally silent about a refused write, and a 2x2 cell has nowhere to say it. The
-list screen remains the surface that reports one.
+What this deliberately does NOT do is tell anybody, and that is the one
+position here argued rather than fixed: the shade's buttons are equally silent
+about a refused write, and the note line the widget does have is spent on the
+state that is permanent rather than on one that a refresh will explain. It is
+not free — the rollback blanks the day, so the user is left believing they never
+answered rather than that their answer was refused, which invites the identical
+second tap. The list screen remains the surface that reports one.
 
 Four smaller decisions. A measurable habit's tap opens the number pad rather
 than cycling, by the same predicate the notification uses (`isNumerical &&

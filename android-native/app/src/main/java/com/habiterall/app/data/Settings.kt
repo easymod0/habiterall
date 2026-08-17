@@ -184,6 +184,20 @@ class Settings(private val context: Context) {
     }
 
     /**
+     * Read, change and write the whole set inside ONE `edit`.
+     *
+     * The shape every caller here wants: DataStore serialises the transform,
+     * so a tap landing between a read and a write cannot be lost, and values
+     * derived from what was read cannot be derived from a stale copy.
+     */
+    suspend fun updateWidgets(transform: (List<Widgets.Record>) -> List<Widgets.Record>) {
+        context.dataStore.edit { prefs ->
+            val current = Widgets.decodeAll(prefs[widgetCacheKey] ?: "")
+            prefs[widgetCacheKey] = Widgets.encodeAll(transform(current))
+        }
+    }
+
+    /**
      * Replace the whole set, for the one caller that rewrites ids rather than
      * values: a restore, where every record has to move at once and a
      * key-by-key merge would leave both the old and the new id in the blob.

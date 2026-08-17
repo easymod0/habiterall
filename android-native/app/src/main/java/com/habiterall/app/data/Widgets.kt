@@ -203,7 +203,18 @@ object Widgets {
      */
     fun remap(records: List<Record>, oldIds: IntArray, newIds: IntArray): List<Record> {
         val moved = oldIds.zip(newIds.toList()).toMap()
-        return records.map { r -> moved[r.widgetId]?.let { r.copy(widgetId = it) } ?: r }
+        val taken = newIds.toSet()
+        return records
+            // A record the restore did not mention keeps its id — it may be a
+            // widget that was never in the backup — EXCEPT where that id is one
+            // the restore has just handed to somebody else. Measured:
+            // `remap([7, 12], old=[7], new=[12])` returned two records both
+            // holding 12, and the launcher's new ids come off a low counter
+            // that overlaps the backup's heavily. `redraw` then drew one and
+            // `tap` resolved the other with `firstOrNull`, so the home screen
+            // showed habit B and recording it wrote habit A.
+            .filterNot { it.widgetId in taken && moved[it.widgetId] == null }
+            .map { r -> moved[r.widgetId]?.let { r.copy(widgetId = it) } ?: r }
     }
 
     /**

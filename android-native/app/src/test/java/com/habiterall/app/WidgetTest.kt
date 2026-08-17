@@ -266,6 +266,39 @@ class WidgetTest {
         )
     }
 
+    @Test
+    fun `a restore never leaves two records holding one widget id`() {
+        // The two documented behaviours collide: ids move, and a record the
+        // restore did not mention keeps the id it had. A fresh launcher hands
+        // out ids from a low counter and a backup's ids are low too, so the
+        // overlap is ordinary rather than exotic. Measured before the fix:
+        // remapping [7, 12] with old=[7] new=[12] returned 12 twice, `redraw`
+        // drew one of them and `tap` resolved the other with `firstOrNull` —
+        // the home screen showing habit B while a tap recorded habit A.
+        val records = listOf(
+            record(boolHabit()).copy(widgetId = 7),
+            record(waterHabit()).copy(widgetId = 12),
+        )
+        val moved = Widgets.remap(records, intArrayOf(7), intArrayOf(12))
+        assertEquals(listOf(12), moved.map { it.widgetId })
+        // And it is the RESTORED record that survives: the other names a widget
+        // the launcher has just given to somebody else.
+        assertEquals(records[0].habitId, moved.single().habitId)
+    }
+
+    @Test
+    fun `a record written before the gone field still reads`() {
+        // Twelve fields is what every widget on a phone that upgrades holds,
+        // and the reader indexes positionally: a length check of 13 would
+        // discard the lot, which is the unrecoverable state — blank, dead to
+        // taps, with nothing left to repair it.
+        val twelve = Widgets.encode(record(boolHabit())).split('|').take(12).joinToString("|")
+        val back = Widgets.decode(twelve)
+        assertNotNull(back)
+        assertFalse("an absent field is not a claim that the habit is gone", back!!.gone)
+        assertEquals(7, back.widgetId)
+    }
+
     /* ---------- what the cell says ---------- */
 
     @Test

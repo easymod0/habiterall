@@ -25,6 +25,24 @@
         android:paddingBottom="6dp"
         android:text="@string/app_name" />
 
+    <!--
+      Only ever visible when the habit has left the account. A widget has one
+      line for a name and one cell for a day, and neither can say "this habit
+      is gone" — the cell would have to borrow a state that means something
+      else. So there is a third view, hidden the rest of the time.
+    -->
+    <TextView
+        android:id="@+id/widget_note"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="10sp"
+        android:textColor="@color/widget_text"
+        android:paddingBottom="4dp"
+        android:visibility="gone" />
+
     <FrameLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content">

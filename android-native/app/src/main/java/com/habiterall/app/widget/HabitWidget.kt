@@ -106,13 +106,19 @@ class HabitWidget : AppWidgetProvider() {
             // The other two ARE on the list and are kept: they change what
             // "today" is without a midnight passing, and they invalidate the
             // alarm that was armed for the old clock.
-            ACTION_MIDNIGHT,
+            // Midnight only redraws. It used to reschedule the reminders too,
+            // under a comment about clock changes — but midnight is not a clock
+            // change, and `rescheduleAll` enqueues a network-constrained
+            // worker, so every phone with a widget made a sync at 00:00 for no
+            // reason.
+            ACTION_MIDNIGHT -> async { redraw(context) }
+
+            // A clock change is the other thing, and it moves the reminders as
+            // well as the day. Held open by the same `async`, where before the
+            // reschedule was launched into a process free to die.
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED -> async {
                 redraw(context)
-                // A clock change moves the reminders too, and this receiver is
-                // the one that hears about it. Held open by the same `async`,
-                // where before it was launched into a process free to die.
                 suspendCancellableReschedule(context)
             }
         }
@@ -197,7 +203,7 @@ class HabitWidget : AppWidgetProvider() {
             val live = manager
                 .getAppWidgetIds(ComponentName(app, HabitWidget::class.java))
                 .toSet()
-            armMidnight(app, wanted = live.isNotEmpty())
+            armMidnight(app)
             if (live.isEmpty()) return
 
             val settings = Settings(app)
@@ -237,9 +243,15 @@ class HabitWidget : AppWidgetProvider() {
          * a substitute: those updates ride an inexact alarm too and Doze defers
          * them across the night, so overnight the redraw lands on wake.
          */
-        fun armMidnight(context: Context, wanted: Boolean) {
+        fun armMidnight(context: Context) {
             val app = context.applicationContext
             val manager = app.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            // Asked here rather than passed in, so that every caller — a
+            // redraw, a boot, the exact-alarm permission changing — is one line
+            // and none of them has to know how to answer it.
+            val wanted = AppWidgetManager.getInstance(app)
+                .getAppWidgetIds(ComponentName(app, HabitWidget::class.java))
+                .isNotEmpty()
             val intent = Intent(app, HabitWidget::class.java).apply {
                 action = ACTION_MIDNIGHT
                 data = android.net.Uri.parse("habiterall://widget/midnight")
@@ -284,13 +296,42 @@ class HabitWidget : AppWidgetProvider() {
         ): RemoteViews {
             val state = Widgets.stateOn(record, today)
             val habit = record.habit
-            val filled = state == Grid.DayState.DONE ||
-                (state == Grid.DayState.NO && habit.isAvoided)
+            val filled = !record.gone && (
+                state == Grid.DayState.DONE || (state == Grid.DayState.NO && habit.isAvoided)
+            )
 
             val views = RemoteViews(context.packageName, R.layout.widget_habit)
             views.setTextViewText(R.id.widget_name, record.name)
-            views.setTextViewText(R.id.widget_mark, Widgets.markFor(record, state, questionMarks))
-            views.setInt(R.id.widget_cell, "setColorFilter", fill(context, record, state))
+
+            // A habit that has left the account has to be VISIBLY different,
+            // and this is where an earlier version stopped short: the sentence
+            // went to `setContentDescription` and nowhere else, so on the day
+            // it was archived the cell was pixel-identical to a live habit
+            // answered done — full colour, a tick — and the day after it was a
+            // blank cell under the habit's name. The only change a sighted user
+            // could see was that tapping it opened the app, which reads as a
+            // bug rather than as an explanation. A `uiautomator dump` prints
+            // the accessibility node, so it showed the sentence and looked
+            // right; the dump is not the screen.
+            views.setViewVisibility(
+                R.id.widget_note,
+                if (record.gone) android.view.View.VISIBLE else android.view.View.GONE,
+            )
+            if (record.gone) {
+                views.setTextViewText(R.id.widget_note, context.getString(R.string.widget_gone_short))
+            }
+            // And the cell says nothing rather than repeating whatever the day
+            // held when the habit was still there.
+            views.setTextViewText(
+                R.id.widget_mark,
+                if (record.gone) "" else Widgets.markFor(record, state, questionMarks),
+            )
+            views.setInt(
+                R.id.widget_cell,
+                "setColorFilter",
+                if (record.gone) ContextCompat.getColor(context, R.color.widget_cell_empty)
+                else fill(context, record, state),
+            )
             views.setTextColor(
                 R.id.widget_mark,
                 ContextCompat.getColor(

@@ -111,11 +111,18 @@ object WidgetSync {
         val app = context.applicationContext
         withContext(NonCancellable + Dispatchers.IO) {
             runCatching {
-                val settings = Settings(app)
-                val mine = settings.cachedWidgets()
-                    .filter { it.habitId == habitId && it.date == date }
-                if (mine.isEmpty()) return@runCatching
-                settings.putWidgets(mine.map { it.copy(value = null, skip = false) })
+                // Read and change inside ONE `edit`: this derives new values
+                // from what it read, so a tap landing between a separate read
+                // and write would either be lost or lose its rollback.
+                Settings(app).updateWidgets { records ->
+                    records.map {
+                        if (it.habitId == habitId && it.date == date) {
+                            it.copy(value = null, skip = false)
+                        } else {
+                            it
+                        }
+                    }
+                }
                 HabitWidget.redraw(app)
             }
         }
@@ -140,10 +147,13 @@ object WidgetSync {
         val app = context.applicationContext
         withContext(NonCancellable + Dispatchers.IO) {
             runCatching {
-                val settings = Settings(app)
-                val mine = settings.cachedWidgets().filter { it.habitId == habitId }
-                if (mine.isEmpty()) return@runCatching
-                settings.putWidgets(mine.map { Widgets.answered(it, date, value, skip) })
+                // One `edit` for the same reason: `answered` reads the
+                // record's own date to decide whether this answer is newer.
+                Settings(app).updateWidgets { records ->
+                    records.map {
+                        if (it.habitId == habitId) Widgets.answered(it, date, value, skip) else it
+                    }
+                }
                 HabitWidget.redraw(app)
             }
         }

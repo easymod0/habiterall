@@ -121,7 +121,8 @@ Two things are worth knowing before changing it:
 - **A habit that leaves the account marks its widget rather than freeing it.**
   Archiving is enough — `/api/overview` carries neither archived nor deleted
   habits — and a record simply dropped would leave the last cell on screen,
-  still tappable, recording writes that 404 forever.
+  still tappable, recording writes that 404 forever. The widget says *Removed*
+  under the habit's name and its tap opens the app.
 
 ## Requirements
 
