@@ -837,6 +837,12 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 7px 9px;
+  /* 44px is the touch minimum every day cell already clears. The padding alone
+     left this at 39, and nothing had measured it: `responsive.mjs` runs on four
+     fixture habits and the box only appears at six, so the one control that
+     comes and goes with the size of an account was the one control never laid
+     out on a phone. */
+  min-height: 44px;
 }
 #habit-search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .search-count {

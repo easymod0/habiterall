@@ -9,7 +9,7 @@
 import { api } from '/shared/ui/api.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, state } from '/shared/ui/store.js';
+import { emit, staysOnList, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -97,11 +97,20 @@ async function saveHabit(e) {
   };
 
   try {
+    // Both routes answer with the STORED habit in both editions, and the reply
+    // is what the rule below is asked about rather than what was sent. They
+    // differ: `parseHabit` clamps `description` to `LIMITS.description`, so a
+    // 600-character description whose only mention of the query sits past the
+    // cut matches the request and not the row — and the box then survives over a
+    // list the habit has just left. It is the same reading `applyImport` got
+    // wrong the other way round, asking the file's word for something instead of
+    // what it would mean here.
+    let saved;
     if (state.editingId) {
-      await api(`/habits/${state.editingId}`, { method: 'PUT', body: JSON.stringify(payload) });
+      saved = await api(`/habits/${state.editingId}`, { method: 'PUT', body: JSON.stringify(payload) });
       toast('Habit updated');
     } else {
-      await api('/habits', { method: 'POST', body: JSON.stringify(payload) });
+      saved = await api('/habits', { method: 'POST', body: JSON.stringify(payload) });
       toast('Habit created');
     }
     dialog.close();
@@ -111,16 +120,35 @@ async function saveHabit(e) {
     // set because a modal dialog repaints nothing behind it. Creating from the
     // dashboard still needs 'reload': a repaint alone would draw the old list
     // without the habit that was just made.
-    // The list is being REPLACED — a habit created or renamed — so the
-    // dashboard's search filter goes with it: a habit created behind a live
-    // filter is one the user is told about and cannot see.
+    // The dashboard's search filter goes only when what was just saved would be
+    // OFF the list: a habit the user is told about and cannot see is the thing
+    // #74 protects against, and clearing on anything else is the opposite
+    // failure — a filter wiped by something that replaced nothing.
+    //
+    // Three saves can take it off, and only the first is obvious. A CREATE,
+    // because the new habit need not match the query. An EDIT that changed the
+    // name or the description, because the habit you were looking at may no
+    // longer match — the same disappearance arriving from the other side, and
+    // the reason "this was a create" is the tempting simpler rule and the wrong
+    // one; it is reachable only from a habit's own page, where Edit lives. And
+    // ARCHIVING, which does not touch either matched field and removes the row
+    // anyway, because the dashboard fetches active habits or archived ones and
+    // never both. `staysOnList` is all three as one question.
+    //
+    // It re-tests the MATCH rather than comparing the name with what was there
+    // before, for two reasons. The filter reads the description as well, so
+    // "did the name change" is blind to a habit found by its second field. And
+    // the match answers the near-misses for free: an edit that leaves the habit
+    // on the list clears nothing at all, where a name comparison would clear
+    // harmlessly but pointlessly, and a save with no query in the box is a
+    // no-op rather than a write and a repaint.
     //
     // Cleared at the mutators that actually replace the list rather than in the
     // dashboard's 'reload' listener. That event has ten emitters and only half
     // of them replace anything, so clearing there also wiped the box on Back
     // from a habit and on a background reconnect, mid-word. `dashboard.js`'s
     // archive toggle already works this way.
-    state.query = '';
+    if (!staysOnList(saved)) state.query = '';
     emit(state.openHabitId != null ? 'change' : 'reload');
   } catch (err) {
     toast(err.message);
@@ -132,7 +160,11 @@ async function saveHabit(e) {
     // second one.
     if (err.indeterminate) {
       dialog.close();
-      state.query = '';   // the habit may exist; see above
+      // Unconditional, where the success path above asks whether the habit
+      // would be visible: nobody here knows what landed, so the payload is not
+      // evidence about the list. Showing everything is the only answer that is
+      // right whichever way the abandoned request went.
+      state.query = '';
       emit('reload');
     }
   }
@@ -157,6 +189,11 @@ async function deleteHabit() {
 
     await api(`/habits/${id}`, { method: 'DELETE' });
     dialog.close();
+    // `staysOnList` of a habit that no longer exists is false however the
+    // account is set up, so this constant IS the rule above, resolved in
+    // advance rather than a second rule. Left as it stands, the filtered list
+    // the delete emptied reads "No habits match that." over a delete that
+    // succeeded.
     state.query = '';
     emit('reload');
 
@@ -191,7 +228,12 @@ async function restoreHabit(habit, entries) {
       }
     }
 
-    state.query = '';
+    // An undo is a create, and it has the created habit in hand, so it asks the
+    // same question `saveHabit` does rather than borrowing the delete's answer.
+    // The delete above is unconditional because a deleted habit is off the list
+    // whatever the account is set to; this one is not, and a restore whose habit
+    // is still on screen under the query in the box should leave it alone.
+    if (!staysOnList(created)) state.query = '';
     emit('reload');
     toast(`Restored "${habit.name}"`);
   } catch (e) {

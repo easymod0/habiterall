@@ -430,16 +430,54 @@ word arrives with focus still in the box, because moving it inside `#grid` does
 not fail a check, it makes the element unreadable.
 
 Three rules travel with it. **The drag handle goes while a filter is on**: a drop
-against a subset computes a `position` from neighbours that are not the habit's,
-and `persistOrder` sends the RENDERED order. **The threshold reads the unfiltered
-count** (and the box also stays while it has focus), or it vanishes under the
-cursor at the moment a query narrows the list past it. And **the MUTATORS clear the query**, not the `'reload'` listener. Creating a
-habit or restoring a backup replaces the list, so a filter that hides the result
-is a thing the user is told about and cannot see — `habit-dialog` and
-`data-dialog` clear it where the archive toggle already does. Doing it in the
-listener looks equivalent and is not: `'reload'` has ten emitters and only half
-replace anything, so it also wiped the box on **Back from a habit** — the
-feature's main workflow — and on a background reconnect, mid-word.
+against a subset computes a `position` from neighbours that are not the habit's.
+Note what is NOT the reason — `persistOrder` sends `state.habits.map(h => h.id)`,
+the FULL list, so nothing is dropped from the write; what a drop against a subset
+gets wrong is where in that list the habit lands. **The threshold reads the
+unfiltered count** (and the box also stays while it has focus), or it vanishes
+under the cursor at the moment a query narrows the list past it. And **the
+MUTATORS clear the query**, not the `'reload'` listener. Doing it in the listener
+looks equivalent and is not: `'reload'` has ten emitters and only half replace
+anything, so it also wiped the box on **Back from a habit** — the feature's main
+workflow — and on a background reconnect, mid-word.
+
+**But a mutator clears it only when what it wrote would be OFF THE LIST**, which
+is one question and not a list of mutators. Clearing on every save was the same
+defect one road over: filter to a habit, open it, Edit, change only the COLOUR,
+Save, Back — and the box is empty with all eight rows showing, a filter wiped by
+something that replaced nothing. So `habit-dialog` asks `staysOnList` and clears
+only on a no.
+
+**The question is `staysOnList` and not `matchesQuery`, and the gap between them
+is a whole route.** A create need not match the query and a rename may stop
+matching — that second one is the same disappearance from the other side, and the
+reason "this was a create" is the tempting simpler rule and the wrong one. But
+**archiving** touches neither matched field and removes the row anyway, because
+`load()` fetches the active habits or the archived ones and never both. Asking
+the filter alone left "No habits match that." over an archive that had just
+succeeded — the very sentence the rename case exists to prevent, arriving by the
+one route that predicate cannot see. `staysOnList` is `archived` and the match
+together, and it is what `deleteHabit`'s unconditional clear already IS: for a
+habit that no longer exists the answer is no however the account is set up, so
+the constant there is this rule resolved in advance rather than a second rule.
+`restoreHabit` asks it properly, since an undo is a create with the habit in
+hand. `data-dialog` is the one real exception — a restore replaces the whole
+account, and there is no one habit to ask about.
+
+Two things about the shape of it. It re-tests the MATCH rather than comparing the
+name, because the filter reads the **description** too: a habit found by its
+second field is one a name comparison is blind to, and the match also makes an
+edit that still matches a no-op rather than a harmless pointless clear. And it is
+asked of the **reply**, not of the request — `parseHabit` clamps `description` to
+`LIMITS.description`, so a mention of the query past the cut is in what was sent
+and not in what was stored, and the box then survives over a list the habit has
+just left. Both routes return the stored habit in both editions.
+
+The predicate lives in `ui/store.js` beside `query` — a file that touches no DOM
+and imports nothing — because `dashboard` imports `habit-dialog` already, so a
+second copy of the rule was the alternative to a cycle. All four clears are
+pinned in `searchcheck.mjs` now; three were deletable in silence, and the restore
+is the one whose removal left the entire browser suite green.
 
 **A rebuilt control keeps focus via `data-focus-key`, not its position.**
 `dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single

@@ -17,7 +17,7 @@ import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
 import { gridCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
-import { on, state } from '/shared/ui/store.js';
+import { matchesQuery, on, state } from '/shared/ui/store.js';
 import {
   DAY, dayStateOf, isAvoided, nextDayState, valueForState,
 } from '/shared/ui/toggle.js';
@@ -101,23 +101,17 @@ export async function load() {
  */
 const SEARCH_FROM = 6;
 
-/** Fold case and strip the accents, so "cafe" finds "Café". */
-const fold = (s) => String(s ?? '')
-  .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-
 /**
  * The habits the list is showing.
  *
  * A filter over what is already in memory — no API change, no schema change,
- * and it works offline, which is what makes this the cheap half of #74. Name
- * and description, because a habit called "Gym" whose description says
- * "swimming Tuesdays" is one people look for by the second.
+ * and it works offline, which is what makes this the cheap half of #74. The
+ * predicate itself is `store.js`'s, because `habit-dialog` asks the same
+ * question of the habit it has just saved; a second copy of it here is how the
+ * two come to disagree about whether a row would have been on screen.
  */
 function visibleHabits() {
-  const query = fold(state.query).trim();
-  if (!query) return state.habits;
-  return state.habits.filter((h) =>
-    fold(h.name).includes(query) || fold(h.description).includes(query));
+  return state.habits.filter((h) => matchesQuery(h));
 }
 
 export function paint() {
@@ -193,8 +187,9 @@ export function paint() {
     // list's real order: a drop against a filtered list computes a `position`
     // from neighbours that are not the habit's actual neighbours, so the write
     // lands somewhere nobody asked for and the rows appear to jump when the
-    // query is cleared. `persistOrder` sends the rendered order, which is
-    // exactly what must not be a subset.
+    // query is cleared. The order that goes to the server is the FULL list —
+    // `state.habits.map(h => h.id)` — so nothing is dropped from it; what a
+    // drop against a subset gets wrong is where in that list the habit lands.
     const reorderable =
       !state.showArchived && !filtering && state.habits.length > 1;
     if (reorderable) {

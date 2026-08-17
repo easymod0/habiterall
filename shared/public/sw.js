@@ -22,6 +22,13 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v16: the search filter's predicate moved to ui/store.js, so dashboard.js and
+// habit-dialog.js both IMPORT `matchesQuery` from it — the v14 case exactly,
+// one module over. A shell holding the new dashboard.js and the old store.js
+// is a link error rather than a wrong answer, and it happens before `start()`.
+// Nothing about the markup moved, which is what makes this bump about the
+// atomicity of the swap and nothing else.
+//
 // v15: `ui/amount.js` gained `amountComplaint`, and then `resolveNumberFormat`
 // and `deviceDecimalSeparator` with the decimal-separator setting;
 // `ui/count-field.js` imports all three, and `ui/settings.js` for the account's
@@ -84,7 +91,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v15';
+const CACHE_VERSION = 'v16';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
