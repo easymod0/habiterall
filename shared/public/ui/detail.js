@@ -476,9 +476,10 @@ function buildAwardsCard(stats, color) {
   for (const a of awards) {
     const el = document.createElement('div');
     el.className = 'award';
-    // The habit's own colour, as every other figure on this page uses. Set as
-    // a custom property rather than a border colour so the record variant can
-    // decline it without a second rule.
+    // The habit's own colour, as every other figure on this page uses. A
+    // custom property rather than a border colour directly, so the stylesheet
+    // decides which edges take it — and so nothing here has to know that the
+    // one element with text ON a fill deliberately does not.
     el.style.setProperty('--award-accent', color);
     el.setAttribute('data-award', a.id);
 

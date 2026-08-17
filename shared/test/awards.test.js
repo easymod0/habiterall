@@ -419,8 +419,10 @@ test('AN AWARD CAN BE TAKEN AWAY: logging an older day lowers a non-daily one', 
   rows.unshift({ date: '2026-06-28', value: YES, status: '' });
 
   const after = computeStats(gym, rows, { end });
-  assert.ok(after.bestStreak < before.bestStreak,
-    `the streak should have FALLEN, got ${after.bestStreak}`);
+  // Pinned exactly, not just "lower": 21 -> 17 is the figure the module header
+  // and the CLAUDE.md section both quote, and a documented number that no test
+  // holds is a number free to drift away from its prose.
+  assert.equal(after.bestStreak, 17, 'the measured drop, 21 -> 17');
   assert.equal(byFamily(computeAwards(after, end)).streak.value, 14);
 });
 
@@ -445,6 +447,41 @@ test('AN AWARD CAN VANISH WITH NO USER ACTION: the window slides', () => {
   assert.ok(now > 0 && later > 0, `expected a comeback at both ends, got ${now} and ${later}`);
   assert.ok(later < now,
     `the comeback should have SHRUNK as the window slid: ${now} then ${later}`);
+});
+
+test('...and the two "ever" claims go the same way, at their own dates', () => {
+  // The counterexamples the comments on those two awards now cite by date. A
+  // claim written in a comment and checked nowhere is how the retracted rule
+  // survived in this very file after the commit that retracted it.
+  //
+  // Rows in 2014 and 2016 only, so `MAX_RANGE_DAYS` walks over both blocks.
+  const iso = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const rows = [];
+  for (const year of [2014, 2016]) {
+    for (let i = 0; i < 30; i++) rows.push({ date: iso(new Date(year, 0, 1 + i)), value: YES, status: '' });
+  }
+  const at = (end) => {
+    const s = computeStats(DAILY, rows, { end });
+    return {
+      ids: computeAwards(s, end, DAILY, 'miss').map((a) => a.id),
+      weekdaysKept: s.weekdays.filter((d) => d.completed > 0).length,
+    };
+  };
+
+  // Tenure dies first — it is the only award that reads the OLD end of the
+  // history, so it goes as soon as the first run falls out of the window.
+  assert.ok(at('2024-01-01').ids.includes('tenure:2'));
+  assert.ok(!at('2024-06-01').ids.includes('tenure:2'),
+    'tenure should be gone once the 2014 block slid out');
+  assert.ok(at('2024-06-01').ids.includes('week:full'),
+    'while everything else is still there');
+
+  // The full week goes when the last row does, and the seven weekdays with it.
+  assert.equal(at('2026-01-01').weekdaysKept, 7);
+  assert.ok(at('2026-01-01').ids.includes('week:full'));
+  assert.equal(at('2026-06-01').weekdaysKept, 0);
+  assert.deepEqual(at('2026-06-01').ids, [], 'the card empties itself entirely');
 });
 
 test('a daily habit whose earliest entry does not move keeps what it shows', () => {
@@ -507,29 +544,112 @@ test('a stats response from before this shipped yields no awards', () => {
   assert.deepEqual(computeAwards({ bestStreak: 0, scores: [] }, '2026-01-01'), []);
 });
 
+/**
+ * Source with comments removed, so a comment cannot be mistaken for code.
+ *
+ * The guard below reads `api.js` as text, and the first version of it matched
+ * the raw file — which a COMMENT naming the call shape defeated completely. A
+ * comment in these files' own house style, with the real call stripped back to
+ * two arguments, passed 38 of 38. That is the worst kind of test: it fails only
+ * when someone is not trying, and the thing it exists to catch is silent.
+ *
+ * Strings are tracked so a `//` inside one is not read as a comment. Regex
+ * literals are not, because neither file has one — every `/**` in them opens a
+ * JSDoc block, which this handles — and a scanner that guessed at regex-vs-
+ * division would be more likely to be wrong than the thing it is protecting
+ * against. `stripsComments` below pins the behaviour either way.
+ */
+function stripComments(src) {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const two = src.slice(i, i + 2);
+    if (two === '//') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (two === '/*') {
+      i += 2;
+      while (i < src.length && src.slice(i, i + 2) !== '*/') i++;
+      i += 2;
+      continue;
+    }
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      out += ch; i++;
+      while (i < src.length && src[i] !== ch) {
+        if (src[i] === '\\') { out += src[i]; i++; }
+        if (i < src.length) { out += src[i]; i++; }
+      }
+      out += src[i] ?? ''; i++;
+      continue;
+    }
+    out += ch; i++;
+  }
+  return out;
+}
+
+/** The argument text of every `computeAwards(...)` call, comments removed. */
+function awardCallsIn(src) {
+  const code = stripComments(src);
+  const calls = [];
+  for (const m of code.matchAll(/\bcomputeAwards\s*\(/g)) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    const from = i;
+    while (i < code.length && depth > 0) {
+      if (code[i] === '(') depth++;
+      else if (code[i] === ')') depth--;
+      i++;
+    }
+    calls.push(code.slice(from, i - 1));
+  }
+  return calls;
+}
+
+test('the comment stripper is not fooled by the two things it must not be', () => {
+  // A test on the test, because everything below trusts it.
+  // Asserted on substance rather than on whitespace: the stripper leaves the
+  // space that sat before a comment, and pinning that exactly would make this
+  // a test about spacing.
+  assert.doesNotMatch(stripComments('a // computeAwards(x)\nb'), /computeAwards/);
+  assert.doesNotMatch(stripComments('a /* computeAwards(x) */ b'), /computeAwards/);
+  assert.match(stripComments('a // gone\nb'), /a\s*\nb/, 'code either side survives');
+  // A `//` inside a string is not a comment, and losing the rest of that line
+  // would silently delete real code.
+  assert.match(stripComments('const u = "http://x//y"; // gone'),
+    /const u = "http:\/\/x\/\/y";/);
+  assert.doesNotMatch(stripComments('const u = "http://x//y"; // gone'), /gone/);
+  assert.equal(awardCallsIn('// computeAwards(stats, end, habit, unlogged)\n'
+    + 'computeAwards(stats, end);').length, 1, 'a comment is not a call site');
+});
+
 test('both editions hand the gate its inputs, or it silently does nothing', () => {
   // `computeAwards(stats, end)` still returns a full card — the habit and the
   // unlogged setting are optional, because a caller that has neither should get
   // awards rather than an exception. That makes forgetting them silent: the
-  // suppression above simply never fires, on the one shape it exists for.
+  // suppression simply never fires, on the one shape it exists for.
   //
   // Read from the source, as `api-surface.test.js` reads the routes: mounting
   // either edition's api.js needs a database.
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   for (const edition of ['habiterall-personal', 'habiterall-cloud']) {
     const src = readFileSync(join(root, edition, 'src', 'api.js'), 'utf8');
-    const call = /computeAwards\(([^)]*)\)/.exec(src);
-    assert.ok(call, `${edition} does not call computeAwards at all`);
+    const calls = awardCallsIn(src);
 
-    const args = call[1].split(',').map((s) => s.trim());
+    // EVERY call site, not the first one. Checking only the first let a second,
+    // ungated `computeAwards(...)` ship in the same file — and a route added
+    // later is exactly how that would happen.
+    assert.equal(calls.length, 1,
+      `${edition} has ${calls.length} computeAwards call sites, expected 1: `
+      + calls.join(' | '));
+
+    const args = calls[0].split(',').map((s) => s.trim());
     assert.equal(args.length, 4,
-      `${edition} calls computeAwards with ${args.length} arguments: ${call[1]}`);
+      `${edition} calls computeAwards with ${args.length} arguments: ${calls[0]}`);
     assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
     assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
 
     // And it must be the SAME value computeStats was given, or the gate and the
     // arithmetic answer different questions about one habit.
-    assert.match(src, /computeStats\([\s\S]{0,400}?unlogged[,\s}]/,
+    assert.match(stripComments(src), /computeStats\([\s\S]{0,400}?unlogged[,\s}]/,
       `${edition} does not hand the same unlogged to computeStats`);
   }
 });
@@ -597,6 +717,40 @@ test('a limit whose silence counts as kept earns nothing, though its tiles fill'
   const m = byFamily(computeAwards(missed, end, strict, 'success'));
   assert.equal(m.streak, undefined, 'one answered day is not a streak');
   assert.equal(m.week, undefined);
+});
+
+test('a habit saying "default" lets the ACCOUNT decide, both ways', () => {
+  // The configuration `parseHabit` stores for every habit, and therefore the
+  // one most accounts are actually in — and the case an inline re-implementation
+  // of the gate gets wrong. `habit.at_most_unlogged === 'success'` looks like
+  // the whole rule and is false here: the habit says `'default'`, so the
+  // ACCOUNT's `success` is what applies and the card must be empty.
+  const rows = [{ date: '2026-01-01', value: 0, status: '' }];
+  const end = '2026-02-15';
+
+  for (const own of ['default', undefined]) {
+    const habit = { ...LIMIT, at_most_unlogged: own };
+    const kept = computeStats(habit, rows, { end, unlogged: 'success' });
+    assert.equal(kept.bestStreak, 46, `${own}: the arithmetic followed the account`);
+    assert.deepEqual(computeAwards(kept, end, habit, 'success'), [],
+      `${own}: the gate must follow the account too`);
+  }
+
+  // The other direction: the account says the strict thing, so a limit with a
+  // real logged history earns normally even though the habit named nothing.
+  const logged = [];
+  for (let i = 0; i < 40; i++) {
+    const d = new Date(2026, 0, 1 + i);
+    logged.push({
+      date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+      value: i === 12 ? 1 : 0, status: '',
+    });
+  }
+  const habit = { ...LIMIT, at_most_unlogged: 'default' };
+  const strictEnd = logged[logged.length - 1].date;
+  const s = computeStats(habit, logged, { end: strictEnd, unlogged: 'miss' });
+  assert.ok(computeAwards(s, strictEnd, habit, 'miss').length > 0,
+    'nothing is withheld when silence is a miss');
 });
 
 test('the gate is at-most only, and a real history on a limit still earns', () => {

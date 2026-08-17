@@ -206,8 +206,9 @@ export function computeAwards(stats, end, habit, unlogged) {
   if (recovery) {
     // The deepest hole climbed out of. `longest` is over CLOSED lapses only, so
     // being mid-slip neither earns this nor takes it away — the same line
-    // `computeRecovery` already draws for the recovery rate, and the reason it
-    // can be permanent.
+    // `computeRecovery` already draws for the recovery rate. That is a claim
+    // about lapses and not about durability: the window can still take this
+    // award, as it can take every other one here.
     if (recovery.longest >= COMEBACK_MIN_DAYS) {
       out.push(award({
         id: `comeback:${recovery.longest}`,
@@ -238,11 +239,19 @@ export function computeAwards(stats, end, habit, unlogged) {
     }
   }
 
-  /* ---- the two "ever" claims, which is what makes them permanent ---- */
+  /* ---- the two "ever" claims, and "ever" means "in the window" ---- */
 
-  // Every weekday kept at least once. An "at least once" claim over a window
-  // that only grows, so it cannot come untrue — and note what it deliberately
-  // is NOT: a threshold on all seven weekdays. `computeWeekdays` counts
+  // Every weekday kept at least once.
+  //
+  // An "at least once" claim, so nothing the user DOES takes it back: a bad
+  // week cannot un-keep a Sunday that was kept. The window can, and does. On a
+  // habit whose rows are all older than `MAX_RANGE_DAYS`, the seven weekdays go
+  // 7/7 to 0/7 and this award disappears with nobody touching anything —
+  // measured between `end` 2026-01-01 and 2026-06-01 on rows from 2014 and
+  // 2016. "Ever" is scoped to the window every figure here is computed over,
+  // which slides. See the header.
+  //
+  // Note what this deliberately is NOT: a threshold on all seven. `computeWeekdays` counts
   // COMPLETIONS and not pace, so a 3×/week habit kept perfectly has four
   // weekdays sitting at zero, and any rate test across all seven would be
   // unreachable for every non-daily habit. That is the `applicable: false`
@@ -261,12 +270,18 @@ export function computeAwards(stats, end, habit, unlogged) {
   }
 
   // The long haul, read from the STREAKS rather than from the habit's creation
-  // date — which is not on the stats response, and which answers a slightly
-  // different question anyway. "Created a year ago" is true of a habit
-  // abandoned in its first week; what is worth an award is having been on pace
-  // once and on pace again a year or more later, which is what the span
-  // between the first run and the last one says. Both ends only move outward
-  // as the window grows, so it is monotone, and it costs no new input.
+  // date. "Created a year ago" is true of a habit abandoned in its first week;
+  // what is worth an award is having been on pace once and on pace again a year
+  // or more later, which is what the span between the first run and the last
+  // one says. It is the first run's START — the test's fixtures straddle the
+  // boundary, because a short first run puts both readings on the same side of
+  // a year and unpins the whole distinction.
+  //
+  // This is the award the sliding window takes FIRST, and by the widest margin:
+  // it is the only one that reads the OLD end of the history, so it dies as
+  // soon as the first run falls out of `MAX_RANGE_DAYS`. Measured on rows from
+  // 2014 and 2016, `tenure:2` is gone between `end` 2024-01-01 and 2024-06-01
+  // while every other award is still there. Nothing about it is monotone.
   const streaks = stats.streaks ?? [];
   const span = streaks.length
     ? daysBetween(streaks[0].start, streaks[streaks.length - 1].end)

@@ -482,17 +482,28 @@ record is a year long and that is what the badge claims. (The README used to say
 there was "exactly one way to earn that one", which this contradicts. It no
 longer does.)
 
-**One award family is withheld where the tiles are not, and it is the only such
-carve-out.** An at-most habit resolved to `success` counts every unanswered day
-as kept — deliberately, and documented above — so a limit with a single stored
-row grows a streak, a strength band and a full weekday spread purely as the
-calendar moves. That is right for a TILE, which states a number the user reads
-against their own memory. It is wrong for a BADGE, which makes a claim in
+**On an at-most habit resolved to `success`, the whole card is withheld — ALL
+awards, not just the ones that would read oddly.** An unanswered day counts as
+kept there — deliberately, and documented above — so a limit with a single
+stored row grows a streak, a strength band and a full weekday spread purely as
+the calendar moves. That is right for a TILE, which states a number the user
+reads against their own memory. It is wrong for a BADGE, which makes a claim in
 English: *"You have kept this on all seven weekdays at least once"* over a habit
 logged once is a sentence its owner knows to be false, and being told it
 discredits every other sentence on the card. #63 settles the tie itself — where
 an award is pure vanity, prefer the chart — and every figure is still on the
 chart and the tiles, untouched.
+
+Be clear about what that costs, because the gate is wider than its motivation.
+A limit with twelve typed-in slips loses "Recovered 12 times" and "No lapse over
+a day" as well, and those are honest claims about ROWS THAT EXIST — nothing
+about them depends on how silence is read. They go because the alternative is a
+per-award judgement about which sentences survive the setting, which is a second
+rule to keep in step with the first and would have to be re-decided for every
+award added later. One gate that is occasionally too broad beats seven that
+drift apart. The narrower version wants a coverage measure — how much of the
+window is actually answered — which is the deferred award from #63, and if that
+ever lands this gate should be revisited with it.
 
 The gate asks `unansweredCounts` rather than restating it, so the habit's
 `at_most_unlogged` beating the account's `atMostUnlogged` stays resolved in the
