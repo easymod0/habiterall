@@ -22,6 +22,19 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
+// v15: `ui/amount.js` gained `amountComplaint`, and then `resolveNumberFormat`
+// and `deviceDecimalSeparator` with the decimal-separator setting;
+// `ui/count-field.js` imports all three, and `ui/settings.js` for the account's
+// answer. Both are shell assets and both are SCRIPTS, which `shellFirst` serves
+// cache-first while revalidating per request — so the swap is not atomic and
+// the two can land a load apart. New count-field.js over a cached old
+// amount.js is a module LINK error: no such export, so count-field.js never
+// evaluates, app-entry.js never evaluates, and the app boots to nothing. That
+// is v14's case with the arrow the other way round, and the precache is again
+// what makes it all-or-nothing. It self-heals on the load after, since the
+// broken boot still revalidates amount.js — which is a reason to bump rather
+// than a reason not to: being wrong costs a blank screen, and the bump costs
+// one refetch of data the client is about to refetch anyway.
 // v13: the habit search. `index.html` grew `#search-row`, `#habit-search`,
 // `#search-count` and `#empty-nomatch`, and dashboard.js looks all four up at
 // module scope and dereferences them in `paint()` — so a stale v12 shell with
@@ -71,7 +84,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v14';
+const CACHE_VERSION = 'v15';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

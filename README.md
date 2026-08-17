@@ -1886,6 +1886,30 @@ applies those — a merge deliberately leaves your preferences alone. Merge a
 backup onto an account set the other way and the habits keep their own answers
 while the account keeps its.
 
+One more decides what a number you type *means*:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Decimal separator** (Tracking) | Follow this device | Whether you write a decimal point as `1234.5` or `1234,5`, wherever an amount is typed. *Follow this device* reads it off the browser each time rather than storing what it found, so one account can be right on a laptop and on a phone — and choosing one explicitly is what to do when the device is not set up the way you write |
+
+It matters because of what it makes `10.000` mean: ten, or ten thousand written
+with a separator. Neither reading can be assumed for everybody, and getting it
+wrong is not a display glitch — it is a stored number out by a factor of a
+thousand, with nothing on screen to say so.
+
+Whichever way it is set, a **thousands separator is refused rather than guessed
+at**, and the message says what to type instead. `10,000` on a *point* account
+and `10.000` on a *comma* one are one refusal seen from two sides. Anything with
+fewer than three digits after the separator — `8,5`, `8.5` — is the same number
+under both conventions and is accepted under both, which is most of what anyone
+types. The box also *writes* amounts back the way you write them, so a field
+that accepts `8,5` does not redraw it as `8.5`.
+
+It travels in the JSON backup, because it decides what the next amount you type
+will mean. The Android app does not read it yet — see issue #157, which has to
+give that client a single reader for a typed amount before it can have one
+answer.
+
 ---
 
 ## API

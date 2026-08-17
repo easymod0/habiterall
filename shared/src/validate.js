@@ -318,6 +318,15 @@ export const SETTING_VALUES = {
   // computed daily, since it is an EWMA and skipping days would change the
   // value rather than the resolution.
   scoreGranularity: ['day', 'week', 'month', 'quarter', 'year'],
+  // Which character a decimal point is, WHERE AN AMOUNT IS TYPED. `auto`
+  // resolves against the device at parse time and is a stored value rather than
+  // the absence of one, exactly as `theme: 'system'` is: a device fact must not
+  // become a stored decision, and the de-DE reader on an en-US work laptop
+  // needs something to change. The rule is `resolveNumberFormat` in
+  // public/ui/amount.js and this list is only what may be stored. It is not a
+  // display preference — it decides whether `10.000` is ten or a refused
+  // thousands group — which is why it is portable.
+  numberFormat: ['auto', 'point', 'comma'],
 
   /* --- notifications: see notify.js for what each of these means --- */
 
@@ -393,6 +402,12 @@ export const PORTABLE_SETTINGS = Object.freeze([
   // count as. Restore the entries without it and the streaks and the strength
   // come back different from the ones that were exported.
   'atMostUnlogged',
+  // Portable for that reason one step further out: it decides what the NEXT row
+  // will be. `10.000` is ten under one convention and a refused group under the
+  // other, so restoring a backup onto an account without it hands the same
+  // keystrokes a different number. It carries no capability — it is a
+  // preference, like `theme` — so nothing about it belongs with the webhook.
+  'numberFormat',
 ]);
 
 /**

@@ -144,6 +144,38 @@ try {
     /not an amount/.test(await ev(
       `document.querySelector('#grid-count .countfield-hint').textContent`)));
 
+  console.log('\n--- an AMBIGUOUS amount is told how to fix itself ---');
+  // "10,000" is refused because it could be ten thousand or ten and a half, not
+  // because it is nonsense — so "not an amount" is the wrong sentence for it,
+  // and it is the sentence somebody gets for typing their step goal the way
+  // their own keyboard and country write it. The phone has said the actionable
+  // thing since #111; this is the web catching up, followed to the row because
+  // the refusal and the non-deletion are one behaviour.
+  await typeAndSave('10,000');
+  row = await stored();
+  check('the ambiguous amount is not stored', row?.value === 8.5, JSON.stringify(row));
+  const hint = await ev(
+    `document.querySelector('#grid-count .countfield-hint').textContent`);
+  check('and the complaint says what to type instead', /10000/.test(hint), hint);
+  check('rather than only that it is not a number',
+    !/^\"10,000\" is not an amount/.test(hint), hint);
+
+  // ...and the STEPPER says it too. Both refusal sites in `count-field.js` go
+  // through `amountComplaint`, and only this one is reachable without saving —
+  // a review found the Save site pinned and this one not, which is the "fixed
+  // two of three call sites" shape the repo keeps paying for.
+  await ev(`(()=>{
+    const i = document.getElementById('grid-count-typed');
+    i.value = '10,000';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#grid-count .countfield-step[data-step="1"]').click();
+    return true;})()`);
+  await sleep(300);
+  const stepHint = await ev(
+    `document.querySelector('#grid-count .countfield-hint').textContent`);
+  check('the stepper refuses it with the same sentence',
+    /without the thousands separator/.test(stepHint), stepHint);
+
   console.log('\n--- a limit of zero gets the button its whole point needs ---');
   // Closed first. The section above leaves the dialog open, and clicking a grid
   // cell under it drives `showModal()` on an already-modal dialog — a no-op in
@@ -216,6 +248,45 @@ try {
   await typeAndSave('');
   row = await stored();
   check('an empty box clears the day', row === null, JSON.stringify(row));
+
+  console.log('\n--- a comma account reads and writes the other way round ---');
+  // #108's remaining half, followed to the row for the reason the rest of this
+  // suite exists: "10.000" is ten to this parser and ten thousand to the reader
+  // who typed it, and being wrong there is a stored number rather than a
+  // rejected form. The setting belongs to the account, so it is written through
+  // the API and the page reloaded — the path a second device would take.
+  await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ numberFormat: 'comma' }) }); })()`);
+  await ev(`location.reload(); true`);
+  for (let i = 0; i < 60; i++) {
+    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+    await sleep(250);
+  }
+
+  check('reopened', await openToday());
+  await typeAndSave('10.000');
+  row = await stored();
+  check('"10.000" is not quietly stored as ten', row === null, JSON.stringify(row));
+  const commaHint = await ev(
+    `document.querySelector('#grid-count .countfield-hint').textContent`);
+  check('and the complaint names the DOT, which is what they are looking at',
+    /a dot can separate thousands/.test(commaHint), commaHint);
+
+  // ...and the comma is the decimal point now, both read and written. The
+  // second half is what stops the box telling its owner they typed it wrong:
+  // it accepted 8,5 and would have redrawn it as 8.5.
+  await typeAndSave('8,5');
+  row = await stored();
+  check('"8,5" is stored as 8.5 on a comma account', row?.value === 8.5, JSON.stringify(row));
+  check('reopened', await openToday());
+  const shown = await ev(`document.getElementById('grid-count-typed').value`);
+  check('and the box shows it back with a comma', shown === '8,5', shown);
+  await ev(`document.getElementById('count-cancel').click(); true`);
+
+  await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ numberFormat: 'auto' }) }); })()`);
 } catch (e) {
   console.log('ERROR:', e.message);
   fails++;

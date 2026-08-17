@@ -22,6 +22,26 @@
 import {
   answerText, discordPayload, parseAction, reminderComponents, reminderMessage,
 } from './notify.js';
+// The one import in this directory that reaches into `shared/public`, and it is
+// deliberate. A modal is a BOX SOMEBODY TYPES AN AMOUNT INTO, which is the day
+// editor's question arriving over a socket, and this file had its own answer to
+// it: `Number()` after a comma-to-dot replace, which read "10,000" as ten —
+// the silent thousandfold under-record `ui/amount.js` exists to refuse, and
+// which `parseHabit` cannot catch downstream because ten is a valid amount.
+//
+// The usual answer here is two declarations pinned by a test (`CHANNELS`,
+// `SETTING_VALUES`), but that is forced by a direction this does not run in:
+// the browser cannot see `shared/src`, while node can read anything on disk.
+// `ui/amount.js` is DOM-free by construction and already imported by a node
+// test, so one import buys what a mirror only approximates. Keep it DOM-free.
+//
+// It carries the web control's display bounds with it — a trillion, a
+// millionth, six decimal places — which are wider than anything a habit records
+// and are stated here because they are the one thing a press can now be refused
+// for that it could not be before.
+import {
+  amountComplaint, parseAmount, resolveNumberFormat,
+} from '../public/ui/amount.js';
 
 const API = 'https://discord.com/api/v10';
 
@@ -483,15 +503,25 @@ export async function handleInteraction(interaction, adapter) {
     let value;
     if (type === INTERACTION.MODAL) {
       const raw = modalValue(interaction);
-      const text = String(raw ?? '').trim().replace(',', '.');
-      // The emptiness check comes first, and on purpose: `Number('')` is 0,
-      // which is finite and non-negative, so an empty box would record a zero —
-      // and for an "at most" habit a zero is a *success*. The input is marked
-      // required, but that is Discord's promise to keep, not ours to assume.
-      value = text === '' ? NaN : Number(text);
-      if (!Number.isFinite(value) || value < 0) {
-        return send(ephemeral(`"${raw}" is not a number I can record.`));
+      // The account's convention, with NO device tier: a press arrives from
+      // Discord, so there is nothing here making the request and no device to
+      // report one — the same shape as `adapter.today`, which asks the account
+      // rather than a header for the same reason. `auto` therefore lands on the
+      // app's own convention here while it lands on the browser's in the web
+      // app, which is the honest answer for a box nobody is standing at.
+      const format = resolveNumberFormat(account?.settings?.numberFormat);
+      // `parseAmount` is the rule, and the three answers must be told apart with
+      // `typeof`: `''` means the box was empty, which is a DELETE in the day
+      // editor and is nothing at all here — there is no day being cleared, only
+      // an amount that was not given. Reading it as a number would record a
+      // zero, and on an "at most" habit a zero is a *success*. The field is
+      // marked required, but that is Discord's promise to keep, not ours to
+      // assume.
+      const amount = parseAmount(raw, format);
+      if (typeof amount !== 'number') {
+        return send(ephemeral(amountComplaint(raw, format)));
       }
+      value = amount;
     }
 
     const result = await adapter.record(account, {
