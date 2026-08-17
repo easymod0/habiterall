@@ -26,6 +26,13 @@ One optional argument decides what you review and whether you post.
 `local` is how the `issue-to-pr` skill calls this before a PR exists. When in
 doubt about whether to post, print and say you did not.
 
+**Preloaded into `habiterall-reviewer`**, this skill runs under a *lens* named in
+the prompt — which says where to spend the budget, because a second reviewer is
+reading the same diff under a different one. The lens is not a licence to skip:
+the six always-checks all run whatever it says, and a finding outside it is
+still a finding. That agent is always `local`, and has no `Edit` tool, so "do
+not fix anything" is a property rather than a request.
+
 Read the issue the PR names (`gh issue view`) when the diff's *purpose* is
 unclear — but not otherwise. The diff and its claims are the subject.
 

@@ -76,10 +76,15 @@ coverage/
 # Untracked and must stay so — a bare `git add -A` otherwise stages the
 # worktrees as broken gitlinks, which is exactly what happened twice.
 #
-# `.claude/*` rather than `.claude/`, so that ONE child can be excepted: git
+# `.claude/*` rather than `.claude/`, so that children can be excepted: git
 # does not descend into an excluded directory, so a negation under the bare
-# form matches nothing. `skills/` is tracked because a skill is read from the
-# checkout it runs in, and a review agent gets its own worktree — where an
-# ignored file does not exist at all. Everything else here stays scratch.
+# form matches nothing. Two are tracked, for one reason: both are read from the
+# checkout they run in, and an agent may get its own worktree — where an ignored
+# file does not exist at all. `skills/` is the method; `agents/` is what the
+# method dispatches to, and a skill naming an agent that a fresh clone does not
+# have fails on the line that spawns it. Everything else here stays scratch —
+# `work/` in particular is where issue-to-pr leaves its briefs and review
+# reports, deliberately invisible to `git status`.
 .claude/*
 !.claude/skills/
+!.claude/agents/
