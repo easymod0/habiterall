@@ -173,42 +173,38 @@ object Reminders {
         }
 
         val at = nextOccurrence(time, java.time.ZonedDateTime.now(ZoneId.systemDefault()))
-        setAlarm(context, at, habit.id, Alarm.DAILY)
-    }
-
-    /** Which of a habit's two alarms — see [snoozePendingIntent]. */
-    private enum class Alarm { DAILY, SNOOZE }
-
-    /**
-     * Arm one of a habit's two alarms.
-     *
-     * The PendingIntent is built HERE rather than handed in, which looks like a
-     * pointless narrowing and is not one. Taking a `PendingIntent` parameter
-     * severs the link between the explicit `Intent(context, …::class.java)` and
-     * the `AlarmManager.set*` call below, and CodeQL's
-     * `java/android/implicit-pendingintents` then cannot prove a component is
-     * set: it reports a high-severity implicit PendingIntent — an alarm any app
-     * could intercept — about two intents that are explicit and `FLAG_IMMUTABLE`
-     * and always were. Only the shape had hidden it, and the honest fix is to
-     * make the explicitness visible at the call rather than to dismiss the
-     * query. Keep the construction and the `set` in one function.
-     */
-    private fun setAlarm(context: Context, at: Long, habitId: Long, which: Alarm) {
+        // The PendingIntent is built and armed in the same breath here, and
+        // again in [snooze], rather than through one shared `setAlarm(…,
+        // intent)`. That shared helper is the obvious shape and CodeQL's
+        // `java/android/implicit-pendingintents` cannot read it: with the
+        // PendingIntent arriving as a parameter it cannot prove a component was
+        // set, and reports a high-severity implicit PendingIntent — an alarm any
+        // app could intercept — about intents that are explicit and
+        // `FLAG_IMMUTABLE` and always were. Building it inside the helper did
+        // not help either; the `when` over the two kinds defeats it just as the
+        // parameter did. What the query can follow is a builder call adjacent to
+        // the `set`, which is what this was before the snooze was added.
+        //
+        // Only the four lines below are repeated. The two intents still come
+        // from ONE builder each, which is what matters: `cancel` looks them up
+        // by `filterEquals`, so an intent built a second way here would arm an
+        // alarm nothing could ever cancel.
         val manager = alarmManager(context)
-        val intent = when (which) {
-            Alarm.DAILY -> pendingIntent(context, habitId)
-            Alarm.SNOOZE -> snoozePendingIntent(context, habitId)
-        }
-        // Exact alarms can be revoked by the user on API 31+. Falling back to
-        // an inexact alarm keeps reminders working, just less punctually —
-        // better than silently dropping them.
-        val canBeExact = Build.VERSION.SDK_INT < 31 || manager.canScheduleExactAlarms()
-        if (canBeExact) {
+        val intent = pendingIntent(context, habit.id)
+        if (canBeExact(manager)) {
             manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         } else {
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         }
     }
+
+    /**
+     * Exact alarms can be revoked by the user on API 31+. Falling back to an
+     * inexact alarm keeps reminders working, just less punctually — better than
+     * silently dropping them.
+     */
+    private fun canBeExact(manager: AlarmManager) =
+        Build.VERSION.SDK_INT < 31 || manager.canScheduleExactAlarms()
 
     /**
      * When a snooze pressed at [now] should fire, or null if there is no room
@@ -257,7 +253,15 @@ object Reminders {
         now: java.time.ZonedDateTime = java.time.ZonedDateTime.now(ZoneId.systemDefault()),
     ): Boolean {
         val at = snoozeUntil(now) ?: return false
-        setAlarm(context, at.toInstant().toEpochMilli(), habitId, Alarm.SNOOZE)
+        // Built and armed together — see the note in [schedule].
+        val manager = alarmManager(context)
+        val intent = snoozePendingIntent(context, habitId)
+        val millis = at.toInstant().toEpochMilli()
+        if (canBeExact(manager)) {
+            manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, intent)
+        } else {
+            manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, intent)
+        }
         return true
     }
 
