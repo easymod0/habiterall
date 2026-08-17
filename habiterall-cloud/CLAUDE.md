@@ -90,6 +90,34 @@ canonicalised; `/api/notify/test` re-reads it from the database rather than
 taking one from the request body, and carries its own tight rate limit because
 it causes outbound traffic.
 
+## `/healthz` has four callers, not the two it looks like
+
+It is the only unauthenticated route here that touches Postgres. The container
+healthcheck and an attacker are the obvious pair; the other two are the PWA's
+connectivity probe (`isReachable`, on every boot and every visibilitychange) and
+the Android setup screen's, and **both read anything but a 200 as "the server is
+unreachable"**.
+
+So a per-IP 429 does not shed load — it makes a browser banner itself offline and
+divert writes to the outbox while the server is perfectly healthy. Self-feeding,
+because going offline starts a backoff poll into the same bucket, and shared,
+because an office NAT is one bucket for everyone behind it. `/healthz` therefore
+**never answers 429**: over the limit it answers from the memo. `skip` covers the
+other direction, since a healthchecker reads 429 as "down" and restarts the
+container.
+
+**What protects the pool is the memo (`src/health.js`), not the limit.**
+`PG_POOL_MAX` is 10, and a per-IP limit is the wrong shape for pool exhaustion
+anyway — a distributed flood pays nothing for a fresh bucket, while one second of
+memo caps the cost at one connection per second however many callers arrive. Its
+`inflight` half is what makes that true of the case that matters: a burst on a
+cold memo would otherwise open a connection each and fill the memo afterwards.
+
+It lives in its own file because `server.js` starts a server at import time, so
+nothing declared in it can be unit tested — and the failure mode here is silent
+in the worst direction, an `inflight` left set reporting the last good answer
+forever while Postgres is down.
+
 ## Verify it, don't trust it
 
 ```bash
