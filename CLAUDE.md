@@ -1028,6 +1028,60 @@ deferral after the interruption it was deferring; the day's own alarm still asks
 at its own time. Say it as a trade, because stating it as an absolute is how the
 first version of this paragraph came to be wrong.
 
+**A home-screen widget is a CACHE, not a sixth mirror — and the cache is what
+raises every question in it.** One habit, today, tap to cycle. Everything it
+decides was already written down: the cycle is `Grid.nextState`, the encoding
+`Grid.valueForState` (so an avoided habit's clean day is 0 and its slip is
+target + 1), what a stored day means is `Habit`'s, and the write is `Outbox`'s.
+What is new is `Widgets.Record` — the habit's SHAPE and one day's answer, on
+disk — because a tap on a home screen happens with no network and nothing about
+drawing or answering may wait for a server. That is the reminder cache's
+reasoning at a second surface, and a second record rather than a wider one:
+`cacheReminders` holds only the habits that carry a reminder, and a widget is
+for whichever habit you put on the home screen.
+
+**The record names the day it is about, and that is the whole of the midnight
+problem.** A widget has no `onResume` — `MainActivity` re-reads `LocalDate.now()`
+on every one, and nothing on a home screen can — so `stateOn` answers `unknown`
+for a record whose date is not today rather than showing yesterday's tick. The
+cost of getting that wrong is not a stale pixel: read as done, the next tap
+advances to *not done* and records a MISS against a day nobody has touched. The
+tap resolves today when the tap ARRIVES, never when the widget was drawn, which
+is also why a measurable habit's click intent carries `EXTRA_TODAY` instead of a
+date — a `getActivity` PendingIntent is built at draw time and pressed whenever
+the user presses it. It has to be `getActivity`: opening the number pad from the
+receiver instead would be a background activity launch, which Android 10 refuses.
+
+**What redraws it is the part that has to be arranged.** Measured on an
+emulator: the launcher keeps showing the last `RemoteViews` until something
+updates them, so the rule above is only ever as good as its trigger. There are
+four, and they are the ones that already existed — the list's own fetch (beside
+`Reminders.armFrom`, for the same reason), the six-hourly `ScheduleWorker` that
+already re-arms alarms, an answer given elsewhere on the phone
+(`WidgetSync.noteAnswer`, from the notification's buttons and its number pad),
+and the widget's own tap. `ACTION_DATE_CHANGED` is the fifth and the only one
+aimed at midnight itself; `updatePeriodMillis` is 30 minutes underneath it,
+because a broadcast that does not arrive would otherwise leave the home screen
+on yesterday until someone opened the app.
+
+**Who wins while a write is in flight is asked of WorkManager, not remembered.**
+A refresh must not repaint the server's older answer over a tap that has not
+been delivered — the `pending` overlay of the list screen, at a surface that has
+nowhere to hold one: the tap happens in a broadcast receiver free to die the
+moment it returns. So `Outbox.isPending` reads the unique work's own state, which
+is durable, survives a reboot, and cannot get stuck the way a flag set by a
+process that then died would.
+
+Three smaller decisions. A measurable habit's tap opens the number pad rather
+than cycling, by the same predicate the notification uses (`isNumerical &&
+!isAvoided`) — cycling one would record `YES`, which is 2, as the amount. The
+configuration activity is the one part that needs the server, deliberately: a
+widget names a habit and a phone that has never reached the account has none to
+name, while everything after that point works offline. And `questionMarks`
+joined `skipDays` in the local mirrors, because those two are what
+`Grid.nextState` reads and the widget must walk the same four states the app's
+grid does.
+
 **A row's streak is the server's arithmetic, so recording a day re-asks for
 it.** The optimistic overlay knows one day and a streak is the whole history;
 without a refetch, ticking today left the number sitting still at the exact

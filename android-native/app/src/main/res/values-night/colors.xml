@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The dark half of the widget's palette. A widget follows the LAUNCHER's
+      configuration rather than the app's theme, which is why this qualifier is
+      `-night` and not tied to anything the app decides.
+    -->
+    <color name="widget_background">#FF1C1B1F</color>
+    <color name="widget_cell_empty">#FF49454F</color>
+    <color name="widget_text">#FFE6E1E5</color>
+    <color name="widget_on_fill">#FFFFFFFF</color>
+</resources>

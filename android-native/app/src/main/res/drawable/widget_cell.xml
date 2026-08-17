@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  White on purpose: the colour comes from a runtime tint (`setColorFilter`,
+  which is SRC_ATOP), so the shape has to be a blank canvas or every fill
+  would be mixed with whatever was painted here.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FFFFFFFF" />
+    <corners android:radius="12dp" />
+</shape>

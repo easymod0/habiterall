@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  `updatePeriodMillis` is the floor Android allows (30 minutes) and it is a
+  BACKSTOP, not the refresh: it redraws from the cache with no network, which
+  is what bounds how long a widget can go on showing yesterday's answer if
+  ACTION_DATE_CHANGED is never delivered. The state itself is refreshed by
+  whatever fetch happens anyway — see WidgetSync.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="110dp"
+    android:minHeight="110dp"
+    android:targetCellWidth="2"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/widget_habit"
+    android:previewLayout="@layout/widget_habit"
+    android:configure="com.habiterall.app.widget.WidgetConfigActivity"
+    android:description="@string/widget_description"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

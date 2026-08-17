@@ -19,6 +19,7 @@ import com.habiterall.app.data.Entry
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Sentinels
 import com.habiterall.app.data.Settings
+import com.habiterall.app.widget.WidgetSync
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -537,6 +538,10 @@ object Reminders {
                 // beside them. Whichever of the two paths ran last decided, which
                 // is the drift this whole mirror exists to prevent.
                 runCatching { settings.cacheSkipDays(fresh.skipDaysEnabled) }
+                // And the other half of what `Grid.nextState` reads, for the
+                // home-screen widget — which cycles a day with no network at
+                // all and must walk the same four states the app's grid does.
+                runCatching { settings.cacheQuestionMarks(fresh.questionMarksEnabled) }
                 fresh.androidRemindersEnabled
             } catch (e: Exception) {
                 settings.cachedAndroidReminders()
@@ -556,6 +561,14 @@ object Reminders {
                 habits.forEach { schedule(applicationContext, it, enabled) }
                 stale.forEach { cancel(applicationContext, it) }
             }
+
+            // The home screen has the same problem the alarms do — nothing
+            // pushes to it and it cannot poll — so the heartbeat that exists to
+            // heal a broken chain of events heals that one too. It costs one
+            // request, and only on a phone that has a widget: `refreshFromServer`
+            // reads the overview, because a widget is about the DAY and
+            // `api.habits()` above does not carry one.
+            runCatching { WidgetSync.refreshFromServer(applicationContext, api) }
             return Result.success()
         }
     }

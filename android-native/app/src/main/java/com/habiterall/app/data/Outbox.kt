@@ -71,6 +71,28 @@ object Outbox {
     }
 
     /**
+     * Whether a write for this habit-day is still on its way.
+     *
+     * Asked rather than remembered, and that is the point: a flag set at the
+     * tap would have to be cleared by something, and the process that set it is
+     * a broadcast receiver free to die the moment it returns — so a widget
+     * carrying one would stop following the server forever if it lost that
+     * race. WorkManager already knows, durably, and answers the same question
+     * after a reboot.
+     *
+     * Reads the flow's current value rather than waiting for a terminal state,
+     * which is what [awaitWrite] is for. No work at all means nothing is
+     * pending: WorkManager prunes finished work, so an unknown name and a
+     * long-finished one are the same answer, and both are "the server's word
+     * wins".
+     */
+    suspend fun isPending(context: Context, habitId: Long, date: String): Boolean =
+        WorkManager.getInstance(context)
+            .getWorkInfosForUniqueWorkFlow(workName(habitId, date))
+            .first()
+            .any { !it.state.isFinished }
+
+    /**
      * Queue a write. Uniqueness is per habit+day and [ExistingWorkPolicy.REPLACE]:
      * if you tap Yes then No before either reaches the server, the last tap is
      * the one that lands, rather than the two racing.

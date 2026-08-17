@@ -70,6 +70,42 @@
             android:name=".notify.ReminderReceiver"
             android:exported="false" />
 
+        <!--
+          One habit on the home screen, today, tap to record.
+
+          The three date actions are what stands in for the `onResume` a widget
+          does not have: the record says which day it is about, so a redraw is
+          all it takes to stop showing yesterday's answer.
+        -->
+        <receiver
+            android:name=".widget.HabitWidget"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/habit_widget_info" />
+        </receiver>
+
+        <!--
+          Asks which habit a newly-placed widget is for. Exported, because the
+          launcher starts it: that is what a configuration activity is, and
+          the only thing it can be told is a widget id the launcher just made.
+        -->
+        <activity
+            android:name=".widget.WidgetConfigActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.Habiterall.Transparent">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+
         <receiver
             android:name=".notify.BootReceiver"
             android:exported="false">

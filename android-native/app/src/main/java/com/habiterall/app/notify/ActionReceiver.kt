@@ -7,6 +7,10 @@ import android.widget.Toast
 import com.habiterall.app.R
 import com.habiterall.app.data.Outbox
 import com.habiterall.app.data.Sentinels
+import com.habiterall.app.widget.WidgetSync
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Handles a Yes / No / Skip tap from the notification shade.
@@ -78,6 +82,20 @@ class ActionReceiver : BroadcastReceiver() {
         // this app's own grid and its day editor besides.
         Outbox.enqueue(context, habitId, date, value, skip)
         Notifications.cancel(context, Notifications.notificationId(habitId))
+
+        // A home-screen widget for this habit is showing the day this just
+        // answered. `goAsync`, because the record lives in DataStore and this
+        // receiver's process is free to die the moment `onReceive` returns —
+        // the same hold `ReminderReceiver` takes for the same reason. Losing
+        // it costs a repaint, never the answer: that is already in the outbox.
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                WidgetSync.noteAnswer(context.applicationContext, habitId, date, value, skip)
+            } finally {
+                pending.finish()
+            }
+        }
 
         val avoided = intent.getBooleanExtra(Notifications.EXTRA_AVOIDED, false)
         val message = when (intent.action) {
