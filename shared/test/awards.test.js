@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 import {
   COMEBACK_FRESH_DAYS, STRENGTH_BANDS, computeAwards,
@@ -218,19 +221,22 @@ test('being mid-slip neither earns a comeback nor takes one away', () => {
   assert.equal(openToo.value, 4, 'an ongoing lapse must not move the tier');
 });
 
-test('a comeback is fresh for a week and then is not', () => {
-  // One lapse, then `n` days back on pace: the marker is the only "you just
-  // earned this" pure derivation can offer, so its boundary is worth pinning.
+test('a comeback is fresh for seven days and stale on the eighth', () => {
+  // One lapse, then `n` days back on pace. Asserted against LITERALS: an
+  // earlier version wrote `after(COMEBACK_FRESH_DAYS)`, which pins the
+  // off-by-one and nothing else — changing the constant to 30 left every
+  // assertion true while the comment claimed the boundary was pinned.
   const after = (n) =>
     byFamily(awardsFor('x'.repeat(10) + '.' + 'x'.repeat(n))).recovered;
 
   assert.equal(after(1).fresh, true);
-  assert.equal(after(COMEBACK_FRESH_DAYS).fresh, true);
-  assert.equal(after(COMEBACK_FRESH_DAYS + 1).fresh, false);
+  assert.equal(after(7).fresh, true);
+  assert.equal(after(8).fresh, false);
+  assert.equal(COMEBACK_FRESH_DAYS, 7, 'the constant and the boundary are one fact');
 
   // The award itself is untouched by the marker expiring — it is the emphasis
   // that fades, never the badge.
-  assert.equal(after(COMEBACK_FRESH_DAYS + 1).value, after(1).value);
+  assert.equal(after(8).value, after(1).value);
 });
 
 test('"no lapse over a day" needs more than one lapse to be a claim', () => {
@@ -250,9 +256,11 @@ test('"no lapse over a day" counts the lapse you are IN', () => {
   assert.equal(byFamily(computeAwards(stats, endOf(str))).lapses, undefined);
 });
 
-test('a two-day lapse ends the claim, and says so as a record', () => {
+test('a two-day lapse ends the claim, and the wording says "so far"', () => {
   const a = byFamily(awardsFor('xxxxx.xxxxx.xxxxx'));
-  assert.equal(a.lapses.permanent, false, 'this one can be lost, and must say so');
+  // This one is falsified by the next bad week with no window movement at all,
+  // so the sentence has to carry that rather than a flag on the payload.
+  assert.match(a.lapses.detail, /so far/);
   assert.equal(byFamily(awardsFor('xxxxx.xxxxx..xxxxx')).lapses, undefined);
 });
 
@@ -323,17 +331,34 @@ test('a rigid weekly schedule does not earn a full week, and that is not a gate'
   assert.ok(byFamily(computeAwards(computeStats(gym, rows, { end }), end)).week);
 });
 
-test('the long haul is the span between the first good run and the last', () => {
-  const long = 'x'.repeat(10) + '.'.repeat(380) + 'x'.repeat(10);
+test('the long haul is measured from the first run\'s START, not its end', () => {
+  // The fixtures straddle the boundary on purpose. An earlier version used a
+  // 10-day first run, so start-to-end was 399 and end-to-end 390 — both over
+  // 365, and measuring from the wrong end of the first run passed every
+  // assertion. A 40-day first run puts the two answers either side of a year,
+  // which is the distinction that makes this not `created_at`.
+  const long = 'x'.repeat(40) + '.'.repeat(330) + 'x'.repeat(10);
   const a = byFamily(awardsFor(long));
   assert.equal(a.tenure.value, 1);
   assert.equal(a.tenure.label, 'A year of keeping it');
+  assert.equal(daysBetween('2026-01-01', endOf(long)), 379, 'first run START to last end');
+  assert.equal(daysBetween(addDays('2026-01-01', 39), endOf(long)), 340,
+    'first run END to last end — under a year, so it must not be what is used');
 
   assert.equal(byFamily(awardsFor('x'.repeat(10) + '.'.repeat(300) + 'x'.repeat(10))).tenure,
     undefined);
 
-  const longer = 'x'.repeat(10) + '.'.repeat(720) + 'x'.repeat(10);
+  // Straddling the two-year boundary the same way: 739 days from the start,
+  // 700 from the end of the first run.
+  const longer = 'x'.repeat(40) + '.'.repeat(690) + 'x'.repeat(10);
   assert.equal(byFamily(awardsFor(longer)).tenure.label, '2 years of keeping it');
+});
+
+test('a habit that has simply never broken is not described as two runs', () => {
+  const a = byFamily(awardsFor('x'.repeat(400)));
+  assert.equal(a.tenure.value, 1);
+  assert.equal(a.tenure.detail, 'One unbroken run, 400 days long.');
+  assert.doesNotMatch(a.tenure.detail, /first|most recent|apart/);
 });
 
 test('a habit created a year ago and abandoned in week one does not earn it', () => {
@@ -357,27 +382,92 @@ test('the long haul does not move as time passes without new entries', () => {
   assert.equal(at(addDays(endOf(str), 180)).value, 1);
 });
 
-/* ---------- the property the whole design rests on ---------- */
+/* ---------- what an award can and cannot promise ---------- */
 
-test('a permanent award is never taken away as history grows', () => {
-  // The reason `permanent` is on the payload at all. Nothing is stored, so an
-  // award exists for exactly as long as the numbers say — which is only safe
-  // while the numbers it is read from cannot go down. Asserted as the invariant
-  // rather than by example: walk one history a day at a time and require that
-  // no family ever disappears and no value ever drops.
+test('AN AWARD CAN BE TAKEN AWAY: logging an older day lowers a non-daily one', () => {
+  // The counterexample that killed this module's first organising rule, which
+  // was "only a monotone reading may be dressed as a trophy". `bestStreak` is a
+  // maximum and does only go up for a FIXED window — but the window is not
+  // fixed. `computeStats` starts at `start ?? firstEntry`, and `onPaceSeries`
+  // pro-rates the requirement near that start so a habit is not judged against
+  // history it does not have. Move the earliest entry earlier and the first
+  // `den - 1` days are re-judged against a full requirement they now fail.
   //
-  // `is-record` awards are exempt by construction: that is what the flag means.
+  // So remembering one forgotten session — an ordinary, virtuous thing to do —
+  // takes the badge DOWN. Pinned as behaviour, not as a bug to fix here: the
+  // leniency is deliberate and correct, and it is the permanence claim that was
+  // wrong. See issue #141 for the ledger that would change the answer.
+  const gym = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 3, freq_denominator: 7,
+  };
+  const iso = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  const rows = [];
+  for (let i = 0; i < 21; i++) {
+    const d = new Date(2026, 6, 6 + i);
+    if ([1, 3, 5].includes(d.getDay())) rows.push({ date: iso(d), value: YES, status: '' });
+  }
+  const end = '2026-07-26';
+
+  const before = computeStats(gym, rows, { end });
+  assert.equal(before.bestStreak, 21);
+  assert.equal(byFamily(computeAwards(before, end)).streak.value, 21);
+
+  // One session, a week before the habit's first stored day.
+  rows.unshift({ date: '2026-06-28', value: YES, status: '' });
+
+  const after = computeStats(gym, rows, { end });
+  assert.ok(after.bestStreak < before.bestStreak,
+    `the streak should have FALLEN, got ${after.bestStreak}`);
+  assert.equal(byFamily(computeAwards(after, end)).streak.value, 14);
+});
+
+test('AN AWARD CAN VANISH WITH NO USER ACTION: the window slides', () => {
+  // The second mechanism, and this one needs nobody to do anything at all.
+  // `MAX_RANGE_DAYS` clamps the window start to `end - 3660`, so a habit with
+  // any row older than ten years has a SLIDING window rather than a growing
+  // one, and awards shrink as the calendar moves.
+  const rows = [{ date: '2010-01-01', value: YES, status: '' }];
+  for (let i = 0; i < 120; i++) {
+    const d = new Date(2026, 0, 1 + i);
+    rows.push({
+      date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+      value: YES, status: '',
+    });
+  }
+  const comebackAt = (end) =>
+    byFamily(computeAwards(computeStats(DAILY, rows, { end }), end)).comeback?.value ?? 0;
+
+  const now = comebackAt('2026-08-17');
+  const later = comebackAt('2030-08-17');
+  assert.ok(now > 0 && later > 0, `expected a comeback at both ends, got ${now} and ${later}`);
+  assert.ok(later < now,
+    `the comeback should have SHRUNK as the window slid: ${now} then ${later}`);
+});
+
+test('a daily habit whose earliest entry does not move keeps what it shows', () => {
+  // The narrow claim that survives, stated with both of its preconditions,
+  // because it is the ordinary case and a regression in it would be real.
+  // DAILY means `num >= den`, so `onPaceSeries` has no leniency window; a fixed
+  // first entry means `from` does not move; and 130 days is far inside
+  // MAX_RANGE_DAYS, so the clamp never engages. Take away any of the three and
+  // the two tests above apply instead.
   const history =
     'xxxxxxxxxxxx.xxxxxxxx..xxxxxxxxxxxxxxxxxxxxx.....xxxxxxxxxxxxxxxxxx'
     + '.xxxxxxxxxxxxxxx...xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
 
   const seen = new Map();
+  // Excluded by name: it is a claim about the whole record, so the next bad
+  // week ends it whatever the window does. That is not the property under test.
+  const RECORD = 'lapses';
 
   for (let n = 1; n <= history.length; n++) {
     const slice = history.slice(0, n);
     const end = endOf(slice);
     const list = computeAwards(computeStats(DAILY, entries(slice), { end }), end);
-    const today = byFamily(list.filter((a) => a.permanent));
+    const today = byFamily(list.filter((a) => a.family !== RECORD));
 
     for (const [family, previous] of seen) {
       assert.ok(today[family], `day ${n}: the ${family} award was taken away`);
@@ -390,13 +480,21 @@ test('a permanent award is never taken away as history grows', () => {
   assert.ok(seen.size >= 3, `expected several families to be exercised, got ${seen.size}`);
 });
 
+test('no award claims permanence on the wire', () => {
+  // The flag said which awards could not be taken away, and the answer is none
+  // of them. A field that is false for every member is not a distinction, and
+  // on the wire it is a claim a client could act on.
+  for (const a of awardsFor('xxxxx.....xxxxxxxxxx.xxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxx')) {
+    assert.ok(!('permanent' in a), `${a.id} still carries a permanence claim`);
+  }
+});
+
 test('every award carries a label, a detail and no placeholder', () => {
   const list = awardsFor('xxxxx.....xxxxxxxxxx.xxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxx');
   assert.ok(list.length >= 3, `expected a full row, got ${list.length}`);
   for (const a of list) {
     assert.ok(a.id && a.family && a.label && a.detail, JSON.stringify(a));
     assert.doesNotMatch(a.label + ' ' + a.detail, /undefined|NaN|null|Infinity/);
-    assert.equal(typeof a.permanent, 'boolean');
     assert.equal(typeof a.fresh, 'boolean');
   }
   // A plural that reads as machine output is how a number stops being trusted.
@@ -407,6 +505,33 @@ test('a stats response from before this shipped yields no awards', () => {
   assert.deepEqual(computeAwards(null, '2026-01-01'), []);
   assert.deepEqual(computeAwards({}, '2026-01-01'), []);
   assert.deepEqual(computeAwards({ bestStreak: 0, scores: [] }, '2026-01-01'), []);
+});
+
+test('both editions hand the gate its inputs, or it silently does nothing', () => {
+  // `computeAwards(stats, end)` still returns a full card — the habit and the
+  // unlogged setting are optional, because a caller that has neither should get
+  // awards rather than an exception. That makes forgetting them silent: the
+  // suppression above simply never fires, on the one shape it exists for.
+  //
+  // Read from the source, as `api-surface.test.js` reads the routes: mounting
+  // either edition's api.js needs a database.
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  for (const edition of ['habiterall-personal', 'habiterall-cloud']) {
+    const src = readFileSync(join(root, edition, 'src', 'api.js'), 'utf8');
+    const call = /computeAwards\(([^)]*)\)/.exec(src);
+    assert.ok(call, `${edition} does not call computeAwards at all`);
+
+    const args = call[1].split(',').map((s) => s.trim());
+    assert.equal(args.length, 4,
+      `${edition} calls computeAwards with ${args.length} arguments: ${call[1]}`);
+    assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
+    assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
+
+    // And it must be the SAME value computeStats was given, or the gate and the
+    // arithmetic answer different questions about one habit.
+    assert.match(src, /computeStats\([\s\S]{0,400}?unlogged[,\s}]/,
+      `${edition} does not hand the same unlogged to computeStats`);
+  }
 });
 
 /* ---------- the two habit shapes that read differently ---------- */
@@ -443,30 +568,62 @@ test('an at-most habit earns from stated lapses, and a slip is a lapse', () => {
   }
 });
 
-test('what an unlogged day is worth reaches awards without a second opinion', () => {
-  // A limit nobody has ever logged. Under the account default (`miss`) there is
-  // nothing to award; under `success` the streak, the strength and the history
-  // bar all say the habit is being kept — documented, deliberate, and the
-  // awards have to AGREE with the tiles beside them rather than hold a view of
-  // their own about silence.
+test('a limit whose silence counts as kept earns nothing, though its tiles fill', () => {
+  // The one place awards decline to agree with the figures beside them.
+  //
+  // Under `success` an unanswered day counts as kept, so a limit with a single
+  // stored row grows a streak, a strength and a full weekday spread purely as
+  // `end` walks forward. That is right for a TILE, which states a number. It is
+  // wrong for a BADGE, which says "You have kept this on all seven weekdays at
+  // least once" in English, about a habit logged once — a sentence its owner
+  // knows to be false. The figures are untouched and still shown; only the
+  // claims are withheld.
   const habit = { ...LIMIT, at_most_unlogged: 'success' };
   const rows = [{ date: '2026-01-01', value: 0, status: '' }];
+  const end = '2026-02-15';
 
-  const missed = computeStats({ ...habit, at_most_unlogged: 'miss' }, rows,
-    { end: '2026-02-15' });
-  const kept = computeStats(habit, rows, { end: '2026-02-15' });
+  const kept = computeStats(habit, rows, { end });
+  assert.equal(kept.bestStreak, 46, 'the tile really does claim the whole window');
+  assert.ok(kept.weekdays.every((d) => d.completed > 0), 'and every weekday is "kept"');
 
-  const m = byFamily(computeAwards(missed, '2026-02-15'));
-  assert.equal(m.streak, undefined);
-  assert.equal(m.week, undefined, 'only the one answered day counts as kept');
+  assert.deepEqual(computeAwards(kept, end, habit, 'miss'), [],
+    'yet the card is empty, because every badge would be a false sentence');
 
-  const a = byFamily(computeAwards(kept, '2026-02-15'));
-  assert.equal(a.streak.value, 30, 'the award must match the streak on the tile');
-  assert.equal(a.streak.value <= kept.bestStreak, true);
-  assert.ok(a.strength, 'and the strength band the curve reached');
-  // `computeWeekdays` reads the same rule, so the full week goes the same way.
-  // Two awards agreeing about silence beats two awards with opinions.
-  assert.ok(a.week, 'and every weekday, since silence is what the habit asked for');
+  // The gate is the habit-level override beating the account's, resolved by
+  // `unansweredCounts` and not restated here. Same habit, account saying
+  // `success`, habit saying `miss`: the arithmetic changes and so does the card.
+  const strict = { ...LIMIT, at_most_unlogged: 'miss' };
+  const missed = computeStats(strict, rows, { end });
+  const m = byFamily(computeAwards(missed, end, strict, 'success'));
+  assert.equal(m.streak, undefined, 'one answered day is not a streak');
+  assert.equal(m.week, undefined);
+});
+
+test('the gate is at-most only, and a real history on a limit still earns', () => {
+  // `unansweredCounts` is false for a boolean habit and for any at-least one,
+  // so nothing else is touched by the carve-out — including an at-least habit
+  // carrying `at_most_unlogged: 'success'`, which is reachable because the
+  // field outlives a switch of goal type.
+  const atLeast = {
+    type: 'numerical', target_value: 1, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1, at_most_unlogged: 'success',
+  };
+  const rows = [];
+  for (let i = 0; i < 40; i++) {
+    const d = new Date(2026, 0, 1 + i);
+    rows.push({
+      date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+      value: 1, status: '',
+    });
+  }
+  assert.ok(computeAwards(computeStats(atLeast, rows, { end: endOf('x'.repeat(40)) }),
+    endOf('x'.repeat(40)), atLeast, 'success').length > 0);
+
+  // And a limit whose days are actually answered is unaffected: it resolves to
+  // `miss`, which is the account default.
+  const limitRows = rows.map((r) => ({ ...r, value: 0 }));
+  assert.ok(computeAwards(computeStats(LIMIT, limitRows, { end: endOf('x'.repeat(40)) }),
+    endOf('x'.repeat(40)), LIMIT, 'miss').length > 0);
 });
 
 test('an avoided habit is judged on what is stored, not on how it is shown', () => {

@@ -386,7 +386,11 @@ api.get('/habits/:id/stats', route(async (req, res) => {
   // than inside `computeStats`, because `/overview` calls that once per habit
   // and throws all but four of its fields away. Same reason, same place, in
   // both editions — see the awards section of the root CLAUDE.md.
-  res.json({ habit, ...stats, awards: computeAwards(stats, end) });
+  //
+  // `habit` and `unlogged` are the SAME pair `computeStats` was given: awards
+  // read them for one gate, and a different answer there than here would
+  // withhold a card whose figures say the opposite.
+  res.json({ habit, ...stats, awards: computeAwards(stats, end, habit, unlogged) });
 }));
 
 api.get('/overview', route(async (req, res) => {

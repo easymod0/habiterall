@@ -105,6 +105,9 @@ export const UNLOGGED_DEFAULT = 'miss';
  * Resolved HERE rather than at each entry point, because every caller already
  * has the habit in hand and none of them should have to remember the
  * precedence. Add a third level and this stays the only place that changes.
+ * `awards.js` is the one caller outside this file, and it asks the question
+ * rather than restating it for exactly that reason — see the awards section of
+ * the root CLAUDE.md for why an award is withheld where a tile is not.
  *
  * Note this is about the FOURTH state and not about zero. A row holding 0 is a
  * stated lapse — "I had none today" — and for an at-most habit that is a real
@@ -112,7 +115,7 @@ export const UNLOGGED_DEFAULT = 'miss';
  * answered and a day nobody has, which is the whole of `questionMarks` and the
  * reason `entryWrite` stopped deleting rows. See constants.js.
  */
-function unansweredCounts(habit, unlogged) {
+export function unansweredCounts(habit, unlogged) {
   // Gated on the case this exists for, and the gate is load bearing rather
   // than tidy. Ungated, `success` fell through to the ordinary predicate for
   // EVERY habit — and on an at-least habit with a target of 0, `0 >= 0` is

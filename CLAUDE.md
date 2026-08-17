@@ -338,22 +338,55 @@ one place it looks like it belongs: `/overview` calls `computeStats` once per
 habit and keeps four of its fields, so putting awards there is a per-habit
 computation the dashboard would throw away.
 
-**Only a MONOTONE reading may be dressed as a trophy.** Nothing is stored — no
-ledger, no first-earned date — so an award exists for exactly as long as the
-numbers say so, and re-deriving can *revoke* one. That is not hypothetical here:
-several ranges start at the earliest stored entry, so one imported Loop `NO` row
-extends a habit's window backwards and a habit with `recovery.rate === null`
-acquires a real lapse. `bestStreak`, the peak of the score series, the longest
-CLOSED lapse and the recovery count all only grow as the window does, so an
-award read off one of them cannot be taken away — and `shared/test/awards.test.js`
-asserts that as the invariant rather than by example, walking one history a day
-at a time and failing if any family disappears or any value drops.
+**An award can be taken away, and the first version of this section said it
+could not.** That claim — *only a monotone reading may be dressed as a trophy,
+so an award read off `bestStreak` or the peak score cannot be revoked* — is
+false, and it is worth reading how it failed, because the reasoning was the
+plausible kind. It was a true statement about the FIGURES and a false one about
+the WINDOW, and only the second is what a user sees.
 
-Two readings are deliberately refused for that reason and they are the obvious
-ones. `currentStreak` un-earns itself on the day the run ends. And the score's
-CURRENT value flickers: it is a trailing-window EWMA, so a badge on it goes out
-with a bad week, which is a badge that punishes the thing it exists to
-encourage. The strength band is the **peak of the series**.
+`computeStats` starts at `from = start ?? firstEntry`, and `onPaceSeries`
+pro-rates the requirement near that start — `required = min(activeDays,
+num*activeDays/den)` — deliberately, so a habit is not judged against history it
+does not have yet. Move the earliest entry EARLIER and the first `den - 1` days
+are re-judged against a full requirement they now fail. Measured end to end
+through the real route: a 3×/week habit kept perfectly reads `bestStreak` 21 and
+shows "21-day streak"; logging **one forgotten session** from the week before
+drops it to 17 and the badge to "14-day streak". Remembering something you did
+takes the award down. Daily habits (`num >= den`) have no leniency window and
+are immune, which is exactly why this survived a test suite built on one.
+
+The second mechanism needs no user at all. `MAX_RANGE_DAYS` clamps `from` to
+`end - 3660`, so a habit older than ten years — or one carrying a single ancient
+row from an import — has a **sliding** window rather than a growing one. Watched
+over a few weeks of simulated calendar, an entire awards card emptied itself,
+`comeback` walking 2191 → 38 → 14 → gone.
+
+So there is no cleverer figure to read; the window is the problem, and nothing
+inside `awards.js` can patch around it. The framing is therefore **what this
+habit's history currently shows** — the position `computeSurvival`'s docstring
+already argues one card up, that a probability you can act on beats a trophy.
+The card says so in its lead, the payload carries no `permanent` flag, and there
+is no second visual treatment implying some badges are safer than others. If
+awards should ever be durable the answer is a granted ledger with a first-earned
+date, which is **issue #141**, and it is the only thing that would change this.
+
+What survives is the part that was about the figures rather than about
+permanence. `currentStreak` and the score's CURRENT value are still refused,
+because both fall on an ordinary bad week with the window standing perfectly
+still — a badge on either flickers for reasons the user cannot even see.
+Reading a maximum does not make an award durable; it stops it twitching day to
+day. That is a smaller claim and a true one.
+
+Two lessons about the tests, both of which cost nothing to state and would have
+cost a release to learn later. The invariant test asserted the property honestly
+and walked a **daily** habit forward from a fixed first entry — so `from` never
+moved and the leniency window never applied. It could not have seen either
+mechanism. It is now three tests: the two counterexamples above, pinned as
+behaviour, and the narrow claim that does hold with **both of its preconditions
+named in the test itself**. And a property test that constructs its own history
+is only ever as good as the shapes it constructs; the fuzz that found this ran
+400 non-daily histories and lost or lowered an award in 36.
 
 **The two ladders are calibrated to the curve, and the calibration was
 MEASURED.** `STRENGTH_BANDS` is 50/80/95, and a perfect daily habit crosses them
@@ -368,13 +401,14 @@ curve is drawn full height at the top of the same page, which answers "how far
 is there to go" better than a badge could. Same answer as the streak ladder, and
 for the same reason.
 
-**The one award that is not monotone says so in the payload.** "No lapse over a
-day" is a claim about the whole record and a two-day lapse ends it; there is no
-honest way to make that permanent short of the ledger #63 defers. It is
-`permanent: false`, it is worded as a fact rather than as a prize, and
-`.award.is-record` declines the habit's accent so it does not *look* like one
-either. The flag is on the wire rather than implicit so the next award of that
-kind has to state which it is.
+**"No lapse over a day" is falsified by a bad week rather than by the window,
+and the wording is what carries that.** Every other award moves when the window
+does; this one is a claim about the whole record, so the next two-day lapse ends
+it with the window standing still. It used to be `permanent: false` against a
+payload where everything else was `true` — a distinction that stopped meaning
+anything the moment the paragraph above was written. The sentence does the work
+instead: *All 7 lapses **so far** have lasted a single day*, which is a
+statement of the record and not a prize, and there is a test on the "so far".
 
 That award is also read from `missDistribution` and **not** from
 `recovery.rate === 1`, which is the same fact one set smaller. The closed set
@@ -394,11 +428,14 @@ figure in a stats response is computed over (`from = start ?? firstEntry`,
 clamped) is derived inside `computeStats` and never returned, so a second
 derivation is a second answer waiting to disagree.
 
-**Pure derivation has no "you just earned this" moment, and `fresh` is the
-cheapest honest substitute.** It marks the award whose value MOVED — the
+**Deriving on every request has no "you just earned this" moment, and `fresh` is
+the cheapest honest substitute.** It marks the award whose value MOVED — the
 recovery count, which goes up every time a lapse closes, not the comeback tier,
-which only moves when you beat your worst one — for `COMEBACK_FRESH_DAYS`. The
-award is permanent; it is the emphasis that expires.
+which only moves when you beat your worst one — for `COMEBACK_FRESH_DAYS`. Its
+test asserts a **literal** 7 and not the constant: reading the name back pins
+the off-by-one and nothing else, and that version passed with the window widened
+to 30 while its own comment claimed the boundary was covered. The same trap is
+worth looking for anywhere a test imports the number it is checking.
 
 Two smaller decisions, both of which read as omissions and are not. **Only the
 rung reached is shown**, not every rung passed: nine badges for a hundred-day
@@ -409,11 +446,11 @@ act on beating a trophy. And a **one-day lapse earns no comeback**
 (`COMEBACK_MIN_DAYS`), because "Back after 1 day" is precisely what "Recovered N
 times" already said.
 
-**The two "ever" claims are permanent for free, and one of them had to refuse
-the obvious threshold.** *Every day of the week* is `computeWeekdays` with
-`completed > 0` on all seven, and *A year of keeping it* is the span between the
-FIRST streak's start and the LAST one's end. Both ends of both only move
-outward as the window grows, which is the whole of why they are safe.
+**The two "ever" claims, and one of them had to refuse the obvious threshold.**
+*Every day of the week* is `computeWeekdays` with `completed > 0` on all seven,
+and *A year of keeping it* is the span between the FIRST streak's start and the
+LAST one's end. Both read maxima, which is what stops them twitching — and, per
+the paragraph above, is not a promise that they last.
 
 The weekday one is deliberately "at least once" and deliberately not a RATE
 across all seven, and that is the load-bearing part. `computeWeekdays` counts
@@ -427,15 +464,45 @@ what keeps the award consistent with the tiles for a limit under
 `atMostUnlogged: 'success'`, where an unanswered day counts as kept and so does
 the weekday it fell on.
 
-**A year is measured between the runs, not from `created_at`.** The creation
-date is not on the stats response — passing the habit in would have widened
-`computeAwards` past "a reading of what `computeStats` produced" — but the
-better reason is that it answers a different question: *created* a year ago is
-true of a habit abandoned in its first week, and there is a test that says so.
-The span between the first good run and the most recent one claims what the
-award actually means, needs no new input, and is monotone. It is also honest
-about an import: a Loop backup carrying a year of history earns it on the day it
-lands, because the record is a year long and that is what the badge says.
+**A year is measured between the runs, not from `created_at`.** The reason is
+not availability — `computeAwards` does take the habit now, for the gate below —
+it is that the creation date answers a different question: *created* a year ago
+is true of a habit abandoned in its first week, and there is a test that says
+so. The span between the first good run and the most recent one claims what the
+badge actually says. Note it is the first run's **start**, and the test's
+fixtures straddle the boundary on purpose: an earlier pair used a ten-day first
+run, so start-to-end and end-to-end were 399 and 390 days — both over a year, so
+measuring from the wrong end of that run passed every assertion and the whole
+distinction was unpinned. A forty-day first run puts the two answers either side
+of 365.
+
+It is also honest about an import in a way `created_at` would not be: a Loop
+backup carrying a year of history earns it on the day it lands, because the
+record is a year long and that is what the badge claims. (The README used to say
+there was "exactly one way to earn that one", which this contradicts. It no
+longer does.)
+
+**One award family is withheld where the tiles are not, and it is the only such
+carve-out.** An at-most habit resolved to `success` counts every unanswered day
+as kept — deliberately, and documented above — so a limit with a single stored
+row grows a streak, a strength band and a full weekday spread purely as the
+calendar moves. That is right for a TILE, which states a number the user reads
+against their own memory. It is wrong for a BADGE, which makes a claim in
+English: *"You have kept this on all seven weekdays at least once"* over a habit
+logged once is a sentence its owner knows to be false, and being told it
+discredits every other sentence on the card. #63 settles the tie itself — where
+an award is pure vanity, prefer the chart — and every figure is still on the
+chart and the tiles, untouched.
+
+The gate asks `unansweredCounts` rather than restating it, so the habit's
+`at_most_unlogged` beating the account's `atMostUnlogged` stays resolved in the
+one place that knows the precedence; that function is exported from `stats.js`
+for this one caller. And the routes must hand `computeAwards` the **same**
+`habit` and `unlogged` they handed `computeStats`, or the gate and the
+arithmetic answer different questions about one habit. Both arguments are
+optional — a caller with neither should get awards rather than an exception —
+which makes forgetting them silent on precisely the shape this exists for, so a
+test reads both editions' `api.js` and fails if either call loses them.
 
 **What is NOT here, and why, because each looked cheap and was not.**
 *Coverage* — "every day this month has an answer, whatever it was" — is the
@@ -454,23 +521,25 @@ taken deliberately* is gated on `skipDays`, which defaults off, and #63's own
 warning applies: an award nobody can see is worse than no award. Portfolio
 awards read every habit at once and belong to an account-level route.
 
-Note the caveat that applies to every award above: `?start=` narrows the window
-and can therefore lower any of these, deliberately — that caller is asking about
-a period, exactly as the detail view's range controls do, and the same is
-already true of `bestStreak`. The monotonicity claim is about the window as it
-actually moves for the detail view, which is forward with the habit's whole
-history inside it.
+`?start=` narrows the window and lowers any of these, which is the same
+mechanism as the two above and the one case where it is unambiguously right:
+that caller is asking about a period, exactly as the detail view's range
+controls do, and `bestStreak` has always answered it that way.
 
 **Nothing here is worded per habit shape, and that was checked rather than
 assumed.** An at-most habit and a `show_as: 'avoid'` one both earn from the same
 vocabulary — lapse, streak, strength — because those are the words the cards
 either side of the awards row already use for the same habit, and #113 inverted
 the RENDERING and no verdict. `show_as` is display-only, so the two award
-identically and a test pins that. What an unlogged day is worth reaches awards
-for free: `at_most_unlogged` is resolved in `unansweredCounts` before any of
-these numbers exist, so a limit kept by saying nothing shows the same streak
-award as it shows a streak tile. That is the model working as designed, and the
-awards agreeing with the tiles beside them is the point.
+identically and a test pins that.
+
+**One element here has text on a fill, and it must not be the habit's colour.**
+The "New" pill took `--award-accent`, which is a colour the user picked and
+whose lightness nothing constrains, with `color: #fff` — so a pale habit gave
+white on white. Every other coloured surface in the app either carries no text
+or mixes against a theme variable, as `charts.js` does. It takes `--accent` and
+the `#fff` pairing `.btn-primary` already ships in both themes; the habit's
+colour stays on the chip's left edge, where it needs no contrast ratio.
 
 **Every date range is clamped** (`boundedRange`, `MAX_RANGE_DAYS`). Ranges
 derived from *stored* data are attacker-controlled: one entry dated year 0100

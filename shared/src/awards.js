@@ -7,30 +7,49 @@
  * which is the whole reason this file is thirty lines of arithmetic and not a
  * table with a ledger behind it.
  *
- * Two rules decide what may be in here, and they are the ones that cost
- * something to get wrong:
+ * **Nothing here is permanent, and an earlier draft of this file claimed
+ * otherwise.** The claim was that a reading taken from a figure that only goes
+ * up — `bestStreak`, the peak score, the longest lapse recovered from — could
+ * not be taken away, so it was safe to present as something earned. That is
+ * false, and it is false through the ordinary API. Two mechanisms, neither
+ * patchable from here:
  *
- * **A derived award can be REVOKED, so only a monotone reading may be dressed
- * as a trophy.** With no ledger there is no "you earned this on the 4th": the
- * award exists for exactly as long as the numbers say so. `bestStreak`, the
- * peak score, the longest lapse recovered from and the recovery count all only
- * ever go up as the window grows, so an award read off one of them cannot be
- * taken away. `permanent` says which, and it is on the payload rather than
- * implicit so that the next award of the other kind has to say what it is.
+ * 1. `computeStats` starts its window at `start ?? firstEntry`, and
+ *    `onPaceSeries` pro-rates the requirement near the start of that window —
+ *    deliberately, so a habit is not judged against history it does not have
+ *    yet. Move the earliest entry EARLIER and the first `den - 1` days are
+ *    re-judged against a full requirement they now fail. So logging one
+ *    forgotten session takes a 3×/week habit from `bestStreak` 21 to 17, and
+ *    the badge from "21-day streak" to "14-day streak". Daily habits
+ *    (`num >= den`) have no leniency window and are immune; every other
+ *    frequency is exposed.
+ * 2. `MAX_RANGE_DAYS` clamps that window start to `end - 3660`, so a habit
+ *    older than ten years — or one carrying a single ancient row from an
+ *    import — has a SLIDING window rather than a growing one. Awards then
+ *    shrink and vanish with no user action at all, purely as the calendar
+ *    moves.
  *
- * **The one that is not monotone is worded as a record, not as a medal.** "No
- * lapse over a day" is a claim about the whole history and a two-day lapse ends
- * it — there is no honest way to make that permanent short of storing it, which
- * is the decision issue #63 defers. It is `permanent: false`, and it reads as a
- * statement of fact so that its going away is the fact changing rather than a
- * prize being confiscated.
+ * So the framing is not "you have earned this" but **what this habit's history
+ * currently shows**, which is the position `computeSurvival`'s docstring
+ * already argues for one card further up: a reading you can act on beats a
+ * trophy. Every label and every detail sentence here is a statement in the
+ * present tense about the window that was computed, and the card says so. If
+ * awards should ever be durable, the answer is the granted-ledger with a
+ * first-earned date — issue #141 — and not a cleverer choice of figure. There
+ * is no cleverer choice of figure; the window is the problem.
  *
- * Note what is deliberately NOT read here: `currentStreak`, and the score's
- * current value. Both go down. An award tied to either un-earns itself on the
- * day the run ends, which is the single most demotivating thing this could do.
+ * What survives from that first draft is the part that was about the FIGURES
+ * rather than about permanence, and it is still worth keeping. `currentStreak`
+ * and the score's current value are refused: both fall on an ordinary bad week
+ * with the window standing perfectly still, so a badge on either flickers for
+ * reasons the user cannot even see. Reading a maximum does not make an award
+ * durable, but it does stop it twitching day to day, which is a smaller and
+ * true claim.
  */
 
-import { daysBetween, SURVIVAL_THRESHOLDS } from './stats.js';
+import {
+  daysBetween, unansweredCounts, SURVIVAL_THRESHOLDS, UNLOGGED_DEFAULT,
+} from './stats.js';
 
 /**
  * The strength ladder, calibrated against the real curve rather than against
@@ -55,10 +74,13 @@ export const STRENGTH_BANDS = [0.5, 0.8, 0.95];
 /**
  * How long a comeback stays news.
  *
- * Pure derivation has no "you just earned this" moment, which is the thing it
- * genuinely gives up. This is the cheapest honest substitute: the award whose
- * value MOVED when a lapse closed says so for a week. The award itself is
- * permanent — it is the emphasis that expires, not the badge.
+ * Deriving on every request has no "you just earned this" moment, which is the
+ * thing it genuinely gives up. This is the cheapest honest substitute: the
+ * award whose value MOVED when a lapse closed says so for a week.
+ *
+ * Pinned against a LITERAL in the test rather than against this name, because a
+ * test that reads the constant proves only the off-by-one and passes with the
+ * value changed to anything at all.
  */
 export const COMEBACK_FRESH_DAYS = 7;
 
@@ -87,27 +109,56 @@ const COMEBACK_MIN_DAYS = 2;
  * @property {string} label     the badge itself
  * @property {string} detail    the number behind it, in a sentence
  * @property {number} value     the figure the award was read from
- * @property {boolean} permanent  false only for a claim a future lapse can end
  * @property {boolean} fresh    this moved within COMEBACK_FRESH_DAYS
+ *
+ * There is deliberately no `permanent` here any more. It used to say which
+ * awards could not be taken away, and the answer turned out to be none of
+ * them — see the header. A flag that is false for every member is not a
+ * distinction, and leaving it on the wire would have kept the claim alive in
+ * the one place a client could act on it.
  */
 
 /** @param {Partial<Award>} a @returns {Award} */
-const award = (a) => /** @type {Award} */ ({ permanent: true, fresh: false, ...a });
+const award = (a) => /** @type {Award} */ ({ fresh: false, ...a });
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /**
- * Every award this habit's history supports, in a fixed order.
+ * Every award this habit's history currently supports, in a fixed order.
  *
  * @param {import('./types.js').Stats} stats the response `computeStats` built
  * @param {string} end the day the stats were computed as of, 'YYYY-MM-DD'.
  *   The caller's day, not the container's — see `callerDay` in notify.js.
+ * @param {*} [habit] the habit those stats are about. Read for ONE question —
+ *   see the gate below — and never for a figure: everything an award reports
+ *   comes off `stats`.
+ * @param {string} [unlogged] the account's `atMostUnlogged`, as passed to
+ *   `computeStats`. Same value, or the gate and the arithmetic disagree.
  * @returns {Award[]}
  */
-export function computeAwards(stats, end) {
+export function computeAwards(stats, end, habit, unlogged) {
   /** @type {Award[]} */
   const out = [];
   if (!stats) return out;
+
+  // A limit whose unanswered days count as KEPT earns nothing here, and this is
+  // the one place awards decline to agree with the tiles beside them.
+  //
+  // Under that resolution the arithmetic counts every day nobody answered as a
+  // success — deliberately, and documented: "I had no soda" is not something
+  // anyone opens an app for, so silence is the answer. It is right for a tile,
+  // which STATES A NUMBER the user can read against their own memory. It is
+  // wrong for a badge, which makes A CLAIM IN ENGLISH: "You have kept this on
+  // all seven weekdays at least once" over a habit with one stored row is a
+  // sentence its owner knows to be false, and being told it undermines every
+  // other sentence on the card. #63's own brief settles the tie — where an
+  // award is pure vanity, prefer the chart — and every figure is still on the
+  // chart and the tiles, unchanged.
+  //
+  // Asked through `unansweredCounts` rather than restated, so the habit's
+  // `at_most_unlogged` beating the account's `atMostUnlogged` stays resolved in
+  // the one place that knows the precedence.
+  if (unansweredCounts(habit, unlogged ?? UNLOGGED_DEFAULT)) return out;
 
   /* ---- streaks: the ladder the survival curve already uses ---- */
 
@@ -227,12 +278,16 @@ export function computeAwards(stats, end) {
       family: 'tenure',
       value: years,
       label: years === 1 ? 'A year of keeping it' : `${years} years of keeping it`,
-      detail:
-        `Your first good run and your most recent are ${plural(span, 'day')} apart.`,
+      // One run is both the first and the most recent, and "your first good run
+      // and your most recent are 399 days apart" is a strange thing to read
+      // about a habit that has simply never broken.
+      detail: streaks.length === 1
+        ? `One unbroken run, ${plural(streaks[0].length, 'day')} long.`
+        : `Your first good run and your most recent are ${plural(span, 'day')} apart.`,
     }));
   }
 
-  /* ---- and the one that is a record rather than a trophy ---- */
+  /* ---- the claim about the whole record ---- */
 
   // Read from the DISTRIBUTION, which counts an open run, and not from
   // `rate === 1`, which does not. Those two disagree in exactly the case that
@@ -252,7 +307,6 @@ export function computeAwards(stats, end) {
       value: lapses,
       label: 'No lapse over a day',
       detail: `All ${plural(lapses, 'lapse')} so far have lasted a single day.`,
-      permanent: false,
     }));
   }
 

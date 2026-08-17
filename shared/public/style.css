@@ -594,14 +594,6 @@ svg.chart { display: block; max-width: 100%; height: auto; }
   padding: 10px 12px;
   min-width: 0;
 }
-/*
- * A record rather than a mark: true of the history so far, and a future lapse
- * can end it. It declines the accent for exactly that reason — a coloured bar
- * reads as something you were given, and this one can go away.
- */
-.award.is-record {
-  border-left-color: var(--border);
-}
 .award-label {
   font-size: 13.5px;
   font-weight: 600;
@@ -613,6 +605,17 @@ svg.chart { display: block; max-width: 100%; height: auto; }
   color: var(--text-dim);
   line-height: 1.4;
 }
+/*
+ * The "New" pill, and it deliberately does NOT take the habit's colour.
+ *
+ * This is the one element here with text ON a fill, and `--award-accent` is a
+ * colour the user picked — nothing constrains its lightness, so a pale habit
+ * gave white-on-white and an unreadable pill. Every other coloured surface in
+ * this app either carries no text or mixes against a theme variable
+ * (`color-mix` in charts.js). `--accent` is the theme's own, and `#fff` on it
+ * is the pairing `.btn-primary` already ships in both themes. The habit's
+ * colour is on the chip's left edge, where it needs no contrast ratio.
+ */
 .award-fresh {
   display: inline-block;
   vertical-align: 1px;
@@ -622,7 +625,7 @@ svg.chart { display: block; max-width: 100%; height: auto; }
   letter-spacing: 0.06em;
   padding: 1px 5px;
   border-radius: 999px;
-  background: var(--award-accent, var(--accent));
+  background: var(--accent);
   color: #fff;
 }
 

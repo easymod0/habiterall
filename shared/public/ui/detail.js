@@ -441,11 +441,12 @@ function render(stats, entries) {
  * `shared/src/awards.js` — the ladder they are read off (`SURVIVAL_THRESHOLDS`)
  * lives in `stats.js`, which the browser cannot import, and a second copy of it
  * here is exactly the drift the issue asked for it to be reused to avoid. So
- * the client's whole job is the styling, and the one bit of judgement it keeps
- * is which of two shapes to draw: `permanent` says whether an award is a mark
- * that cannot be lost or a claim about the record so far that a future lapse
- * can end. That is the visible half of the "derive, do not keep a counter"
- * decision, and it must not be flattened into one appearance.
+ * the client's whole job is the styling, and it keeps no judgement at all: an
+ * earlier version drew two shapes from a `permanent` flag, which claimed some
+ * awards could not be taken away. None of them can promise that — the window
+ * every figure is computed over moves — so the flag is gone and with it the
+ * second shape. The lead paragraph says what these are instead, which is the
+ * honest place for it.
  *
  * Returns null for a habit with nothing yet, so a brand-new one gets no empty
  * card — the same rule the resilience card follows.
@@ -460,9 +461,13 @@ function buildAwardsCard(stats, color) {
 
   const lead = document.createElement('p');
   lead.className = 'hint';
+  // Says what these are, in the one place a reader will look. Nothing is
+  // stored, so each of these is a reading of the history as it stands — which
+  // means it can change when the history does, including backwards.
   lead.textContent =
-    'Read back from this habit’s own history. Nothing is stored, so an '
-    + 'award says what is true now.';
+    'What this habit’s history shows right now. These are worked out from '
+    + 'your entries each time rather than stored, so they move as the history '
+    + 'does.';
   c.append(lead);
 
   const row = document.createElement('div');
@@ -470,7 +475,7 @@ function buildAwardsCard(stats, color) {
 
   for (const a of awards) {
     const el = document.createElement('div');
-    el.className = a.permanent ? 'award' : 'award is-record';
+    el.className = 'award';
     // The habit's own colour, as every other figure on this page uses. Set as
     // a custom property rather than a border colour so the record variant can
     // decline it without a second rule.
@@ -484,9 +489,8 @@ function buildAwardsCard(stats, color) {
     if (a.fresh) {
       const flag = document.createElement('span');
       flag.className = 'award-fresh';
-      // The award is permanent; it is this marker that expires. A comeback is
-      // the one thing here with a moment, and pure derivation has no other way
-      // to give it one.
+      // A comeback is the one thing here with a moment, and deriving on every
+      // request has no other way to give it one.
       flag.textContent = 'New';
       label.append(' ', flag);
     }

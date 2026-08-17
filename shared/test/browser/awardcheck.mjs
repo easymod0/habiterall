@@ -8,10 +8,11 @@
  * shows that the response does not carry is a second opinion, which is the one
  * thing `shared/src/awards.js` exists to prevent.
  *
- * Two shapes only a rendered page has: a `permanent: false` award has to LOOK
- * different from a mark (a claim a future lapse can end must not read as a
- * medal), and the row has to fit a 360px card, which is where a grid of five
- * badges squeezes its labels to nothing.
+ * The other thing only a rendered page can answer is fit: the row has to work
+ * in a 360px card, which is where a grid of five badges squeezes its labels to
+ * nothing. And the "New" pill is checked for CONTRAST, because it is the one
+ * element here with text on a fill and it used to take the habit's own colour —
+ * a pale habit gave white on white.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -96,9 +97,11 @@ try {
         // the marker is a state of the award, not part of its name.
         label:a.querySelector('.award-label')?.firstChild?.textContent.trim(),
         detail:a.querySelector('.award-detail')?.textContent.trim(),
-        record:a.classList.contains('is-record'),
         fresh:!!a.querySelector('.award-fresh'),
         accent:cs.borderLeftColor,
+        pill:(()=>{const p=a.querySelector('.award-fresh');if(!p)return null;
+          const ps=getComputedStyle(p);
+          return {bg:ps.backgroundColor, fg:ps.color};})(),
         w:Math.round(a.getBoundingClientRect().width),
         right:Math.round(a.getBoundingClientRect().right),
       };});
@@ -122,7 +125,7 @@ try {
 
   console.log('\n--- the card ---');
 
-  let withRecord = null, withFresh = null, seen = 0;
+  let withFresh = null, seen = 0;
 
   for (let i = 0; i < habits.length; i++) {
     if (i > 0) await back();
@@ -173,30 +176,18 @@ try {
     ck('  no chip overflows the card', r.chips.every((c) => c.right <= r.right + 1),
       `card ${r.right}, widest chip ${Math.max(...r.chips.map((c) => c.right))}`);
 
-    if (r.chips.some((c) => c.record)) withRecord = r;
+    // Nothing on the wire may claim an award cannot be lost — the window every
+    // figure is computed over moves, in both directions.
+    ck('  no award claims permanence',
+      api.awards.every((a) => !('permanent' in a)),
+      JSON.stringify(api.awards.map((a) => Object.keys(a))[0] ?? []));
+
     if (r.chips.some((c) => c.fresh)) withFresh = r;
   }
 
   ck('at least one fixture habit earned something', seen > 0, `${seen} of ${habits.length}`);
 
-  /* ---------- a record is not a medal ---------- */
-
-  console.log('\n--- a record is drawn as a record ---');
-
-  ck('some habit has an award that a future lapse could end', withRecord != null,
-    withRecord ? withRecord.habit : 'none');
-
-  if (withRecord) {
-    const record = withRecord.chips.find((c) => c.record);
-    const mark = withRecord.chips.find((c) => !c.record);
-    ck('  it is the one the server marked not permanent',
-      record.id === 'lapses:single', record.id);
-    ck('  and it does not wear the habit\'s accent',
-      mark != null && record.accent !== mark.accent,
-      `${record.accent} vs ${mark?.accent}`);
-  }
-
-  /* ---------- the one moment pure derivation can offer ---------- */
+  /* ---------- the one moment deriving-every-time can offer ---------- */
 
   console.log('\n--- a fresh comeback ---');
 
@@ -204,6 +195,19 @@ try {
   // stop, this says so rather than silently checking nothing.
   ck('a recent comeback is marked as new', withFresh != null,
     withFresh ? withFresh.habit : 'no fixture habit came back this week');
+
+  if (withFresh) {
+    // The pill carries text on a fill, so its colours must not come from the
+    // habit's — nothing constrains what the user picked, and a pale habit gave
+    // white on white. It takes the theme's accent, the pairing .btn-primary
+    // already ships.
+    const pill = withFresh.chips.find((c) => c.fresh).pill;
+    const accent = withFresh.chips.find((c) => c.fresh).accent;
+    ck('  the pill does not take the habit\'s colour as its fill',
+      pill.bg !== accent, `${pill.bg} vs habit ${accent}`);
+    ck('  and its text is not the same colour as its background',
+      pill.fg !== pill.bg, `${pill.fg} on ${pill.bg}`);
+  }
 
   /* ---------- narrow ---------- */
 
