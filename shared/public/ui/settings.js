@@ -760,11 +760,27 @@ export function set(key, value) {
   }).then(async (res) => {
     if (!res.ok) return;
     const payload = await res.json().catch(() => null);
-    adopt(payload?.settings);
+    // `[key]`, exactly as `save` and `saveAll` pass theirs. `wrote` is how an
+    // applier tells "the account says this" from "this device just said this",
+    // and defaulting it to `[]` here says the write came from somewhere else —
+    // so an in-place control for a key any applier watches would reinstate the
+    // defect `reconcile`'s `wrote` check exists to prevent. No caller uses
+    // `set` for such a key today, which is exactly why it is worth being right
+    // about now rather than at the point one does.
+    adopt(payload?.settings, [key]);
   }).catch(async (err) => {
     // Out of time is not offline, and this one is fire-and-forget: nobody is
     // waiting to be told, so an abandoned write is simply dropped rather than
     // queued to replay over whatever the user does next.
+    //
+    // Note this covers EVERY key `set` writes — `calendarZoom`,
+    // `historyGranularity`, `historyMode` — and not only the theme that
+    // motivated it. The cache has already been written, so the device keeps a
+    // value the server never received and it reverts at the next `init()`.
+    // That is the deliberate trade: a bounded write that may still land must
+    // not also be queued, or the replay lands on top of whatever the user
+    // chose in the meantime, and these are all in-place toggles somebody is
+    // actively working. `save` is the path for a value that must be confirmed.
     if (timedOut(err)) return;
     // Offline. Queue the write so the choice reaches the server rather than
     // living on this device only — otherwise a preference set on a train

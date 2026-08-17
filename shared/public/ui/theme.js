@@ -147,6 +147,28 @@ const LABEL = {
 };
 
 /**
+ * A distinct glyph per state, because one press cannot change the pixels.
+ *
+ * The cycle's last step is `system` from a value that already matches the
+ * device, which is the same appearance BY DEFINITION — so with a static `◐` on
+ * the button, the third press did nothing observable whatsoever. `LABEL` was
+ * the answer to that and it is not one on the app's primary target: a `title`
+ * needs a pointer to hover, and a phone has none. `aria-label` is read aloud
+ * and is the right thing for a screen reader; neither is visible to somebody
+ * looking at the screen.
+ *
+ * So the button SHOWS which of the three it is on. That also makes the two
+ * pressed states tellable from the followed one at a glance, which the label
+ * could only answer when asked — an account set to dark on a dark device and
+ * one following a dark device are the same pixels everywhere else.
+ */
+const GLYPH = {
+  system: '◐',
+  light: '☀',
+  dark: '☾',
+};
+
+/**
  * One `MediaQueryList`, built on first use.
  *
  * Lazily rather than at module scope, so importing this into a fake DOM that
@@ -172,6 +194,24 @@ function choice() {
 }
 
 /**
+ * The same answer, for the settings dialog's draft.
+ *
+ * The dialog seeded `theme` from `settings.load()`, which is the account's
+ * view and cannot see the device record — so the control could say "Follow
+ * this device" over a page painted dark, which is the one place a user goes to
+ * find out what the theme IS. Two states reach it: an un-migrated pre-setting
+ * key with the boot GET refused (offline, or the 429 this module's own
+ * reconcile is written around), and a press whose write came back
+ * `indeterminate`, where the record deliberately outlives the cache.
+ *
+ * Exported rather than reached for, because the record's spellings are this
+ * module's business and `choice()` is the one place they are read.
+ */
+export function currentTheme() {
+  return choice();
+}
+
+/**
  * What the button should say, given where the cycle is.
  *
  * The current STATE, not the next action — `LABEL` reads "Theme: light", and
@@ -184,10 +224,10 @@ function choice() {
  *
  * Returned rather than written, because `#btn-theme` belongs to `app.js` and
  * `test/ui-modules.test.js` fails when two modules reach for one id. Note this
- * is NOT the redraw callback the header refuses: it says a sentence, and
- * nothing repaints on the strength of it.
+ * is NOT the redraw callback the header refuses: it says a sentence and shows
+ * a glyph, and nothing repaints on the strength of either.
  */
-/** @type {(text: string) => void} */
+/** @type {(text: string, glyph: string) => void} */
 let announce = () => {};
 
 /**
@@ -221,7 +261,7 @@ function apply(value) {
     }
   } catch { /* a document without a cascade; the attribute is what matters */ }
 
-  announce(LABEL[value] ?? LABEL.system);
+  announce(LABEL[value] ?? LABEL.system, GLYPH[value] ?? GLYPH.system);
 }
 
 /**
@@ -232,8 +272,8 @@ function apply(value) {
  * immediately and again every time they move, which covers all six paths the
  * cache changes by.
  *
- * @param {{onLabel?: (text: string) => void}} [opts] told what the control
- *   should now say. The control itself is `app.js`'s.
+ * @param {{onLabel?: (text: string, glyph: string) => void}} [opts] told what
+ *   the control should now say AND show. The control itself is `app.js`'s.
  */
 export function initTheme({ onLabel } = {}) {
   if (onLabel) announce = onLabel;

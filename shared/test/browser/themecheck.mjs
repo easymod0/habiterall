@@ -895,10 +895,19 @@ try {
   // Against a choice made on this same device afterwards, that toughness was
   // wrong. Press to dark offline, reconnect, open Settings, pick Light, press
   // Done: the reply reached `reconcile`, the press was still on the device, and
-  // it was pushed straight back over the choice with nothing said — then again
-  // when the outbox replayed the queued press. The rule is `wrote`, not
-  // `stored`: cloud answers every write with the whole blob, so a reply naming
-  // `theme` cannot say whether this write was about it.
+  // it was pushed straight back over the choice with nothing said. The rule is
+  // `wrote`, not `stored`: cloud answers every write with the whole blob, so a
+  // reply naming `theme` cannot say whether this write was about it.
+  //
+  // Be exact about what that closes, because an earlier version of this
+  // comment said "then again when the outbox replayed the queued press" as
+  // though the replay were covered too. It is not. `forget()` retires the
+  // RECORD and does not reach into the outbox, so a press queued while offline
+  // still replays: pick Light in the dialog before the flush runs and the
+  // flush lands dark. The window is narrow — the boot `watchConnectivity` emit
+  // flushes early — and it is not specific to the theme, since the outbox has
+  // always been last-write-wins by submission order for every setting.
+  //
   // The read is refused for the whole block, which is what keeps the press
   // UNCONFIRMED — the state the bug needs and the state the real report is in.
   // Without it the boot GET reconciles first: the account holds no theme, so

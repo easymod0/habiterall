@@ -138,7 +138,7 @@ class AppSettingsDefaultsTest {
      * the account, and nothing here noticed there was no default for it.
      *
      * So the registry is enumerated and every key must be in one list or the
-     * other. [NOT_MIRRORED] is the deliberate half, and each entry carries its
+     * other. [notMirrored] is the deliberate half, and each entry carries its
      * reason — the same shape as `ELSEWHERE` in shared/test/compose.test.js,
      * and for the same purpose: "we thought about it" has to be written down,
      * or it is indistinguishable from "we forgot".
@@ -154,6 +154,17 @@ class AppSettingsDefaultsTest {
         // browser uses. The native chrome around it follows the system theme,
         // which is Android's own setting and not this account's — so a default
         // here would be a value nothing on this client reads.
+        //
+        // Two costs come with that and are accepted rather than unnoticed. A
+        // phone in light mode with the account set to dark shows light chrome
+        // around a dark page; and `WebScreen`'s pre-paint background is the
+        // Material one, so that combination flashes light on the way into each
+        // habit — the very flash that colour is set to prevent, corrected for
+        // the wrong theme. Fixing either properly means the phone knowing the
+        // account's theme, which is a mirror, and this list is where that is
+        // refused. If it is ever worth it, the honest shape is an OBSERVATION
+        // (cache the colour the WebView last painted) and not a copy of the
+        // setting — the distinction `notifyTimezone` already draws.
         "theme" to "the WebView paints it; native chrome follows Android",
         // Server-sent destinations. The phone's own channel is `notifyChannels`,
         // which IS mirrored; these three configure Discord, which this client
@@ -167,10 +178,28 @@ class AppSettingsDefaultsTest {
         "notifyTimezone" to "the local alarm is already on this device's clock",
     )
 
+    /**
+     * The text of the `SETTINGS` object literal, and nothing else in the file.
+     *
+     * Scoped rather than scanned whole. The key pattern is "two spaces, a name,
+     * a brace", which inside this literal means a setting and outside it means
+     * any two-space-indented object — a `CHANNELS`-shaped map, an options
+     * table, a nested literal in some later function — so a scan over the file
+     * would invent settings and demand a mirror decision for each. The floor
+     * below catches the opposite failure and could not catch this one.
+     */
+    private val settingsLiteral: String by lazy {
+        val open = registry.indexOf("\nexport const SETTINGS = {")
+        assertTrue("no `export const SETTINGS = {` in the registry", open >= 0)
+        val close = registry.indexOf("\n};", open)
+        assertTrue("`export const SETTINGS` is not closed by a `};` at column 0", close > open)
+        registry.substring(open, close)
+    }
+
     @Test
     fun `every registry key is mirrored or deliberately not`() {
         val keys = Regex("""\n {2}([a-zA-Z][a-zA-Z0-9]*): \{""")
-            .findAll(registry)
+            .findAll(settingsLiteral)
             .map { it.groupValues[1] }
             .toList()
 
@@ -181,6 +210,20 @@ class AppSettingsDefaultsTest {
                 "must have changed",
             keys.size >= 12,
         )
+
+        // ...and the other direction: a name in either list that the registry no
+        // longer has. Without this a setting could be REMOVED from the web and
+        // its entry here would sit on, reading as a decision about something
+        // that does not exist — and if the scan ever widened to match too much,
+        // the lists would still be satisfied and only this would notice.
+        for (listed in mirrored + notMirrored.keys) {
+            assertTrue(
+                "`$listed` is listed here but is not a key in SETTINGS. Either it " +
+                    "was renamed or removed from shared/public/ui/settings.js, or " +
+                    "this list has outlived it.",
+                listed in keys,
+            )
+        }
 
         for (key in keys) {
             assertTrue(

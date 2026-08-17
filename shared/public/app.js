@@ -136,10 +136,16 @@ export async function start(adapter) {
   // only says what it should read. Two modules reaching for one id is what
   // `test/ui-modules.test.js` refuses.
   initTheme({
-    onLabel: (text) => {
+    onLabel: (text, glyph) => {
       const button = $('#btn-theme');
       button.title = text;
       button.setAttribute('aria-label', text);
+      // The VISIBLE half, and the only one a phone has: `title` needs a
+      // pointer to hover and `aria-label` needs a screen reader. With a
+      // static glyph the one press that cannot change the pixels — back to
+      // `system` from a value the device already matches — looked like a
+      // dead control on the app's primary target.
+      button.textContent = glyph;
     },
   });
   connectivity.refreshOfflineBadge();
