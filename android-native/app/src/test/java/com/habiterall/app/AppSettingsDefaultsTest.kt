@@ -185,6 +185,26 @@ class AppSettingsDefaultsTest {
         // so there is nothing here for this to govern. `resolveTimeZone` reads
         // it for the SERVER's sends only.
         "notifyTimezone" to "the local alarm is already on this device's clock",
+        // The one entry here that records a COST rather than an absence of one,
+        // and it is written down as such deliberately.
+        //
+        // This decides which character a decimal point is where an amount is
+        // TYPED, and this client has three places that read one: `parseAmount`
+        // in HabitFormScreen, and a bare `toDoubleOrNull` in both
+        // CountEntryActivity and MainActivity's day dialog — which already
+        // disagree with each other about "8,5", never mind with the web. So the
+        // honest statement is not "the phone does not read this", it is "the
+        // phone has no single reader to give it to", and handing an account's
+        // answer to three rules that differ would make it mean three things.
+        //
+        // What that costs: an account that has CHOSEN a convention is followed
+        // in the browser and not here, where the notification's number pad goes
+        // on reading a dot as a decimal point whatever the account says. Under
+        // `auto` — the default, and almost everybody — the phone would resolve
+        // its own locale and there would be nothing to carry. Issue #157 is the
+        // whole of it: unify the three readers, then choose between the device
+        // tier and a real mirror.
+        "numberFormat" to "three Kotlin readers that do not yet agree — see #157",
     )
 
     /**

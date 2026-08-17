@@ -477,6 +477,10 @@ await withUser(alice, (db) => db.query(
     // Not the registry default, or this compares 'system' with 'system'
     // and passes with `theme` dropped from PORTABLE_SETTINGS.
     theme: 'dark',
+    // Likewise, and this one decides what the NEXT typed amount MEANS rather
+    // than how anything is drawn: `10.000` is ten under one and a refused
+    // thousands group under the other.
+    numberFormat: 'comma',
     discordWebhook: 'https://discord.com/api/webhooks/1/secret',
   }), alice]
 ));
@@ -490,7 +494,8 @@ ck('a backup carries the tracking settings',
   // The third of them, and the one that changes an arithmetic rather than a
   // drawing: restore the rows without it and a limit's streaks come back
   // different from the ones that were exported.
-  exported.atMostUnlogged === 'success' && exported.theme === 'dark',
+  exported.atMostUnlogged === 'success' && exported.theme === 'dark' &&
+  exported.numberFormat === 'comma',
   JSON.stringify(exported));
 ck('and no notification destination',
   !Object.keys(exported).some((k) => k.startsWith('discord') || k.startsWith('notify')),

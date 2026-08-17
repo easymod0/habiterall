@@ -115,7 +115,8 @@ try {
     const id=location.hash.replace('#/habit/','');
     const r=await fetch('/api/habits/'+id+'/stats');
     const s=await r.json();
-    return {id, awards:s.awards, bestStreak:s.bestStreak, score:s.score};})()`);
+    return {id, awards:s.awards, bestStreak:s.bestStreak, score:s.score,
+      coverage:s.coverage};})()`);
 
   const habits = await ev(
     `[...document.querySelectorAll('.habit-row .habit-name, .habit-row .name')].map(n=>n.textContent.trim())`);
@@ -125,7 +126,7 @@ try {
 
   console.log('\n--- the card ---');
 
-  let withFresh = null, seen = 0;
+  let withFresh = null, seen = 0, coverageSeen = 0;
 
   for (let i = 0; i < habits.length; i++) {
     if (i > 0) await back();
@@ -182,10 +183,46 @@ try {
       api.awards.every((a) => !('permanent' in a)),
       JSON.stringify(api.awards.map((a) => Object.keys(a))[0] ?? []));
 
+    // The coverage award is the one read off a FIELD rather than off a figure,
+    // so this is where the two ends of that decision are checked against each
+    // other: `stats.coverage` is what the route sends, the badge is what the
+    // page shows, and they must be the same count. Asserted as a relationship
+    // rather than as a number, because whether a 60-day fixture window contains
+    // a whole calendar month depends on the day the suite is run.
+    //
+    // The at-most `success` gate looks as though it should break the second
+    // half of that relationship — it withholds the badge while `stats.coverage`
+    // still reports a full month, which would read as a correct suppression
+    // being called a failure. It cannot reach here: the gate empties the card
+    // ENTIRELY, so such a habit leaves this loop at the `!api.awards.length`
+    // branch above. Verified rather than argued, by setting
+    // `at_most_unlogged: 'success'` on the fixtures' at-most habit and
+    // re-running — it takes the "earns nothing, so there is no empty card"
+    // branch and passes. Move that early `continue` and this check needs the
+    // gate written into it.
+    const full = (api.coverage ?? []).filter((m) => m.answered === m.days).length;
+    const badge = api.awards.find((a) => a.family === 'coverage');
+    ck(`  coverage: ${full} fully-answered month(s) in the window`,
+      full > 0 ? badge?.value === full : badge === undefined,
+      `${full} months, badge ${badge ? badge.value : 'absent'}`);
+    if (badge) {
+      coverageSeen++;
+      ck('  and the badge is on the page with the server\'s words',
+        r.chips.some((c) => c.id === badge.id && c.label === badge.label),
+        r.chips.map((c) => c.id).join(', '));
+    }
+
     if (r.chips.some((c) => c.fresh)) withFresh = r;
   }
 
   ck('at least one fixture habit earned something', seen > 0, `${seen} of ${habits.length}`);
+  // Not a failure: two fixture habits are answered every day, but whether the
+  // 60-day window CONTAINS a whole calendar month depends on today's date —
+  // Jan 30 gives a window of Dec 2 to Jan 30, which contains neither. Reported
+  // so a run where the family never rendered says so rather than looking green.
+  console.log(coverageSeen
+    ? `note  ${coverageSeen} habit(s) rendered a coverage badge`
+    : 'note  no whole calendar month sits inside the fixture window today');
 
   /* ---------- the one moment deriving-every-time can offer ---------- */
 

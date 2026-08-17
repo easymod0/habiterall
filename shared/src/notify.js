@@ -620,6 +620,13 @@ export function callerDay(reported, instant = Date.now()) {
  * has named a zone is unaffected by what its devices say — which is the whole
  * point of tier 1 being reachable.
  *
+ * Tier 2 is a zone that MOVES, and the one place that is visible is the
+ * reminder watermark, which is keyed on the local date this answer decides.
+ * Carrying one account across a date line therefore costs a duplicate reminder
+ * one way (warned about, as `too_late`) and a silently suppressed one the other
+ * (`already_sent`, at debug) — see `dueReminders`, which sets out both and why
+ * it is the trade `auto` is rather than a defect in the keying.
+ *
  * @param {Record<string, any>} [settings]
  * @param {string} [reported] the zone a client last sent, if any
  * @returns {string} an IANA name, or '' for the server's own clock
@@ -984,6 +991,45 @@ export function answeredIds(habits, rows) {
  * at 00:05) is dropped rather than re-dated: `late` goes hugely negative, so
  * it fails the window. Sending it under tomorrow's date would both misreport
  * the day and consume tomorrow's slot.
+ *
+ * **The watermark is keyed on the account's LOCAL date, and under `auto` that
+ * date can move.** Written down because it reads as a bug the day it happens,
+ * and it is not one.
+ *
+ * `notify_log` holds (habit, channel, local date), and the local date comes
+ * from `zonedClock` under whatever `resolveTimeZone` answered on this tick —
+ * which for an account set to `auto` is the zone its LAST CLIENT reported. So
+ * an account genuinely used from two zones either side of a date boundary can
+ * have that boundary crossed by a device checking in rather than by time
+ * passing, and the two directions fail differently.
+ *
+ * **Forward** — a check-in from the later zone, Los Angeles to Tokyo — moves the
+ * local date on. The log's row sits under the earlier date, so nothing is found
+ * and the gate opens. Inside the catch-up window that is a second send: the same
+ * habit twice in one UTC day, one per zone. Past it, this reports `too_late`,
+ * which is a WARN — so the noisy half of this is here, and it is the one
+ * direction that produces a line an operator will see.
+ *
+ * **Backward** — Tokyo to Los Angeles — moves the local date back onto a day the
+ * log already has a row for, and the answer is `already_sent` on every tick. Not
+ * `too_late`: the two gates are eight lines apart and `already_sent` is asked
+ * FIRST, deliberately (see the comment on the gate order below), so a present
+ * row wins however late the minute is. The arrival day's reminder is therefore
+ * suppressed — it was spent on the old clock, at what is the wrong hour on the
+ * new one — and `already_sent` logs at DEBUG, so nothing above it says a word.
+ * That is the shape somebody would be trying to diagnose: not a warning to look
+ * for, but the absence of one.
+ *
+ * That is the trade `auto` IS, not a defect in the keying, which is why the
+ * keying is left alone. The alternative — a UTC date — files every reminder
+ * under the wrong day for anyone east or west of the meridian, and gets a user
+ * in Auckland reminded again a few hours later, every day, which is the failure
+ * the local date was chosen to fix in the first place. Nor can a second key
+ * (say, the zone) help: it makes the duplicate certain rather than possible,
+ * because two zones would then never share a slot. The exposure is bounded by
+ * how often somebody actually carries one account across a date line, and the
+ * account that names its zone explicitly — tier one of `resolveTimeZone` — does
+ * not have it at all.
  *
  * @param {object} args
  * @param {import('./types.js').Habit[]} args.habits

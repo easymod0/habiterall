@@ -332,6 +332,18 @@ test('the filter is not fooled by a prototype key', () => {
 
 /* ---------- a default must satisfy its own rule ---------- */
 
+/**
+ * The control shapes `renderSettingsBody` knows how to draw, and `isValid`
+ * knows how to check.
+ *
+ * Written down here rather than inferred, because a type neither of them
+ * recognises is silent at both ends: the dialog falls through to its final
+ * `else` and draws a checkbox, and `isValid` returns `false` for every value,
+ * so the setting cannot be stored and reverts to its default on every load with
+ * nothing anywhere saying why.
+ */
+const CONTROL_TYPES = ['select', 'toggle', 'multi', 'text'];
+
 test('every registry default is a value the registry itself accepts', () => {
   // The bug this is written for shipped and was caught by review, not by a
   // test: `notifyTimezone`'s default became `auto` while its `validate`
@@ -343,24 +355,145 @@ test('every registry default is a value the registry itself accepts', () => {
   // Asked of every key rather than that one, because the shape recurs: any
   // `select` whose default is missing from `options`, any `toggle` defaulting
   // to a string, any `validate` that forgets a new state.
+  //
+  // **Every rule that APPLIES, not the first one that matches.** This was an
+  // `if/else if` chain with `def.validate` at its head, so a key carrying one
+  // never reached the option-membership check below — and `notifyTimezone` is
+  // the only key that carries one, which is to say the single entry this test
+  // was WRITTEN for was the single entry exempt from half of it. Measured:
+  // dropping the `{value: 'auto', …}` entry from `timeZoneOptions()` while
+  // leaving `default: 'auto'` passed the whole suite and every browser suite, a
+  // default its own control cannot offer. `validate` is an ADDITIONAL rule for
+  // a value whose legal set is not a list; it was never a substitute for the
+  // list. Two `if`s, no `else`.
+  //
+  // The consequence today is only cosmetic — `settings-dialog.js` prepends a
+  // synthetic option for a draft value the list does not carry, so nothing is
+  // silently rewritten — but a default the registry cannot express is exactly
+  // what this exists to catch, and normaliser-form settings are where new
+  // options are currently landing.
+  //
+  // ONE SHAPE IS OUT OF THIS LOOP, and it is worth writing down precisely
+  // because what currently catches it is a coincidence. Retyping
+  // `notifyTimezone` to `text` and deleting its options satisfies every rule
+  // below: its `SETTING_VALUES` rule is a normaliser rather than an
+  // enumeration, so rule 4 has nothing to compare against, and its own
+  // `validate` goes on holding — which is the point, since values stay checked
+  // by `knownTimeZone` at both ends and only the CONTROL degrades, from a list
+  // of zones to a box you type `Europe/Berlin` into. That is a rendering
+  // regression and not a data one, and a registry-only test cannot tell it from
+  // a text field somebody meant.
+  //
+  // Measured, it does fail the suite today — but in `every option a control
+  // offers…`, on that test's `checked > 0` floor, because `notifyTimezone` is
+  // the ONLY key carrying both a validate and an options list and deleting them
+  // leaves it nothing to check. That catch evaporates the moment a second such
+  // key lands. Recorded, not relied on.
   for (const [key, def] of Object.entries(SETTINGS)) {
     const value = def.default;
     assert.notEqual(value, undefined, `${key} has no default`);
 
+    // 0. A type the dialog can actually render, asked FIRST because everything
+    // below is keyed on it — an unrecognised one matches no branch, so the loop
+    // runs and checks nothing, which is the `else if` defect one field over.
+    // Measured: retyping `confirmDelete` from `toggle` to `text`, or to a
+    // `checkbox` that does not exist, leaves the whole unit suite green while
+    // `isValid` refuses every stored value, so the setting silently reverts to
+    // its default on every load — `load().confirmDelete` answers `true` with
+    // `false` stored.
+    assert.ok(CONTROL_TYPES.includes(def.type),
+      `${key}: control type ${JSON.stringify(def.type)} is not one the dialog renders`);
+
+    // 1. Its own validator, for a legal set that cannot be enumerated.
     if (def.validate) {
       assert.ok(def.validate(value),
         `${key}: the default ${JSON.stringify(value)} fails its own validate()`);
-    } else if (def.type === 'select') {
-      assert.ok(def.options.some((o) => o.value === value),
-        `${key}: the default ${JSON.stringify(value)} is not one of its options`);
-    } else if (def.type === 'toggle') {
+    }
+
+    // 2. Its type's rule. Both of the types whose default has a shape of its
+    // own — a toggle is a real boolean, free text is a string. `isValid` tests
+    // exactly these, so a default that fails here is one the cache throws away.
+    if (def.type === 'toggle') {
       assert.equal(typeof value, 'boolean', `${key}: a toggle defaulting to ${typeof value}`);
-    } else if (def.type === 'multi') {
-      assert.ok(Array.isArray(value)
-        && value.every((v) => def.options.some((o) => o.value === v)),
-      `${key}: the default ${JSON.stringify(value)} is not a subset of its options`);
+    }
+    if (def.type === 'text') {
+      assert.equal(typeof value, 'string', `${key}: free text defaulting to ${typeof value}`);
+    }
+
+    // 3. And membership, wherever there is a list to be a member of. Gated on
+    // the OPTIONS and not on the absence of a `validate`, which is the whole
+    // correction: the question is whether the control offers a list, and a
+    // `validate` says nothing about that. A `text` control — a webhook URL, an
+    // ntfy topic — has no list and is checked by the server, which is the only
+    // check that counts for it.
+    if (def.type === 'select' || def.type === 'multi') {
+      // ...and it must HAVE one, or the check above could be dodged by
+      // deleting the list rather than by fixing the default. `renderSettingsBody`
+      // dereferences `def.options` for both of these types anyway, so a missing
+      // list is a dialog that throws.
+      assert.ok(Array.isArray(def.options),
+        `${key}: a ${def.type} with no options — the dialog cannot render it`);
+    }
+
+    if (Array.isArray(def.options)) {
+      // ...and the other way round, which closes the way OUT of the check
+      // above: retype a `select` as `text` and leave its options in place and
+      // the membership rule below still runs, but the control renders as a free
+      // text box and `isValid` degrades to "any string". Options mean one
+      // thing, and the dialog reads them for two types.
+      assert.ok(def.type === 'select' || def.type === 'multi',
+        `${key}: a ${def.type} carrying options — only a select or a multi is `
+        + 'rendered from a list');
+
+      const offers = (v) => def.options.some((o) => o.value === v);
+      if (def.type === 'multi') {
+        assert.ok(Array.isArray(value) && value.every(offers),
+          `${key}: the default ${JSON.stringify(value)} is not a subset of its options`);
+      } else {
+        assert.ok(offers(value),
+          `${key}: the default ${JSON.stringify(value)} is not one of its options`);
+      }
+    }
+
+    // 4. And the last way out: retype a `select` as `text` AND delete its
+    // options, and every rule above is satisfied by a string default. The
+    // registry alone cannot tell that from a legitimate text field, so this
+    // asks the SERVER, which is the only other opinion there is — a key whose
+    // rule in `SETTING_VALUES` is an enumeration has a list, and a control that
+    // offers a list is a select, a multi or a toggle. It says nothing about the
+    // normaliser-form keys, which are legitimately either.
+    if (Array.isArray(SETTING_VALUES[key])) {
+      assert.ok(['select', 'multi', 'toggle'].includes(def.type),
+        `${key}: the server enumerates its values, so the control must offer `
+        + `them — a ${def.type} box would take anything`);
     }
   }
+});
+
+test('every option a control offers is one its own validator accepts', () => {
+  // The other half of "a default must satisfy its own rule", and the half the
+  // test above cannot reach: it checks ONE value, the default, so a `validate`
+  // and an `options` list that disagree anywhere else go unnoticed. For
+  // `notifyTimezone` — the only key with both — the default satisfies both
+  // lists by luck rather than by construction, since `auto` was added to
+  // `knownTimeZone` and to `timeZoneOptions()` in two separate edits.
+  //
+  // An option the control offers that its own validator refuses is a control
+  // you cannot use: `sanitise` throws the chosen value away and substitutes the
+  // default, so picking it appears to do nothing. Cheap enough to ask of every
+  // option rather than of the default alone — the whole registry is a few
+  // hundred values, measured in tens of milliseconds.
+  let checked = 0;
+  for (const [key, def] of Object.entries(SETTINGS)) {
+    if (!def.validate || !Array.isArray(def.options)) continue;
+    for (const option of def.options) {
+      assert.ok(def.validate(option.value),
+        `${key}: the control offers ${JSON.stringify(option.value)}, which its `
+        + 'own validate() refuses — choosing it would silently do nothing');
+      checked++;
+    }
+  }
+  assert.ok(checked > 0, 'no key has both a validate and an options list');
 });
 
 test('every registry default is a value the SERVER accepts', () => {

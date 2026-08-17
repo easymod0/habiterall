@@ -104,6 +104,11 @@ dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.04.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
+    // The same BOM for the JVM tests, so a composable is rendered by exactly the
+    // Compose the app ships. A test artifact resolved independently is a second
+    // Compose in the test classpath, and the runtime it links against is then
+    // not the one under test.
+    testImplementation(composeBom)
 
     // 1.19.0 declares `minCompileSdk=37`, which is why `compileSdk` above moved
     // and `targetSdk` did not. AGP's AAR metadata check is what refuses the
@@ -160,5 +165,16 @@ dependencies {
     // Lets a test ask what work a receiver enqueued, which is the only way to
     // see the difference between a snoozed delivery and a daily one.
     testImplementation("androidx.work:work-testing:2.10.0")
+    // Renders a composable on the JVM, under Robolectric. Every rule that lives
+    // in a @Composable was otherwise verified by a person on an emulator once
+    // and never again — see issue #110. Version from the BOM above.
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    // `createComposeRule` launches a ComponentActivity, and this is the artifact
+    // that declares one in the manifest. Without it the rule fails at
+    // `ActivityNotFoundException` rather than at anything a test wrote.
+    // `debugImplementation` and not `testImplementation`: it contributes a
+    // MANIFEST entry, and only the app variant's manifest is merged into what
+    // the unit tests inflate.
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }

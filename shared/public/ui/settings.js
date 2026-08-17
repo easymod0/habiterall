@@ -232,6 +232,25 @@ export const SETTINGS = {
       { value: 'success', label: 'Counts as staying under' },
     ],
   },
+  numberFormat: {
+    section: 'Tracking',
+    label: 'Decimal separator',
+    help: 'How you write numbers, where an amount is typed. It decides whether ' +
+      '“10.000” is ten or a thousands separator this app will not guess at, ' +
+      'and the box writes amounts back the same way.',
+    type: 'select',
+    // `auto` resolves against this device at the moment something is parsed,
+    // and is a stored value rather than the absence of one — the same shape as
+    // `theme: 'system'` above and `notifyTimezone: 'auto'` below, for the same
+    // reason: what the device reports must not silently become what the account
+    // has decided. See `resolveNumberFormat` in ui/amount.js.
+    default: 'auto',
+    options: [
+      { value: 'auto', label: 'Follow this device' },
+      { value: 'point', label: 'Point — 1234.5' },
+      { value: 'comma', label: 'Comma — 1234,5' },
+    ],
+  },
   scoreGranularity: {
     section: 'Statistics',
     label: 'Strength chart resolution',

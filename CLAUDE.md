@@ -501,9 +501,21 @@ about them depends on how silence is read. They go because the alternative is a
 per-award judgement about which sentences survive the setting, which is a second
 rule to keep in step with the first and would have to be re-decided for every
 award added later. One gate that is occasionally too broad beats seven that
-drift apart. The narrower version wants a coverage measure — how much of the
-window is actually answered — which is the deferred award from #63, and if that
-ever lands this gate should be revisited with it.
+drift apart.
+
+That last sentence used to end "the narrower version wants a coverage measure,
+and if that ever lands this gate should be revisited with it". Coverage has
+landed and the revisit reached the **same** answer, which is worth recording
+because the reasoning moved even though the code did not. Coverage is the one
+award `success` genuinely cannot flatter — it counts ROWS, and the whole of
+`success` is crediting a day that has none, so a limit logged once covers no
+month and its sentence would be true either side of the gate. Hoisting it is
+therefore *safe* and not merely tempting, and it is still not hoisted: the
+exemption would exist for an account that has been told silence is the answer
+and has answered every day of a month regardless, and the price of serving that
+account is the second rule this paragraph refuses. The cost is a false NEGATIVE,
+which is the direction this file prefers everywhere else. It is one `return` to
+undo, and `awards.js` says so at the gate.
 
 The gate asks `unansweredCounts` rather than restating it, so the habit's
 `at_most_unlogged` beating the account's `atMostUnlogged` stays resolved in the
@@ -515,22 +527,116 @@ optional — a caller with neither should get awards rather than an exception �
 which makes forgetting them silent on precisely the shape this exists for, so a
 test reads both editions' `api.js` and fails if either call loses them.
 
+**The award nobody else can offer is about ANSWERING, and it arrives as a stats
+FIELD rather than as an entry map.** *A month with no blanks* counts the days
+that hold a row — `done`, `skip` and `no` all count, `unknown` does not — which
+is the four-state model read as an achievement, and #63's strongest argument:
+every gamified tracker rewards success only, so the moment you slip you stop
+logging and the data dies exactly where it would be most useful. This is the
+badge that is reachable on a bad month.
+
+It is not a reading of `computeStats`'s output, which is why it was deferred
+once. The two ways to fix that were to hand `computeAwards` the entries or to
+add a field, and the field wins on two counts. `awards.js`'s header states the
+property that every award is a reading of the figures already on the payload and
+that nothing is counted a second way — an entry map breaks that for one award,
+and once broken there is nothing to point the next one at. And a field inherits
+the window every other figure already uses (`from = start ?? firstEntry`,
+clamped to `MAX_RANGE_DAYS`), where a second derivation is a second answer
+waiting to disagree about what "ever" means — the same reason `computeRecovery`
+returns `longest` and `lastEnd` rather than letting awards recount them.
+
+**A field is not free, though, and this one is the first to say so out loud.**
+The paragraph three above — awards are computed at `/stats` and never inside
+`computeStats`, because `/overview` calls that once per habit and keeps `score`
+and `currentStreak` — applies word for word to a FIELD of `computeStats` that
+only the detail view reads. Coverage is its own pass over the window, measured
+at ~10-11% of a call (2,000 iterations of a 400-day habit: 12.1s against 10.8s),
+and it was being paid per habit on the dashboard's hot path and discarded. Every
+other field there is either a pass the summary figures already need or a cheap
+read of one, which is why this is the first opt-out and not a general one:
+`coverage: false`, passed by both `/overview` routes, and the key is then
+**absent** rather than empty — an empty array claims no month is fully answered,
+where this is the absence of a claim. `computeAwards` reads `stats.coverage ??
+[]` and withholds the badge, which is the right answer for a caller that did not
+ask. A test pins the call sites by COUNT as well as by content, so a third route
+cannot quietly start paying for it, and asserts the declining call is the one
+NOT feeding awards — declining it on `/stats` would withhold the badge from the
+only surface that shows it.
+
+**`computeCoverage` reports only the months the window entirely CONTAINS, and
+that one rule does two jobs.** A partial first month — the habit was created on
+the 10th — can never legitimately be full, so reporting it is either a figure
+nothing can reach or, if the denominator were the days of the window rather than
+the days of the month, one reached wrongly. And it settles #146's monotonicity
+requirement with no second rule: on the last day of a month the month is
+contained and can no longer go down, while on the 3rd it is not contained at
+all, so the badge cannot appear on the 3rd and vanish on the 4th. Containment is
+asked as "does the window hold all of this month's days", which needs no
+comparison against the window's ends and survives `boundedRange` clamping the
+far one. Both edges have tests, and the coverage fixture straddles the boundary
+by a **day and not by a month** — two Januaries alike but for one row — because
+a fixture with a full month and an empty one passes against `answered > 0`,
+which is exactly how #137's tenure fixture went unpinned.
+
+**Rest taken deliberately reads a number `computeStreaks` was already standing
+next to.** A skip bridges a run rather than breaking it, so a long run may
+contain planned rest, and "you rested and did not fall off" is a different claim
+from "you did not stop" — which is why the award is read from a new `skips` on
+each streak and not from the streak award's own rung. The subtlety is that
+`skips` must count only the skipped days INSIDE `[start, end]` of the run: skips
+are transparent to the loop, so a trailing one sits after `runEnd` and belongs
+to nothing, and banking every skip on sight reports a rest the run never
+carried. `x x s .` is the fixture — one skip, and a run of two days that does
+not contain it — beside `x x s x`, where the MISS has moved and the same skip is
+now inside the run. Note which token moves: the skip is on the same date in
+both, and what changes is whether anything closed the run before the skip could
+be banked into it.
+
+There are **two** ways a skip lands outside a run and the pair above only
+reaches one of them. A skip after the run's last on-pace day is kept out by the
+reset when the run closes; a skip before any run has STARTED is kept out by the
+guard on banking at all, and nothing exercised that — the guard was deletable
+with the whole suite green until `s x x x x x x x` was added. It is not a tidy
+case: seven days on pace with a rest the day before them is a badge reading
+"held together across 1 skipped day" about a day the run does not contain.
+A third fixture puts a skip in the gap between two runs, which needs both.
+
+It is gated on the account's `skipDays`, which defaults **off**: with the
+setting off there is no Skip control on either grid or in either day editor, so
+the only skips are imported ones and the badge congratulates somebody on using
+something they do not have. That gate is a **fifth argument** to `computeAwards`
+and it inherits the trap the fourth had — optional, so dropping it turns the
+award off for a whole edition in silence. The call-site guard now demands five
+and names the fifth, and it was mutation-tested against the two shapes that have
+fooled it before: a comment naming the full call, and the call spread over
+several lines. It also refuses a hard-coded `true`, which passes every other
+assertion in that test and hands the award to everybody.
+
+**But that guard reads SOURCE TEXT, and the class of bug one argument along is
+not a text bug.** It matches the file rather than the binding that reaches the
+call, so `settings ->> 'skipdays'` with the column alias left alone, and
+`=== true` written as `!== true`, both pass it — and each one silently costs
+every account in that edition the award, in opposite directions. No regex over
+source can close that; the second one is not even wrong-looking. So each edition
+has a **behavioural** test that sets the setting through its own API and watches
+the badge appear and disappear: `test:awards` in personal, the `--- awards ---`
+block in cloud's API suite. Both were confirmed by mutation to catch exactly
+those two while the unit suite stayed green at 55 of 55. The text guard is kept
+because it catches the different thing they cannot — a call site that reads no
+setting at all — and the two are written up as covering different halves so
+neither is deleted as redundant. Both also pin `coverage` to `/stats` and its
+absence from `/overview`, which is the opt-out above seen from the wire.
+
 **What is NOT here, and why, because each looked cheap and was not.**
-*Coverage* — "every day this month has an answer, whatever it was" — is the
-best award in #63 and the one this app can do that almost nothing else can, but
-it is a count of dates the entry map HOLDS and `computeAwards` receives no entry
-map. That is a signature decision (admit the entries, and say exactly which
-questions may use them) or a stats-shape one, not a few lines, and it is left
-for its own change. *Beat your worst day* is refused for a harder reason: it is
+*Beat your worst day* is refused for a harder reason: it is
 a current-state claim over a lifetime rate, so it is not monotone; its "stops
 being the lowest" half can be satisfied by another weekday getting WORSE, which
 is an award for regression; and its entire value is NAMING the day, which the
 server cannot do — a weekday name is locale-dependent and `shared/src` has no
 locale, so it would have to hand the client a number to compose prose around,
-which is the one thing computing awards on the server exists to prevent. *Rest
-taken deliberately* is gated on `skipDays`, which defaults off, and #63's own
-warning applies: an award nobody can see is worse than no award. Portfolio
-awards read every habit at once and belong to an account-level route.
+which is the one thing computing awards on the server exists to prevent.
+Portfolio awards read every habit at once and belong to an account-level route.
 
 `?start=` narrows the window and lowers any of these, which is the same
 mechanism as the two above and the one case where it is unambiguously right:
@@ -1577,6 +1683,30 @@ per channel, or enabling a second destination is silenced for its first day by
 the send to the first; keyed on the local date, or a user east of the server
 gets it filed under the wrong day and again a few hours later.
 
+**...and under `auto` that local date can move, which reads as a bug and is the
+trade.** `resolveTimeZone`'s second tier is the zone the account's LAST CLIENT
+reported, so an account genuinely used from two zones either side of a date
+boundary can have the boundary crossed by a device checking in rather than by
+time passing — and the two directions fail differently, which is the part worth
+getting right. **Forward** (Los Angeles to Tokyo) moves the date on, the log's
+row sits under the earlier one, and the gate opens: inside the catch-up window
+that is a second send, the same habit twice in one UTC day, one per zone; past
+it, `too_late`, at warn. **Backward** (Tokyo to Los Angeles) moves the date onto
+a day the log already has, so the answer is `already_sent` — never `too_late`,
+because that gate is asked FIRST and a present row wins however late the minute
+is, which is the ordering `notify.too_late` exists to preserve. The arrival day's
+reminder is simply suppressed, and `already_sent` logs at debug, so the symptom
+is the absence of a line rather than the presence of one. A first version of this
+paragraph had the two backwards and sent an operator looking for a warning that
+cannot appear.
+
+The keying is deliberately left alone: a UTC date is the defect the local date
+was chosen to fix, and adding the zone to the key makes the duplicate certain
+instead of possible, since two zones would then never share a slot. It is
+bounded by how often somebody carries one account across a date line, and an
+account that NAMES its zone — tier one — does not have it at all. Written down
+in `dueReminders` because the day it happens it will be reported as a bug.
+
 **How it WENT is written down too, and that one is for the user.** A permanent
 failure — a deleted webhook, the bot kicked from its channel, a revoked token —
 is marked as sent (a 404 answers 404 forever, and retrying every minute until
@@ -2094,6 +2224,99 @@ write and THEN throws. Routing the grid's writes through the day editor's
 `saveDay` would have undone that whole comment, which is why there are two
 dialogs over one control rather than one dialog.
 
+**A refusal has to be actionable, and what it QUOTES has to be true of what it
+quoted.** `parseAmount` refuses `10,000` because it is ambiguous, and the box
+said *"10,000" is not an amount* — true of `eight`, and what somebody gets for
+typing their step goal the way their own country writes it. `amountComplaint`
+is the sentence, and its first version made the mistake the rule above is
+worded against: it named the readings — *could be ten thousand or ten and a
+half* — beside whatever had been typed, so `1,500` was told it might be ten
+thousand, with the module's own correct example (*fifteen hundred or one and a
+half*) sitting forty lines up in `parseAmount`. Naming the reading is what made
+it specific and is what made it false. So the sentence names the AMBIGUITY,
+which is the same whatever the digits are, and the advice carries the specifics:
+the user's own number with the commas taken out, because *like 10000* is an
+example where *like 1500* is an instruction. That suggestion is run through the
+parser before it is offered, and it decides the whole branch rather than just
+the number in it — `1,500 steps` holds a thousands group and is not ambiguous,
+it is not an amount, and a box may not suggest something it would then refuse.
+The phone has said the actionable thing since #111; a test reads its string out
+of `HabitFormScreen.kt`, because a comment claiming two clients agree is
+precisely the claim that goes stale.
+
+**Three surfaces read a typed amount, and the third was reading it with
+`Number()`.** The day editor and the dashboard share `ui/amount.js`; a Discord
+modal is the same box arriving over a socket, and `shared/src/discord.js` had
+its own answer — a comma-to-dot replace and `Number()` — which read `10,000` as
+**ten**. Nothing downstream can catch that, since ten is a valid amount, and it
+is the surface with the least to show for it: no box stays open afterwards. So
+`discord.js` imports `parseAmount`, and that is **the one import reaching from
+`shared/src` into `shared/public`**. The usual answer here is two declarations
+pinned by a test (`CHANNELS`, `SETTING_VALUES`), but that is forced by a
+direction this does not run in — the browser cannot see `shared/src`, while node
+can read anything on disk. What it costs is `ui/amount.js`'s first line:
+"DOM-free so it can be tested without one" was a convenience and is now a
+contract with a server.
+
+**Which character a decimal point is, is a DECISION with a device-shaped
+default.** `10.000` is ten to this parser and ten thousand to a de-DE or es-ES
+reader, and reading it the first way was silent — no refusal, no message, a row
+a thousand times too small (#108). The three options were: infer from the
+habit's target, which makes one input mean two things depending on a different
+field; read the browser's locale, which is a DEVICE fact deciding a STORED
+value; or a setting, which is correct and asks something of somebody who has
+never thought about it. What shipped is the second as the DEFAULT of the third —
+`numberFormat`, whose `auto` resolves against `Intl` at parse time, in
+`resolveNumberFormat`'s three tiers: the account's stated answer, else what the
+device reports, else the app's own. That is `resolveTimeZone`'s shape and it is
+here for its reason, and `'auto'` is a stored value rather than the absence of
+one exactly as `theme: 'system'` and `at_most_unlogged: 'default'` are.
+
+**A group is refused under every convention, and that asymmetry is the whole
+safety argument.** With the convention known, `10,000` on a `point` account is
+unambiguously ten thousand and could be accepted — and is not. The reason is
+that most accounts are on `auto`, so the convention is a GUESS from a device: a
+wrong guess that refuses costs one sentence saying what to type, while a wrong
+guess that accepts costs a row out by a thousand that nothing reports. So the
+setting only ever moves which spelling is refused. What it accepts is what was
+already accepted: anything with fewer than three digits after the separator is
+the same number under both conventions, which is most of what anyone types, and
+`parseAmount` needed no convention for it before this and needs none now.
+
+`formatAmount` takes it too, because a box that accepts `8,5` and redraws it as
+`8.5` has told its owner they typed it wrong — and on the preset buttons what is
+drawn is what gets typed. Nothing is grouped at any size, which keeps the
+control's own output inside the one domain its parser accepts. The setting is
+**portable**: it decides what the next typed amount MEANS, so restoring entries
+onto an account without it hands the same keystrokes a different number. It
+carries no capability, so unlike the notification keys there is nothing to hold
+back.
+
+Two callers, and they resolve it differently on purpose. `count-field.js` asks
+the settings cache and `Intl` at the moment of each read or write, never at
+import time — `auto` is a question about the device and the setting is a
+question about the account, and either can change while the module is loaded.
+`discord.js` passes the account's answer and NO device: a press arrives from
+Discord, so there is nothing making the request and nothing to report a
+separator, which is the same reason `adapter.today` asks the account rather than
+a header. The phone reads none of it yet and says so in `notMirrored` — it has
+three readers for a typed amount (`HabitFormScreen.parseAmount` and a bare
+`toDoubleOrNull` in both `CountEntryActivity` and the day dialog) that already
+disagree with each other about `8,5`, so there is no single reader to give an
+answer to. That is **issue #157**, and it is a cost written down rather than an
+absence: an account that has CHOSEN a convention is followed in the browser and
+not on the phone. Under `auto`, which is almost everybody, the phone would
+resolve its own locale and there is nothing to carry.
+
+**Adding an EXPORT to a shell module is a `CACHE_VERSION` bump**, for the same
+reason v14 was one. `shellFirst` serves scripts cache-first and revalidates per
+request, so the swap is not atomic: a shell holding the new `count-field.js`
+over a cached old `amount.js` is a module link error — `amountComplaint` is not
+an export of that file — and nothing downstream of it evaluates, including
+`app-entry.js`. It self-heals on the next load, which is a reason to bump rather
+than a reason not to: being wrong costs a blank screen, and the bump costs one
+refetch of data the client is about to refetch anyway.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —
@@ -2232,6 +2455,7 @@ Several layers, and they catch different things:
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
+| Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |
 | Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
 | Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |

@@ -1261,6 +1261,17 @@ currently shows:
   arrival, because the record really is that long.
 - **No lapse over a day** — every lapse so far has lasted a single day. The
   next two-day one ends it, which is why it is worded as a record.
+- **A month with no blanks** — every day of a whole month has an *answer*,
+  whatever it said. A day you did it, a day you skipped and a day you recorded
+  as missed all count; only a day you never touched does not. It is the one
+  badge here that a bad month can earn, which is the point of it — and it is
+  a reason to log the days that went badly. A month counts from its last day
+  onwards, never before, so this never appears on the 3rd and vanishes on the
+  4th.
+- **A rest day inside a run** — a run of a week or more that held together
+  across days you deliberately skipped. Only shown if you have skipped days
+  switched on under ⚙, since that is what puts Skip on the grid in the first
+  place.
 
 They are **worked out from your entries each time, never stored.** That has one
 consequence worth knowing, because it can surprise you: a badge is a reading of
@@ -1885,6 +1896,30 @@ well as a replace; the account setting is a *setting*, and only a **replace**
 applies those — a merge deliberately leaves your preferences alone. Merge a
 backup onto an account set the other way and the habits keep their own answers
 while the account keeps its.
+
+One more decides what a number you type *means*:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Decimal separator** (Tracking) | Follow this device | Whether you write a decimal point as `1234.5` or `1234,5`, wherever an amount is typed. *Follow this device* reads it off the browser each time rather than storing what it found, so one account can be right on a laptop and on a phone — and choosing one explicitly is what to do when the device is not set up the way you write |
+
+It matters because of what it makes `10.000` mean: ten, or ten thousand written
+with a separator. Neither reading can be assumed for everybody, and getting it
+wrong is not a display glitch — it is a stored number out by a factor of a
+thousand, with nothing on screen to say so.
+
+Whichever way it is set, a **thousands separator is refused rather than guessed
+at**, and the message says what to type instead. `10,000` on a *point* account
+and `10.000` on a *comma* one are one refusal seen from two sides. Anything with
+fewer than three digits after the separator — `8,5`, `8.5` — is the same number
+under both conventions and is accepted under both, which is most of what anyone
+types. The box also *writes* amounts back the way you write them, so a field
+that accepts `8,5` does not redraw it as `8.5`.
+
+It travels in the JSON backup, because it decides what the next amount you type
+will mean. The Android app does not read it yet — see issue #157, which has to
+give that client a single reader for a typed amount before it can have one
+answer.
 
 ---
 

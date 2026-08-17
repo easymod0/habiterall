@@ -22,7 +22,7 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
-// v15: the browser's own reminder. `ui/nudge.js` is a new shell asset that
+// v17: the browser's own reminder. `ui/nudge.js` is a new shell asset that
 // `app.js` imports STATICALLY, and it is BOTH earlier cases at once — this note
 // has now been written wrong in each direction, so both halves are set out.
 //
@@ -34,18 +34,17 @@ const sw = self;
 // grounds that an old shell serving the old app.js links fine. It does — but
 // that is not the state the window produces. `shellFirst` is
 // stale-while-revalidate and it writes into the RUNNING worker's SHELL_CACHE,
-// so while a v14 worker is still in control (the v15 install fetches every
+// so while a v16 worker is still in control (the v17 install fetches every
 // asset first), a request for `/shared/app.js` serves the old file and stores
-// the NEW one into `habiterall-shell-v14`, which has no nudge.js. Offline in
+// the NEW one into `habiterall-shell-v16`, which has no nudge.js. Offline in
 // that window the static import is a module link error before `start()` — so
 // outside the `#view-error` surface, which is a blank page. That is the v14
-// note fifty lines below, verbatim: the revalidate is per request and not
-// atomic.
+// note further below, verbatim: the revalidate is per request and not atomic.
 //
 // What the bump does about it is worth stating exactly, because it is not what
 // it looks like. `install` re-runs `SHELL.map(cache.add)` on any change to this
 // file, into whichever cache is NAMED — so unbumped, nudge.js would land in the
-// v14 shell sooner and with the data cache intact. The bump's actual effect is
+// v16 shell sooner and with the data cache intact. The bump's actual effect is
 // that the new shell is built under a name of its own and the old one is
 // dropped on `activate`, so no request can mix the two. Note it is atomic at
 // the CACHE level and not at the asset level: `install` uses
@@ -53,6 +52,27 @@ const sw = self;
 // the old one is deleted regardless. It costs every installed client its data
 // cache, which is why the first offline boot afterwards gets the synthetic 503
 // that `#view-error` exists for. Nothing in index.html or style.css moved.
+//
+// v16: the search filter's predicate moved to ui/store.js, so dashboard.js and
+// habit-dialog.js both IMPORT `matchesQuery` from it — the v14 case exactly,
+// one module over. A shell holding the new dashboard.js and the old store.js
+// is a link error rather than a wrong answer, and it happens before `start()`.
+// Nothing about the markup moved, which is what makes this bump about the
+// atomicity of the swap and nothing else.
+//
+// v15: `ui/amount.js` gained `amountComplaint`, and then `resolveNumberFormat`
+// and `deviceDecimalSeparator` with the decimal-separator setting;
+// `ui/count-field.js` imports all three, and `ui/settings.js` for the account's
+// answer. Both are shell assets and both are SCRIPTS, which `shellFirst` serves
+// cache-first while revalidating per request — so the swap is not atomic and
+// the two can land a load apart. New count-field.js over a cached old
+// amount.js is a module LINK error: no such export, so count-field.js never
+// evaluates, app-entry.js never evaluates, and the app boots to nothing. That
+// is v14's case with the arrow the other way round, and the precache is again
+// what makes it all-or-nothing. It self-heals on the load after, since the
+// broken boot still revalidates amount.js — which is a reason to bump rather
+// than a reason not to: being wrong costs a blank screen, and the bump costs
+// one refetch of data the client is about to refetch anyway.
 // v13: the habit search. `index.html` grew `#search-row`, `#habit-search`,
 // `#search-count` and `#empty-nomatch`, and dashboard.js looks all four up at
 // module scope and dereferences them in `paint()` — so a stale v12 shell with
@@ -106,7 +126,7 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v15';
+const CACHE_VERSION = 'v17';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

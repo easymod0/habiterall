@@ -63,6 +63,76 @@ try {
     }
   };
 
+  /**
+   * The in-page half of this file's polling idiom, injected into the blocks
+   * below.
+   *
+   * The loops two hundred lines down poll from node, one `ev` round trip per
+   * step, which works because each step is its own evaluation. The #128 blocks
+   * are one evaluation each — a whole workflow, not a step — so the loop has to
+   * go into the page with them. Fixed sleeps there summed to 28.7 seconds
+   * against measured waits of 0-41ms: never flaky on this machine and exactly
+   * the class of thing #134 and #135 were both fixed for.
+   *
+   * Every wait is bounded and every caller checks the answer. `waitFor` resolves
+   * to null on a timeout rather than throwing, so a step that never happened is
+   * reported as the step it was instead of being read too early and asserted on.
+   */
+  const WAIT = `
+    const waitFor = async (fn, ms = 8000) => {
+      const until = Date.now() + ms;
+      for (;;) {
+        try { const v = fn(); if (v) return v; } catch (err) { /* not there yet */ }
+        if (Date.now() > until) return null;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+    const byText = (sel, text) => [...document.querySelectorAll(sel)]
+      .find((b) => b.textContent.trim() === text);
+    const backBtn = () => [...document.querySelectorAll('#view-detail button')]
+      .find((b) => b.textContent.trim().endsWith('Back'));
+    const names = () => [...document.querySelectorAll('#grid .habit-row .habit-name')]
+      .map((n) => n.textContent.trim());
+    // paint() runs synchronously inside the input handler, so a filter needs no
+    // wait at all: the rows are right by the time dispatchEvent returns.
+    const filter = (q) => {
+      const i = document.getElementById('habit-search');
+      i.value = q; i.dispatchEvent(new Event('input', { bubbles: true }));
+      return i;
+    };
+    // The list is painted, one way or the other — a row, or the sentence that
+    // stands in for one. Waiting on rows alone would hang on exactly the
+    // failure these blocks are looking for.
+    const onList = () => waitFor(() => !document.getElementById('view-list').hidden
+      && (document.querySelector('#grid .habit-row')
+        || !document.getElementById('empty-nomatch').hidden));
+    // Open a row and hand back the Edit button of THAT habit.
+    //
+    // Three conditions, and each one was a wrong ANSWER rather than a slow one
+    // while it was missing. detail.open() fetches before it renders and
+    // views.showList() only HIDES the detail view, so between the tap and the
+    // render the previous habit's header is still sitting there — Edit button
+    // included, carrying the habit it was rendered with. Waiting on the button
+    // alone opened the dialog on the habit viewed before this one, and the
+    // delete then removed a habit the filter had never matched. Waiting on the
+    // heading alone was worse where the previous habit was the SAME one: the
+    // stale header matches its own name, so the dialog opened over the
+    // DASHBOARD, and the save correctly emitted 'reload' — a real answer to a
+    // question the test had no business asking, one run in three.
+    //
+    // So: a FRESH heading node, naming this habit, in a view that is showing.
+    const openHabit = (row) => {
+      const name = row.querySelector('.habit-name').textContent.trim();
+      const stale = document.querySelector('#view-detail h2');
+      row.querySelector('.habit-meta').click();
+      return waitFor(() => {
+        const h2 = document.querySelector('#view-detail h2');
+        return h2 && h2 !== stale && h2.textContent.trim() === name
+          && !document.getElementById('view-detail').hidden
+          && byText('#view-detail button', 'Edit');
+      });
+    };`;
+
   await send('Page.navigate', { url: APP }, sessionId);
   for (let i = 0; i < 80; i++) {
     if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
@@ -258,6 +328,264 @@ try {
   ck('and coming back KEEPS the filter you were using',
     roundTrip.value === 'wombat' && roundTrip.rows === roundTrip.before,
     JSON.stringify(roundTrip));
+
+  /* ---------- editing a habit from its own page (#128) ---------- */
+  //
+  // The same workflow one step further in — find, open, EDIT, come back — and
+  // the one place the rule is decided by what changed rather than by which
+  // mutator ran. Two things make these assertions mean anything.
+  //
+  // The box is read after a REPAINT. On the detail view nothing repaints the
+  // dashboard, so `#habit-search` still shows the old text whatever
+  // `state.query` holds, and an assertion taken there passes either way. The
+  // dashboard is reached by the app's own Back button rather than
+  // `history.back()`, because that is the button the report describes.
+  //
+  // And the habit is read BACK from the API afterwards. `value === 'wombat'
+  // && rows === 1` is also what a form that never submitted produces, so
+  // without the stored row these would pass against a save that silently did
+  // nothing.
+  const editFrom = (query, mutate) => ev(`(async()=>{
+    ${WAIT}
+    filter(${JSON.stringify(query)});
+    const row = document.querySelector('#grid .habit-row');
+    if (!row) return { error: 'nothing matched ' + ${JSON.stringify(query)} };
+    const id = row.dataset.habitId;
+    const edit = await openHabit(row);
+    if (!edit) return { error: 'the habit never opened' };
+    edit.click();
+    const dlg = document.getElementById('habit-dialog');
+    if (!await waitFor(() => dlg.open)) return { error: 'the dialog never opened' };
+    const f = document.getElementById('habit-form');
+    ${mutate}
+    f.requestSubmit();
+    // The dialog closes only once the write has landed, so this waits on the
+    // save rather than on a duration.
+    if (!await waitFor(() => !dlg.open)) return { error: 'the save never finished' };
+
+    // Which branch of the ternary ran, asked positively so it costs no bounded
+    // wait for the expected answer: 'change' re-renders the detail view and
+    // replaces the Edit button, 'reload' shows the list. Whichever arrives
+    // first is the answer.
+    const settled = await waitFor(() => {
+      const fresh = byText('#view-detail button', 'Edit');
+      return (!document.getElementById('view-list').hidden && 'list')
+        || (fresh && fresh !== edit && 'detail');
+    });
+
+    const back = await waitFor(() => backBtn());
+    if (!back) return { error: 'no Back button', settled };
+    back.click();
+    if (!await onList()) return { error: 'never got back to the list', settled };
+    return { settled,
+      stored: await (await fetch('/api/habits/' + id)).json(),
+      value: document.getElementById('habit-search').value,
+      rows: [...document.querySelectorAll('#grid .habit-row .habit-name')]
+        .map((n) => n.textContent.trim()) };
+  })()`);
+
+  // Mark's reproduction, verbatim: change ONLY the colour. Nothing was added to
+  // or removed from the list, so a cleared box is a filter wiped by something
+  // that replaced nothing — the failure #74 was written to avoid, arriving from
+  // the code written to avoid it.
+  const recoloured = await editFrom('wombat', `f.color.value = '#654321';`);
+  ck('editing a habit from its own page stays on that page',
+    recoloured.settled === 'detail', JSON.stringify(recoloured.settled));
+  ck('and the save really did reach the server',
+    recoloured.stored?.color === '#654321', JSON.stringify(recoloured.stored?.color));
+  ck('and changing only the colour KEEPS the filter',
+    recoloured.value === 'wombat' && recoloured.rows.length === 1,
+    JSON.stringify(recoloured));
+
+  // The other side of it, and the reason "this was a create" is the wrong rule:
+  // the habit you were looking at no longer matches, so leaving the box alone
+  // would report "No habits match that." over the rename that just succeeded.
+  const renamed = await editFrom('wombat', `f.name.value = 'Zzz Numbat';`);
+  ck('a rename that moves the row OUT clears the filter',
+    renamed.value === '' && renamed.stored?.name === 'Zzz Numbat',
+    JSON.stringify(renamed));
+  ck('and the renamed habit is on screen',
+    renamed.rows.includes('Zzz Numbat'), JSON.stringify(renamed.rows));
+
+  // The case a "did the name change" test cannot see. `matchesQuery` reads the
+  // description too — that is what "Plain jogging" is in the fixtures for — so
+  // an edit touching only that field moves the row out just as a rename does.
+  const rewritten = await ev(`(async()=>{
+    ${WAIT}
+    filter('quokka');
+    const before = names();
+    const row = [...document.querySelectorAll('#grid .habit-row')]
+      .find((r) => r.querySelector('.habit-name').textContent.includes('jogging'));
+    if (!row) return { error: 'no jogging row', before };
+    const edit = await openHabit(row);
+    if (!edit) return { error: 'the habit never opened', before };
+    edit.click();
+    const dlg = document.getElementById('habit-dialog');
+    if (!await waitFor(() => dlg.open)) return { error: 'the dialog never opened', before };
+    const f = document.getElementById('habit-form');
+    f.description.value = 'no longer mentions any marsupial';
+    f.requestSubmit();
+    if (!await waitFor(() => !dlg.open)) return { error: 'the save never finished', before };
+    const back = await waitFor(() => backBtn());
+    if (!back) return { error: 'no Back button', before };
+    back.click();
+    if (!await onList()) return { error: 'never got back to the list', before };
+    return { before,
+      value: document.getElementById('habit-search').value,
+      rows: document.querySelectorAll('#grid .habit-row').length };
+  })()`);
+  ck('the row was found by its DESCRIPTION to begin with',
+    rewritten.before?.includes('Plain jogging'), JSON.stringify(rewritten));
+  ck('and rewriting that description clears the filter too',
+    rewritten.value === '', JSON.stringify(rewritten));
+
+  /* ---------- the rule is asked of the ROW, not of the request ---------- */
+  //
+  // `parseHabit` clamps `description` to `LIMITS.description` (500), so a
+  // mention of the query past the cut is in what was SENT and not in what was
+  // stored. Asked of the payload, the box survives over a list the habit has
+  // just left — the contrived-looking half of a reading this codebase has got
+  // wrong before in `applyImport`: the file's word for something instead of what
+  // it would mean here. `name` cannot do this (over 100 is a ValidationError,
+  // not a clamp) and `.trim()` cannot remove an interior match, so the
+  // description is the only reachable instance and this is it.
+  const clamped = await editFrom('cafe', `
+    f.name.value = 'Zzz Clamped';
+    f.description.value = 'x'.repeat(600) + ' cafe';`);
+  ck('the stored description really was cut short',
+    clamped.stored?.description?.length === 500,
+    JSON.stringify(clamped.stored?.description?.length));
+  ck('and the filter goes by what was STORED, not by what was sent',
+    clamped.value === '', JSON.stringify(clamped));
+
+  /* ---------- ...and so does archiving it ---------- */
+  //
+  // The route neither the query nor the name can see: `load()` fetches the
+  // active habits or the archived ones and never both, so the Archived checkbox
+  // takes the row off the list without touching either matched field. Asking
+  // `matchesQuery` alone left "No habits match that." over an archive that had
+  // just succeeded — which is why the rule is `staysOnList` and not the filter.
+  const shelved = await editFrom('numbat', `f.archived.checked = true;`);
+  ck('the habit really was archived', !!shelved.stored?.archived,
+    JSON.stringify(shelved.stored?.archived));
+  ck('and archiving the habit you filtered to clears the filter',
+    shelved.value === '' && !shelved.rows.includes('Zzz Numbat'),
+    JSON.stringify(shelved));
+
+  /* ---------- deleting the habit you filtered down to ---------- */
+  //
+  // Unasserted until #128: the clear in `deleteHabit` could be deleted and the
+  // whole suite stayed green. Without it the account is left reading "No habits
+  // match that." over the one row the query had, which is the empty-result
+  // screen standing in for a successful delete.
+  const removed = await ev(`(async()=>{
+    ${WAIT}
+    // The confirm is a preference (settings.confirmDelete), not the claim being
+    // made here, and a modal one would hang this evaluation outright.
+    window.confirm = () => true;
+    filter('newly');
+    const row = document.querySelector('#grid .habit-row');
+    if (!row) return { error: 'nothing matched newly' };
+    const before = document.querySelectorAll('#grid .habit-row').length;
+    const edit = await openHabit(row);
+    if (!edit) return { error: 'the habit never opened' };
+    edit.click();
+    const dlg = document.getElementById('habit-dialog');
+    if (!await waitFor(() => dlg.open)) return { error: 'the dialog never opened' };
+    document.getElementById('dialog-delete').click();
+    // The undo toast is the completion signal, and it is posted after the
+    // 'reload' — so waiting for both is waiting for the whole path.
+    const done = await waitFor(() => !document.getElementById('view-list').hidden
+      && document.querySelector('#toast .toast-action'));
+    if (!done) return { error: 'the delete never landed' };
+    return { before,
+      value: document.getElementById('habit-search').value,
+      rows: names() };
+  })()`);
+  ck('the filter found exactly the habit to delete', removed.before === 1,
+    JSON.stringify(removed));
+  ck('deleting it clears the filter it emptied',
+    removed.value === '' && !removed.rows.includes('Zzz Newly made'),
+    JSON.stringify(removed));
+
+  /* ---------- and undoing that delete ---------- */
+  //
+  // `restoreHabit` puts the habit back through a create and an import, so it
+  // asks `staysOnList` of the created habit exactly as a save does — and it runs
+  // from a toast, against whatever query is in the box by then rather than the
+  // one the delete was made under. Filtered to something else, the undo would
+  // otherwise land off screen.
+  //
+  // The one genuinely time-coupled block in this file: an action toast dismisses
+  // itself after 9000ms (`ui/toast.js`) and this reaches it about two seconds
+  // after the delete. That bound cannot be polled away — it is the app's, not a
+  // guess about a machine — but it fails LOUDLY if it is ever exceeded, on the
+  // explicit check below rather than by reading a stale value.
+  const undone = await ev(`(async()=>{
+    ${WAIT}
+    filter('numbat');
+    const action = document.querySelector('#toast .toast-action');
+    if (!action) return { error: 'the undo toast had already dismissed itself' };
+    action.click();
+    if (!await waitFor(() =>
+      document.getElementById('toast').textContent.includes('Restored')))
+      return { error: 'the restore never reported' };
+    // A timeout here IS the failure this block exists for: with the clear gone
+    // the list stays filtered to the one row the query had.
+    await waitFor(() => document.querySelectorAll('#grid .habit-row').length > 1);
+    return { value: document.getElementById('habit-search').value, rows: names() };
+  })()`);
+  ck('undoing a delete clears the filter that was in the box by then',
+    undone.value === '', JSON.stringify(undone));
+  ck('and the restored habit is on screen',
+    undone.rows?.includes('Zzz Newly made'), JSON.stringify(undone));
+
+  /* ---------- a restore replaces every habit ---------- */
+  //
+  // The one the comment above calls the worse of the two, and the one that was
+  // deletable in silence: "No habits match that." over a freshly imported
+  // account. Driven through the real dialog — the file input is fed a Blob via
+  // DataTransfer rather than a path, so this needs no CDP file plumbing — for
+  // the same reason the create is: a hand-fired 'reload' would stay green with
+  // `data-dialog`'s clear removed.
+  const imported = await ev(`(async()=>{
+    ${WAIT}
+    const backup = await (await fetch('/api/export')).json();
+    filter('numbat');
+    const before = document.querySelectorAll('#grid .habit-row').length;
+
+    document.getElementById('btn-settings').click();
+    const backupBtn = await waitFor(() => document.getElementById('settings-backup'));
+    if (!backupBtn) return { error: 'no backup button in settings' };
+    backupBtn.click();
+    const dd = document.getElementById('data-dialog');
+    if (!await waitFor(() => dd.open)) return { error: 'the data dialog never opened' };
+    document.querySelector('input[name=import-mode][value=merge]').checked = true;
+    const dt = new DataTransfer();
+    dt.items.add(new File([JSON.stringify(backup)], 'backup.json',
+      { type: 'application/json' }));
+    const f = document.getElementById('import-file');
+    f.files = dt.files;
+    f.dispatchEvent(new Event('change', { bubbles: true }));
+    document.getElementById('import-run').click();
+    // The result panel is unhidden when the import answers, whether it worked
+    // or not, so this waits on the request and reports what it said.
+    if (!await waitFor(() => !document.getElementById('import-result').hidden, 20000))
+      return { error: 'the import never answered', before };
+    const report = document.getElementById('import-result').textContent;
+    [...document.querySelectorAll('dialog[open]')].reverse().forEach((d) => d.close());
+    // As above: a timeout here is the failure, not a slow machine.
+    await waitFor(() => document.querySelectorAll('#grid .habit-row').length > before);
+    return { before, report,
+      value: document.getElementById('habit-search').value,
+      rows: document.querySelectorAll('#grid .habit-row').length };
+  })()`);
+  ck('the import ran', /merged|created/.test(String(imported.report)),
+    JSON.stringify(imported));
+  ck('a restore clears the filter the imported habits would hide behind',
+    imported.value === '', JSON.stringify(imported));
+  ck('and the whole account is on screen', imported.rows > imported.before,
+    JSON.stringify(imported));
 
   console.log(fails === 0 ? '\nALL SEARCH CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {

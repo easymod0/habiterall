@@ -371,21 +371,42 @@ export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_
   const streaks = [];
   let runStart = null;
   let runEnd = null;
+  // Skipped days already counted into the run, and the ones seen since the last
+  // day that was actually on pace. The second is what keeps `skips` a count of
+  // days INSIDE `[start, end]`: skips bridge a run, so a trailing one sits after
+  // `runEnd` and belongs to nothing. `x x s .` has one skip and a run of two
+  // days that does not contain it — banking every skip on sight would report a
+  // rest the run never carried.
+  let runSkips = 0;
+  let pendingSkips = 0;
 
   for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged)) {
-    if (ok === null) continue; // skip: neither extends nor breaks
+    if (ok === null) { // skip: neither extends nor breaks
+      if (runStart !== null) pendingSkips++;
+      continue;
+    }
 
     if (ok) {
       if (runStart === null) runStart = date;
       runEnd = date;
+      runSkips += pendingSkips;
+      pendingSkips = 0;
     } else if (runStart !== null) {
-      streaks.push({ start: runStart, end: runEnd, length: daysBetween(runStart, runEnd) + 1 });
+      streaks.push({
+        start: runStart, end: runEnd,
+        length: daysBetween(runStart, runEnd) + 1, skips: runSkips,
+      });
       runStart = null;
       runEnd = null;
+      runSkips = 0;
+      pendingSkips = 0;
     }
   }
   if (runStart !== null) {
-    streaks.push({ start: runStart, end: runEnd, length: daysBetween(runStart, runEnd) + 1 });
+    streaks.push({
+      start: runStart, end: runEnd,
+      length: daysBetween(runStart, runEnd) + 1, skips: runSkips,
+    });
   }
   return streaks;
 }
@@ -783,19 +804,99 @@ export function computeFrequency(habit, entryMap, start, end, weekStart = 'monda
   return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
 }
 
+/* ---------- coverage ---------- */
+
+/** Days in the calendar month `'YYYY-MM'` names. */
+function daysInMonth(month) {
+  const [y, m] = month.split('-').map(Number);
+  // Day 0 of the next month is the last day of this one, which is how February
+  // and a leap year answer for themselves rather than from a table.
+  return new Date(y, m, 0).getDate();
+}
+
+/**
+ * How many days of each month have an ANSWER, over the months this window
+ * entirely contains.
+ *
+ * The four-state day model is what makes this askable at all: `done`, `skip`,
+ * `no` (a row holding 0) and `unknown` (no row). Every other figure in a stats
+ * response reads what a day SAID; this one reads whether the day was answered,
+ * which is the distinction almost no tracker can draw. All three of the first
+ * count and `unknown` does not, so this is membership of the entry map and
+ * nothing else — never `entryMap.get(date) ?? UNSET`, the collapse
+ * `shared/CLAUDE.md` forbids of a reader and that `isCompleted` already paid
+ * for once.
+ *
+ * **Only months entirely inside `[start, end]` are reported, and the
+ * containment rule does two jobs.** A partial first month — the habit was
+ * created on the 10th — can never legitimately be fully covered, so counting it
+ * would either be a figure nothing can reach or, if the denominator were the
+ * days of the window rather than the days of the month, one reached wrongly.
+ * And it settles "a month in progress is not finished" with no second rule: on
+ * the last day of a month the month is contained and what it says can no longer
+ * change downward, while on the 3rd it is not contained at all — so a reader can
+ * never show something on the 3rd that vanishes on the 4th.
+ *
+ * `days` is therefore always the length of the month, and a caller wanting
+ * "fully answered" asks `answered === days`.
+ *
+ * @param {Map<string, any>} entryMap
+ * @param {string} start
+ * @param {string} end
+ * @returns {Array<{month: string, answered: number, days: number}>} oldest first
+ */
+export function computeCoverage(entryMap, start, end) {
+  const months = new Map();
+
+  for (const date of boundedRange(start, end)) {
+    const month = date.slice(0, 7);
+    if (!months.has(month)) months.set(month, { month, answered: 0, days: 0 });
+    const m = months.get(month);
+    m.days += 1;
+    if (entryMap.has(date)) m.answered += 1;
+  }
+
+  // A month is entirely inside the window exactly when the window holds all of
+  // its days — which needs no comparison against `start` and `end` and stays
+  // right when `boundedRange` clamps the far edge.
+  return [...months.values()].filter((m) => m.days === daysInMonth(m.month));
+}
+
 /* ---------- top-level summary ---------- */
 
 /**
+ * Every figure the detail view draws, over one window.
+ *
+ * **`coverage` is the one field a caller may decline, and the rule is the same
+ * one that keeps `computeAwards` out of here.** Awards are computed at
+ * `/habits/:id/stats` and nowhere else, because `/overview` calls this once per
+ * habit and keeps `score` and `currentStreak` — so work that only the detail
+ * view reads is paid for per habit on the dashboard's hot path and thrown away.
+ * Coverage is the first field to make that cost visible rather than free: it is
+ * its own pass over the window, measured at ~10% of a call, where every other
+ * field here is either a pass the summary figures already need (`scores`,
+ * `streaks`) or a cheap read of one. So `/overview` passes `coverage: false` in
+ * both editions and the key is then ABSENT rather than empty — an empty array
+ * would say "no month is fully answered", which is a claim, and this is the
+ * absence of one. `computeAwards` reads `stats.coverage ?? []` and so degrades
+ * to withholding the badge, which is the right answer for a caller that did not
+ * ask for the figure.
+ *
+ * A test pins both editions' call sites, because a third route added later
+ * would otherwise pay this quietly.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, granularity?: string,
- *           weekStart?: 'monday'|'sunday', unlogged?: string}} [opts]
+ *           weekStart?: 'monday'|'sunday', unlogged?: string,
+ *           coverage?: boolean}} [opts]
  * @returns {import('./types.js').Stats}
  */
 export function computeStats(habit, entries,
                              { start, end, granularity = 'day',
                                weekStart = 'monday',
-                               unlogged = UNLOGGED_DEFAULT } = {}) {
+                               unlogged = UNLOGGED_DEFAULT,
+                               coverage = true } = {}) {
   // Preserve `status` alongside the value so skips stay distinguishable from
   // a numerical habit legitimately recording the value 3.
   const entryMap = new Map(
@@ -837,5 +938,16 @@ export function computeStats(habit, entries,
     weekdayByMonth: computeWeekdayByMonth(habit, entryMap, from, end, unlogged),
     frequency: computeFrequency(habit, entryMap, from, end, weekStart, unlogged),
     resilience: computeResilience(habit, entryMap, streaks, from, end, unlogged),
+    // On the payload rather than passed into `computeAwards` as a second data
+    // source. `awards.js`'s header states that every award is a reading of the
+    // figures already here and that nothing is counted a second way; an entry
+    // map handed to it would break that property for exactly one award. A field
+    // also inherits `[from, end]` — `start ?? firstEntry`, clamped to
+    // MAX_RANGE_DAYS — so coverage cannot disagree with the awards beside it
+    // about what "ever" means.
+    //
+    // ...and spread rather than assigned, so a caller that declined it gets no
+    // key at all. See the note on the parameter.
+    ...(coverage ? { coverage: computeCoverage(entryMap, from, end) } : {}),
   };
 }

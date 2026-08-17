@@ -385,6 +385,16 @@ jobs:
         working-directory: habiterall-personal
         run: node test/overview.integration.mjs
 
+      # Two award inputs are read out of storage by the route, and the unit
+      # suite can only check the CALL, as source text — which a misspelt
+      # settings key or an inverted comparison passes while every account
+      # silently loses the badge. This sets the setting through the API and
+      # watches the award appear and disappear, and pins `coverage` to the one
+      # route that reads it.
+      - name: Awards read the settings the account stored
+        working-directory: habiterall-personal
+        run: node test/awards.integration.mjs
+
       # `today()` is the SERVER's day, and every route that asked "is this
       # today?" asked it that way — so a user east of the container had the
       # current column of their own grid refused as a future date. This one
