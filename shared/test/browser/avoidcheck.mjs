@@ -71,13 +71,44 @@ try {
   check('the server stores the rendering choice', made.show_as === 'avoid', made.show_as);
 
   await ev(`location.reload()`);
+
+  // Wait for THIS habit's row, not for any row.
+  //
+  // The dashboard paints from `state.habits` and repaints on every change, so
+  // "a `.habit-row` exists" becomes true before the habit created two lines
+  // above is necessarily among them — the fixtures ship four habits, and the
+  // first paint after a reload is enough to satisfy the weaker condition. The
+  // `cell` expression below then ran `rows.find(...).querySelector(...)` on
+  // `undefined` and the suite died with `Cannot read properties of undefined
+  // (reading 'querySelector')`, which names neither the habit nor the wait
+  // that was too weak.
+  //
+  // Seen in CI: this suite failed in 1.3s, passed on a re-run, and cost an
+  // unrelated pull request a red tick. A wait that can be satisfied by
+  // somebody else's row is not a wait for yours.
+  //
+  // The margin is thinner than "it flaked once" suggests, and the check below
+  // reports it: the row lands on the SECOND poll (`after 250ms`) on an idle
+  // local machine, every run. So the old condition was true a quarter of a
+  // second before the one that matters, and CI only has to be slower than that
+  // once.
+  let painted = false;
+  let waited = 0;
   for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+    painted = await ev(`[...document.querySelectorAll('#grid .habit-row')]
+      .some(r => r.textContent.includes('Smoking'))`).catch(() => false) === true;
+    if (painted) break;
+    waited += 250;
     await sleep(250);
   }
+  check('the habit painted on the dashboard', painted,
+    painted ? `after ${waited}ms` : 'no row containing "Smoking" after 20s');
 
   const cell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Smoking'));
+    // Named, so a regression here reports the missing ROW rather than a
+    // TypeError from the property access that follows it.
+    if (!row) throw new Error('no dashboard row for "Smoking"');
     return row.querySelector('.day-cell, .check, button[data-focus-key^="check:"]');})()`;
 
   const stored = async () => ev(`(async()=>{
