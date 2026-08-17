@@ -13,7 +13,8 @@
 
 import { TIME_RE } from './constants.js';
 import {
-  parseChannelList, parseDiscordWebhook, parseSnowflake, parseTimeZone,
+  parseChannelList, parseDiscordWebhook, parseNtfyToken, parseNtfyUrl,
+  parseSnowflake, parseTimeZone,
 } from './notify.js';
 
 export const HABIT_TYPES = new Set(['boolean', 'numerical']);
@@ -341,6 +342,18 @@ export const SETTING_VALUES = {
   // is what turns the three into one answer; this only decides what may be
   // stored.
   notifyTimezone: parseTimeZone,
+  // The topic this instance publishes to. A normaliser and not a list for the
+  // reason a webhook URL is one — but the rule it enforces is not this file's
+  // and not even this repository's: `parseNtfyUrl` asks the OPERATOR, through
+  // `NTFY_ALLOWED_HOSTS`, which hosts the server may be aimed at. So the same
+  // value is accepted on one instance and refused on another, deliberately:
+  // whose network a server fetches from is not a question the person typing the
+  // URL gets to answer, and on the cloud edition they are not the operator.
+  ntfyTopicUrl: parseNtfyUrl,
+  // Optional: what a protected topic needs. Bounded and header-safe, because it
+  // is interpolated into an `Authorization` header on a request this server
+  // makes.
+  ntfyToken: parseNtfyToken,
 };
 
 /**
@@ -392,6 +405,12 @@ export const UNPORTABLE_SETTINGS = Object.freeze([
   'discordChannelId',
   'discordUserId',
   'notifyTimezone',
+  // A topic URL is a bearer capability exactly as a webhook is: anyone holding
+  // it can publish into that topic, and on a public ntfy anyone holding it can
+  // SUBSCRIBE — so a backup carrying one hands over every future reminder, habit
+  // names and prompts included. The token is a credential outright.
+  'ntfyTopicUrl',
+  'ntfyToken',
 ]);
 
 /**

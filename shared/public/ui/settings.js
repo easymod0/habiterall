@@ -41,6 +41,7 @@ const CACHE_KEY = 'habiterall-settings';
 const CHANNEL_OPTIONS = [
   { value: 'android', label: 'Android app (on-device alarm, works offline)' },
   { value: 'discord', label: 'Discord channel (sent by the server)' },
+  { value: 'ntfy', label: 'ntfy topic (sent by the server, nothing to click)' },
 ];
 
 /** The zone the browser is in, e.g. 'Europe/Berlin'. */
@@ -282,6 +283,26 @@ export const SETTINGS = {
     default: '',
     placeholder: 'https://discord.com/api/webhooks/…',
     requires: (values) => (values.notifyChannels ?? []).includes('discord'),
+  },
+  ntfyTopicUrl: {
+    section: 'Notifications',
+    label: 'ntfy topic URL',
+    help: 'Where reminders are published. Subscribe to the same topic in the ' +
+      'ntfy app. This server only posts to hosts its operator allows, so a URL ' +
+      'that snaps back to blank is one it has not been permitted to reach.',
+    type: 'text',
+    default: '',
+    placeholder: 'https://ntfy.sh/my-habits',
+    requires: (values) => (values.notifyChannels ?? []).includes('ntfy'),
+  },
+  ntfyToken: {
+    section: 'Notifications',
+    label: 'ntfy access token',
+    help: 'Only for a protected topic — leave it empty for a public one.',
+    type: 'text',
+    default: '',
+    placeholder: 'tk_…',
+    requires: (values) => (values.notifyChannels ?? []).includes('ntfy'),
   },
   notifyTimezone: {
     section: 'Notifications',

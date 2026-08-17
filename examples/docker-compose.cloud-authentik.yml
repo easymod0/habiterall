@@ -198,6 +198,10 @@ services:
       HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
       HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
+      # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
+      # your own ntfy REPLACES that, and `off` refuses every one. The server
+      # fetches whatever is here, so this is the whole guard.
+      NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}          # ntfy.sh, or your own
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}

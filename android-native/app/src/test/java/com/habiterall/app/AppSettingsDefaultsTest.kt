@@ -172,6 +172,15 @@ class AppSettingsDefaultsTest {
         "discordChannelId" to "a server-sent destination this client never posts to",
         "discordUserId" to "a server-sent destination this client never posts to",
         "discordWebhook" to "a server-sent destination this client never posts to",
+        // The other server-sent destination, and the reason it is listed rather
+        // than mirrored is sharper than Discord's: ntfy HAS an Android app, so
+        // "the phone is involved" is true and still does not make this a value
+        // this client reads. The subscribing app is ntfy's, the publisher is
+        // this account's server, and nothing in habiterall's own client posts to
+        // a topic or holds its token. Copying either here would be a mirror with
+        // no second reader — cost with no property.
+        "ntfyTopicUrl" to "a server-sent destination this client never posts to",
+        "ntfyToken" to "a credential for a destination this client never posts to",
         // The phone's alarms are local and already on the device's own clock,
         // so there is nothing here for this to govern. `resolveTimeZone` reads
         // it for the SERVER's sends only.
