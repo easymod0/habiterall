@@ -873,23 +873,47 @@ view into a synthetic 503 with a toast, rather than one missing card. The
 payload is worth attacking through the WINDOW instead (`scores` is 139KB and a
 day-granularity `history` 250KB of that 464KB), which is a different change.
 
-One consequence that is not about drawing, **and the detail view keeps a paging
-position in two places rather than one.** `detail.open()` clears a position only
-when the HABIT changes, so a card hidden while paged into 2023 comes back there
-with nothing on screen to say why. `applyDraft` therefore clears both when
-`detailCards` changes, beside where it clears the session overrides for
-`calendarZoom` and the two granularities: `state.chartOffsets`, which
-`windowedChart` keys per card, **and `state.calEnd`, which is the calendar's**.
-Clearing only the first is what the self-review caught — measured hiding a
-calendar at `30 Jan 2023 → 7 Apr 2024` and showing it again at exactly that, on
-the one card anybody actually pages. The test drives it through the DIALOG with
-the habit open, because setting the value through the API reloads the page,
-which starts everything at today for free and would pass against a version that
-clears nothing.
+One consequence that is not about drawing, **and it took two goes to put in the
+right place.** `detail.open()` clears a paging position only when the HABIT
+changes, so a card hidden while paged into 2023 comes back there with nothing on
+screen to say why. The rule is `forgetHiddenPositions` in `ui/detail.js`: a card
+that is not being DRAWN holds no position.
 
-That halfness has an older half of its own, left alone here: `open()`'s comment
-says "Opening a different habit starts at 'now'", and it clears `chartOffsets`
-only — so `calEnd` already survives opening a different habit today.
+It belongs there rather than beside the setting, and that is the whole lesson.
+The detail view keeps a position in **two** places — `state.chartOffsets`, which
+`windowedChart` keys per card, and `state.calEnd`, which is the calendar's — and
+two of the four offset keys are `score:<gran>` and `history:<gran>`, built from
+the CURRENT granularity, session override included. Only `detail.js` knows that
+mapping. Written in `applyDraft`, it would be a third copy of it, reconstructed
+from a granularity that function is in the middle of clearing.
+
+Both wrong versions shipped in a review round. The first cleared only
+`chartOffsets`, and was measured hiding a calendar at `30 Jan 2023 → 7 Apr 2024`
+and showing it again at exactly that — the rule failing on the one card anybody
+pages. The second cleared BOTH but from `applyDraft`, gated on "`detailCards`
+changed at all", so unticking *Weekday consistency* also sent a History card
+paged back to 2019 — still ticked, never hidden — to today. One fix was too
+narrow about WHICH state and the other too broad about WHICH CARDS, and the
+scoped-by-card version in `detail.js` is what answers both.
+
+Three things about the test, because two of them are the "cannot fail" shape
+this file keeps recording. It drives the dialog with the habit open, since
+setting the value through the API reloads the page and starts everything at
+today for free. It runs **narrow and at day granularity**, because at desktop
+width with the fixtures the calendar is the only card that pages at all — so the
+first version found no range readout and compared `''` with `''`. And it asserts
+that **both** cards actually MOVED before asserting one was left alone: the
+calendar's position survives a broken `chartOffsets` rule on its own, so
+checking only that one leaves History sitting at today and the comparison passes
+against the very bug it is written for. The mutation run is what showed both.
+
+`windowedChart` also gives its range readout the same `.cal-range` class the
+calendar uses, so a test looking one up must scope to a card by title or it
+reads whichever card is highest on the page.
+
+An older half of this is left alone: `open()`'s comment says "Opening a
+different habit starts at 'now'", and it clears `chartOffsets` only — so
+`calEnd` already survives opening a different habit today.
 
 Neither setting is mirrored on the phone, and the two reasons differ. The native
 grid does not page a fixed window at all — it grows by scrolling and sends

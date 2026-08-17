@@ -282,6 +282,70 @@ try{
   ck('and ticking it back reopens it at today, not where it was hidden',
      await calRange() === atToday, `expected ${atToday}, got ${await calRange()}`);
 
+  // ...and a card NOT touched keeps its place. The block above only ever
+  // toggles the same card it pages, so it cannot see a rule scoped to "the
+  // setting changed at all" wiping everybody's position as collateral — which
+  // is what the first fix did, and what a review caught.
+  //
+  // Two things had to be measured rather than assumed to make this bite. A
+  // `windowedChart` card grows paging controls only when its data does not fit,
+  // and at desktop width with these fixtures the CALENDAR is the only card that
+  // pages at all — so this runs narrow and at day granularity, where Habit
+  // strength and History page too. And `windowedChart` gives its readout the
+  // same `.cal-range` class the calendar uses, so the lookups below are scoped
+  // to a card by title: unscoped, they return whichever card is highest on the
+  // page, and a test about two cards holding separate positions compared one of
+  // them with itself. The first version did both wrong and compared '' to ''.
+  await putSetting({ historyGranularity: 'day' });
+  await resize(390, 900, true);
+  await load();
+  await openHabit();
+
+  const rangeIn = (title) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent===${JSON.stringify(title)});
+    return c?.querySelector('.cal-range')?.textContent ?? '';})()`);
+  const pageBack = (title) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent===${JSON.stringify(title)});
+    const b=[...(c?.querySelectorAll('.cal-nav button') ?? [])]
+      .find(b=>b.textContent.includes('Earlier'));
+    if (!b || b.disabled) return false;
+    b.click(); return true;})()`);
+
+  // BOTH before-values are captured and BOTH are asserted to have moved. The
+  // calendar's position survives a broken `chartOffsets` rule on its own — it
+  // lives in `calEnd` — so checking only that one leaves History's range sitting
+  // at today, and the "left alone" check below then compares today with today
+  // and passes against the very bug it is written for. That is exactly what the
+  // first version of this did, and the mutation run is what showed it.
+  const calAtToday = await rangeIn('Calendar');
+  const histAtToday = await rangeIn('History');
+  for (const _ of [0, 1]) { await pageBack('Calendar'); await sleep(700); }
+  for (const _ of [0, 1]) { await pageBack('History'); await sleep(700); }
+  const calPaged = await rangeIn('Calendar');
+  const histPaged = await rangeIn('History');
+  ck('two different cards page independently, and both actually moved',
+     calPaged !== '' && calPaged !== calAtToday &&
+     histPaged !== '' && histPaged !== histAtToday,
+     `calendar ${calAtToday} -> ${calPaged}, history ${histAtToday} -> ${histPaged}`);
+
+  // Untick a THIRD card, related to neither — and one with no paging of its own.
+  await ev(`document.getElementById('btn-settings').click()`); await sleep(600);
+  await ev(`(()=>{const b=document.getElementById('setting-detailCards-weekdays');
+    b.checked=false; b.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await ev(`document.getElementById('settings-close').click()`); await sleep(1400);
+  await openHabit();
+  ck('unticking one card leaves another card’s paging alone',
+     await rangeIn('History') === histPaged && histPaged !== '',
+     `expected ${histPaged}, got ${await rangeIn('History')}`);
+  ck('and leaves the calendar where it was',
+     await rangeIn('Calendar') === calPaged && calPaged !== '',
+     `expected ${calPaged}, got ${await rangeIn('Calendar')}`);
+
+  await putSetting({ historyGranularity: 'week' });
+  await resize(1440, 900, false);
+
   await ev(`localStorage.removeItem('habiterall-settings')`);
   await load();
 

@@ -87,6 +87,50 @@ export async function open(id) {
   }
 }
 
+/**
+ * A card that is not being drawn holds no paging position.
+ *
+ * The rule the `detailCards` setting needs, and it lives HERE rather than
+ * beside the setting because this file is the only one that knows which key a
+ * card pages under: `windowedChart` is passed `score:<gran>` and
+ * `history:<gran>` — built from the CURRENT granularity, session override
+ * included — while the other two are literals, and the calendar does not use
+ * `chartOffsets` at all. Written where the setting is applied, that mapping
+ * would be a second copy of something already written down twice, and it would
+ * have to reconstruct a granularity the settings dialog is in the middle of
+ * clearing.
+ *
+ * Scoped to the cards actually hidden, which is the whole point. The first
+ * version cleared `chartOffsets` wholesale whenever `detailCards` changed at
+ * all, so unticking *Weekday consistency* also sent a History card paged back
+ * to 2019 — still ticked, never hidden — back to today, with nothing on screen
+ * to explain it.
+ *
+ * Prefix-matched for the two granular keys, so hiding the strength card forgets
+ * every resolution it was paged at rather than only the one showing.
+ *
+ * @param {(id: string) => boolean} shows
+ */
+function forgetHiddenPositions(shows) {
+  const owns = {
+    strength: (key) => key.startsWith('score:'),
+    history: (key) => key.startsWith('history:'),
+    weekdayMonths: (key) => key === 'weekdayByMonth',
+    frequency: (key) => key === 'frequency',
+  };
+
+  for (const [id, isOurs] of Object.entries(owns)) {
+    if (shows(id)) continue;
+    for (const key of Object.keys(state.chartOffsets)) {
+      if (isOurs(key)) delete state.chartOffsets[key];
+    }
+  }
+
+  // The calendar keeps its position in `calEnd` instead — the reason clearing
+  // `chartOffsets` alone was not enough, on the one card anybody pages.
+  if (!shows('calendar')) state.calEnd = null;
+}
+
 function render(stats, entries) {
   const habit = stats.habit;
   const color = habit.color;
@@ -170,6 +214,7 @@ function render(stats, entries) {
   // rather than a blank one.
   const cards = new Set(settings.get('detailCards') ?? []);
   const shows = (id) => cards.has(id);
+  forgetHiddenPositions(shows);
 
   /* score, with its own resolution selector */
   if (shows('strength')) {
