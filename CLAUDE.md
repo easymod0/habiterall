@@ -1429,6 +1429,30 @@ per channel, or enabling a second destination is silenced for its first day by
 the send to the first; keyed on the local date, or a user east of the server
 gets it filed under the wrong day and again a few hours later.
 
+**...and under `auto` that local date can move, which reads as a bug and is the
+trade.** `resolveTimeZone`'s second tier is the zone the account's LAST CLIENT
+reported, so an account genuinely used from two zones either side of a date
+boundary can have the boundary crossed by a device checking in rather than by
+time passing — and the two directions fail differently, which is the part worth
+getting right. **Forward** (Los Angeles to Tokyo) moves the date on, the log's
+row sits under the earlier one, and the gate opens: inside the catch-up window
+that is a second send, the same habit twice in one UTC day, one per zone; past
+it, `too_late`, at warn. **Backward** (Tokyo to Los Angeles) moves the date onto
+a day the log already has, so the answer is `already_sent` — never `too_late`,
+because that gate is asked FIRST and a present row wins however late the minute
+is, which is the ordering `notify.too_late` exists to preserve. The arrival day's
+reminder is simply suppressed, and `already_sent` logs at debug, so the symptom
+is the absence of a line rather than the presence of one. A first version of this
+paragraph had the two backwards and sent an operator looking for a warning that
+cannot appear.
+
+The keying is deliberately left alone: a UTC date is the defect the local date
+was chosen to fix, and adding the zone to the key makes the duplicate certain
+instead of possible, since two zones would then never share a slot. It is
+bounded by how often somebody carries one account across a date line, and an
+account that NAMES its zone — tier one — does not have it at all. Written down
+in `dueReminders` because the day it happens it will be reported as a bug.
+
 **How it WENT is written down too, and that one is for the user.** A permanent
 failure — a deleted webhook, the bot kicked from its channel, a revoked token —
 is marked as sent (a 404 answers 404 forever, and retrying every minute until
