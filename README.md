@@ -30,7 +30,7 @@ reconnect.
 
 - [Which edition do I want?](#which-edition-do-i-want)
 - [Quick start](#quick-start) · [personal](#personal-edition) · [cloud](#cloud-edition)
-- [Features](#features) · [Statistics](#statistics) · [Bouncing back](#bouncing-back)
+- [Features](#features) · [Statistics](#statistics) · [Bouncing back](#bouncing-back) · [Awards](#awards)
 - [Reminders and notifications](#reminders-and-notifications)
 - [Install on a phone](#install-on-a-phone)
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
@@ -1076,6 +1076,7 @@ disagrees with you.
 | **History** | Completions by day / week / month / quarter / year, as a percentage or a count |
 | **Best streaks** | Your ten longest runs, listed newest first with the dates |
 | **Bouncing back** | What happens *after* a miss — see below |
+| **Awards** | What the history has already earned — see below |
 | **By day of week** | Which days you reliably miss |
 | **Weekday consistency** | The same, month by month, so you can see a weekday slipping |
 | **Times per week** | How many weeks each month hit 1×, 2×, 3× … |
@@ -1115,6 +1116,34 @@ separates them.
 
 > Shown for daily habits only. For a 3×/week habit an off-day is not a
 > failure, so these figures would be measuring the wrong thing.
+
+### Awards
+
+A short row of badges under *Bouncing back*, for what a habit's history has
+already earned:
+
+- **Streaks** — the longest run you have managed, against the same ladder the
+  survival curve uses: 2, 3, 5, 7, 14, 21, 30, 60, 100 days. It is your *best*
+  run, so it stays when the current one ends.
+- **Strength** — 50%, 80% or 95%, whichever your strength curve has reached.
+  50% is about a fortnight of keeping a daily habit, 95% about two months.
+- **Comebacks** — how many times you were back the next day after a miss, and
+  the longest lapse you have climbed out of. A recent one is flagged as new for
+  a week, because coming back is the moment worth noticing.
+- **Every day of the week** — you have kept this on all seven weekdays at least
+  once.
+- **A year of keeping it** — your first good run and your most recent are a
+  year or more apart. There is exactly one way to earn that one.
+
+They are **worked out from your entries, never stored**, so nothing is ever
+awarded for something your history does not show, and restoring a backup brings
+your awards with it without carrying anything extra in the file. It also means
+one badge is worded as a record rather than a medal: *No lapse over a day* says
+what has been true so far, and a two-day lapse ends it — where the rest are
+high-water marks that cannot be taken away.
+
+There is nothing to switch on, and no card at all until a habit has earned
+something.
 
 ---
 

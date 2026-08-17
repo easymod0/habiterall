@@ -33,16 +33,24 @@
 import { daysBetween, SURVIVAL_THRESHOLDS } from './stats.js';
 
 /**
- * The one strength band in this first set.
+ * The strength ladder, calibrated against the real curve rather than against
+ * intuition.
  *
- * Calibrated against the real curve rather than against intuition. The decay is
- * Loop's, `0.5^(sqrt(frequency)/13)`, and `test/stats.test.js` pins a perfect
- * daily habit at ~50% on day 13, >75% at day 30 and >94% at day 60. So 50% is a
- * fortnight of keeping it — reachable by someone who has just started, which is
- * who an award is for. The 80% and 95% bands are months-long goals and want to
- * be presented as such; they are not in this pass.
+ * The decay is Loop's, `0.5^(sqrt(frequency)/13)`, and `test/stats.test.js`
+ * pins a perfect daily habit at ~50% on day 13, >75% at day 30 and >94% at day
+ * 60. So the rungs are a fortnight, about a month, and about two months of
+ * keeping it perfectly — and longer than that for anyone real. 50% is the one
+ * that carries somebody who has just started, which is who an award is for;
+ * 95% is a months-long goal.
+ *
+ * Presenting 95% "as one" is what the ladder does by SHOWING ONLY THE RUNG
+ * REACHED, exactly as the streak ladder does. A new user is never handed a row
+ * of greyed-out bands they have not earned, which is how a months-long goal
+ * turns into a daily reminder of falling short — and the strength curve is
+ * drawn full-height at the top of this very page, so how far there is to go is
+ * already answered better than a badge could.
  */
-export const STRENGTH_BAND = 0.5;
+export const STRENGTH_BANDS = [0.5, 0.8, 0.95];
 
 /**
  * How long a comeback stays news.
@@ -55,6 +63,16 @@ export const STRENGTH_BAND = 0.5;
 export const COMEBACK_FRESH_DAYS = 7;
 
 /**
+ * How long a habit has to have been going to count as a long one.
+ *
+ * A year, and measured between the first good run and the most recent one —
+ * see `computeAwards`. 365 rather than a calendar year because `daysBetween`
+ * counts days and absorbs DST, and a leap day either way does not change what
+ * this is claiming.
+ */
+const LONG_HAUL_DAYS = 365;
+
+/**
  * A lapse this short is what "Recovered N times" already counts, so a second
  * award about it is one fact said twice. The comeback award is for the hole you
  * had to climb out of.
@@ -64,7 +82,8 @@ const COMEBACK_MIN_DAYS = 2;
 /**
  * @typedef {object} Award
  * @property {string} id        stable within a family; the tier moves with it
- * @property {string} family    'streak' | 'strength' | 'comeback' | 'recovered' | 'lapses'
+ * @property {string} family    'streak' | 'strength' | 'comeback' | 'recovered' |
+ *                              'week' | 'tenure' | 'lapses'
  * @property {string} label     the badge itself
  * @property {string} detail    the number behind it, in a sentence
  * @property {number} value     the figure the award was read from
@@ -115,12 +134,16 @@ export function computeAwards(stats, end) {
   // week, which is a badge that punishes you for the thing it is meant to
   // encourage. The series is what the chart above already plots.
   const peak = (stats.scores ?? []).reduce((max, p) => (p.score > max ? p.score : max), 0);
-  if (peak >= STRENGTH_BAND) {
+  // The highest band reached, and only that one — the same answer the streak
+  // ladder gives, for the same reason.
+  const band = STRENGTH_BANDS.filter((b) => peak >= b).pop();
+  if (band) {
+    const pct = Math.round(band * 100);
     out.push(award({
-      id: `strength:${Math.round(STRENGTH_BAND * 100)}`,
+      id: `strength:${pct}`,
       family: 'strength',
-      value: Math.round(STRENGTH_BAND * 100),
-      label: `${Math.round(STRENGTH_BAND * 100)}% strength`,
+      value: pct,
+      label: `${pct}% strength`,
       detail: `Your strength has been as high as ${Math.round(peak * 100)}%.`,
     }));
   }
@@ -162,6 +185,51 @@ export function computeAwards(stats, end) {
         fresh: since >= 0 && since <= COMEBACK_FRESH_DAYS,
       }));
     }
+  }
+
+  /* ---- the two "ever" claims, which is what makes them permanent ---- */
+
+  // Every weekday kept at least once. An "at least once" claim over a window
+  // that only grows, so it cannot come untrue — and note what it deliberately
+  // is NOT: a threshold on all seven weekdays. `computeWeekdays` counts
+  // COMPLETIONS and not pace, so a 3×/week habit kept perfectly has four
+  // weekdays sitting at zero, and any rate test across all seven would be
+  // unreachable for every non-daily habit. That is the `applicable: false`
+  // shape `computeResilience` had to stop doing. "At least once" a Mon/Wed/Fri
+  // habit can genuinely meet, by going once on a Sunday — it is simply a claim
+  // about a rigid schedule that is false until it is true.
+  const weekdays = stats.weekdays ?? [];
+  if (weekdays.length === 7 && weekdays.every((d) => d.completed > 0)) {
+    out.push(award({
+      id: 'week:full',
+      family: 'week',
+      value: 7,
+      label: 'Every day of the week',
+      detail: 'You have kept this on all seven weekdays at least once.',
+    }));
+  }
+
+  // The long haul, read from the STREAKS rather than from the habit's creation
+  // date — which is not on the stats response, and which answers a slightly
+  // different question anyway. "Created a year ago" is true of a habit
+  // abandoned in its first week; what is worth an award is having been on pace
+  // once and on pace again a year or more later, which is what the span
+  // between the first run and the last one says. Both ends only move outward
+  // as the window grows, so it is monotone, and it costs no new input.
+  const streaks = stats.streaks ?? [];
+  const span = streaks.length
+    ? daysBetween(streaks[0].start, streaks[streaks.length - 1].end)
+    : 0;
+  const years = Math.floor(span / LONG_HAUL_DAYS);
+  if (years >= 1) {
+    out.push(award({
+      id: `tenure:${years}`,
+      family: 'tenure',
+      value: years,
+      label: years === 1 ? 'A year of keeping it' : `${years} years of keeping it`,
+      detail:
+        `Your first good run and your most recent are ${plural(span, 'day')} apart.`,
+    }));
   }
 
   /* ---- and the one that is a record rather than a trophy ---- */

@@ -353,10 +353,20 @@ Two readings are deliberately refused for that reason and they are the obvious
 ones. `currentStreak` un-earns itself on the day the run ends. And the score's
 CURRENT value flickers: it is a trailing-window EWMA, so a badge on it goes out
 with a bad week, which is a badge that punishes the thing it exists to
-encourage. The strength band is the **peak of the series** — 50%, and one band,
-calibrated against the curve `test/stats.test.js` pins rather than against
-intuition: a perfect daily habit is at ~50% on day 13, so it is a fortnight of
-keeping it. 80% and 95% are months-long goals and want presenting as such.
+encourage. The strength band is the **peak of the series**.
+
+**The two ladders are calibrated to the curve, and the calibration was
+MEASURED.** `STRENGTH_BANDS` is 50/80/95, and a perfect daily habit crosses them
+on days **13, 31 and 57** — the first draft of the test asserted 30 and 60 from
+the two figures `test/stats.test.js` happens to pin, and was wrong by a day and
+by three. Both sides of each crossing are pinned now, so Loop's decay constant
+drifting fails here as well as there, and "95% is a months-long goal" is a fact
+about the arithmetic rather than a claim in a comment. Which is also how that
+goal is *presented as one*: only the rung reached is shown, so a new user is
+never handed a row of greyed-out bands they have not earned — and the strength
+curve is drawn full height at the top of the same page, which answers "how far
+is there to go" better than a badge could. Same answer as the streak ladder, and
+for the same reason.
 
 **The one award that is not monotone says so in the payload.** "No lapse over a
 day" is a claim about the whole record and a two-day lapse ends it; there is no
@@ -398,6 +408,58 @@ the ordering `computeSurvival`'s own docstring argues for, a probability you can
 act on beating a trophy. And a **one-day lapse earns no comeback**
 (`COMEBACK_MIN_DAYS`), because "Back after 1 day" is precisely what "Recovered N
 times" already said.
+
+**The two "ever" claims are permanent for free, and one of them had to refuse
+the obvious threshold.** *Every day of the week* is `computeWeekdays` with
+`completed > 0` on all seven, and *A year of keeping it* is the span between the
+FIRST streak's start and the LAST one's end. Both ends of both only move
+outward as the window grows, which is the whole of why they are safe.
+
+The weekday one is deliberately "at least once" and deliberately not a RATE
+across all seven, and that is the load-bearing part. `computeWeekdays` counts
+completions rather than pace, so a 3×/week habit kept perfectly has four
+weekdays sitting at zero — and any threshold over all seven is then unreachable
+for every non-daily habit, which is the `applicable: false` shape
+`computeResilience` had to stop doing. "At least once" a Mon/Wed/Fri habit can
+genuinely meet by going once at a weekend: a claim about a schedule that is
+false until it is true, rather than a gate on the habit's frequency. It is also
+what keeps the award consistent with the tiles for a limit under
+`atMostUnlogged: 'success'`, where an unanswered day counts as kept and so does
+the weekday it fell on.
+
+**A year is measured between the runs, not from `created_at`.** The creation
+date is not on the stats response — passing the habit in would have widened
+`computeAwards` past "a reading of what `computeStats` produced" — but the
+better reason is that it answers a different question: *created* a year ago is
+true of a habit abandoned in its first week, and there is a test that says so.
+The span between the first good run and the most recent one claims what the
+award actually means, needs no new input, and is monotone. It is also honest
+about an import: a Loop backup carrying a year of history earns it on the day it
+lands, because the record is a year long and that is what the badge says.
+
+**What is NOT here, and why, because each looked cheap and was not.**
+*Coverage* — "every day this month has an answer, whatever it was" — is the
+best award in #63 and the one this app can do that almost nothing else can, but
+it is a count of dates the entry map HOLDS and `computeAwards` receives no entry
+map. That is a signature decision (admit the entries, and say exactly which
+questions may use them) or a stats-shape one, not a few lines, and it is left
+for its own change. *Beat your worst day* is refused for a harder reason: it is
+a current-state claim over a lifetime rate, so it is not monotone; its "stops
+being the lowest" half can be satisfied by another weekday getting WORSE, which
+is an award for regression; and its entire value is NAMING the day, which the
+server cannot do — a weekday name is locale-dependent and `shared/src` has no
+locale, so it would have to hand the client a number to compose prose around,
+which is the one thing computing awards on the server exists to prevent. *Rest
+taken deliberately* is gated on `skipDays`, which defaults off, and #63's own
+warning applies: an award nobody can see is worse than no award. Portfolio
+awards read every habit at once and belong to an account-level route.
+
+Note the caveat that applies to every award above: `?start=` narrows the window
+and can therefore lower any of these, deliberately — that caller is asking about
+a period, exactly as the detail view's range controls do, and the same is
+already true of `bestStreak`. The monotonicity claim is about the window as it
+actually moves for the detail view, which is forward with the habit's whole
+history inside it.
 
 **Nothing here is worded per habit shape, and that was checked rather than
 assumed.** An at-most habit and a `show_as: 'avoid'` one both earn from the same

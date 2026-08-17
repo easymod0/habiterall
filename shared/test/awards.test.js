@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  COMEBACK_FRESH_DAYS, STRENGTH_BAND, computeAwards,
+  COMEBACK_FRESH_DAYS, STRENGTH_BANDS, computeAwards,
 } from '../src/awards.js';
+
+const STRENGTH_BAND = STRENGTH_BANDS[0];
 import {
-  SURVIVAL_THRESHOLDS, computeRecovery, computeStats,
+  SURVIVAL_THRESHOLDS, addDays, computeRecovery, computeStats, daysBetween,
 } from '../src/stats.js';
 
 const DAILY = {
@@ -107,7 +109,9 @@ test('the strength award is the PEAK of the curve, not today\'s score', () => {
     `the current score should have decayed below the band, got ${stats.score}`);
   const a = byFamily(computeAwards(stats, end));
   assert.ok(a.strength, 'a high-water mark must survive the decay');
-  assert.equal(a.strength.value, 50);
+  // The top band, reached two months in and kept even though today's score is
+  // below the lowest one.
+  assert.equal(a.strength.value, 95);
 });
 
 test('a habit that never reached the band earns no strength award', () => {
@@ -116,6 +120,47 @@ test('a habit that never reached the band earns no strength award', () => {
   const stats = computeStats(DAILY, entries(str), { end: endOf(str) });
   assert.ok(Math.max(...stats.scores.map((s) => s.score)) < STRENGTH_BAND);
   assert.equal(byFamily(computeAwards(stats, endOf(str))).strength, undefined);
+});
+
+test('the strength ladder shows the rung reached, and only that one', () => {
+  // The same answer the streak ladder gives. A row of greyed-out bands is how a
+  // months-long goal turns into a daily reminder of falling short, and the
+  // strength curve at the top of the page already shows how far there is to go.
+  const bands = (days) =>
+    awardsFor('x'.repeat(days)).filter((a) => a.family === 'strength').map((a) => a.value);
+
+  assert.deepEqual(bands(13), [50]);
+  assert.deepEqual(bands(35), [80]);
+  assert.deepEqual(bands(75), [95]);
+});
+
+test('every strength award is a band, never an arbitrary percentage', () => {
+  const pcts = STRENGTH_BANDS.map((b) => Math.round(b * 100));
+  for (let days = 0; days <= 90; days += 3) {
+    for (const a of awardsFor('x'.repeat(days) || '.')) {
+      if (a.family !== 'strength') continue;
+      assert.ok(pcts.includes(a.value), `${a.id} is not a band`);
+      assert.equal(a.label, `${a.value}% strength`);
+    }
+  }
+});
+
+test('the bands land where the curve puts them: a fortnight, a month, two months', () => {
+  // Measured against the real curve rather than asserted from intuition — the
+  // first draft of this test had 80% arriving on day 30 and 95% on day 60, and
+  // both were wrong by a day and by three days respectively. Pinned exactly on
+  // both sides of each crossing, so a change to Loop's decay constant fails
+  // here as well as in `test/stats.test.js`, and so "95% is a months-long goal"
+  // is a fact about the arithmetic rather than a claim in a comment.
+  const bandAt = (days) =>
+    awardsFor('x'.repeat(days)).find((a) => a.family === 'strength')?.value ?? 0;
+
+  assert.equal(bandAt(12), 0);
+  assert.equal(bandAt(13), 50);
+  assert.equal(bandAt(30), 50);
+  assert.equal(bandAt(31), 80);
+  assert.equal(bandAt(56), 80);
+  assert.equal(bandAt(57), 95);
 });
 
 test('the band is where the pinned curve says a fortnight of keeping it is', () => {
@@ -233,6 +278,85 @@ test('computeRecovery reports no longest and no date when nothing has closed', (
   assert.equal(r.rate, null);
 });
 
+/* ---------- the two "ever" claims ---------- */
+
+test('a full week needs all seven weekdays, and one short is not one', () => {
+  // Seven consecutive days cover every weekday whichever day they start on.
+  assert.equal(byFamily(awardsFor('x'.repeat(7))).week?.value, 7);
+  assert.equal(byFamily(awardsFor('x'.repeat(6))).week, undefined);
+});
+
+test('a rigid weekly schedule does not earn a full week, and that is not a gate', () => {
+  // `computeWeekdays` counts COMPLETIONS and not pace, so a 3x/week habit kept
+  // exactly on Mon/Wed/Fri has four weekdays at zero. It is a claim that is
+  // false rather than a habit shape being excluded — which is why the award is
+  // "at least once" and not a rate across all seven, a test no non-daily habit
+  // could ever pass.
+  const gym = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 3, freq_denominator: 7,
+  };
+  const rows = [];
+  for (let i = 0; i < 84; i++) {
+    const d = new Date(2026, 0, 1 + i);
+    if (![1, 3, 5].includes(d.getDay())) continue;
+    rows.push({
+      date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+      value: YES, status: '',
+    });
+  }
+  const end = '2026-03-31';
+  const stats = computeStats(gym, rows, { end });
+  assert.ok(stats.bestStreak > 30, 'the habit is being kept, on pace');
+  assert.deepEqual(stats.weekdays.map((d) => d.completed > 0),
+    [false, true, false, true, false, true, false], 'four weekdays at zero');
+
+  const a = byFamily(computeAwards(stats, end));
+  assert.ok(a.streak, 'so it earns a streak');
+  assert.equal(a.week, undefined, 'but it has never been done at a weekend');
+
+  // Going once on each of the four is all it takes, which is what makes this a
+  // claim about a schedule rather than a gate on the habit's frequency.
+  for (const date of ['2026-03-22', '2026-03-24', '2026-03-26', '2026-03-28']) {
+    rows.push({ date, value: YES, status: '' });
+  }
+  assert.ok(byFamily(computeAwards(computeStats(gym, rows, { end }), end)).week);
+});
+
+test('the long haul is the span between the first good run and the last', () => {
+  const long = 'x'.repeat(10) + '.'.repeat(380) + 'x'.repeat(10);
+  const a = byFamily(awardsFor(long));
+  assert.equal(a.tenure.value, 1);
+  assert.equal(a.tenure.label, 'A year of keeping it');
+
+  assert.equal(byFamily(awardsFor('x'.repeat(10) + '.'.repeat(300) + 'x'.repeat(10))).tenure,
+    undefined);
+
+  const longer = 'x'.repeat(10) + '.'.repeat(720) + 'x'.repeat(10);
+  assert.equal(byFamily(awardsFor(longer)).tenure.label, '2 years of keeping it');
+});
+
+test('a habit created a year ago and abandoned in week one does not earn it', () => {
+  // The distinction from reading a creation date, and the reason the span is
+  // read from the streaks instead. The window here is over a year wide; the
+  // habit was kept for a week of it.
+  const stats = computeStats(DAILY, entries('x'.repeat(7)), { end: '2027-03-01' });
+  assert.ok(daysBetween('2026-01-01', '2027-03-01') > 365, 'the window is over a year');
+  assert.equal(byFamily(computeAwards(stats, '2027-03-01')).tenure, undefined);
+});
+
+test('the long haul does not move as time passes without new entries', () => {
+  const str = 'x'.repeat(10) + '.'.repeat(380) + 'x'.repeat(10);
+  const rows = entries(str);
+  const at = (end) => byFamily(computeAwards(computeStats(DAILY, rows, { end }), end)).tenure;
+
+  const earned = at(endOf(str));
+  assert.equal(earned.value, 1);
+  // Six months later, nothing recorded: the award is a statement about what
+  // happened and cannot be undone by the calendar moving.
+  assert.equal(at(addDays(endOf(str), 180)).value, 1);
+});
+
 /* ---------- the property the whole design rests on ---------- */
 
 test('a permanent award is never taken away as history grows', () => {
@@ -310,6 +434,7 @@ test('an at-most habit earns from stated lapses, and a slip is a lapse', () => {
 
   assert.ok(a.streak, 'a run of clean days is a streak');
   assert.equal(a.recovered.value, 1, 'the day over the limit is a lapse recovered from');
+  assert.ok(a.week, 'and forty clean days cover every weekday');
   // The vocabulary has to be true of a limit as well as of a goal. "Lapse",
   // "streak" and "strength" are what the cards either side of this already say
   // about the same habit, so no award is worded the other way up.
@@ -331,12 +456,17 @@ test('what an unlogged day is worth reaches awards without a second opinion', ()
     { end: '2026-02-15' });
   const kept = computeStats(habit, rows, { end: '2026-02-15' });
 
-  assert.equal(byFamily(computeAwards(missed, '2026-02-15')).streak, undefined);
+  const m = byFamily(computeAwards(missed, '2026-02-15'));
+  assert.equal(m.streak, undefined);
+  assert.equal(m.week, undefined, 'only the one answered day counts as kept');
 
   const a = byFamily(computeAwards(kept, '2026-02-15'));
   assert.equal(a.streak.value, 30, 'the award must match the streak on the tile');
   assert.equal(a.streak.value <= kept.bestStreak, true);
   assert.ok(a.strength, 'and the strength band the curve reached');
+  // `computeWeekdays` reads the same rule, so the full week goes the same way.
+  // Two awards agreeing about silence beats two awards with opinions.
+  assert.ok(a.week, 'and every weekday, since silence is what the habit asked for');
 });
 
 test('an avoided habit is judged on what is stored, not on how it is shown', () => {
