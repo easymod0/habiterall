@@ -77,6 +77,27 @@ export function matchesQuery(habit, query = state.query) {
   return fold(habit.name).includes(q) || fold(habit.description).includes(q);
 }
 
+/**
+ * Whether a habit would be on the dashboard as it is currently set up.
+ *
+ * This is the question a MUTATOR has to ask, and it is deliberately wider than
+ * the filter. `load()` fetches the active habits or the archived ones and never
+ * both, so the **Archived** checkbox — which `openDialog` renders for every
+ * existing habit — takes a row off the list without touching either field the
+ * filter reads. Asking `matchesQuery` alone left "No habits match that." over an
+ * archive that had just succeeded: the very sentence the rename case exists to
+ * prevent, arriving by the one route that predicate cannot see.
+ *
+ * It is also why `deleteHabit` clears unconditionally rather than asking. For a
+ * habit that no longer exists this is false however the account is set up, so
+ * the constant there IS this rule, resolved in advance.
+ *
+ * @param {{name?: string, description?: string, archived?: unknown}} habit
+ */
+export function staysOnList(habit) {
+  return !!habit.archived === state.showArchived && matchesQuery(habit);
+}
+
 /** @type {Map<string, Set<Function>>} */
 const listeners = new Map();
 
