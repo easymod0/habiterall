@@ -248,6 +248,45 @@ try {
   await typeAndSave('');
   row = await stored();
   check('an empty box clears the day', row === null, JSON.stringify(row));
+
+  console.log('\n--- a comma account reads and writes the other way round ---');
+  // #108's remaining half, followed to the row for the reason the rest of this
+  // suite exists: "10.000" is ten to this parser and ten thousand to the reader
+  // who typed it, and being wrong there is a stored number rather than a
+  // rejected form. The setting belongs to the account, so it is written through
+  // the API and the page reloaded — the path a second device would take.
+  await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ numberFormat: 'comma' }) }); })()`);
+  await ev(`location.reload(); true`);
+  for (let i = 0; i < 60; i++) {
+    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
+    await sleep(250);
+  }
+
+  check('reopened', await openToday());
+  await typeAndSave('10.000');
+  row = await stored();
+  check('"10.000" is not quietly stored as ten', row === null, JSON.stringify(row));
+  const commaHint = await ev(
+    `document.querySelector('#grid-count .countfield-hint').textContent`);
+  check('and the complaint names the DOT, which is what they are looking at',
+    /a dot can separate thousands/.test(commaHint), commaHint);
+
+  // ...and the comma is the decimal point now, both read and written. The
+  // second half is what stops the box telling its owner they typed it wrong:
+  // it accepted 8,5 and would have redrawn it as 8.5.
+  await typeAndSave('8,5');
+  row = await stored();
+  check('"8,5" is stored as 8.5 on a comma account', row?.value === 8.5, JSON.stringify(row));
+  check('reopened', await openToday());
+  const shown = await ev(`document.getElementById('grid-count-typed').value`);
+  check('and the box shows it back with a comma', shown === '8,5', shown);
+  await ev(`document.getElementById('count-cancel').click(); true`);
+
+  await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ numberFormat: 'auto' }) }); })()`);
 } catch (e) {
   console.log('ERROR:', e.message);
   fails++;

@@ -22,8 +22,10 @@
 // @ts-ignore -- redeclaring the global for type purposes only
 const sw = self;
 
-// v15: `ui/amount.js` gained `amountComplaint` and `ui/count-field.js` imports
-// it. Both are shell assets and both are SCRIPTS, which `shellFirst` serves
+// v15: `ui/amount.js` gained `amountComplaint`, and then `resolveNumberFormat`
+// and `deviceDecimalSeparator` with the decimal-separator setting;
+// `ui/count-field.js` imports all three, and `ui/settings.js` for the account's
+// answer. Both are shell assets and both are SCRIPTS, which `shellFirst` serves
 // cache-first while revalidating per request — so the swap is not atomic and
 // the two can land a load apart. New count-field.js over a cached old
 // amount.js is a module LINK error: no such export, so count-field.js never

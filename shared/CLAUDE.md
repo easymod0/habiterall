@@ -106,6 +106,14 @@ which `0` is a real answer. Two of the three are falsy, so callers compare with
 already records as too generous about form — `1e3` is not a thing anyone types
 into a box asking how many glasses of water they drank.
 
+Which of the two separators is the decimal point is the account's
+`numberFormat`, resolved by `resolveNumberFormat` in three tiers — the stated
+answer, else the device's, else the app's own — and passed IN rather than looked
+up, because a DOM-free module has no business reaching for a settings cache or
+for `Intl`. Only a three-digit group depends on it (`10.000`), which is why the
+default costs no existing caller anything, and a group is refused under either
+convention rather than read. The root CLAUDE.md has the argument.
+
 It owns the reading for the SERVER too, which is what makes "DOM-free" a
 contract rather than a convenience: `src/discord.js` imports it, because a modal
 is the same box arriving over a socket and its own `Number()` reading recorded

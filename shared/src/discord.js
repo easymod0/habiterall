@@ -39,7 +39,9 @@ import {
 // millionth, six decimal places — which are wider than anything a habit records
 // and are stated here because they are the one thing a press can now be refused
 // for that it could not be before.
-import { amountComplaint, parseAmount } from '../public/ui/amount.js';
+import {
+  amountComplaint, parseAmount, resolveNumberFormat,
+} from '../public/ui/amount.js';
 
 const API = 'https://discord.com/api/v10';
 
@@ -501,6 +503,13 @@ export async function handleInteraction(interaction, adapter) {
     let value;
     if (type === INTERACTION.MODAL) {
       const raw = modalValue(interaction);
+      // The account's convention, with NO device tier: a press arrives from
+      // Discord, so there is nothing here making the request and no device to
+      // report one — the same shape as `adapter.today`, which asks the account
+      // rather than a header for the same reason. `auto` therefore lands on the
+      // app's own convention here while it lands on the browser's in the web
+      // app, which is the honest answer for a box nobody is standing at.
+      const format = resolveNumberFormat(account?.settings?.numberFormat);
       // `parseAmount` is the rule, and the three answers must be told apart with
       // `typeof`: `''` means the box was empty, which is a DELETE in the day
       // editor and is nothing at all here — there is no day being cleared, only
@@ -508,9 +517,9 @@ export async function handleInteraction(interaction, adapter) {
       // zero, and on an "at most" habit a zero is a *success*. The field is
       // marked required, but that is Discord's promise to keep, not ours to
       // assume.
-      const amount = parseAmount(raw);
+      const amount = parseAmount(raw, format);
       if (typeof amount !== 'number') {
-        return send(ephemeral(amountComplaint(raw)));
+        return send(ephemeral(amountComplaint(raw, format)));
       }
       value = amount;
     }

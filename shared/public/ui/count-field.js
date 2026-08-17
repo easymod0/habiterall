@@ -19,17 +19,35 @@
  *
  * Two instances, because there are two places to record an amount and each
  * lives in its own dialog. The rules they share are in `ui/amount.js`, which is
- * DOM-free and unit-tested; nothing here decides anything about a number.
+ * DOM-free and unit-tested; nothing here decides anything about a number. What
+ * this does supply is the CONVENTION those rules are applied under — the
+ * account's `numberFormat` resolved against this device — because the setting
+ * and `Intl` are both things a DOM-free module should be handed rather than go
+ * looking for.
  *
  * Owns the `#day-count-*` and `#grid-count-*` controls and the `.countfield-*`
  * classes inside them.
  */
 
 import {
-  amountComplaint, formatAmount, parseAmount, stepAmount, stepFor,
+  amountComplaint, deviceDecimalSeparator, formatAmount, parseAmount,
+  resolveNumberFormat, stepAmount, stepFor,
 } from '/shared/ui/amount.js';
+import { get } from '/shared/ui/settings.js';
 
 const $ = (sel) => document.querySelector(sel);
+
+/**
+ * Which character a decimal point is, for this account on this device.
+ *
+ * Asked at the moment something is read or written, and never held: `auto` is a
+ * question about the DEVICE and the setting is a question about the ACCOUNT, so
+ * a value captured at import time would answer with whichever was true first
+ * and go on answering that after the dialog changed it. Two instances of this
+ * control exist for the life of the page, which is the same span.
+ */
+const convention = () =>
+  resolveNumberFormat(get('numberFormat'), deviceDecimalSeparator());
 
 /**
  * @param {any} root the `.countfield` container
@@ -61,7 +79,7 @@ function createCountField(root) {
     }
     const direction = habit.target_type === 'at_most' ? 'at most' : 'at least';
     const unit = habit.unit ? ` ${habit.unit}` : '';
-    return `Target ${direction} ${formatAmount(goal())}${unit}. Leave empty to clear.`;
+    return `Target ${direction} ${formatAmount(goal(), convention())}${unit}. Leave empty to clear.`;
   }
 
   function hint(message, isError = false) {
@@ -91,8 +109,9 @@ function createCountField(root) {
     // `parseAmount`'s domain gave a button that fills the box with a value
     // Save then refuses. Neither is reachable with a sane target; both are one
     // expression to rule out.
-    const labels = [...new Set([0, target].map(formatAmount))]
-      .filter((label) => typeof parseAmount(label) === 'number');
+    const format = convention();
+    const labels = [...new Set([0, target].map((n) => formatAmount(n, format)))]
+      .filter((label) => typeof parseAmount(label, format) === 'number');
     for (const label of labels) {
       const button = document.createElement('button');
       button.type = 'button';
@@ -109,17 +128,18 @@ function createCountField(root) {
 
   for (const button of root.querySelectorAll('.countfield-step')) {
     button.addEventListener('click', () => {
-      const current = parseAmount(typed.value);
+      const format = convention();
+      const current = parseAmount(typed.value, format);
       // A box holding something unreadable is not a number to step from, and
       // stepping would throw away what was typed without saying why. Complain
       // and leave it alone — the same thing Save does with it.
       if (current === null) {
-        hint(amountComplaint(typed.value), true);
+        hint(amountComplaint(typed.value, format), true);
         return;
       }
       const direction = Number(button.dataset.step) < 0 ? -1 : 1;
       typed.value = formatAmount(
-        stepAmount(current, stepFor(goal()), direction, goal())
+        stepAmount(current, stepFor(goal()), direction, goal()), format
       );
       hint('');
       typed.focus();
@@ -139,15 +159,15 @@ function createCountField(root) {
     set(forHabit, value) {
       habit = forHabit;
       label.textContent = forHabit?.unit ? `Amount (${forHabit.unit})` : 'Amount';
-      typed.value = value == null ? '' : formatAmount(value);
+      typed.value = value == null ? '' : formatAmount(value, convention());
       fillPresets();
       hint('');
     },
     /** `''` empty, `null` unreadable, or the number. See `parseAmount`. */
-    value: () => parseAmount(typed.value),
+    value: () => parseAmount(typed.value, convention()),
     /** Say what is wrong with what is in the box, in one place. */
     complain() {
-      hint(amountComplaint(typed.value), true);
+      hint(amountComplaint(typed.value, convention()), true);
       typed.focus();
     },
     focus: () => typed.focus(),

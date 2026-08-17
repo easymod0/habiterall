@@ -644,14 +644,14 @@ const getSettings = async () => (await (await api('/api/settings')).json());
 // with the field dropped from the allowlist entirely. It is set to a value the
 // registry's default is NOT, which is what makes the assertion below bite.
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
-  atMostUnlogged: 'success', theme: 'dark' });
+  atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma' });
 const withSettings = Buffer.from(await (await api('/api/export')).arrayBuffer());
 const exported = JSON.parse(withSettings.toString('utf8')).settings ?? {};
 
 ck('the JSON backup carries the settings',
   exported.skipDays === true && exported.questionMarks === true &&
   exported.dayOrder === 'newest-right' && exported.atMostUnlogged === 'success' &&
-  exported.theme === 'dark',
+  exported.theme === 'dark' && exported.numberFormat === 'comma',
   JSON.stringify(exported));
 
 // And nothing that is a capability rather than a preference. A backup file is
@@ -681,17 +681,17 @@ ck('though it can still set a display preference',
 // Put the habits back for the sections below.
 await restore(jsonBackup, 'replace');
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
-  atMostUnlogged: 'success', theme: 'dark' });
+  atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma' });
 
 await putSettings({ skipDays: false, questionMarks: false, dayOrder: 'newest-left',
-  atMostUnlogged: 'miss', theme: 'light' });
+  atMostUnlogged: 'miss', theme: 'light', numberFormat: 'point' });
 const restored = await restore(withSettings, 'replace');
 const back = await getSettings();
 
 ck('a replace-mode restore puts them back',
   back.skipDays === true && back.questionMarks === true &&
   back.dayOrder === 'newest-right' && back.atMostUnlogged === 'success' &&
-  back.theme === 'dark',
+  back.theme === 'dark' && back.numberFormat === 'comma',
   JSON.stringify(back));
 ck('and says how many it applied', restored.settings >= 3, String(restored.settings));
 

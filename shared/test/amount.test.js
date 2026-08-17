@@ -4,7 +4,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const { parseAmount, stepFor, formatAmount, stepAmount, amountComplaint } =
+const {
+  parseAmount, stepFor, formatAmount, stepAmount, amountComplaint,
+  resolveNumberFormat, deviceDecimalSeparator,
+} =
   await import('../public/ui/amount.js');
 
 /* ---------- reading what was typed ---------- */
@@ -350,15 +353,114 @@ test('a long string of digits is not a way to spend the event loop', () => {
     'the thousands test has stopped being linear');
 });
 
-test('a dot group is still given the benefit of the doubt', () => {
-  // Pinned so that closing #108's remaining half is a deliberate change to a
-  // failing test rather than something that quietly starts happening. `10.000`
-  // is ten here, and to a de-DE reader it is ten thousand — but `0.500` and
-  // `1.250` are ordinary decimals, and a dot is the spelling this field itself
-  // writes. Whoever adds a locale changes this test on purpose.
+test('a dot group is given the benefit of the doubt, on a point account', () => {
+  // What the app has always done, and what it still does for anyone who has not
+  // said otherwise — `point` is the default of the default. `0.500` and `1.250`
+  // are ordinary decimals and a dot is the spelling this field itself writes,
+  // so the dot cannot be refused for everybody to catch the reading below.
   assert.equal(parseAmount('10.000'), 10);
   assert.equal(parseAmount('1.500'), 1.5);
   assert.equal(parseAmount('0.500'), 0.5);
+});
+
+/* ---------- ...and which reading that is, per account ---------- */
+
+test('the convention is resolved in three tiers, and only the first is stored', () => {
+  // `resolveTimeZone`'s shape: what the account SAID, else what the device
+  // REPORTS, else the app's own. The middle tier is why `auto` is a stored
+  // value rather than the absence of one — a device fact that becomes a stored
+  // decision can never be reached back out of, which is what happened to the
+  // theme toggle before `system` existed.
+  assert.equal(resolveNumberFormat('comma', '.'), 'comma', 'the account wins');
+  assert.equal(resolveNumberFormat('point', ','), 'point', 'the account wins');
+  assert.equal(resolveNumberFormat('auto', ','), 'comma', 'else the device');
+  assert.equal(resolveNumberFormat('auto', '.'), 'point');
+
+  // No device to ask — a server answering a Discord modal — and no setting at
+  // all, which is every account that has never opened the dialog and every
+  // caller written before this existed.
+  assert.equal(resolveNumberFormat('auto'), 'point', 'else the app\'s own');
+  assert.equal(resolveNumberFormat(undefined, ','), 'comma');
+  assert.equal(resolveNumberFormat(), 'point');
+  // A stored value nothing recognises is the app's own too, never a crash and
+  // never the device: `parseSettings` cannot store one, but an older client, a
+  // hand-edited backup and a future value all can arrive here.
+  assert.equal(resolveNumberFormat('POINT', ','), 'comma');
+  assert.equal(resolveNumberFormat('arabic', '.'), 'point');
+
+  // The device reports a separator and not a locale, because that is the whole
+  // of what this asks — `de-AT` and `de-CH` disagree — and because anything
+  // this app has no convention for resolves to its own rather than to nothing.
+  assert.equal(resolveNumberFormat('auto', '٫'), 'point', 'an unsupported one');
+  assert.equal(typeof deviceDecimalSeparator(), 'string');
+});
+
+test('on a comma account the two readings swap, and nothing else moves', () => {
+  // #108. `10.000` is ten thousand to a de-DE or es-ES reader, and reading it
+  // as ten was silent — no refusal, no message, a row a thousand times too
+  // small. It is refused here exactly as `10,000` is on a point account.
+  assert.equal(parseAmount('10.000', 'comma'), null);
+  assert.equal(parseAmount('1.250', 'comma'), null);
+  assert.match(amountComplaint('10.000', 'comma'), /a dot can separate thousands/);
+  assert.match(amountComplaint('10.000', 'comma'), /like 10000\./);
+
+  // ...and the comma is now the decimal point, so what a point account refuses
+  // as a group is an ordinary number here. This is the one place the setting
+  // ACCEPTS something rather than refusing it, and it is the reading its owner
+  // asked for.
+  assert.equal(parseAmount('10,000', 'comma'), 10);
+  assert.equal(parseAmount('1,250', 'comma'), 1.25);
+
+  // Everything with fewer than three digits after the separator is the same
+  // number under both conventions, so nothing about it is decided here — which
+  // is most of what anyone types.
+  for (const format of ['point', 'comma']) {
+    assert.equal(parseAmount('8,5', format), 8.5, format);
+    assert.equal(parseAmount('8.5', format), 8.5, format);
+    assert.equal(parseAmount('0,255', format), 0.255, format);
+    assert.equal(parseAmount('8', format), 8, format);
+    assert.equal(parseAmount('', format), '', format);
+    assert.equal(parseAmount('abc', format), null, format);
+    assert.equal(parseAmount('1e3', format), null, format);
+    // A mixed form is refused under both: it is a group under one reading and
+    // nonsense under the other, whichever way round they are.
+    assert.equal(parseAmount('1,000.5', format), null, format);
+  }
+});
+
+test('a group is refused rather than read, even where it is unambiguous', () => {
+  // A stated convention makes `10,000` on a point account unambiguously ten
+  // thousand, and it is still refused. Accepting it would make the answer
+  // depend on how the convention was RESOLVED — and for most accounts that is
+  // `auto` reading a device, which is a guess. A wrong guess that refuses costs
+  // one sentence; a wrong guess that accepts costs a row that is out by a
+  // thousand and says nothing.
+  assert.equal(parseAmount('10,000', 'point'), null);
+  assert.equal(parseAmount('10.000', 'comma'), null);
+});
+
+test('the box writes back the convention it reads', () => {
+  // A field that accepts `8,5` and then redraws it as `8.5` has told its owner
+  // they typed it wrong. `formatAmount` takes the convention for that reason
+  // and for one more: what it writes goes straight back into `parseAmount` on
+  // the next Save, and on the preset buttons it IS what gets typed.
+  assert.equal(formatAmount(8.5, 'comma'), '8,5');
+  assert.equal(formatAmount(8.5, 'point'), '8.5');
+  assert.equal(formatAmount(8.5), '8.5', 'the app\'s own, for a caller with no account');
+  // Never grouped, at any size: grouping is the one form `parseAmount` refuses,
+  // so a control that wrote `10,000` into its own box would refuse its own
+  // output on the next press.
+  assert.equal(formatAmount(10000, 'comma'), '10000');
+  assert.equal(formatAmount(10000, 'point'), '10000');
+
+  // The round trip that matters, over both conventions and the values a limit
+  // and a step actually produce.
+  for (const format of ['point', 'comma']) {
+    for (const value of [0, 1, 8.5, 0.1, 1250, 10000, 0.000001]) {
+      assert.equal(parseAmount(formatAmount(value, format), format), value,
+        `${value} under ${format}`);
+    }
+  }
 });
 
 test('the advice is the phone\'s advice, read from the phone', () => {

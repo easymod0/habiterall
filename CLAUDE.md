@@ -1980,6 +1980,56 @@ can read anything on disk. What it costs is `ui/amount.js`'s first line:
 "DOM-free so it can be tested without one" was a convenience and is now a
 contract with a server.
 
+**Which character a decimal point is, is a DECISION with a device-shaped
+default.** `10.000` is ten to this parser and ten thousand to a de-DE or es-ES
+reader, and reading it the first way was silent — no refusal, no message, a row
+a thousand times too small (#108). The three options were: infer from the
+habit's target, which makes one input mean two things depending on a different
+field; read the browser's locale, which is a DEVICE fact deciding a STORED
+value; or a setting, which is correct and asks something of somebody who has
+never thought about it. What shipped is the second as the DEFAULT of the third —
+`numberFormat`, whose `auto` resolves against `Intl` at parse time, in
+`resolveNumberFormat`'s three tiers: the account's stated answer, else what the
+device reports, else the app's own. That is `resolveTimeZone`'s shape and it is
+here for its reason, and `'auto'` is a stored value rather than the absence of
+one exactly as `theme: 'system'` and `at_most_unlogged: 'default'` are.
+
+**A group is refused under every convention, and that asymmetry is the whole
+safety argument.** With the convention known, `10,000` on a `point` account is
+unambiguously ten thousand and could be accepted — and is not. The reason is
+that most accounts are on `auto`, so the convention is a GUESS from a device: a
+wrong guess that refuses costs one sentence saying what to type, while a wrong
+guess that accepts costs a row out by a thousand that nothing reports. So the
+setting only ever moves which spelling is refused. What it accepts is what was
+already accepted: anything with fewer than three digits after the separator is
+the same number under both conventions, which is most of what anyone types, and
+`parseAmount` needed no convention for it before this and needs none now.
+
+`formatAmount` takes it too, because a box that accepts `8,5` and redraws it as
+`8.5` has told its owner they typed it wrong — and on the preset buttons what is
+drawn is what gets typed. Nothing is grouped at any size, which keeps the
+control's own output inside the one domain its parser accepts. The setting is
+**portable**: it decides what the next typed amount MEANS, so restoring entries
+onto an account without it hands the same keystrokes a different number. It
+carries no capability, so unlike the notification keys there is nothing to hold
+back.
+
+Two callers, and they resolve it differently on purpose. `count-field.js` asks
+the settings cache and `Intl` at the moment of each read or write, never at
+import time — `auto` is a question about the device and the setting is a
+question about the account, and either can change while the module is loaded.
+`discord.js` passes the account's answer and NO device: a press arrives from
+Discord, so there is nothing making the request and nothing to report a
+separator, which is the same reason `adapter.today` asks the account rather than
+a header. The phone reads none of it yet and says so in `notMirrored` — it has
+three readers for a typed amount (`HabitFormScreen.parseAmount` and a bare
+`toDoubleOrNull` in both `CountEntryActivity` and the day dialog) that already
+disagree with each other about `8,5`, so there is no single reader to give an
+answer to. That is **issue #157**, and it is a cost written down rather than an
+absence: an account that has CHOSEN a convention is followed in the browser and
+not on the phone. Under `auto`, which is almost everybody, the phone would
+resolve its own locale and there is nothing to carry.
+
 **Adding an EXPORT to a shell module is a `CACHE_VERSION` bump**, for the same
 reason v14 was one. `shellFirst` serves scripts cache-first and revalidates per
 request, so the swap is not atomic: a shell holding the new `count-field.js`

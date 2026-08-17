@@ -21,12 +21,15 @@
  * on the phone has a comment about the same input — and note it is NOT a mirror
  * of this and does not try to be: it reads a habit's TARGET where this reads a
  * DAY's amount. Be exact about where they part, because "not a mirror" is easy
- * to say too strongly. They agree about the FORM: the same thousands refusal
- * since #111, the same digits-and-at-most-one-separator shape, the same refusal
- * of a sign, an exponent or hex. They part at the DOMAIN, and only there — this
- * one bounds and quantises to what `formatAmount` can show back, so
- * `3.14159265` is 3.141593 here and itself there; that one answers to no
- * display and needs neither.
+ * to say too strongly. They agree about the FORM: the same digits-and-at-most-
+ * one-separator shape, the same refusal of a sign, an exponent or hex, and —
+ * on a `point` account, which is every account until somebody says otherwise —
+ * the same thousands refusal since #111. They part in two places. The DOMAIN:
+ * this one bounds and quantises to what `formatAmount` can show back, so
+ * `3.14159265` is 3.141593 here and itself there. And the CONVENTION: `10.000`
+ * is ten thousand here on a `comma` account and ten on the phone, always, which
+ * is #108's remaining half and is written down as such rather than fixed by
+ * copying this file a sixth time.
  *
  * The web's own target box is the gap that leaves. `index.html`'s
  * `target_value` is still an `<input type="number">` — the very control this
@@ -56,10 +59,17 @@
  *   number  a non-negative amount. `0` is a real answer — a stated lapse — and
  *           is why the two above cannot be collapsed into one falsy check.
  *
- * A comma is read as a decimal point, matching the phone. A form that mixes
- * both — `1,000.5` — is refused rather than guessed at: it means one thing to
- * a reader who writes thousands with commas and another to one who writes
- * decimals with them, and this is not the place to decide which they are.
+ * **Either separator is read as a decimal point, and a three-digit GROUP is
+ * refused.** Those are one rule seen from two ends, and the second is the only
+ * place the convention matters at all: a group is exactly three digits, so
+ * `8,5` and `8.5` are eight and a half under both conventions and need nothing
+ * decided about them. `10,000` and `10.000` are where the two readings part,
+ * and which of them is the group is what `format` says.
+ *
+ * A form that mixes both — `1,000.5` — is refused rather than guessed at, and
+ * so is a group under the convention in force. Refusing is loud; guessing is
+ * silent and wrong by a factor of a thousand, which is how "10,000 steps" —
+ * this module's own example habit — once became ten.
  *
  * The regex is deliberately stricter than `Number()`, which the root CLAUDE.md
  * already records as too generous about form: it reads `0x10` as 16 and `1e3`
@@ -67,31 +77,32 @@
  * of water they drank.
  *
  * @param {string} raw
+ * @param {'point'|'comma'} [format] which character the DECIMAL point is, from
+ *   `resolveNumberFormat`. Defaults to the app's own, so a caller that has no
+ *   account to ask behaves as this always did.
  * @returns {'' | null | number}
  */
-export function parseAmount(raw) {
+export function parseAmount(raw, format = 'point') {
   const text = String(raw ?? '').trim();
   if (text === '') return '';
 
-  // A comma group that reads as a thousands separator is REFUSED, not guessed.
-  // Reading it as a decimal point is how "10,000 steps" — this module's own
-  // example habit — became ten: a thousandfold under-record, silent, and worse
-  // than the bug this parser exists to fix. It is genuinely ambiguous, since
-  // "1,500" is fifteen hundred to one reader and one and a half to another, and
-  // that is exactly the case the mixed form below is already refused for.
+  // The thousands group, refused rather than read. Under `point` that is
+  // `10,000` — the case that has been refused since #60 — and under `comma` it
+  // is `10.000`, which is #108: ten to this parser and ten thousand to the
+  // de-DE reader who typed it, silently, with nothing on screen to say which
+  // was stored.
   //
-  // A non-zero integer part is required, so this fires on a real group and not
-  // on "0,255" or ",255", where no thousands can precede the comma. Three
-  // digits is what makes it a group; "8,5" and "0,25" were never ambiguous.
+  // A non-zero integer part is required, so it fires on a real group and not on
+  // `0,255` or `,255`, where no thousands can precede the separator. Three
+  // digits is what makes it a group; `8,5` and `0,25` were never ambiguous.
   //
-  // **The same ambiguity spelled with a DOT is not closed, and cannot be here.**
-  // `10.000` is ten, and to a de-DE or es-ES reader it is ten thousand — but
-  // `0.500` and `1.250` are ordinary decimals people type, and refusing
-  // `\.\d{3}` to catch the other reading would break far more than it fixed. A
-  // dot is the spelling this field itself writes (`formatAmount`) and shows
-  // (the placeholder), so it gets the benefit of the doubt. Closing that
-  // properly needs a locale, not a regex.
-  if (THOUSANDS.test(text)) return null;
+  // Note what is NOT done here: a group is never ACCEPTED, even under a stated
+  // convention that makes it unambiguous. `10,000` on a `point` account could
+  // be read as ten thousand and is not, because the answer would then be wrong
+  // by a thousand for anyone whose convention was resolved from a device rather
+  // than chosen — the `auto` default, which is most people. Refusing costs one
+  // sentence saying what to type; accepting costs a wrong row nobody sees.
+  if (GROUPS[format === 'comma' ? 'comma' : 'point'].test(text)) return null;
 
   const decimal = text.replace(/,/g, '.');
   if (!/^(\d+(\.\d*)?|\.\d+)$/.test(decimal)) return null;
@@ -126,8 +137,10 @@ export const MAX_AMOUNT = 1e12;
 export const MIN_AMOUNT = 1e-6;
 
 /**
- * "10,000" and "1,500", but not "0,255" or ",255" — see `parseAmount`, which
- * is the only place the reasoning is written down.
+ * A thousands group, one pattern per convention: "10,000" and "1,500" where the
+ * decimal point is a point, "10.000" and "1.500" where it is a comma. Not
+ * "0,255" or ",255" under either — see `parseAmount`, which is the only place
+ * the reasoning is written down.
  *
  * **Anchored, because a SERVER reads this now.** The Kotlin mirror and this
  * file's own first version were `[1-9]\d*,\d{3}(?!\d)` unanchored, which is
@@ -147,12 +160,68 @@ export const MIN_AMOUNT = 1e-6;
  * it "01,000" is not a group here, and "01.000" IS a number to the decimal
  * test, so a leading zero would have bought a silent 1.
  *
- * ONE declaration, read by the parser and by nothing else now — `amountComplaint`
- * asks the parser instead of copying this. Written twice it drifted: dropping
- * the `(?!\d)` from the complaint's copy alone offered separator advice about
- * "10,0000", which the parser reads as 10.
+ * ONE declaration per convention, read by the parser and by nothing else —
+ * `amountComplaint` asks the parser instead of copying either. Written twice it
+ * drifted: dropping the `(?!\d)` from the complaint's copy alone offered
+ * separator advice about "10,0000", which the parser reads as 10.
  */
-const THOUSANDS = /^0*[1-9]\d*,\d{3}$/;
+const GROUPS = {
+  point: /^0*[1-9]\d*,\d{3}$/,
+  comma: /^0*[1-9]\d*\.\d{3}$/,
+};
+
+/**
+ * Which character the decimal point is, in three tiers.
+ *
+ * `resolveTimeZone`'s shape and for its reason: the account's stated answer
+ * wins, else what the device reports, else the app's own. `'auto'` is a STORED
+ * value and not the absence of one — the distinction `theme: 'system'` and
+ * `at_most_unlogged: 'default'` both already draw — so a device fact never
+ * becomes a stored decision, and a de-DE reader on an en-US work laptop has
+ * something to change.
+ *
+ * The device's report is a separator character rather than a locale, because
+ * that is the only part of a locale this asks about and a caller with no device
+ * to ask (the server, answering a Discord modal) then has nothing to invent.
+ * The third tier is the app's own convention and NOT the process's locale: a
+ * container's ICU default is not a fact about the person typing, which is the
+ * same trap `deliverAccount` fell into over `notifyTimezone`.
+ *
+ * @param {string} [setting] the account's `numberFormat`
+ * @param {string} [deviceSeparator] what the device writes, from
+ *   `deviceDecimalSeparator()` in a browser and nothing at all on a server
+ * @returns {'point'|'comma'}
+ */
+export function resolveNumberFormat(setting, deviceSeparator) {
+  if (setting === 'point' || setting === 'comma') return setting;
+  if (deviceSeparator === ',') return 'comma';
+  return 'point';
+}
+
+/**
+ * What THIS device writes a decimal point as, for `resolveNumberFormat`'s
+ * middle tier.
+ *
+ * An observation, never stored — the `device_clock` distinction one file over.
+ * `formatToParts` rather than a locale string because the answer wanted is one
+ * character and locale tags do not carry it (`de-AT` and `de-CH` disagree).
+ * Anything that is not a comma resolves to `point`, which covers the Arabic and
+ * Persian separators this app has no convention for.
+ *
+ * **The server must not call this.** In node it answers from the container's
+ * ICU default, which is a fact about the host and not about the person typing;
+ * `src/discord.js` passes no device and takes the third tier.
+ *
+ * @returns {string}
+ */
+export function deviceDecimalSeparator() {
+  try {
+    return new Intl.NumberFormat().formatToParts(1.5)
+      .find((part) => part.type === 'decimal')?.value ?? '';
+  } catch {
+    return '';
+  }
+}
 
 /**
  * Why `parseAmount` refused, for somebody looking at the box.
@@ -204,15 +273,26 @@ const THOUSANDS = /^0*[1-9]\d*,\d{3}$/;
  * would refuse. So the group is necessary and the suggestion working is what
  * makes it sufficient.
  *
+ * The character it names is the one the convention in force groups with, so the
+ * sentence is about what the reader is actually looking at. "Ambiguous" is
+ * still the right word under a STATED convention, which is the one case where
+ * the input is not: it is the notation that is ambiguous, and refusing a group
+ * outright is what keeps the answer from depending on how it was resolved — see
+ * `parseAmount`, which declines to accept one for exactly that reason.
+ *
  * @param {string} raw exactly what is in the box
+ * @param {'point'|'comma'} [format] as `parseAmount`
  * @returns {string} a sentence to show
  */
-export function amountComplaint(raw) {
+export function amountComplaint(raw, format = 'point') {
   const text = String(raw ?? '').trim();
-  const plain = text.replace(/,/g, '');
-  return parseAmount(text) === null && typeof parseAmount(plain) === 'number'
-    ? `"${text}" is ambiguous — a comma can separate thousands or stand for a `
-      + `decimal point. Type it without the thousands separator, like ${plain}.`
+  const grouper = format === 'comma' ? '.' : ',';
+  const plain = text.split(grouper).join('');
+  return parseAmount(text, format) === null
+    && typeof parseAmount(plain, format) === 'number'
+    ? `"${text}" is ambiguous — a ${format === 'comma' ? 'dot' : 'comma'} can `
+      + `separate thousands or stand for a decimal point. Type it without the `
+      + `thousands separator, like ${plain}.`
     : `"${text}" is not an amount — type a number like 8 or 8.5.`;
 }
 
@@ -259,10 +339,23 @@ export function stepFor(target) {
  * count. Rounded to a sane number of places and then trimmed, which also makes
  * the arrows idempotent: pressing + then − returns the value it started on.
  *
+ * It takes the convention as well, because a box that reads `8,5` and then
+ * writes `8.5` back into itself has told its owner they typed it wrong. Nothing
+ * is grouped at any size — `10000` and never `10,000` — which is what keeps
+ * this inside `parseAmount`'s domain rather than producing the one form it
+ * refuses. There is no thousands separator to get right here, only a decimal
+ * point.
+ *
+ * Note the SERVER never renders through this: `answerText` in notify.js writes
+ * an amount into a Discord message with `String()`, and giving that the
+ * account's convention is a separate decision about prose in a channel other
+ * people can read.
+ *
  * @param {number} n
+ * @param {'point'|'comma'} [format] as `parseAmount`
  * @returns {string}
  */
-export function formatAmount(n) {
+export function formatAmount(n, format = 'point') {
   const value = Number(n);
   if (!Number.isFinite(value)) return '';
   const shown = Number(value.toFixed(6));
@@ -273,8 +366,8 @@ export function formatAmount(n) {
   // an older client can store a value smaller than this can show. As "0" it
   // would be rewritten into a stated lapse by the next Save; as its raw self
   // it is refused by `parseAmount`, and being refused is loud.
-  if (shown === 0 && value !== 0) return String(value);
-  return String(shown);
+  const text = shown === 0 && value !== 0 ? String(value) : String(shown);
+  return format === 'comma' ? text.replace('.', ',') : text;
 }
 
 /**
