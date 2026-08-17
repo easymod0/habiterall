@@ -259,6 +259,195 @@ try {
     roundTrip.value === 'wombat' && roundTrip.rows === roundTrip.before,
     JSON.stringify(roundTrip));
 
+  /* ---------- editing a habit from its own page (#128) ---------- */
+  //
+  // The same workflow one step further in — find, open, EDIT, come back — and
+  // the one place the rule is decided by what changed rather than by which
+  // mutator ran. The save has to reach `habit-dialog`'s real submit handler
+  // and the box has to be read after a REPAINT: on the detail view nothing
+  // repaints the dashboard, so `#habit-search` still shows the old text
+  // whatever `state.query` holds, and an assertion taken there passes either
+  // way.
+  //
+  // Reaching the dashboard by the app's own Back button rather than
+  // `history.back()`, because that is the button the report describes.
+  const editFrom = (mutate) => ev(`(async()=>{
+    const i = document.getElementById('habit-search');
+    i.value = 'wombat'; i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    document.querySelector('#grid .habit-row .habit-meta').click();
+    await new Promise((r) => setTimeout(r, 1500));
+    const edit = [...document.querySelectorAll('#view-detail button')]
+      .find((b) => b.textContent === 'Edit');
+    if (!edit) return { error: 'no Edit button' };
+    edit.click();
+    await new Promise((r) => setTimeout(r, 400));
+    const f = document.getElementById('habit-form');
+    ${mutate}
+    f.requestSubmit();
+    await new Promise((r) => setTimeout(r, 1500));
+    const stayed = !document.getElementById('view-detail').hidden;
+    [...document.querySelectorAll('#view-detail button')]
+      .find((b) => b.textContent.includes('Back')).click();
+    await new Promise((r) => setTimeout(r, 1800));
+    return { stayed,
+      value: document.getElementById('habit-search').value,
+      rows: [...document.querySelectorAll('#grid .habit-row .habit-name')]
+        .map((n) => n.textContent.trim()) };
+  })()`);
+
+  // Mark's reproduction, verbatim: change ONLY the colour. Nothing was added to
+  // or removed from the list, so a cleared box is a filter wiped by something
+  // that replaced nothing — the failure #74 was written to avoid, arriving from
+  // the code written to avoid it.
+  const recoloured = await editFrom(`f.color.value = '#654321';`);
+  ck('editing a habit from its own page stays on that page',
+    recoloured.stayed === true, JSON.stringify(recoloured));
+  ck('and changing only the colour KEEPS the filter',
+    recoloured.value === 'wombat' && recoloured.rows.length === 1,
+    JSON.stringify(recoloured));
+
+  // The other side of it, and the reason "this was a create" is the wrong rule:
+  // the habit you were looking at no longer matches, so leaving the box alone
+  // would report "No habits match that." over the rename that just succeeded.
+  const renamed = await editFrom(`f.name.value = 'Zzz Numbat';`);
+  ck('but a rename that moves the row OUT clears it',
+    renamed.value === '', JSON.stringify(renamed));
+  ck('and the renamed habit is on screen',
+    renamed.rows.includes('Zzz Numbat'), JSON.stringify(renamed.rows));
+
+  // The case a "did the name change" test cannot see. `visibleHabits` matches
+  // the description too — that is what "Plain jogging" is in the fixtures for —
+  // so an edit that touches only that field moves the row out just as a rename
+  // does.
+  const rewritten = await ev(`(async()=>{
+    const i = document.getElementById('habit-search');
+    i.value = 'quokka'; i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const before = [...document.querySelectorAll('#grid .habit-row .habit-name')]
+      .map((n) => n.textContent.trim());
+    const row = [...document.querySelectorAll('#grid .habit-row')]
+      .find((r) => r.querySelector('.habit-name').textContent.includes('jogging'));
+    if (!row) return { error: 'no jogging row', before };
+    row.querySelector('.habit-meta').click();
+    await new Promise((r) => setTimeout(r, 1500));
+    [...document.querySelectorAll('#view-detail button')]
+      .find((b) => b.textContent === 'Edit').click();
+    await new Promise((r) => setTimeout(r, 400));
+    const f = document.getElementById('habit-form');
+    f.description.value = 'no longer mentions any marsupial';
+    f.requestSubmit();
+    await new Promise((r) => setTimeout(r, 1500));
+    [...document.querySelectorAll('#view-detail button')]
+      .find((b) => b.textContent.includes('Back')).click();
+    await new Promise((r) => setTimeout(r, 1800));
+    return { before,
+      value: document.getElementById('habit-search').value,
+      rows: document.querySelectorAll('#grid .habit-row').length };
+  })()`);
+  ck('the row was found by its DESCRIPTION to begin with',
+    rewritten.before?.includes('Plain jogging'), JSON.stringify(rewritten));
+  ck('and rewriting that description clears the filter too',
+    rewritten.value === '', JSON.stringify(rewritten));
+
+  /* ---------- deleting the habit you filtered down to ---------- */
+  //
+  // Unasserted until #128: the clear in `deleteHabit` could be deleted and the
+  // whole suite stayed green. Without it the account is left reading "No habits
+  // match that." over the one row the query had, which is the empty-result
+  // screen standing in for a successful delete.
+  const removed = await ev(`(async()=>{
+    // The confirm is a preference (settings.confirmDelete), not the claim being
+    // made here, and a modal one would hang this evaluation outright.
+    window.confirm = () => true;
+    const i = document.getElementById('habit-search');
+    i.value = 'newly'; i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const before = document.querySelectorAll('#grid .habit-row').length;
+    document.querySelector('#grid .habit-row .habit-meta').click();
+    await new Promise((r) => setTimeout(r, 1500));
+    [...document.querySelectorAll('#view-detail button')]
+      .find((b) => b.textContent === 'Edit').click();
+    await new Promise((r) => setTimeout(r, 400));
+    document.getElementById('dialog-delete').click();
+    await new Promise((r) => setTimeout(r, 2000));
+    return { before,
+      value: document.getElementById('habit-search').value,
+      rows: [...document.querySelectorAll('#grid .habit-row .habit-name')]
+        .map((n) => n.textContent.trim()),
+      undo: !!document.querySelector('#toast .toast-action') };
+  })()`);
+  ck('the filter found exactly the habit to delete', removed.before === 1,
+    JSON.stringify(removed));
+  ck('deleting it clears the filter it emptied',
+    removed.value === '' && !removed.rows.includes('Zzz Newly made'),
+    JSON.stringify(removed));
+
+  /* ---------- and undoing that delete ---------- */
+  //
+  // `restoreHabit` puts the habit back through a create and an import, so it
+  // replaces the list exactly as the create above does — and it runs from a
+  // toast, minutes-old context, against whatever query is in the box by then.
+  // Filtered to something else, the undo would otherwise land off screen.
+  const undone = await ev(`(async()=>{
+    const i = document.getElementById('habit-search');
+    i.value = 'numbat'; i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const action = document.querySelector('#toast .toast-action');
+    if (!action) return { error: 'the undo toast is gone' };
+    action.click();
+    await new Promise((r) => setTimeout(r, 2500));
+    return { value: document.getElementById('habit-search').value,
+      rows: [...document.querySelectorAll('#grid .habit-row .habit-name')]
+        .map((n) => n.textContent.trim()) };
+  })()`);
+  ck('undoing a delete clears the filter that was in the box by then',
+    undone.value === '', JSON.stringify(undone));
+  ck('and the restored habit is on screen',
+    undone.rows?.includes('Zzz Newly made'), JSON.stringify(undone));
+
+  /* ---------- a restore replaces every habit ---------- */
+  //
+  // The one the comment above calls the worse of the two, and the one that was
+  // deletable in silence: "No habits match that." over a freshly imported
+  // account. Driven through the real dialog — the file input is fed a Blob via
+  // DataTransfer rather than a path, so this needs no CDP file plumbing — for
+  // the same reason the create is: a hand-fired 'reload' would stay green with
+  // `data-dialog`'s clear removed.
+  const imported = await ev(`(async()=>{
+    const backup = await (await fetch('/api/export')).json();
+    const i = document.getElementById('habit-search');
+    i.value = 'numbat'; i.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const before = document.querySelectorAll('#grid .habit-row').length;
+
+    document.getElementById('btn-settings').click();
+    await new Promise((r) => setTimeout(r, 300));
+    document.getElementById('settings-backup').click();
+    await new Promise((r) => setTimeout(r, 300));
+    document.querySelector('input[name=import-mode][value=merge]').checked = true;
+    const dt = new DataTransfer();
+    dt.items.add(new File([JSON.stringify(backup)], 'backup.json',
+      { type: 'application/json' }));
+    const f = document.getElementById('import-file');
+    f.files = dt.files;
+    f.dispatchEvent(new Event('change', { bubbles: true }));
+    document.getElementById('import-run').click();
+    await new Promise((r) => setTimeout(r, 4000));
+    const report = document.getElementById('import-result').textContent;
+    [...document.querySelectorAll('dialog[open]')].reverse().forEach((d) => d.close());
+    await new Promise((r) => setTimeout(r, 300));
+    return { before, report,
+      value: document.getElementById('habit-search').value,
+      rows: document.querySelectorAll('#grid .habit-row').length };
+  })()`);
+  ck('the import ran', /merged|created/.test(String(imported.report)),
+    JSON.stringify(imported));
+  ck('a restore clears the filter the imported habits would hide behind',
+    imported.value === '', JSON.stringify(imported));
+  ck('and the whole account is on screen', imported.rows > imported.before,
+    JSON.stringify(imported));
+
   console.log(fails === 0 ? '\nALL SEARCH CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;
