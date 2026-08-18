@@ -63,6 +63,23 @@ const fold = (s) => String(s ?? '')
   .normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 
 /**
+ * Whether a query is actually filtering — i.e. has something left after the
+ * same fold+trim `matchesQuery` runs, not just whitespace or combining marks.
+ *
+ * A query of only combining accents (say a stray U+0300) is empty once folded,
+ * so `matchesQuery` matches everything with it; the dashboard's old
+ * `!!state.query.trim()` still saw it as live and lit the indicator for a
+ * filter that was doing nothing. Asking the question here keeps the two
+ * callers — `matchesQuery` and the dashboard's "filter live" flag — on one
+ * definition of "active", so they cannot drift again.
+ *
+ * @param {string} [query]  defaults to the live one
+ */
+export function isQueryActive(query = state.query) {
+  return !!fold(query).trim();
+}
+
+/**
  * Whether a habit is one the dashboard's filter is currently showing.
  *
  * It lives beside `query` rather than in `dashboard.js` because two modules
@@ -82,7 +99,7 @@ const fold = (s) => String(s ?? '')
  */
 export function matchesQuery(habit, query = state.query) {
   const q = fold(query).trim();
-  if (!q) return true;
+  if (!isQueryActive(query)) return true;
   return fold(habit.name).includes(q) || fold(habit.description).includes(q);
 }
 

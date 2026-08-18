@@ -18,7 +18,7 @@ import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
 import { gridCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
-import { matchesQuery, on, state } from '/shared/ui/store.js';
+import { isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
 import {
   DAY, dayStateOf, isAvoided, nextDayState, valueForState,
 } from '/shared/ui/toggle.js';
@@ -145,8 +145,11 @@ export function paint() {
   const shown = visibleHabits();
   // `shown` can only be shorter when there is a query, so this IS the query —
   // written as the question being asked rather than as a comparison that reads
-  // like it guards a case it cannot reach.
-  const filtering = !!state.query.trim();
+  // like it guards a case it cannot reach. The predicate is the same one
+  // `matchesQuery` uses, so a query of only combining accents — folded to
+  // nothing by the matcher, and previously left "live" by a bare `.trim()` —
+  // no longer lights the indicator for a filter that is doing nothing.
+  const filtering = isQueryActive();
 
   // The box appears once there are enough habits to lose one in, and never
   // disappears while a query is in it.

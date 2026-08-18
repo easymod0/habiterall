@@ -153,7 +153,21 @@ const sw = self;
 // the RUNNING worker's cache, so a shell could hold a new `dashboard.js` over
 // a cached old `components.js` with no `habitIcon` at all: a module link
 // error before `start()` runs, and so outside `#view-error`.
-const CACHE_VERSION = 'v19';
+//
+// v20: `ui/store.js` gained an EXPORT, `isQueryActive` (#180), and
+// `ui/dashboard.js` imports it STATICALLY. This is v16 again with the same two
+// modules — that bump was `matchesQuery` moving INTO store.js, this one is a
+// second export out of it — and the failure is identical: both are shell
+// assets, `shellFirst` is stale-while-revalidate writing into the RUNNING
+// worker's cache, so a shell can hold the new dashboard.js over a cached old
+// store.js. Module instantiation resolves a named import before any of it
+// runs, so that pairing is a v14-style LINK error rather than v19's or v18's
+// property miss: `app.js`'s static import of dashboard.js throws with "does
+// not provide an export named 'isQueryActive'" BEFORE `start()`, and therefore
+// outside `#view-error`. A blank page, and a reload serves the same pair.
+// One new export across two shell modules is the whole reason for this bump;
+// no new file was added, and nothing in index.html or style.css moved.
+const CACHE_VERSION = 'v20';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

@@ -232,6 +232,36 @@ try {
   ck('an unaccented query finds an accented name',
     folded.rows.some((r) => r.startsWith('Café')), JSON.stringify(folded.rows));
 
+  /* ---------- a query that folds to NOTHING is not a filter (#180) ---------- */
+  //
+  // `matchesQuery` folds BEFORE it trims, so a query of only combining marks is
+  // empty to the filter and every habit is shown. The dashboard used to decide
+  // "a filter is live" with a second predicate — `!!state.query.trim()`, which a
+  // combining mark passes — and then withdrew every drag handle and announced
+  // "N of N" over a list that is provably the whole account.
+  //
+  // This block is here rather than in the unit suite because the defect was
+  // never in `store.js`: `matchesQuery` was already right, and the predicate
+  // being right is not the same as `paint()` reading it. Mutation-prove by
+  // putting `const filtering = !!state.query.trim();` back in dashboard.js —
+  // the count and the handles below both fail, and no unit test moves.
+  const MARK = String.fromCharCode(0x0301);   // COMBINING ACUTE ACCENT, no base
+  await ev(`(() => { const i = document.getElementById('habit-search');
+    i.value = String.fromCharCode(0x0301);
+    i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await sleep(300);
+  const inert = await shown();
+  ck('a query of only combining marks still shows every habit',
+    inert.rows.length >= seeded, `${inert.rows.length} of ${seeded}`);
+  ck('and the count says nothing, because nothing is being narrowed',
+    inert.count === '', JSON.stringify(inert.count));
+  // #74's rule is right and is simply being applied to a list that is not a
+  // subset: the real order IS on screen, so a drop computes true neighbours.
+  ck('and reordering stays available over a list that is the real order',
+    inert.handles > 1, String(inert.handles));
+  ck('while the box still holds what was typed',
+    inert.value === MARK, JSON.stringify(inert.value));
+
   /* ---------- Escape clears ---------- */
   await ev(`document.getElementById('habit-search').focus()`);
   await send('Input.dispatchKeyEvent',
