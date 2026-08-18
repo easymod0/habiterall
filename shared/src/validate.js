@@ -274,25 +274,90 @@ export const DETAIL_CARDS = Object.freeze([
 ]);
 
 /**
- * Which detail cards to draw, normalised.
+ * Which detail cards to draw AND in what order, normalised.
  *
- * The shape `parseChannelList` uses, and the canonical ORDER it returns is load
- * bearing rather than tidiness: `parseSettings` stores what this returns, and
- * `test/settings.test.js` asserts the server does not normalise the registry's
- * own default away — which a filter over `raw` would, the moment a client sent
- * the same nine ids in a different order.
+ * The stored shape is `{id, on}[]` — every id in `DETAIL_CARDS` exactly once —
+ * rather than membership alone, because hiding a card and reordering it are two
+ * different decisions and a bare list of ids can only ever record one of them.
+ * Two input shapes are read, and which one a given `raw` is decides everything:
  *
- * An empty list is legal. Unticking everything leaves the header and the four
- * stat tiles, which is a page rather than a blank, and it is reversible from
- * the same dialog.
+ *   - LEGACY (every element a string, or the array is EMPTY): membership meant
+ *     visible, and the list carries NO order of its own to honour. Master's own
+ *     `parseCardList` was `DETAIL_CARDS.filter((id) => raw.includes(id))`, so
+ *     every legacy value that can be in storage is already a canonical-order
+ *     subset — reading the order the caller happened to list ids in would
+ *     silently rearrange the page the first time a card was re-ticked. Read for
+ *     membership alone: all nine ids in `DETAIL_CARDS` order, `on` set by
+ *     whether the id was mentioned. `[]` takes this branch on purpose —
+ *     unticking everything must still mean nothing visible, and reading it as
+ *     the new shape (nothing mentioned, so nothing to hide) would invert that
+ *     to everything shown.
+ *   - NEW SHAPE (every element an object with a string `id`): the array already
+ *     carries both the order and the visibility, so it is kept close to
+ *     verbatim — deduped by id first-wins, unknown ids dropped, `on` coerced to
+ *     a boolean — and only an id the caller left out entirely is inserted,
+ *     `on: true`, immediately after the nearest `DETAIL_CARDS` predecessor that
+ *     is present. That is the case for a card that shipped after this account
+ *     last saved the setting: it arrives visible, at its canonical position,
+ *     rather than needing a migration to appear at all.
+ *
+ * A mix of the two element shapes returns `undefined` — no legitimate client
+ * produces one, and guessing which rule applies is exactly the ambiguity the
+ * object shape exists to avoid. Ids are matched with `DETAIL_CARDS.includes`,
+ * never an object lookup, so `__proto__` is just another unknown id.
  *
  * @param {unknown} raw
- * @returns {string[]|undefined}
+ * @returns {{id: string, on: boolean}[]|undefined}
  */
 export function parseCardList(raw) {
   if (!Array.isArray(raw)) return undefined;
   if (raw.length > DETAIL_CARDS.length * 4) return undefined;   // obvious junk
-  return DETAIL_CARDS.filter((id) => raw.includes(id));
+
+  const isCardObject = (el) => el !== null && typeof el === 'object' &&
+    typeof el.id === 'string';
+
+  if (raw.length === 0 || raw.every((el) => typeof el === 'string')) {
+    // A legacy value carries no order — see the JSDoc above — so this is
+    // membership alone, in DETAIL_CARDS order. `raw.includes` rather than a
+    // Set: the array is at most DETAIL_CARDS.length * 4 by the junk cap above,
+    // small enough that a second membership test costs nothing, and it means
+    // a repeated or unknown id in `raw` needs no separate handling — it simply
+    // matches nothing extra.
+    return DETAIL_CARDS.map((id) => ({ id, on: raw.includes(id) }));
+  }
+
+  if (raw.every(isCardObject)) {
+    const seen = new Set();
+    const kept = [];
+    for (const el of raw) {
+      if (DETAIL_CARDS.includes(el.id) && !seen.has(el.id)) {
+        seen.add(el.id);
+        kept.push({ id: el.id, on: !!el.on });
+      }
+    }
+    // Every id DETAIL_CARDS names and this list omits is inserted right after
+    // its canonical predecessor. Walking DETAIL_CARDS in its own order means
+    // that predecessor — if it was ALSO missing — has already been inserted
+    // by the time it is looked up here, so a run of several consecutive
+    // missing ids still lands as a run, in the right place, with one lookup
+    // each rather than a search back through DETAIL_CARDS.
+    for (const id of DETAIL_CARDS) {
+      if (seen.has(id)) continue;
+      const predecessorIndex = DETAIL_CARDS.indexOf(id) - 1;
+      let insertAt = 0;
+      if (predecessorIndex >= 0) {
+        const foundAt = kept.findIndex((c) => c.id === DETAIL_CARDS[predecessorIndex]);
+        if (foundAt !== -1) insertAt = foundAt + 1;
+      }
+      kept.splice(insertAt, 0, { id, on: true });
+      seen.add(id);
+    }
+    return kept;
+  }
+
+  // Mixed strings and objects (or something that is neither) — refused rather
+  // than guessed at.
+  return undefined;
 }
 
 /**

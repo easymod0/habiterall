@@ -644,12 +644,22 @@ const getSettings = async () => (await (await api('/api/settings')).json());
 // with the field dropped from the allowlist entirely. It is set to a value the
 // registry's default is NOT, which is what makes the assertion below bite.
 // `gridDays` and `detailCards` are here for the same reason, and `detailCards`
-// needs it most: its default is ALL nine card ids, so a list dropped from the
-// file would compare equal to a list restored intact. A proper subset is what
-// makes the assertion bite.
+// needs it in two dimensions at once now that it stores order as well as
+// membership: its default is all nine ids ON in `DETAIL_CARDS` order, so a
+// fixture that varies only WHICH ids are on and leaves them in canonical order
+// would still compare equal with the order silently dropped on export or
+// import — the "fixture holds a field's default" defect, just one axis short
+// of catching it. This one is a non-canonical order with two cards off.
+const nonCanonicalDetailCards = [
+  { id: 'history', on: true }, { id: 'calendar', on: true },
+  { id: 'strength', on: false }, { id: 'frequency', on: true },
+  { id: 'weekdays', on: false }, { id: 'awards', on: true },
+  { id: 'streaks', on: true }, { id: 'resilience', on: true },
+  { id: 'weekdayMonths', on: true },
+];
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
   atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma',
-  gridDays: '7', detailCards: ['calendar', 'history'] });
+  gridDays: '7', detailCards: nonCanonicalDetailCards });
 const withSettings = Buffer.from(await (await api('/api/export')).arrayBuffer());
 const exported = JSON.parse(withSettings.toString('utf8')).settings ?? {};
 
@@ -658,7 +668,7 @@ ck('the JSON backup carries the settings',
   exported.dayOrder === 'newest-right' && exported.atMostUnlogged === 'success' &&
   exported.theme === 'dark' && exported.numberFormat === 'comma' &&
   exported.gridDays === '7' &&
-  JSON.stringify(exported.detailCards) === '["calendar","history"]',
+  JSON.stringify(exported.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(exported));
 
 // And nothing that is a capability rather than a preference. A backup file is
@@ -689,7 +699,7 @@ ck('though it can still set a display preference',
 await restore(jsonBackup, 'replace');
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
   atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma',
-  gridDays: '7', detailCards: ['calendar', 'history'] });
+  gridDays: '7', detailCards: nonCanonicalDetailCards });
 
 await putSettings({ skipDays: false, questionMarks: false, dayOrder: 'newest-left',
   atMostUnlogged: 'miss', theme: 'light', numberFormat: 'point',
@@ -702,7 +712,7 @@ ck('a replace-mode restore puts them back',
   back.dayOrder === 'newest-right' && back.atMostUnlogged === 'success' &&
   back.theme === 'dark' && back.numberFormat === 'comma' &&
   back.gridDays === '7' &&
-  JSON.stringify(back.detailCards) === '["calendar","history"]',
+  JSON.stringify(back.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(back));
 ck('and says how many it applied', restored.settings >= 3, String(restored.settings));
 

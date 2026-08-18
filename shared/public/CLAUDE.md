@@ -12,6 +12,12 @@ a test, and why anything a page needs has to live on this side of the line.
 **Adding a FILE or an EXPORT here is a `CACHE_VERSION` bump.** See the root
 `CLAUDE.md`. It is why one-off helpers go in an existing module —
 `deviceClockHeader` lives in `offline.js` rather than in a module of its own.
+**So is changing the SHAPE of a value read by more than one shell module** even
+when neither is true — `detailCards` becoming `{id, on}[]` (#163) added no file
+and no export, but `ui/settings.js`, `ui/settings-dialog.js` and `ui/detail.js`
+all read the stored value, and `shellFirst`'s stale-while-revalidate can serve
+one of those three a new module over a cached old one. See `sw.js`'s own
+comment at `v18` for what that looks like in practice.
 
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both habit
@@ -52,10 +58,64 @@ targets.
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears
-about it.** `detailCards` is a `multi` over `DETAIL_CARDS` (`shared/src/validate.js`),
-gating the nine appends in `ui/detail.js`. Ids and not titles, because a card has
-no id and the titles are English prose #144 will translate. The gate is on the
-*append*, so a hidden card is never built.
+about it.** `detailCards` gates the nine builders in `ui/detail.js`; the ids come
+from `DETAIL_CARDS` (`shared/src/validate.js`) and not titles, because a card has
+no id and the titles are English prose #144 will translate.
+
+**The stored shape is `{id, on}[]`, not a bare list of the ids that are on**
+(#163). Membership and order are two different decisions — hiding a card and
+moving it are not the same press — and a bare array of ids can only ever record
+one of them: normalising `['history','calendar']` down to canonical order to
+give the SERVER an opinion about ordering would throw the order away the moment
+anyone reordered anything. An object per id, always all nine, says which of the
+two questions each entry is answering, so a tenth card cannot later make "a bare
+id" ambiguous between "legacy, absent means hidden" and "new shape, absent means
+new and visible" — a marked string (`'!history'`) still faces exactly that
+question with a longer list of ids. `[]` is read as the LEGACY shape and means
+nothing visible; reading it as the new shape (nothing named, so nothing to
+hide) would invert unticking everything to everything shown, which is the one
+case `parseCardList`'s tests treat as the whole point of the change.
+
+**A legacy account is read tolerantly, and migrated only by a deliberate
+Done.** Nothing writes the new shape on its behalf otherwise: not a boot, not a
+`GET`, nothing scheduled. An account that saved `['history','calendar']` before
+this shipped keeps meaning exactly that — those two on, every other card off —
+for as long as it never opens the settings dialog, because every card added
+after that save is invented later than the account's stored intent and there is
+nothing in a bare id list to say otherwise.
+
+Pressing **Done** rewrites it, *even with nothing else changed*, and that took a
+deliberate mechanism: `applyDraft` sends the keys whose draft differs from
+`load()`, and for `detailCards` those are two clones of the same NORMALISED
+array — `sanitise` ran the normaliser over the server's reply — so they never
+differ unless a tick or a position was touched. Without the extra pass the
+documented recovery was a no-op, which is the review finding this paragraph
+exists because of. `storedShapeIsStale` (`ui/settings.js`) answers it from
+`ApplyMeta.stored`, the server's OWN reply, never from `load()`, since the cache
+is already normalised and would report staleness that is not there; an absent
+key answers false, or every fresh account would write its defaults on its first
+Done. It is generic over `def.normalise` rather than a `detailCards` special
+case, because the second normaliser should not have to find this.
+
+**A legacy list carries no order to honour, and is read in `DETAIL_CARDS`
+order rather than the order it happens to list ids in.** Master's own
+`parseCardList` was `DETAIL_CARDS.filter((id) => raw.includes(id))`, so every
+legacy value that can be in storage is already a canonical-order subset —
+there is no ordering decision recorded in it to lose. Reading `['history',
+'calendar']` as "history then calendar" read information into a value that
+never carried any: re-tick `strength` on such an account and the page would
+silently rearrange from what master drew (Habit strength, Calendar, History)
+to Calendar, History, Habit strength. `parseCardList` and `normaliseDetailCards`
+both return all nine in `DETAIL_CARDS` order, `on` set by membership, for a
+legacy input — which is exactly the page master drew, unchanged by a later
+re-tick.
+
+**A card absent from a *new-shape* list is one that shipped after the account
+last saved the setting**, and `parseCardList` reads that absence as "on,
+canonical position" rather than "off": inserted immediately after the nearest
+`DETAIL_CARDS` predecessor still present in the list. That is what lets a
+tenth card show up for an account that has an opinion about the other nine,
+with no migration and no write anyone had to schedule.
 
 Two things it deliberately does not do: it does not hide the four stat tiles, so
 unticking everything leaves a page rather than a blank one; and it does not reach
@@ -63,15 +123,22 @@ unticking everything leaves a page rather than a blank one; and it does not reac
 else reads, and a `?cards=` parameter would be one service-worker data-cache
 entry per combination.
 
-**A card that is not being DRAWN holds no position.** `forgetHiddenPositions` in
-`ui/detail.js`, and it belongs there rather than beside the setting: the view
-keeps a position in **two** places — `state.chartOffsets`, keyed per card by
-`windowedChart`, and `state.calEnd` — and two of the four offset keys are built
-from the CURRENT granularity, session override included. Only `detail.js` knows
-that mapping. Both wrong versions shipped in one review round: clearing only
-`chartOffsets` left the calendar at its old date, and clearing both from
-`applyDraft` gated on "`detailCards` changed at all" sent a still-ticked History
-card back to today.
+**A card that is not being DRAWN holds no position, and the same table now says
+both what to build and what to forget.** `CARDS` in `ui/detail.js` is one `Map`
+keyed by id — `build` and an optional `forget` — replacing what used to be two
+separate lists of the same nine ids answering two different questions: the nine
+`if (shows(id))` gates in source order, and `forgetHiddenPositions`'s own table
+of which ids own a paging position. Merging them is the point, not a side
+effect: two tables naming one set of ids is exactly the "two rules for one
+question" shape this file's other traps warn about, and only `ui/detail.js`
+knows the position mapping in the first place — the view keeps a position in
+**two** places, `state.chartOffsets` (keyed per card by `windowedChart`, two of
+whose four keys are built from the CURRENT granularity, session override
+included) and `state.calEnd`, and `forget` is that same knowledge attached to
+the id it belongs to instead of restated beside it. Both wrong versions shipped
+in one review round before this: clearing only `chartOffsets` left the calendar
+at its old date, and clearing both from `applyDraft` gated on "`detailCards`
+changed at all" sent a still-ticked History card back to today.
 
 `windowedChart` gives its range readout the same `.cal-range` class the calendar
 uses, so a test looking one up must scope to a card by title.

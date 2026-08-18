@@ -470,6 +470,22 @@ await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
 // The settings half of a backup, which only this edition stores as JSONB under
 // RLS. `portableSettings` is what keeps a capability out of the file in both
 // directions — the notification keys are absent by design.
+//
+// `detailCards` is set directly by raw SQL here rather than through the API,
+// so it bypasses `parseCardList` entirely — `portableSettings` must carry
+// whatever shape is stored, not normalise it. The fixture is still a
+// non-canonical order with two cards off, and in two dimensions at once: its
+// default is all nine ids ON in `DETAIL_CARDS` order, so a fixture varying
+// only WHICH ids are on and left in canonical order would compare equal with
+// the order silently dropped — the "fixture holds a field's default" defect,
+// one axis short of catching it.
+const nonCanonicalDetailCards = [
+  { id: 'history', on: true }, { id: 'calendar', on: true },
+  { id: 'strength', on: false }, { id: 'frequency', on: true },
+  { id: 'weekdays', on: false }, { id: 'awards', on: true },
+  { id: 'streaks', on: true }, { id: 'resilience', on: true },
+  { id: 'weekdayMonths', on: true },
+];
 await withUser(alice, (db) => db.query(
   `UPDATE users SET settings = $1::jsonb WHERE id = $2`,
   [JSON.stringify({
@@ -481,11 +497,8 @@ await withUser(alice, (db) => db.query(
     // than how anything is drawn: `10.000` is ten under one and a refused
     // thousands group under the other.
     numberFormat: 'comma',
-    // Same reason, and it bites harder on `detailCards`: its default is ALL
-    // nine ids, so a list dropped from the file would be indistinguishable
-    // from one restored intact unless the fixture holds a proper subset.
     gridDays: '7',
-    detailCards: ['calendar', 'history'],
+    detailCards: nonCanonicalDetailCards,
     discordWebhook: 'https://discord.com/api/webhooks/1/secret',
   }), alice]
 ));
@@ -506,7 +519,7 @@ ck('a backup carries the tracking settings',
   // in a list, and a key that quietly stopped travelling would show up only as
   // a page that came back longer than it was left.
   exported.gridDays === '7' &&
-  JSON.stringify(exported.detailCards) === '["calendar","history"]',
+  JSON.stringify(exported.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(exported));
 ck('and no notification destination',
   !Object.keys(exported).some((k) => k.startsWith('discord') || k.startsWith('notify')),

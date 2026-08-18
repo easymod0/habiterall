@@ -61,8 +61,14 @@ row evenly and the gain is the fat thumb targets the issue asked for (45px →
 wrong about the app.
 
 **Which cards a habit's page draws is a list of INVENTED IDS, and the server
-never hears about it.** `detailCards` is a `multi` over `DETAIL_CARDS`
-(shared/src/validate.js), gating the nine appends in `ui/detail.js`. Ids and not
+never hears about it.** *Superseded by #163: `detailCards` is no longer a bare
+`multi` list of ids — the stored shape is `{id, on}[]`, an `ordered-multi`, so
+that a card can be reordered and not only hidden. See `shared/public/CLAUDE.md`
+("The detail view") for the current shape and the legacy-migration rules; the
+"invented ids" and "gating the append" framing below is still true, it is only
+the membership-only-list part that no longer holds.* `detailCards` is a `multi`
+over `DETAIL_CARDS` (shared/src/validate.js), gating the nine appends in
+`ui/detail.js`. Ids and not
 the card titles, because a card has no id — `card()` sets a class and the detail
 view "owns no ids of its own" — and the titles are English prose that #144 is
 about to make translatable. Nothing in the DOM needs one: the gate is on the

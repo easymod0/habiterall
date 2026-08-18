@@ -1066,6 +1066,18 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 /* A long webhook URL must not widen the dialog on a phone. */
 #settings-dialog input[type='text'] { text-overflow: ellipsis; }
 
+/* `ordered-multi` (detailCards, #163): the checkbox plus a pair of buttons
+   that swap the row's position, so the label must not claim the whole row
+   the way a plain `.checkbox` does. */
+.setting-ordered-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+.setting-ordered-row label.checkbox { flex: 1; min-width: 0; margin-bottom: 0; }
+.setting-ordered-row button { flex: none; padding: 3px 9px; }
+
 /* ---------- backup / restore dialog ---------- */
 
 #data-dialog { width: min(500px, 92vw); }

@@ -31,6 +31,11 @@ let fails = 0;
 const ck = (l, c, e = '') => { console.log(`${c ? 'PASS' : 'FAIL'}  ${l}${e ? ' :: ' + e : ''}`); if (!c) fails++; };
 let ws, nid = 1;
 const pend = new Map();
+// Every request the page makes, for the "a Done that touches nothing still
+// migrates a legacy detailCards reply" block below — the only place in this
+// file that needs to see the WRITE rather than merely stub an answer to it.
+// `settingscheck.mjs` reads the same event for the same reason.
+const netReqs = [];
 const send = (m, p = {}, s) => new Promise((res, rej) => {
   const id = nid++; pend.set(id, { res, rej });
   ws.send(JSON.stringify({ id, method: m, params: p, sessionId: s }));
@@ -45,6 +50,8 @@ try {
     if (m.id && pend.has(m.id)) {
       const { res, rej } = pend.get(m.id); pend.delete(m.id);
       m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result);
+    } else if (m.method === 'Network.requestWillBeSent') {
+      netReqs.push(m.params.request);
     }
   };
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
@@ -877,6 +884,101 @@ try {
   ck('a throwing applier does not reject the write it followed',
     applierThrew?.threw === undefined, JSON.stringify(applierThrew));
 
+  /* ---------- a Done that touches nothing still migrates detailCards ---------- */
+  //
+  // A second setting reached through the same durability model this whole
+  // file is about — not the theme, but the same shape: a value with a
+  // pre-current home (a legacy bare-string `detailCards`) and a migration that
+  // only a deliberate act performs. #163 review round 1 added
+  // `storedShapeIsStale` plus a second pass in `applyDraft` so that pressing
+  // Done, even with nothing touched, rewrites a legacy value — because
+  // `draft` and `settings.load()` are both already the NORMALISED cache and
+  // never differ on their own. Nothing anywhere asserted the WIRING actually
+  // runs: delete that second pass and every other test in this repo still
+  // passes, while the README's migration instruction quietly becomes untrue
+  // again.
+  //
+  // The gap the first pass at this hit and reported honestly: no HTTP write
+  // path can leave a bare-string `detailCards` in the SERVER's real store,
+  // because both editions run `parseSettings`/`parseCardList` on every write
+  // — `putSetting`, and `POST /import` in replace mode, both normalise before
+  // a byte is stored. But `storedShapeIsStale` reads `ApplyMeta.stored`, which
+  // is the BODY of the `GET /api/settings` reply, not a database row — so
+  // what has to be legacy is what the client is TOLD the account holds. A
+  // real upgrading account looks exactly like a fabricated reply to the
+  // browser, whatever wrote the row underneath it, which is why patching
+  // `window.fetch` for this one route — the same shape this file already
+  // uses for a rate-limited read or a refused write — is an honest way to
+  // reach it and putting a legacy value on the server through `putSetting` is
+  // not.
+  await boot();
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'DELETE', credentials: 'same-origin' });
+    localStorage.removeItem('habiterall-settings');
+    return 1;
+  })()`);
+  const legacyCardsGet = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (url.includes('/api/settings') && (init?.method ?? 'GET') === 'GET') {
+          // Everything else is the real server's answer; only the ONE field
+          // this block is about is overwritten, and in the LEGACY shape — a
+          // bare array of the ids that are on, nothing said about the other
+          // seven and nothing about order.
+          return real(input, init).then(async (r) => {
+            const body = await r.clone().json().catch(() => ({}));
+            body.detailCards = ['calendar', 'history'];
+            return new Response(JSON.stringify(body),
+              { status: r.status, headers: { 'Content-Type': 'application/json' } });
+          });
+        }
+        return real(input, init);
+      };
+    })();`,
+  }, sessionId);
+  await boot();
+
+  // The canonical order, read from the running app rather than hard-coded
+  // here — `options` is unchanged by #163 (only the default and the type
+  // moved), so this is the same order `DETAIL_CARDS` declares.
+  const canonicalCards = await ev(`(async()=>{
+    const { SETTINGS } = await import('/shared/ui/settings.js');
+    return SETTINGS.detailCards.options.map((o) => o.value);
+  })()`);
+
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev, `document.getElementById('settings-dialog').open === true`,
+    { what: 'the settings dialog to open, over the legacy detailCards reply' });
+  const beforeDone = netReqs.length;
+  // Done, with nothing touched — the exact press the README says migrates a
+  // legacy value.
+  await ev(`document.getElementById('settings-close').click()`);
+  await waitUntil(ev, `document.getElementById('settings-dialog').open === false`,
+    { what: 'the dialog to close after a Done that touched nothing' });
+
+  const migratingPuts = netReqs.slice(beforeDone)
+    .filter((r) => r.method === 'PUT' && r.url.endsWith('/api/settings'));
+  const cardsBody = migratingPuts
+    .map((r) => { try { return JSON.parse(r.postData ?? ''); } catch { return null; } })
+    .find((b) => b && Object.hasOwn(b, 'detailCards'));
+  ck('a Done that touches nothing still issues a PUT carrying detailCards',
+    migratingPuts.length > 0 && !!cardsBody,
+    JSON.stringify(migratingPuts.map((r) => r.postData)));
+
+  // The legacy rule changed in this same fix round: a bare list is read for
+  // MEMBERSHIP only, in canonical order — not "mentioned ids first" — so the
+  // expected shape below is all nine cards, calendar and history on, in the
+  // order `SETTINGS.detailCards.options` declares.
+  const expectedCards = canonicalCards.map((id) =>
+    ({ id, on: id === 'calendar' || id === 'history' }));
+  ck('...and the write carries the NEW {id,on}[] shape, in canonical order',
+    JSON.stringify(cardsBody?.detailCards) === JSON.stringify(expectedCards),
+    `got ${JSON.stringify(cardsBody?.detailCards)}, expected ${JSON.stringify(expectedCards)}`);
+
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: legacyCardsGet.identifier }, sessionId);
 
   console.log(fails === 0 ? '\nALL THEME SYNC CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {

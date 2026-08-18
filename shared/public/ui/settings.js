@@ -18,14 +18,15 @@ const CACHE_KEY = 'habiterall-settings';
  * @typedef {object} SettingDef
  * @property {string} label      shown in the settings dialog
  * @property {string} [help]     one-line explanation under the control
- * @property {'select'|'toggle'|'multi'|'text'} type
+ * @property {'select'|'toggle'|'multi'|'ordered-multi'|'text'} type
  * @property {any} default
  * @property {{value: string, label: string, onEnable?: () => any}[]} [options]
- *   for `select` and `multi`. `onEnable` runs when a `multi` option is TICKED,
- *   inside the click that ticked it — the settings dialog is the only place in
- *   the app with a user gesture to spend, and a notification permission cannot
- *   be asked for without one. Return a promise and the dialog redraws when it
- *   settles, so the section can report what the browser answered.
+ *   for `select`, `multi` and `ordered-multi`. `onEnable` runs when a `multi`
+ *   option is TICKED, inside the click that ticked it — the settings dialog is
+ *   the only place in the app with a user gesture to spend, and a notification
+ *   permission cannot be asked for without one. Return a promise and the
+ *   dialog redraws when it settles, so the section can report what the
+ *   browser answered.
  * @property {string} [placeholder]  for `text`
  * @property {string} [section]  groups controls in the dialog
  * @property {(values: Record<string, any>) => boolean} [requires]
@@ -33,6 +34,13 @@ const CACHE_KEY = 'habiterall-settings';
  *   is noise until its channel is switched on
  * @property {(value: any) => boolean} [validate]
  *   overrides the type's own check, for a value whose legal set is not a list
+ * @property {(raw: any) => any} [normalise]
+ *   for `ordered-multi`: an independent mirror of the server's normaliser
+ *   (`parseCardList` for `detailCards`), needed because `sanitise` runs in the
+ *   browser and `shared/src` is not served there — the same reason
+ *   `DETAIL_CARDS` is declared twice. Must answer `undefined` for `undefined`,
+ *   so an absent key still falls through to `defaults()` rather than the
+ *   normaliser inventing a value. Runs before `isValid`.
  */
 
 /**
@@ -129,6 +137,69 @@ function timeZoneOptions() {
       label: zone === device ? `${zone} (this device)` : zone,
     })),
   ];
+}
+
+/**
+ * Which cards `ui/detail.js` draws, and in what order — the `detailCards`
+ * def's `normalise`.
+ *
+ * An independent mirror of `parseCardList` in shared/src/validate.js, not a
+ * call to it: `shared/src` is not served to the browser, the same reason
+ * `DETAIL_CARDS` is declared twice. The canonical order comes from
+ * `SETTINGS.detailCards.options`, so it is not a THIRD declaration of the
+ * nine ids — only of the rule that reads them. See that function's JSDoc for
+ * the two input shapes (LEGACY: every element a string, or `[]`; NEW: every
+ * element an `{id, on}` object) and why a mix of the two refuses rather than
+ * guesses. LEGACY carries no order of its own to honour — master's own
+ * `parseCardList` was `DETAIL_CARDS.filter((id) => raw.includes(id))`, so
+ * every legacy value that can be in storage is already a canonical-order
+ * subset, and reading the order the caller happened to list ids in would
+ * silently rearrange the page the first time one card was re-ticked.
+ *
+ * @param {unknown} raw
+ * @returns {{id: string, on: boolean}[]|undefined}
+ */
+function normaliseDetailCards(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const order = SETTINGS.detailCards.options.map((o) => o.value);
+  if (raw.length > order.length * 4) return undefined;   // obvious junk
+
+  const isCardObject = (el) => el !== null && typeof el === 'object' &&
+    typeof el.id === 'string';
+
+  if (raw.length === 0 || raw.every((el) => typeof el === 'string')) {
+    // A legacy value carries no order — see the module comment above — so
+    // this is membership alone, in canonical (`order`) order. `order.includes`
+    // rather than a Set: `raw` is already capped to `order.length * 4` above,
+    // and a repeated or unknown id in it needs no separate handling either —
+    // it simply matches nothing extra.
+    return order.map((id) => ({ id, on: raw.includes(id) }));
+  }
+
+  if (raw.every(isCardObject)) {
+    const seen = new Set();
+    const kept = [];
+    for (const el of raw) {
+      if (order.includes(el.id) && !seen.has(el.id)) {
+        seen.add(el.id);
+        kept.push({ id: el.id, on: !!el.on });
+      }
+    }
+    for (const id of order) {
+      if (seen.has(id)) continue;
+      const predecessorIndex = order.indexOf(id) - 1;
+      let insertAt = 0;
+      if (predecessorIndex >= 0) {
+        const foundAt = kept.findIndex((c) => c.id === order[predecessorIndex]);
+        if (foundAt !== -1) insertAt = foundAt + 1;
+      }
+      kept.splice(insertAt, 0, { id, on: true });
+      seen.add(id);
+    }
+    return kept;
+  }
+
+  return undefined;   // mixed strings and objects — no legitimate client sends this
 }
 
 /**
@@ -305,19 +376,32 @@ export const SETTINGS = {
     label: 'Cards on a habit’s page',
     help: 'A card with nothing in it yet is hidden whatever you choose here. ' +
       'The four figures at the top of the page are always shown.',
-    type: 'multi',
-    // All of them: this is a way to make the page shorter, not a page you have
-    // to assemble before it says anything.
+    type: 'ordered-multi',
+    // All of them, on: this is a way to make the page shorter and reorder it,
+    // not a page you have to assemble before it says anything.
     //
-    // The values and their ORDER mirror `DETAIL_CARDS` in
-    // shared/src/validate.js, which the browser cannot import — and the order
-    // is load bearing, not tidiness: `parseCardList` stores the canonical order,
-    // so a default written in any other one would be normalised on its first
-    // write. test/settings.test.js is what catches that.
-    default: ['strength', 'calendar', 'streaks', 'resilience', 'awards',
-      'history', 'weekdays', 'weekdayMonths', 'frequency'],
+    // The ids and their ORDER mirror `DETAIL_CARDS` in shared/src/validate.js,
+    // which the browser cannot import — and the order is load bearing, not
+    // tidiness: `parseCardList` stores a NEW-SHAPE list close to verbatim, so
+    // a default written in any other order would be normalised away on its
+    // first write. `calendar` immediately follows `strength` (sits directly
+    // under the score) and `awards` comes after `resilience` (a probability
+    // you can act on beats a trophy); test/settings.test.js pins both.
+    default: [
+      { id: 'strength', on: true },
+      { id: 'calendar', on: true },
+      { id: 'streaks', on: true },
+      { id: 'resilience', on: true },
+      { id: 'awards', on: true },
+      { id: 'history', on: true },
+      { id: 'weekdays', on: true },
+      { id: 'weekdayMonths', on: true },
+      { id: 'frequency', on: true },
+    ],
+    normalise: normaliseDetailCards,
     // The labels are the card titles as they appear on the page, so the dialog
-    // and the page name the same thing.
+    // and the page name the same thing. Unchanged in shape and order — only
+    // `default` and `type` above express the new stored shape.
     options: [
       { value: 'strength', label: 'Habit strength' },
       { value: 'calendar', label: 'Calendar' },
@@ -442,11 +526,15 @@ let cache = null;
 /** Defaults for every declared setting. */
 export function defaults() {
   return Object.fromEntries(
-    // Arrays are copied: a `multi` default is a mutable value, and handing the
-    // registry's own array to the caller means one stray push would change
-    // what "default" means for the rest of the session.
+    // Arrays are copied: a `multi` or `ordered-multi` default is a mutable
+    // value, and handing the registry's own array to the caller means one
+    // stray push would change what "default" means for the rest of the
+    // session. `structuredClone` rather than `[...def.default]`, because
+    // `detailCards`'s default now holds OBJECTS — a shallow copy shares every
+    // element with the registry's own default, and one stray `entry.on =
+    // false` on a caller's copy would flip it there too.
     Object.entries(SETTINGS).map(([k, def]) =>
-      [k, Array.isArray(def.default) ? [...def.default] : def.default])
+      [k, Array.isArray(def.default) ? structuredClone(def.default) : def.default])
   );
 }
 
@@ -455,7 +543,17 @@ function sanitise(raw) {
   const out = defaults();
   if (!raw || typeof raw !== 'object') return out;
   for (const [key, def] of Object.entries(SETTINGS)) {
-    if (isValid(def, raw[key])) out[key] = raw[key];
+    // `normalise` runs first, exactly as the server's own normaliser-form
+    // rules in SETTING_VALUES do — so `isValid` below is checking the
+    // normaliser's OUTPUT, which catches a bug in the normaliser rather than
+    // merely rejecting a stale stored value. A def WITH a normaliser is
+    // validated on what it answers, refusal included — `??` here would let a
+    // normaliser's `undefined` (a refusal) fall back to the raw,
+    // unnormalised value and hand `isValid` something the normaliser never
+    // approved. A def with no normaliser is validated on the raw value, as
+    // before.
+    const value = def.normalise ? def.normalise(raw[key]) : raw[key];
+    if (isValid(def, value)) out[key] = value;
   }
   return out;
 }
@@ -468,6 +566,22 @@ function isValid(def, value) {
   if (def.type === 'multi') {
     return Array.isArray(value) &&
       value.every((v) => def.options.some((o) => o.value === v));
+  }
+  if (def.type === 'ordered-multi') {
+    // Strict: an array holding every option exactly once, each entry an
+    // object with a known id and a boolean `on`. Strict on purpose — the
+    // normaliser has already run by the time this is asked, so a value that
+    // fails here is a normaliser bug rather than a legacy shape to tolerate.
+    if (!Array.isArray(value) || value.length !== def.options.length) return false;
+    const seen = new Set();
+    for (const entry of value) {
+      if (!entry || typeof entry !== 'object') return false;
+      if (typeof entry.on !== 'boolean') return false;
+      if (!def.options.some((o) => o.value === entry.id)) return false;
+      if (seen.has(entry.id)) return false;
+      seen.add(entry.id);
+    }
+    return true;
   }
   // Free text is checked by the server, which is the only check that counts —
   // a webhook URL's real rule (an allowed host) belongs where the fetch is.
@@ -720,10 +834,32 @@ function writeCache(values, meta) {
  * successful server write into a rejected `save()`.
  */
 /**
+ * The server's own value for every key it has ever told us about, held RAW —
+ * before `sanitise` fills a gap or a normaliser rewrites it. Read only by
+ * `storedShapeIsStale`, below. Updated here rather than in `writeCache`,
+ * because `reset()` calls `notifyAppliers` directly with its own `meta` —
+ * this is the one point every path carrying an `ApplyMeta.stored` passes
+ * through.
+ *
+ * A `full` reply REPLACES this rather than merging into it: it is the
+ * account's WHOLE state, so a key missing from one is a key the account no
+ * longer holds (this is what makes `reset()` retire a stale flag rather than
+ * leaving it stuck stale forever). A partial reply — a single `save`/
+ * `saveAll`'s accepted patch — only ADDS to what is known, since it says
+ * nothing about a key it does not mention.
+ *
+ * @type {Record<string, unknown>}
+ */
+let lastServerStored = {};
+
+/**
  * @param {Record<string, any>} values
  * @param {ApplyMeta} [meta]
  */
 function notifyAppliers(values, meta) {
+  if (meta?.stored && typeof meta.stored === 'object') {
+    lastServerStored = meta.full ? { ...meta.stored } : { ...lastServerStored, ...meta.stored };
+  }
   for (const fn of appliers) {
     try {
       fn(values, meta);
@@ -731,6 +867,39 @@ function notifyAppliers(values, meta) {
       /* an applier must not break a save either */
     }
   }
+}
+
+/**
+ * Whether the account's OWN stored value for `key` is in a shape its
+ * normaliser would rewrite — i.e. whether there is a legacy value left for a
+ * Save to migrate.
+ *
+ * Generic over `def.normalise`, not a `detailCards` special case: the
+ * question "the server holds a value my normaliser would rewrite" is the
+ * general one, and a special case here would have to be found and rewritten
+ * by whoever adds the second normaliser.
+ *
+ * Only a value the SERVER named counts. `lastServerStored` is built solely
+ * from `ApplyMeta.stored`, never from `load()` — the localStorage cache and a
+ * merge are already in the new shape by the time anything reads them (both go
+ * through `sanitise`), and asking `load()` here would report that as staleness
+ * that is not there. An absent key answers false: an account that has never
+ * stored `key` has nothing to migrate, and answering true for it would make
+ * every fresh account write its defaults back on its very first Save.
+ *
+ * @param {string} key
+ * @returns {boolean}
+ */
+export function storedShapeIsStale(key) {
+  const def = SETTINGS[key];
+  if (!def?.normalise) return false;
+  if (!Object.hasOwn(lastServerStored, key)) return false;
+  const raw = lastServerStored[key];
+  const normalised = def.normalise(raw);
+  // The normaliser refusing the stored value outright is not this predicate's
+  // question to answer — there is no shape to migrate TO.
+  if (normalised === undefined) return false;
+  return JSON.stringify(raw) !== JSON.stringify(normalised);
 }
 
 /**
