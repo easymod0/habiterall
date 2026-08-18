@@ -556,7 +556,18 @@ OPERATOR's question: `NTFY_ALLOWED_HOSTS`, defaulting to `ntfy.sh` alone, naming
 your own **replaces** rather than adds, and `off` refuses every URL while still
 telling the user why.
 
-**An entry names a host and optionally a BASE PATH.** The property worth copying
+**An entry names a host, optionally a BASE PATH, and optionally a SCHEME.** The
+scheme defaults to https and `http://ntfy.lan:8080` is how an operator says
+their ntfy is on this server's own network, where the hop never leaves it and a
+public proxy in the middle buys nothing. It is per ENTRY, not a switch — an
+instance can allow http to the box in the cupboard and still refuse it to
+ntfy.sh — and it is asked UPWARD only: an `http://` entry serves an https URL
+too, because refusing one for being better protected than what was written
+reads as a bug, while an https entry never serves an http URL. A user's URL can
+never ask for plaintext; only the operator's list can offer it. The canonical
+entry therefore carries its scheme (`https://ntfy.sh`), and so must any lookup.
+
+**...and it names a BASE PATH.** The property worth copying
 from `parseDiscordWebhook` is not "it checks the host", it is that allowlisting a
 destination allows one KIND of request — so it pins the path too. The first
 version allowed any 1–4 dotless segments and posted to all but the last, which
@@ -569,7 +580,8 @@ the only part the operator cannot know in advance. It is a **whole-segment**
 match (`Set.has` on the joined base), never a prefix, or `/ntfy` allows
 `/ntfyadmin` — and the stored URL is rebuilt with the **entry's** spelling.
 
-The rest of the shape and every clause in it: **https only**; **no credentials**
+The rest of the shape and every clause in it: **https, unless the entry itself
+named http** (above); **no credentials**
 (`https://ntfy.sh@evil.test/x` has a host of `evil.test`); the host matched
 **whole and with its port**, never a suffix test (`evilntfy.sh` ends with
 `ntfy.sh`); segments containing **no dots at all**, which makes `..`
@@ -582,7 +594,10 @@ here: every name in the allowlist was chosen by the operator. Pinning would buy
 nothing and break every ntfy behind a load balancer.
 
 **A malformed entry fails closed, and says so once.** `*`, `*.example.com`,
-`https://ntfy.sh`, a bare comma — none allow anything. Dropping it in silence was
+`ftp://ntfy.sh`, `//ntfy.sh`, a bare comma — none allow anything (`http://` and
+`https://` are the only two prefixes that mean anything, and every other
+spelling of a scheme leaves a host that is not a host, which is the fail-closed
+direction rather than a second check). Dropping it in silence was
 the wrong half: the only surface was a user's URL snapping back to blank, which
 gets reported as an app bug by somebody who cannot fix it.
 `notify.ntfy_allowlist_unusable` is the operator's copy. The one fail-OPEN value

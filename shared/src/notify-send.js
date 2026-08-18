@@ -281,7 +281,8 @@ export async function postNtfy(args, deps = {}) {
       status: 0,
       permanent: true,
       error: 'this topic URL is not one this server may post to — it must be '
-        + 'https and on a host named in NTFY_ALLOWED_HOSTS',
+        + 'https, or http to a destination NTFY_ALLOWED_HOSTS names that way, '
+        + 'and on a host named in NTFY_ALLOWED_HOSTS',
     };
   }
 
@@ -694,7 +695,8 @@ export async function runTick(ctx) {
     log.warn?.('notify.ntfy_allowlist_unusable', {
       entry,
       reason: 'NTFY_ALLOWED_HOSTS entries are `host`, `host:port` or '
-        + '`host/base/path` — no scheme, no wildcard — and this one allows nothing',
+        + '`host/base/path`, optionally prefixed `http://` or `https://` — no '
+        + 'other scheme, no wildcard — and this one allows nothing',
     });
   }
 

@@ -67,7 +67,9 @@ services:
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
       # your own ntfy REPLACES that, and `off` refuses every one. The server
-      # fetches whatever is here, so this is the whole guard.
+      # fetches whatever is here, so this is the whole guard. An entry may name
+      # its scheme — `http://ntfy.lan:8080` allows plaintext to THAT one, for an
+      # ntfy on the same network as this server; everything else stays https.
       NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}          # ntfy.sh, or your own
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.

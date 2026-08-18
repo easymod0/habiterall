@@ -309,22 +309,87 @@ test('which destinations are reachable is the OPERATOR\'s answer, not the user\'
     assert.equal(parseNtfyUrl('https://ntfy.sh/habits', { NTFY_ALLOWED_HOSTS: off }),
       undefined, `${off} should refuse every host`);
   }
-  assert.deepEqual([...ntfyAllowlist(PUBLIC_NTFY)], ['ntfy.sh'],
-    'the documented default is the public service and nothing else');
+  assert.deepEqual([...ntfyAllowlist(PUBLIC_NTFY)], ['https://ntfy.sh'],
+    'the documented default is the public service, over https, and nothing else');
+});
+
+test('http is reachable only where the OPERATOR named it, one destination at a time', () => {
+  // An ntfy on the same LAN as this server is a server-to-server hop with
+  // nothing between the two to protect it from, and routing that out through a
+  // public proxy to satisfy a rule written for the public internet buys
+  // nothing. So the scheme joins the host and the base path as something the
+  // operator answers — and, exactly like those, it answers for ONE destination.
+  const LAN = { NTFY_ALLOWED_HOSTS: 'ntfy.sh,http://ntfy.lan:8080' };
+
+  assert.equal(parseNtfyUrl('http://ntfy.lan:8080/habits', LAN),
+    'http://ntfy.lan:8080/habits');
+  // The half that makes this per-destination rather than a switch: the other
+  // entry in the same list is untouched by it. A boolean `NTFY_ALLOW_HTTP`
+  // would have made this line pass a plaintext post to the public service.
+  assert.equal(parseNtfyUrl('http://ntfy.sh/habits', LAN), undefined,
+    'allowing http to one destination must not allow it to another');
+  assert.equal(parseNtfyUrl('http://ntfy.sh/habits', PUBLIC_NTFY), undefined,
+    'and the default is https-only, as it always was');
+
+  // Asked UPWARD and never downward. https to a place the operator was willing
+  // to reach in clear cannot be the thing that makes a request unsafe, and a
+  // URL refused for being better protected than what was written would read as
+  // a bug — but the other direction is the whole point and stays shut.
+  assert.equal(parseNtfyUrl('https://ntfy.lan:8080/habits', LAN),
+    'https://ntfy.lan:8080/habits');
+  assert.equal(parseNtfyUrl('http://ntfy.lan/habits', LAN), undefined,
+    'the port is still part of the destination');
+  assert.equal(parseNtfyUrl('http://evil.lan:8080/habits', LAN), undefined);
+
+  // Writing the default scheme out is allowed and changes nothing, so an
+  // operator copying a URL out of a browser bar does not get a silent typo.
+  const HTTPS_WRITTEN = { NTFY_ALLOWED_HOSTS: 'https://ntfy.lan' };
+  assert.equal(parseNtfyUrl('https://ntfy.lan/habits', HTTPS_WRITTEN),
+    'https://ntfy.lan/habits');
+  assert.equal(parseNtfyUrl('http://ntfy.lan/habits', HTTPS_WRITTEN), undefined,
+    'naming https is naming https');
+
+  // A scheme is not a way around the base path: both halves still apply.
+  const LAN_PROXIED = { NTFY_ALLOWED_HOSTS: 'http://box.lan/ntfy' };
+  assert.equal(parseNtfyUrl('http://box.lan/ntfy/habits', LAN_PROXIED),
+    'http://box.lan/ntfy/habits');
+  assert.equal(parseNtfyUrl('http://box.lan/internal/admin/reset/x', LAN_PROXIED),
+    undefined);
+  assert.equal(parseNtfyUrl('http://box.lan/ntfyadmin/habits', LAN_PROXIED), undefined);
+  assert.equal(parseNtfyUrl('http://box.lan/habits', LAN_PROXIED), undefined);
+
+  // Credentials and a hostile host are refused over http for the same reasons
+  // they are over https — the scheme is one clause of the check, not the check.
+  assert.equal(parseNtfyUrl('http://user:pass@ntfy.lan:8080/habits', LAN), undefined);
+  assert.equal(parseNtfyUrl('http://ntfy.lan:8080@evil.test/habits', LAN), undefined);
+  assert.equal(parseNtfyUrl('http://ntfy.lan:8080/a/b', LAN), undefined);
+  assert.equal(parseNtfyUrl('http://ntfy.lan:8080/habits', { NTFY_ALLOWED_HOSTS: 'off' }),
+    undefined, '`off` is still every destination, by either scheme');
+
+  // The canonical entry carries the scheme, because the lookup does.
+  assert.deepEqual([...ntfyAllowlist(LAN)], ['https://ntfy.sh', 'http://ntfy.lan:8080']);
+  assert.deepEqual([...ntfyAllowlist({ NTFY_ALLOWED_HOSTS: 'HTTP://NTFY.LAN/NTFY' })],
+    ['http://ntfy.lan/ntfy'], 'an entry is lowercased whole, scheme included');
 });
 
 test('an allowlist entry nothing can be made of allows nothing, and says so', () => {
   // Every one of these fails CLOSED, which is the direction that has to be
   // pinned rather than assumed: a wildcard nobody implemented must not read as
   // one that works, and a scheme somebody pasted in must not become a hostname.
+  // `http://` and `https://` are the two prefixes that DO mean something now
+  // (see the scheme test below); every other spelling of one is still a typo.
   const useless = [
     ',', ',,,', '*', '*.example.com', '.example.com', 'example.com.',
-    'https://ntfy.sh', 'http://ntfy.sh', 'ntfy.sh:', 'ntfy.sh:not-a-port',
+    'ftp://ntfy.sh', 'gopher://ntfy.sh', 'file://ntfy.sh', '//ntfy.sh',
+    'http:/ntfy.sh', 'https:ntfy.sh', 'https://', 'http://*.example.com',
+    'ntfy.sh:', 'ntfy.sh:not-a-port',
     'ntfy sh', 'ntfy.sh/../admin', 'ntfy.sh/a/b/c/d/e', '-ntfy.sh', 'ntfy..sh',
   ];
   for (const entry of useless) {
     assert.equal(parseNtfyUrl('https://ntfy.sh/habits', { NTFY_ALLOWED_HOSTS: entry }),
       undefined, `${entry} allowed something`);
+    assert.equal(parseNtfyUrl('http://ntfy.sh/habits', { NTFY_ALLOWED_HOSTS: entry }),
+      undefined, `${entry} allowed something over http`);
     assert.deepEqual([...ntfyAllowlist({ NTFY_ALLOWED_HOSTS: entry })], [],
       `${entry} produced an entry`);
   }
@@ -334,9 +399,12 @@ test('an allowlist entry nothing can be made of allows nothing, and says so', ()
   assert.deepEqual(ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: '*.example.com' }),
     ['*.example.com']);
   assert.deepEqual(
-    ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: 'ntfy.sh, *.example.com , https://x.test' }),
-    ['*.example.com', 'https://x.test'],
+    ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: 'ntfy.sh, *.example.com , ftp://x.test' }),
+    ['*.example.com', 'ftp://x.test'],
     'a good entry beside two bad ones is not a reason to say nothing');
+  assert.deepEqual(
+    ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: 'http://ntfy.lan:8080,https://ntfy.sh' }), [],
+    'the two schemes that mean something are not typos');
   // The two values that are not typos: unset (the ntfy.sh default) and `off`.
   assert.deepEqual(ntfyAllowlistProblems({}), []);
   assert.deepEqual(ntfyAllowlistProblems({ NTFY_ALLOWED_HOSTS: 'off' }), []);
@@ -380,6 +448,21 @@ test('a topic URL is split into the endpoint to post to and the topic to name', 
   assert.equal(ntfyTarget('https://example.com/other/habits', PROXIED_NTFY), null,
     'the endpoint this builds is always a base the operator named');
   assert.equal(ntfyTarget('', PUBLIC_NTFY), null);
+
+  // The scheme reaches the ENDPOINT, and this is the assertion that says so.
+  // `parseNtfyUrl` answering `http://…` decides nothing on its own: this used
+  // to rebuild with a written-in `https://`, which would have upgraded every
+  // send back onto a port the operator's ntfy is not listening on.
+  assert.deepEqual(
+    ntfyTarget('http://ntfy.lan:8080/habits', { NTFY_ALLOWED_HOSTS: 'http://ntfy.lan:8080' }),
+    { endpoint: 'http://ntfy.lan:8080/', topic: 'habits' });
+  assert.deepEqual(
+    ntfyTarget('http://box.lan/ntfy/habits', { NTFY_ALLOWED_HOSTS: 'http://box.lan/ntfy' }),
+    { endpoint: 'http://box.lan/ntfy/', topic: 'habits' });
+  assert.deepEqual(
+    ntfyTarget('https://box.lan/ntfy/habits', { NTFY_ALLOWED_HOSTS: 'http://box.lan/ntfy' }),
+    { endpoint: 'https://box.lan/ntfy/', topic: 'habits' },
+    'and an https URL to an http entry is posted over https, not downgraded');
 });
 
 test('ntfy is not interactive, and that is a decision', () => {
@@ -1181,6 +1264,40 @@ test('a second server destination is delivered, and watermarked, on its own', as
     ]);
     assert.deepEqual(fetch.calls.map((c) => c.url),
       ['https://discord.com/api/webhooks/1/abc', 'https://ntfy.sh/']);
+  } finally {
+    if (before === undefined) delete process.env.NTFY_ALLOWED_HOSTS;
+    else process.env.NTFY_ALLOWED_HOSTS = before;
+  }
+});
+
+test('a reminder to an http destination is FETCHED over http', async () => {
+  // Pinning the decision is not pinning the wiring. `parseNtfyUrl` and
+  // `ntfyTarget` can both answer `http://…` while the request that leaves this
+  // process goes somewhere else entirely, so this asserts the URL the sender
+  // actually handed to `fetch` — through the real path, where the allowlist
+  // comes from the process rather than a `deps.env` the test chose.
+  const before = process.env.NTFY_ALLOWED_HOSTS;
+  process.env.NTFY_ALLOWED_HOSTS = 'http://ntfy.lan:8080';
+  try {
+    const fetch = fakeFetch([{ status: 204 }]);
+    const lan = account({
+      settings: {
+        notifyChannels: ['ntfy'],
+        ntfyTopicUrl: 'http://ntfy.lan:8080/my-habits',
+        notifyTimezone: 'UTC',
+      },
+    });
+
+    const result = await runTick({
+      collect: () => [lan],
+      instant: utc(2026, 8, 13, 8, 0),
+      fetch,
+    });
+
+    assert.equal(result.sent, 1);
+    assert.deepEqual(fetch.calls.map((c) => c.url), ['http://ntfy.lan:8080/']);
+    assert.equal(fetch.calls[0].body.topic, 'my-habits',
+      'the topic is named in the body, not in the URL that was fetched');
   } finally {
     if (before === undefined) delete process.env.NTFY_ALLOWED_HOSTS;
     else process.env.NTFY_ALLOWED_HOSTS = before;

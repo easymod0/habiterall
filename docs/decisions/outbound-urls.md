@@ -48,9 +48,44 @@ is rebuilt with the **entry's** spelling of the base path, so what gets fetched
 is the path the operator wrote and the caller's casing decides nothing but the
 topic's.
 
-The rest of the shape is the same and each clause is load bearing: **https
-only**, because a reminder carries a habit's name and a token would ride beside
-it; **no credentials**, since `https://ntfy.sh@evil.test/x` has a host of
+**An entry may also name its SCHEME, and that is the same decision a third
+time** (2026-08-18). The rule was https only, and the reason was real — a
+reminder carries a habit's name and prompt, and an ntfy token rides on the same
+request — but it was written for the public internet and applied to a hop that
+never reaches it. Somebody running an ntfy on the same LAN as their habiterall
+has a server-to-server request between two boxes in one building; making it
+https means routing it out to a public proxy and back purely to get a
+certificate onto a connection nothing untrusted can see, and their *client*
+already goes through that proxy, which is the part that does cross a network.
+Refusing that was not buying security, it was buying a second reverse proxy.
+
+So the scheme joins the host and the base path in `NTFY_ALLOWED_HOSTS`, and
+joins them completely: `http://ntfy.lan:8080` allows plaintext to **that entry**
+and nothing else, so an instance can reach the box in the cupboard in clear and
+still refuse `http://ntfy.sh`. A boolean `NTFY_ALLOW_HTTP` was the obvious
+alternative and is the wrong shape for exactly that reason — one variable
+answering for every destination means switching it on for the LAN also permits
+a plaintext post, with a bearer token in it, to the public service. The same
+argument the base path already won: the operator is answering about a
+destination, not about the feature.
+
+Two smaller halves. It is asked **upward and never downward** — an `http://`
+entry serves an https URL as well, because a refusal for being *better*
+protected than what was written reads as an app bug to the person it happens
+to, and can only fail in the safe direction, while an `https://` entry never
+serves an http one. And the canonical entry now **always carries its scheme**
+(`ntfy.sh` becomes `https://ntfy.sh`), which is what makes the lookup a
+scheme-aware `Set.has` rather than a host check with a flag beside it; two
+mutations that pass every other test in the file — dropping the scheme from the
+entry, and rebuilding the endpoint with a written-in `https://` in `ntfyTarget`
+— are each pinned by a test, the second by asserting the URL that reached
+`fetch` rather than the one `parseNtfyUrl` returned.
+
+What this does **not** relax: nothing a USER types can ask for plaintext, and
+every other clause applies to an http URL exactly as it does to an https one.
+
+The rest of the shape is the same and each clause is load bearing: **no
+credentials**, since `https://ntfy.sh@evil.test/x` has a host of
 `evil.test` and reads as the opposite to a person; the host matched **whole and
 with its port** — never a suffix test, because `evilntfy.sh` ends with `ntfy.sh`
 — so allowing a host does not allow every service on it or every host that ends
@@ -69,7 +104,8 @@ name in this allowlist was chosen by the OPERATOR. Pinning an address would buy
 nothing and break every ntfy behind a load balancer.
 
 **A malformed entry fails closed, and says so once.** `*`, `*.example.com`,
-`.example.com`, `https://ntfy.sh`, a bare comma — none of them allow anything,
+`.example.com`, `ftp://ntfy.sh`, `//ntfy.sh`, `http:/ntfy.sh`, a bare comma —
+none of them allow anything,
 which is the right direction and was worth pinning rather than assuming, since a
 wildcard nobody implemented must not read as one that works. Dropping it in
 silence was the wrong half: the only surface for the typo was a user's URL
