@@ -80,6 +80,16 @@ reason the icon renders `BadgedBox` and tints itself
 and a collapsed, filtered list reads as the whole of the account, with nothing
 left on screen saying it is not.
 
+**The field is in the bar's TITLE slot, so it inherits a style nobody chose.**
+`TopAppBar` wraps that slot in `ProvideTextStyle(titleTextStyle)` and
+`TextField`'s `textStyle` defaults to `LocalTextStyle.current` — measured at
+22sp/28sp, against the 16sp every other field in this app uses. It is passed
+explicitly for that reason, and pinned through `GetTextLayoutResult` because
+nothing bounds-based can see it: the field measures to the bar's 64dp height
+either way. The search icon's `role = Role.Button` is the same shape of
+omission — `IconButton` supplies one, a bare `combinedClickable` does not, and
+this control cannot be an `IconButton` because it needs the long-press.
+
 **The two clients now disagree about when a search is offered, on purpose —
 do not "fix" the difference.** The web keeps `dashboard.js`'s `SEARCH_FROM = 6`
 untouched; the phone drops its own threshold entirely and offers a 48dp icon

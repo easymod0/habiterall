@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -307,6 +308,17 @@ fun HabitList(
                                     }
                                 },
                             singleLine = true,
+                            // Explicit, because this field is in the TITLE
+                            // slot: `TopAppBar` wraps that slot in
+                            // `ProvideTextStyle(titleTextStyle)`, and
+                            // `TextField`'s `textStyle` defaults to
+                            // `LocalTextStyle.current` — so a query typed here
+                            // renders at the bar's 22sp/28sp headline rather
+                            // than the 16sp every other field in this app
+                            // uses, roughly a third fewer characters visible
+                            // on a 360dp bar before it scrolls under the
+                            // caret. Nothing chose 22sp; it was inherited.
+                            textStyle = MaterialTheme.typography.bodyLarge,
                             placeholder = { Text("Find a habit") },
                             colors = TextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent,
@@ -402,6 +414,16 @@ fun HabitList(
                                 modifier = Modifier
                                     .size(48.dp)
                                     .combinedClickable(
+                                        // Stats, More, Clear and Confirm are
+                                        // all `IconButton`, which passes this
+                                        // for them; a bare `combinedClickable`
+                                        // leaves `Role` out of the config
+                                        // entirely, so TalkBack announced this
+                                        // one control — the one carrying "a
+                                        // filter is live" — as neither a
+                                        // button nor anything else, alone
+                                        // among its four neighbours.
+                                        role = Role.Button,
                                         onClick = { onSearchOpenChange(true) },
                                         // `null`, not an empty lambda, when
                                         // there is nothing to clear:

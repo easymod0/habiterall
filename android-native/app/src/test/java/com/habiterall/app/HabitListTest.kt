@@ -8,7 +8,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
@@ -30,6 +33,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.requestFocus
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Sentinels
 import com.habiterall.app.ui.HabitList
@@ -983,5 +987,82 @@ class HabitListTest {
         compose.onNodeWithText("No habits match that.").assertIsDisplayed()
         compose.onNodeWithText("0 of 30").assertIsDisplayed()
         compose.onNodeWithContentDescription("Search, filter active").assertIsDisplayed()
+    }
+
+    /**
+     * The search icon is a bare `Box` + `combinedClickable` rather than an
+     * `IconButton` (which gives no long-press), and that trade has one thing
+     * to pay back: `IconButton` passes `Role.Button` to its own `clickable`
+     * and a bare `combinedClickable` leaves `Role` out of the semantics
+     * config entirely. Measured before the fix — `search role=null` against
+     * `stats role=Button` — so TalkBack announced the one control carrying
+     * "a filter is live" as neither a button nor anything else, alone among
+     * the four `IconButton`s beside it.
+     *
+     * Two tests rather than one because `show()` can only be called once per
+     * test: the role is the one thing on this control that must NOT vary with
+     * `filtering`, while the description, the badge, the tint and the
+     * long-click action all do, so both states are asserted.
+     */
+    @Test
+    fun `the search icon is announced as a button, with no filter live`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+        // The control it is announced beside, so a version that dropped the
+        // role from BOTH — an `IconButton` regression, say — cannot pass this
+        // by making the comparison vacuous.
+        compose.onNodeWithContentDescription("Stats")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+    }
+
+    /** The half of the case above that the badge and the tint also change. */
+    @Test
+    fun `the active search icon is announced as a button too`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = "Wat")
+
+        compose.onNodeWithContentDescription("Search, filter active")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+    }
+
+    /**
+     * The field lives in `TopAppBar`'s TITLE slot — which is what gives it the
+     * bar's whole width — and that slot is wrapped in
+     * `ProvideTextStyle(titleTextStyle)`. `TextField`'s `textStyle` defaults
+     * to `LocalTextStyle.current`, so with none passed the query rendered at
+     * the bar's headline size. Measured, not reasoned: a probe reading
+     * `LocalTextStyle.current` from inside a bare `TopAppBar(title = …)`
+     * returns `size=22.0.sp lh=28.0.sp`, roughly a third fewer characters
+     * visible on a 360dp bar before the text scrolls under the caret.
+     *
+     * Asserted through `GetTextLayoutResult` — the style the text layout was
+     * actually performed with — because nothing else discriminates the two:
+     * the field measures to the bar's 64dp height either way, so
+     * `the bar fits at 360dp` and every other bounds assertion here passes
+     * against both. This is the "assert the output that reached the platform"
+     * rule; a test that read the constant back would pin the decision and not
+     * the wiring, and the wiring is the entire defect.
+     */
+    @Config(qualifiers = "w360dp-h800dp")
+    @Test
+    fun `the expanded field renders its query at body size, not the bar's title size`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
+        compose.waitForIdle()
+
+        val layouts = mutableListOf<TextLayoutResult>()
+        compose.onNode(hasSetTextAction())
+            .fetchSemanticsNode()
+            .config[SemanticsActions.GetTextLayoutResult]
+            .action!!(layouts)
+
+        assertEquals(16.sp, layouts.single().layoutInput.style.fontSize)
     }
 }

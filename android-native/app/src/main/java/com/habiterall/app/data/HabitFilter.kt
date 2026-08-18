@@ -4,10 +4,21 @@ import java.text.Normalizer
 import java.util.Locale
 
 /**
- * The main screen's search box, mirroring `shared/public/ui/store.js`'s `fold`
- * and `matchesQuery` at the same threshold — but the fold itself is not
- * guaranteed identical. `NFD` decomposes precomposed accents the same way JS's
- * `normalize('NFD')` does, but the two runtimes do not agree on what counts as
+ * The main screen's search predicate, mirroring `shared/public/ui/store.js`'s
+ * `fold` and `matchesQuery` — but NOT its threshold, and not its fold exactly.
+ *
+ * The two clients disagree about when a search is OFFERED, deliberately, and
+ * restoring the symmetry here is a drift repair that undoes a decision: the web
+ * keeps `dashboard.js`'s `SEARCH_FROM = 6` because a permanent row is only
+ * worth a wide dashboard's spare width, while this screen has no threshold at
+ * all and offers a 48dp icon from the first habit up. Neither predicate reaches
+ * storage, so there is no shared truth the two could have drifted out of — only
+ * two "is this control worth its space" answers to two budgets that are not
+ * comparable. `android-native/CLAUDE.md` states it at length.
+ *
+ * The fold itself is not guaranteed identical either. `NFD` decomposes
+ * precomposed accents the same way JS's `normalize('NFD')` does, but the two
+ * runtimes do not agree on what counts as
  * a combining mark to strip, and they part ways in BOTH directions. A habit
  * named "Hawaiʻi" has an ʻokina (U+02BB), which is `Diacritic` but not `Mn`:
  * the web folds it away and this does not. The Devanagari anusvara (U+0902) is
