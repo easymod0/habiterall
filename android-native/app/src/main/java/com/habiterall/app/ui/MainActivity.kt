@@ -794,6 +794,15 @@ class MainActivity : ComponentActivity() {
         var query by rememberSaveable { mutableStateOf("") }
 
         /**
+         * Whether the search field is expanded in the top bar. `rememberSaveable`
+         * for the same reason `query` is, plus one more: a rotation that dropped
+         * this while keeping `query` would land on exactly the hidden-filter
+         * state this issue exists to prevent — a live filter with the field, the
+         * active icon and the count nowhere on screen to say so.
+         */
+        var searchOpen by rememberSaveable { mutableStateOf(false) }
+
+        /**
          * How much history is loaded, and which way the days run.
          *
          * The window is always "the last N days ending today", which is what
@@ -1060,8 +1069,13 @@ class MainActivity : ComponentActivity() {
                     today = LocalDate.now().toString()
                     reload++
                     // A query is about the list you were looking at, not a
-                    // setting that should follow you back into the app.
+                    // setting that should follow you back into the app — and
+                    // an expanded field goes with it: a resume that cleared
+                    // only the query could leave an active-looking icon over
+                    // an empty query, or the field itself open over a list
+                    // nobody just filtered.
                     query = ""
+                    searchOpen = false
                     // Unless this resume IS a notification tap: the two would
                     // race, and whichever landed second decided where the list
                     // sat. Snapping to the top is the right default for coming
@@ -1170,6 +1184,8 @@ class MainActivity : ComponentActivity() {
             questionMarks = questionMarks,
             query = query,
             onQueryChange = { query = it },
+            searchOpen = searchOpen,
+            onSearchOpenChange = { searchOpen = it },
             listState = listState,
             dayScroll = dayScroll,
             snackbar = snackbar,
