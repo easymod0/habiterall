@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { SESSION_COOKIE } from '@habiterall/shared/security.js';
+
 import { throttleTouch, TOUCH_INTERVAL_MS } from '../src/session-touch.js';
 
 /** A clock the test moves by hand, so an hour costs no time. */
@@ -75,6 +77,26 @@ test('the expiry still slides, once the interval has passed', BOUNDED, async () 
   time.advance(1);
   await touch(store, 'sid-a');
   assert.equal(store.calls.touch.length, 2, 'past it, the row is written');
+});
+
+test('the interval stays a small fraction of the window it slides', BOUNDED, () => {
+  // The case for an hour is arithmetic over `SESSION_COOKIE.maxAge` — 0.3% of
+  // a fourteen-day window. But that constant lives in another package and
+  // serves both editions, so the rule is written in two files and only one of
+  // them knows it is holding one.
+  //
+  // Shorten the window past the interval and an ACTIVE session is signed out in
+  // silence: the row is written once for `t0 + maxAge`, every touch until
+  // `t0 + 1h` is skipped, and the row is gone while the cookie — refreshed on
+  // every response by `rolling: true` — still claims a live session. Nothing
+  // else in this repo notices. The tests above inject their own clock, and the
+  // integration suite only ever asserts that `expire` does NOT move, which is
+  // exactly what a session nobody is renewing also looks like.
+  const staleFraction = TOUCH_INTERVAL_MS / SESSION_COOKIE.maxAge;
+  assert.ok(TOUCH_INTERVAL_MS * 24 <= SESSION_COOKIE.maxAge,
+    `TOUCH_INTERVAL_MS of ${TOUCH_INTERVAL_MS}ms against a ${SESSION_COOKIE.maxAge}ms `
+    + `window lets the stored expiry fall ${(staleFraction * 100).toFixed(1)}% behind `
+    + 'the cookie. Shorten the interval, or say here why this window can carry it.');
 });
 
 test('sessions are throttled independently', BOUNDED, async () => {

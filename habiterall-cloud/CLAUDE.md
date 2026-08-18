@@ -118,6 +118,24 @@ nothing declared in it can be unit tested — and the failure mode here is silen
 in the worst direction, an `inflight` left set reporting the last good answer
 forever while Postgres is down.
 
+**The route is mounted ABOVE `app.use(session(...))`, and that is a rule rather
+than a tidy-up.** It reads no session and never has, but below the middleware it
+paid for one anyway: connect-pg-simple runs a `SELECT` on `session` for the
+cookie, and `rolling: true` adds a touch `UPDATE` on top — two round trips, one
+a write, on the one route whose job is to be cheap, and the memo covers
+`SELECT 1` and nothing else. The personal edition has always mounted it there,
+which is why only this edition had it. `sameOriginOnly` sits below too and costs
+nothing, because it returns early for safe methods.
+
+Nothing but a booted server can see that ordering, so `test/healthz.integration.mjs`
+boots the real `server.js` and renames the `session` table out from under it:
+above the middleware the probe still answers 200, below it answers 500. Its two
+controls are the load-bearing half — one asserts `/api/me` returns **exactly**
+500, because a 401 or a 403 is an answer about the *user* and passes with the
+table intact, and one asserts a request below the middleware does write the row,
+because otherwise "the column did not move" is also what a server with no
+session handling at all would say.
+
 ## Verify it, don't trust it
 
 ```bash

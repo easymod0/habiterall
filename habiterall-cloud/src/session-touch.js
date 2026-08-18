@@ -46,7 +46,10 @@ export const TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 /**
  * @typedef {object} TouchStats
  * @property {number} session_touch_tracked  sessions the throttle is holding
- * @property {number} session_touch_skipped  writes it has avoided since boot
+ * @property {number} session_touch_skipped  touches suppressed since boot. Not
+ *   quite "writes avoided": a touch whose UPDATE failed is recorded as done —
+ *   see `record` below for why that is the right trade — so a run of database
+ *   trouble is counted here as a saving.
  */
 
 /**
@@ -81,6 +84,18 @@ export function throttleTouch(store, {
   const written = new Map();
   let skipped = 0;
 
+  /**
+   * Recorded BEFORE the write is issued, not after it succeeds, and that order
+   * is the point rather than an oversight. Recording on success would leave the
+   * whole burst this exists to stop — five concurrent requests on a cold map
+   * would each find nothing recorded and each fire an UPDATE at the one row,
+   * which is the serialisation the throttle is for.
+   *
+   * The cost is that a touch whose UPDATE fails is remembered as a touch that
+   * happened, so the row goes unslid for one more interval. Against a fourteen-
+   * day window that is an hour of extra staleness during database trouble the
+   * user is already feeling, which is a cheaper failure than the one above.
+   */
   const record = (sid) => {
     // Clear before insert, so the map can never exceed the bound even by one.
     if (written.size >= maxEntries) written.clear();
