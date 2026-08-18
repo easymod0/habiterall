@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9250);
 
@@ -57,14 +57,28 @@ try {
   /* ---- 1. service worker registers ---- */
   console.log('--- service worker ---');
   await goto(APP);
-  // `serviceWorker.ready` is the platform's own "there is an active worker"
-  // signal, and it is NOT the thing asserted below — that reads the
-  // registration's state, scope and script. A flat 4s was enough on an idle
-  // box and not on a contended one: at twelve workers this failed as
-  // `worker is active :: undefined`, the registration not yet having one.
-  await waitUntil(ev, `(async()=>{
-    await navigator.serviceWorker.ready; return true;})()`,
-    { what: 'the service worker to reach an active registration' });
+  // A flat 4s was enough on an idle box and not on a contended one: at twelve
+  // workers this failed as `worker is active :: undefined`, the registration
+  // not yet having one.
+  //
+  // `serviceWorker.ready` is NOT the signal to replace it with, which is worth
+  // stating because it is the obvious one. It resolves as soon as the
+  // registration HAS an active worker, and `active` is set at the START of
+  // activation — the worker is 'activating' there, and only becomes
+  // 'activated' once the activate handler's `waitUntil` settles. sw.js's does
+  // real work: drop every foreign cache, then `clients.claim()`. Measured with
+  // a 3s delay spliced into that handler, `ready` resolved at 108ms reporting
+  // 'activating', and `worker is active :: activating` failed under it.
+  //
+  // So poll the state the checks below actually read — BOUNDED, and let them
+  // judge it, the same shape as calcheck's scroll restore. A worker that never
+  // activates then still gets its named FAIL line rather than a thrown timeout.
+  for (let i = 0; i < 100; i++) {
+    if (await ev(`(async()=>{
+      const r = await navigator.serviceWorker.getRegistration();
+      return r?.active?.state === 'activated';})()`).catch(() => false)) break;
+    await sleep(100);
+  }
 
   const sw = await ev(`(async()=>{
     const r = await navigator.serviceWorker.getRegistration();

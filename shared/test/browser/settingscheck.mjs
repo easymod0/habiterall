@@ -34,14 +34,21 @@ try{
   // worker, so measuring now would report the stale stylesheet.
   await send('Page.navigate',{url:APP},sessionId); await sleep(1500);
 
-  // The trailing settle stays: a rendered row is not a settled LAYOUT, and this
-  // suite measures alignment and widths. Only the poll granularity changes —
-  // 250ms steps against a boot measured at ~55ms spent most of a step waiting
-  // for nothing.
+  // This suite measures alignment and widths, so what it has to wait for is a
+  // LAID-OUT row, not merely a present one — `height > 0` is that, and it is
+  // what replaced a flat 500ms settle repeated eighteen times.
+  //
+  // Not `document.fonts.status`, which an earlier version of this ANDed in on
+  // the reasoning that font loading is what moves a measured layout. True in
+  // general and vacuous here: the app names no webfont, `style.css` sets a
+  // system stack, and nothing calls the Font Loading API — so the set is empty.
+  // Measured on the running dashboard, `document.fonts` is `{status: 'loaded',
+  // size: 0}`, and sampled every 15ms from navigation it reads `loaded:0` at
+  // every point. A term that is constant-true cannot gate anything; it only
+  // makes the wait look stronger than it is.
   const load=async()=>{await send('Page.navigate',{url:APP},sessionId);
     await waitUntil(ev,`(()=>{const r=document.querySelector('#grid .habit-row');
-      return !!r && r.getBoundingClientRect().height > 0
-        && document.fonts.status === 'loaded';})()`,{what:'a measurable dashboard'});};
+      return !!r && r.getBoundingClientRect().height > 0;})()`,{what:'a measurable dashboard'});};
   await load();
 
   console.log('--- dialog ---');
