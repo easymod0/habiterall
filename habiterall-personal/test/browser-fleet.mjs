@@ -39,7 +39,7 @@ const jobsFlag = argv.indexOf('-j');
 if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
 
 /**
- * How many instances to run: TWICE the core count, capped at eight.
+ * How many instances to run: twice the core count, floor 4, ceiling 16.
  *
  * Deliberately oversubscribed, because these suites are not CPU-bound. The
  * slowest of them are mostly idle — `themesync` waits 13s on a write that never
@@ -53,11 +53,26 @@ if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
  *     j=12  104s,  98s      j=12   86s,  94s   <- pwatest, once
  *     j=16  104s, 114s      j=16  101s, 109s   <- avoidcheck, awardcheck, calcheck
  *
- * The second sweep is why this is still eight rather than ten. Between eight
- * and twelve the curve is FLAT: run-to-run variance on this runner is 3-8s and
- * all three ranges overlap, so ten's apparent 3s edge is not a result on two
- * samples. Twelve is where failures start, and eight is the value with margin
- * from it at no measurable cost.
+ * The second sweep is why the runner lands on eight rather than ten. Between
+ * eight and twelve the curve is FLAT: run-to-run variance there is 3-8s and all
+ * three ranges overlap, so ten's apparent 3s edge is not a result on two
+ * samples. Twelve is where failures start, and eight has margin from it at no
+ * measurable cost.
+ *
+ * The CEILING of 16 is the other end, measured on a 16-core box:
+ *
+ *     j=8   41.2s          j=24  38.4s  <- hovercheck fails
+ *     j=16  36.6s          j=32  39.0s  <- calcheck fails
+ *
+ * so `2 x cores` alone would have put this machine on 32 — slower than 16 AND
+ * unstable. Past sixteen there is nothing left to win: the floor is the longest
+ * SUITE, and no worker count goes below it, while every extra worker slows every
+ * suite. The two measured optima are 8 on four cores and 16 on sixteen, which is
+ * exactly what this expression gives.
+ *
+ * The FLOOR of 4 is for a runner that shrinks. Four workers on one core is heavy
+ * oversubscription and still the right call, because the thing being overlapped
+ * is waiting rather than computing.
  *
  * The failures are contention exposing waits weaker than what follows them —
  * the same defect `countcheck` had, which the first sweep is what found. Note
@@ -78,7 +93,7 @@ if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
 const asked = Number(jobsFlag !== -1 ? process.argv[jobsFlag + 1] : 0)
   || Number(process.env.HABITERALL_BROWSER_JOBS)
   || 0;
-const jobs = Math.max(1, asked || Math.min(8, availableParallelism() * 2));
+const jobs = Math.max(1, asked || Math.max(4, Math.min(16, availableParallelism() * 2)));
 
 // Not :3000 — a dev server or a stale one from an earlier session squatting
 // there is a thing that has actually happened here, and the failure it produces
