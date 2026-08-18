@@ -13,9 +13,22 @@ const { computeHistory, UNLOGGED_DEFAULT } = await import('../src/stats.js');
 // Importable under Node because it has no imports of its own — deliberately,
 // so the browser can load it with no build step. That makes the registry
 // itself testable rather than only greppable.
-const { SETTINGS, defaults } = await import('../public/ui/settings.js');
+const { SETTINGS, defaults, init, reset, storedShapeIsStale } =
+  await import('../public/ui/settings.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+// `init`/`reset` read and write `localStorage` as a first-paint cache; under
+// plain Node there is none, so a minimal in-memory stand-in is enough to let
+// them run at all. Module-scoped rather than per-test: `node --test` isolates
+// each FILE into its own process, so nothing here can leak into another test
+// file, and nothing else in this one touches it.
+const memoryStorage = new Map();
+globalThis.localStorage = {
+  getItem: (k) => (memoryStorage.has(k) ? memoryStorage.get(k) : null),
+  setItem: (k, v) => memoryStorage.set(k, String(v)),
+  removeItem: (k) => memoryStorage.delete(k),
+};
 
 /* ---------- the two registries must agree ---------- */
 
@@ -131,20 +144,80 @@ test('a setting whose values are not a list is still enforced', () => {
   assert.equal(accepted.discordWebhook, 'https://discord.com/api/webhooks/1/abc');
 });
 
+/* ---------- a Save migrates a stale-shaped value (#163 review round 1) ---------- */
+
+test('storedShapeIsStale answers only for a value the server named, and only ' +
+  'when its own normaliser would rewrite it', async (t) => {
+  // This is the WIRING behind FIX 1's `applyDraft` addition, exercised directly
+  // rather than through a browser: `ui/settings.js` has no imports of its own
+  // (see the module comment above), so `init`/`reset` run under plain Node once
+  // `fetch` is stubbed. It is NOT the browser-suite migration test the fix
+  // brief asks for — that needs a genuinely legacy value sitting in the
+  // SERVER's store, and there is no honest way to put one there: every write
+  // path in both editions (`PUT /api/settings`, and `POST /import` in replace
+  // mode) runs the value through `parseSettings`/`parseCardList` before it
+  // touches storage, so nothing reachable over HTTP can leave a bare-string
+  // `detailCards` behind. `shared/test/browser/settingscheck.mjs` covers the
+  // half that IS reachable from there — that a no-op Save on an
+  // already-current value writes nothing.
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const serveSettings = (body) => {
+    globalThis.fetch = async () => ({ ok: true, json: async () => body });
+  };
+
+  // Nothing has ever been said about detailCards yet in this process — an
+  // absent key must not read as stale, or a fresh account would rewrite its
+  // own default back at its very first Save.
+  assert.equal(storedShapeIsStale('detailCards'), false,
+    'a key the server has never named must not be reported as stale');
+
+  // The server hands back a genuinely legacy, bare-string value.
+  serveSettings({ detailCards: ['calendar', 'history'] });
+  await init();
+  assert.equal(storedShapeIsStale('detailCards'), true,
+    'a legacy bare-string value is exactly what this predicate exists to catch');
+
+  // A key with no normaliser at all — `theme` — is never stale, whatever the
+  // server says, because there is no rewritten shape to compare it against.
+  assert.equal(storedShapeIsStale('theme'), false,
+    'a key with no normaliser has nothing for this predicate to say');
+
+  // The server now hands back the new (canonical) shape — what this build
+  // itself would have written. Nothing left to migrate.
+  serveSettings({ detailCards: SETTINGS.detailCards.default });
+  await init();
+  assert.equal(storedShapeIsStale('detailCards'), false,
+    'a value already in the shape the normaliser produces is not stale');
+
+  // `reset()` tells the account it now holds nothing at all — re-seed the
+  // legacy value, confirm it reads stale, then reset and confirm the flag
+  // clears rather than sticking forever.
+  serveSettings({ detailCards: ['calendar', 'history'] });
+  await init();
+  assert.equal(storedShapeIsStale('detailCards'), true);
+  await reset();
+  assert.equal(storedShapeIsStale('detailCards'), false,
+    'a reset account has nothing stored, so nothing can be stale');
+});
+
 /* ---------- which detail cards a page shows ---------- */
 
-test('a legacy list means membership is visibility, and the empty list is the inversion', () => {
-  // LEGACY: a bare list of ids meant "these are ticked". The mentioned ids
-  // come back `on: true` in the order given, then every card left unmentioned
-  // is appended in DETAIL_CARDS order, `on: false`.
-  const expectedRest = DETAIL_CARDS
-    .filter((id) => id !== 'history' && id !== 'calendar')
-    .map((id) => ({ id, on: false }));
-  assert.deepEqual(parseCardList(['history', 'calendar']), [
-    { id: 'history', on: true },
-    { id: 'calendar', on: true },
-    ...expectedRest,
-  ]);
+test('a legacy list means membership is visibility, and carries NO order of its own', () => {
+  // LEGACY: a bare list of ids meant "these are ticked" and nothing about
+  // their SEQUENCE. Master's own `parseCardList` was
+  // `DETAIL_CARDS.filter((id) => raw.includes(id))`, so every legacy value
+  // that can be in storage is already a canonical-order subset — there is no
+  // ordering decision recorded in `['history', 'calendar']` to preserve.
+  // Reading the given order used to rearrange the page the moment a card was
+  // re-ticked (master drew Habit strength, Calendar, History; re-ticking
+  // `strength` on the old rule drew Calendar, History, Habit strength
+  // instead) — so this reads for membership alone: all nine in
+  // `DETAIL_CARDS` order, `on` set by whether the id was mentioned, which
+  // reproduces exactly the page master drew.
+  assert.deepEqual(parseCardList(['history', 'calendar']),
+    DETAIL_CARDS.map((id) => ({ id, on: id === 'history' || id === 'calendar' })),
+    'a legacy list must be read in DETAIL_CARDS order, not the order it lists ids in');
 
   // `[]` is the single most important case here: it must NOT be read as the
   // new shape (an empty array of objects, meaning "nothing mentioned to
@@ -187,13 +260,10 @@ test('dupes collapse first-wins, unknown ids and __proto__ are dropped, and a mi
   // Legacy (string) form. The expected value is written out rather than
   // produced by a second call to parseCardList — both sides calling the
   // function under test would let a parseCardList broken in the same way on
-  // both inputs pass. `calendar` on, then the other eight in DETAIL_CARDS
-  // order, off — `.filter().map()` over DETAIL_CARDS is fine here because
-  // that is a constant, not the function under test.
-  const expected = [
-    { id: 'calendar', on: true },
-    ...DETAIL_CARDS.filter((id) => id !== 'calendar').map((id) => ({ id, on: false })),
-  ];
+  // both inputs pass. A legacy list carries no order (see the test above),
+  // so a repeat, an unknown id and `__proto__` change nothing at all — the
+  // result is every id in DETAIL_CARDS order, `on` iff it is `calendar`.
+  const expected = DETAIL_CARDS.map((id) => ({ id, on: id === 'calendar' }));
   assert.deepEqual(parseCardList(['calendar', 'calendar', 'nonsense', '__proto__']), expected,
     'a repeated, unknown or prototype id must not change the legacy result');
   assert.equal(/** @type {any} */ ({}).polluted, undefined);
@@ -322,6 +392,30 @@ test('every id the dialog offers is one the page can actually draw', () => {
   const offered = [...block.matchAll(/\{ value: '([^']*)'/g)].map((m) => m[1]);
   assert.deepEqual(offered, [...DETAIL_CARDS],
     'the dialog and the server disagree about which cards exist, or about their order');
+});
+
+test('every id the detail page can draw is one DETAIL_CARDS names, and no other', () => {
+  // A THIRD copy of the nine ids, for the reason ui/detail.js's own comment on
+  // `CARDS` gives: `shared/src` is not served to the browser, so the page that
+  // actually builds a card cannot import `DETAIL_CARDS` either. This is a
+  // source-text guard, not a behavioural one — it pins the SET of keys `CARDS`
+  // is built from, nothing about what `render` draws or in what order. Order
+  // is deliberately not asked here: `render` draws in whatever order the
+  // STORED list names, not `CARDS`'s own declaration order, so pinning this
+  // Map's order would be pinning an accident of source layout rather than a
+  // rule. What DOES matter, and what a silent typo here would break, is that
+  // every id `parseCardList` can hand the page is one `CARDS.get` can find —
+  // `CARDS.get(id)?.forget?.()` in `forgetHiddenPositions` already tolerates a
+  // miss by returning `undefined`, so a misspelled key would not throw, it
+  // would just quietly stop drawing that card.
+  const src = readFileSync(join(root, 'public', 'ui', 'detail.js'), 'utf8');
+  const mapBody = src.slice(
+    src.indexOf('const CARDS = new Map(['),
+    src.indexOf(']);', src.indexOf('const CARDS = new Map(['))
+  );
+  const keys = [...mapBody.matchAll(/^\s*\['([^']+)',/gm)].map((m) => m[1]);
+  assert.deepEqual(new Set(keys), new Set(DETAIL_CARDS),
+    'ui/detail.js\'s CARDS Map and DETAIL_CARDS disagree about which cards exist');
 });
 
 /* ---------- server-side validation ---------- */
@@ -667,7 +761,7 @@ test('every registry default is a value the registry itself accepts', () => {
     // offers a list is a select, a multi or a toggle. It says nothing about the
     // normaliser-form keys, which are legitimately either.
     if (Array.isArray(SETTING_VALUES[key])) {
-      assert.ok(['select', 'multi', 'toggle'].includes(def.type),
+      assert.ok(['select', 'multi', 'toggle', 'ordered-multi'].includes(def.type),
         `${key}: the server enumerates its values, so the control must offer `
         + `them — a ${def.type} box would take anything`);
     }

@@ -76,15 +76,39 @@ nothing visible; reading it as the new shape (nothing named, so nothing to
 hide) would invert unticking everything to everything shown, which is the one
 case `parseCardList`'s tests treat as the whole point of the change.
 
-**A legacy account is read tolerantly forever and never migrated.** Nothing
-writes the new shape on its behalf: not a boot, not a `GET`, nothing scheduled.
-An account that saved `['history','calendar']` before this shipped keeps
-meaning exactly that — those two on, in that order, every other card off — for
-as long as it never reopens the dialog, because every card added after that
-save is invented later than the account's stored intent and there is nothing
-in a bare id list to say otherwise. The first Save from the dialog (even with
-no visible change) rewrites the value in the new shape, and only from then on
-does a newly shipped card arrive **on**, inserted at its canonical position.
+**A legacy account is read tolerantly, and migrated only by a deliberate
+Done.** Nothing writes the new shape on its behalf otherwise: not a boot, not a
+`GET`, nothing scheduled. An account that saved `['history','calendar']` before
+this shipped keeps meaning exactly that — those two on, every other card off —
+for as long as it never opens the settings dialog, because every card added
+after that save is invented later than the account's stored intent and there is
+nothing in a bare id list to say otherwise.
+
+Pressing **Done** rewrites it, *even with nothing else changed*, and that took a
+deliberate mechanism: `applyDraft` sends the keys whose draft differs from
+`load()`, and for `detailCards` those are two clones of the same NORMALISED
+array — `sanitise` ran the normaliser over the server's reply — so they never
+differ unless a tick or a position was touched. Without the extra pass the
+documented recovery was a no-op, which is the review finding this paragraph
+exists because of. `storedShapeIsStale` (`ui/settings.js`) answers it from
+`ApplyMeta.stored`, the server's OWN reply, never from `load()`, since the cache
+is already normalised and would report staleness that is not there; an absent
+key answers false, or every fresh account would write its defaults on its first
+Done. It is generic over `def.normalise` rather than a `detailCards` special
+case, because the second normaliser should not have to find this.
+
+**A legacy list carries no order to honour, and is read in `DETAIL_CARDS`
+order rather than the order it happens to list ids in.** Master's own
+`parseCardList` was `DETAIL_CARDS.filter((id) => raw.includes(id))`, so every
+legacy value that can be in storage is already a canonical-order subset —
+there is no ordering decision recorded in it to lose. Reading `['history',
+'calendar']` as "history then calendar" read information into a value that
+never carried any: re-tick `strength` on such an account and the page would
+silently rearrange from what master drew (Habit strength, Calendar, History)
+to Calendar, History, Habit strength. `parseCardList` and `normaliseDetailCards`
+both return all nine in `DETAIL_CARDS` order, `on` set by membership, for a
+legacy input — which is exactly the page master drew, unchanged by a later
+re-tick.
 
 **A card absent from a *new-shape* list is one that shipped after the account
 last saved the setting**, and `parseCardList` reads that absence as "on,

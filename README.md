@@ -1863,12 +1863,12 @@ Two of them decide how much there is to look at:
 A card with nothing in it yet — bouncing back on a habit with no history, awards
 on one that has not earned any — stays hidden whichever way this is set.
 
-An account that saved this setting before ordering existed is not migrated: it
-keeps recording only which cards were on, so a card added to habiterall after
-that save arrives **off** rather than at the end of the list. Opening the
-dialog and pressing Save — even with nothing else changed — rewrites the value
-in the new shape, after which a newly added card arrives on, at its usual place
-in the order above.
+An account that saved this setting before ordering existed still records only
+which cards were on, so a card added to habiterall after that save arrives
+**off** rather than in its usual place. Opening ⚙ and pressing **Done** — even
+with nothing else changed — rewrites it, after which a newly added card arrives
+on, at its usual place in the order above. Nothing else does: no upgrade step
+and no background write will do it for you.
 
 Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 

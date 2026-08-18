@@ -150,7 +150,11 @@ function timeZoneOptions() {
  * nine ids — only of the rule that reads them. See that function's JSDoc for
  * the two input shapes (LEGACY: every element a string, or `[]`; NEW: every
  * element an `{id, on}` object) and why a mix of the two refuses rather than
- * guesses.
+ * guesses. LEGACY carries no order of its own to honour — master's own
+ * `parseCardList` was `DETAIL_CARDS.filter((id) => raw.includes(id))`, so
+ * every legacy value that can be in storage is already a canonical-order
+ * subset, and reading the order the caller happened to list ids in would
+ * silently rearrange the page the first time one card was re-ticked.
  *
  * @param {unknown} raw
  * @returns {{id: string, on: boolean}[]|undefined}
@@ -164,19 +168,12 @@ function normaliseDetailCards(raw) {
     typeof el.id === 'string';
 
   if (raw.length === 0 || raw.every((el) => typeof el === 'string')) {
-    const seen = new Set();
-    const mentioned = [];
-    for (const id of raw) {
-      if (order.includes(id) && !seen.has(id)) {
-        seen.add(id);
-        mentioned.push(id);
-      }
-    }
-    const result = mentioned.map((id) => ({ id, on: true }));
-    for (const id of order) {
-      if (!seen.has(id)) result.push({ id, on: false });
-    }
-    return result;
+    // A legacy value carries no order — see the module comment above — so
+    // this is membership alone, in canonical (`order`) order. `order.includes`
+    // rather than a Set: `raw` is already capped to `order.length * 4` above,
+    // and a repeated or unknown id in it needs no separate handling either —
+    // it simply matches nothing extra.
+    return order.map((id) => ({ id, on: raw.includes(id) }));
   }
 
   if (raw.every(isCardObject)) {
@@ -837,10 +834,32 @@ function writeCache(values, meta) {
  * successful server write into a rejected `save()`.
  */
 /**
+ * The server's own value for every key it has ever told us about, held RAW —
+ * before `sanitise` fills a gap or a normaliser rewrites it. Read only by
+ * `storedShapeIsStale`, below. Updated here rather than in `writeCache`,
+ * because `reset()` calls `notifyAppliers` directly with its own `meta` —
+ * this is the one point every path carrying an `ApplyMeta.stored` passes
+ * through.
+ *
+ * A `full` reply REPLACES this rather than merging into it: it is the
+ * account's WHOLE state, so a key missing from one is a key the account no
+ * longer holds (this is what makes `reset()` retire a stale flag rather than
+ * leaving it stuck stale forever). A partial reply — a single `save`/
+ * `saveAll`'s accepted patch — only ADDS to what is known, since it says
+ * nothing about a key it does not mention.
+ *
+ * @type {Record<string, unknown>}
+ */
+let lastServerStored = {};
+
+/**
  * @param {Record<string, any>} values
  * @param {ApplyMeta} [meta]
  */
 function notifyAppliers(values, meta) {
+  if (meta?.stored && typeof meta.stored === 'object') {
+    lastServerStored = meta.full ? { ...meta.stored } : { ...lastServerStored, ...meta.stored };
+  }
   for (const fn of appliers) {
     try {
       fn(values, meta);
@@ -848,6 +867,39 @@ function notifyAppliers(values, meta) {
       /* an applier must not break a save either */
     }
   }
+}
+
+/**
+ * Whether the account's OWN stored value for `key` is in a shape its
+ * normaliser would rewrite — i.e. whether there is a legacy value left for a
+ * Save to migrate.
+ *
+ * Generic over `def.normalise`, not a `detailCards` special case: the
+ * question "the server holds a value my normaliser would rewrite" is the
+ * general one, and a special case here would have to be found and rewritten
+ * by whoever adds the second normaliser.
+ *
+ * Only a value the SERVER named counts. `lastServerStored` is built solely
+ * from `ApplyMeta.stored`, never from `load()` — the localStorage cache and a
+ * merge are already in the new shape by the time anything reads them (both go
+ * through `sanitise`), and asking `load()` here would report that as staleness
+ * that is not there. An absent key answers false: an account that has never
+ * stored `key` has nothing to migrate, and answering true for it would make
+ * every fresh account write its defaults back on its very first Save.
+ *
+ * @param {string} key
+ * @returns {boolean}
+ */
+export function storedShapeIsStale(key) {
+  const def = SETTINGS[key];
+  if (!def?.normalise) return false;
+  if (!Object.hasOwn(lastServerStored, key)) return false;
+  const raw = lastServerStored[key];
+  const normalised = def.normalise(raw);
+  // The normaliser refusing the stored value outright is not this predicate's
+  // question to answer — there is no shape to migrate TO.
+  if (normalised === undefined) return false;
+  return JSON.stringify(raw) !== JSON.stringify(normalised);
 }
 
 /**

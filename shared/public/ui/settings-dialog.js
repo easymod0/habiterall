@@ -130,6 +130,7 @@ function paintNotices() {
  */
 function orderedMultiFieldset(key, def, controlId) {
   const fieldset = document.createElement('fieldset');
+  fieldset.id = controlId;
   fieldset.className = 'setting-multi setting-ordered-multi';
   const legend = document.createElement('legend');
   legend.textContent = def.label;
@@ -177,7 +178,7 @@ function orderedMultiFieldset(key, def, controlId) {
     up.dataset.card = opt.value;
     up.dataset.dir = 'up';
     up.addEventListener('click',
-      () => moveOrderedCard(key, def, controlId, fieldset, opt.value, -1));
+      () => moveOrderedCard(key, def, controlId, opt.value, -1));
 
     const down = document.createElement('button');
     down.type = 'button';
@@ -188,7 +189,7 @@ function orderedMultiFieldset(key, def, controlId) {
     down.dataset.card = opt.value;
     down.dataset.dir = 'down';
     down.addEventListener('click',
-      () => moveOrderedCard(key, def, controlId, fieldset, opt.value, 1));
+      () => moveOrderedCard(key, def, controlId, opt.value, 1));
 
     row.append(up, down);
     fieldset.append(row);
@@ -199,9 +200,22 @@ function orderedMultiFieldset(key, def, controlId) {
 
 /**
  * Swap `id`'s row with its neighbour in `direction` (-1 up, +1 down), stage
- * the result, and repaint only `fieldset` — never `renderSettingsBody`, for
- * the reason at :186 below (a rebuild takes a text field's content with it
+ * the result, and repaint only the one fieldset — never `renderSettingsBody`,
+ * for the reason at :186 below (a rebuild takes a text field's content with it
  * elsewhere in the dialog, and here it would also be pointless work).
+ *
+ * The live fieldset is looked up by `controlId` at replace time rather than
+ * handed in from the row's own render closure. A node captured there can go
+ * stale: `init()`'s background reconcile can call `renderSettingsBody()` (a
+ * full `body.replaceChildren()`) between this row being drawn and its button
+ * being pressed, which detaches every node from that render — including the
+ * fieldset a closure would have captured. `Node.replaceWith` on a node with no
+ * parent does nothing, silently, so replacing a stale reference would neither
+ * throw nor update anything on screen, with the move still staged correctly
+ * underneath and no visible sign that the press did nothing. Re-reading
+ * `document.getElementById(controlId)` finds whatever is actually live —
+ * the reconcile's own redraw, if one happened — and a miss (the setting no
+ * longer being on screen at all) is a no-op rather than a throw.
  *
  * Focus follows the CARD, not the position, matching `focusKeyOf` /
  * `restoreFocus` in `ui/dashboard.js`: naming what moved rather than where it
@@ -210,7 +224,7 @@ function orderedMultiFieldset(key, def, controlId) {
  * put the card first), so the fallback is its sibling in the same row — the
  * only other thing there is to focus.
  */
-function moveOrderedCard(key, def, controlId, fieldset, id, direction) {
+function moveOrderedCard(key, def, controlId, id, direction) {
   const current = Array.isArray(draft[key]) ? draft[key] : def.default;
   const from = current.findIndex((e) => e.id === id);
   const to = from + direction;
@@ -220,8 +234,11 @@ function moveOrderedCard(key, def, controlId, fieldset, id, direction) {
   [next[from], next[to]] = [next[to], next[from]];
   stage(key, next);
 
+  const live = document.getElementById(controlId);
+  if (!live) return;
+
   const fresh = orderedMultiFieldset(key, def, controlId);
-  fieldset.replaceWith(fresh);
+  live.replaceWith(fresh);
 
   const pressedDir = direction < 0 ? 'up' : 'down';
   const siblingDir = direction < 0 ? 'down' : 'up';
@@ -561,6 +578,18 @@ async function applyDraft() {
     const changed = {};
     for (const key of Object.keys(settings.SETTINGS)) {
       if (JSON.stringify(draft[key]) !== JSON.stringify(current[key])) {
+        changed[key] = draft[key];
+      }
+    }
+
+    // The account may hold a value in a shape its normaliser would rewrite —
+    // a legacy `detailCards` list, today — and nothing above catches that:
+    // `draft[key]` and `current[key]` are both already the normalised cache,
+    // so they never differ unless the user touched the control. A deliberate
+    // Save is the one moment the user has asked for a write, which is why the
+    // rewrite happens here and not on boot.
+    for (const key of Object.keys(settings.SETTINGS)) {
+      if (!(key in changed) && settings.storedShapeIsStale(key)) {
         changed[key] = draft[key];
       }
     }

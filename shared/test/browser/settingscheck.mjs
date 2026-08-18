@@ -9,13 +9,19 @@ const chrome=launchChrome(PORT, profile);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let fails=0;const ck=(l,c,e='')=>{console.log((c?'PASS':'FAIL')+'  '+l+(e?' :: '+e:''));if(!c)fails++;};
 let ws,nid=1;const pend=new Map();
+// Every request this page makes, for the FIX-1 "no spurious write" check below —
+// `Network.enable` is already on for the layout measurements this suite does
+// elsewhere, so this is a second reader of the same events rather than a new
+// domain.
+const netReqs=[];
 const send=(m,p={},s)=>new Promise((res,rej)=>{const id=nid++;pend.set(id,{res,rej});
  ws.send(JSON.stringify({id,method:m,params:p,sessionId:s}));});
 try{
   const url = await devtoolsUrl(PORT, chrome);
   ws=new globalThis.WebSocket(url);await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j;});
   ws.onmessage=ev=>{const m=JSON.parse(ev.data);
-    if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(new Error(JSON.stringify(m.error))):res(m.result);}};
+    if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(new Error(JSON.stringify(m.error))):res(m.result);}
+    else if(m.method==='Network.requestWillBeSent')netReqs.push(m.params.request);};
   const{targetId}=await send('Target.createTarget',{url:'about:blank'});
   const{sessionId}=await send('Target.attachToTarget',{targetId,flatten:true});
   const ev=async e=>{const r=await send('Runtime.evaluate',{expression:e,awaitPromise:true,returnByValue:true},sessionId);
@@ -434,7 +440,16 @@ try{
      pressResult.focusedTag === 'BUTTON' && pressResult.focusedCard === pressResult.movedCard,
      JSON.stringify(pressResult));
 
-  await ev(`document.getElementById('settings-close').click()`); await sleep(1000);
+  // Closing the dialog does not itself redraw the detail page: `set(overrides)`
+  // emits `'change'` synchronously, but the detail view's own listener
+  // REFETCHES its stats before repainting (shared/public/CLAUDE.md, "Mutators
+  // announce; views listen") — so the dialog closing is not evidence the swap
+  // has reached the DOM yet. Poll for the swap itself, not the dialog.
+  await ev(`document.getElementById('settings-close').click()`);
+  await waitUntil(ev,`(()=>{
+      const t=[...document.querySelectorAll('#view-detail .card-title')].map(e=>e.textContent);
+      return t[0]===${JSON.stringify(beforePress[1])} && t[1]===${JSON.stringify(beforePress[0])};
+    })()`,{what:'the detail page to redraw with the first two cards swapped'});
   await openHabit();
   const afterPress = await cardTitles();
   ck('the rendered detail page reflects the reorder: the first two cards swapped',
@@ -449,13 +464,67 @@ try{
   await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
   await ev(`(()=>{const b=document.getElementById('setting-detailCards-awards');
     b.checked=false; b.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-  await ev(`document.getElementById('settings-close').click()`); await sleep(1000);
+  await ev(`document.getElementById('settings-close').click()`);
+  await waitUntil(ev,`![...document.querySelectorAll('#view-detail .card-title')]
+      .some(e=>e.textContent==='Awards')`,
+    {what:'the detail page to redraw with Awards removed'});
   await openHabit();
   const afterUntick = await cardTitles();
   ck('unticking a card in the dialog removes it and leaves the rest in the same relative order',
      !afterUntick.includes('Awards') &&
      JSON.stringify(afterUntick) === JSON.stringify(afterPress.filter((t) => t !== 'Awards')),
      `${JSON.stringify(afterPress)} -> ${JSON.stringify(afterUntick)}`);
+
+  // FIX 1 (#163 review round 1) is about a legacy-shaped `detailCards` on the
+  // SERVER never getting migrated, because a Save with nothing touched builds
+  // its patch from `draft` vs `settings.load()` — two clones of the same
+  // already-normalised cache — so they never differ. `storedShapeIsStale`
+  // plus the addition in `applyDraft` are meant to fix that by sending the
+  // normalised value whenever the ACCOUNT's own copy is stale.
+  //
+  // The primary claim — "a Done migrates a legacy value" — lives in
+  // `themesync.mjs`, not here, and the reason it is over there is worth
+  // knowing before anything is added to this block.
+  //
+  // A legacy value cannot be put in the SERVER's store from any suite:
+  // `putSetting` above is a real `PUT /api/settings`, and both editions route
+  // that through `parseSettings`/`parseCardList` before a single byte is
+  // written, so a bare-string array is normalised before it ever reaches
+  // storage. `POST /import` in replace mode does the same
+  // (`parseSettings(portableSettings(raw))`), and neither edition exposes any
+  // other write path. That much is a real dead end.
+  //
+  // But it is the wrong thing to have gone looking for. `storedShapeIsStale`
+  // reads `ApplyMeta.stored`, which is the BODY of the `GET /api/settings`
+  // reply and not a database row — so what has to be legacy is what the client
+  // is TOLD the account holds, and an upgrading account is indistinguishable
+  // from a patched `window.fetch` on that one route. `themesync.mjs` does
+  // exactly that, which is also where it belongs: that file is the
+  // settings-durability model rather than the theme, and a value with a
+  // pre-current home that only a deliberate act migrates is that model
+  // precisely.
+  //
+  // What stays here is the CONVERSE, which is this suite's own business.
+  //
+  // What CAN be tested honestly, and is: the converse the brief also asks
+  // for. If `storedShapeIsStale` answered `true` unconditionally — "always
+  // rewrite on Save" — a no-op Save on an ORDINARY account (every value this
+  // suite can produce is already in the new shape, per the paragraph above)
+  // would issue a stray PUT every single time the dialog is closed. That is a
+  // real, different defect from the one FIX 1 fixes, and it is fully
+  // reachable: `detailCards` is already in the new shape here (the reorder
+  // block just above left it so), so a no-op Save must send NOTHING for it.
+  console.log('--- detail cards: a no-op Save does not rewrite an already-current value ---');
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
+  const beforeNoopSave = netReqs.length;
+  await ev(`document.getElementById('settings-close').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === false`,
+    {what:'the dialog to close after a no-op Save'});
+  const noopPuts = netReqs.slice(beforeNoopSave)
+    .filter((r) => r.method === 'PUT' && r.url.endsWith('/api/settings'));
+  ck('a Save with nothing touched, on a value already in the new shape, writes nothing',
+     noopPuts.length === 0, JSON.stringify(noopPuts.map((r) => r.postData)));
 
   await putSetting({ historyGranularity: 'week' });
   await resize(1440, 900, false);

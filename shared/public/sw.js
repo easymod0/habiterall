@@ -132,14 +132,20 @@ const sw = self;
 // THREE shell modules: `ui/settings.js` (the registry default and its
 // `normalise`), `ui/settings-dialog.js` (the `ordered-multi` control, which
 // has no branch at all for the old shape) and `ui/detail.js` (the stored-order
-// draw). No file and no export was added — the same reason v14 gives for why
-// that is not the test — but `shellFirst` is stale-while-revalidate and writes
-// into the RUNNING worker's cache, so a shell could hold a new settings.js
-// over a cached old settings-dialog.js: the dialog's generic `else` branch
-// would render one bogus checkbox with no `-<value>` suffix, and a tick on it
-// would stage a value the server then refuses. The same mismatch in detail.js
-// is a blank card region below the stat tiles rather than a link error, which
-// is the quieter and worse failure — nothing throws to reach `#view-error`.
+// draw). The same review round added a fourth export to `ui/settings.js`,
+// `storedShapeIsStale` — covered by this bump rather than one of its own —
+// which is what lets `applyDraft` migrate a legacy value on Save instead of
+// only ever reading it. `settings-dialog.js` reaches it through the namespace
+// import already in place (`import * as settings`), so a stale shell missing
+// it is a property miss at runtime rather than a v14-style link error; it
+// does not change what this bump is FOR. No new FILE was added — but
+// `shellFirst` is stale-while-revalidate and writes into the RUNNING worker's
+// cache, so a shell could hold a new settings.js over a cached old
+// settings-dialog.js: the dialog's generic `else` branch would render one
+// bogus checkbox with no `-<value>` suffix, and a tick on it would stage a
+// value the server then refuses. The same mismatch in detail.js is a blank
+// card region below the stat tiles rather than a link error, which is the
+// quieter and worse failure — nothing throws to reach `#view-error`.
 const CACHE_VERSION = 'v18';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;

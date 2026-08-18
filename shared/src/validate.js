@@ -282,12 +282,16 @@ export const DETAIL_CARDS = Object.freeze([
  * Two input shapes are read, and which one a given `raw` is decides everything:
  *
  *   - LEGACY (every element a string, or the array is EMPTY): membership meant
- *     visible. The mentioned ids, deduped first-wins and unknown ones dropped,
- *     become `on: true` in the order given; every id left unmentioned is
- *     appended after them in `DETAIL_CARDS` order, `on: false`. `[]` takes this
- *     branch on purpose — unticking everything must still mean nothing
- *     visible, and reading it as the new shape (nothing mentioned, so nothing
- *     to hide) would invert that to everything shown.
+ *     visible, and the list carries NO order of its own to honour. Master's own
+ *     `parseCardList` was `DETAIL_CARDS.filter((id) => raw.includes(id))`, so
+ *     every legacy value that can be in storage is already a canonical-order
+ *     subset — reading the order the caller happened to list ids in would
+ *     silently rearrange the page the first time a card was re-ticked. Read for
+ *     membership alone: all nine ids in `DETAIL_CARDS` order, `on` set by
+ *     whether the id was mentioned. `[]` takes this branch on purpose —
+ *     unticking everything must still mean nothing visible, and reading it as
+ *     the new shape (nothing mentioned, so nothing to hide) would invert that
+ *     to everything shown.
  *   - NEW SHAPE (every element an object with a string `id`): the array already
  *     carries both the order and the visibility, so it is kept close to
  *     verbatim — deduped by id first-wins, unknown ids dropped, `on` coerced to
@@ -313,19 +317,13 @@ export function parseCardList(raw) {
     typeof el.id === 'string';
 
   if (raw.length === 0 || raw.every((el) => typeof el === 'string')) {
-    const seen = new Set();
-    const mentioned = [];
-    for (const id of raw) {
-      if (DETAIL_CARDS.includes(id) && !seen.has(id)) {
-        seen.add(id);
-        mentioned.push(id);
-      }
-    }
-    const result = mentioned.map((id) => ({ id, on: true }));
-    for (const id of DETAIL_CARDS) {
-      if (!seen.has(id)) result.push({ id, on: false });
-    }
-    return result;
+    // A legacy value carries no order — see the JSDoc above — so this is
+    // membership alone, in DETAIL_CARDS order. `raw.includes` rather than a
+    // Set: the array is at most DETAIL_CARDS.length * 4 by the junk cap above,
+    // small enough that a second membership test costs nothing, and it means
+    // a repeated or unknown id in `raw` needs no separate handling — it simply
+    // matches nothing extra.
+    return DETAIL_CARDS.map((id) => ({ id, on: raw.includes(id) }));
   }
 
   if (raw.every(isCardObject)) {
