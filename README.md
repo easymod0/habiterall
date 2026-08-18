@@ -221,16 +221,25 @@ DISCORD_BOT_TOKEN=
 # that THIS SERVER makes, so whatever is here is what it can be aimed at — a URL
 # typed into Settings is only ever fetched if its host is on this list.
 #
-# An entry is a host, and optionally a BASE PATH under it:
+# An entry is a host, optionally a BASE PATH under it, and optionally a SCHEME
+# in front of it:
 #
 #   ntfy.sh                     https://ntfy.sh/<topic>
 #   ntfy.example.com:8443       a port, when your ntfy is not on 443
 #   example.com/ntfy            https://example.com/ntfy/<topic>
+#   http://ntfy.lan:8080        plain http, to THAT destination only
 #
 # A user's URL may add exactly ONE topic segment to what you name here, and
 # nothing else — so naming `example.com` alone does NOT allow
 # `https://example.com/anything/else`. Name the base path if your ntfy is
-# reverse-proxied under one. https is required either way.
+# reverse-proxied under one.
+#
+# https unless you write `http://`, which is for an ntfy on your own network:
+# there is no proxy in a server-to-server hop across a LAN and no point routing
+# one out to the internet to come back. It applies to that entry alone, so
+# allowing http to your own box still refuses it to ntfy.sh — and be clear about
+# what it costs: the habit's name, its prompt and your ntfy token are then on
+# the wire in clear, to anything that can see that network.
 #
 # LEAVING THIS EMPTY MEANS ntfy.sh — it is the default, not "nothing allowed".
 # Naming your own REPLACES that rather than adding to it, so write both if you
@@ -493,7 +502,9 @@ services:
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
       # your own ntfy REPLACES that, and `off` refuses every one. The server
-      # fetches whatever is here, so this is the whole guard.
+      # fetches whatever is here, so this is the whole guard. An entry may name
+      # its scheme — `http://ntfy.lan:8080` allows plaintext to THAT one, for an
+      # ntfy on the same network as this server; everything else stays https.
       NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}          # ntfy.sh, or your own
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
@@ -719,17 +730,25 @@ DISCORD_BOT_TOKEN=
 # can point your instance at. Without it a topic URL is a request-forgery
 # primitive aimed at your private network or your cloud metadata endpoint.
 #
-# An entry is a host, and optionally a BASE PATH under it:
+# An entry is a host, optionally a BASE PATH under it, and optionally a SCHEME
+# in front of it:
 #
 #   ntfy.sh                     https://ntfy.sh/<topic>
 #   ntfy.example.com:8443       a port, when your ntfy is not on 443
 #   example.com/ntfy            https://example.com/ntfy/<topic>
+#   http://ntfy.lan:8080        plain http, to THAT destination only
 #
 # A user's URL may add exactly ONE topic segment to what you name here, and
 # nothing else. That is the point of the base path rather than a convenience:
 # naming `example.com` alone would let any account on this instance make the
 # server POST to any shallow path on that host, and read the status back.
-# Name the base path if your ntfy is reverse-proxied under one. https either way.
+# Name the base path if your ntfy is reverse-proxied under one.
+#
+# https unless you write `http://`, which exists for an ntfy on the same network
+# as this server, where the hop never leaves it. It applies to that entry alone,
+# so allowing http to your own box still refuses it to ntfy.sh. Weigh it harder
+# here than on a personal instance: the habit names and ntfy tokens then in clear
+# on that network belong to your USERS, who cannot see this file.
 #
 # LEAVING THIS EMPTY MEANS ntfy.sh — it is the default, not "nothing allowed".
 # Naming your own REPLACES that rather than adding to it, so write both if you
@@ -888,7 +907,9 @@ services:
       NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
       # your own ntfy REPLACES that, and `off` refuses every one. The server
-      # fetches whatever is here, so this is the whole guard.
+      # fetches whatever is here, so this is the whole guard. An entry may name
+      # its scheme — `http://ntfy.lan:8080` allows plaintext to THAT one, for an
+      # ntfy on the same network as this server; everything else stays https.
       NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}          # ntfy.sh, or your own
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
@@ -1424,6 +1445,16 @@ back to blank, so on a shared instance the host — and the base path, if the
 ntfy sits behind a reverse proxy under one — is something to ask your operator
 for. Everything after it is yours: the topic is the one part of the URL you
 choose.
+
+The same list decides the scheme, and it is https unless an entry says
+otherwise. **If you run an ntfy on your own network, `http://ntfy.lan:8080` in
+`NTFY_ALLOWED_HOSTS` lets the server post to it in plaintext** — there is no
+proxy in a hop that never leaves the LAN, and no reason to send one out to the
+internet and back to get a certificate onto it. Your phone can still reach the
+same ntfy through your proxy; the two are separate URLs. It applies to that
+entry alone, so allowing it for your own box does not allow it for ntfy.sh, and
+what it costs is what plaintext always costs: the habit's name, its prompt and
+your ntfy token are readable by anything that can see that network.
 
 **There is nothing to press on an ntfy notification, deliberately.** ntfy can
 carry action buttons, and answering with one would mean this server exposing an

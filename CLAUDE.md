@@ -161,7 +161,10 @@ module rather than a new file.
 Allowlist the host whole and with its port (never a suffix test), require HTTPS,
 refuse credentials, refuse redirects, and rebuild the URL from the parts you
 checked. Allowlisting a destination must allow one KIND of request, so pin the
-path too. See `docs/decisions/outbound-urls.md`.
+path too. The one relaxation is an OPERATOR's: an `NTFY_ALLOWED_HOSTS` entry may
+be written `http://host`, which permits plaintext to that destination and no
+other — never something a user's URL can ask for. See
+`docs/decisions/outbound-urls.md`.
 
 **Whose day it is has two answers and folding them together breaks one.**
 `callerDay` (`shared/src/notify.js`) reads the `X-Habiterall-Timezone` header

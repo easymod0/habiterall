@@ -239,11 +239,19 @@ const NTFY_SEGMENT_RE = /^[A-Za-z0-9_-]{1,64}$/;
  *
  * Strict rather than "whatever is left of the first slash", because this is
  * where an operator's typo has to fail CLOSED. `*`, `*.example.com`,
- * `.example.com`, `https://ntfy.sh` and an empty entry all fail it and are
- * dropped, so a wildcard nobody implemented cannot read as one that works. An
- * IP literal passes, deliberately: naming one is a thing an operator may mean.
+ * `.example.com` and an empty entry all fail it and are dropped, so a wildcard
+ * nobody implemented cannot read as one that works. An IP literal passes,
+ * deliberately: naming one is a thing an operator may mean.
  */
 const NTFY_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?$/;
+
+/**
+ * The optional scheme on an allowlist entry, and the ONLY two it may name.
+ *
+ * Anything else — `ftp://`, `file://`, a bare `//` — leaves a host that is not
+ * a host and is dropped by `NTFY_HOST_RE`, which is the fail-closed direction.
+ */
+const NTFY_ENTRY_SCHEME_RE = /^(https?):\/\//;
 
 /** How deep a base path an entry may name. Four is already generous. */
 const MAX_NTFY_BASE_SEGMENTS = 4;
@@ -251,17 +259,32 @@ const MAX_NTFY_BASE_SEGMENTS = 4;
 /**
  * One allowlist entry, canonicalised, or `null` if it is not usable.
  *
- * An entry is a host and OPTIONALLY a base path: `ntfy.sh`,
- * `ntfy.example.com:8443`, `example.com/ntfy`. Both halves are lowercased and
- * empty segments are dropped, so `Example.COM/ntfy/` and `example.com//ntfy`
- * are the same entry — and the canonical form is what a URL is later compared
- * against, whole segment by whole segment.
+ * An entry is an OPTIONAL scheme, a host, and OPTIONALLY a base path:
+ * `ntfy.sh`, `ntfy.example.com:8443`, `example.com/ntfy`, `http://ntfy.lan`.
+ * Every part is lowercased and empty segments are dropped, so
+ * `Example.COM/ntfy/` and `example.com//ntfy` are the same entry — and the
+ * canonical form is what a URL is later compared against, whole segment by
+ * whole segment.
+ *
+ * **The scheme is the operator's third decision, beside the host and the base
+ * path, and it defaults to https.** Plain http on a public network would put a
+ * habit's name and an ntfy token in clear, so it cannot be something a USER's
+ * URL asks for — but the person who runs an ntfy on their own LAN is posting
+ * server-to-server inside it, and making them route that through a public
+ * proxy to satisfy a rule written for the public internet buys nothing. So it
+ * is answered where the host is answered: `http://ntfy.lan` permits http to
+ * THAT entry and to no other, and every unprefixed entry stays https-only.
  *
  * @param {string} raw
  * @returns {string|null}
  */
 function ntfyEntry(raw) {
-  const parts = raw.trim().toLowerCase().split('/');
+  let rest = raw.trim().toLowerCase();
+
+  const scheme = NTFY_ENTRY_SCHEME_RE.exec(rest)?.[1] ?? 'https';
+  rest = rest.replace(NTFY_ENTRY_SCHEME_RE, '');
+
+  const parts = rest.split('/');
   const host = parts.shift() ?? '';
   if (!NTFY_HOST_RE.test(host)) return null;
 
@@ -269,7 +292,7 @@ function ntfyEntry(raw) {
   if (base.length > MAX_NTFY_BASE_SEGMENTS) return null;
   if (!base.every((segment) => NTFY_SEGMENT_RE.test(segment))) return null;
 
-  return base.length ? `${host}/${base.join('/')}` : host;
+  return `${scheme}://${base.length ? `${host}/${base.join('/')}` : host}`;
 }
 
 /**
@@ -309,12 +332,21 @@ function ntfyEntry(raw) {
  * it is therefore not reachable, and pinning an IP would buy nothing while
  * breaking every ntfy behind a load balancer.
  *
+ * **An entry may also name its SCHEME**, and that is the same decision one more
+ * time: `http://ntfy.lan:8080` is how an operator says their ntfy is on the
+ * same network as this server and there is nothing between them to protect the
+ * hop from. It applies to that entry alone — an instance can allow http to the
+ * box in the cupboard and still refuse it to `ntfy.sh` — and an unprefixed
+ * entry, which is every entry written before this existed and the `ntfy.sh`
+ * default, means https and only https.
+ *
  * `off` is an empty set: every URL refused, which is how an operator switches
  * the destination off for a whole instance without it disappearing from the
  * settings dialog and looking broken — the refusal says why.
  *
  * @param {Record<string, string|undefined>} [env]
- * @returns {Set<string>} canonical `host` / `host/base/path` entries
+ * @returns {Set<string>} canonical `scheme://host` / `scheme://host/base/path`
+ *   entries — the scheme is always present, so a lookup must ask for it
  */
 export function ntfyAllowlist(env = globalThis.process?.env ?? {}) {
   const raw = String(env.NTFY_ALLOWED_HOSTS ?? '').trim();
@@ -362,9 +394,14 @@ const NTFY_TOKEN_RE = /^[\x21-\x7e]{1,128}$/;
  * list — see `ntfyAllowlist` — so the rest of the check carries more weight
  * than it does there, and every part of it is load bearing:
  *
- *   - **https only.** Plain http is refused even for a host the operator has
- *     allowed: a reminder carries a habit's name and prompt, and an ntfy token
- *     would ride on the same request in clear.
+ *   - **https, unless the ENTRY itself named http.** A reminder carries a
+ *     habit's name and prompt, and an ntfy token would ride on the same
+ *     request in clear, so plaintext is never something a user's URL can ask
+ *     for — only something the operator has already decided about that one
+ *     destination (see `ntfyAllowlist`). An `http://` entry accepts https to
+ *     the same place as well: that only ever fails in the safe direction, and
+ *     refusing a URL for being *more* protected than the operator asked for
+ *     would read as a bug.
  *   - **no credentials**, because `https://ntfy.sh@evil.example/x` has a host
  *     of `evil.example` and reads as the opposite to a person.
  *   - **the host, WITH its port**, matched WHOLE against the operator's list.
@@ -398,9 +435,10 @@ export function parseNtfyUrl(raw, env = globalThis.process?.env ?? {}) {
     return undefined;
   }
 
-  if (url.protocol !== 'https:') return undefined;
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
   if (url.username || url.password) return undefined;
 
+  const scheme = url.protocol.slice(0, -1);
   const host = url.host.toLowerCase();
 
   // One trailing slash is forgiven — it is what people paste. Everything else
@@ -420,9 +458,21 @@ export function parseNtfyUrl(raw, env = globalThis.process?.env ?? {}) {
   // `example.com/ntfy`, where a `startsWith` would have let it through.
   const topic = /** @type {string} */ (segments.pop());
   const base = segments.map((segment) => segment.toLowerCase()).join('/');
-  if (!ntfyAllowlist(env).has(base ? `${host}/${base}` : host)) return undefined;
+  const destination = base ? `${host}/${base}` : host;
 
-  return `https://${host}${base ? `/${base}` : ''}/${topic}`;
+  // The scheme is part of the key, so allowing a destination over http does not
+  // allow every destination over http. Asked upward and never downward: an
+  // https URL is served by an `http://` entry as well as an `https://` one,
+  // because TLS to a place the operator was willing to reach in clear cannot be
+  // the thing that makes a request unsafe — while an http URL is served by the
+  // `http://` entry alone, which is the half that has to fail closed.
+  const allowed = ntfyAllowlist(env);
+  const permitted = scheme === 'https'
+    ? allowed.has(`https://${destination}`) || allowed.has(`http://${destination}`)
+    : allowed.has(`http://${destination}`);
+  if (!permitted) return undefined;
+
+  return `${scheme}://${host}${base ? `/${base}` : ''}/${topic}`;
 }
 
 /**
@@ -470,7 +520,10 @@ export function ntfyTarget(raw, env = globalThis.process?.env ?? {}) {
   const parts = url.pathname.split('/').filter(Boolean);
   const topic = /** @type {string} */ (parts.pop());
   const base = parts.length ? `/${parts.join('/')}/` : '/';
-  return { endpoint: `https://${url.host}${base}`, topic };
+  // The scheme comes from `parseNtfyUrl`'s answer rather than being written in
+  // here, or an operator who allowed `http://ntfy.lan` would have every send
+  // upgraded back to a port that is not listening.
+  return { endpoint: `${url.protocol}//${url.host}${base}`, topic };
 }
 
 /**
