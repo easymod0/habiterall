@@ -67,8 +67,16 @@ private val PALETTE = listOf(
     "#a855f7", "#d946ef", "#ec4899", "#64748b",
 )
 
-/** The form's editable state. Numbers are text, because a half-typed number is text. */
-private data class Draft(
+/**
+ * The form's editable state. Numbers are text, because a half-typed number is
+ * text.
+ *
+ * `internal`, not `private`: `HabitFieldCoverageTest` pins this and
+ * [Draft.toInput] from outside the package, the same way it already pins
+ * `Habit.toInput()` — a bridge nobody looked at is exactly how `icon` was
+ * missed here the first time.
+ */
+internal data class Draft(
     val name: String = "",
     val description: String = "",
     val numerical: Boolean = false,
@@ -82,10 +90,11 @@ private data class Draft(
     val reminderMessage: String = "",
     val atMostUnlogged: String = "default",
     val showAs: String = "amount",
+    val icon: String = "",
     val archived: Boolean = false,
 )
 
-private fun Habit.toDraft() = Draft(
+internal fun Habit.toDraft() = Draft(
     name = name,
     description = description,
     numerical = isNumerical,
@@ -100,6 +109,7 @@ private fun Habit.toDraft() = Draft(
     reminderMessage = reminderMessage,
     atMostUnlogged = atMostUnlogged,
     showAs = showAs,
+    icon = icon,
     archived = archived,
 )
 
@@ -185,7 +195,7 @@ private val DECIMAL = Regex("^(\\d+(\\.\\d*)?|\\.\\d+)$")
  * What IS done here is coercion the wire format needs — an empty target box is
  * the number 0, and a habit that is not numerical has no unit or target to send.
  */
-private fun Draft.toInput() = HabitInput(
+internal fun Draft.toInput() = HabitInput(
     name = name.trim(),
     description = description.trim(),
     type = if (numerical) "numerical" else "boolean",
@@ -209,6 +219,10 @@ private fun Draft.toInput() = HabitInput(
     // field is reset rather than left alone.
     atMostUnlogged = atMostUnlogged,
     showAs = showAs,
+    // No form control here either — an icon input is issue #66's group C and
+    // out of scope for this screen. Carried through untouched for the same
+    // PUT-replaces reason as atMostUnlogged and showAs above.
+    icon = icon,
     archived = archived,
 )
 

@@ -1,6 +1,8 @@
 package com.habiterall.app
 
 import com.habiterall.app.data.Habit
+import com.habiterall.app.ui.toDraft
+import com.habiterall.app.ui.toInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
@@ -175,6 +177,63 @@ class HabitFieldCoverageTest {
                     "resets it on the server exactly as if it were missing.",
                 source[field],
                 sent[field],
+            )
+        }
+    }
+
+    /**
+     * There are TWO write bridges, not one. `HabitFormScreen`'s `Draft` is a
+     * second, independent path from a fetched [Habit] to a [HabitInput] —
+     * `MainActivity` routes `Manage.EditHabit` through it — and it has its own
+     * chance to drop a field the way `toInput()` above once dropped `icon`.
+     *
+     * The fixture habit above is deliberately one that survives the form's own
+     * coercion unchanged: numerical, with a `reminderTime` already in canonical
+     * `HH:MM` form and a `unit` the numerical branch keeps rather than blanks.
+     * A field that legitimately cannot survive the round trip (none currently
+     * do, for this fixture) belongs in a documented exclusion set here, the
+     * way `notMirrored` documents one in `AppSettingsDefaultsTest` — not a
+     * silent skip.
+     */
+    @Test
+    fun `every fixture-declared habit field reaches the form's write bridge too`() {
+        val lists = parseFieldLists(fixtureSource)
+        val fields = lists["JSON_HABIT_FIELDS"]
+        assertTrue(
+            "`JSON_HABIT_FIELDS` not found in shared/test/roundtrip-fixture.mjs — " +
+                "has it been renamed?",
+            fields != null,
+        )
+        assertTrue(
+            "parsed ${fields!!.size} fields out of JSON_HABIT_FIELDS — the shape " +
+                "this test reads it by must have changed",
+            fields.size >= 14,
+        )
+
+        // Fields the form is known to legitimately transform rather than carry
+        // verbatim — none, for the fixture habit chosen above. A field added
+        // here must name why, the way `notMirrored` does for a setting.
+        val formCoerced = emptySet<String>()
+
+        val sentViaForm = writeJson.encodeToJsonElement(habit.toDraft().toInput()).jsonObject
+        val source = writeJson.encodeToJsonElement(habit).jsonObject
+
+        for (field in fields) {
+            if (field in formCoerced) continue
+            assertTrue(
+                "`$field` is in JSON_HABIT_FIELDS but HabitFormScreen's Draft.toInput() " +
+                    "does not send it at all. A habit PUT REPLACES, so editing a habit " +
+                    "from the phone's OWN form — not just the two callers that flip one " +
+                    "thing about a fetched habit — resets this field on the server.",
+                sentViaForm.containsKey(field),
+            )
+            assertEquals(
+                "`$field` is sent by HabitFormScreen's form as something other than the " +
+                    "habit's own value — declared on Draft/HabitInput but not wired " +
+                    "through Draft.toDraft()/Draft.toInput(), which resets it on the " +
+                    "server exactly as if the field were missing.",
+                source[field],
+                sentViaForm[field],
             )
         }
     }
