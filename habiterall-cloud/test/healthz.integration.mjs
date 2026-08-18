@@ -159,6 +159,33 @@ try {
     await admin.query('ALTER TABLE session_hidden RENAME TO session');
   }
 
+  console.log('\n--- the touch throttle, through the real server ---');
+  // A route BELOW the session middleware, so it does touch: the static shell.
+  // Not /api/*, which would need a provisioned user, and not /healthz, which is
+  // now above the middleware and would pass this without a throttle at all.
+  const shell = () => fetch(`${base}/`, { headers: { cookie } });
+
+  // The requests MUST be spaced over a second apart, and that is not padding.
+  // `expire` has one-second resolution, so an unthrottled burst inside a single
+  // second writes the same value every time and leaves the column unchanged —
+  // this check passed against a server with the throttle removed until the
+  // spacing was added, which is the whole "a fixture that compares equal to
+  // itself" shape.
+  await shell();                      // whatever the interval owes, pay it here
+  await idle(1300);
+  const before = (await admin.query('SELECT expire FROM session WHERE sid = $1', [SID]))
+    .rows[0].expire.getTime();
+
+  for (let i = 0; i < 3; i++) {
+    await shell();
+    await idle(1300);
+  }
+  const after = (await admin.query('SELECT expire FROM session WHERE sid = $1', [SID]))
+    .rows[0].expire.getTime();
+
+  ck('requests below the session middleware write the row at most once per interval',
+    after === before, `expire moved by ${after - before}ms across 3 spaced requests`);
+
   console.log(`\n${fails === 0 ? 'all checks passed' : `${fails} FAILED`}`);
 } finally {
   await admin.query('DELETE FROM session WHERE sid = $1', [SID]).catch(() => {});

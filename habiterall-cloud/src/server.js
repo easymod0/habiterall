@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 
 import { pool, closePool, poolGauge } from './db/pool.js';
 import { LOCAL_IPS, createHealthProbe, sendHealth } from './health.js';
+import { throttleTouch } from './session-touch.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api } from './api.js';
 import { start as startNotifier } from './notifier.js';
@@ -152,8 +153,18 @@ app.get('/healthz', healthLimiter, async (req, res) => {
 
 const PgStore = connectPgSimple(session);
 
+// `rolling: true` below slides the expiry on every request, which the store
+// writes as an UPDATE on one row — so concurrent requests for the same user
+// take the same row lock and run one at a time. See session-touch.js for the
+// measurement; the short version is that a page load fires ~5 requests at once
+// and serialises itself five deep on every load. The throttle keeps the
+// rolling window and writes it at most once an hour per session.
+const sessionStore = throttleTouch(
+  new PgStore({ pool, tableName: 'session', createTableIfMissing: false }),
+);
+
 app.use(session({
-  store: new PgStore({ pool, tableName: 'session', createTableIfMissing: false }),
+  store: sessionStore,
   name: SESSION_NAME,
   secret: process.env.SESSION_SECRET,
   resave: false,
@@ -293,7 +304,9 @@ const notifier = startNotifier();
 // One line a minute, and the one to graph: event-loop lag is what turns a heavy
 // dashboard into everybody's latency, and pool exhaustion is what a replica
 // count that outgrew Postgres looks like.
-const runtime = watchRuntime(log, { extra: poolGauge });
+const runtime = watchRuntime(log, {
+  extra: () => ({ ...poolGauge(), ...sessionStore.touchStats() }),
+});
 
 async function start() {
   await initAuth();
