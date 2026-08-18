@@ -1172,7 +1172,7 @@ above the dashboard. It folds case and strips accents, so "cafe" finds "Café",
 and it matches the description as well as the name — a habit called "Gym" whose
 description says "swimming Tuesdays" is one people look for by the second. It
 filters what is already on screen, so it works offline and costs no request.
-The Android app has the same box, at the same six.
+The Android app has the same box, at the same six, with a near-identical fold.
 
 **Light, dark, or whatever this device is set to** — three states, not two, and
 the header's ◐ / ☀ / ☾ button cycles between them. *Follow this device* is

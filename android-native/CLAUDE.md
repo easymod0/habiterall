@@ -60,7 +60,9 @@ suppresses the resume snap-to-top.
 **`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two
 clients disagreeing about diacritic folding costs a search result, not a wrong
-entry.
+entry. The two folds are near-identical, not equal — Java's `\p{Mn}` and JS's
+`\p{Diacritic}` part ways on marks like the Hawaiian ʻokina — and that gap is
+tolerated for the same reason: nothing here reaches disk.
 
 ## Notifications
 

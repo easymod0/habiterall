@@ -16,6 +16,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import com.habiterall.app.data.Habit
+import com.habiterall.app.data.Sentinels
 import com.habiterall.app.ui.HabitList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -69,12 +70,23 @@ class HabitListTest {
         error: String? = null,
         focusHabit: Long? = null,
         query: String = "",
+        // Non-zero simulates a `rememberSaveable` `LazyListState` restored
+        // from before process death: this is the actual origin of the
+        // ScrollRestore case (see its own KDoc), not something a test drives
+        // by scrolling live — a restored index is applied before the list it
+        // now names has ever been measured at all.
+        initialScrollIndex: Int = 0,
     ) {
         compose.setContent {
             var q by remember { mutableStateOf(query) }
             currentQuery = q
-            val ls = remember { LazyListState() }
+            val ls = remember { LazyListState(firstVisibleItemIndex = initialScrollIndex) }
             listState = ls
+            // Mirrors MainActivity's own `onFocused = { focusHabit = null }`:
+            // a bare flag here is what let the dropped-`return` bug in the
+            // focus effect pass every test, since only a caller that actually
+            // nulls the habit on focus can be short-circuited by it.
+            var fh by remember { mutableStateOf(focusHabit) }
             HabitList(
                 habits = habits,
                 rows = rows,
@@ -89,8 +101,8 @@ class HabitListTest {
                 listState = ls,
                 dayScroll = ScrollState(0),
                 snackbar = SnackbarHostState(),
-                focusHabit = focusHabit,
-                onFocused = { focused = true },
+                focusHabit = fh,
+                onFocused = { focused = true; fh = null },
                 onRefresh = {},
                 onReorder = { reordered = it },
                 onNewHabit = {},
@@ -147,6 +159,31 @@ class HabitListTest {
 
         compose.onNodeWithContentDescription("More").performClick()
         compose.onNodeWithText("Reorder habits").assertIsNotEnabled()
+    }
+
+    /**
+     * `rows` is what the `LazyColumn` renders, and `withPending` is the only
+     * difference from `habits` — an optimistic write laid over the fetched
+     * state. `habits` here carries Water with no entry at all; `rows` carries
+     * the SAME id with today already recorded. If the grid ever fell back to
+     * filtering `habits` instead, the cell would paint nothing until the next
+     * refetch landed, and nothing at all while the write sat in the offline
+     * outbox — the one interaction this screen exists for.
+     *
+     * Addressed by the day cell's own content description (`DayGrid.describe`),
+     * not by text: the visible label for a done day is a bare "✓", which is not
+     * unique enough to say which habit it belongs to.
+     */
+    @Test
+    fun `the grid renders rows' pending overlay, not habits' fetched state`() {
+        val fetchedWater = water
+        val pendingWater = water.copy(entries = mapOf("2026-08-17" to Sentinels.YES))
+        show(
+            habits = listOf(fetchedWater, reading),
+            rows = listOf(pendingWater, reading),
+        )
+
+        compose.onNodeWithContentDescription("Water, Monday 17 August: done").assertIsDisplayed()
     }
 
     /**
@@ -320,6 +357,39 @@ class HabitListTest {
         compose.onNodeWithText("Find a habit").assertIsDisplayed()
         compose.onNodeWithText("No habits match that.").assertIsDisplayed()
         compose.onNodeWithText("Try again").assertDoesNotExist()
+    }
+
+    /**
+     * `ScrollRestore` has to be asked about the list the `LazyColumn` actually
+     * holds. 30 habits fetched, a query already narrowing to 10 (as after a
+     * process restore, where the query is `rememberSaveable` too), and a
+     * restored scroll position of row 15: `needsSnapToTop(15, 0, 10)` is true
+     * (the restored index is now past the end) and Compose's own layout is
+     * asked, through our effect, to put the list back at the top. Keyed on
+     * `habits.size` (30) instead, `needsSnapToTop(15, 0, 30)` is false, our
+     * effect never calls `scrollToItem(0)`, and the `LazyColumn` is left to
+     * its own devices — measured here, it lands mid-list rather than at the
+     * top, which is not a state a restored session should ever show.
+     *
+     * A live scroll-then-narrow within one session cannot show this: Compose's
+     * `LazyColumn` already reflows a `firstVisibleItemIndex` that has run past
+     * an in-place shrink on its own, back to exactly the same index 0 either
+     * way, which is what made an earlier version of this test pass under the
+     * `habits.size` mutation too. Restoring the index directly — the actual
+     * origin of `ScrollRestore`, a `LazyListState` deserialized from before
+     * process death — is the one place Compose does not already paper over
+     * the difference, which is why this constructs `initialScrollIndex`
+     * rather than driving a real scroll gesture.
+     */
+    @Test
+    fun `a restored scroll position past the filtered list snaps back to the top`() {
+        val many = (1..30).map {
+            Habit(id = it.toLong(), name = if (it <= 10) "Match $it" else "Habit $it")
+        }
+        show(habits = many, rows = many, query = "Match", initialScrollIndex = 15)
+
+        assertEquals(0, listState.firstVisibleItemIndex)
+        assertEquals(0, listState.firstVisibleItemScrollOffset)
     }
 
     /**
