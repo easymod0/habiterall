@@ -136,6 +136,35 @@ table intact, and one asserts a request below the middleware does write the row,
 because otherwise "the column did not move" is also what a server with no
 session handling at all would say.
 
+## Which claim names the account
+
+`displayName` in `src/auth.js` (unexported) picks what the chip shows:
+`name -> preferred_username -> email`. `name` is an optional claim of the
+`profile` scope — Authentik only emits it when the account's Name field has
+been filled, so a bootstrapped admin with no Name set carries no `name` claim
+at all. `preferred_username` is the claim carrying what the personal edition
+calls a username, and unlike `name` an IdP has one for every account, which is
+why it outranks `email`: cloud should read `mark` where personal would rather
+read `mark@example.com`. A blank string counts as absent, hence the chain
+trims before testing truthiness rather than testing the raw claim.
+
+`display_name` is baked into the session at `/auth/callback` and `GET /api/me`
+serves it from there — it must **not** re-read the `users` row. #205 is open
+about exactly this route family paying for a database round trip it does not
+need; a display name that goes stale at the IdP until the next sign-in is the
+accepted trade, not a bug to fix here. `provision_user` refreshes
+`display_name` on every login, so an existing row corrects itself the next
+time that user signs in — no migration, no backfill.
+
+`test/login-claims.integration.mjs` proves the chain reaches the response
+body, not just the mapping function, by driving a real `/auth/login` ->
+`/auth/callback` -> `/api/me` round trip against a fake issuer — no Authentik
+needed. Its ID tokens are signed with `node:crypto` alone
+(`generateKeyPairSync('rsa', ...)` plus `createSign('RSA-SHA256')`), on
+purpose: `jose` is already a transitive dependency of `openid-client`, but
+pulling it in directly for one test file is a dependency this suite does not
+need to add.
+
 ## Verify it, don't trust it
 
 ```bash

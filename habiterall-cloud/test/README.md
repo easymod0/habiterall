@@ -34,6 +34,21 @@ The policy that lets the scan span users at all is attacked in
 `tenancy.integration.mjs` — see the "notifier scope" checks there and the
 header of `migrations/008_notify_log.sql`.
 
+## `login-claims.integration.mjs`
+
+Which claim ends up naming the account: `name -> preferred_username -> email`
+(`src/auth.js`). It boots the real `server.js` and drives a real
+`/auth/login` -> `/auth/callback` -> `/api/me` round trip against a fake
+issuer it starts on an ephemeral port, so it needs no Authentik and no
+network — only Postgres, for the same reason every other suite here does.
+
+The assertion is on `GET /api/me`'s response body, not on the mapping
+function directly: a unit test on the function alone would pin the ordering
+and nothing about whether `completeLogin` actually wires it into the session.
+Every case also asserts the login answered `200`, because a suite in which
+every login had silently broken would otherwise still read as a pass on the
+case that expects an empty name.
+
 ## `roundtrip.integration.mjs`
 
 Seeds a known dataset, exports it as JSON, a Loop `.db`, and a CSV archive,
