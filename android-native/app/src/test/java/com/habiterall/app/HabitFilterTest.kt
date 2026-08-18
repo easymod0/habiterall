@@ -1,6 +1,7 @@
 package com.habiterall.app
 
 import com.habiterall.app.data.Habit
+import com.habiterall.app.data.HabitFilter.isActive
 import com.habiterall.app.data.HabitFilter.matches
 import java.util.Locale
 import org.junit.Assert.assertFalse
@@ -12,6 +13,14 @@ import org.junit.Test
  * `matchesQuery`. Pure, so every case here is a direct call — no Robolectric.
  */
 class HabitFilterTest {
+
+    /**
+     * COMBINING ACUTE ACCENT, U+0301, written as an escape on purpose: as a
+     * literal it is an invisible mark that attaches itself to whatever
+     * character precedes it in the source, which is not a thing to leave a
+     * reader guessing about.
+     */
+    private val COMBINING_ACUTE = "\u0301"
 
     private fun habit(name: String = "Gym", description: String = "") =
         Habit(id = 1, name = name, description = description)
@@ -46,6 +55,49 @@ class HabitFilterTest {
     fun `an upper-case query finds a lower-case name, and vice versa`() {
         assertTrue(matches(habit(name = "gym"), "GYM"))
         assertTrue(matches(habit(name = "GYM"), "gym"))
+    }
+
+    /**
+     * The case `isActive` exists for, and the one a blank check cannot see.
+     *
+     * U+0301 COMBINING ACUTE ACCENT with no base letter — reachable by a paste
+     * or an orphaned dead-key sequence — is category `Mn`, so `fold` strips it
+     * and `matches` is left with the empty string and shows every habit. It is
+     * not empty and not whitespace, so `isNotBlank()` calls it a live filter
+     * while the list it supposedly narrows is complete. Asserted as a PAIR, in
+     * one test, because the defect is precisely the two disagreeing: either
+     * answer alone is defensible, and only together do they pin the rule.
+     */
+    @Test
+    fun `a query that folds away matches everything and is not active`() {
+        assertTrue(matches(habit(name = "Gym"), COMBINING_ACUTE))
+        assertFalse(isActive(COMBINING_ACUTE))
+    }
+
+    @Test
+    fun `an empty or blank query is not active, and a real one is`() {
+        assertFalse(isActive(""))
+        assertFalse(isActive("   "))
+        assertTrue(isActive("gym"))
+        // Surrounding whitespace is trimmed, not counted: " gym " is the same
+        // filter as "gym", and both are live.
+        assertTrue(isActive("  gym  "))
+    }
+
+    /**
+     * The control for the case above, and written DECOMPOSED on purpose.
+     *
+     * The tempting wrong fix for the test above is "a query holding a
+     * combining mark is not a real query" — reject on `Mn` being present
+     * rather than on what is left once it is stripped. Spelled `"café"` with a
+     * precomposed U+00E9 that mutation survives, because there is no `Mn`
+     * codepoint in the literal to see. Spelled `"cafe" + U+0301` — which is
+     * what an IME emitting NFD hands over for the same word — it fails, while
+     * folding-then-asking passes: there is a whole word left after the strip.
+     */
+    @Test
+    fun `an accented word typed decomposed is still an active query`() {
+        assertTrue(isActive("cafe" + COMBINING_ACUTE))
     }
 
     @Test

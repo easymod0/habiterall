@@ -1,5 +1,6 @@
 package com.habiterall.app
 
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material3.SnackbarHostState
@@ -7,18 +8,37 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.requestFocus
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Sentinels
 import com.habiterall.app.ui.HabitList
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -40,7 +60,22 @@ import org.robolectric.annotation.Config
 @Config(application = android.app.Application::class, qualifiers = "w400dp-h800dp")
 class HabitListTest {
 
-    @get:Rule val compose = createComposeRule()
+    // `createAndroidComposeRule`, not `createComposeRule`: `HabitList` now
+    // calls `BackHandler`, which reads `LocalOnBackPressedDispatcherOwner` and
+    // silently no-ops with nothing behind it — a bare `createComposeRule` host
+    // is not an `OnBackPressedDispatcherOwner`, only a real `ComponentActivity`
+    // is. `debugImplementation("...ui-test-manifest")` is what puts one in the
+    // merged test manifest.
+    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+
+    /**
+     * COMBINING ACUTE ACCENT, U+0301, as an escape rather than as itself: a
+     * literal one is invisible and attaches to whatever character precedes it
+     * in the source. `HabitFilterTest` holds the same constant for the same
+     * reason, and pins what the predicate does with it; this file pins what
+     * the bar does.
+     */
+    private val COMBINING_ACUTE = "\u0301"
 
     private val water = Habit(id = 1, name = "Water")
     private val reading = Habit(id = 2, name = "Reading")
@@ -51,6 +86,9 @@ class HabitListTest {
 
     /** The query text as [HabitList] currently sees it, read back after a test acts. */
     private var currentQuery: String = ""
+
+    /** Whether the search field is expanded, read back the same way as [currentQuery]. */
+    private var currentSearchOpen: Boolean = false
 
     /**
      * The list's own scroll position, hoisted out of `show()` so a test can
@@ -70,6 +108,7 @@ class HabitListTest {
         error: String? = null,
         focusHabit: Long? = null,
         query: String = "",
+        searchOpen: Boolean = false,
         // Non-zero simulates a `rememberSaveable` `LazyListState` restored
         // from before process death: this is the actual origin of the
         // ScrollRestore case (see its own KDoc), not something a test drives
@@ -80,6 +119,8 @@ class HabitListTest {
         compose.setContent {
             var q by remember { mutableStateOf(query) }
             currentQuery = q
+            var open by remember { mutableStateOf(searchOpen) }
+            currentSearchOpen = open
             val ls = remember { LazyListState(firstVisibleItemIndex = initialScrollIndex) }
             listState = ls
             // Mirrors MainActivity's own `onFocused = { focusHabit = null }`:
@@ -98,6 +139,8 @@ class HabitListTest {
                 questionMarks = false,
                 query = q,
                 onQueryChange = { q = it; currentQuery = it },
+                searchOpen = open,
+                onSearchOpenChange = { open = it; currentSearchOpen = it },
                 listState = ls,
                 dayScroll = ScrollState(0),
                 snackbar = SnackbarHostState(),
@@ -305,31 +348,13 @@ class HabitListTest {
         compose.onNodeWithText("No habits match that.").assertDoesNotExist()
     }
 
-    @Test
-    fun `the box appears with 6 habits`() {
-        val six = manyHabits(6)
-        show(habits = six, rows = six)
-
-        compose.onNodeWithText("Find a habit").assertIsDisplayed()
-    }
-
-    @Test
-    fun `the box does not appear with 5 habits`() {
-        val five = manyHabits(5)
-        show(habits = five, rows = five)
-
-        compose.onNodeWithText("Find a habit").assertDoesNotExist()
-    }
-
-    /** Below the threshold, but the box has to stay up while it holds a query. */
-    @Test
-    fun `the box appears with 5 habits once it holds a query`() {
-        val five = manyHabits(5)
-        show(habits = five, rows = five, query = "x")
-
-        compose.onNodeWithText("Find a habit").assertIsDisplayed()
-    }
-
+    /**
+     * The count is ungated on `searchOpen`: it reads whenever a filter is
+     * live, whether or not the field that produced it is still open — and
+     * the field is collapsed by default, which is what this pins. A version
+     * that re-gates the count on `searchOpen` passes only while the field
+     * happens to be open.
+     */
     @Test
     fun `the count reads exactly 2 of 7`() {
         val seven = (1..7).map { i ->
@@ -344,6 +369,10 @@ class HabitListTest {
      * A failed background refresh must not steal the screen from a live,
      * merely unlucky, search: the full-screen error is for when there is
      * nothing to show at all, not for a query that happens to match nothing.
+     * The search icon (not a permanent box) is what has to survive it now,
+     * and it has to read as active — asserted via its
+     * "Search, filter active" description, since the live query behind it
+     * is what makes the icon active in the first place.
      */
     @Test
     fun `a fetch error with habits present and a no-match query still shows the search box, not the error screen`() {
@@ -354,7 +383,7 @@ class HabitListTest {
             query = "zzzznomatch",
         )
 
-        compose.onNodeWithText("Find a habit").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Search, filter active").assertIsDisplayed()
         compose.onNodeWithText("No habits match that.").assertIsDisplayed()
         compose.onNodeWithText("Try again").assertDoesNotExist()
     }
@@ -434,9 +463,606 @@ class HabitListTest {
         val habits = listOf(water, reading, cycling, yoga, running, swimming)
         show(habits = habits, rows = habits)
 
-        compose.onNodeWithText("Find a habit").performTextInput("Wat")
+        compose.onNodeWithContentDescription("Search").performClick()
+        // Selected by `hasSetTextAction()`, never by the placeholder text:
+        // "Find a habit" disappears the moment a character is typed into it,
+        // so a placeholder-based selector would only ever find the field
+        // before the first keystroke.
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
 
         compose.onNodeWithText("Water").assertIsDisplayed()
         compose.onNodeWithText("Reading").assertDoesNotExist()
+    }
+
+    // --- The bar-icon search: expand, confirm, clear, tap-off (step 2) ---
+
+    /**
+     * Settles `AnimatedVisibility`'s enter/exit transition. A test that
+     * asserts mid-transition can pass against a version that never actually
+     * finishes expanding or collapsing the field — this is the harness's own
+     * defect-shape #1 (root `CLAUDE.md`, "Writing tests here"), applied to an
+     * animation instead of a sleep.
+     */
+    private fun settleAnimation() {
+        compose.mainClock.advanceTimeBy(500)
+        compose.waitForIdle()
+    }
+
+    /**
+     * A node carrying an `OnLongClick` accessibility action labelled
+     * `"Clear filter"` — TalkBack's only way to know the long-press shortcut
+     * exists, since a gesture with no matching `semantics { onLongClick }` is
+     * invisible to it even though the touch handler still fires. This is the
+     * SAME semantics action `combinedClickable`'s own long click already
+     * registers, just with a label attached — `semantics { onLongClick(...) }`
+     * does not add a second, distinct action.
+     */
+    private val hasClearFilterAction = SemanticsMatcher(
+        "has an OnLongClick accessibility action labelled 'Clear filter'",
+    ) { node ->
+        node.config.contains(SemanticsActions.OnLongClick) &&
+            node.config[SemanticsActions.OnLongClick].label == "Clear filter"
+    }
+
+    /**
+     * Any `OnLongClick` action at all, labelled or not — the check that
+     * `hasClearFilterAction` above cannot make: a version that still passed
+     * `combinedClickable` an unconditional (unlabelled) `onLongClick` would
+     * carry no action matching `hasClearFilterAction` (no label) and would
+     * still fail `assertDoesNotExist(hasClearFilterAction)` for the wrong
+     * reason — it has no OTHER `OnLongClick` action to collide with, so
+     * nothing here would notice one being registered anyway.
+     */
+    private val hasAnyLongClickAction = SemanticsMatcher(
+        "has an OnLongClick accessibility action",
+    ) { node -> node.config.contains(SemanticsActions.OnLongClick) }
+
+    /**
+     * Pressing the icon has to both show the field AND move keyboard focus
+     * into it — a version that only toggles `searchOpen` without the
+     * `FocusRequester` effect would pass every other test in this file (the
+     * field would still be there for `performTextInput` to find) while
+     * leaving the user staring at a text box the keyboard never opened for.
+     */
+    @Test
+    fun `pressing the search icon expands the field and focuses it`() {
+        show(habits = listOf(water, reading), rows = listOf(water, reading))
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+
+        compose.onNode(hasSetTextAction()).assertIsDisplayed().assertIsFocused()
+    }
+
+    /**
+     * The list narrows on every keystroke, before Confirm is ever pressed.
+     * Asserting only after Confirm would pass just as well against a version
+     * that stashed the typed text and applied it to `visible` solely on
+     * submission — this is what tells the two apart.
+     */
+    @Test
+    fun `typing narrows the list before Confirm is pressed`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
+        compose.waitForIdle()
+
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertDoesNotExist()
+    }
+
+    /**
+     * The single most important assertion in this step: Confirm collapses
+     * the field but the filter it produced survives the collapse, unchanged.
+     * Every "closing means clearing" version — an ✕-shaped Confirm, a
+     * `confirmSearch` that also calls `onQueryChange("")` — fails this one
+     * and only this one, since every earlier test either never presses
+     * Confirm or never checks the list afterwards.
+     */
+    @Test
+    fun `pressing Confirm collapses the field and the list stays narrowed`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
+        compose.waitForIdle()
+
+        compose.onNodeWithContentDescription("Confirm").performClick()
+        settleAnimation()
+
+        compose.onNode(hasSetTextAction()).assertDoesNotExist()
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertDoesNotExist()
+        assertEquals("Wat", currentQuery)
+    }
+
+    /**
+     * Tap-off: focus leaving the field-and-buttons group behaves exactly
+     * like Confirm. Driven here by moving focus onto the FAB — the one
+     * always-present focusable target that sits entirely outside
+     * `Modifier.focusGroup()`, since the bar's own Stats/overflow icons are
+     * gone from the tree while the field is expanded and cannot be tapped to
+     * pull focus away. See the brief's *Stop and report if*: this is the one
+     * line in the change whose testability was not certain in advance, and
+     * this FAB turned out to be a route into it.
+     */
+    @Test
+    fun `focus leaving the field and its buttons behaves as Confirm`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
+        compose.waitForIdle()
+
+        compose.onNodeWithContentDescription("New habit").requestFocus()
+        settleAnimation()
+
+        compose.onNode(hasSetTextAction()).assertDoesNotExist()
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertDoesNotExist()
+        assertEquals("Wat", currentQuery)
+    }
+
+    /**
+     * Back press is a separate code path from Confirm, Clear and tap-off —
+     * `BackHandler`, not a click at all — and left to the system it would
+     * exit the screen entirely rather than just closing the field. No other
+     * test here drives the back dispatcher, so none of them would notice
+     * `BackHandler` being deleted.
+     */
+    @Test
+    fun `back press behaves as Confirm`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
+        compose.waitForIdle()
+
+        compose.runOnUiThread {
+            compose.activity.onBackPressedDispatcher.onBackPressed()
+        }
+        settleAnimation()
+
+        compose.onNode(hasSetTextAction()).assertDoesNotExist()
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertDoesNotExist()
+    }
+
+    /**
+     * Clear (✕) is not a second Confirm wearing an X: it drops the typed
+     * text, keeps the field open and keeps the caret focused, so all three
+     * have to be checked. Dropping the third assertion alone would still
+     * pass against a version where Clear also collapses the field — a
+     * "clear-and-close" button rather than the one control decision 3
+     * specifies.
+     */
+    @Test
+    fun `Clear drops the filter, the whole list is back, and the field is still open`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
+        compose.waitForIdle()
+
+        compose.onNodeWithContentDescription("Clear").performClick()
+        compose.waitForIdle()
+
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertIsDisplayed()
+        compose.onNode(hasSetTextAction()).assertIsDisplayed()
+    }
+
+    /**
+     * The collapsed icon's own long-press, decision 5's route to dropping a
+     * filter without opening the field at all. `performTouchInput { longClick() }`
+     * exercises the actual gesture registered on `combinedClickable`, not the
+     * semantics-only custom action the next two tests check.
+     */
+    @Test
+    fun `long-pressing the collapsed search icon drops the filter`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = "Wat")
+
+        compose.onNodeWithContentDescription("Search, filter active")
+            .performTouchInput { longClick() }
+        compose.waitForIdle()
+
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertIsDisplayed()
+    }
+
+    /**
+     * The gesture working proves nothing about TalkBack, which never
+     * performs a touch gesture at all — it reads registered custom
+     * accessibility actions. This is the assertion that actually stands in
+     * for a screen reader: a version with the long-click wired up but no
+     * matching `semantics { onLongClick(...) }` passes the test above and
+     * fails only this one.
+     */
+    @Test
+    fun `the Clear filter accessibility action is registered while a filter is live`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = "Wat")
+
+        compose.onNode(hasClearFilterAction).assertExists()
+    }
+
+    /**
+     * The collapsed search icon's long-press is spoken for by
+     * `combinedClickable` + `semantics { onLongClick(label = "Clear filter") }`
+     * alone — no `TooltipBox` wraps it, unlike Stats/Clear/Confirm. A
+     * `TooltipBox` there would put a SECOND `OnLongClick`-carrying node
+     * (`anchorSemantics`) directly around this one.
+     *
+     * `useUnmergedTree = true` is why this test can see that at all: the
+     * MERGED tree — what every assertion above queries — collapses the two
+     * nodes into one, and `AccessibilityAction`'s own merge policy prefers the
+     * more deeply nested value's label, so a merged-tree check of the label
+     * alone reads "Clear filter" whether or not a `TooltipBox` sits on top
+     * contributing a second, unlabelled one. Counting UNMERGED nodes is the
+     * only way to see the second contributor.
+     *
+     * Scoped to a node with a "Search" descendant: `DayGrid`'s own habit-row
+     * and day-cell long presses ("Edit habit" / "Edit $date") are real
+     * `OnLongClick` actions elsewhere on this same screen, so counting every
+     * unmerged long-click node on screen (4, with two habits and one date
+     * column) would not isolate this control at all.
+     */
+    @Test
+    fun `the collapsed search icon is the only unmerged node carrying a long-click action`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = "Wat")
+
+        val searchLongClickNodes = compose.onAllNodes(
+            hasAnyLongClickAction.and(hasAnyDescendant(hasContentDescription("Search", substring = true))),
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes()
+
+        assertEquals(1, searchLongClickNodes.size)
+        assertEquals(
+            "Clear filter",
+            searchLongClickNodes.single().config[SemanticsActions.OnLongClick].label,
+        )
+    }
+
+    /**
+     * The control for the test above: registering the action unconditionally
+     * would advertise a shortcut to clear a filter that is not there — a
+     * no-op TalkBack action offered for no reason. Strengthened past "no
+     * action labelled 'Clear filter'" to "no `OnLongClick` action at all":
+     * `combinedClickable(onLongClick = { clearFilter() })` passed unconditionally
+     * registers an UNLABELLED `OnLongClick` action, which `hasClearFilterAction`
+     * (label-gated) cannot see — so the weaker assertion alone would pass
+     * against a version whose gesture still fires, and fires a haptic, for a
+     * long-press with nothing to clear.
+     */
+    @Test
+    fun `the Clear filter accessibility action is absent with no filter live`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNode(hasClearFilterAction).assertDoesNotExist()
+        compose.onNodeWithContentDescription("Search").assert(hasAnyLongClickAction.not())
+    }
+
+    /**
+     * Pressing the icon while a filter is already live has to reopen the
+     * field showing the query that produced it, not an empty box — the
+     * query was never touched by collapsing, so there is a live filter's
+     * text to edit. A version whose `onClick` cleared the query before
+     * reopening would pass every test above (none of them presses the icon
+     * a second time with a filter already live) and fail only this one.
+     */
+    @Test
+    fun `pressing the icon with a filter live reopens the field showing the query`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = "Wat")
+
+        compose.onNodeWithContentDescription("Search, filter active").performClick()
+        settleAnimation()
+
+        compose.onNode(hasSetTextAction()).assertTextEquals("Wat")
+    }
+
+    /**
+     * Collapsed with a filter live, the icon and the count are the only two
+     * things on screen saying the list is not the whole of it — hard-coding
+     * the plain description (mutation 10) would pass every other test here,
+     * since none of the earlier ones checks the description's exact text
+     * while a filter is live and the field is collapsed at the same time.
+     */
+    @Test
+    fun `collapsed with a filter live, the active icon and the count are both present`() {
+        val thirty = (1..30).map { i ->
+            Habit(id = i.toLong(), name = if (i <= 3) "Match $i" else "Habit $i")
+        }
+        show(habits = thirty, rows = thirty, query = "Match")
+
+        compose.onNodeWithContentDescription("Search, filter active").assertIsDisplayed()
+        compose.onNodeWithText("3 of 30").assertIsDisplayed()
+    }
+
+    /**
+     * The control for the test above: with no filter live the icon reads
+     * plain `"Search"` and no `"N of M"` count renders at all. Registering
+     * the active description unconditionally (mutation 11) passes the test
+     * above and fails only this one.
+     */
+    @Test
+    fun `collapsed with no filter live, the icon reads plain Search and no count shows`() {
+        show(habits = listOf(water, reading), rows = listOf(water, reading))
+
+        compose.onNodeWithContentDescription("Search, filter active").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Search").assertIsDisplayed()
+        compose.onNode(hasText(" of ", substring = true)).assertDoesNotExist()
+    }
+
+    /**
+     * The bar's five "a filter is live" claims have to agree with the filter.
+     *
+     * `HabitFilter.fold` strips every `Mn` codepoint before `matches` looks at
+     * what is left, so a query of nothing but a combining acute (U+0301, with
+     * no base letter — a paste, or an orphaned dead key) matches every habit:
+     * the list on screen is the WHOLE account. Asked `query.isNotBlank()`, the
+     * bar answered yes anyway — badge, `primary` tint, "Search, filter active"
+     * to TalkBack, a "2 of 2" count and a long-press advertised as clearing a
+     * filter that does not exist. The whole list being asserted present is the
+     * half that makes the rest a contradiction rather than a preference.
+     */
+    @Test
+    fun `a query that folds to nothing is not shown as a live filter`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = COMBINING_ACUTE)
+
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertIsDisplayed()
+
+        compose.onNodeWithContentDescription("Search, filter active").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Search").assertIsDisplayed()
+        compose.onNode(hasText(" of ", substring = true)).assertDoesNotExist()
+        compose.onNode(hasClearFilterAction).assertDoesNotExist()
+    }
+
+    /**
+     * The test that catches the missing `onSearchOpenChange(false)` in the
+     * focus effect (step 1's second mutation, left green at that step on
+     * purpose): a notification tap has to beat an OPEN field as well as a
+     * live query, or it lands on exactly the hidden-filter state this issue
+     * exists to prevent.
+     *
+     * The query starts BLANK on purpose, not "something": with a live query,
+     * `query` itself changes value inside the collapse branch (to `""`), and
+     * that change alone re-runs the effect regardless of whether `searchOpen`
+     * is one of its keys — so a version that also dropped `searchOpen` from
+     * the key list would still pass. With the query blank throughout,
+     * `searchOpen` going true→false in that same branch is the ONLY key that
+     * changes value, so the second run (the one that resolves `focusHabit`
+     * and scrolls) only happens if `searchOpen` stays in the key list. This
+     * is what makes this one test catch both halves of step 1's second
+     * mutation: the missing call, and the guard never being re-evaluated at
+     * all.
+     */
+    @Test
+    fun `a focusHabit arriving with the field open ends collapsed, unfiltered and scrolled`() {
+        val many = manyHabits(20)
+        val target = many[18]
+        show(
+            habits = many,
+            rows = many,
+            query = "",
+            searchOpen = true,
+            focusHabit = target.id,
+        )
+
+        assertTrue(focused)
+        assertEquals("", currentQuery)
+        assertFalse(currentSearchOpen)
+        assertTrue(listState.firstVisibleItemIndex > 0)
+    }
+
+    /**
+     * `IconButton` with no `contentDescription` compiles, renders, and is
+     * invisible to TalkBack and to every test that would have caught it —
+     * this is that test, and its control, in one: Stats has to be reachable
+     * by description and must NOT still be reachable by the text it lost.
+     */
+    @Test
+    fun `Stats is reachable by content description and no longer by text`() {
+        show(habits = listOf(water, reading), rows = listOf(water, reading))
+
+        compose.onNodeWithContentDescription("Stats").assertIsDisplayed()
+        compose.onNodeWithText("Stats").assertDoesNotExist()
+    }
+
+    /**
+     * Decision 2: the icon is hidden at zero habits, where the onboarding
+     * panel is what shows instead and there is nothing to search.
+     */
+    @Test
+    fun `no search icon on an empty account`() {
+        show(habits = emptyList(), rows = emptyList())
+
+        compose.onNodeWithContentDescription("Search").assertDoesNotExist()
+        compose.onNodeWithText("No habits yet.").assertIsDisplayed()
+    }
+
+    /**
+     * Not decision 2 reopened: with no habits AND no filter the icon stays
+     * hidden (the test above). But filter down to nothing and then archive
+     * every matching habit — `habits` itself goes empty while the query that
+     * emptied it is still live — and the icon is the only control that can
+     * clear or reopen that filter. Gate it on `habits.isNotEmpty()` alone and
+     * it vanishes along with the last habit, leaving the filter live,
+     * unclearable, and hiding whatever gets created next. Inherited from
+     * #173's `showSearch`, which carried `|| query.isNotEmpty()` for the
+     * identical reason.
+     */
+    @Test
+    fun `the active search icon survives habits going empty under a live filter`() {
+        show(habits = emptyList(), rows = emptyList(), query = "x")
+
+        compose.onNodeWithContentDescription("Search, filter active").assertIsDisplayed()
+    }
+
+    /**
+     * This client has no equivalent of the web's `responsive.mjs`, so a
+     * width is asserted here deliberately or not at all. `assertIsDisplayed()`
+     * fails on a clipped node — that is the entire point of driving this at
+     * `w360dp`, the narrowest phone width this project targets, rather than
+     * the class's own `w400dp`, which the scroll-restore test needs left
+     * alone. Clear only renders once the query is non-empty, so the field is
+     * typed into before the expanded assertions — otherwise this would never
+     * catch a version that clips only once all three trailing controls are
+     * on screen.
+     *
+     * `assertIsDisplayed` alone would not catch a field given a FIXED width
+     * instead of `fillMaxWidth()`: Compose's size modifiers coerce a request
+     * down to the incoming constraint rather than ever overflowing it, so a
+     * fixed width — whatever value it names — never produces a clipped node;
+     * it produces one that simply stops short of the bar's edge, still fully
+     * displayed. That is what is checked directly: `fillMaxWidth()` measures
+     * the field to the root's own right edge (confirmed empirically at
+     * 360dp with no trailing gap), so its `right` edge — read via
+     * `getUnclippedBoundsInRoot`, which reports where a node was measured and
+     * placed regardless of what a parent did to it afterward — is asserted
+     * to reach nearly all the way there. A fixed width stops well short of
+     * that (320dp measures to 336dp, a 24dp gap this floor catches).
+     */
+    @Config(qualifiers = "w360dp-h800dp")
+    @Test
+    fun `the bar fits at 360dp, collapsed and expanded`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithText("Today").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Stats").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Search").assertIsDisplayed()
+        compose.onNodeWithContentDescription("More").assertIsDisplayed()
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("W")
+        compose.waitForIdle()
+
+        compose.onNode(hasSetTextAction()).assertIsDisplayed()
+        compose.onNodeWithContentDescription("Clear").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Confirm").assertIsDisplayed()
+        val fieldRight = compose.onNode(hasSetTextAction()).getUnclippedBoundsInRoot().right
+        assertTrue(fieldRight >= 355.dp)
+    }
+
+    /**
+     * The state this whole issue is for: a query confirmed, the field
+     * dismissed, and the list empty as a RESULT rather than an account with
+     * nothing in it. "No habits match that.", the ungated `"0 of 30"` and the
+     * active icon are the only three things on screen explaining why the
+     * list looks the way it does — re-gating the count on `searchOpen`
+     * (mutation 16) would make this exact state show a partial list with
+     * nothing that says so.
+     */
+    @Test
+    fun `the empty-result branch reached while collapsed still shows the ungated count and active icon`() {
+        val thirty = (1..30).map { Habit(id = it.toLong(), name = "Habit $it") }
+        show(habits = thirty, rows = thirty)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("zzzznomatch")
+        compose.waitForIdle()
+
+        compose.onNodeWithContentDescription("Confirm").performClick()
+        settleAnimation()
+
+        compose.onNodeWithText("No habits match that.").assertIsDisplayed()
+        compose.onNodeWithText("0 of 30").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Search, filter active").assertIsDisplayed()
+    }
+
+    /**
+     * The search icon is a bare `Box` + `combinedClickable` rather than an
+     * `IconButton` (which gives no long-press), and that trade has one thing
+     * to pay back: `IconButton` passes `Role.Button` to its own `clickable`
+     * and a bare `combinedClickable` leaves `Role` out of the semantics
+     * config entirely. Measured before the fix — `search role=null` against
+     * `stats role=Button` — so TalkBack announced the one control carrying
+     * "a filter is live" as neither a button nor anything else, alone among
+     * the four `IconButton`s beside it.
+     *
+     * Two tests rather than one because `show()` can only be called once per
+     * test: the role is the one thing on this control that must NOT vary with
+     * `filtering`, while the description, the badge, the tint and the
+     * long-click action all do, so both states are asserted.
+     */
+    @Test
+    fun `the search icon is announced as a button, with no filter live`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+        // The control it is announced beside, so a version that dropped the
+        // role from BOTH — an `IconButton` regression, say — cannot pass this
+        // by making the comparison vacuous.
+        compose.onNodeWithContentDescription("Stats")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+    }
+
+    /** The half of the case above that the badge and the tint also change. */
+    @Test
+    fun `the active search icon is announced as a button too`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = "Wat")
+
+        compose.onNodeWithContentDescription("Search, filter active")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+    }
+
+    /**
+     * The field lives in `TopAppBar`'s TITLE slot — which is what gives it the
+     * bar's whole width — and that slot is wrapped in
+     * `ProvideTextStyle(titleTextStyle)`. `TextField`'s `textStyle` defaults
+     * to `LocalTextStyle.current`, so with none passed the query rendered at
+     * the bar's headline size. Measured, not reasoned: a probe reading
+     * `LocalTextStyle.current` from inside a bare `TopAppBar(title = …)`
+     * returns `size=22.0.sp lh=28.0.sp`, roughly a third fewer characters
+     * visible on a 360dp bar before the text scrolls under the caret.
+     *
+     * Asserted through `GetTextLayoutResult` — the style the text layout was
+     * actually performed with — because nothing else discriminates the two:
+     * the field measures to the bar's 64dp height either way, so
+     * `the bar fits at 360dp` and every other bounds assertion here passes
+     * against both. This is the "assert the output that reached the platform"
+     * rule; a test that read the constant back would pin the decision and not
+     * the wiring, and the wiring is the entire defect.
+     */
+    @Config(qualifiers = "w360dp-h800dp")
+    @Test
+    fun `the expanded field renders its query at body size, not the bar's title size`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        compose.onNodeWithContentDescription("Search").performClick()
+        settleAnimation()
+        compose.onNode(hasSetTextAction()).performTextInput("Wat")
+        compose.waitForIdle()
+
+        val layouts = mutableListOf<TextLayoutResult>()
+        compose.onNode(hasSetTextAction())
+            .fetchSemanticsNode()
+            .config[SemanticsActions.GetTextLayoutResult]
+            .action!!(layouts)
+
+        assertEquals(16.sp, layouts.single().layoutInput.style.fontSize)
     }
 }

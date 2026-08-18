@@ -1,21 +1,37 @@
 package com.habiterall.app.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -26,14 +42,19 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -42,7 +63,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.HabitFilter
@@ -63,15 +94,18 @@ import com.habiterall.app.data.HabitFilter
  * pending-write overlay laid on, still unfiltered; and `visible` — computed
  * here from `rows.filter { HabitFilter.matches(it, query) }` — is what the
  * `LazyColumn` actually renders. The reorder hand-off, its `enabled`, the
- * full-screen error branch and the search box's own visibility threshold all
- * read `habits`, on purpose: handing any of those a filtered subset is wrong in
- * a way that ranges from "looks wrong" (the box vanishing under the query that
- * would show it) to "corrupts stored data" (a reorder rewriting the position of
- * every habit that was not on screen). `ScrollRestore` and the `focusHabit`
- * index read `visible`, because both are about what the `LazyColumn` actually
- * holds.
+ * full-screen error branch and the search icon's own
+ * `habits.isNotEmpty() || filtering` gate all read `habits`, on purpose:
+ * handing any of those a filtered subset is wrong in a way that ranges from
+ * "looks wrong" (the icon vanishing while a query it is showing is still live)
+ * to "corrupts stored data" (a reorder rewriting the position of every habit
+ * that was not on screen). The icon's second clause is not a hedge on the
+ * first: `filtering` is what keeps the only control that can clear a filter on
+ * screen once `habits` itself goes empty underneath one. `ScrollRestore`
+ * and the `focusHabit` index read `visible`, because both are about what the
+ * `LazyColumn` actually holds.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HabitList(
     habits: List<Habit>,          // the fetched list, unfiltered
@@ -84,6 +118,8 @@ fun HabitList(
     questionMarks: Boolean,
     query: String,
     onQueryChange: (String) -> Unit,
+    searchOpen: Boolean,
+    onSearchOpenChange: (Boolean) -> Unit,
     listState: LazyListState,
     dayScroll: ScrollState,
     snackbar: SnackbarHostState,
@@ -107,7 +143,14 @@ fun HabitList(
     // search box, if it holds anything. `remember`ed on both, not recomputed
     // per recomposition for no reason — this runs per keystroke.
     val visible = remember(rows, query) { rows.filter { HabitFilter.matches(it, query) } }
-    val filtering = query.isNotBlank()
+    // `HabitFilter.isActive`, not `query.isNotBlank()`: this drives the active
+    // badge, the tint, the "filter active" description, the long-press to clear
+    // and the "N of M" count — five claims that a filter is narrowing the list
+    // — so it has to be the predicate the FILTER decides by rather than a
+    // second, near-enough one. `matches` folds before it looks, and a query of
+    // only combining marks folds to nothing and matches everything: not blank,
+    // not filtering.
+    val filtering = HabitFilter.isActive(query)
 
     // Correct a restored scroll position that no longer fits the list.
     //
@@ -148,75 +191,339 @@ fun HabitList(
     // snap-to-top below. Returning without `onFocused()` on the clearing pass
     // is deliberate too: calling it here would clear the focus as though the
     // habit had already been found, when the very next recomposition is the
-    // pass that looks for it.
-    LaunchedEffect(focusHabit, visible, loaded, query) {
+    // pass that looks for it. `searchOpen` joins `query` as both a guard and a
+    // key for the identical reason: a tap arriving with the field expanded but
+    // no text typed would otherwise leave the field open over a list the user
+    // never filtered, and keyed on `visible` alone this effect would not even
+    // re-run to collapse it once `query` had nothing to change.
+    //
+    // This one guard stays `query.isNotBlank()` rather than `filtering`, and
+    // the difference is deliberate: `filtering` asks whether the query narrows
+    // the list, while this asks whether the BOX still holds text a tap should
+    // take away. A query that folds to nothing narrows nothing but is still
+    // text, and leaving it there means the next thing typed is appended to it.
+    // Being the wider predicate costs one extra pass and ends in the same
+    // empty box.
+    LaunchedEffect(focusHabit, visible, loaded, query, searchOpen) {
         if (focusHabit == null || !loaded) return@LaunchedEffect
-        if (query.isNotBlank()) { onQueryChange(""); return@LaunchedEffect }
+        if (query.isNotBlank() || searchOpen) {
+            onQueryChange("")
+            onSearchOpenChange(false)
+            return@LaunchedEffect
+        }
         val index = visible.indexOfFirst { it.id == focusHabit }
         if (index >= 0) listState.scrollToItem(index)
         onFocused()
     }
 
     var menuOpen by remember { mutableStateOf(false) }
-    // Whether the search field itself holds focus. Read alongside the query
-    // and the unfiltered count so the box never disappears out from under the
-    // caret: see `showSearch` below.
-    var boxHasFocus by remember { mutableStateOf(false) }
+
+    val haptic = LocalHapticFeedback.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val searchFocusRequester = remember { FocusRequester() }
+
+    // The group's FIRST `onFocusChanged` callback after it is composed always
+    // reports `hasFocus = false` — nothing has been granted focus yet, and
+    // `requestFocus()` below is still pending in its own effect. Confirming on
+    // that callback treated "never focused" the same as "lost focus", so
+    // opening the field closed it again on the very next frame. `everFocused`
+    // is keyed on `searchOpen` so it starts fresh each time the field opens,
+    // and tap-off only fires past the point focus was actually granted once.
+    var everFocused by remember(searchOpen) { mutableStateOf(false) }
+
+    // Long-press-to-clear, shared by the collapsed icon's gesture and its
+    // TalkBack custom action below, so the two cannot drift apart on what
+    // "clear" means. No snackbar: the list visibly growing back and the icon
+    // visibly deactivating are the feedback, and the haptic tells a user who
+    // is not looking at the screen that the press landed.
+    fun clearFilter() {
+        onQueryChange("")
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
+
+    // The one path back to collapsed with the filter kept, called from
+    // Confirm, the IME action, back and tap-off — so the four exits cannot
+    // disagree about what "confirm" does.
+    fun confirmSearch() {
+        onSearchOpenChange(false)
+        keyboard?.hide()
+    }
+
+    // Left to the system, back exits the screen entirely, which is the wrong
+    // answer while the field is open rather than the list.
+    BackHandler(enabled = searchOpen) { confirmSearch() }
+
+    LaunchedEffect(searchOpen) {
+        if (searchOpen) searchFocusRequester.requestFocus()
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Today") },
-                actions = {
-                    TextButton(onClick = onOpenStats) { Text("Stats") }
-                    // An overflow rather than more buttons: the bar already
-                    // carries Stats, and a 360dp phone runs out of room at
-                    // three. Everything in here is a screen, not an action.
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "More")
+                title = {
+                    // "Today" gives way the instant the field expands; the
+                    // field itself fades back in over the shrink animation on
+                    // the way down, which is the one place the two visibly
+                    // overlap. Not worth a crossfade for a transition this
+                    // short-lived.
+                    if (!searchOpen) {
+                        Text("Today")
                     }
-                    DropdownMenu(
-                        expanded = menuOpen,
-                        onDismissRequest = { menuOpen = false },
+                    // In the title slot, not the actions row: that is what
+                    // gives it the bar's width once Stats, the search icon and
+                    // the overflow give way below. The animation is what makes
+                    // the icon and the field read as one control rather than
+                    // one replacing the other with no relationship shown.
+                    AnimatedVisibility(
+                        visible = searchOpen,
+                        enter = expandHorizontally(expandFrom = Alignment.End),
+                        exit = shrinkHorizontally(shrinkTowards = Alignment.End),
                     ) {
-                        DropdownMenuItem(
-                            text = { Text("Reorder habits") },
-                            // Two, not one: a single habit has nowhere to
-                            // go, and a screen whose every button is
-                            // disabled is worse than a menu item that is.
-                            //
-                            // `habits`, not `visible`: `ReorderScreen` writes
-                            // the WHOLE order back to the server — every id's
-                            // index becomes its `position` — so handing it a
-                            // filtered subset would rewrite the position of
-                            // every habit a live query had hidden. This is the
-                            // one hazard here that corrupts stored data rather
-                            // than just looking wrong, which is also why the
-                            // reorder screen is a separate full-screen list
-                            // rather than the web's in-place drag handle: it
-                            // keeps working under a query that hides most of
-                            // the grid.
-                            enabled = habits.size > 1,
-                            onClick = { menuOpen = false; onReorder(habits) },
+                        TextField(
+                            value = query,
+                            onValueChange = onQueryChange,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(searchFocusRequester)
+                                .focusGroup()
+                                .onFocusChanged {
+                                    // The GROUP's focus, not the field's own:
+                                    // pressing Clear or Confirm moves focus to
+                                    // that button first, and an `isFocused`
+                                    // check on just the field would read that
+                                    // as focus having left and auto-confirm
+                                    // out from under the press.
+                                    //
+                                    // Gated on `everFocused`: this callback
+                                    // also fires once on composition, before
+                                    // `requestFocus()` below has run, reporting
+                                    // `hasFocus = false` for a group nothing
+                                    // has touched yet — treating that as a
+                                    // loss confirmed the field shut on the same
+                                    // frame it opened.
+                                    if (it.hasFocus) {
+                                        everFocused = true
+                                    } else if (searchOpen && everFocused) {
+                                        confirmSearch()
+                                    }
+                                },
+                            singleLine = true,
+                            // Explicit, because this field is in the TITLE
+                            // slot: `TopAppBar` wraps that slot in
+                            // `ProvideTextStyle(titleTextStyle)`, and
+                            // `TextField`'s `textStyle` defaults to
+                            // `LocalTextStyle.current` — so a query typed here
+                            // renders at the bar's 22sp/28sp headline rather
+                            // than the 16sp every other field in this app
+                            // uses, roughly a third fewer characters visible
+                            // on a 360dp bar before it scrolls under the
+                            // caret. Nothing chose 22sp; it was inherited.
+                            textStyle = MaterialTheme.typography.bodyLarge,
+                            placeholder = { Text("Find a habit") },
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
+                            ),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { confirmSearch() }),
+                            trailingIcon = {
+                                Row {
+                                    // Absent on an empty query, where it would
+                                    // mean the same thing as Confirm beside it.
+                                    if (query.isNotEmpty()) {
+                                        TooltipBox(
+                                            positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                                            tooltip = { PlainTooltip { Text("Clear") } },
+                                            state = rememberTooltipState(),
+                                        ) {
+                                            IconButton(onClick = { onQueryChange("") }) {
+                                                Icon(Icons.Default.Clear, contentDescription = "Clear")
+                                            }
+                                        }
+                                    }
+                                    TooltipBox(
+                                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                                        tooltip = { PlainTooltip { Text("Confirm") } },
+                                        state = rememberTooltipState(),
+                                    ) {
+                                        IconButton(onClick = { confirmSearch() }) {
+                                            Icon(Icons.Default.Check, contentDescription = "Confirm")
+                                        }
+                                    }
+                                }
+                            },
                         )
-                        DropdownMenuItem(
-                            text = { Text("Archived habits") },
-                            onClick = { menuOpen = false; onOpenArchive() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Settings") },
-                            onClick = { menuOpen = false; onOpenSettings() },
-                        )
-                        onSignOut?.let { signOut ->
+                    }
+                },
+                actions = {
+                    // Stats, the search icon and the overflow all give way
+                    // while the field is expanded, so it gets the bar's width
+                    // rather than what is left over from three 48dp icons;
+                    // all three come back the moment `confirmSearch` collapses
+                    // it.
+                    if (!searchOpen) {
+                        TooltipBox(
+                            positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                            tooltip = { PlainTooltip { Text("Stats") } },
+                            state = rememberTooltipState(),
+                        ) {
+                            IconButton(onClick = onOpenStats) {
+                                Icon(Icons.Default.BarChart, contentDescription = "Stats")
+                            }
+                        }
+                        // Hidden on an empty account: the onboarding panel or
+                        // the full-screen error branch is what shows instead,
+                        // and neither is a thing to search. Reads `habits`,
+                        // the unfiltered list, for the same reason the reorder
+                        // hand-off and the error branch do.
+                        //
+                        // `|| filtering` is inherited from #173's `showSearch`
+                        // (`habits.size >= SEARCH_FROM || query.isNotEmpty() ||
+                        // boxHasFocus`), which carried the identical clause for
+                        // the identical reason: the icon is the only control
+                        // that can clear or re-open a live filter, so it must
+                        // not disappear along with the last habit a filter
+                        // narrowed the list to. This does not reopen the
+                        // decision that the icon is hidden on an empty
+                        // account — with no habits AND no filter it stays
+                        // hidden; the clause only keeps the escape hatch alive
+                        // while a filter it produced is still narrowing
+                        // something.
+                        if (habits.isNotEmpty() || filtering) {
+                            val searchDescription =
+                                if (filtering) "Search, filter active" else "Search"
+                            // No `TooltipBox` here, unlike Stats/Clear/Confirm
+                            // below: `TooltipBox(enableUserInput = true)`
+                            // (the default) drives `anchorSemantics`, which
+                            // adds the tooltip's OWN long-click semantics
+                            // action to this node — on top of the
+                            // `onLongClick(label = "Clear filter")` below, two
+                            // long-click consumers on one control, a "Search"
+                            // bubble popping up over the gesture that drops
+                            // the filter, and TalkBack left to choose between
+                            // two long-click actions on one node. This
+                            // control's long-press is already spoken for, so
+                            // it cannot also carry a tooltip. It also does not
+                            // need one the other three do: a magnifying glass
+                            // is self-evident in a way a bar-chart glyph is
+                            // not, and Search never had a word on the bar to
+                            // lose the way Stats just did.
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .combinedClickable(
+                                        // Stats, More, Clear and Confirm are
+                                        // all `IconButton`, which passes this
+                                        // for them; a bare `combinedClickable`
+                                        // leaves `Role` out of the config
+                                        // entirely, so TalkBack announced this
+                                        // one control — the one carrying "a
+                                        // filter is live" — as neither a
+                                        // button nor anything else, alone
+                                        // among its four neighbours.
+                                        role = Role.Button,
+                                        onClick = { onSearchOpenChange(true) },
+                                        // `null`, not an empty lambda, when
+                                        // there is nothing to clear:
+                                        // `combinedClickable` registers no
+                                        // `OnLongClick` semantics action at
+                                        // all for a null handler, which is
+                                        // what stops an unconditional press
+                                        // from firing the haptic for a no-op
+                                        // and stops TalkBack advertising a
+                                        // long-press that does nothing.
+                                        onLongClick = if (filtering) ({ clearFilter() }) else null,
+                                    )
+                                    // A custom accessibility action, only
+                                    // while there is something to clear —
+                                    // a long-press handler is otherwise
+                                    // invisible to TalkBack, and
+                                    // advertising it with no filter live
+                                    // advertises a no-op.
+                                    .then(
+                                        if (filtering) {
+                                            Modifier.semantics {
+                                                onLongClick(label = "Clear filter") {
+                                                    clearFilter()
+                                                    true
+                                                }
+                                            }
+                                        } else {
+                                            Modifier
+                                        },
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                // Badge AND tint, not tint alone: colour
+                                // must not be the only channel a filter's
+                                // liveness is shown on, and the
+                                // description is the only channel TalkBack
+                                // has.
+                                if (filtering) {
+                                    BadgedBox(badge = { Badge() }) {
+                                        Icon(
+                                            Icons.Default.Search,
+                                            contentDescription = searchDescription,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                } else {
+                                    Icon(Icons.Default.Search, contentDescription = searchDescription)
+                                }
+                            }
+                        }
+                        // An overflow rather than more buttons: everything in
+                        // here is a screen, not an action — three 48dp
+                        // targets plus a "Today" comfortably fit a 360dp bar,
+                        // so width was never the reason.
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false },
+                        ) {
                             DropdownMenuItem(
-                                text = { Text("Sign out") },
-                                onClick = { menuOpen = false; signOut() },
+                                text = { Text("Reorder habits") },
+                                // Two, not one: a single habit has nowhere to
+                                // go, and a screen whose every button is
+                                // disabled is worse than a menu item that is.
+                                //
+                                // `habits`, not `visible`: `ReorderScreen` writes
+                                // the WHOLE order back to the server — every id's
+                                // index becomes its `position` — so handing it a
+                                // filtered subset would rewrite the position of
+                                // every habit a live query had hidden. This is the
+                                // one hazard here that corrupts stored data rather
+                                // than just looking wrong, which is also why the
+                                // reorder screen is a separate full-screen list
+                                // rather than the web's in-place drag handle: it
+                                // keeps working under a query that hides most of
+                                // the grid.
+                                enabled = habits.size > 1,
+                                onClick = { menuOpen = false; onReorder(habits) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Archived habits") },
+                                onClick = { menuOpen = false; onOpenArchive() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                onClick = { menuOpen = false; onOpenSettings() },
+                            )
+                            onSignOut?.let { signOut ->
+                                DropdownMenuItem(
+                                    text = { Text("Sign out") },
+                                    onClick = { menuOpen = false; signOut() },
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text("Change server") },
+                                onClick = { menuOpen = false; onChangeServer() },
                             )
                         }
-                        DropdownMenuItem(
-                            text = { Text("Change server") },
-                            onClick = { menuOpen = false; onChangeServer() },
-                        )
                     }
                 },
             )
@@ -247,45 +554,21 @@ fun HabitList(
             Column(Modifier.fillMaxSize()) {
                 // Above `DayHeader` and outside the `when` below, on purpose:
                 // a query that matches nothing switches the `when` to the
-                // no-match branch, and a box that lived only inside the list
-                // branch would vanish along with it — leaving no way to type
-                // the query back out.
+                // no-match branch, and a count that lived only inside the list
+                // branch would vanish along with it — leaving a partial list
+                // on screen with nothing that says it is partial.
                 //
-                // The threshold reads `habits`, the unfiltered count, mirroring
-                // `dashboard.js`: #74's own framing is "fine at eight habits and
-                // unpleasant at thirty", and a control above a list of four is
-                // clutter. The other two clauses are why the box never
-                // disappears out from under the caret — below the threshold,
-                // clearing the query would otherwise hide the row the cursor is
-                // sitting in.
-                val showSearch = habits.size >= SEARCH_FROM ||
-                    query.isNotEmpty() ||
-                    boxHasFocus
-                if (showSearch) {
-                    OutlinedTextField(
-                        value = query,
-                        onValueChange = onQueryChange,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                            .onFocusChanged { boxHasFocus = it.isFocused },
-                        singleLine = true,
-                        label = { Text("Find a habit") },
-                        trailingIcon = {
-                            if (query.isNotEmpty()) {
-                                IconButton(onClick = { onQueryChange("") }) {
-                                    Icon(Icons.Default.Clear, contentDescription = "Clear")
-                                }
-                            }
-                        },
+                // Ungated on `searchOpen`: a filter survives the field
+                // collapsing, and once it does, this line plus the active
+                // search icon are the only two things on screen saying the
+                // list is not the whole of it. Divisor stays `habits.size`,
+                // the unfiltered count.
+                if (filtering) {
+                    Text(
+                        "${visible.size} of ${habits.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp),
                     )
-                    if (filtering) {
-                        Text(
-                            "${visible.size} of ${habits.size}",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(horizontal = 16.dp),
-                        )
-                    }
                 }
                 Box(Modifier.weight(1f)) {
                     when {
@@ -357,16 +640,6 @@ fun HabitList(
         }
     }
 }
-
-/**
- * The box appears once there are enough habits to lose one in.
- *
- * #74's own framing: "fine at eight habits and unpleasant at thirty" — a
- * control above a list of four is clutter. Mirrors `dashboard.js`'s
- * `SEARCH_FROM`; not imported from anywhere, because there is nowhere shared
- * to import it from — this predicate reaches no storage and is not a mirror.
- */
-private const val SEARCH_FROM = 6
 
 // Not `private`, unlike everything else moved here: MainActivity's own
 // `onCreate` still calls this directly for two branches that are not part of

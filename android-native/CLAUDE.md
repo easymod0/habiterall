@@ -43,19 +43,61 @@ below a correct pure function.
 
 **The rendered list is a SUBSET, and three things must keep reading the
 unfiltered one** — the reorder hand-off and its `enabled`, the full-screen error
-branch, and the search-box threshold — **while two must read the rendered one**:
-`ScrollRestore`'s item count and the `focusHabit` index. A reorder against a
-subset writes a wrong `position` for habits that were never on screen, and it is
-the only one of the five that reaches storage; the rest only look wrong — the
-error screen replacing a working list, the search box vanishing under its own
-caret, or `ScrollRestore` and the focus effect answering about a list the
-`LazyColumn` does not hold.
+branch, and the search icon's own `habits.isNotEmpty() || filtering` gate —
+**while two must read the rendered one**: `ScrollRestore`'s item count and the
+`focusHabit` index. A reorder against a subset writes a wrong `position` for
+habits that were never on screen, and it is the only one of the five that
+reaches storage; the rest only look wrong — the error screen replacing a working
+list, the search icon itself disappearing (were it gated on `visible` instead)
+at the exact moment a live query narrows the list to nothing, taking with it the
+only way back to the rest of the list, or `ScrollRestore` and the focus effect
+answering about a list the `LazyColumn` does not hold.
+
+**The icon's gate has two clauses and the second one is load bearing.** Quote it
+whole — `habits.isNotEmpty() || filtering` — because the shorter half is the one
+that reads like the whole rule and is not. `filtering` is what keeps the icon on
+screen when `habits` goes empty UNDER a live filter (archive down to nothing
+with a query set), which is the one state where the control that can clear a
+filter would otherwise vanish along with the thing it was filtering. #173's
+`showSearch` carried the same clause as `|| query.isNotEmpty()`; deleting the
+six-habit threshold took it along, and it had to come back.
 
 **A notification tap beats a filter**, and the focus effect is keyed on `query`
 as well as the list because a query matching everything yields an `equals` list
 when it clears — keyed on the list alone, the effect would never re-run and the
 focus would stay pending for the life of the process, which is exactly what
-suppresses the resume snap-to-top.
+suppresses the resume snap-to-top. `searchOpen` joins that key list, and its
+guard, for the identical reason: a notification can arrive with the field
+expanded but nothing typed, where `query` alone has nothing to change and the
+effect would never re-fire to collapse it.
+
+**A filter that outlives the box it was typed in is a subset with its reason
+off screen, so the active icon and the ungated count are not decoration.**
+Confirm collapses the field on purpose without clearing the query, and the
+count `Text` is gated on `filtering` rather than on `searchOpen` for the same
+reason the icon renders `BadgedBox` and tints itself
+`MaterialTheme.colorScheme.primary` on that condition: drop any of the three
+and a collapsed, filtered list reads as the whole of the account, with nothing
+left on screen saying it is not.
+
+**The field is in the bar's TITLE slot, so it inherits a style nobody chose.**
+`TopAppBar` wraps that slot in `ProvideTextStyle(titleTextStyle)` and
+`TextField`'s `textStyle` defaults to `LocalTextStyle.current` — measured at
+22sp/28sp, against the 16sp every other field in this app uses. It is passed
+explicitly for that reason, and pinned through `GetTextLayoutResult` because
+nothing bounds-based can see it: the field measures to the bar's 64dp height
+either way. The search icon's `role = Role.Button` is the same shape of
+omission — `IconButton` supplies one, a bare `combinedClickable` does not, and
+this control cannot be an `IconButton` because it needs the long-press.
+
+**The two clients now disagree about when a search is offered, on purpose —
+do not "fix" the difference.** The web keeps `dashboard.js`'s `SEARCH_FROM = 6`
+untouched; the phone drops its own threshold entirely and offers a 48dp icon
+from the first habit up, because an icon costs almost nothing while a
+permanent row is only worth a 1440px dashboard's spare width. Neither predicate
+reaches storage, so there is no shared truth for the two to have drifted out
+of — only two different "is this control worth its space" answers to two
+budgets that are not comparable.
 
 **`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two
@@ -63,6 +105,19 @@ clients disagreeing about diacritic folding costs a search result, not a wrong
 entry. The two folds are near-identical, not equal — Java's `\p{Mn}` and JS's
 `\p{Diacritic}` part ways on marks like the Hawaiian ʻokina — and that gap is
 tolerated for the same reason: nothing here reaches disk.
+
+**"Is a filter live" is `HabitFilter.isActive`, never `query.isNotBlank()`.**
+The bar makes five claims off it — the badge, the `primary` tint, "Search,
+filter active", the long-press that clears, and the "N of M" count — and all
+five are claims about what `matches` is doing, so they have to be decided by
+the same predicate `matches` decides by. The fold strips before it looks: a
+query of nothing but combining marks (a bare U+0301, pasted or left by an
+orphaned dead key) folds to the empty string and matches every habit, while
+being neither empty nor whitespace. Asked the wrong way the bar announced a
+live filter over a complete list, with the count reading "N of N". The one
+guard that stays `isNotBlank` is the focus effect's, and deliberately: that one
+asks whether the BOX holds text a notification tap should take away, not
+whether it narrows anything.
 
 ## Notifications
 
@@ -269,6 +324,9 @@ that has CHOSEN a convention is followed in the browser and not here. Under
 `auto`, which is almost everybody, the phone resolves its own locale and there is
 nothing to carry.
 
-`ReminderWiringTest` is the one place in this repo that uses Robolectric,
-deliberately: this package's bugs are all in the wiring, the wiring is Android,
-and a JVM test that cannot see an `Intent` cannot see any of them.
+Robolectric is not only `ReminderWiringTest`'s: `HabitListTest`,
+`ArchiveScreenTest`, `SettingsScreenTest` and `ReminderTimeFieldTest` all run
+under it too, and `HabitListTest` is now the largest suite in the package. The
+reason is the one this file has stated all along: this package's bugs are all
+in the wiring, the wiring is Android, and a JVM test that cannot see an
+`Intent` or drive a real `Composable` cannot see any of them.

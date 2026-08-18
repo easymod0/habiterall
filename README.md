@@ -1172,7 +1172,12 @@ above the dashboard. It folds case and strips accents, so "cafe" finds "Café",
 and it matches the description as well as the name — a habit called "Gym" whose
 description says "swimming Tuesdays" is one people look for by the second. It
 filters what is already on screen, so it works offline and costs no request.
-The Android app has the same box, at the same six, with a near-identical fold.
+The Android app offers the same search, but behind an icon in its top bar
+rather than a permanent row — a phone shows about four rows and can't spare a
+dashboard's vertical room — and it's offered as soon as the account holds any
+habits at all, not from six. Closing the field doesn't drop the filter: the
+icon stays lit and an "N of M" count stays on screen until you clear it. The
+fold is still near-identical.
 
 **Light, dark, or whatever this device is set to** — three states, not two, and
 the header's ◐ / ☀ / ☾ button cycles between them. *Follow this device* is
@@ -1491,9 +1496,13 @@ account to a new phone.
 The list itself is native: a row of days per habit — its current streak beside
 the name, tappable squares back through a year of history, the whole grid
 scrolling together and running whichever way your `dayOrder` setting says. It
-carries the same search, appearing at the same six habits, with a near-identical
-fold of case and accents, matching the description as well as the name, and
-filtering what is already on screen so it works offline. Everything a web page does well —
+carries the same search, behind an icon in the top bar rather than a permanent
+row — the phone doesn't have a dashboard's room to spare — offered from the
+first habit onward rather than six, with a near-identical fold of case and
+accents, matching the description as well as the name, and filtering what is
+already on screen so it works offline. Closing the field keeps a live filter
+in place: the icon shows active and an "N of M" count stays visible until it's
+cleared. Everything a web page does well —
 charts, the calendar, history editing — opens the server's own UI inside the
 app, so there is one implementation of the statistics rather than two, and
 tapping a habit lands on *that* habit's page rather than the dashboard.
