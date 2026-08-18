@@ -348,57 +348,89 @@ fun HabitList(
                         // and neither is a thing to search. Reads `habits`,
                         // the unfiltered list, for the same reason the reorder
                         // hand-off and the error branch do.
-                        if (habits.isNotEmpty()) {
+                        //
+                        // `|| filtering` is inherited from #173's `showSearch`
+                        // (`habits.size >= SEARCH_FROM || query.isNotEmpty() ||
+                        // boxHasFocus`), which carried the identical clause for
+                        // the identical reason: the icon is the only control
+                        // that can clear or re-open a live filter, so it must
+                        // not disappear along with the last habit a filter
+                        // narrowed the list to. This does not reopen the
+                        // decision that the icon is hidden on an empty
+                        // account — with no habits AND no filter it stays
+                        // hidden; the clause only keeps the escape hatch alive
+                        // while a filter it produced is still narrowing
+                        // something.
+                        if (habits.isNotEmpty() || filtering) {
                             val searchDescription =
                                 if (filtering) "Search, filter active" else "Search"
-                            TooltipBox(
-                                positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-                                tooltip = { PlainTooltip { Text("Search") } },
-                                state = rememberTooltipState(),
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .combinedClickable(
-                                            onClick = { onSearchOpenChange(true) },
-                                            onLongClick = { clearFilter() },
-                                        )
-                                        // A custom accessibility action, only
-                                        // while there is something to clear —
-                                        // a long-press handler is otherwise
-                                        // invisible to TalkBack, and
-                                        // advertising it with no filter live
-                                        // advertises a no-op.
-                                        .then(
-                                            if (filtering) {
-                                                Modifier.semantics {
-                                                    onLongClick(label = "Clear filter") {
-                                                        clearFilter()
-                                                        true
-                                                    }
+                            // No `TooltipBox` here, unlike Stats/Clear/Confirm
+                            // below: `TooltipBox(enableUserInput = true)`
+                            // (the default) drives `anchorSemantics`, which
+                            // adds the tooltip's OWN long-click semantics
+                            // action to this node — on top of the
+                            // `onLongClick(label = "Clear filter")` below, two
+                            // long-click consumers on one control, a "Search"
+                            // bubble popping up over the gesture that drops
+                            // the filter, and TalkBack left to choose between
+                            // two long-click actions on one node. This
+                            // control's long-press is already spoken for, so
+                            // it cannot also carry a tooltip. It also does not
+                            // need one the other three do: a magnifying glass
+                            // is self-evident in a way a bar-chart glyph is
+                            // not, and Search never had a word on the bar to
+                            // lose the way Stats just did.
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .combinedClickable(
+                                        onClick = { onSearchOpenChange(true) },
+                                        // `null`, not an empty lambda, when
+                                        // there is nothing to clear:
+                                        // `combinedClickable` registers no
+                                        // `OnLongClick` semantics action at
+                                        // all for a null handler, which is
+                                        // what stops an unconditional press
+                                        // from firing the haptic for a no-op
+                                        // and stops TalkBack advertising a
+                                        // long-press that does nothing.
+                                        onLongClick = if (filtering) ({ clearFilter() }) else null,
+                                    )
+                                    // A custom accessibility action, only
+                                    // while there is something to clear —
+                                    // a long-press handler is otherwise
+                                    // invisible to TalkBack, and
+                                    // advertising it with no filter live
+                                    // advertises a no-op.
+                                    .then(
+                                        if (filtering) {
+                                            Modifier.semantics {
+                                                onLongClick(label = "Clear filter") {
+                                                    clearFilter()
+                                                    true
                                                 }
-                                            } else {
-                                                Modifier
-                                            },
-                                        ),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    // Badge AND tint, not tint alone: colour
-                                    // must not be the only channel a filter's
-                                    // liveness is shown on, and the
-                                    // description is the only channel TalkBack
-                                    // has.
-                                    if (filtering) {
-                                        BadgedBox(badge = { Badge() }) {
-                                            Icon(
-                                                Icons.Default.Search,
-                                                contentDescription = searchDescription,
-                                                tint = MaterialTheme.colorScheme.primary,
-                                            )
-                                        }
-                                    } else {
-                                        Icon(Icons.Default.Search, contentDescription = searchDescription)
+                                            }
+                                        } else {
+                                            Modifier
+                                        },
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                // Badge AND tint, not tint alone: colour
+                                // must not be the only channel a filter's
+                                // liveness is shown on, and the
+                                // description is the only channel TalkBack
+                                // has.
+                                if (filtering) {
+                                    BadgedBox(badge = { Badge() }) {
+                                        Icon(
+                                            Icons.Default.Search,
+                                            contentDescription = searchDescription,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                        )
                                     }
+                                } else {
+                                    Icon(Icons.Default.Search, contentDescription = searchDescription)
                                 }
                             }
                         }

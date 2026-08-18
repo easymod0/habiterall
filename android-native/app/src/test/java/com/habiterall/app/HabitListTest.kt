@@ -10,12 +10,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -489,6 +492,19 @@ class HabitListTest {
     }
 
     /**
+     * Any `OnLongClick` action at all, labelled or not — the check that
+     * `hasClearFilterAction` above cannot make: a version that still passed
+     * `combinedClickable` an unconditional (unlabelled) `onLongClick` would
+     * carry no action matching `hasClearFilterAction` (no label) and would
+     * still fail `assertDoesNotExist(hasClearFilterAction)` for the wrong
+     * reason — it has no OTHER `OnLongClick` action to collide with, so
+     * nothing here would notice one being registered anyway.
+     */
+    private val hasAnyLongClickAction = SemanticsMatcher(
+        "has an OnLongClick accessibility action",
+    ) { node -> node.config.contains(SemanticsActions.OnLongClick) }
+
+    /**
      * Pressing the icon has to both show the field AND move keyboard focus
      * into it — a version that only toggles `searchOpen` without the
      * `FocusRequester` effect would pass every other test in this file (the
@@ -670,9 +686,53 @@ class HabitListTest {
     }
 
     /**
+     * The collapsed search icon's long-press is spoken for by
+     * `combinedClickable` + `semantics { onLongClick(label = "Clear filter") }`
+     * alone — no `TooltipBox` wraps it, unlike Stats/Clear/Confirm. A
+     * `TooltipBox` there would put a SECOND `OnLongClick`-carrying node
+     * (`anchorSemantics`) directly around this one.
+     *
+     * `useUnmergedTree = true` is why this test can see that at all: the
+     * MERGED tree — what every assertion above queries — collapses the two
+     * nodes into one, and `AccessibilityAction`'s own merge policy prefers the
+     * more deeply nested value's label, so a merged-tree check of the label
+     * alone reads "Clear filter" whether or not a `TooltipBox` sits on top
+     * contributing a second, unlabelled one. Counting UNMERGED nodes is the
+     * only way to see the second contributor.
+     *
+     * Scoped to a node with a "Search" descendant: `DayGrid`'s own habit-row
+     * and day-cell long presses ("Edit habit" / "Edit $date") are real
+     * `OnLongClick` actions elsewhere on this same screen, so counting every
+     * unmerged long-click node on screen (4, with two habits and one date
+     * column) would not isolate this control at all.
+     */
+    @Test
+    fun `the collapsed search icon is the only unmerged node carrying a long-click action`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = "Wat")
+
+        val searchLongClickNodes = compose.onAllNodes(
+            hasAnyLongClickAction.and(hasAnyDescendant(hasContentDescription("Search", substring = true))),
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes()
+
+        assertEquals(1, searchLongClickNodes.size)
+        assertEquals(
+            "Clear filter",
+            searchLongClickNodes.single().config[SemanticsActions.OnLongClick].label,
+        )
+    }
+
+    /**
      * The control for the test above: registering the action unconditionally
      * would advertise a shortcut to clear a filter that is not there — a
-     * no-op TalkBack action offered for no reason.
+     * no-op TalkBack action offered for no reason. Strengthened past "no
+     * action labelled 'Clear filter'" to "no `OnLongClick` action at all":
+     * `combinedClickable(onLongClick = { clearFilter() })` passed unconditionally
+     * registers an UNLABELLED `OnLongClick` action, which `hasClearFilterAction`
+     * (label-gated) cannot see — so the weaker assertion alone would pass
+     * against a version whose gesture still fires, and fires a haptic, for a
+     * long-press with nothing to clear.
      */
     @Test
     fun `the Clear filter accessibility action is absent with no filter live`() {
@@ -680,6 +740,7 @@ class HabitListTest {
         show(habits = habits, rows = habits)
 
         compose.onNode(hasClearFilterAction).assertDoesNotExist()
+        compose.onNodeWithContentDescription("Search").assert(hasAnyLongClickAction.not())
     }
 
     /**
@@ -795,6 +856,24 @@ class HabitListTest {
 
         compose.onNodeWithContentDescription("Search").assertDoesNotExist()
         compose.onNodeWithText("No habits yet.").assertIsDisplayed()
+    }
+
+    /**
+     * Not decision 2 reopened: with no habits AND no filter the icon stays
+     * hidden (the test above). But filter down to nothing and then archive
+     * every matching habit — `habits` itself goes empty while the query that
+     * emptied it is still live — and the icon is the only control that can
+     * clear or reopen that filter. Gate it on `habits.isNotEmpty()` alone and
+     * it vanishes along with the last habit, leaving the filter live,
+     * unclearable, and hiding whatever gets created next. Inherited from
+     * #173's `showSearch`, which carried `|| query.isNotEmpty()` for the
+     * identical reason.
+     */
+    @Test
+    fun `the active search icon survives habits going empty under a live filter`() {
+        show(habits = emptyList(), rows = emptyList(), query = "x")
+
+        compose.onNodeWithContentDescription("Search, filter active").assertIsDisplayed()
     }
 
     /**
