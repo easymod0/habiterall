@@ -14,6 +14,7 @@
     "test": "node --test test/*.test.js",
     "test:tenancy": "node test/tenancy.integration.mjs",
     "test:api": "node test/api.integration.mjs",
+    "test:healthz": "node test/healthz.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:roundtrip": "node test/roundtrip.integration.mjs"
   },
