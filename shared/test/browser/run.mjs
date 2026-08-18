@@ -51,13 +51,12 @@ const OFFLINE_SUITES = new Set(['rendercheck', 'daydialog', 'atmost', 'weekcheck
  *
  * It exists because the tail of a parallel run is one long suite finishing
  * alone. Handing the slowest out first keeps the workers busy to the end —
- * measured serially in CI, themecheck is 98.8s against a 399s total, so
- * starting it last on four workers would add most of it to the wall clock.
- * A name that no longer exists here costs nothing; a new slow suite missing
- * from it costs a few seconds of packing, never a failure.
+ * a suite that takes a third of the run and starts last adds most of itself to
+ * the wall clock. A name that no longer exists here costs nothing; a new slow
+ * suite missing from it costs a few seconds of packing, never a failure.
  */
 const SLOW_FIRST = [
-  'themecheck', 'settingscheck', 'hangcheck', 'nudgecheck', 'unknowncheck',
+  'settingscheck', 'hangcheck', 'themesync', 'nudgecheck', 'unknowncheck',
   'responsive', 'searchcheck', 'notifycheck', 'pwatest', 'gridcheck',
 ];
 
@@ -137,22 +136,23 @@ const SUITE_TIMEOUT_MS = Number(process.env.SUITE_TIMEOUT_MS) || 120_000;
  * The exceptions, and each one is a suite that WAITS on a real bound rather
  * than on a machine.
  *
- * `themecheck` blocks a settings write and then sleeps past `ui/settings.js`'s
+ * `themesync` blocks a settings write and then sleeps past `ui/settings.js`'s
  * ten-second ceiling — twice, because the write that is abandoned and the
  * write that is refused are different answers and both have to be seen. That
- * is 25 seconds of deliberate waiting in a suite measured at 46, which leaves
+ * is 25 seconds of deliberate waiting in a suite measured at 34, which leaves
  * no margin under the shared limit: the kill would land on a healthy run, and
  * a suite killed mid-flight reads as a failure with no output to say why.
  *
- * It was 99s, of which 53.8s was 26 fixed sleeps waiting on app boot — against
- * a boot measured at 52–95ms. Those are polls now (`waitUntil`), and what is
- * left is the deliberate half.
+ * The override follows the WAIT, not the name. It sat on `themecheck` until
+ * that file was split and the deliberate half went to `themesync`; leaving it
+ * behind would have put a 180s ceiling on a 3.7s suite and a 120s one on the
+ * suite that spends 25s waiting on purpose.
  *
  * Raising the shared default instead would buy that margin by removing it from
  * every other suite, which is the wrong way round — a stuck browser in
  * `gridcheck` should still be noticed inside a minute.
  */
-const SUITE_TIMEOUT_OVERRIDES = { themecheck: 180_000 };
+const SUITE_TIMEOUT_OVERRIDES = { themesync: 180_000 };
 
 const timeoutFor = (suite) =>
   Number(process.env.SUITE_TIMEOUT_MS) || SUITE_TIMEOUT_OVERRIDES[suite] ||
@@ -222,8 +222,8 @@ function runSuite(suite, base) {
 /**
  * The queue is shared and workers take from it as they free up, rather than the
  * suites being dealt out in advance. Static shards are only as fast as their
- * unluckiest member — one holding themecheck and hangcheck is 137s of a 100s
- * budget while another finishes in 40 and idles.
+ * unluckiest member — one drawing both `settingscheck` and `hangcheck` is 83s
+ * against a 40s average while another finishes early and idles.
  */
 const queue = [...suites].sort(
   (a, b) => (SLOW_FIRST.indexOf(a) + 1 || Infinity) - (SLOW_FIRST.indexOf(b) + 1 || Infinity)

@@ -290,6 +290,19 @@ is connection-refused, which rejects in ~3ms and passes against a build with no
 timeout in it at all. `responsive.mjs` checks every major view at 360 / 390 /
 768 / 1440px; most other suites only ever run at 1440.
 
+**`themecheck` is about colour; `themesync` is not.** They were one 1,042-line
+file whose name described a seventh of it: 13 of its 47 assertions are the
+palette not being frozen into an SVG at draw time, and the other 34 are the
+settings-durability model — the migration off `localStorage['habiterall-theme']`,
+the reconcile between this device and the account, a dialog choice beating an
+unconfirmed press, the outbox, a write that never answers. The theme is merely
+the only setting with both a pre-setting home on the device and a record of a
+press, so it is where that model is reachable; rename the setting and every
+block in `themesync` is unchanged. The blocks are deliberately NOT merged into
+shared setups — several look like near-duplicates and pin different halves, the
+record's FORMAT against the behaviour a reload shows, a write abandoned against
+a write refused, and each has a version that passes while the other fails.
+
 The browser suites reset to known fixtures before each run
 (`shared/test/browser/fixtures.mjs`). If one fails, check the fixtures before
 suspecting the app — several "failures" have been stale test data.
@@ -301,8 +314,8 @@ a guess in both directions. Measured on the personal edition: a boot is ready in
 because `start()` awaits `settings.init()` before it renders — so a rendered
 dashboard is downstream of the whole of it, and it holds under a stubbed-out
 `/api/settings` too (49–67ms, *faster*). `themecheck` carried 26 fixed sleeps of
-1.2–3s against that: 53.8s, 56% of its runtime, and it now runs in 46s instead of
-99s. The predicate has to be everything the block depends on — a poll on a weak
+1.2–3s against that: 53.8s, 56% of its runtime, and 99s became 46s — then 3.7s
+once the durability half moved to `themesync`. The predicate has to be everything the block depends on — a poll on a weak
 condition returns the instant the DOM has anything in it, which is worse than the
 sleep it replaced. Post-action settles are a different thing and stay: waiting to
 see that something did NOT happen has no predicate to poll.
