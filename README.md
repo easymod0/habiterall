@@ -1491,9 +1491,9 @@ account to a new phone.
 The list itself is native: a row of days per habit — its current streak beside
 the name, tappable squares back through a year of history, the whole grid
 scrolling together and running whichever way your `dayOrder` setting says. It
-carries the same search, appearing at the same six habits, folding case and
-accents and matching the description as well as the name, and filtering what is
-already on screen so it works offline. Everything a web page does well —
+carries the same search, appearing at the same six habits, with a near-identical
+fold of case and accents, matching the description as well as the name, and
+filtering what is already on screen so it works offline. Everything a web page does well —
 charts, the calendar, history editing — opens the server's own UI inside the
 app, so there is one implementation of the statistics rather than two, and
 tapping a habit lands on *that* habit's page rather than the dashboard.

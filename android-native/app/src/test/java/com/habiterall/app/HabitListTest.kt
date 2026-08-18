@@ -380,6 +380,13 @@ class HabitListTest {
      * process death — is the one place Compose does not already paper over
      * the difference, which is why this constructs `initialScrollIndex`
      * rather than driving a real scroll gesture.
+     *
+     * The class's `qualifiers = "w400dp-h800dp"` is load bearing here, not
+     * decoration: the ten matches have to OVERFLOW the viewport for the
+     * clamped position to land anywhere but 0. Raise that height — adding a
+     * tablet case to this class would do it — and the filtered list fits, both
+     * implementations land at 0, and this test goes on passing while pinning
+     * nothing. If you change the qualifier, raise the match count with it.
      */
     @Test
     fun `a restored scroll position past the filtered list snaps back to the top`() {
