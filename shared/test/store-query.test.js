@@ -29,7 +29,28 @@ test('isQueryActive is true for a real word', () => {
 });
 
 test('isQueryActive treats an accented word as live (the accent folds away)', () => {
+  // Precomposed U+00E9, which carries no combining mark of its own — so this
+  // is the ordinary case and NOT the control. The decomposed one below is.
   assert.equal(isQueryActive('Café'), true);
+});
+
+test('a DECOMPOSED accent is live, and still narrows the list', () => {
+  // The control, and the reason the precomposed literal above cannot be it.
+  // `fold` strips Diacritic marks, so the tempting wrong predicate — "not
+  // active if the query contains a combining mark" — passes every other
+  // assertion in this file while breaking a search a person actually types:
+  // NFD text (a dead-key layout, a paste from anything normalised that way)
+  // would report no filter while the box holds a word, and `matchesQuery`
+  // would match the whole account behind it. That is #180 again, in the other
+  // direction and on a reachable input.
+  const q = 'café';
+  assert.equal(q.length, 5, 'the literal must be decomposed, not precomposed');
+
+  assert.equal(isQueryActive(q), true);
+  assert.equal(matchesQuery({ name: 'Café', description: '' }, q), true);
+  // The assertion that binds the two: it fails if `isQueryActive` and `fold`
+  // ever stop agreeing about normalisation, whichever way they drift.
+  assert.equal(matchesQuery({ name: 'Read', description: '' }, q), false);
 });
 
 test('isQueryActive defaults to the live state.query', () => {
