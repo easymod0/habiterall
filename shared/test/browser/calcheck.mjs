@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9294);
 const profile = mkdtempSync(join(tmpdir(), 'habcal-'));
@@ -262,8 +262,27 @@ try {
     await ev(`(()=>{document.querySelector('[aria-label="Completion calendar"]')
       ?.setAttribute('data-rerender','1'); return true;})()`);
     await ev(`${sel}?.click()`);
-    await waitUntil(ev, `!document.querySelector('[data-rerender="1"]')`,
-      { what: `the detail view to re-render after ${label}` });
+    // Bounded rather than `waitUntil`, at the same 20s ceiling: a throw here is
+    // caught, but it leaves the loop, so a control whose re-render regresses
+    // would take the other two controls' coverage and the persistence checks
+    // with it — the three used to be judged independently, however weakly, by
+    // the flat sleep this replaced. Mutation-tested: with `open()` dropped from
+    // `changeZoom`, the throw stopped the suite at `zoom` and the paging,
+    // granularity and persistence checks — one of which catches that same
+    // regression by name — never ran.
+    //
+    // The ceiling is then JUDGED rather than merely spent, because spending it
+    // in silence is worse than the sleep was: a view that never rebuilds never
+    // moves the scroll either, so `534 -> 534` below passes for the one reason
+    // that should fail it. This is the check that the marker was stamped for.
+    let rerendered = false;
+    for (let i = 0; i < 400; i++) {
+      if (await ev(`!document.querySelector('[data-rerender="1"]')`)
+        .catch(() => false)) { rerendered = true; break; }
+      await sleep(50);
+    }
+    ck(`${label} re-renders the detail view`, rerendered,
+      rerendered ? '' : 'the marked node survived 20s');
 
     // Wait for the restore, BOUNDED — and let the assertion below judge it.
     //
