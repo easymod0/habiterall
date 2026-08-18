@@ -93,6 +93,30 @@ export async function beginLogin(req) {
 }
 
 /**
+ * Pick what the chip shows: `name` -> `preferred_username` -> `email`.
+ *
+ * `name` is an optional claim of the `profile` scope, and Authentik only
+ * emits it when the account's Name field has been filled in — a bootstrapped
+ * admin, for instance, ships with no Name and no `name` claim at all.
+ * `preferred_username` is the claim carrying what the personal edition calls
+ * a username, and unlike `name` an IdP has one for every account, so it goes
+ * ahead of email: cloud should read `mark` where personal would rather than
+ * `mark@example.com`. A blank string counts as absent, hence the `.trim()`
+ * check rather than a bare truthiness test.
+ *
+ * Not exported: the only thing that proves this chain actually reached the
+ * chip is `GET /api/me`, not a unit test that pins the ordering and nothing
+ * about the wiring that uses it.
+ */
+const displayName = (claims) => {
+  for (const claim of ['name', 'preferred_username', 'email']) {
+    const v = claims?.[claim];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
+};
+
+/**
  * Complete login: exchange the code, validate the ID token, then map the
  * IdP subject onto a local user row.
  *
@@ -130,7 +154,7 @@ export async function completeLogin(req) {
     subject: claims.sub,
     issuer: claims.iss,
     email: typeof claims.email === 'string' ? claims.email : null,
-    name: typeof claims.name === 'string' ? claims.name : '',
+    name: displayName(claims),
   });
 
   // The issuer, never the subject or the email: identity here is

@@ -335,6 +335,17 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/healthz.integration.mjs
 
+      # A mapping change inside completeLogin only matters if it reaches
+      # GET /api/me. Boots the real server.js and drives a real OIDC callback
+      # against a fake issuer, so the assertion is on the response body rather
+      # than on the mapping function in isolation.
+      - name: Which claim names the account
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/login-claims.integration.mjs
+
       # Exports every format and imports it back, asserting the data is
       # unchanged. A silent encoding regression here loses real history and
       # would otherwise only surface when someone restores a backup.
