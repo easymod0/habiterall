@@ -324,6 +324,17 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/api.integration.mjs
 
+      # `/healthz` must answer without consulting the session store. It boots
+      # the real server.js, because where a route sits in that file's
+      # middleware chain is the thing under test and a hand-built app in a test
+      # would only be a copy of the ordering.
+      - name: The connectivity probe reaches no session store
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/healthz.integration.mjs
+
       # Exports every format and imports it back, asserting the data is
       # unchanged. A silent encoding regression here loses real history and
       # would otherwise only surface when someone restores a backup.
