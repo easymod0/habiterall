@@ -28,6 +28,7 @@ export function openDialog(habit = null) {
 
   const f = form;
   f.name.value = habit?.name ?? '';
+  f.icon.value = habit?.icon ?? '';
   f.description.value = habit?.description ?? '';
   f.type.value = habit?.type ?? 'boolean';
   f.unit.value = habit?.unit ?? '';
@@ -79,6 +80,7 @@ async function saveHabit(e) {
 
   const payload = {
     name: f.name.value,
+    icon: f.icon.value,
     description: f.description.value,
     type: f.type.value,
     unit: f.unit.value,

@@ -149,6 +149,16 @@ try {
     const i=rows.findIndex(r=>r.querySelector('.habit-name').textContent.includes('Meditate'));
     rows[i].querySelector('.habit-meta').click();})()`);
   await sleep(700);
+
+  // #66: the icon is set through the real Edit dialog, not a raw fetch — this
+  // is what makes the block sensitive to `saveHabit`'s payload rather than to
+  // the server alone, since a raw PUT would prove nothing about the form.
+  await ev(`[...document.querySelectorAll('#view-detail .btn')].find(b=>b.textContent==='Edit').click()`);
+  await sleep(300);
+  await ev(`document.getElementById('habit-form').icon.value = '🧘'`);
+  await ev(`document.getElementById('habit-form').requestSubmit()`);
+  await sleep(700);
+
   await ev(`[...document.querySelectorAll('#view-detail .btn')].find(b=>b.textContent==='Edit').click()`);
   await sleep(300);
   await ev(`document.getElementById('dialog-delete').click()`);
@@ -168,11 +178,12 @@ try {
     const hs=await (await fetch('/api/habits')).json();
     const h=hs.find(x=>x.name==='Meditate');
     const es=h ? await (await fetch('/api/habits/'+h.id+'/entries')).json() : [];
-    return {restored: !!h, entries: es.length, notes: es[0]?.notes};
+    return {restored: !!h, entries: es.length, notes: es[0]?.notes, icon: h?.icon};
   })()`);
   check('undo restores the habit', afterUndo.restored === true, JSON.stringify(afterUndo));
   check('undo restores its history', afterUndo.entries === 2, String(afterUndo.entries));
   check('undo restores notes too', afterUndo.notes === 'kept', String(afterUndo.notes));
+  check('undo restores its icon too', afterUndo.icon === '🧘', String(afterUndo.icon));
 
   /* ---------- 4. calendar keyboard nav ---------- */
   console.log('--- calendar keys ---');

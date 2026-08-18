@@ -8,6 +8,7 @@
  */
 
 import { api } from '/shared/ui/api.js';
+import { habitIcon } from '/shared/ui/components.js';
 import { dayCountField } from '/shared/ui/count-field.js';
 import { formatDateLong, fromISOLocal } from '/shared/ui/dates.js';
 import * as settings from '/shared/ui/settings.js';
@@ -54,7 +55,13 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
   // because "three coffees" is a thing someone may want to record exactly and
   // a limit of two has no other way to say it.
   const avoided = isAvoided(habit);
-  title.textContent = habit.name;
+  title.replaceChildren();
+  const dayIcon = habitIcon(habit);
+  // `.append` takes a bare string as well as a node — this avoids
+  // `document.createTextNode`, which `daydialog.mjs`'s fake DOM (this function
+  // is sliced out and run through `new Function`) has no `document` to call.
+  if (dayIcon) title.append(dayIcon, ' ', habit.name);
+  else title.append(habit.name);
 
   const pretty = formatDateLong(fromISOLocal(date));
 

@@ -1670,3 +1670,48 @@ test('a prompt at the limit is not truncated on the way out', () => {
   const payload = discordPayload({ habit: h, message: reminderMessage(h) });
   assert.equal(payload.embeds[0].title, prompt);
 });
+
+/* ---------- an icon prefixes the name, never the prompt ---------- */
+
+test('a habit with no icon is byte-identical to before the icon existed', () => {
+  // The strongest assertion in this file: nothing about an ordinary habit's
+  // wording may change. Covers all three branches so a stray prefix in any
+  // one of them is caught here, not just where it happens to be exercised.
+  assert.deepEqual(reminderMessage(habit()), {
+    title: 'Meditate', subtitle: '', body: 'Time to check in — have you done this today?',
+  });
+  assert.deepEqual(
+    reminderMessage(habit({ reminder_message: 'Did you exercise today?' })),
+    { title: 'Did you exercise today?', subtitle: 'Meditate', body: '' }
+  );
+  assert.deepEqual(reminderMessage(habit(), { test: true }), {
+    title: 'Meditate',
+    subtitle: 'Meditate',
+    body: 'Test notification from habiterall. Buttons here record nothing.',
+  });
+});
+
+test('no prompt: the icon prefixes the title', () => {
+  const message = reminderMessage(habit({ icon: '🧘' }));
+  assert.equal(message.title, '🧘 Meditate');
+  assert.equal(message.subtitle, '');
+});
+
+test('a custom prompt: the title stays the question, the subtitle gets the icon', () => {
+  const message = reminderMessage(habit({ icon: '🧘', reminder_message: 'Did you exercise today?' }));
+  assert.equal(message.title, 'Did you exercise today?', 'a prompt is a question, not a name');
+  assert.equal(message.subtitle, '🧘 Meditate');
+});
+
+test('test: true carries the icon on both title (no prompt) and subtitle', () => {
+  const message = reminderMessage(habit({ icon: '🧘' }), { test: true });
+  assert.equal(message.title, '🧘 Meditate');
+  assert.equal(message.subtitle, '🧘 Meditate');
+
+  const withPrompt = reminderMessage(
+    habit({ icon: '🧘', reminder_message: 'Did you exercise today?' }),
+    { test: true }
+  );
+  assert.equal(withPrompt.title, 'Did you exercise today?');
+  assert.equal(withPrompt.subtitle, '🧘 Meditate');
+});

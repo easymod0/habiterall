@@ -110,15 +110,15 @@ const q = {
   insertHabit: db.prepare(`
     INSERT INTO habits (name, description, type, unit, target_value, target_type,
                         freq_numerator, freq_denominator, color, reminder_time,
-                        reminder_message, at_most_unlogged, show_as, position)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        reminder_message, at_most_unlogged, show_as, icon, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
   `),
   updateHabit: db.prepare(`
     UPDATE habits SET name = ?, description = ?, type = ?, unit = ?,
       target_value = ?, target_type = ?, freq_numerator = ?,
       freq_denominator = ?, color = ?, reminder_time = ?, reminder_message = ?,
-      at_most_unlogged = ?, show_as = ?, archived = ?
+      at_most_unlogged = ?, show_as = ?, icon = ?, archived = ?
     WHERE id = ?
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
@@ -231,7 +231,7 @@ api.post('/habits', (req, res) => {
   const info = q.insertHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value,
     h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as
+    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon
   );
   res.status(201).json(toApiHabit(q.habitById.get(info.lastInsertRowid)));
 });
@@ -250,7 +250,7 @@ api.put('/habits/:id', (req, res) => {
   q.updateHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
     h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as, h.archived, id
+    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, h.archived, id
   );
   res.json(toApiHabit(q.habitById.get(id)));
 });

@@ -228,7 +228,7 @@ ck('the JSON backup carries no user_id',
 // Closing that needs the list to live somewhere both editions assert against.
 const PORTABLE_HABIT_KEYS = [
   'archived', 'at_most_unlogged', 'color', 'created_at', 'description', 'entries',
-  'freq_denominator', 'freq_numerator', 'id', 'name', 'position',
+  'freq_denominator', 'freq_numerator', 'icon', 'id', 'name', 'position',
   'reminder_message', 'reminder_time', 'show_as', 'target_type', 'target_value',
   'type', 'unit',
 ];
@@ -282,6 +282,72 @@ ck('and junk is refused rather than stored', await zoneOf(alice) === 'Europe/Ber
 // it directly, and this asserts the ordinary path never strays.
 ck('one account\'s device says nothing about another\'s',
   await zoneOf(bob) === '', JSON.stringify(await zoneOf(bob)));
+
+/* ---------- habit writes over HTTP ---------- */
+
+console.log('--- habit writes over HTTP ---');
+// Everything above this point either goes straight at the data layer or reads
+// a route that only ever GETs. `insertHabit`'s `$n` list and `updateHabit`'s
+// SET list are the riskiest edit in this whole change — a renumbering that
+// slips is a bind-count error at best and a value landing in the WRONG COLUMN
+// at worst — and nothing above exercises `POST /habits` or `PUT /habits/:id`
+// at all. This does, over the same router the fake session above already
+// mounts.
+//
+// Every field is set to something OTHER than its default: a field left at
+// its default compares equal to itself and passes with the field dropped
+// entirely, which is the failure this repo names most often. Iterating the
+// SENT body's own keys, rather than a hand-written list, is what makes a
+// field added later covered automatically instead of silently exempt.
+const everyField = {
+  name: 'Every Field',
+  description: 'a description, not the empty one',
+  type: 'numerical',
+  unit: 'reps',
+  target_value: 5,
+  target_type: 'at_most',
+  freq_numerator: 3,
+  freq_denominator: 7,
+  color: '#ff00ff',
+  reminder_time: '08:30',
+  reminder_message: 'Did you do it?',
+  at_most_unlogged: 'success',
+  show_as: 'avoid',
+  icon: '🧘',
+  archived: true,
+};
+
+const postHabit = (body) => fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+}).then((r) => r.json());
+
+const created = await postHabit(everyField);
+const wrongOnCreate = Object.keys(everyField)
+  .filter((k) => created[k] !== everyField[k])
+  .map((k) => `${k}: sent ${JSON.stringify(everyField[k])}, got ${JSON.stringify(created[k])}`);
+ck('POST /habits round-trips every field', wrongOnCreate.length === 0,
+  wrongOnCreate.join('; '));
+
+// PUT REPLACES: send the same body back with the ONE thing a real caller
+// changes, and everything else — icon included — must still be what was
+// sent, not silently reset to a default by a column the SQL forgot.
+const putHabit = (id, body) => fetch(`${overviewBase}/api/habits/${id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+}).then((r) => r.json());
+
+const oneFieldChanged = { ...everyField, archived: false };
+const updated2 = await putHabit(created.id, oneFieldChanged);
+const wrongOnUpdate = Object.keys(everyField)
+  .filter((k) => k !== 'archived' && updated2[k] !== everyField[k])
+  .map((k) => `${k}: sent ${JSON.stringify(everyField[k])}, got ${JSON.stringify(updated2[k])}`);
+ck('PUT /habits/:id replaces, and carries every OTHER field unchanged',
+  wrongOnUpdate.length === 0, wrongOnUpdate.join('; '));
+ck('  and the one field that was meant to change, did',
+  updated2.archived === false, JSON.stringify(updated2.archived));
 
 /* ---------- and which day that device is ON ---------- */
 

@@ -61,6 +61,8 @@ data class Habit(
     @SerialName("at_most_unlogged") val atMostUnlogged: String = "default",
     /** See [HabitInput.showAs]. */
     @SerialName("show_as") val showAs: String = "amount",
+    /** See [HabitInput.icon]. */
+    val icon: String = "",
     val position: Int = 0,
     val archived: Boolean = false,
     // Present on /overview only.
@@ -141,6 +143,7 @@ data class Habit(
         reminderTime = reminderTime,
         reminderMessage = reminderMessage,
         showAs = showAs,
+        icon = icon,
         // Every field, and this is the bridge that has to carry them: a habit
         // PUT REPLACES, so a field dropped here is a field RESET on the server
         // by the two callers that flip one thing about a habit they fetched —
@@ -203,6 +206,13 @@ data class HabitInput(
      * rows mean. Carried here because a habit PUT REPLACES.
      */
     @SerialName("show_as") val showAs: String = "amount",
+    /**
+     * One grapheme, decided by the server's `parseIcon` — this client holds
+     * whatever it was sent and never segments it itself. Carried here because
+     * a habit PUT REPLACES: omit it and the server's `parseHabit` resets it
+     * to `''` on the next write, however it got here.
+     */
+    val icon: String = "",
     val archived: Boolean = false,
 )
 

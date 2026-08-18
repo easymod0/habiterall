@@ -1132,14 +1132,19 @@ export function reminderMessage(habit, { test = false } = {}) {
   const custom = String(habit.reminder_message ?? '').trim();
   const goal = goalText(habit);
 
+  // The icon prefixes wherever the NAME appears, and nowhere else: a custom
+  // prompt is a question, not a name, so its title is untouched by it.
+  const icon = String(habit.icon ?? '');
+  const shown = icon ? `${icon} ${name}` : name;
+
   const generated = goal
     ? `Time to log this one — goal: ${goal}.`
     : 'Time to check in — have you done this today?';
 
   if (test) {
     return {
-      title: custom || name,
-      subtitle: name,
+      title: custom || shown,
+      subtitle: shown,
       body: 'Test notification from habiterall. Buttons here record nothing.',
     };
   }
@@ -1148,8 +1153,8 @@ export function reminderMessage(habit, { test = false } = {}) {
   // "have you done this today?" under "Did you exercise today?" is noise.
   // Without one, the name leads exactly as before.
   return custom
-    ? { title: custom, subtitle: name, body: goal ? `Goal: ${goal}.` : '' }
-    : { title: name, subtitle: '', body: generated };
+    ? { title: custom, subtitle: shown, body: goal ? `Goal: ${goal}.` : '' }
+    : { title: shown, subtitle: '', body: generated };
 }
 
 /* ---------- answering from the notification ---------- */

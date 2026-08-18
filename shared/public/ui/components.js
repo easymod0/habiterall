@@ -3,7 +3,9 @@
  * segmented control, and the paging wrapper every time-axis chart needs.
  *
  * These were buried 1,500 lines into the detail view, which is why nothing
- * else used them. They know nothing about habits.
+ * else used them. Mostly they know nothing about habits; `habitIcon` is the
+ * one exception, placed here rather than in a new file because a one-off
+ * helper does not earn its own `SHELL` entry and `CACHE_VERSION` bump.
  */
 
 import { columnsForWidth, windowSlice } from '/shared/ui/window.js';
@@ -21,6 +23,21 @@ export function card(titleText, content) {
   c.append(head);
   if (content) c.append(content);
   return c;
+}
+
+/**
+ * The habit's icon as a span, or null when it has none. `aria-hidden` always:
+ * an emoji announces as its Unicode name ("person running facing right"),
+ * which is noise on every row, and the icon must never replace the name a
+ * screen reader gets — the name element beside it stays the accessible one.
+ */
+export function habitIcon(habit) {
+  if (!habit?.icon) return null;
+  const span = document.createElement('span');
+  span.className = 'habit-icon';
+  span.setAttribute('aria-hidden', 'true');
+  span.textContent = habit.icon;
+  return span;
 }
 
 export function subheading(text) {

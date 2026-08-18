@@ -13,7 +13,7 @@ import {
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
 import {
-  card, cardInnerWidth, segmented, subheading, windowedChart,
+  card, cardInnerWidth, habitIcon, segmented, subheading, windowedChart,
 } from '/shared/ui/components.js';
 import {
   addDaysISO, formatDateShort, formatStamp, freqLabel, fromISOLocal,
@@ -208,7 +208,9 @@ function render(stats, entries) {
   const titleWrap = document.createElement('div');
   titleWrap.style.flex = '1';
   const h2 = document.createElement('h2');
-  h2.textContent = habit.name;
+  const headIcon = habitIcon(habit);
+  if (headIcon) h2.append(headIcon, ' ');
+  h2.append(document.createTextNode(habit.name));
   const sub = document.createElement('div');
   sub.className = 'habit-sub';
   sub.textContent = [habit.description, freqLabel(habit), targetLabel(habit)]

@@ -124,6 +124,21 @@ None of this is bad-habit support of the other kind. A limit of zero is how a ba
 habit is *expressible*; what is still missing is the interaction — answering by
 typing a number, a filled cell painting as an achievement.
 
+**A habit's `icon` is one grapheme, decided by `parseIcon` and never a second
+name.** It is validated the way `reminder_message` is — a rule in `validate.js`,
+the importer's own copy in `import.js` — and, because `PUT /habits/:id`
+REPLACES, a partial write clears it exactly as it clears every other omitted
+field. The length limit is UTF-16 units, not characters, because a grapheme
+cluster (a ZWJ family, a flag tag sequence) can legitimately be many of the
+latter; slicing it would corrupt the sequence rather than shorten it, so a
+value past the cap is dropped to `''` instead. It renders `aria-hidden` on
+every surface — the dashboard row, a habit's own page, the day editor, the
+archive view (the same dashboard row, so it needs nothing of its own) — because
+an emoji announces as its Unicode name and must never stand in for the name a
+screen reader gets. It is in `JSON_HABIT_FIELDS` and in no Loop list: Loop's
+schema has nowhere to put it, so a Loop round trip correctly returns it to `''`,
+the same asymmetry `at_most_unlogged` and `show_as` already have.
+
 ## Scoring, streaks and stats
 
 **The score is a trailing-window ratio**, not per-day credit scaled by frequency.

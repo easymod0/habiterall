@@ -49,6 +49,8 @@
  * @property {string} [show_as]        'amount' or 'avoid' — how the habit is
  *   RENDERED. Presentation only; the verdict still comes from `target_type`
  *   and `target_value`. See SHOW_AS in validate.js
+ * @property {string} [icon]           one grapheme, decided by `parseIcon` in
+ *   validate.js; '' means none. Never a second name field
  * @property {number} [position]       display order
  * @property {boolean|0|1} archived    boolean in Postgres, 0/1 in SQLite
  */

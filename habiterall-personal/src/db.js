@@ -46,6 +46,8 @@ db.exec(`
     -- target_type and target_value, which is what lets a Loop file lose it
     -- without losing what the rows mean
     show_as       TEXT    NOT NULL DEFAULT 'amount',
+    -- one grapheme, decided by parseIcon; '' = none
+    icon          TEXT    NOT NULL DEFAULT '',
     position      INTEGER NOT NULL DEFAULT 0,
     archived      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -209,6 +211,10 @@ if (!habitColumns.has('at_most_unlogged')) {
     `ALTER TABLE habits ADD COLUMN at_most_unlogged TEXT NOT NULL DEFAULT 'default'`
   );
   console.log('migrated habits: added at_most_unlogged');
+}
+if (!habitColumns.has('icon')) {
+  db.exec(`ALTER TABLE habits ADD COLUMN icon TEXT NOT NULL DEFAULT ''`);
+  console.log('migrated habits: added icon');
 }
 
 const entryColumns = new Set(

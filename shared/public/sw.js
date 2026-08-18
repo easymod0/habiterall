@@ -146,7 +146,14 @@ const sw = self;
 // value the server then refuses. The same mismatch in detail.js is a blank
 // card region below the stat tiles rather than a link error, which is the
 // quieter and worse failure — nothing throws to reach `#view-error`.
-const CACHE_VERSION = 'v18';
+//
+// v19: a habit's icon (#66). `ui/components.js` gained a new export,
+// `habitIcon`, read by `ui/dashboard.js`, `ui/detail.js` and `ui/day-dialog.js`
+// — no new FILE, but `shellFirst` is stale-while-revalidate and writes into
+// the RUNNING worker's cache, so a shell could hold a new `dashboard.js` over
+// a cached old `components.js` with no `habitIcon` at all: a module link
+// error before `start()` runs, and so outside `#view-error`.
+const CACHE_VERSION = 'v19';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
