@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9294);
 const profile = mkdtempSync(join(tmpdir(), 'habcal-'));
@@ -231,11 +231,13 @@ try {
   // Every control in the detail view re-renders it, and replaceChildren()
   // collapses the page height, which scrolls the window back to the top.
   // Pressing a button should leave you looking at the button you pressed.
-  const scrollTo = await ev(`(()=>{
+  const scrollToCalendar = () => ev(`(()=>{
     const cal=document.querySelector('[aria-label="Completion calendar"]');
     const y=Math.round(cal.getBoundingClientRect().top + window.scrollY - 80);
     window.scrollTo(0, y);
     return Math.round(window.scrollY);})()`);
+
+  const scrollTo = await scrollToCalendar();
   await sleep(300);
 
   ck('the page can scroll down to the calendar', scrollTo > 100, `y=${scrollTo}`);
@@ -247,9 +249,42 @@ try {
     ['calendar paging', `[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.includes('Earlier'))`],
     ['history granularity', `[...document.querySelectorAll('.card button')].find(b=>b.textContent.trim()==='week')`],
   ]) {
-    const before = await ev(`Math.round(window.scrollY)`);
+    // Scroll back down FIRST, so each control is judged on its own. Reading
+    // `before` from wherever the last iteration left the page made the second
+    // and third vacuous the moment the first failed: at 0, `0 -> 0` passes.
+    // Mutation-tested — with the restore in detail.js removed, all three fail
+    // now where only the first did.
+    const before = await scrollToCalendar();
+    // Stamp a node so the re-render can be SEEN rather than waited out:
+    // `replaceChildren()` drops it, so its absence is the rebuild having
+    // happened. Without this, polling for a settled scroll can return before
+    // the collapse even starts and pass against an app that never restores.
+    await ev(`(()=>{document.querySelector('[aria-label="Completion calendar"]')
+      ?.setAttribute('data-rerender','1'); return true;})()`);
     await ev(`${sel}?.click()`);
-    await sleep(600);
+    await waitUntil(ev, `!document.querySelector('[data-rerender="1"]')`,
+      { what: `the detail view to re-render after ${label}` });
+
+    // Wait for the restore, BOUNDED — and let the assertion below judge it.
+    //
+    // There is no predicate that separates "the restore has not happened yet"
+    // from "this build never restores", so anything cleverer is either vacuous
+    // or flaky, and both were tried: a plain stability poll reported `534 -> 0`
+    // because scrollY sits at 0 and is perfectly stable between the collapse
+    // and the rebuild, and gating on the page being tall enough first fixed
+    // `zoom` and left `calendar paging` failing the same way.
+    //
+    // So the claim this makes is "restored within the ceiling". A build that
+    // never restores spends the ceiling and then fails on the position it
+    // actually settled at, which is the same failure the 600ms sleep gave and
+    // the same message. What it buys is that a restore taking 700ms under load
+    // is no longer a failure — the flake at sixteen workers — and that the NEXT
+    // iteration reads its `before` after this one has settled, which is where
+    // the cascading `0 -> 534` came from.
+    for (let i = 0; i < 60; i++) {
+      if (Math.abs(await ev(`Math.round(window.scrollY)`) - before) < 120) break;
+      await sleep(50);
+    }
     const after = await ev(`Math.round(window.scrollY)`);
     ck(`${label} keeps the scroll position`, Math.abs(after - before) < 120,
       `${before} -> ${after}`);

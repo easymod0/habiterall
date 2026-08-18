@@ -326,10 +326,10 @@ the number of `--bases` and there is no flag that can put two workers on one
 instance. The default is **twice the core count, capped at eight** — these suites
 are mostly idle, not CPU-bound (`hangcheck` holds a request open for 38s), so a
 worker per core leaves the box waiting. Swept on a 4-core runner: 126s at j=4,
-90s at j=8, and past that both slower and FAILING, because contention exposes
-waits weaker than what follows them (`pwatest`, then `awardcheck` and
-`calcheck` — all pre-existing, all reproducing on master). Fix those before
-raising it. `npm run test:browser` is personal's fleet script — N servers, N
+90s at j=8, and past that slower again. The FAILURES past eight are fixed —
+`pwatest` waits on `serviceWorker.ready`, `calcheck` on a bounded scroll
+restore — so sixteen workers now run clean six times over on a 16-core box;
+whether they are also FASTER on a 4-core runner would need a fresh sweep. `npm run test:browser` is personal's fleet script — N servers, N
 throwaway SQLite files, N bases — while `run.mjs` stays edition-agnostic so cloud
 is pointed at the same way. Two consequences that have already cost something:
 the base must be threaded through `reset({base})` rather than left in module

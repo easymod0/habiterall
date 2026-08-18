@@ -39,12 +39,14 @@ try{
   // 250ms steps against a boot measured at ~55ms spent most of a step waiting
   // for nothing.
   const load=async()=>{await send('Page.navigate',{url:APP},sessionId);
-    await waitUntil(ev,`!!document.querySelector('#grid .habit-row')`,{what:'the dashboard'});
-    await sleep(500);};
+    await waitUntil(ev,`(()=>{const r=document.querySelector('#grid .habit-row');
+      return !!r && r.getBoundingClientRect().height > 0
+        && document.fonts.status === 'loaded';})()`,{what:'a measurable dashboard'});};
   await load();
 
   console.log('--- dialog ---');
-  await ev(`document.getElementById('btn-settings').click()`); await sleep(400);
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
   ck('settings dialog opens', await ev(`document.getElementById('settings-dialog').open`));
   ck('controls rendered from the registry',
      await ev(`document.querySelectorAll('#settings-body select, #settings-body input').length`) >= 2);
@@ -73,7 +75,8 @@ try{
   ck('and stores nothing',
      (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder===undefined);
 
-  await ev(`document.getElementById('btn-settings').click()`); await sleep(400);
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
   ck('reopening shows the saved value, not the abandoned draft',
      await ev(`(()=>{const s=[...document.querySelectorAll('#settings-body select')]
        .find(s=>[...s.options].some(o=>o.value==='newest-right'));
@@ -109,7 +112,8 @@ try{
      (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder === 'newest-right');
 
   console.log('--- reset ---');
-  await ev(`document.getElementById('btn-settings').click()`); await sleep(300);
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
   // Reset is staged like any other edit, so it is undoable until Done.
   await ev(`document.getElementById('settings-reset').click()`); await sleep(400);
   ck('reset alone does not touch the saved values',
@@ -269,7 +273,8 @@ try{
      `${atToday} -> ${pagedBack}`);
 
   const tickCalendar = async (on) => {
-    await ev(`document.getElementById('btn-settings').click()`); await sleep(600);
+    await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
     await ev(`(()=>{const b=document.getElementById('setting-detailCards-calendar');
       b.checked=${on}; b.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     await ev(`document.getElementById('settings-close').click()`); await sleep(1200);
@@ -335,7 +340,8 @@ try{
      `calendar ${calAtToday} -> ${calPaged}, history ${histAtToday} -> ${histPaged}`);
 
   // Untick a THIRD card, related to neither — and one with no paging of its own.
-  await ev(`document.getElementById('btn-settings').click()`); await sleep(600);
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
   await ev(`(()=>{const b=document.getElementById('setting-detailCards-weekdays');
     b.checked=false; b.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   await ev(`document.getElementById('settings-close').click()`); await sleep(1400);
@@ -433,7 +439,8 @@ try{
           {headers:{'Content-Type':'application/json'}}))
       : real(u,o);})()`);
 
-  await ev(`document.getElementById('btn-settings').click()`); await sleep(900);
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
   ck('the failure is shown without being asked for',
      await ev(`!!document.querySelector('.setting-problem')`));
   ck('naming the destination and quoting the sender, not a status code',

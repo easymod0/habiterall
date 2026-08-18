@@ -20,7 +20,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9256);
@@ -138,9 +138,32 @@ try {
   check('and it is the check-off, not something else',
     during.outbox[0]?.startsWith('PUT /api/habits/'), String(during.outbox[0]));
 
-  await sleep(BOUND_MS + SLACK_MS - 2000);
+  // Wait for the BOUND to fire, not for the slack to elapse. The offline bar is
+  // what appears when the attempt is abandoned, so it is the event itself; the
+  // ceiling is what the fixed sleep used to be, so a bound that never fires
+  // still fails here — and now says so, instead of arriving at a silent
+  // assertion 16s later.
+  const gaveUpAt = Date.now();
+  await waitUntil(ev, `(()=>{
+    const vis = (id) => !!document.getElementById(id)?.offsetParent;
+    return vis('offline-bar') && vis('offline-message');})()`,
+    { timeoutMs: BOUND_MS + SLACK_MS - 2000, intervalMs: 100,
+      what: 'the bound to fire and the app to report itself offline' });
+  const gaveUp = Date.now() - gaveUpAt + 2000;
   const after = await look();
   const write = held.find((r) => r.method === 'PUT');
+
+  // The sleep could not say this: it waited past the bound either way, so a
+  // build whose bound was 17s — or absent, with the browser's own socket
+  // timeout arriving eventually — read the same as one at 10s.
+  // The window is the BOUND plus tolerance, deliberately NOT the ceiling above:
+  // with `BOUND_MS + SLACK_MS` as the upper limit this passed against a build
+  // whose bound was 16s, which is the whole thing it exists to notice. Measured
+  // idle at 10045ms and under an eight-worker run at 10s-and-change — the timer
+  // is an AbortSignal, so contention delays it by milliseconds, not seconds.
+  check('and it gave up AT the bound, not merely eventually',
+    gaveUp >= BOUND_MS * 0.5 && gaveUp < BOUND_MS * 1.4,
+    `${gaveUp}ms against a ${BOUND_MS}ms bound`);
 
   check('the attempt was given up on rather than waited out',
     after.outbox.length === 1, JSON.stringify(after.outbox));
@@ -210,7 +233,11 @@ try {
     return true;
   })()`);
 
-  await sleep(BOUND_MS + SLACK_MS);
+  // Again the settling, not the slack: `__create` leaves 'pending' when the
+  // bound fires. Same ceiling as the sleep it replaces.
+  await waitUntil(ev, `window.__create !== 'pending'`,
+    { timeoutMs: BOUND_MS + SLACK_MS, intervalMs: 100,
+      what: 'the create to be abandoned at the bound' });
   const createState = await ev(`window.__create`);
   const afterCreate = await look();
   check('a create is abandoned at the bound rather than hanging forever',

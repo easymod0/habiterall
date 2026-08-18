@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9250);
 
@@ -57,7 +57,14 @@ try {
   /* ---- 1. service worker registers ---- */
   console.log('--- service worker ---');
   await goto(APP);
-  await sleep(4000);
+  // `serviceWorker.ready` is the platform's own "there is an active worker"
+  // signal, and it is NOT the thing asserted below — that reads the
+  // registration's state, scope and script. A flat 4s was enough on an idle
+  // box and not on a contended one: at twelve workers this failed as
+  // `worker is active :: undefined`, the registration not yet having one.
+  await waitUntil(ev, `(async()=>{
+    await navigator.serviceWorker.ready; return true;})()`,
+    { what: 'the service worker to reach an active registration' });
 
   const sw = await ev(`(async()=>{
     const r = await navigator.serviceWorker.getRegistration();
