@@ -13,20 +13,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
-// A subpackage, so the wildcard above does not reach it.
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -659,13 +650,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable
-    private fun Loading() {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
-    }
-
     // There is deliberately no "the server answered oddly" screen. An early
     // version had one, and it was a new way to break the one configuration that
     // never needed this endpoint: an instance with no sign-in, where a 429 from
@@ -800,6 +784,14 @@ class MainActivity : ComponentActivity() {
         /** The day a dialog is editing, and which habit's. */
         var editing by remember { mutableStateOf<Pair<Habit, String>?>(null) }
         var holding by remember { mutableStateOf<Pair<Habit, String>?>(null) }
+        /**
+         * The search box's live text. `rememberSaveable`, exactly as `webUrl`
+         * is, so it survives rotation — but session-only and never a setting:
+         * a filter is something you are doing right now, and one that
+         * survived would be a list silently missing habits with no memory of
+         * why. Cleared on resume, alongside the scroll snap below.
+         */
+        var query by rememberSaveable { mutableStateOf("") }
 
         /**
          * How much history is loaded, and which way the days run.
@@ -973,23 +965,6 @@ class MainActivity : ComponentActivity() {
             loaded = true
         }
 
-        // Correct a restored scroll position that no longer fits the list.
-        //
-        // See ScrollRestore for what can go wrong and why; the rule is there,
-        // and unit-tested, because the version inlined here only covered a
-        // clipped FIRST row and left a clipped row at any other index — which
-        // is the case that kept being reported.
-        LaunchedEffect(habits.size) {
-            if (ScrollRestore.needsSnapToTop(
-                    listState.firstVisibleItemIndex,
-                    listState.firstVisibleItemScrollOffset,
-                    habits.size,
-                )
-            ) {
-                listState.scrollToItem(0)
-            }
-        }
-
         // Everything below renders from this, never from `habits` directly.
         val shown = remember(habits, pending) { habits.withPending(pending) }
 
@@ -1059,28 +1034,14 @@ class MainActivity : ComponentActivity() {
                 }
         }
 
-        // Put the habit a notification was about on screen.
-        //
-        // Waits for the fetch rather than for the list: a tap that cold-starts
-        // the app arrives before there are any habits to look through, and
-        // scrolling to "not found" is just the top. Cleared once `loaded`,
-        // found or not — a habit archived since its alarm was armed must not
-        // leave a focus pending forever, because the resume snap below defers
-        // to it.
-        LaunchedEffect(focusHabit, shown, loaded) {
-            if (focusHabit == null || !loaded) return@LaunchedEffect
-            val index = shown.indexOfFirst { it.id == focusHabit }
-            if (index >= 0) listState.scrollToItem(index)
-            onFocused()
-        }
-
         // Coming back to the app shows today, from the top.
         //
-        // The check above runs when the list SIZE changes, which is not the same
-        // as "the app was reopened": close and reopen with the same five habits
-        // and it never fires, so a stale position survives. This is the event
-        // that actually matters, and it is also the right moment to refetch —
-        // the app is most often reopened because the day moved on.
+        // ScrollRestore, in HabitList.kt, runs when the list SIZE changes, which
+        // is not the same as "the app was reopened": close and reopen with the
+        // same five habits and it never fires, so a stale position survives.
+        // This is the event that actually matters, and it is also the right
+        // moment to refetch — the app is most often reopened because the day
+        // moved on.
         val lifecycle = LocalLifecycleOwner.current.lifecycle
         // Read inside the coroutine below, which outlives the composition that
         // launched it: the parameter captured there would be whatever it was
@@ -1098,6 +1059,9 @@ class MainActivity : ComponentActivity() {
                     // day and every column moves.
                     today = LocalDate.now().toString()
                     reload++
+                    // A query is about the list you were looking at, not a
+                    // setting that should follow you back into the app.
+                    query = ""
                     // Unless this resume IS a notification tap: the two would
                     // race, and whichever landed second decided where the list
                     // sat. Snapping to the top is the right default for coming
@@ -1195,130 +1159,36 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        var menuOpen by remember { mutableStateOf(false) }
-
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("Today") },
-                    actions = {
-                        TextButton(onClick = onOpenStats) { Text("Stats") }
-                        // An overflow rather than more buttons: the bar already
-                        // carries Stats, and a 360dp phone runs out of room at
-                        // three. Everything in here is a screen, not an action.
-                        IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More")
-                        }
-                        DropdownMenu(
-                            expanded = menuOpen,
-                            onDismissRequest = { menuOpen = false },
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Reorder habits") },
-                                // Two, not one: a single habit has nowhere to
-                                // go, and a screen whose every button is
-                                // disabled is worse than a menu item that is.
-                                enabled = shown.size > 1,
-                                onClick = { menuOpen = false; onReorder(shown) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Archived habits") },
-                                onClick = { menuOpen = false; onOpenArchive() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Settings") },
-                                onClick = { menuOpen = false; onOpenSettings() },
-                            )
-                            onSignOut?.let { signOut ->
-                                DropdownMenuItem(
-                                    text = { Text("Sign out") },
-                                    onClick = { menuOpen = false; signOut() },
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Change server") },
-                                onClick = { menuOpen = false; onChangeServer() },
-                            )
-                        }
-                    },
-                )
-            },
-            floatingActionButton = {
-                // Only once a fetch has landed. A phone that cannot reach the
-                // server should not offer to create a habit on it — the POST
-                // would fail, and the failure would be the first the user heard
-                // of a connection problem the error screen is already reporting.
-                if (loaded && error == null) {
-                    FloatingActionButton(onClick = onNewHabit) {
-                        Icon(Icons.Default.Add, contentDescription = "New habit")
-                    }
-                }
-            },
-            snackbarHost = { SnackbarHost(snackbar) },
-        ) { pad ->
-            // Exactly one spinner per fetch: the full-screen one until the
-            // first result lands, the pull indicator for every fetch after it.
-            // Keyed on "has a fetch finished" rather than "is the list empty",
-            // or an account with no habits yet would flip between the two on
-            // every pull.
-            PullToRefreshBox(
-                isRefreshing = loading && loaded,
-                onRefresh = { reload++ },
-                modifier = Modifier.padding(pad).fillMaxSize(),
-            ) {
-                when {
-                    loading && !loaded -> Loading()
-                    error != null && shown.isEmpty() -> Column(
-                        // Scrollable so the pull gesture reaches this screen at
-                        // all: PullToRefreshBox only hears about a drag that a
-                        // scrollable child hands up to it, and this is the one
-                        // screen where a retry is the entire point.
-                        Modifier.fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(24.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text(error!!, color = MaterialTheme.colorScheme.error)
-                        Button(onClick = { reload++ }) { Text("Try again") }
-                        TextButton(onClick = onChangeServer) { Text("Change server") }
-                    }
-                    shown.isEmpty() -> Column(
-                        Modifier.fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(24.dp),
-                    ) {
-                        // "Add one in the web app" is what this said until the
-                        // phone could create one, which is the single change
-                        // that most decided whether this client was a companion
-                        // or a client in its own right.
-                        Text("No habits yet.")
-                        Button(onClick = onNewHabit) { Text("Add a habit") }
-                        TextButton(onClick = onOpenStats) { Text("Open the web app") }
-                    }
-                    else -> Column(Modifier.fillMaxSize()) {
-                        DayHeader(dates = dates, today = today, scroll = dayScroll)
-                        HorizontalDivider()
-                        LazyColumn(Modifier.fillMaxSize(), state = listState) {
-                            items(shown, key = { it.id }) { habit ->
-                                HabitGridRow(
-                                    habit = habit,
-                                    dates = dates,
-                                    today = today,
-                                    scroll = dayScroll,
-                                    onOpen = { onOpenHabit(habit) },
-                                    onEdit = { onEditHabit(habit) },
-                                    onSetReminder = { reminderFor = habit },
-                                    onTapDay = { date -> tapDay(habit, date) },
-                                    onHoldDay = { date -> holding = habit to date },
-                                    questionMarks = questionMarks,
-                                )
-                                HorizontalDivider()
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        HabitList(
+            habits = habits,
+            rows = shown,
+            loading = loading,
+            loaded = loaded,
+            error = error,
+            dates = dates,
+            today = today,
+            questionMarks = questionMarks,
+            query = query,
+            onQueryChange = { query = it },
+            listState = listState,
+            dayScroll = dayScroll,
+            snackbar = snackbar,
+            focusHabit = focusHabit,
+            onFocused = onFocused,
+            onRefresh = { reload++ },
+            onReorder = onReorder,
+            onNewHabit = onNewHabit,
+            onOpenHabit = onOpenHabit,
+            onEditHabit = onEditHabit,
+            onSetReminder = { habit -> reminderFor = habit },
+            onTapDay = { habit, date -> tapDay(habit, date) },
+            onHoldDay = { habit, date -> holding = habit to date },
+            onOpenStats = onOpenStats,
+            onOpenArchive = onOpenArchive,
+            onOpenSettings = onOpenSettings,
+            onSignOut = onSignOut,
+            onChangeServer = onChangeServer,
+        )
 
         reminderFor?.let { habit ->
             ReminderDialog(

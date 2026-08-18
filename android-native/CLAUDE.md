@@ -32,6 +32,36 @@ one silent too.
 is why it never had the dashboard's `end`-paging defect and why `gridDays` is not
 mirrored: there is no fixed column count for a setting to govern.
 
+## The search box
+
+**`HabitList` is top-level, and that is the point.** `HabitListScreen` remains a
+private method on `MainActivity` holding the fetch and the dialogs; the shell —
+top bar, search box, empty states, list, focus effect — is a top-level
+composable so a Robolectric test can drive it. This file's own repeated lesson
+is that pinning the decision is not pinning the wiring; four bugs lived one line
+below a correct pure function.
+
+**The rendered list is a SUBSET, and three things must keep reading the
+unfiltered one** — the reorder hand-off and its `enabled`, the full-screen error
+branch, and the search-box threshold — **while two must read the rendered one**:
+`ScrollRestore`'s item count and the `focusHabit` index. A reorder against a
+subset writes a wrong `position` for habits that were never on screen, and it is
+the only one of the five that reaches storage; the rest only look wrong — the
+error screen replacing a working list, the search box vanishing under its own
+caret, or `ScrollRestore` and the focus effect answering about a list the
+`LazyColumn` does not hold.
+
+**A notification tap beats a filter**, and the focus effect is keyed on `query`
+as well as the list because a query matching everything yields an `equals` list
+when it clears — keyed on the list alone, the effect would never re-run and the
+focus would stay pending for the life of the process, which is exactly what
+suppresses the resume snap-to-top.
+
+**`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
+about a value that reaches storage; this predicate reaches none. The two
+clients disagreeing about diacritic folding costs a search result, not a wrong
+entry.
+
 ## Notifications
 
 **The body opens the app; only the buttons answer.** `MainActivity` is
