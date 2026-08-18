@@ -1858,10 +1858,17 @@ Two of them decide how much there is to look at:
 | Setting | Default | What it does |
 |---|---|---|
 | **Day columns** (Dashboard) | Fit the screen | How many days the dashboard grid shows **at most** — 5, 7, 10, 14, or as many as fit. It is a maximum and never a minimum: a phone asked for a fortnight still draws a week, because fourteen columns on a narrow screen leave nothing for the habit's name. Choosing fewer on a phone is how you get five fat columns you can hit with a thumb |
-| **Cards on a habit's page** (Statistics) | All of them | Which of the nine cards a habit's page draws: the strength curve, the calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency and times per week. The four figures at the top are always shown, so unticking everything leaves a page rather than a blank one |
+| **Cards on a habit's page** (Statistics) | All of them, in this order | Which of the nine cards a habit's page draws, and in what order: the strength curve, the calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency and times per week. Each row has ▲ / ▼ buttons to move it up or down the list, alongside its tick. The four figures at the top are always shown, so unticking everything leaves a page rather than a blank one |
 
 A card with nothing in it yet — bouncing back on a habit with no history, awards
 on one that has not earned any — stays hidden whichever way this is set.
+
+An account that saved this setting before ordering existed is not migrated: it
+keeps recording only which cards were on, so a card added to habiterall after
+that save arrives **off** rather than at the end of the list. Opening the
+dialog and pressing Save — even with nothing else changed — rewrites the value
+in the new shape, after which a newly added card arrives on, at its usual place
+in the order above.
 
 Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 

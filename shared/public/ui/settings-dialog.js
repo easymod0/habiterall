@@ -114,6 +114,124 @@ function paintNotices() {
   }
 }
 
+/**
+ * The `ordered-multi` control: one row per card in DRAFT order, each a
+ * checkbox plus ▲/▼ buttons that swap its position.
+ *
+ * A fieldset, not the whole dialog body — a card's position is the ENTIRE
+ * thing this control expresses, so nothing else on the page needs redrawing
+ * when it changes, and rebuilding the body anyway would tear controls out of
+ * whatever other section the user is mid-edit in for no reason of this
+ * control's own. `moveOrderedCard` below is what re-renders it in place.
+ *
+ * `${controlId}-${opt.value}` is unchanged from `multi`'s scheme —
+ * `settingscheck.mjs` looks a card's checkbox up by it, and that lookup must
+ * not care what order the rows happen to be drawn in.
+ */
+function orderedMultiFieldset(key, def, controlId) {
+  const fieldset = document.createElement('fieldset');
+  fieldset.className = 'setting-multi setting-ordered-multi';
+  const legend = document.createElement('legend');
+  legend.textContent = def.label;
+  fieldset.append(legend);
+
+  // The draft always holds every option by the time the dialog can open — see
+  // `SettingDef.normalise` — so `def.default` here is only ever a defensive
+  // fallback, the same one `multi`'s `draft[key] ?? []` is above.
+  const list = Array.isArray(draft[key]) ? draft[key] : def.default;
+
+  list.forEach((entry, index) => {
+    const opt = def.options.find((o) => o.value === entry.id);
+    if (!opt) return;   // a stored id this registry no longer knows
+
+    const row = document.createElement('div');
+    row.className = 'setting-ordered-row';
+
+    const label = document.createElement('label');
+    label.className = 'checkbox';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.id = `${controlId}-${opt.value}`;
+    box.checked = !!entry.on;
+    box.addEventListener('change', () => {
+      // `on` changes; position does not. Read the draft at event time, the
+      // same reason `multi`'s handler does: a captured list goes stale the
+      // moment a second row is touched.
+      const current = Array.isArray(draft[key]) ? draft[key] : list;
+      const next = current.map((e) => (e.id === entry.id ? { ...e, on: box.checked } : e));
+      stage(key, next);
+    });
+    const text = document.createElement('span');
+    text.textContent = opt.label;
+    label.append(box, text);
+    row.append(label);
+
+    // A glyph alone says nothing to a screen reader, so the label names the
+    // card. Disabled at the ends of the list — there is nowhere further to go.
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'btn btn-sm';
+    up.textContent = '▲';
+    up.setAttribute('aria-label', `Move ${opt.label} up`);
+    up.disabled = index === 0;
+    up.dataset.card = opt.value;
+    up.dataset.dir = 'up';
+    up.addEventListener('click',
+      () => moveOrderedCard(key, def, controlId, fieldset, opt.value, -1));
+
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'btn btn-sm';
+    down.textContent = '▼';
+    down.setAttribute('aria-label', `Move ${opt.label} down`);
+    down.disabled = index === list.length - 1;
+    down.dataset.card = opt.value;
+    down.dataset.dir = 'down';
+    down.addEventListener('click',
+      () => moveOrderedCard(key, def, controlId, fieldset, opt.value, 1));
+
+    row.append(up, down);
+    fieldset.append(row);
+  });
+
+  return fieldset;
+}
+
+/**
+ * Swap `id`'s row with its neighbour in `direction` (-1 up, +1 down), stage
+ * the result, and repaint only `fieldset` — never `renderSettingsBody`, for
+ * the reason at :186 below (a rebuild takes a text field's content with it
+ * elsewhere in the dialog, and here it would also be pointless work).
+ *
+ * Focus follows the CARD, not the position, matching `focusKeyOf` /
+ * `restoreFocus` in `ui/dashboard.js`: naming what moved rather than where it
+ * sat is what makes a second press possible at all. The button just pressed
+ * can itself become disabled by the move (pressing ▲ on the second row can
+ * put the card first), so the fallback is its sibling in the same row — the
+ * only other thing there is to focus.
+ */
+function moveOrderedCard(key, def, controlId, fieldset, id, direction) {
+  const current = Array.isArray(draft[key]) ? draft[key] : def.default;
+  const from = current.findIndex((e) => e.id === id);
+  const to = from + direction;
+  if (from === -1 || to < 0 || to >= current.length) return;
+
+  const next = [...current];
+  [next[from], next[to]] = [next[to], next[from]];
+  stage(key, next);
+
+  const fresh = orderedMultiFieldset(key, def, controlId);
+  fieldset.replaceWith(fresh);
+
+  const pressedDir = direction < 0 ? 'up' : 'down';
+  const siblingDir = direction < 0 ? 'down' : 'up';
+  const pressed = /** @type {HTMLButtonElement | null} */ (
+    fresh.querySelector(`button[data-card="${id}"][data-dir="${pressedDir}"]`));
+  if (pressed && !pressed.disabled) pressed.focus();
+  else /** @type {HTMLButtonElement | null} */ (
+    fresh.querySelector(`button[data-card="${id}"][data-dir="${siblingDir}"]`))?.focus();
+}
+
 function renderSettingsBody() {
   body.replaceChildren();
   actionButtons = [];
@@ -226,6 +344,16 @@ function renderSettingsBody() {
           fieldset.append(row);
         }
         group.append(fieldset);
+        if (def.help) group.append(settingHelp(def.help));
+        continue;                       // no outer <label> for a group
+      } else if (def.type === 'ordered-multi') {
+        // Rows in DRAFT order, not registry order — that is the whole
+        // difference from `multi` above, whose handler rebuilds from
+        // `def.options` and so can only ever send canonical order. One row
+        // per card, plus ▲/▼ buttons that swap its position; see
+        // `orderedMultiFieldset` for why a press repaints only this fieldset
+        // and never the whole dialog body.
+        group.append(orderedMultiFieldset(key, def, controlId));
         if (def.help) group.append(settingHelp(def.help));
         continue;                       // no outer <label> for a group
       } else if (def.type === 'text') {

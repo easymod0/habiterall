@@ -87,6 +87,65 @@ export async function open(id) {
   }
 }
 
+/** Delete every `state.chartOffsets` key a predicate matches. */
+function forgetOffsets(matches) {
+  for (const key of Object.keys(state.chartOffsets)) {
+    if (matches(key)) delete state.chartOffsets[key];
+  }
+}
+
+/**
+ * Every card the detail view can draw, keyed by the id `detailCards` stores —
+ * one table, in `DETAIL_CARDS` order (shared/src/validate.js, which the
+ * browser cannot import; `ui/settings.js`'s `multi`/`ordered-multi` options
+ * are the second declaration `test/settings.test.js` keeps honest, and this
+ * is a third one only of the KEYS, not the order — `render` below draws in
+ * whatever order the stored list names).
+ *
+ * A `Map`, not an object literal: an id comes out of storage, and
+ * `CARDS['__proto__']` resolves to `Object.prototype` on a plain object —
+ * `Map.prototype.get` sidesteps the question rather than needing its own
+ * `Object.hasOwn` check.
+ *
+ * `forget` is the paging position a card owns, if it owns one at all — this
+ * used to be a SECOND table here (`forgetHiddenPositions`'s `owns`), naming
+ * the same nine ids for a different question. Two lists of one set of ids is
+ * the trap; merging them into one entry per id is the fix. An entry with no
+ * paging position (streaks, resilience, awards, weekdays) simply omits
+ * `forget`.
+ */
+const CARDS = new Map([
+  ['strength', {
+    build: buildStrengthCard,
+    // Prefix-matched, so hiding the strength card forgets every resolution
+    // it was ever paged at rather than only the one last showing.
+    forget: () => forgetOffsets((key) => key.startsWith('score:')),
+  }],
+  ['calendar', {
+    build: buildCalendarCard,
+    // The calendar keeps its position in `calEnd` rather than
+    // `chartOffsets` — the reason clearing `chartOffsets` alone was never
+    // enough, on the one card anybody pages by a date rather than a window.
+    forget: () => { state.calEnd = null; },
+  }],
+  ['streaks', { build: buildStreaksCard }],
+  ['resilience', { build: buildResilienceCard }],
+  ['awards', { build: buildAwardsCard }],
+  ['history', {
+    build: buildHistoryCard,
+    forget: () => forgetOffsets((key) => key.startsWith('history:')),
+  }],
+  ['weekdays', { build: buildWeekdaysCard }],
+  ['weekdayMonths', {
+    build: buildWeekdayMonthsCard,
+    forget: () => forgetOffsets((key) => key === 'weekdayByMonth'),
+  }],
+  ['frequency', {
+    build: buildFrequencyCard,
+    forget: () => forgetOffsets((key) => key === 'frequency'),
+  }],
+]);
+
 /**
  * A card that is not being drawn holds no paging position.
  *
@@ -94,11 +153,10 @@ export async function open(id) {
  * beside the setting because this file is the only one that knows which key a
  * card pages under: `windowedChart` is passed `score:<gran>` and
  * `history:<gran>` — built from the CURRENT granularity, session override
- * included — while the other two are literals, and the calendar does not use
- * `chartOffsets` at all. Written where the setting is applied, that mapping
- * would be a second copy of something already written down twice, and it would
- * have to reconstruct a granularity the settings dialog is in the middle of
- * clearing.
+ * included — while the other two granular keys are literals, and the calendar
+ * does not use `chartOffsets` at all. `CARDS`'s own `forget` entries are that
+ * knowledge now, which is what lets this be a plain walk over the stored list
+ * rather than a second table naming the ids again.
  *
  * Scoped to the cards actually hidden, which is the whole point. The first
  * version cleared `chartOffsets` wholesale whenever `detailCards` changed at
@@ -106,29 +164,12 @@ export async function open(id) {
  * to 2019 — still ticked, never hidden — back to today, with nothing on screen
  * to explain it.
  *
- * Prefix-matched for the two granular keys, so hiding the strength card forgets
- * every resolution it was paged at rather than only the one showing.
- *
- * @param {(id: string) => boolean} shows
+ * @param {{id: string, on: boolean}[]} cardList
  */
-function forgetHiddenPositions(shows) {
-  const owns = {
-    strength: (key) => key.startsWith('score:'),
-    history: (key) => key.startsWith('history:'),
-    weekdayMonths: (key) => key === 'weekdayByMonth',
-    frequency: (key) => key === 'frequency',
-  };
-
-  for (const [id, isOurs] of Object.entries(owns)) {
-    if (shows(id)) continue;
-    for (const key of Object.keys(state.chartOffsets)) {
-      if (isOurs(key)) delete state.chartOffsets[key];
-    }
+function forgetHiddenPositions(cardList) {
+  for (const { id, on } of cardList) {
+    if (!on) CARDS.get(id)?.forget?.();
   }
-
-  // The calendar keeps its position in `calEnd` instead — the reason clearing
-  // `chartOffsets` alone was not enough, on the one card anybody pages.
-  if (!shows('calendar')) state.calEnd = null;
 }
 
 function render(stats, entries) {
@@ -144,6 +185,14 @@ function render(stats, entries) {
   host.replaceChildren();
 
   const entriesByDate = Object.fromEntries(entries.map((e) => [e.date, e.value]));
+  // Computed unconditionally, same as `entriesByDate` above, rather than only
+  // inside the calendar's own builder: which card is `on` is decided by the
+  // stored order below, so nothing this early can gate on the calendar being
+  // shown, and both are cheap single passes over `entries`.
+  const skipSet = new Set(entries.filter((e) => e.status === 'skip').map((e) => e.date));
+  const notesByDate = Object.fromEntries(
+    entries.filter((e) => e.notes).map((e) => [e.date, e.notes])
+  );
 
   /* header */
   const head = document.createElement('div');
@@ -204,380 +253,225 @@ function render(stats, entries) {
   // card scrolls horizontally instead.
   const chartWidth = Math.max(320, cardInnerWidth(host));
 
-  // Which cards this account wants, read once — everything below the tiles is
-  // gated on it. The ids are `DETAIL_CARDS` in shared/src/validate.js, which
-  // the browser cannot import, so the `multi` options in ui/settings.js are the
-  // second copy and test/settings.test.js is what keeps the two honest.
+  // Which cards this account wants, AND IN WHAT ORDER — read once, everything
+  // below the tiles is gated on and ordered by this. `settings.get('detailCards')`
+  // already answers the tolerant, filled-in `{id, on}[]` shape covering every
+  // id in `DETAIL_CARDS` exactly once: `normalise` on the registry def
+  // (ui/settings.js) is an independent mirror of `parseCardList` in
+  // shared/src/validate.js, which the browser cannot import — the same reason
+  // `DETAIL_CARDS` is declared twice.
   //
   // The header and the four stat tiles are deliberately NOT in the list: they
   // are the summary rather than a card, so unticking everything leaves a page
   // rather than a blank one.
-  const cards = new Set(settings.get('detailCards') ?? []);
-  const shows = (id) => cards.has(id);
-  forgetHiddenPositions(shows);
+  const cardList = settings.get('detailCards') ?? [];
 
-  /* score, with its own resolution selector */
-  if (shows('strength')) {
-    const scoreCard = card('Habit strength', null);
-    const scoreHead = scoreCard.querySelector('.card-head');
-    scoreHead.append(segmented(
-      ['day', 'week', 'month', 'quarter', 'year'],
-      scoreGranularity(),
-      async (g) => { state.scoreGranularity = g; await open(habit.id); }
-    ));
+  // Two passes over the stored list: every hidden card is forgotten FIRST,
+  // then every shown card is built and appended. That is exactly what the
+  // fixed source order always did — all forgetting happened before any
+  // building — and it removes any question of a builder observing a later
+  // card's clearing. A hidden card is still not BUILT, rather than built and
+  // left unappended: these draw SVG, which is most of what rendering this
+  // page costs, and the setting exists partly for people who do not want to
+  // wait for it — which is why the second pass below only ever calls
+  // `build` for an `on` entry.
+  forgetHiddenPositions(cardList);
 
-    // The score is computed daily whatever this says — it is an EWMA, so
-    // skipping days would change the value rather than the resolution. The
-    // selector only thins out which points are plotted.
-    const scorePoints =
-      resampleScores(stats.scores, scoreGranularity(), settings.get('weekStart'));
-
-    windowedChart({
-      card: scoreCard,
-      key: `score:${scoreGranularity()}`,
-      items: scorePoints,
-      // A line chart stays readable at far tighter spacing than bars do, so it
-      // only pages once the vertices would overlap.
-      density: 'point',
-      width: chartWidth,
-      labelOf: (p) => formatStamp(p.date),
-      redraw: () => open(habit.id),
-      render: (slice) => scoreChart(slice, color, { width: chartWidth }),
-    });
-    host.append(scoreCard);
-  }
-
-  // Built here but appended after the calendar: the calendar is the thing
-  // people come to the detail view to look at and edit, so it sits directly
-  // under the score rather than below two analysis cards.
-  //
-  // A hidden card is not BUILT, rather than built and left unappended: these
-  // draw SVG, which is most of what rendering this page costs, and the setting
-  // exists partly for people who do not want to wait for it.
-  const streaksCard = shows('streaks')
-    ? card('Best streaks',
-      streakChart(stats.streaks, color, { limit: STREAK_LIMIT, width: chartWidth }))
-    : null;
-  const resilienceCard = shows('resilience')
-    ? buildResilienceCard(stats, color, chartWidth)
-    : null;
-
-  /* calendar — clickable, with navigation back through history */
-  if (shows('calendar')) {
-    const calCard = card('Calendar', null);
-    const calHead = calCard.querySelector('.card-head');
-
-    const nav = document.createElement('div');
-    nav.className = 'cal-nav';
-    const navLabel = document.createElement('span');
-    navLabel.className = 'cal-range';
-
-    const mkNav = (text, label, fn) => {
-      const b = document.createElement('button');
-      b.className = 'btn btn-sm';
-      b.textContent = text;
-      b.setAttribute('aria-label', label);
-      b.addEventListener('click', fn);
-      return b;
-    };
-
-    // Zoom comes from the saved setting, but the buttons below change it for
-    // this session too, so trying a level does not mean a trip to Settings.
-    const ZOOM_ORDER = ['closest', 'close', 'default', 'wide'];
-    const zoom = state.calZoom ?? settings.get('calendarZoom');
-
-    // Fill the card rather than sitting at a fixed width with empty space to the
-    // right of it. `chartWidth` is measured from the container the card is about
-    // to be appended to, since calCard is not in the DOM yet.
-    const CAL_WEEKS = weeksForWidth(chartWidth, zoom);
-
-    const shift = (weeks) => {
-      state.calEnd = addDaysISO(state.calEnd ?? todayISO(), weeks * 7);
-      if (state.calEnd > todayISO()) state.calEnd = todayISO();
-      open(habit.id);
-    };
-
-    /** @param {number} dir -1 zooms in (bigger squares), +1 zooms out */
-    const changeZoom = (dir) => {
-      const i = ZOOM_ORDER.indexOf(zoom);
-      const next = ZOOM_ORDER[Math.min(ZOOM_ORDER.length - 1, Math.max(0, i + dir))];
-      if (next === zoom) return;
-      state.calZoom = next;
-      // `set` is synchronous and owns its own offline queuing, so the redraw
-      // never waits on the server.
-      settings.set('calendarZoom', next);
-      open(habit.id);
-    };
-
-    const zoomIn = mkNav('+', 'Zoom in: bigger squares, less history', () => changeZoom(-1));
-    const zoomOut = mkNav('−', 'Zoom out: smaller squares, more history', () => changeZoom(1));
-    zoomIn.disabled = zoom === ZOOM_ORDER[0];
-    zoomOut.disabled = zoom === ZOOM_ORDER.at(-1);
-
-    nav.append(
-      mkNav('‹ Earlier', 'Show earlier months', () => shift(-CAL_WEEKS)),
-      navLabel,
-      mkNav('Later ›', 'Show later months', () => shift(CAL_WEEKS)),
-      mkNav('Today', 'Jump to today', () => { state.calEnd = null; open(habit.id); }),
-      zoomOut,
-      zoomIn,
-    );
-    calHead.append(nav);
-
-    const calEnd = state.calEnd ?? todayISO();
-    // BOTH ends from the same window the grid below is drawn with. Left to the
-    // parameter default this label named a date the calendar does not start on —
-    // by a day most of the week, by six whenever the anchor falls on the week's
-    // last day — and the right-hand side had the same fault for the same reason:
-    // `calEnd` is the day being asked about, not the last cell, so paging back
-    // drew up to six further days of real history beyond the labelled end.
-    //
-    // Clamped to today, because the window's last column runs to the end of the
-    // week and those days have not happened yet. The label says what is shown
-    // and answerable; the future cells are drawn but empty.
-    const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
-    const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
-    // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
-    // says "Completion calendar" reads as a serial number.
-    //
-    // Written, not ISO. Every range readout goes through one of the two
-    // formatters now, including `windowedChart`'s — which used to show the raw
-    // bucket key, so a card's header read `2026-07-03 → 2026-08-16` above an axis
-    // saying `Jul 3, 2026`.
-    navLabel.textContent =
-      `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
-      `${formatDateShort(fromISOLocal(calLast))}`;
-
-    const skipSet = new Set(entries.filter((e) => e.status === 'skip').map((e) => e.date));
-    const notesByDate = Object.fromEntries(
-      entries.filter((e) => e.notes).map((e) => [e.date, e.notes])
-    );
-
-    const calScroll = document.createElement('div');
-    calScroll.className = 'chart-scroll';
-    calScroll.append(calendarChart(entriesByDate, color, habit, {
-      zoom,
-      // The account's week, which `startOfWeek` in stats.js has always honoured
-      // while the calendar snapped to Sunday regardless — so the heatmap and the
-      // history chart under it disagreed about where a week begins.
-      weekStart: settings.get('weekStart'),
-      weeks: CAL_WEEKS,
-      endDate: calEnd,
-      skips: skipSet,
-      unknownMark: settings.get('questionMarks'),
-      // Bands behind runs of 3+, so a good stretch reads as one thing rather
-      // than a scatter of filled squares.
-      streaks: stats.streaks,
-      onPick: (date) => openDayDialog(
-        habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
-      ),
-    }));
-    calCard.append(calScroll);
-
-    // The legend has to describe the grid above it, and for an avoided habit that
-    // grid has two colours rather than a ramp — a clean day in the habit's colour
-    // and a slip in red. A "Less ▢▢▢▢ More" ramp under it advertises a shading
-    // the cells no longer use and shows no red at all, which is the same "two
-    // surfaces over one dataset disagree" the inversion exists to end.
-    const legend = document.createElement('div');
-    legend.className = 'legend';
-    const swatch = (background, opacity) => {
-      const sw = document.createElement('span');
-      sw.className = 'legend-swatch';
-      sw.style.background = background;
-      if (opacity != null) sw.style.opacity = String(opacity);
-      legend.append(sw);
-      return sw;
-    };
-
-    if (isAvoided(habit)) {
-      legend.append(document.createTextNode('Clean'));
-      swatch(color);
-      swatch('var(--danger)');
-      legend.append(document.createTextNode('Slipped'));
-    } else {
-      legend.append(document.createTextNode('Less'));
-      for (const t of [0.2, 0.45, 0.7, 1]) swatch(color, t);
-      legend.append(document.createTextNode('More'));
-    }
-    calCard.append(legend);
-    host.append(calCard);
-  }
-
-  /* streaks, then the resilience counterweight to them */
-  if (streaksCard) host.append(streaksCard);
-  if (resilienceCard) host.append(resilienceCard);
-
-  // Beside the survival curve and never instead of it. `computeSurvival` took
-  // the position that "best streak: 23" is the weaker framing — a probability
-  // you can act on beats a trophy — so the awards go UNDER the card holding
-  // that chart rather than above it, and the chart is what answers "how far do
-  // my streaks usually get" while a badge only says how far one of them got.
-  const awardsCard = shows('awards') ? buildAwardsCard(stats, color) : null;
-  if (awardsCard) host.append(awardsCard);
-
-  /* history with granularity toggle */
-  if (shows('history')) {
-    const histCard = card('History', null);
-    const histHead = histCard.querySelector('.card-head');
-
-    const gran = segmented(
-      ['day', 'week', 'month', 'quarter', 'year'],
-      historyGranularity(),
-      async (g) => { state.granularity = g; await open(habit.id); }
-    );
-    const mode = segmented(
-      ['percent', 'count'],
-      historyMode(),
-      async (m) => { state.historyMode = m; await open(habit.id); }
-    );
-    const toggles = document.createElement('div');
-    toggles.style.display = 'flex';
-    toggles.style.gap = '8px';
-    toggles.style.flexWrap = 'wrap';
-    toggles.append(gran, mode);
-    histHead.append(toggles);
-
-    windowedChart({
-      card: histCard,
-      key: `history:${historyGranularity()}`,   // per bucket: 60 weeks ≠ 60 days
-      items: stats.history,
-      density: 'bar',
-      width: chartWidth,
-      labelOf: (b) => formatStamp(b.bucket),
-      redraw: () => open(habit.id),
-      render: (slice) => historyChart(slice, color, {
-        showPercent: historyMode() === 'percent',
-        width: chartWidth,
-      }),
-    });
-    host.append(histCard);
-  }
-
-  /* weekday — seven fixed bars, so nothing to page through */
-  if (shows('weekdays')) {
-    host.append(
-      card('By day of week', weekdayChart(stats.weekdays, color,
-        { width: chartWidth, weekStart: settings.get('weekStart') }))
-    );
-  }
-
-  /* weekday consistency over time — the same question as the bars above,
-     but keeping the month axis so drift on one weekday is visible */
-  if (shows('weekdayMonths') && stats.weekdayByMonth?.length) {
-    const wmCard = card('Weekday consistency', null);
-    const hint = document.createElement('p');
-    hint.className = 'hint';
-    hint.textContent =
-      'Bigger circles mean a higher completion rate. A row that fades to the '
-      + 'right is a weekday you have been losing.';
-    wmCard.append(hint);
-    windowedChart({
-      card: wmCard,
-      key: 'weekdayByMonth',
-      items: stats.weekdayByMonth,
-      density: 'circle',
-      width: chartWidth,
-      labelOf: (m) => formatStamp(m.month),
-      redraw: () => open(habit.id),
-      render: (slice) => weekdayMonthChart(slice, color,
-        { width: chartWidth, weekStart: settings.get('weekStart') }),
-    });
-    host.append(wmCard);
-  }
-
-  /* frequency */
-  if (shows('frequency') && stats.frequency.length) {
-    const fc = card('Times per week', null);
-    // Months are ROWS here, so the limit is 12 rows of vertical space rather
-    // than a minimum column width — but it still silently dropped older
-    // months, which is the same problem the paging controls solve.
-    windowedChart({
-      card: fc,
-      key: 'frequency',
-      items: stats.frequency,
-      density: 60,   // ~12 rows on a typical card
-      width: chartWidth,
-      labelOf: (m) => formatStamp(m.month),
-      redraw: () => open(habit.id),
-      render: (slice) => frequencyChart(slice, color, { width: chartWidth }),
-    });
-    host.append(fc);
+  const ctx = { habit, stats, entries, color, chartWidth, entriesByDate, skipSet, notesByDate };
+  for (const { id, on } of cardList) {
+    if (!on) continue;
+    // A stored id this file does not know — an older shape, or a card since
+    // removed — is skipped rather than thrown on.
+    const built = CARDS.get(id)?.build?.(ctx);
+    if (built) host.append(built);
   }
 }
 
 /**
- * The awards row: the server's reading of the figures already on this page.
- *
- * Rendered, never decided. Which awards exist and what they are called is
- * `shared/src/awards.js` — the ladder they are read off (`SURVIVAL_THRESHOLDS`)
- * lives in `stats.js`, which the browser cannot import, and a second copy of it
- * here is exactly the drift the issue asked for it to be reused to avoid. So
- * the client's whole job is the styling, and it keeps no judgement at all: an
- * earlier version drew two shapes from a `permanent` flag, which claimed some
- * awards could not be taken away. None of them can promise that — the window
- * every figure is computed over moves — so the flag is gone and with it the
- * second shape. The lead paragraph says what these are instead, which is the
- * honest place for it.
- *
- * Returns null for a habit with nothing yet, so a brand-new one gets no empty
- * card — the same rule the resilience card follows.
+ * The score card: the strength curve, with its own resolution selector.
  */
-function buildAwardsCard(stats, color) {
-  // `?? []` and not a guard on the key: an offline boot can serve a stats
-  // response the service worker cached before this shipped.
-  const awards = stats.awards ?? [];
-  if (!awards.length) return null;
+function buildStrengthCard({ habit, stats, color, chartWidth }) {
+  const scoreCard = card('Habit strength', null);
+  const scoreHead = scoreCard.querySelector('.card-head');
+  scoreHead.append(segmented(
+    ['day', 'week', 'month', 'quarter', 'year'],
+    scoreGranularity(),
+    async (g) => { state.scoreGranularity = g; await open(habit.id); }
+  ));
 
-  const c = card('Awards', null);
+  // The score is computed daily whatever this says — it is an EWMA, so
+  // skipping days would change the value rather than the resolution. The
+  // selector only thins out which points are plotted.
+  const scorePoints =
+    resampleScores(stats.scores, scoreGranularity(), settings.get('weekStart'));
 
-  const lead = document.createElement('p');
-  lead.className = 'hint';
-  // Says what these are, in the one place a reader will look. Nothing is
-  // stored, so each of these is a reading of the history as it stands — which
-  // means it can change when the history does, including backwards.
-  lead.textContent =
-    'What this habit’s history shows right now. These are worked out from '
-    + 'your entries each time rather than stored, so they move as the history '
-    + 'does.';
-  c.append(lead);
+  windowedChart({
+    card: scoreCard,
+    key: `score:${scoreGranularity()}`,
+    items: scorePoints,
+    // A line chart stays readable at far tighter spacing than bars do, so it
+    // only pages once the vertices would overlap.
+    density: 'point',
+    width: chartWidth,
+    labelOf: (p) => formatStamp(p.date),
+    redraw: () => open(habit.id),
+    render: (slice) => scoreChart(slice, color, { width: chartWidth }),
+  });
+  return scoreCard;
+}
 
-  const row = document.createElement('div');
-  row.className = 'award-row';
+/**
+ * The calendar — clickable, with navigation back through history and its own
+ * zoom, independent of the account's saved default for the length of this
+ * viewing.
+ *
+ * The thing people come to the detail view to look at and edit, which is why
+ * the `detailCards` DEFAULT (ui/settings.js) puts it immediately after
+ * `strength` — directly under the score rather than below two analysis
+ * cards. That is a fact about the default order now, not about where this
+ * builder is called from: `test/settings.test.js`'s adjacency assertion pins
+ * it, and any account is free to move it.
+ */
+function buildCalendarCard({ habit, color, chartWidth, entriesByDate, skipSet, notesByDate, stats }) {
+  const calCard = card('Calendar', null);
+  const calHead = calCard.querySelector('.card-head');
 
-  for (const a of awards) {
-    const el = document.createElement('div');
-    el.className = 'award';
-    // The habit's own colour, as every other figure on this page uses. A
-    // custom property rather than a border colour directly, so the stylesheet
-    // decides which edges take it — and so nothing here has to know that the
-    // one element with text ON a fill deliberately does not.
-    el.style.setProperty('--award-accent', color);
-    el.setAttribute('data-award', a.id);
+  const nav = document.createElement('div');
+  nav.className = 'cal-nav';
+  const navLabel = document.createElement('span');
+  navLabel.className = 'cal-range';
 
-    const label = document.createElement('div');
-    label.className = 'award-label';
-    label.textContent = a.label;
+  const mkNav = (text, label, fn) => {
+    const b = document.createElement('button');
+    b.className = 'btn btn-sm';
+    b.textContent = text;
+    b.setAttribute('aria-label', label);
+    b.addEventListener('click', fn);
+    return b;
+  };
 
-    if (a.fresh) {
-      const flag = document.createElement('span');
-      flag.className = 'award-fresh';
-      // A comeback is the one thing here with a moment, and deriving on every
-      // request has no other way to give it one.
-      flag.textContent = 'New';
-      label.append(' ', flag);
-    }
+  // Zoom comes from the saved setting, but the buttons below change it for
+  // this session too, so trying a level does not mean a trip to Settings.
+  const ZOOM_ORDER = ['closest', 'close', 'default', 'wide'];
+  const zoom = state.calZoom ?? settings.get('calendarZoom');
 
-    const detail = document.createElement('div');
-    detail.className = 'award-detail';
-    detail.textContent = a.detail;
+  // Fill the card rather than sitting at a fixed width with empty space to the
+  // right of it. `chartWidth` is measured from the container the card is about
+  // to be appended to, since calCard is not in the DOM yet.
+  const CAL_WEEKS = weeksForWidth(chartWidth, zoom);
 
-    el.append(label, detail);
-    row.append(el);
+  const shift = (weeks) => {
+    state.calEnd = addDaysISO(state.calEnd ?? todayISO(), weeks * 7);
+    if (state.calEnd > todayISO()) state.calEnd = todayISO();
+    open(habit.id);
+  };
+
+  /** @param {number} dir -1 zooms in (bigger squares), +1 zooms out */
+  const changeZoom = (dir) => {
+    const i = ZOOM_ORDER.indexOf(zoom);
+    const next = ZOOM_ORDER[Math.min(ZOOM_ORDER.length - 1, Math.max(0, i + dir))];
+    if (next === zoom) return;
+    state.calZoom = next;
+    // `set` is synchronous and owns its own offline queuing, so the redraw
+    // never waits on the server.
+    settings.set('calendarZoom', next);
+    open(habit.id);
+  };
+
+  const zoomIn = mkNav('+', 'Zoom in: bigger squares, less history', () => changeZoom(-1));
+  const zoomOut = mkNav('−', 'Zoom out: smaller squares, more history', () => changeZoom(1));
+  zoomIn.disabled = zoom === ZOOM_ORDER[0];
+  zoomOut.disabled = zoom === ZOOM_ORDER.at(-1);
+
+  nav.append(
+    mkNav('‹ Earlier', 'Show earlier months', () => shift(-CAL_WEEKS)),
+    navLabel,
+    mkNav('Later ›', 'Show later months', () => shift(CAL_WEEKS)),
+    mkNav('Today', 'Jump to today', () => { state.calEnd = null; open(habit.id); }),
+    zoomOut,
+    zoomIn,
+  );
+  calHead.append(nav);
+
+  const calEnd = state.calEnd ?? todayISO();
+  // BOTH ends from the same window the grid below is drawn with. Left to the
+  // parameter default this label named a date the calendar does not start on —
+  // by a day most of the week, by six whenever the anchor falls on the week's
+  // last day — and the right-hand side had the same fault for the same reason:
+  // `calEnd` is the day being asked about, not the last cell, so paging back
+  // drew up to six further days of real history beyond the labelled end.
+  //
+  // Clamped to today, because the window's last column runs to the end of the
+  // week and those days have not happened yet. The label says what is shown
+  // and answerable; the future cells are drawn but empty.
+  const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
+  const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
+  // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
+  // says "Completion calendar" reads as a serial number.
+  //
+  // Written, not ISO. Every range readout goes through one of the two
+  // formatters now, including `windowedChart`'s — which used to show the raw
+  // bucket key, so a card's header read `2026-07-03 → 2026-08-16` above an axis
+  // saying `Jul 3, 2026`.
+  navLabel.textContent =
+    `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
+    `${formatDateShort(fromISOLocal(calLast))}`;
+
+  const calScroll = document.createElement('div');
+  calScroll.className = 'chart-scroll';
+  calScroll.append(calendarChart(entriesByDate, color, habit, {
+    zoom,
+    // The account's week, which `startOfWeek` in stats.js has always honoured
+    // while the calendar snapped to Sunday regardless — so the heatmap and the
+    // history chart under it disagreed about where a week begins.
+    weekStart: settings.get('weekStart'),
+    weeks: CAL_WEEKS,
+    endDate: calEnd,
+    skips: skipSet,
+    unknownMark: settings.get('questionMarks'),
+    // Bands behind runs of 3+, so a good stretch reads as one thing rather
+    // than a scatter of filled squares.
+    streaks: stats.streaks,
+    onPick: (date) => openDayDialog(
+      habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
+    ),
+  }));
+  calCard.append(calScroll);
+
+  // The legend has to describe the grid above it, and for an avoided habit that
+  // grid has two colours rather than a ramp — a clean day in the habit's colour
+  // and a slip in red. A "Less ▢▢▢▢ More" ramp under it advertises a shading
+  // the cells no longer use and shows no red at all, which is the same "two
+  // surfaces over one dataset disagree" the inversion exists to end.
+  const legend = document.createElement('div');
+  legend.className = 'legend';
+  const swatch = (background, opacity) => {
+    const sw = document.createElement('span');
+    sw.className = 'legend-swatch';
+    sw.style.background = background;
+    if (opacity != null) sw.style.opacity = String(opacity);
+    legend.append(sw);
+    return sw;
+  };
+
+  if (isAvoided(habit)) {
+    legend.append(document.createTextNode('Clean'));
+    swatch(color);
+    swatch('var(--danger)');
+    legend.append(document.createTextNode('Slipped'));
+  } else {
+    legend.append(document.createTextNode('Less'));
+    for (const t of [0.2, 0.45, 0.7, 1]) swatch(color, t);
+    legend.append(document.createTextNode('More'));
   }
+  calCard.append(legend);
+  return calCard;
+}
 
-  c.append(row);
-  return c;
+/** Longest streaks, newest first, up to `STREAK_LIMIT` of them. */
+function buildStreaksCard({ stats, color, chartWidth }) {
+  return card('Best streaks',
+    streakChart(stats.streaks, color, { limit: STREAK_LIMIT, width: chartWidth }));
 }
 
 /**
@@ -592,7 +486,7 @@ function buildAwardsCard(stats, color) {
  * Returns null when there is nothing honest to say: a non-daily habit (where
  * off-days are not failures) or a habit with no history yet.
  */
-function buildResilienceCard(stats, color, chartWidth) {
+function buildResilienceCard({ stats, color, chartWidth }) {
   const r = stats.resilience;
   if (!r || !r.applicable) return null;
 
@@ -678,6 +572,188 @@ function buildResilienceCard(stats, color, chartWidth) {
   }
 
   return c;
+}
+
+/**
+ * The awards row: the server's reading of the figures already on this page.
+ *
+ * Rendered, never decided. Which awards exist and what they are called is
+ * `shared/src/awards.js` — the ladder they are read off (`SURVIVAL_THRESHOLDS`)
+ * lives in `stats.js`, which the browser cannot import, and a second copy of it
+ * here is exactly the drift the issue asked for it to be reused to avoid. So
+ * the client's whole job is the styling, and it keeps no judgement at all: an
+ * earlier version drew two shapes from a `permanent` flag, which claimed some
+ * awards could not be taken away. None of them can promise that — the window
+ * every figure is computed over moves — so the flag is gone and with it the
+ * second shape. The lead paragraph says what these are instead, which is the
+ * honest place for it.
+ *
+ * `computeSurvival` took the position that "best streak: 23" is the weaker
+ * framing — a probability you can act on beats a trophy — which is why the
+ * `detailCards` DEFAULT (ui/settings.js) puts awards after resilience rather
+ * than above it: the survival chart answers "how far do my streaks usually
+ * get" and a badge only says how far one of them got. That is a fact about the
+ * default order now, not about where this card is appended from;
+ * `test/settings.test.js`'s adjacency assertion pins it, and any account is
+ * free to move it.
+ *
+ * Returns null for a habit with nothing yet, so a brand-new one gets no empty
+ * card — the same rule the resilience card follows.
+ */
+function buildAwardsCard({ stats, color }) {
+  // `?? []` and not a guard on the key: an offline boot can serve a stats
+  // response the service worker cached before this shipped.
+  const awards = stats.awards ?? [];
+  if (!awards.length) return null;
+
+  const c = card('Awards', null);
+
+  const lead = document.createElement('p');
+  lead.className = 'hint';
+  // Says what these are, in the one place a reader will look. Nothing is
+  // stored, so each of these is a reading of the history as it stands — which
+  // means it can change when the history does, including backwards.
+  lead.textContent =
+    'What this habit’s history shows right now. These are worked out from '
+    + 'your entries each time rather than stored, so they move as the history '
+    + 'does.';
+  c.append(lead);
+
+  const row = document.createElement('div');
+  row.className = 'award-row';
+
+  for (const a of awards) {
+    const el = document.createElement('div');
+    el.className = 'award';
+    // The habit's own colour, as every other figure on this page uses. A
+    // custom property rather than a border colour directly, so the stylesheet
+    // decides which edges take it — and so nothing here has to know that the
+    // one element with text ON a fill deliberately does not.
+    el.style.setProperty('--award-accent', color);
+    el.setAttribute('data-award', a.id);
+
+    const label = document.createElement('div');
+    label.className = 'award-label';
+    label.textContent = a.label;
+
+    if (a.fresh) {
+      const flag = document.createElement('span');
+      flag.className = 'award-fresh';
+      // A comeback is the one thing here with a moment, and deriving on every
+      // request has no other way to give it one.
+      flag.textContent = 'New';
+      label.append(' ', flag);
+    }
+
+    const detail = document.createElement('div');
+    detail.className = 'award-detail';
+    detail.textContent = a.detail;
+
+    el.append(label, detail);
+    row.append(el);
+  }
+
+  c.append(row);
+  return c;
+}
+
+/** History with its granularity and percent-vs-count toggles. */
+function buildHistoryCard({ habit, stats, color, chartWidth }) {
+  const histCard = card('History', null);
+  const histHead = histCard.querySelector('.card-head');
+
+  const gran = segmented(
+    ['day', 'week', 'month', 'quarter', 'year'],
+    historyGranularity(),
+    async (g) => { state.granularity = g; await open(habit.id); }
+  );
+  const mode = segmented(
+    ['percent', 'count'],
+    historyMode(),
+    async (m) => { state.historyMode = m; await open(habit.id); }
+  );
+  const toggles = document.createElement('div');
+  toggles.style.display = 'flex';
+  toggles.style.gap = '8px';
+  toggles.style.flexWrap = 'wrap';
+  toggles.append(gran, mode);
+  histHead.append(toggles);
+
+  windowedChart({
+    card: histCard,
+    key: `history:${historyGranularity()}`,   // per bucket: 60 weeks ≠ 60 days
+    items: stats.history,
+    density: 'bar',
+    width: chartWidth,
+    labelOf: (b) => formatStamp(b.bucket),
+    redraw: () => open(habit.id),
+    render: (slice) => historyChart(slice, color, {
+      showPercent: historyMode() === 'percent',
+      width: chartWidth,
+    }),
+  });
+  return histCard;
+}
+
+/** Seven fixed bars, so nothing to page through. */
+function buildWeekdaysCard({ stats, color, chartWidth }) {
+  return card('By day of week', weekdayChart(stats.weekdays, color,
+    { width: chartWidth, weekStart: settings.get('weekStart') }));
+}
+
+/**
+ * Weekday consistency over time — the same question as the bars above, but
+ * keeping the month axis so drift on one weekday is visible.
+ *
+ * Returns null with too little history to plot a month axis at all — the
+ * guard that used to sit in the `if` this card was appended inside.
+ */
+function buildWeekdayMonthsCard({ habit, stats, color, chartWidth }) {
+  if (!stats.weekdayByMonth?.length) return null;
+
+  const wmCard = card('Weekday consistency', null);
+  const hint = document.createElement('p');
+  hint.className = 'hint';
+  hint.textContent =
+    'Bigger circles mean a higher completion rate. A row that fades to the '
+    + 'right is a weekday you have been losing.';
+  wmCard.append(hint);
+  windowedChart({
+    card: wmCard,
+    key: 'weekdayByMonth',
+    items: stats.weekdayByMonth,
+    density: 'circle',
+    width: chartWidth,
+    labelOf: (m) => formatStamp(m.month),
+    redraw: () => open(habit.id),
+    render: (slice) => weekdayMonthChart(slice, color,
+      { width: chartWidth, weekStart: settings.get('weekStart') }),
+  });
+  return wmCard;
+}
+
+/**
+ * Months per row, so the limit is vertical space rather than a minimum column
+ * width — but it still needs paging, or it silently drops older months.
+ *
+ * Returns null with no frequency data at all — the guard that used to sit in
+ * the `if` this card was appended inside.
+ */
+function buildFrequencyCard({ habit, stats, color, chartWidth }) {
+  if (!stats.frequency.length) return null;
+
+  const fc = card('Times per week', null);
+  windowedChart({
+    card: fc,
+    key: 'frequency',
+    items: stats.frequency,
+    density: 60,   // ~12 rows on a typical card
+    width: chartWidth,
+    labelOf: (m) => formatStamp(m.month),
+    redraw: () => open(habit.id),
+    render: (slice) => frequencyChart(slice, color, { width: chartWidth }),
+  });
+  return fc;
 }
 
 export function init() {

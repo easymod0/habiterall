@@ -360,6 +360,103 @@ try{
      await rangeIn('Calendar') === calPaged && calPaged !== '',
      `expected ${calPaged}, got ${await rangeIn('Calendar')}`);
 
+  // detailCards now stores ORDER as well as visibility (#163). A new-shape
+  // value, PUT directly rather than composed through the dialog, in a
+  // deliberately non-canonical order — proving the order reaches the real
+  // server's `parseCardList` and back out through `ui/detail.js`'s stored-list
+  // draw, not just that the right cards are present (the pre-existing legacy
+  // assertions above already prove membership). `resilience`, `awards`,
+  // `weekdayMonths` and `frequency` are set `off` here and excluded from the
+  // comparison below, so this does not depend on which of those the fixture
+  // habit's history happens to qualify for — only the five cards that always
+  // draw regardless of data are checked, by their relative order.
+  console.log('--- detail cards: order ---');
+  await putSetting({ detailCards: [
+    { id: 'frequency', on: false },
+    { id: 'history', on: true },
+    { id: 'awards', on: false },
+    { id: 'strength', on: true },
+    { id: 'weekdayMonths', on: false },
+    { id: 'weekdays', on: true },
+    { id: 'resilience', on: false },
+    { id: 'calendar', on: true },
+    { id: 'streaks', on: true },
+  ] });
+  await load();
+  await openHabit();
+  const orderedTitles = await cardTitles();
+  const ALWAYS_DRAWN = ['History', 'Habit strength', 'By day of week', 'Calendar', 'Best streaks'];
+  const seenOrder = orderedTitles.filter((t) => ALWAYS_DRAWN.includes(t));
+  ck('a new-shape value in non-canonical order draws the cards in THAT order',
+     JSON.stringify(seenOrder) === JSON.stringify(
+       ['History', 'Habit strength', 'By day of week', 'Calendar', 'Best streaks']),
+     JSON.stringify(orderedTitles));
+  ck('and the cards left `off` are not drawn at all',
+     ['Bouncing back', 'Awards', 'Weekday consistency', 'Times per week']
+       .every((t) => !orderedTitles.includes(t)),
+     JSON.stringify(orderedTitles));
+
+  // The `ordered-multi` control itself (#163): rows in DRAFT order, each with
+  // ▲/▼ buttons that swap its position. Driven through the real dialog rather
+  // than PUT directly, because the thing under test is the CONTROL, not the
+  // stored shape — step 1 already covers that.
+  console.log('--- detail cards: the dialog reorders them ---');
+  await putSetting({ detailCards: [
+    { id: 'strength', on: true }, { id: 'calendar', on: true },
+    { id: 'streaks', on: true }, { id: 'resilience', on: true },
+    { id: 'awards', on: true }, { id: 'history', on: true },
+    { id: 'weekdays', on: true }, { id: 'weekdayMonths', on: true },
+    { id: 'frequency', on: true },
+  ] });
+  await load();
+  await openHabit();
+  const beforePress = await cardTitles();
+
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
+
+  // Press and read the result of the press in ONE evaluation — a click and a
+  // separate later read of `document.activeElement` risk another repaint
+  // moving focus in between, which is exactly the class of thing this
+  // assertion exists to catch.
+  const pressResult = await ev(`(()=>{
+    const rows = [...document.querySelectorAll('#settings-body .setting-ordered-row')];
+    const down = rows[0]?.querySelector('button[data-dir="down"]');
+    const movedCard = down?.dataset.card ?? null;
+    down?.click();
+    return {movedCard,
+      focusedCard: document.activeElement?.dataset.card ?? null,
+      focusedTag: document.activeElement?.tagName ?? null};
+  })()`);
+  ck('pressing the down arrow on the first row moves the first card',
+     !!pressResult.movedCard, JSON.stringify(pressResult));
+  ck('and focus stays on a control belonging to the card that moved',
+     pressResult.focusedTag === 'BUTTON' && pressResult.focusedCard === pressResult.movedCard,
+     JSON.stringify(pressResult));
+
+  await ev(`document.getElementById('settings-close').click()`); await sleep(1000);
+  await openHabit();
+  const afterPress = await cardTitles();
+  ck('the rendered detail page reflects the reorder: the first two cards swapped',
+     afterPress[0] === beforePress[1] && afterPress[1] === beforePress[0] &&
+     JSON.stringify(afterPress.slice(2)) === JSON.stringify(beforePress.slice(2)),
+     `${JSON.stringify(beforePress)} -> ${JSON.stringify(afterPress)}`);
+
+  // Untick a card unrelated to the two just swapped — the order of everyone
+  // ELSE must be unaffected. Checked on the RENDERED page, not the stored
+  // array: a list being in order does not make its consumer read it that way.
+  await ev(`document.getElementById('btn-settings').click()`);
+  await waitUntil(ev,`document.getElementById('settings-dialog').open === true`,{what:'the settings dialog to open'});
+  await ev(`(()=>{const b=document.getElementById('setting-detailCards-awards');
+    b.checked=false; b.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await ev(`document.getElementById('settings-close').click()`); await sleep(1000);
+  await openHabit();
+  const afterUntick = await cardTitles();
+  ck('unticking a card in the dialog removes it and leaves the rest in the same relative order',
+     !afterUntick.includes('Awards') &&
+     JSON.stringify(afterUntick) === JSON.stringify(afterPress.filter((t) => t !== 'Awards')),
+     `${JSON.stringify(afterPress)} -> ${JSON.stringify(afterUntick)}`);
+
   await putSetting({ historyGranularity: 'week' });
   await resize(1440, 900, false);
 

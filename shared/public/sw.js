@@ -126,7 +126,21 @@ const sw = self;
 //
 // v5: new logo (the bar-checkmark). The icons are shell assets, so without a
 // bump an already-installed PWA would keep serving the old ones from cache.
-const CACHE_VERSION = 'v17';
+//
+// v18: `detailCards` changed SHAPE (#163) — a stored array of ids became an
+// array of `{id, on}` objects carrying order as well as visibility, read by
+// THREE shell modules: `ui/settings.js` (the registry default and its
+// `normalise`), `ui/settings-dialog.js` (the `ordered-multi` control, which
+// has no branch at all for the old shape) and `ui/detail.js` (the stored-order
+// draw). No file and no export was added — the same reason v14 gives for why
+// that is not the test — but `shellFirst` is stale-while-revalidate and writes
+// into the RUNNING worker's cache, so a shell could hold a new settings.js
+// over a cached old settings-dialog.js: the dialog's generic `else` branch
+// would render one bogus checkbox with no `-<value>` suffix, and a tick on it
+// would stage a value the server then refuses. The same mismatch in detail.js
+// is a blank card region below the stat tiles rather than a link error, which
+// is the quieter and worse failure — nothing throws to reach `#view-error`.
+const CACHE_VERSION = 'v18';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
