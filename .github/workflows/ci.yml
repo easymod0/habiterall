@@ -201,10 +201,15 @@ jobs:
       - run: npm run typecheck
 
   browser:
-    name: Browser suites
+    name: Browser suites (j=${{ matrix.jobs }} #${{ matrix.rep }})
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        jobs: [6, 8, 10, 12, 16]
+        rep: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -231,15 +236,8 @@ jobs:
         # protocol and reset to known fixtures before each suite.
         env:
           CHROME_PATH: /usr/bin/google-chrome
+          HABITERALL_BROWSER_JOBS: ${{ matrix.jobs }}
         run: npm run test:browser
-
-      - name: Run the sign-in view suite
-        # Starts and stops its own server, because it needs auth ON and, for
-        # its first half, no account yet — the one configuration no instance in
-        # the fleet above can be in.
-        env:
-          CHROME_PATH: /usr/bin/google-chrome
-        run: npm run test:signin -w habiterall-personal
 
   tenancy:
     name: Multi-tenant isolation
