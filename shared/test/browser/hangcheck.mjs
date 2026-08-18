@@ -138,9 +138,44 @@ try {
   check('and it is the check-off, not something else',
     during.outbox[0]?.startsWith('PUT /api/habits/'), String(during.outbox[0]));
 
-  await sleep(BOUND_MS + SLACK_MS - 2000);
+  // Wait for the BOUND to fire, not for the slack to elapse. The offline bar is
+  // what appears when the attempt is abandoned, so it is the event itself; the
+  // ceiling is what the fixed sleep used to be, so a bound that never fires
+  // still spends it and then fails on the checks below.
+  //
+  // A bounded poll rather than `waitUntil`, because this file's `try` has no
+  // `catch`: a throw here runs `finally`, closes Chrome, and leaves the module
+  // — past the itemised checks, past the create-abandon half, and past the
+  // whole recovery section, whose last check is the one that proves the held
+  // write reached the server. That is precisely the run where the diagnosis
+  // matters, since a missing bound in `ui/api.js` is what this suite exists to
+  // catch. The three checks below already judge this wait's outcome, so it does
+  // not need to judge it itself: an expired ceiling reports the elapsed time
+  // against the bound, and the bar and message as absent.
+  const gaveUpAt = Date.now();
+  const reportedOffline = `(()=>{
+    const vis = (id) => !!document.getElementById(id)?.offsetParent;
+    return vis('offline-bar') && vis('offline-message');})()`;
+  const offlineBy = gaveUpAt + BOUND_MS + SLACK_MS - 2000;
+  while (Date.now() < offlineBy) {
+    if (await ev(reportedOffline).catch(() => false)) break;
+    await sleep(100);
+  }
+  const gaveUp = Date.now() - gaveUpAt + 2000;
   const after = await look();
   const write = held.find((r) => r.method === 'PUT');
+
+  // The sleep could not say this: it waited past the bound either way, so a
+  // build whose bound was 17s — or absent, with the browser's own socket
+  // timeout arriving eventually — read the same as one at 10s.
+  // The window is the BOUND plus tolerance, deliberately NOT the ceiling above:
+  // with `BOUND_MS + SLACK_MS` as the upper limit this passed against a build
+  // whose bound was 16s, which is the whole thing it exists to notice. Measured
+  // idle at 10045ms and under an eight-worker run at 10s-and-change — the timer
+  // is an AbortSignal, so contention delays it by milliseconds, not seconds.
+  check('and it gave up AT the bound, not merely eventually',
+    gaveUp >= BOUND_MS * 0.5 && gaveUp < BOUND_MS * 1.4,
+    `${gaveUp}ms against a ${BOUND_MS}ms bound`);
 
   check('the attempt was given up on rather than waited out',
     after.outbox.length === 1, JSON.stringify(after.outbox));
@@ -210,7 +245,16 @@ try {
     return true;
   })()`);
 
-  await sleep(BOUND_MS + SLACK_MS);
+  // Again the settling, not the slack: `__create` leaves 'pending' when the
+  // bound fires. Same ceiling as the sleep it replaces, and bounded-poll rather
+  // than `waitUntil` for the reason given above — a create that hangs forever
+  // has to reach the three checks below, which say so by name, rather than
+  // throw out of a file that has no `catch`.
+  const createdBy = Date.now() + BOUND_MS + SLACK_MS;
+  while (Date.now() < createdBy) {
+    if (await ev(`window.__create !== 'pending'`).catch(() => false)) break;
+    await sleep(100);
+  }
   const createState = await ev(`window.__create`);
   const afterCreate = await look();
   check('a create is abandoned at the bound rather than hanging forever',

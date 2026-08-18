@@ -39,27 +39,51 @@ const jobsFlag = argv.indexOf('-j');
 if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
 
 /**
- * How many instances to run: TWICE the core count, capped at eight.
+ * How many instances to run: twice the core count, floor 4, ceiling 16.
  *
  * Deliberately oversubscribed, because these suites are not CPU-bound. The
- * slowest of them are mostly idle — `hangcheck` holds a request open for 38s,
- * `themesync` waits 13s on a write that never answers — so a worker per core
- * leaves the box waiting rather than working. Swept on a 4-core CI runner, two
- * runs each, wall clock:
+ * slowest of them are mostly idle — `themesync` waits 13s on a write that never
+ * answers, `hangcheck` 10s on a bound — so a worker per core leaves the box
+ * waiting rather than working. Swept twice on a 4-core CI runner, once before
+ * those suites were made faster and once after, two runs each:
  *
- *     j=4   126s, 128s      j=8    90s,  91s   <- fastest, and stable
- *     j=6   102s, 107s      j=12  104s,  98s   <- pwatest fails
- *                           j=16  104s, 114s   <- awardcheck, calcheck, pwatest
+ *     j=4   126s, 128s      j=6   100s,  99s
+ *     j=6   102s, 107s      j=8    90s,  93s
+ *     j=8    90s,  91s      j=10   85s,  91s
+ *     j=12  104s,  98s      j=12   86s,  94s   <- pwatest, once
+ *     j=16  104s, 114s      j=16  101s, 109s   <- avoidcheck, awardcheck, calcheck
  *
- * Past eight it gets slower AND starts failing, so the cap is where the curve
- * turns rather than an arbitrary ceiling. The failures are contention exposing
- * waits weaker than what follows them — the same defect `countcheck` had, which
- * this sweep is what found. They are pre-existing and reproduce on master; fix
- * them before raising this.
+ * The second sweep is why the runner lands on eight rather than ten. Between
+ * eight and twelve the curve is FLAT: run-to-run variance there is 3-8s and all
+ * three ranges overlap, so ten's apparent 3s edge is not a result on two
+ * samples. Twelve is where failures start, and eight has margin from it at no
+ * measurable cost.
  *
- * Eight is also right on a bigger box: 16 cores locally gives 44.7s against
- * 86.4s at four. That figure is `settingscheck`'s own 44.3s — the bound is the
- * longest suite, not the worker count, so more workers cannot help it.
+ * The CEILING of 16 is the other end, measured on a 16-core box:
+ *
+ *     j=8   41.2s          j=24  38.4s  <- hovercheck fails
+ *     j=16  36.6s          j=32  39.0s  <- calcheck fails
+ *
+ * so `2 x cores` alone would have put this machine on 32 — slower than 16 AND
+ * unstable. Past sixteen there is nothing left to win: the floor is the longest
+ * SUITE, and no worker count goes below it, while every extra worker slows every
+ * suite. The two measured optima are 8 on four cores and 16 on sixteen, which is
+ * exactly what this expression gives.
+ *
+ * The FLOOR of 4 is for a runner that shrinks. Four workers on one core is heavy
+ * oversubscription and still the right call, because the thing being overlapped
+ * is waiting rather than computing.
+ *
+ * The failures are contention exposing waits weaker than what follows them —
+ * the same defect `countcheck` had, which the first sweep is what found. Note
+ * `calcheck` fails at j=16 here having been fixed and verified clean six times
+ * at j=16 on a 16-core box: that is 4x oversubscription against 1x, so the fix
+ * holds at the contention it was tested at and not at any contention.
+ *
+ * More workers cannot help the wall clock much anyway, because the floor is the
+ * LONGEST SUITE. On CI at eight that is `themesync` at 69s and `settingscheck`
+ * at 61s against 79s of wall clock; locally, 41.2s against `settingscheck`'s
+ * 31.1s. Making one of those faster is the lever, not raising this.
  *
  * An EXPLICIT `-j` or `HABITERALL_BROWSER_JOBS` is honoured as given, above the
  * cap and above the core count. The cap is a guard on a value nobody chose;
@@ -69,7 +93,7 @@ if (jobsFlag !== -1) argv.splice(jobsFlag, 2);
 const asked = Number(jobsFlag !== -1 ? process.argv[jobsFlag + 1] : 0)
   || Number(process.env.HABITERALL_BROWSER_JOBS)
   || 0;
-const jobs = Math.max(1, asked || Math.min(8, availableParallelism() * 2));
+const jobs = Math.max(1, asked || Math.max(4, Math.min(16, availableParallelism() * 2)));
 
 // Not :3000 — a dev server or a stale one from an earlier session squatting
 // there is a thing that has actually happened here, and the failure it produces
