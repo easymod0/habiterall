@@ -7,6 +7,7 @@
  */
 
 import { api } from '/shared/ui/api.js';
+import { habitIcon } from '/shared/ui/components.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import {
   addDaysISO, datesEndingOn, formatDateLong, freqLabel, fromISOLocal, iso,
@@ -219,7 +220,11 @@ export function paint() {
     const dot = document.createElement('span');
     dot.className = 'habit-dot';
     dot.style.background = habit.color;
-    name.append(dot, document.createTextNode(habit.name));
+    const nameText = document.createElement('span');
+    nameText.className = 'habit-name-text';
+    nameText.textContent = habit.name;
+    const icon = habitIcon(habit);
+    name.append(dot, ...(icon ? [icon] : []), nameText);
 
     const sub = document.createElement('div');
     sub.className = 'habit-sub';
@@ -769,7 +774,10 @@ function openCountDialog(habit, date) {
   const current = skipped ? null : habit.entries[date];
 
   counting = { habitId: habit.id, date };
-  countTitle.textContent = habit.name;
+  countTitle.replaceChildren();
+  const countIcon = habitIcon(habit);
+  if (countIcon) countTitle.append(countIcon, ' ');
+  countTitle.append(document.createTextNode(habit.name));
   // The date in words. A grid cell is a square in a row of squares, so the
   // dialog has to say which day it is about — the ISO string reads as a serial
   // number, and the whole risk of an editable history is fixing the wrong one.

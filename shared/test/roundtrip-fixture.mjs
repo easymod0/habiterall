@@ -52,6 +52,7 @@ export const FIXTURE = [
     reminder_time: '07:30',
     reminder_message: 'Did you sit for ten minutes?',
     archived: false,
+    icon: '🧘',
     entries: [
       { date: '2026-01-05', value: 2, status: '', notes: '' },
       { date: '2026-01-06', value: 2, status: '', notes: 'felt good' },
@@ -78,6 +79,10 @@ export const FIXTURE = [
     reminder_time: '09:00',
     reminder_message: 'How many glasses of water so far?',
     archived: false,
+    // A ZWJ family sequence, not a single codepoint: this is the icon that
+    // actually exercises the grapheme rule end to end — through two databases
+    // and a JSON export — which no unit test on `parseIcon` alone reaches.
+    icon: '👨‍👩‍👧‍👦',
     entries: [
       { date: '2026-01-05', value: 8, status: '', notes: '' },
       // A literal 3 on a numerical habit. This is the regression that matters
@@ -116,6 +121,10 @@ export const FIXTURE = [
     // be two defaults agreeing again.
     show_as: 'avoid',
     archived: false,
+    // A single digit: `pick()`'s numeric-coercion rule would otherwise turn
+    // this into the Number 7 on the expectation side while the API keeps
+    // returning the string '7' — hence the exclusion below.
+    icon: '7',
     entries: [
       { date: '2026-01-05', value: 0, status: '', notes: '' },
       { date: '2026-01-06', value: 1, status: '', notes: '' },
@@ -155,6 +164,7 @@ export const FIXTURE = [
     color: '#8b5cf6',
     reminder_time: '',
     archived: true,
+    icon: '運',
     entries: [
       { date: '2026-01-05', value: 20, status: '', notes: '' },
       { date: '2026-01-06', value: 12.5, status: '', notes: '' },
@@ -239,9 +249,13 @@ export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color'];
  * correctly returns it to 'default', and only this list watches it. The
  * paragraph above `LOOP_HABIT_FIELDS` is about the cost of a field in neither
  * list; this is the case where exactly one is right.
+ *
+ * `icon` is the same shape as `at_most_unlogged`: Loop's model has no icon
+ * field and no column to add one to, so a Loop round trip correctly returns
+ * every habit's icon to `''`, and only this list watches it.
  */
 export const JSON_HABIT_FIELDS = [
-  ...LOOP_DB_HABIT_FIELDS, 'color', 'at_most_unlogged', 'show_as',
+  ...LOOP_DB_HABIT_FIELDS, 'color', 'at_most_unlogged', 'show_as', 'icon',
 ];
 
 export function pick(obj, fields) {
@@ -250,7 +264,8 @@ export function pick(obj, fields) {
     let v = obj[f];
     // SQLite stores booleans as 0/1 and numbers may arrive as strings from pg.
     if (f === 'archived') v = Boolean(v === true || v === 1 || v === '1' || v === 't');
-    else if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v) && f !== 'name' && f !== 'unit') {
+    else if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v) &&
+      f !== 'name' && f !== 'unit' && f !== 'icon') {
       v = Number(v);
     } else if (f === 'target_value') v = Number(v);
     out[f] = v;

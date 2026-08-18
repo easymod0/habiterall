@@ -27,18 +27,42 @@ const check = (label, cond, extra = '') => {
 function mkEl() {
   return {
     hidden: false, textContent: '', value: '', placeholder: '',
-    _attrs: {},
+    _attrs: {}, _children: [],
     setAttribute(k, v) { this._attrs[k] = String(v); },
     getAttribute(k) { return this._attrs[k]; },
     querySelectorAll() { return this._choices ?? []; },
     focus() { this.focused = true; },
+    // #66: `title` gains these two calls once the icon can precede the name.
+    // `append` takes a bare string as well as a node — real `Element.append`
+    // does too, which is what let `openDayDialog` avoid `document.createTextNode`
+    // (this fake DOM has no `document` to call it on).
+    replaceChildren() { this._children = []; this.textContent = ''; },
+    append(...args) {
+      for (const a of args) {
+        if (typeof a === 'string') this.textContent += a;
+        else this._children.push(a);
+      }
+    },
   };
 }
+
+// #66: `habitIcon` calls `document.createElement`, which this fake DOM has no
+// `document` to provide, so it is stubbed rather than imported for real — the
+// same null-when-absent contract `ui/components.js`'s real one has, returning
+// a fake element `mkEl`'s `append` can hold as a child and `getAttribute` can
+// read `aria-hidden` off.
+const fakeHabitIcon = (habit) => {
+  if (!habit?.icon) return null;
+  const span = mkEl();
+  span.textContent = habit.icon;
+  span.setAttribute('aria-hidden', 'true');
+  return span;
+};
 
 /** The module-level names openDayDialog reads, in one place. */
 const BINDINGS = [
   'title', 'sub', 'booleanBlock', 'numericBlock',
-  'notes', 'skip', 'clear', 'save', 'dialog', 'dayCountField',
+  'notes', 'skip', 'clear', 'save', 'dialog', 'dayCountField', 'habitIcon',
 ];
 
 // The real rule, not a stub: `ui/toggle.js` is dependency-free precisely so it
@@ -68,6 +92,7 @@ function run(habit, date, value, isSkip, prefs = {}) {
     set(forHabit, value) { this.forHabit = forHabit; this.shown = value; },
     focus() { this.focused = true; },
   };
+  els.habitIcon = fakeHabitIcon;
 
   const doneBtn = { dataset: { action: 'done' }, _attrs: {},
     setAttribute(k,v){ this._attrs[k]=String(v); }, getAttribute(k){ return this._attrs[k]; } };
@@ -212,6 +237,25 @@ console.log('--- state tracking ---');
 r = run(numHabit, '2026-04-01', 5, false);
 check('state records habit + date', r.state.dayEdit?.habitId === 2 && r.state.dayEdit?.date === '2026-04-01',
   JSON.stringify(r.state.dayEdit));
+
+console.log('--- #66: a habit icon reaches the title ---');
+r = run({ ...boolHabit, icon: '🧘' }, '2026-03-15', 2, false);
+check('icon: the title holds one child, the icon span',
+  r.els.title._children.length === 1, String(r.els.title._children.length));
+check('icon: the icon span is aria-hidden',
+  r.els.title._children[0]?.getAttribute('aria-hidden') === 'true',
+  String(r.els.title._children[0]?.getAttribute('aria-hidden')));
+check('icon: the title still carries the habit name',
+  r.els.title.textContent.includes('Meditate'), r.els.title.textContent);
+
+// The regression this whole block exists to catch: a habit with no icon must
+// not grow a phantom child, and the title must be exactly the name, no
+// leading space left over from a skipped `title.append(icon, ' ')`.
+r = run(boolHabit, '2026-03-15', 2, false);
+check('no icon: the title has no icon child',
+  r.els.title._children.length === 0, String(r.els.title._children.length));
+check('no icon: the title is exactly the name',
+  r.els.title.textContent === 'Meditate', JSON.stringify(r.els.title.textContent));
 
 console.log(fails === 0 ? '\nALL DIALOG CHECKS PASSED' : `\n${fails} DIALOG CHECK(S) FAILED`);
 process.exit(fails === 0 ? 0 : 1);

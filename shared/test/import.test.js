@@ -1112,6 +1112,17 @@ test('an imported habit is clamped to the limits the API enforces', () => {
   assert.equal(clean.reminder_message.length, LIMITS.reminderMessage);
 });
 
+test('no Loop format has anywhere to put an icon, so one always parses to \'\'', () => {
+  // Neither parseLoopDatabase's row shape nor the CSV parsers ever produce an
+  // `icon` key, so this is what every Loop-sourced habit hands
+  // normaliseImportedHabit — the same absence a real .db or CSV parse would.
+  assert.equal(normaliseImportedHabit({ name: 'Meditate' }).icon, '');
+});
+
+test('a habiterall JSON backup\'s icon survives normalisation', () => {
+  assert.equal(normaliseImportedHabit({ name: 'Meditate', icon: '🧘' }).icon, '🧘');
+});
+
 test('a frequency Loop permits but we do not is squared up, not dropped', () => {
   // Loop allows a numerator above the denominator; our validation does not.
   assert.deepEqual(

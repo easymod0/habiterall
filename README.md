@@ -1122,6 +1122,10 @@ browser as a lever. Neither of those gets safer on a VPN.
 and an *at least* / *at most* goal, so both "drink 8 glasses" and "at most 0
 cigarettes" work.
 
+**An optional icon** — one emoji or character beside the habit's name, on the
+dashboard, the habit's own page, the day editor and the archive view, and in a
+Discord or ntfy reminder's title. It never replaces the name, only decorates it.
+
 **Habits you are trying not to do** — that last one reads backwards by default,
 so an *at most* habit can be shown the other way up. Set **Show this habit as**
 to *Something to avoid* on its edit screen: a clean day then fills in the

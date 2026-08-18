@@ -195,6 +195,16 @@ function statedLapses() {
     .flatMap((h) => h.entries.filter((e) => e.status !== 'skip' && e.value === 0));
 }
 
+/**
+ * FIXTURE habits that declare an icon at all. The same guard `statedLapses()`
+ * is for: without it, "every restored habit has icon === ''" would pass
+ * whether or not the format actually dropped anything, because a fixture with
+ * nothing to lose satisfies it either way.
+ */
+function habitsWithIcon() {
+  return FIXTURE.filter((h) => (h.icon ?? '') !== '');
+}
+
 /* ---------- Loop .db ---------- */
 
 console.log('\n--- Loop .db backup ---');
@@ -276,6 +286,21 @@ ck('Loop: a per-day note survives, on a done day and on a lapse',
   loopMeditate.entries.includes('2026-01-08|0||overslept'),
   loopMeditate.entries.join(' '));
 
+// The gap `icon` belongs to no Loop list: it is stated on the way in and read
+// back afterwards, rather than assumed, and guarded so it cannot pass on a
+// fixture with nothing to lose.
+const iconHabits = habitsWithIcon();
+ck('the fixture declares an icon on more than zero habits',
+  iconHabits.length > 0, String(iconHabits.length));
+
+const afterLoopIcons = await current();
+ck('Loop: the restored habits carry an icon KEY at all',
+  afterLoopIcons.every((h) => Object.hasOwn(h, 'icon')),
+  afterLoopIcons.map((h) => `${h.name}:${Object.hasOwn(h, 'icon')}`).join(' '));
+ck('Loop: every restored habit has icon === \'\', the format has nowhere to put one',
+  afterLoopIcons.every((h) => h.icon === ''),
+  afterLoopIcons.map((h) => `${h.name}:${JSON.stringify(h.icon)}`).join(' '));
+
 /* ---------- CSV ---------- */
 
 console.log('\n--- CSV archive (Habits.csv + Checkmarks.csv) ---');
@@ -347,6 +372,14 @@ ck('CSV: the description is not overwritten by the prompt',
 ck('CSV: a reminder time is dropped, as the format requires',
   (await current()).find((h) => h.name === 'Meditate').reminder_time === '',
   (await current()).find((h) => h.name === 'Meditate').reminder_time);
+
+const afterCsvIcons = await current();
+ck('CSV: the restored habits carry an icon KEY at all',
+  afterCsvIcons.every((h) => Object.hasOwn(h, 'icon')),
+  afterCsvIcons.map((h) => `${h.name}:${Object.hasOwn(h, 'icon')}`).join(' '));
+ck('CSV: every restored habit has icon === \'\', the format has nowhere to put one',
+  afterCsvIcons.every((h) => h.icon === ''),
+  afterCsvIcons.map((h) => `${h.name}:${JSON.stringify(h.icon)}`).join(' '));
 
 /* ---------- a merge adds, and never deletes an answer ---------- */
 

@@ -85,15 +85,18 @@ async function seed(userId) {
         // defaults agreeing, and a seed that omits it puts the default back and
         // makes the assertion vacuous again. Every field the fixture carries
         // has to be written HERE, or this suite watches it in name only.
+        // `icon` is the same trap one field later still: seeded as `h.icon ?? ''`
+        // beside `show_as`, or every habit's icon compares '' against '' and the
+        // fidelity list watches nothing.
         `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                              target_type, freq_numerator, freq_denominator, color,
                              reminder_time, reminder_message, at_most_unlogged,
-                             show_as, position, archived)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
+                             show_as, icon, position, archived)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
         [userId, h.name, h.description, h.type, h.unit, h.target_value,
           h.target_type, h.freq_numerator, h.freq_denominator, h.color,
           h.reminder_time ?? '', h.reminder_message ?? '',
-          h.at_most_unlogged ?? 'default', h.show_as ?? 'amount', i, h.archived]
+          h.at_most_unlogged ?? 'default', h.show_as ?? 'amount', h.icon ?? '', i, h.archived]
       );
       const habitId = rows[0].id;
 
@@ -152,6 +155,16 @@ function statedLapses() {
   return FIXTURE
     .filter((h) => h.type === 'boolean')
     .flatMap((h) => h.entries.filter((e) => e.status !== 'skip' && e.value === 0));
+}
+
+/**
+ * FIXTURE habits that declare an icon at all. The same guard `statedLapses()`
+ * is for: without it, "every restored habit has icon === ''" would pass
+ * whether or not the format actually dropped anything, because a fixture with
+ * nothing to lose satisfies it either way.
+ */
+function habitsWithIcon() {
+  return FIXTURE.filter((h) => (h.icon ?? '') !== '');
 }
 
 /* ---------- baseline ---------- */
@@ -619,6 +632,21 @@ ck('Loop: a per-day note survives, on a done day and on a lapse',
   loopMeditate.entries.includes('2026-01-08|0||overslept'),
   loopMeditate.entries.join(' '));
 
+// The gap `icon` belongs to no Loop list: it is stated on the way in and read
+// back afterwards, rather than assumed, and guarded so it cannot pass on a
+// fixture with nothing to lose.
+const iconHabits = habitsWithIcon();
+ck('the fixture declares an icon on more than zero habits',
+  iconHabits.length > 0, String(iconHabits.length));
+
+const afterLoopFull = snapshot(await read(alice), { fields: JSON_HABIT_FIELDS });
+ck('Loop: the restored habits carry an icon KEY at all',
+  afterLoopFull.every((h) => Object.hasOwn(h, 'icon')),
+  afterLoopFull.map((h) => `${h.name}:${Object.hasOwn(h, 'icon')}`).join(' '));
+ck('Loop: every restored habit has icon === \'\', the format has nowhere to put one',
+  afterLoopFull.every((h) => h.icon === ''),
+  afterLoopFull.map((h) => `${h.name}:${JSON.stringify(h.icon)}`).join(' '));
+
 /* ---------- CSV archive ---------- */
 
 console.log('\n--- CSV archive (Habits.csv + Checkmarks.csv) ---');
@@ -670,6 +698,13 @@ ck('CSV: the description is not overwritten by the prompt',
 // the two Loop formats and the reason there are two field lists.
 ck('CSV: a reminder time is dropped, as the format requires',
   csvFullMeditate.reminder_time === '', JSON.stringify(csvFullMeditate.reminder_time));
+
+ck('CSV: the restored habits carry an icon KEY at all',
+  csvFull.every((h) => Object.hasOwn(h, 'icon')),
+  csvFull.map((h) => `${h.name}:${Object.hasOwn(h, 'icon')}`).join(' '));
+ck('CSV: every restored habit has icon === \'\', the format has nowhere to put one',
+  csvFull.every((h) => h.icon === ''),
+  csvFull.map((h) => `${h.name}:${JSON.stringify(h.icon)}`).join(' '));
 
 /* ---------- tenancy: a restore stays in its own account ---------- */
 

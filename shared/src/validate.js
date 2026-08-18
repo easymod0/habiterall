@@ -79,7 +79,23 @@ export const LIMITS = {
   reminderMessage: 200,
   /** A frequency period longer than a year is not a habit. */
   freqDenominator: 365,
+  /**
+   * UTF-16 units, not graphemes — a grapheme cluster can be arbitrarily long
+   * (a Zalgo stack of combining marks is one grapheme), so this is a length
+   * bound on the ONE grapheme `parseIcon` already picked out, not a second
+   * segmentation rule. 32 covers a subdivision-flag tag sequence (16 units)
+   * and a four-person family with skin tones (19).
+   */
+  icon: 32,
 };
+
+/**
+ * Splits on grapheme-cluster boundaries, so a ZWJ family emoji or a
+ * skin-toned flag is one segment rather than the several UTF-16 code units it
+ * is made of. Module-scoped: constructing one is not free, and every icon in
+ * a request goes through the same rule.
+ */
+const iconSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 export const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -103,6 +119,43 @@ export class ValidationError extends Error {
     this.name = 'ValidationError';
     this.status = status;
   }
+}
+
+/**
+ * A habit's icon: at most one grapheme, never a second name field.
+ *
+ * `\p{Cc}` (control characters) and the bidi override block (U+202A–U+202E,
+ * U+2066–U+2069) are stripped, but NOT `\p{Cf}` — U+200D ZERO WIDTH JOINER is
+ * category `Cf`, and stripping it would destroy every ZWJ emoji sequence,
+ * which is the entire reason the grapheme segmenter is used instead of
+ * `[...value][0]` or a `.slice`. The bidi override range is named explicitly
+ * because a lone U+202E as an icon visually reorders the habit name sitting
+ * beside it. U+2028/U+2029 (line/paragraph separator) are named too, even
+ * though `.trim()` already removes them at the edges as JS whitespace — an
+ * explicit strip means the rule does not depend on that coincidence holding
+ * for one in the middle of the string.
+ *
+ * Any grapheme is accepted, not only `\p{Extended_Pictographic}` — someone
+ * will want 運, ✓ or a single letter, and refusing those buys nothing; the
+ * length cap is what stops this becoming a second name field.
+ *
+ * Past `LIMITS.icon` the field is DROPPED to `''`, never sliced: slicing a
+ * grapheme cluster is exactly the corruption the segmenter exists to avoid,
+ * and this is free text so there is nothing to 400 over — a Loop/JSON import
+ * must not fail wholesale on one habit's over-long icon.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function parseIcon(value) {
+  const cleaned = String(value ?? '')
+    .replace(/[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, '')
+    .trim();
+  if (!cleaned) return '';
+
+  const first = iconSegmenter.segment(cleaned)[Symbol.iterator]().next().value;
+  const grapheme = first ? first.segment : '';
+  return grapheme.length > LIMITS.icon ? '' : grapheme;
 }
 
 /**
@@ -164,6 +217,10 @@ export function parseHabit(body = {}) {
     // Presentation only — see SHOW_AS. Stored regardless of the target type,
     // so switching a habit's goal back and forth does not discard the answer.
     show_as: SHOW_AS.has(body.show_as) ? body.show_as : 'amount',
+    // A habit PUT REPLACES, so an omitted icon is a stated clear, not "leave
+    // it". See parseIcon for what one grapheme means and why over-long input
+    // is dropped rather than sliced.
+    icon: parseIcon(body.icon),
     archived: !!body.archived,
   };
 }

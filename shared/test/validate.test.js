@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const {
   parseHabit, parseEntry, assertDate, assertNotFuture,
-  ValidationError, LIMITS, DEFAULT_COLOR,
+  ValidationError, LIMITS, DEFAULT_COLOR, parseIcon,
 } = await import('../src/validate.js');
 
 const SENTINELS = { UNSET: 0, YES: 2, SKIP: 3 };
@@ -110,6 +110,69 @@ test('errors carry a 400 status for the API layer', () => {
     assert.equal(e.status, 400);
     assert.equal(e.name, 'ValidationError');
   }
+});
+
+/* ---------- icon ---------- */
+
+test('a ZWJ sequence is one grapheme and comes back whole', () => {
+  // The whole reason a segmenter is used rather than [...value][0] or a
+  // .slice: U+200D ZERO WIDTH JOINER is category Cf, and a naive cut through
+  // the code units breaks the sequence into orphaned emoji.
+  assert.equal(parseIcon('\u{1F468}\u200d\u{1F469}\u200d\u{1F467}\u200d\u{1F466}'),
+    '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}\u200d\u{1F466}');
+});
+
+test('only the first grapheme survives, and trailing text is dropped', () => {
+  assert.equal(parseIcon('\u{1F9D8} extra words here'), '\u{1F9D8}');
+});
+
+test('any grapheme is accepted, not only pictographic ones', () => {
+  assert.equal(parseIcon('7'), '7');
+  assert.equal(parseIcon('運'), '運');
+});
+
+test('newlines are gone, either as JS whitespace or as their own grapheme', () => {
+  assert.equal(parseIcon('a\nb'), 'a');
+  assert.equal(parseIcon('a\r\nb'), 'a');
+});
+
+test('a bidi override is stripped, so it cannot reorder the name beside it', () => {
+  assert.equal(parseIcon('\u202eevil'), 'e');
+});
+
+test('a leading control character is stripped rather than becoming the icon', () => {
+  // 'a\nb' above is not a good witness for the \p{Cc} strip: \n is JS
+  // "whitespace" so .trim() removes it regardless, and the segmenter isolates
+  // any control character into its own grapheme cluster anyway, so taking
+  // only the first grapheme already discards a NON-leading one whether or not
+  // it was pre-stripped. BEL (U+0007) is outside .trim()'s whitespace set and
+  // sits first, so it is the one case where skipping the \p{Cc} strip changes
+  // the answer: without it, the control character itself becomes "the icon".
+  assert.equal(parseIcon('\u0007'), '', 'a lone control character is no icon at all');
+  assert.equal(parseIcon('\u0007\u{1F9D8}'), '\u{1F9D8}',
+    'the control character must not outrank the emoji after it');
+});
+
+test('a grapheme over the length cap is dropped, never sliced', () => {
+  // One grapheme (a base letter plus 200 combining marks) that is still over
+  // LIMITS.icon in UTF-16 units. Slicing it would corrupt the cluster, which
+  // is exactly what the segmenter exists to prevent — so the field is
+  // dropped to '' instead.
+  const zalgo = 'e' + '́'.repeat(200);
+  assert.ok(zalgo.length > LIMITS.icon);
+  assert.equal(parseIcon(zalgo), '');
+});
+
+test('an absent icon is the empty string', () => {
+  assert.equal(parseHabit({ name: 'x' }).icon, '');
+});
+
+test('a partial write clears a previously-set icon', () => {
+  // parseHabit REPLACES: a body that names an icon gets it, and a body that
+  // omits the field clears it, because PUT /habits/:id runs the whole body
+  // through this function with no notion of "leave it".
+  assert.equal(parseHabit({ name: 'x', icon: '\u{1F9D8}' }).icon, '\u{1F9D8}');
+  assert.equal(parseHabit({ name: 'x' }).icon, '', 'an omitted icon must not survive a replace');
 });
 
 /* ---------- entries ---------- */

@@ -273,6 +273,18 @@ try {
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({gridDays:'${maxDays}'})}).then(r=>r.ok)`);
 
+  // #66: an icon on the first habit, seeded here rather than by growing
+  // `fixtures.mjs` — same reasoning as `seedForSearch`, and PUT REPLACES a
+  // habit whole, so the write carries the fetched row back with `icon` added
+  // rather than a bare `{icon}`.
+  await ev(`(async()=>{
+    const hs = await (await fetch('/api/habits')).json();
+    const h = hs[0];
+    await fetch('/api/habits/'+h.id, {method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({...h, icon: '\u{1F9D8}'})});
+  })()`);
+
   for (const vp of VIEWPORTS) {
     await send('Emulation.setDeviceMetricsOverride',
       { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
@@ -293,11 +305,15 @@ try {
       const sizes = checks.map(c => c.getBoundingClientRect().height);
       const row = document.querySelector('.habit-row').getBoundingClientRect();
       const strip = document.querySelector('.habit-row:first-child .checks').getBoundingClientRect();
+      const icon = document.querySelector('.habit-row:first-child .habit-icon');
+      const nameText = document.querySelector('.habit-row:first-child .habit-name-text');
       return {
         columns: checks.length,
         tooSmall: sizes.filter(h => h < ${MIN_TOUCH}).length,
         stripOverflowsRow: Math.round(strip.right - row.right) > 0,
         nameWidth: Math.round(document.querySelector('.habit-name').getBoundingClientRect().width),
+        iconWidth: icon ? Math.round(icon.getBoundingClientRect().width) : null,
+        nameTextWidth: nameText ? Math.round(nameText.getBoundingClientRect().width) : null,
       };
     })()`);
 
@@ -309,6 +325,27 @@ try {
     // must not be able to squeeze the name out of the row.
     ck(`${vp.label} @ gridDays=${maxDays}: habit name is not squashed away`,
       grid.nameWidth > 20, `${grid.nameWidth}px`);
+
+    // #66: the icon actually rendered on this row — without this the two
+    // checks below would pass vacuously on a row that never grew one.
+    ck(`${vp.label} @ gridDays=${maxDays}: the icon is on the row`,
+      grid.iconWidth !== null, JSON.stringify(grid));
+    // The invariant is "fixed-width column", not "leaves the name enough
+    // room" — the latter (below) is already guaranteed by the wrap below
+    // 640px and the column ladder above it, with room to spare, so it does
+    // not move under this mutation. 40px is one grapheme's line box; nothing
+    // here is proportional to the container. Measured at 360px: `.habit-name`
+    // is 283px wide, so `.habit-icon { width: 30% }` resolves to ~85px — over
+    // double the cap — which is what actually catches `flex: none` regressing
+    // to a percentage width.
+    ck(`${vp.label} @ gridDays=${maxDays}: the icon column is fixed-width, not proportional`,
+      grid.iconWidth <= 40, `${grid.iconWidth}px`);
+    // The weaker half, kept for a future change that genuinely squeezes the
+    // name out — proved insensitive to the `.habit-icon` width mutation above
+    // (the wrap/ladder leave far more than 20px of headroom regardless), so
+    // it is not what guards the layout; the fixed-width check above is.
+    ck(`${vp.label} @ gridDays=${maxDays}: habit name text is not squashed away`,
+      grid.nameTextWidth > 20, `${grid.nameTextWidth}px`);
   }
 
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',

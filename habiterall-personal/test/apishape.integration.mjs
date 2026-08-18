@@ -66,6 +66,7 @@ const HABIT_TYPES = {
   reminder_message: 'string',
   at_most_unlogged: 'string',
   show_as: 'string',
+  icon: 'string',
   position: 'number',
   archived: 'boolean',
 };

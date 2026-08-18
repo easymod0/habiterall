@@ -191,14 +191,14 @@ api.post('/habits', route(async (req, res) => {
       `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                            target_type, freq_numerator, freq_denominator, color,
                            reminder_time, reminder_message, at_most_unlogged,
-                           show_as, archived, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                           show_as, icon, archived, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
                COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
        RETURNING *`,
       [uid(req), h.name, h.description, h.type, h.unit, h.target_value,
        h.target_type, h.freq_numerator, h.freq_denominator, h.color,
        h.reminder_time, h.reminder_message, h.at_most_unlogged, h.show_as,
-       h.archived]
+       h.icon, h.archived]
     );
     return rows[0];
   });
@@ -221,11 +221,11 @@ api.put('/habits/:id', route(async (req, res) => {
               target_value=$5, target_type=$6, freq_numerator=$7,
               freq_denominator=$8, color=$9, reminder_time=$10,
               reminder_message=$11, at_most_unlogged=$12, show_as=$13,
-              archived=$14
-       WHERE id = $15 RETURNING *`,
+              icon=$14, archived=$15
+       WHERE id = $16 RETURNING *`,
       [h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
        h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-       h.reminder_message, h.at_most_unlogged, h.show_as, h.archived, id]
+       h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, h.archived, id]
     );
     return rows[0];
   });
