@@ -93,11 +93,14 @@ import com.habiterall.app.data.HabitFilter
  * pending-write overlay laid on, still unfiltered; and `visible` — computed
  * here from `rows.filter { HabitFilter.matches(it, query) }` — is what the
  * `LazyColumn` actually renders. The reorder hand-off, its `enabled`, the
- * full-screen error branch and the search icon's own `habits.isNotEmpty()`
- * gate all read `habits`, on purpose: handing any of those a filtered subset is
- * wrong in a way that ranges from "looks wrong" (the icon vanishing while a
- * query it is showing is still live) to "corrupts stored data" (a reorder
- * rewriting the position of every habit that was not on screen). `ScrollRestore`
+ * full-screen error branch and the search icon's own
+ * `habits.isNotEmpty() || filtering` gate all read `habits`, on purpose:
+ * handing any of those a filtered subset is wrong in a way that ranges from
+ * "looks wrong" (the icon vanishing while a query it is showing is still live)
+ * to "corrupts stored data" (a reorder rewriting the position of every habit
+ * that was not on screen). The icon's second clause is not a hedge on the
+ * first: `filtering` is what keeps the only control that can clear a filter on
+ * screen once `habits` itself goes empty underneath one. `ScrollRestore`
  * and the `focusHabit` index read `visible`, because both are about what the
  * `LazyColumn` actually holds.
  */

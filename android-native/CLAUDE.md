@@ -43,15 +43,24 @@ below a correct pure function.
 
 **The rendered list is a SUBSET, and three things must keep reading the
 unfiltered one** — the reorder hand-off and its `enabled`, the full-screen error
-branch, and the search icon's own `habits.isNotEmpty()` gate — **while two must
-read the rendered one**: `ScrollRestore`'s item count and the `focusHabit`
-index. A reorder against a subset writes a wrong `position` for habits that were
-never on screen, and it is the only one of the five that reaches storage; the
-rest only look wrong — the error screen replacing a working list, the search
-icon itself disappearing (were it gated on `visible` instead) at the exact
-moment a live query narrows the list to nothing, taking with it the only way
-back to the rest of the list, or `ScrollRestore` and the focus effect answering
-about a list the `LazyColumn` does not hold.
+branch, and the search icon's own `habits.isNotEmpty() || filtering` gate —
+**while two must read the rendered one**: `ScrollRestore`'s item count and the
+`focusHabit` index. A reorder against a subset writes a wrong `position` for
+habits that were never on screen, and it is the only one of the five that
+reaches storage; the rest only look wrong — the error screen replacing a working
+list, the search icon itself disappearing (were it gated on `visible` instead)
+at the exact moment a live query narrows the list to nothing, taking with it the
+only way back to the rest of the list, or `ScrollRestore` and the focus effect
+answering about a list the `LazyColumn` does not hold.
+
+**The icon's gate has two clauses and the second one is load bearing.** Quote it
+whole — `habits.isNotEmpty() || filtering` — because the shorter half is the one
+that reads like the whole rule and is not. `filtering` is what keeps the icon on
+screen when `habits` goes empty UNDER a live filter (archive down to nothing
+with a query set), which is the one state where the control that can clear a
+filter would otherwise vanish along with the thing it was filtering. #173's
+`showSearch` carried the same clause as `|| query.isNotEmpty()`; deleting the
+six-habit threshold took it along, and it had to come back.
 
 **A notification tap beats a filter**, and the focus effect is keyed on `query`
 as well as the list because a query matching everything yields an `equals` list
