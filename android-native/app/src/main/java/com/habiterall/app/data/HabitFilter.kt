@@ -40,15 +40,38 @@ object HabitFilter {
             .lowercase(Locale.ROOT)
 
     /**
+     * A query as this object actually reads one — folded, then trimmed. Both
+     * public functions below go through it, which is the point: [isActive] is
+     * a claim about what [matches] is going to do, so the two must not be able
+     * to compute "is there anything to search for" two different ways.
+     */
+    private fun folded(query: String): String = fold(query).trim()
+
+    /**
+     * Whether [query] narrows anything at all — the predicate a caller should
+     * ask before telling a user a filter is live.
+     *
+     * NOT `query.isNotBlank()`, which is the same answer only for the queries
+     * this fold leaves alone. [fold] strips every `Mn` codepoint BEFORE
+     * [matches] looks at what is left, so a query that is only combining marks
+     * — a bare U+0301, pasted or left behind by an orphaned dead key — folds
+     * to the empty string and matches every habit, while being neither empty
+     * nor whitespace. Asked the wrong way, the bar renders its active badge,
+     * tints itself and announces "Search, filter active" over a list that is
+     * complete, and the count reads "N of N".
+     */
+    fun isActive(query: String): Boolean = folded(query).isNotEmpty()
+
+    /**
      * Whether [habit] is one a search for [query] should show.
      *
      * Matches the name OR the description — a habit called "Gym" whose
      * description says "swimming Tuesdays" is one people look for by the
-     * second. An empty (or blank) query matches everything, so a caller with
-     * no filter live needs no special case of its own.
+     * second. A query that is not [isActive] matches everything, so a caller
+     * with no filter live needs no special case of its own.
      */
     fun matches(habit: Habit, query: String): Boolean {
-        val q = fold(query).trim()
+        val q = folded(query)
         if (q.isEmpty()) return true
         return fold(habit.name).contains(q) || fold(habit.description).contains(q)
     }

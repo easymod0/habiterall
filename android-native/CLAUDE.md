@@ -96,6 +96,19 @@ entry. The two folds are near-identical, not equal — Java's `\p{Mn}` and JS's
 `\p{Diacritic}` part ways on marks like the Hawaiian ʻokina — and that gap is
 tolerated for the same reason: nothing here reaches disk.
 
+**"Is a filter live" is `HabitFilter.isActive`, never `query.isNotBlank()`.**
+The bar makes five claims off it — the badge, the `primary` tint, "Search,
+filter active", the long-press that clears, and the "N of M" count — and all
+five are claims about what `matches` is doing, so they have to be decided by
+the same predicate `matches` decides by. The fold strips before it looks: a
+query of nothing but combining marks (a bare U+0301, pasted or left by an
+orphaned dead key) folds to the empty string and matches every habit, while
+being neither empty nor whitespace. Asked the wrong way the bar announced a
+live filter over a complete list, with the count reading "N of N". The one
+guard that stays `isNotBlank` is the focus effect's, and deliberately: that one
+asks whether the BOX holds text a notification tap should take away, not
+whether it narrows anything.
+
 ## Notifications
 
 **The body opens the app; only the buttons answer.** `MainActivity` is

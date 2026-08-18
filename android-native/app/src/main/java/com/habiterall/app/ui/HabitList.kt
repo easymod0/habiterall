@@ -142,7 +142,14 @@ fun HabitList(
     // search box, if it holds anything. `remember`ed on both, not recomputed
     // per recomposition for no reason — this runs per keystroke.
     val visible = remember(rows, query) { rows.filter { HabitFilter.matches(it, query) } }
-    val filtering = query.isNotBlank()
+    // `HabitFilter.isActive`, not `query.isNotBlank()`: this drives the active
+    // badge, the tint, the "filter active" description, the long-press to clear
+    // and the "N of M" count — five claims that a filter is narrowing the list
+    // — so it has to be the predicate the FILTER decides by rather than a
+    // second, near-enough one. `matches` folds before it looks, and a query of
+    // only combining marks folds to nothing and matches everything: not blank,
+    // not filtering.
+    val filtering = HabitFilter.isActive(query)
 
     // Correct a restored scroll position that no longer fits the list.
     //
@@ -188,6 +195,14 @@ fun HabitList(
     // no text typed would otherwise leave the field open over a list the user
     // never filtered, and keyed on `visible` alone this effect would not even
     // re-run to collapse it once `query` had nothing to change.
+    //
+    // This one guard stays `query.isNotBlank()` rather than `filtering`, and
+    // the difference is deliberate: `filtering` asks whether the query narrows
+    // the list, while this asks whether the BOX still holds text a tap should
+    // take away. A query that folds to nothing narrows nothing but is still
+    // text, and leaving it there means the next thing typed is appended to it.
+    // Being the wider predicate costs one extra pass and ends in the same
+    // empty box.
     LaunchedEffect(focusHabit, visible, loaded, query, searchOpen) {
         if (focusHabit == null || !loaded) return@LaunchedEffect
         if (query.isNotBlank() || searchOpen) {

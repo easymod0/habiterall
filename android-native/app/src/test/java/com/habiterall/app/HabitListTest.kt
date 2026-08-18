@@ -64,6 +64,15 @@ class HabitListTest {
     // merged test manifest.
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
+    /**
+     * COMBINING ACUTE ACCENT, U+0301, as an escape rather than as itself: a
+     * literal one is invisible and attaches to whatever character precedes it
+     * in the source. `HabitFilterTest` holds the same constant for the same
+     * reason, and pins what the predicate does with it; this file pins what
+     * the bar does.
+     */
+    private val COMBINING_ACUTE = "\u0301"
+
     private val water = Habit(id = 1, name = "Water")
     private val reading = Habit(id = 2, name = "Reading")
     private val cycling = Habit(id = 3, name = "Cycling")
@@ -793,6 +802,32 @@ class HabitListTest {
         compose.onNodeWithContentDescription("Search, filter active").assertDoesNotExist()
         compose.onNodeWithContentDescription("Search").assertIsDisplayed()
         compose.onNode(hasText(" of ", substring = true)).assertDoesNotExist()
+    }
+
+    /**
+     * The bar's five "a filter is live" claims have to agree with the filter.
+     *
+     * `HabitFilter.fold` strips every `Mn` codepoint before `matches` looks at
+     * what is left, so a query of nothing but a combining acute (U+0301, with
+     * no base letter — a paste, or an orphaned dead key) matches every habit:
+     * the list on screen is the WHOLE account. Asked `query.isNotBlank()`, the
+     * bar answered yes anyway — badge, `primary` tint, "Search, filter active"
+     * to TalkBack, a "2 of 2" count and a long-press advertised as clearing a
+     * filter that does not exist. The whole list being asserted present is the
+     * half that makes the rest a contradiction rather than a preference.
+     */
+    @Test
+    fun `a query that folds to nothing is not shown as a live filter`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits, query = COMBINING_ACUTE)
+
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertIsDisplayed()
+
+        compose.onNodeWithContentDescription("Search, filter active").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Search").assertIsDisplayed()
+        compose.onNode(hasText(" of ", substring = true)).assertDoesNotExist()
+        compose.onNode(hasClearFilterAction).assertDoesNotExist()
     }
 
     /**
