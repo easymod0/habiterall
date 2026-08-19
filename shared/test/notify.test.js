@@ -24,6 +24,14 @@ const { daysBetween } = await import('../src/stats.js');
 
 const { ntfyActions } = await import('../src/ntfy-answer.js');
 
+// The app's OWN router. `appLink` mirrors it rather than importing it — see
+// the comment on that function for why `routes.js` cannot be imported from
+// `shared/src` the way `toggle.js` is — so this import is the thing keeping
+// the two declarations in step, and it belongs to the deep-link tests below.
+// A node test can reach it because nothing here calls the three functions in
+// that file that touch `location`.
+const { parseRoute } = await import('../public/ui/routes.js');
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** A habit with a reminder, overridable per test. */
@@ -539,11 +547,109 @@ test('a parsed check beside a raw-string builder still drifts — four spellings
     const payload = ntfyPayload({
       habit: habit(), message: reminderMessage(habit()), topic: 'habits', appUrl,
     });
-    assert.equal(payload.click, `${canonical}/`, `${JSON.stringify(appUrl)}: payload.click`);
+    // `habit()` is id 1, so both links carry the fragment — which is the point:
+    // the normalisation being asserted has to be asserted on what actually
+    // ships, and what ships is now the deep link rather than the bare base.
+    assert.equal(payload.click, `${canonical}/#/habit/1`,
+      `${JSON.stringify(appUrl)}: payload.click`);
 
     const discord = discordPayload({ habit: habit(), message: reminderMessage(habit()), appUrl });
-    assert.equal(discord.embeds[0].url, `${canonical}/`, `${JSON.stringify(appUrl)}: embed.url`);
+    assert.equal(discord.embeds[0].url, `${canonical}/#/habit/1`,
+      `${JSON.stringify(appUrl)}: embed.url`);
   }
+});
+
+test('a reminder links to the habit it is about, on both channels', () => {
+  // Both channels used to land on the site root, which is the dashboard with
+  // the habit still to find — from the one surface that knows exactly which
+  // habit it is talking about.
+  const h = habit({ id: 42 });
+  const appUrl = 'https://habits.example';
+
+  const click = ntfyPayload({
+    habit: h, message: reminderMessage(h), topic: 'habits', appUrl,
+  }).click;
+  const embedUrl = discordPayload({
+    habit: h, message: reminderMessage(h), appUrl,
+  }).embeds[0].url;
+
+  // The literal, not `hashFor(...)`: a test that builds its expectation with
+  // the same function under test pins the name and nothing else.
+  assert.equal(click, 'https://habits.example/#/habit/42');
+  assert.equal(embedUrl, 'https://habits.example/#/habit/42');
+
+  // A deployment under a subpath keeps it, with the fragment after it.
+  assert.equal(
+    ntfyPayload({
+      habit: h, message: reminderMessage(h), topic: 'habits',
+      appUrl: 'https://habits.example/app/',
+    }).click,
+    'https://habits.example/app/#/habit/42'
+  );
+});
+
+test('a reminder never ships a fragment the app does not open on', () => {
+  // This is what keeps the mirror honest. `appLink` cannot import `parseRoute`
+  // (see its comment: `routes.js` reads `location`, so importing it fails the
+  // server typecheck), so the builder and the parser are two declarations of
+  // one rule on opposite sides of the server/browser line — the shape this
+  // repo pins with a test every other time it occurs.
+  //
+  // It is behavioural rather than a source-text guard, and it asserts over a
+  // RANGE of ids rather than the one a fixture happens to hold: a renamed
+  // binding or a `>=` for a `>` is not a text bug, and `id: 1` alone cannot
+  // see either. Asserting the literal `#/habit/42` elsewhere cannot see it
+  // either — a string being the right shape does not make the app open on it.
+  //
+  // `id: 0` is not a hypothetical: `sendTest` builds its stand-in habit with
+  // exactly that, in both editions, and `parseRoute` refuses it.
+  const appUrl = 'https://habits.example';
+  const links = (id) => [
+    ntfyPayload({
+      habit: habit({ id }), message: reminderMessage(habit({ id })),
+      topic: 'habits', appUrl,
+    }).click,
+    discordPayload({
+      habit: habit({ id }), message: reminderMessage(habit({ id })), appUrl,
+    }).embeds[0].url,
+  ];
+
+  const ids = [
+    1, 42, 9007199254740991,
+    0, -1, 1.5, Number.MAX_SAFE_INTEGER + 2, null, undefined,
+  ];
+  for (const id of ids) {
+    for (const link of links(id)) {
+      const hash = new URL(link).hash;
+      // A safe positive integer is the app's rule, restated here as the
+      // EXPECTATION rather than read out of the code under test.
+      if (Number.isSafeInteger(id) && Number(id) > 0) {
+        assert.deepEqual(parseRoute(hash), { view: 'habit', id },
+          `id ${String(id)}: ${link} does not open that habit`);
+      } else {
+        // The whole fragment is ABSENT, not merely inert, and checking that
+        // rather than where it routes is what makes this able to fail. A
+        // builder guarded on `habitId > 0` alone still ships `#/habit/1.5`,
+        // and `parseRoute` answers the dashboard for it — so a route-only
+        // assertion calls that fine while the user gets a notification whose
+        // link names a habit the app has none of.
+        assert.equal(hash, '', `id ${String(id)}: ${link} ships a fragment it cannot open`);
+      }
+    }
+  }
+
+  // The fallback is the app root, spelled the way it always was.
+  assert.deepEqual(links(0), ['https://habits.example/', 'https://habits.example/']);
+
+  // And with no address at all the link stays ABSENT rather than falling back
+  // to a root that was never configured — the third answer both callers
+  // already gave, unchanged by this.
+  assert.equal(ntfyPayload({
+    habit: habit(), message: reminderMessage(habit()), topic: 'habits',
+  }).click, undefined);
+  assert.equal(discordPayload({
+    habit: habit(), message: reminderMessage(habit()),
+  }).embeds[0].url, undefined);
 });
 
 test('the ntfy payload carries what the embed does, and no free text in a header', () => {
@@ -558,7 +664,7 @@ test('the ntfy payload carries what the embed does, and no free text in a header
   assert.equal(payload.title, 'Meditate');
   assert.match(payload.message, /ten minutes/);
   assert.match(payload.message, /2026-08-13/);
-  assert.equal(payload.click, 'https://habits.example.com/');
+  assert.equal(payload.click, 'https://habits.example.com/#/habit/1');
 
   // Long values are clamped rather than rejected, as the Discord embed's are.
   const big = ntfyPayload({
@@ -1081,7 +1187,7 @@ test('a Discord payload carries the habit, its colour, and no mentions', () => {
   assert.equal(embed.title, 'Meditate');
   assert.equal(embed.color, 0x3b82f6);
   assert.equal(embed.footer.text, '2026-08-13');
-  assert.equal(embed.url, 'https://habits.example/');
+  assert.equal(embed.url, 'https://habits.example/#/habit/1');
   assert.deepEqual(embed.fields, [{ name: 'Notes', value: 'ten minutes' }]);
   // A habit may be named '@everyone'. Embeds do not resolve mentions today,
   // but this is the guarantee rather than an accident of where the text sits.
@@ -1101,10 +1207,10 @@ test('the app link ends in exactly one slash, however many were configured', () 
     habit: habit(), message: reminderMessage(habit()), appUrl,
   }).embeds[0].url;
 
-  assert.equal(link('https://habits.example'), 'https://habits.example/');
-  assert.equal(link('https://habits.example/'), 'https://habits.example/');
-  assert.equal(link('https://habits.example///'), 'https://habits.example/');
-  assert.equal(link('https://habits.example/app/'), 'https://habits.example/app/');
+  assert.equal(link('https://habits.example'), 'https://habits.example/#/habit/1');
+  assert.equal(link('https://habits.example/'), 'https://habits.example/#/habit/1');
+  assert.equal(link('https://habits.example///'), 'https://habits.example/#/habit/1');
+  assert.equal(link('https://habits.example/app/'), 'https://habits.example/app/#/habit/1');
   assert.equal(link('ftp://habits.example'), undefined);
 
   // The regex this replaced was `/\/+$/`, unanchored at the start: on a run of

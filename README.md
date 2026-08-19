@@ -1290,9 +1290,13 @@ A reminder has two halves, set in two places:
 | Destination | Delivered by | Answer from it | Works offline | Needs |
 |---|---|---|---|---|
 | **Android app** | the phone, as a local alarm | Yes / No / a count, from the shade — or tap the notification itself to open the app on that habit | yes | the [native app](android-native/README.md) |
-| **Discord (bot)** | your server | Yes / No / Skip buttons, and a box for an amount | no | a Discord application |
-| **Discord (webhook)** | your server | nothing — text only | no | a webhook URL |
-| **ntfy** | your server | Yes / No / a count, from the shade — a signed code, not the topic, authorises it (see below) | no | a topic URL on a host whoever runs the instance allows, and a public server address for the buttons |
+| **Discord (bot)** | your server | Yes / No / Skip buttons, and a box for an amount — or follow the reminder's title to open the app on that habit | no | a Discord application |
+| **Discord (webhook)** | your server | nothing — text only, though the title still links to that habit | no | a webhook URL |
+| **ntfy** | your server | Yes / No / a count, from the shade — a signed code, not the topic, authorises it (see below) — or tap the notification itself to open the app on that habit | no | a topic URL on a host whoever runs the instance allows, and a public server address for the buttons |
+
+Every link into the app needs a public server address, the same one the ntfy
+buttons need: with none set the reminder still arrives and still says what it
+says, it just has nothing to link to.
 
 Nothing is sent for a habit you have already recorded that day.
 

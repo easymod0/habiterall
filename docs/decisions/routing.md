@@ -63,3 +63,46 @@ MutationObserver installed before the app boots — it lasts one request, which
 is less than a devtools round trip, so it cannot be polled for from outside.
 
 
+
+**A reminder is the strongest deep link in the app, and for a long time it was
+not one.** `#/habit/<id>` shipped for the native client's list, was reachable by
+bookmark, and was then not used by the two surfaces that name exactly one habit
+and ask about exactly one day: `ntfyPayload`'s `click` and `discordPayload`'s
+`embed.url` both pointed at the site root. Tapping a reminder landed on the
+dashboard with the habit still to find — the complaint this whole file exists to
+answer, arriving from the one place that already had the id in hand. `appLink`
+(`shared/src/notify.js`) is now the single answer for both, and issue #216's
+scoping comment is where the decision to do both channels together was made:
+leaving one on the root is a difference nobody chose.
+
+**It is a mirror rather than an import, and the reason is a typecheck.** The
+obvious version imports `hashFor` and `parseRoute` from `ui/routes.js` and round
+-trips the fragment through the app's own parser, which would make the builder
+and the parser agree by construction — the property `usableAppUrl` was rewritten
+to have. It was written that way first and reverted. `notify.js` is allowed to
+reach into `shared/public` for `ui/toggle.js` because that module is DOM-free by
+construction; `routes.js` is DOM-free only *at import time*, which is a weaker
+claim and not the one tsc checks. `go`, `current` and `init` read `location` and
+`history` and register on `window`, none is reachable from the server, and
+`npm run typecheck` still fails with thirteen `Cannot find name` errors — the
+server project has `lib: ["ES2023"]` and no DOM, deliberately, and widening it to
+silence this would hand every server file `document`.
+
+So it is two declarations pinned by a test, which is what this repo does
+everywhere else the browser and the server must agree (`CHANNELS`,
+`SETTING_VALUES`). The test is behavioural rather than a source-text guard: it
+builds a real link and feeds its fragment to the real `parseRoute`, over a range
+of ids, so a renamed binding or a `>=` for a `>` fails it.
+
+**The bound is `Number.isSafeInteger(id) && id > 0`, both halves load bearing,
+and the fallback is on a path anybody can press.** `sendTest` builds its
+stand-in habit with `id: 0` in both editions — `parseRoute` refuses a
+non-positive id, so a test notification would otherwise carry `#/habit/0`.
+
+The assertion that made this checkable is narrower than the obvious one, and the
+difference was found by mutation rather than by reading. Asserting where a
+refused id ROUTES is not enough: `#/habit/1.5` routes to the dashboard, so a
+builder guarded on `habitId > 0` alone passes a route-only check while shipping
+a notification whose link names a habit that does not exist. The test asserts
+the fragment is **absent**. Before that change the hand-written-bound mutation
+passed all 104 tests.
