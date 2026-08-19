@@ -120,6 +120,44 @@ test('totalCompleted counts the same window the walked figures do, even when the
   assert.equal(stats.totalCompleted, 1);
 });
 
+test('the past-end trim does not empty a range whose year predates 1000', () => {
+  // `toISO` pads the month and the day and NOT the year, so it writes
+  // '100-03-05' where the range was asked for '0100-03-05' — lexically ABOVE
+  // it, so a string-compared trim popped every element and returned nothing.
+  // `boundedRange` clamps such a start long before `dateRange` sees it, so
+  // the app cannot ask for this; it is pinned because the trim is new code
+  // and emptying a range is the worst way for it to be wrong.
+  const days = dateRange('0100-02-25', '0100-03-05');
+  assert.equal(days.length, 9);
+  assert.equal(days[days.length - 1], '100-03-05');
+});
+
+test('a stored entry dated year 0999 is clamped, not normalised past the clamp', () => {
+  // `toISO` does not pad the YEAR, so normalising '0999-12-31' yields
+  // '999-12-31' — which sorts ABOVE '2016-...' and sails past the `earliest`
+  // clamp that MAX_RANGE_DAYS is enforced by. `assertDate` accepts this date
+  // (999 is a real year and does not roll over, unlike 0050), so one
+  // `PUT /entries/0999-12-31` is all it takes to reach it, and the whole
+  // payload collapsed to a single day reporting zero completions for a habit
+  // logged every other day. The clamp therefore runs BEFORE the normalisation.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const entries = [
+    { date: '0999-12-31', value: YES },
+    { date: '2026-08-10', value: YES },
+    { date: '2026-08-12', value: YES },
+  ];
+  const stats = computeStats(habit, entries, { end: '2026-08-18' });
+
+  // The window is the clamp's width, not one day, and the two recent
+  // completions are still counted.
+  assert.equal(stats.history.length, MAX_RANGE_DAYS + 1);
+  assert.equal(stats.totalCompleted, 2);
+  assert.equal(stats.streaks.length, 2);
+});
+
 test('addDays crosses month and year boundaries', () => {
   assert.equal(addDays('2026-01-31', 1), '2026-02-01');
   assert.equal(addDays('2026-12-31', 1), '2027-01-01');

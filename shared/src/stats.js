@@ -72,7 +72,15 @@ export function dateRange(start, end) {
   // a day past `end`. A deleted day needs no counterpart: there the elapsed
   // count shrinks with the calendar and both agree. Costs one comparison in
   // the ordinary case, where the last element is already `end`.
-  while (out.length && out[out.length - 1] > end) out.pop();
+  //
+  // Compared through `daysBetween` rather than as strings, because `toISO`
+  // pads the month and the day and NOT the year: for a year before 1000 it
+  // writes '100-03-05', which is lexically ABOVE '0100-03-05' and would make
+  // a string test pop the entire range. `boundedRange` clamps such a start
+  // long before it reaches here, so nothing in the app can ask for it — but a
+  // trim that empties a range on an input the function itself accepts is a
+  // trap to leave lying around.
+  while (out.length && daysBetween(out[out.length - 1], end) < 0) out.pop();
   return out;
 }
 
@@ -937,19 +945,27 @@ export function computeStats(habit, entries,
   const earliest = addDays(end, -MAX_RANGE_DAYS);
   let from = start ?? firstEntry;
 
+  if (from < earliest) from = earliest;
+  if (from > end) from = end;
+
   // `firstEntry` comes out of STORAGE, so it can be a date that is not a real
   // day — `assertDate` refuses one on the way in, but a row predating that
   // guard does not have to be a real day to be read back. `dateRange`
   // normalises such a start (a walk from 2026-02-30 begins on 2026-03-02),
   // and `totalCompleted` below selects by STRING comparison against `from`,
   // so leaving it un-normalised makes the two disagree about which entries
-  // are inside the window — the exact disagreement the note down there says
-  // was fixed. Normalise before the clamps so both operate on a real date.
+  // are inside the window.
+  //
+  // AFTER the clamps, never before, and that ordering is the whole safety of
+  // it: `toISO` does not pad the YEAR, so normalising '0999-12-31' yields
+  // '999-12-31', which sorts ABOVE '2016-...' and walks straight past the
+  // `earliest` clamp. One entry dated year 0999 — which `assertDate` accepts,
+  // 999 being a real year that does not roll over — then collapsed the whole
+  // payload to a single day and reported zero completions for a habit logged
+  // every other day. Clamped first, `from` is already inside the window
+  // before anything reformats it.
   const asDate = fromISO(from);
   if (!Number.isNaN(asDate.getTime())) from = toISO(asDate);
-
-  if (from < earliest) from = earliest;
-  if (from > end) from = end;
 
   const scores = computeScores(habit, entryMap, from, end, unlogged);
   const streaks = computeStreaks(habit, entryMap, from, end, unlogged);
