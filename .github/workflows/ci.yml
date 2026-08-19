@@ -137,7 +137,12 @@ jobs:
             exit 0
           fi
 
-          if echo "$CHANGED" | grep -qvE '(\.md$|^\.github/|^LICENSE$|^\.gitignore$)'; then
+          # `^site/` counts as documentation here. Nothing under it is loaded by
+          # either edition or by the Android client — it is the generator for
+          # habiterall.ca, and it has a job of its own below that is not gated on
+          # this filter. Without this line a CSS tweak to the marketing site
+          # started Postgres, the browser fleet and both Docker builds.
+          if echo "$CHANGED" | grep -qvE '(\.md$|^\.github/|^LICENSE$|^\.gitignore$|^site/)'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "Code changed — running everything."
           else
@@ -531,6 +536,30 @@ jobs:
           # rather than relied on, and a missing one only shows up as the app
           # racing an unmigrated database.
           grep -q 'service_completed_successfully' /tmp/cloud.yml
+
+  site:
+    name: Website
+    runs-on: ubuntu-latest
+    # Deliberately NOT gated on `changes`, for the same reason `compose` is not:
+    # this is a job that guards DOCUMENTATION, so a documentation-only pull
+    # request is exactly when it has to run. habiterall.ca's wiki is generated
+    # from README.md, and renaming a heading there breaks every link pointing at
+    # it — a change the `code == 'true'` filter calls docs and skips.
+    #
+    # `--offline` because this job must not depend on the Releases API. The
+    # changelog and downloads pages are the only two that come from it, they are
+    # built by site.yml at deploy time, and a rate-limited API answer here would
+    # fail a pull request over something no one in it changed.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+
+      - name: The site builds, and every link in it resolves
+        run: npm run site:build -- --offline
 
   docker:
     name: Docker images

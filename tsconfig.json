@@ -33,7 +33,16 @@
   "include": [
     "shared/src/**/*.js",
     "habiterall-personal/src/**/*.js",
-    "habiterall-cloud/src/**/*.js"
+    "habiterall-cloud/src/**/*.js",
+
+    // The website generator. Node code, so it belongs on this side — its
+    // browser half is `site/static/site.js` and is in tsconfig.browser.json.
+    // Listed by extension rather than as `site/**/*` so that adding a script
+    // under `site/static/` cannot silently land in the config with the wrong
+    // globals and be checked against a DOM that is not there.
+    "site/*.js",
+    "site/*.mjs",
+    "site/templates/*.mjs"
   ],
   "exclude": ["node_modules", "**/node_modules"]
 }

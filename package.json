@@ -22,7 +22,9 @@
     "test:cloud": "npm run test:api -w habiterall-cloud",
     "test:notify": "npm run test:notify -w habiterall-personal",
     "docs:compose": "node scripts/sync-compose-docs.mjs",
-    "bench:overview": "node scripts/bench-overview.mjs"
+    "bench:overview": "node scripts/bench-overview.mjs",
+    "site:build": "node site/build.mjs",
+    "site:serve": "node site/serve.mjs"
   },
   "engines": {
     "node": ">=26.0.0"
@@ -30,6 +32,7 @@
   "license": "GPL-3.0-or-later",
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "marked": "^18.0.10",
     "typescript": "^7.0.2"
   }
 }

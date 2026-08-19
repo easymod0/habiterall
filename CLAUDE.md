@@ -20,11 +20,23 @@ shared/               EVERYTHING both editions have in common
 habiterall-personal/  single user, SQLite, optional password  (src/ + one entry point)
 habiterall-cloud/     multi user, Postgres, OIDC     (src/ + one entry point)
 android-native/       native Kotlin client — notification actions, and habits
+site/                 habiterall.ca — the public website, generated
 ```
 
 One npm workspace. `shared` resolves as `@habiterall/shared/<file>.js`; the
-browser gets the same files under `/shared/`. **No build step anywhere** —
-what runs is what's on disk.
+browser gets the same files under `/shared/`.
+
+**The app has no build step — what runs is what's on disk.** That is a property
+of the two editions and the client, and it is not negotiable: no bundler, no
+transpiler, no `node_modules` in the browser, and types come from JSDoc through
+`tsc --noEmit`.
+
+**`site/` is the one exception, and it ships nothing to the app.** habiterall.ca
+is generated from `README.md`, `docs/screenshots/` and the Releases API, into
+`site/dist`, by `npm run site:build`. It has one dependency (`marked`, a root
+`devDependency`), it runs at build time only, and neither edition nor the Android
+client loads a byte of it. Its output is not committed. The rule above is about
+what a user runs; nobody runs the marketing site's generator.
 
 ### What belongs where
 
@@ -46,6 +58,7 @@ npm install                 # once, at the root
 npm test                    # unit tests, all workspaces
 npm run typecheck           # JSDoc types via tsc --noEmit
 npm run docs:compose        # rewrite the README's compose blocks from examples/
+npm run site:build          # build habiterall.ca into site/dist (see site/CLAUDE.md)
 
 npm run start:personal      # http://localhost:3000
 cd habiterall-cloud && docker compose up -d   # app :3100, Authentik :9000
@@ -71,6 +84,7 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md` |
 | `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md` |
 | reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md` |
+| `site/`, habiterall.ca | `site/CLAUDE.md` | `site.md` |
 | `examples/`, compose, env | `examples/CLAUDE.md` | `compose-and-env.md` |
 | settings, client mirrors | here, below | `settings-and-mirrors.md` |
 | `shared/test/browser/` | here, below | `testing.md` |
@@ -143,6 +157,15 @@ is what both Loop formats carry, `LOOP_DB_HABIT_FIELDS` adds `reminder_time`
 habiterall's own backup. A field Loop cannot carry — `at_most_unlogged`,
 `show_as` — goes in the last and neither of the others, and a Loop round trip
 correctly returns it to its default.
+
+**A README heading is a URL, and renaming one breaks the website.** `README.md`
+is the source the habiterall.ca wiki is generated from: `site/pages.js` claims
+each section by its heading TEXT, and the anchors are GitHub's own, so a rename
+moves a page and orphans every `(#published-images)`-style link at once. This
+does not fail quietly — `npm test` and the CI `site` job both build the site, and
+an unclaimed heading or an unresolvable link stops them by name. **Adding** a
+`##` section is the same event: place it in `PAGES`, or in `NOT_ON_THE_WIKI` with
+the reason. See `site/CLAUDE.md`.
 
 **Adding a FILE or an EXPORT under `shared/public/` is a `CACHE_VERSION` bump.**
 `shellFirst` is stale-while-revalidate and writes into the running worker's
@@ -266,6 +289,7 @@ Several layers, and they catch different things:
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
 | Compose files | `npm run docs:compose -- --check`, and the CI `compose` job | Docker, for the job |
+| The website, and every link in it | `npm run site:build -- --offline` | nothing |
 | Android | `cd android-native && ./gradlew testDebugUnitTest lintDebug` | JDK 21 + SDK |
 
 CI runs all of these on every pull request, plus both Docker builds. Publishing
