@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  columnsForWidth, gridColumns, windowSlice,
+  cappedColumns, columnsForWidth, gridColumns, windowSlice,
   GRID_DAYS, GRID_DAYS_MEDIUM, GRID_DAYS_NARROW, MIN_SLOT,
 } from '../public/ui/window.js';
 import { SETTING_VALUES } from '../src/validate.js';
@@ -208,4 +208,35 @@ test('every offered value is at most GRID_DAYS, which is what keeps /overview ou
       `"${chosen}" exceeds the ${GRID_DAYS}-day window load() fetches — either ` +
       'lower it, or teach load() to ask for more');
   }
+});
+
+test('cappedColumns applies the setting to room that did not come from the ladder', () => {
+  // The day strip on a habit's own page has no habit-name column beside it, so
+  // what fits is what its CARD is wide enough for — `columnsForWidth` — and the
+  // 7/10/14 viewport ladder `gridColumns` applies would be answering a question
+  // nobody asked. Only the cap survives, and it is the same cap: `gridDays`
+  // means "at most this many days of grid" on both surfaces.
+  assert.equal(cappedColumns(7, 22), 7, 'the setting must cap generous room');
+  assert.equal(cappedColumns(14, 9), 9, 'room must cap a generous setting');
+
+  // 'auto', an absent setting, and anything unrecognised fall back to the room
+  // — never to a number, and never to the ladder, which this function cannot
+  // see. Asserted with room the ladder would never produce (22 is not 7, 10 or
+  // 14), so a version that reached for `fitsFor` instead fails here.
+  for (const bad of ['auto', undefined, null, '', 0, -3, 2.5, 'lots', {}, []]) {
+    assert.equal(cappedColumns(/** @type {any} */ (bad), 22), 22,
+      `${JSON.stringify(bad)} should fall back to the room available`);
+  }
+
+  // Never zero: a strip of no columns is not a narrower strip, it is a card
+  // with nothing in it and no way to page back out.
+  for (const room of [0, -5, NaN, Infinity, undefined]) {
+    assert.ok(cappedColumns(7, /** @type {any} */ (room)) >= 1,
+      `room of ${String(room)} produced a strip with no columns`);
+  }
+
+  // The setting is read as a STRING out of storage, exactly as gridColumns
+  // takes it — a cap that only worked for numbers would be inert in the app
+  // and green in a test that only passed numbers.
+  assert.equal(cappedColumns('5', 22), 5);
 });

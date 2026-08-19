@@ -1,29 +1,34 @@
 /**
  * The habit list: the day grid, its column header and paging, the empty
- * state, drag reordering, and what a checkbox tap does.
+ * state, drag reordering, and search.
  *
  * Owns `#grid`, `#grid-head`, `#list-head`, `#toggle-archived`, `#empty` and
  * the starter panel inside it.
+ *
+ * What a checkbox tap MEANS is no longer here: the cells, their painting, the
+ * tap cycle, the three writes and the amount dialog moved to `ui/day-strip.js`
+ * when a habit's own page grew the same control. That module owns the count
+ * dialog's ids now — this file must not name them, or `ui-modules.test.js`
+ * fails with two owners. What stayed is everything list-shaped: the window is
+ * paged by REFETCHING (`state.gridEnd`), because the dashboard holds only the
+ * fortnight it asked for, where a habit's page holds all of its history and
+ * pages by slicing memory.
  */
 
 import { api } from '/shared/ui/api.js';
-import { habitIcon } from '/shared/ui/components.js';
+import { focusKeyOf, habitIcon, restoreFocus } from '/shared/ui/components.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
+import { dateColumns, dayCells } from '/shared/ui/day-strip.js';
 import {
-  addDaysISO, datesEndingOn, formatDateLong, freqLabel, fromISOLocal, iso,
-  formatDayNumber, formatDayRange, formatMonthShort, targetLabel, todayISO,
-  weekdayLetters,
+  addDaysISO, datesEndingOn, freqLabel, iso,
+  formatDayRange, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
-import { gridCountField } from '/shared/ui/count-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
-import {
-  DAY, dayStateOf, isAvoided, nextDayState, valueForState,
-} from '/shared/ui/toggle.js';
 import { toast } from '/shared/ui/toast.js';
-import { SKIP, UNSET, YES } from '/shared/ui/values.js';
+import { SKIP } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
 import { GRID_DAYS, gridColumns } from '/shared/ui/window.js';
 import { open as openHabit } from '/shared/ui/detail.js';
@@ -66,6 +71,86 @@ const emptyOnboarding = /** @type {HTMLElement[]} */ ([...document.querySelector
 function gridDays() {
   return gridColumns(settings.get('gridDays'), window.innerWidth);
 }
+
+/* ---------- how the strip reaches this list's data ---------- */
+
+/**
+ * Add or remove a date from a habit's `skips`, in place.
+ *
+ * The optimistic writes edit `habit.entries` and then repaint, and since the
+ * grid started reading `skips` to tell a skip from an amount, editing one
+ * without the other leaves the cell asserting the old state. Offline that is
+ * not a flash before the refetch corrects it: `api()` queues the write and
+ * throws, so the refetch never runs and the cell stays wrong while taps
+ * accumulate.
+ *
+ * @returns {boolean} whether the date was a skip before this call
+ */
+function setSkip(habit, date, on) {
+  habit.skips ??= [];
+  const was = habit.skips.includes(date);
+  if (on && !was) habit.skips.push(date);
+  if (!on && was) habit.skips = habit.skips.filter((d) => d !== date);
+  return was;
+}
+
+/**
+ * This list, as `ui/day-strip.js` reads and writes it.
+ *
+ * A module-level singleton rather than something built per paint: the amount
+ * dialog outlives a rebuild, and a host captured in a closure would answer from
+ * a `state.habits` that `load()` has since replaced wholesale.
+ *
+ * The encoding here is `/overview`'s: a skip is BOTH the SKIP wire value in
+ * `entries` and the date listed in `skips`, because that is what the refetch
+ * will return and the optimistic paint has to agree with it. A habit's own page
+ * holds the same day in a different shape, which is exactly why this is the
+ * host's job and not the strip's.
+ *
+ * @type {import('/shared/ui/day-strip.js').StripHost}
+ */
+const listHost = {
+  habit: (id) => state.habits.find((h) => h.id === id) ?? null,
+
+  read(id, date) {
+    const habit = this.habit(id);
+    if (!habit) return { value: undefined, isSkip: false };
+    return {
+      // Whether the map HOLDS the date, never what it holds — see the ban on
+      // `?? UNSET` in the root CLAUDE.md.
+      value: Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined,
+      isSkip: habit.skips?.includes(date) ?? false,
+    };
+  },
+
+  edit(id, date, to) {
+    const habit = this.habit(id);
+    if (!habit) return () => {};
+    const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
+
+    if (to === 'clear') {
+      delete habit.entries[date];
+    } else {
+      // Set, never delete: UNSET is a row now — a stated "no" — and deleting
+      // the key would paint the cell as unknown while the server holds an
+      // answer, which with question marks on is a visible lie until the
+      // refetch.
+      habit.entries[date] = to === 'skip' ? SKIP : to;
+    }
+    const wasSkip = setSkip(habit, date, to === 'skip');
+
+    return () => {
+      const back = this.habit(id);
+      if (!back) return;
+      if (had === undefined) delete back.entries[date];
+      else back.entries[date] = had;
+      setSkip(back, date, wasSkip);
+    };
+  },
+
+  repaint: () => paint(),
+  refresh: () => load(),
+};
 
 export async function load() {
   // Always request the widest column count so a rotation to landscape needs
@@ -245,74 +330,11 @@ export function paint() {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHabit(habit.id); }
     });
 
-    const checks = document.createElement('div');
-    checks.className = 'checks';
-
-    for (const d of dates) {
-      const date = iso(d);
-      const value = habit.entries[date];
-      const btn = document.createElement('button');
-      btn.className = 'check' + (date === todayIso ? ' today' : '');
-      btn.title = `${habit.name} — ${date}`;
-      btn.dataset.focusKey = `check:${habit.id}:${date}`;
-
-      const box = document.createElement('span');
-      box.className = 'check-box';
-      paintCheckbox(box, habit, value, habit.skips?.includes(date) ?? false,
-        settings.get('questionMarks'));
-
-      const day = document.createElement('span');
-      day.className = 'check-day';
-      day.textContent = weekdayLetters()[d.getDay()];
-
-      btn.append(box, day);
-      btn.addEventListener('click', () => onCheckClick(habit, date));
-      checks.append(btn);
-    }
-
-    row.append(meta, checks);
+    row.append(meta, dayCells(listHost, habit, dates, todayIso));
     grid.append(row);
   }
 
   restoreFocus(root, focused);
-}
-
-/* ---------- keeping focus across a repaint ---------- */
-
-/**
- * The identity of a control that survives being rebuilt.
- *
- * Every focusable thing `paint()` recreates carries a `data-focus-key` that
- * names *what it is* rather than where it sat, so the restore still lands
- * after a reorder moves the row or a refetch rebuilds the grid. A key that no
- * longer exists — the column you were on after paging away — simply does not
- * match, which is the right answer rather than a special case.
- */
-function focusKeyOf(el) {
-  return el instanceof HTMLElement ? el.dataset.focusKey ?? null : null;
-}
-
-function restoreFocus(root, key) {
-  if (!key) return;
-
-  // Compared rather than selected: a key carries a habit name or a date, and
-  // building a selector out of either needs escaping that is easy to get
-  // wrong and pointless here.
-  const match = [...root.querySelectorAll('[data-focus-key]')]
-    .find((el) => el.dataset.focusKey === key);
-  if (!match) return;
-
-  // The control can survive but stop being operable — pressing Today disables
-  // it, since there is nowhere left to jump to. `.focus()` on a disabled
-  // button is a no-op, so fall back to its nearest working neighbour rather
-  // than leaving the keyboard at the top of the document.
-  if (!/** @type {HTMLButtonElement} */ (match).disabled) {
-    match.focus();
-    return;
-  }
-  const sibling = [...(match.parentElement?.querySelectorAll('[data-focus-key]') ?? [])]
-    .find((el) => !(/** @type {HTMLButtonElement} */ (el).disabled));
-  /** @type {HTMLElement} */ (sibling)?.focus();
 }
 
 /**
@@ -386,34 +408,10 @@ function renderGridHeader(dates, todayIso) {
   const newer = mk('nav:newer', newerGlyph, `Next ${step} days`, step, atToday);
   nav.append(...(newestLeft ? [newer, older] : [older, newer]));
 
-  // Date row, aligned to the checkbox columns below.
-  const cols = document.createElement('div');
-  cols.className = 'grid-dates';
-  for (const [i, d] of dates.entries()) {
-    const cell = document.createElement('div');
-    const dIso = iso(d);
-    cell.className = 'grid-date' + (dIso === todayIso ? ' is-today' : '');
-    // Only show the month on the first column and when it CHANGES, so the row
-    // stays readable at seven columns on a phone.
-    //
-    // The change is read from the month NAME, not from `getDate() === 1`.
-    // The first of the Gregorian month is not where a Persian or Hijri month
-    // turns, so keying the caption on it put `مرداد` about nine days into the
-    // month it names — the same mistake `formatYear`'s comment records for the
-    // year caption, which was fixed there and left here.
-    const dayNum = document.createElement('span');
-    dayNum.className = 'grid-date-num';
-    dayNum.textContent = formatDayNumber(d);
-    const mon = document.createElement('span');
-    mon.className = 'grid-date-mon';
-    const monthText = formatMonthShort(d);
-    const prev = dates[i - 1];
-    mon.textContent = !prev || formatMonthShort(prev) !== monthText ? monthText : '';
-    cell.append(mon, dayNum);
-    cols.append(cell);
-  }
-
-  gridHead.append(label, nav, cols);
+  // Date row, aligned to the checkbox columns below — built by the same module
+  // as the cells, so the captions and the squares cannot disagree about how
+  // many columns there are or which one is today.
+  gridHead.append(label, nav, dateColumns(dates, todayIso));
 }
 
 /** "3 – 16 Aug 2026" — `Intl` decides what the two ends share, and in which order. */
@@ -594,376 +592,6 @@ async function persistOrder(order) {
   }
 }
 
-/* ---------- the checkboxes ---------- */
-
-/**
- * @param isSkip       whether `/overview` listed this date in the habit's `skips`
- * @param showUnknown  the `questionMarks` setting: draw `?` where there is no row
- *
- * The skip flag is why this takes more than three arguments. `/overview` flattens
- * a skip onto the SKIP wire value so the grid has something paintable, *and*
- * lists the date in `skips` — and the second is the only one that can be trusted,
- * because 3 is a legitimate amount for a measurable habit. Reading the sentinel
- * alone painted "3 pages" and "3 cigarettes" as skipped days, while the score
- * behind them counted the 3: the cell disagreed with every figure computed from
- * it. The bare sentinel still counts for a *boolean* habit, where it cannot mean
- * anything else and is what an imported Loop history carries — the same rule as
- * `normalizeEntry` in shared/src/stats.js.
- */
-function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
-  box.textContent = '';
-  box.style.background = 'var(--grid-empty)';
-  box.style.color = '#fff';
-
-  if (isSkip || (habit.type === 'boolean' && value === SKIP)) {
-    box.style.background = 'var(--surface-2)';
-    box.style.color = 'var(--text-dim)';
-    box.textContent = '–';
-    return;
-  }
-
-  // No row at all. Identical to a stated "no" unless question marks are on,
-  // which is the entire visible difference the setting makes: `value` is
-  // `undefined` here and `0` there, and both are a miss to every figure.
-  if (value == null) {
-    if (showUnknown) {
-      box.style.color = 'var(--text-dim)';
-      box.textContent = '?';
-    }
-    return;
-  }
-
-  if (habit.type === 'boolean') {
-    if (value === YES) {
-      box.style.background = habit.color;
-      box.textContent = '✓';
-    }
-    return;
-  }
-
-  // Shown as something to avoid: a clean day is the achievement and a slip is
-  // the thing to see, so the colours are the other way round. Painting a slip
-  // in the habit's own colour — which is what the at-most branch below does,
-  // correctly, for a habit read as an amount — reads as having done well.
-  if (isAvoided(habit)) {
-    const target = Number(habit.target_value) || 0;
-    if (value <= target) {
-      box.style.background = habit.color;
-      box.textContent = '✓';
-    } else {
-      // The count, because how far over matters on a limit of two coffees and
-      // is the whole answer on a limit of none.
-      box.style.background = 'var(--danger)';
-      box.style.color = '#fff';
-      box.textContent = target === 0 && value === 1
-        ? '✗'
-        : (value % 1 === 0 ? String(value) : value.toFixed(1));
-      box.style.fontSize = '9.5px';
-    }
-    return;
-  }
-
-  // numerical: shade by progress toward target, show the raw number.
-  // For an "at most" habit a low number is the good outcome, so 0 is a full
-  // success and must be painted, not left blank.
-  if (habit.target_type === 'at_most') {
-    const target = habit.target_value;
-    // Fade gradually past the target; scale by 3 when the target is 0 so
-    // small overages remain distinguishable.
-    const scale = Math.max(target, 3);
-    const ratio = value <= target
-      ? 1
-      : Math.max(0.2, 1 - (value - target) / scale);
-    box.style.background = habit.color;
-    box.style.opacity = String(ratio);
-  } else {
-    const target = habit.target_value || 1;
-    const ratio = Math.min(1, value / target);
-    if (value > 0) {
-      box.style.background = habit.color;
-      box.style.opacity = String(Math.max(0.28, ratio));
-    }
-  }
-  box.textContent = value % 1 === 0 ? String(value) : value.toFixed(1);
-  box.style.fontSize = '9.5px';
-}
-
-/**
- * Add or remove a date from a habit's `skips`, in place.
- *
- * The optimistic paths below edit `habit.entries` and then repaint, and since
- * the grid started reading `skips` to tell a skip from an amount, editing one
- * without the other leaves the cell asserting the old state. Offline that is
- * not a flash before the refetch corrects it: `api()` queues the write and
- * throws, so the refetch never runs and the cell stays wrong while taps
- * accumulate — the failure the long comment below was written to prevent,
- * arriving by a different door.
- *
- * @returns {boolean} whether the date was a skip before this call
- */
-function setSkip(habit, date, on) {
-  habit.skips ??= [];
-  const was = habit.skips.includes(date);
-  if (on && !was) habit.skips.push(date);
-  if (!on && was) habit.skips = habit.skips.filter((d) => d !== date);
-  return was;
-}
-
-/**
- * Take a day back to "unknown": no row at all.
- *
- * The one write that is a DELETE rather than a PUT, since `PUT {value: 0}` now
- * records a stated "no" — see `entryWrite`. Optimistic before the await for the
- * same reason as the writes below: offline, `api()` queues the request and
- * throws, so the cell would otherwise keep asserting a value just cleared.
- */
-async function clearDay(habit, date) {
-  const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
-  delete habit.entries[date];
-  const wasSkip = setSkip(habit, date, false);
-  paint();
-  try {
-    await api(`/habits/${habit.id}/entries/${date}`, { method: 'DELETE' });
-  } catch (e) {
-    if (!e.queued) {
-      if (had !== undefined) habit.entries[date] = had;
-      setSkip(habit, date, wasSkip);
-      paint();
-    }
-    throw e;
-  }
-  await load();
-}
-
-/* ---------- recording an amount from the grid ---------- */
-
-const countDialog = $('#count-dialog');
-const countTitle = $('#count-title');
-const countSub = $('#count-sub');
-const countClear = $('#count-clear');
-
-/**
- * Which habit and day the dialog is editing, while it is open.
- *
- * The habit's ID rather than the habit, which is the shape `day-dialog.js`
- * already uses and for a reason that bites here: `load()` REPLACES every
- * object in `state.habits`, and it can run while this dialog is open — a
- * reconnect flush emits `'reload'`, and so does the visibility sync. Holding
- * the object meant the optimistic write landed on an orphan and `paint()`,
- * which iterates `state.habits`, went on drawing the old cell. Online the
- * trailing refetch hides it; offline there is no refetch, so the grid asserts
- * one amount while a different one sits in the outbox — precisely what the
- * comment on `recordValue` exists to prevent, arriving through the door the
- * synchronous `prompt()` used to hold shut.
- */
-let counting = null;
-
-/**
- * Ask for an amount, over the grid.
- *
- * This is a dialog rather than the day editor, which also has an amount field:
- * the day editor writes through its own `saveDay`, which awaits the request and
- * then announces, while a check-off from the grid has to go through
- * `recordValue` below — optimistic paint first, because offline `api()` queues
- * the write and THEN throws, so anything after the await is skipped. Routing
- * the grid's writes through the other path would undo the whole comment on
- * `recordValue`.
- */
-function openCountDialog(habit, date) {
-  // A skipped day has no amount to prefill: for a measurable habit the SKIP
-  // wire value is a legitimate amount, so the skip is what says the day has no
-  // number rather than the value doing it.
-  const skipped = habit.skips?.includes(date) ?? false;
-  const current = skipped ? null : habit.entries[date];
-
-  counting = { habitId: habit.id, date };
-  countTitle.replaceChildren();
-  const countIcon = habitIcon(habit);
-  if (countIcon) countTitle.append(countIcon, ' ');
-  countTitle.append(document.createTextNode(habit.name));
-  // The date in words. A grid cell is a square in a row of squares, so the
-  // dialog has to say which day it is about — the ISO string reads as a serial
-  // number, and the whole risk of an editable history is fixing the wrong one.
-  countSub.textContent = formatDateLong(fromISOLocal(date))
-    + (habit.unit ? ` · ${habit.unit}` : '');
-  // Whether a ROW exists, not whether there is an amount to show. A skipped
-  // day has a row and `current` is nulled above so the SKIP sentinel is not
-  // prefilled as an amount — deriving the button from that hid Clear on the
-  // one kind of day that most needs it, since this dialog has no Unskip.
-  countClear.hidden = !skipped && habit.entries[date] == null;
-  gridCountField.set(habit, current);
-  countDialog.showModal();
-  gridCountField.focus();
-}
-
-/** The habit this dialog is about, as `state.habits` holds it NOW. */
-function countingHabit() {
-  return state.habits.find((h) => h.id === counting?.habitId) ?? null;
-}
-
-async function saveCount() {
-  if (!counting) return;
-  // Three answers and two of them are falsy, so `===` is load bearing — see
-  // the day editor, which had this collapsed and deleted days because of it.
-  const amount = gridCountField.value();
-  if (amount === null) return gridCountField.complain();
-
-  const habit = countingHabit();
-  const { date } = counting;
-  countDialog.close();
-  counting = null;
-  // Deleted, or archived out of the list, while the dialog was open. Said out
-  // loud: the dialog has already closed, so returning quietly is a Save that
-  // looks exactly like one that worked.
-  if (!habit) return toast('That habit is no longer on the list — nothing was saved.');
-
-  try {
-    if (amount === '') await clearDay(habit, date);
-    else await recordValue(habit, date, amount);
-  } catch (e) {
-    // Toasted whatever it is, exactly as the boolean tap does. A QUEUED write
-    // throws too, carrying "Saved offline — will sync when you reconnect", and
-    // swallowing that took the confirmation away from the one path where the
-    // user had just filled in a form and pressed Save.
-    toast(e.message);
-  }
-}
-
-async function onCheckClick(habit, date) {
-  try {
-    let next;
-    // A habit shown as something to avoid CYCLES rather than asking for a
-    // number, which is the whole of what the rendering buys: the answer is
-    // yes-or-no, and typing an amount to say "none today" is the friction it
-    // exists to remove. `valueForState` is what makes the same four states
-    // record different values — see ui/toggle.js.
-    if (habit.type === 'boolean' || isAvoided(habit)) {
-      // Loop's cycle, and both of its switches — `ui/toggle.js` owns it and the
-      // native client mirrors it. Note what is read here: whether the map HOLDS
-      // the date, not what it holds. `habit.entries[date] ?? UNSET` was fine
-      // while a lapse and an unanswered day were one state; now it would report
-      // every untouched day as an answered "no" and start the cycle in the wrong
-      // place.
-      const cur = habit.entries[date];
-      const current = dayStateOf({
-        value: Object.hasOwn(habit.entries, date) ? cur : undefined,
-        isSkip: (habit.skips?.includes(date) ?? false) ||
-          (habit.type === 'boolean' && cur === SKIP),
-        // What counts as done differs: `YES` for a yes/no habit, and being at
-        // or under the limit for one being avoided, where 0 is the goal.
-        done: isAvoided(habit) ? cur <= (Number(habit.target_value) || 0) : cur === YES,
-      });
-      const to = nextDayState(current, {
-        skipDays: settings.get('skipDays'),
-        questionMarks: settings.get('questionMarks'),
-      });
-
-      if (to === DAY.UNKNOWN) return await clearDay(habit, date);
-      // A skip is the status column, never a value. Writing the SKIP sentinel
-      // works for a yes/no habit — `parseEntry` reads 3 as a skip there — and
-      // silently stores three of the thing on a measurable one, which is what
-      // an avoided habit is underneath.
-      if (to === DAY.SKIP) return await recordSkip(habit, date);
-      next = valueForState(habit, to);
-    } else {
-      // A measurable day is asked for rather than cycled to, and the answer
-      // comes back through `saveCount` into the very same `recordValue`.
-      return openCountDialog(habit, date);
-    }
-
-    await recordValue(habit, date, next);
-  } catch (e) {
-    toast(e.message);
-  }
-}
-
-/**
- * Mark a day as skipped, on the same optimistic path as `recordValue`.
- *
- * `{status: 'skip'}` rather than a value, which is what the day editor has
- * always sent and what the Android client sends. The grid paints a skip from
- * `habit.skips`, and `entries[date]` is set to the SKIP sentinel alongside it
- * because that is the shape `/overview` returns — so the optimistic paint and
- * the refetch agree.
- */
-async function recordSkip(habit, date) {
-  const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
-  habit.entries[date] = SKIP;
-  const wasSkip = setSkip(habit, date, true);
-  paint();
-
-  try {
-    await api(`/habits/${habit.id}/entries/${date}`, {
-      method: 'PUT',
-      body: JSON.stringify({ status: 'skip' }),
-    });
-  } catch (e) {
-    if (!e.queued) {
-      if (previous === undefined) delete habit.entries[date];
-      else habit.entries[date] = previous;
-      setSkip(habit, date, wasSkip);
-      paint();
-    }
-    throw e;
-  }
-
-  await load();
-}
-
-/**
- * Write one day's value, paint it before the request, and put it back if the
- * request turns out not to have been made.
- *
- * One function because there are two ways in — the boolean tap cycle and the
- * amount dialog — and every line of what follows is a rule that must not exist
- * in only one of them.
- */
-async function recordValue(habit, date, next) {
-  // Apply optimistically BEFORE awaiting the request. Offline, `api()`
-  // enqueues the write and then throws, so anything after the await is
-  // skipped — which used to leave `habit.entries` stale. The next tap then
-  // recomputed the cycle from the same starting value and queued another
-  // identical write: three offline taps meaning "clear this day" all queued
-  // `value: 2`, and the day synced as DONE. The cell stayed blank the whole
-  // time, so there was no hint anything was wrong.
-  const previous = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
-  // Set, never delete: UNSET is a row now — a stated "no" — and deleting the
-  // key here would paint the cell as unknown while the server holds an
-  // answer, which with question marks on is a visible lie until the refetch.
-  habit.entries[date] = next;
-  // `skips` is what the cell is painted from, so it clears with the value: any
-  // amount recorded on a day ends a skip that was on it.
-  //
-  // Never SETS one. Skips come through `recordSkip` now, which writes the
-  // status; the condition here used to be `next === SKIP && type === 'boolean'`
-  // and became unsatisfiable when `valueForState` stopped answering for a skip
-  // at all. A dead branch is harmless, but a comment claiming a boolean habit
-  // "can reach SKIP from here" is the line a future skip change would read.
-  const wasSkip = setSkip(habit, date, false);
-  paint();
-
-  try {
-    await api(`/habits/${habit.id}/entries/${date}`, {
-      method: 'PUT',
-      body: JSON.stringify({ value: next }),
-    });
-  } catch (e) {
-    // A queued write will still land, so the optimistic state is correct and
-    // must stand. Any other failure did not reach the server, so roll back
-    // rather than leave the UI asserting something untrue.
-    if (!e.queued) {
-      if (previous === undefined) delete habit.entries[date];
-      else habit.entries[date] = previous;
-      setSkip(habit, date, wasSkip);
-      paint();
-    }
-    throw e;
-  }
-
-  // Re-fetch so score and streak reflect the change.
-  await load();
-}
-
 export function init() {
   toggleArchived.addEventListener('click', () => {
     state.showArchived = !state.showArchived;
@@ -990,26 +618,6 @@ export function init() {
     state.query = '';
     paint();
   });
-
-  $('#count-cancel').addEventListener('click', () => { countDialog.close(); counting = null; });
-  $('#count-save').addEventListener('click', saveCount);
-  countClear.addEventListener('click', async () => {
-    // Clearing takes the day back to having no row at all, which is the one
-    // thing an empty box also does — but a button says so, where an empty box
-    // is something you have to know. Both go through `clearDay`.
-    if (!counting) return;
-    const habit = countingHabit();
-    const { date } = counting;
-    countDialog.close();
-    counting = null;
-    if (!habit) return toast('That habit is no longer on the list — nothing was cleared.');
-    try {
-      await clearDay(habit, date);
-    } catch (e) {
-      toast(e.message);
-    }
-  });
-  gridCountField.onEnter(saveCount);
 
   $('#empty-new').addEventListener('click', () => openDialog());
   $('#empty-import').addEventListener('click', openDataDialog);

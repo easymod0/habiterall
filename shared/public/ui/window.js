@@ -100,6 +100,35 @@ export function gridColumns(chosen, width) {
 }
 
 /**
+ * The same cap, applied to a count that did NOT come from the viewport ladder.
+ *
+ * `gridColumns` above answers for the dashboard, where what fits is the ladder
+ * — 7 / 10 / 14 by viewport — because that ladder protects the habit NAME
+ * beside the cells. A habit's own page has no name column, so what fits there
+ * is whatever `columnsForWidth` says about the card, and only the cap survives.
+ *
+ * Split out rather than given a second `gridColumns` parameter so that the
+ * ladder stays unreachable from the card: this takes what fits as an argument
+ * and has no opinion about where it came from. The `gridDays` setting then
+ * means one thing on both surfaces — "at most this many days of grid" — which
+ * is what its label already promises.
+ *
+ * Note what CANNOT go wrong here and does constrain `gridColumns`: a value
+ * above `GRID_DAYS` outrunning the fetched window is a dashboard hazard only,
+ * because a habit's page already holds every entry it has.
+ *
+ * @param {string|number|undefined} chosen  the stored setting: 'auto' or a count
+ * @param {number} fits                     how many columns the space has
+ * @returns {number} at least 1
+ */
+export function cappedColumns(chosen, fits) {
+  const room = Math.max(1, Number.isFinite(fits) ? Math.floor(Number(fits)) : 1);
+  const asked = Number(chosen);
+  if (!Number.isInteger(asked) || asked < 1) return room;
+  return Math.min(asked, room);
+}
+
+/**
  * The slice of `items` to render, given a paging offset.
  *
  * `offset` counts columns back from the most recent: 0 is the latest window,

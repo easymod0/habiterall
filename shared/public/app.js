@@ -16,6 +16,7 @@ import * as dataDialog from '/shared/ui/data-dialog.js';
 import { todayISO } from '/shared/ui/dates.js';
 import * as detail from '/shared/ui/detail.js';
 import * as dayDialog from '/shared/ui/day-dialog.js';
+import * as dayStrip from '/shared/ui/day-strip.js';
 import * as habitDialog from '/shared/ui/habit-dialog.js';
 import * as nudge from '/shared/ui/nudge.js';
 import * as routes from '/shared/ui/routes.js';
@@ -122,6 +123,8 @@ export async function start(adapter) {
   connectivity.init();
   habitDialog.init();
   dayDialog.init();
+  // The amount dialog behind a day cell, on either surface that draws one.
+  dayStrip.init();
   dataDialog.init();
   settingsDialog.init();
   dashboard.init();

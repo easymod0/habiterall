@@ -56,8 +56,9 @@ const OFFLINE_SUITES = new Set(['rendercheck', 'daydialog', 'atmost', 'weekcheck
  * suite missing from it costs a few seconds of packing, never a failure.
  */
 const SLOW_FIRST = [
-  'settingscheck', 'hangcheck', 'themesync', 'nudgecheck', 'unknowncheck',
-  'responsive', 'searchcheck', 'notifycheck', 'pwatest', 'gridcheck',
+  'settingscheck', 'hangcheck', 'themesync', 'nudgecheck', 'stripcheck',
+  'unknowncheck', 'responsive', 'searchcheck', 'notifycheck', 'pwatest',
+  'gridcheck',
 ];
 
 const argv = process.argv.slice(2);

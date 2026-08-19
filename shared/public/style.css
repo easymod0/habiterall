@@ -501,6 +501,27 @@ body {
   box-shadow: var(--shadow);
 }
 
+/*
+ * The day strip on a habit's own page — the same cells as the dashboard grid,
+ * in a card instead of a list row.
+ *
+ * Three overrides, and each undoes something `.grid-dates` / `.checks` carry
+ * only because of where they normally sit. `grid-column: 1 / -1` is inert
+ * outside `#grid-head`'s grid, so it needs nothing; `justify-content:
+ * flex-end` is NOT — it right-aligns the captions while `.checks` (a plain
+ * flex row) left-aligns the boxes, so above 640px the dates drifted off the
+ * squares they label by however much slack the card had. And `.checks`'
+ * narrow-width `flex: 1 1 100%` means "grow to the row's full width" inside
+ * `.habit-row`; inside a flex COLUMN it means grow vertically.
+ *
+ * Below 640px both become `grid-auto-columns: 1fr` with the same gap, so they
+ * line up by construction and nothing here has to intervene. Measured at
+ * 360 / 390 / 768 / 1440 in `responsive.mjs` rather than argued.
+ */
+.day-strip { display: flex; flex-direction: column; gap: 6px; }
+.day-strip .grid-dates { justify-content: flex-start; }
+.day-strip .checks { flex: none; }
+
 .chart-scroll { overflow-x: auto; }
 svg.chart { display: block; max-width: 100%; height: auto; }
 

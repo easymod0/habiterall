@@ -26,6 +26,15 @@ why `test/browser/` exists.
 
 ## The dashboard grid
 
+**What a cell IS, and what a tap on one does, is `ui/day-strip.js` — not
+`ui/dashboard.js`.** The painting (`paintCheckbox`), the cell markup, the date
+captions, the tap cycle, the one `writeDay` all three writes collapsed into,
+and the amount dialog all moved there when a habit's own page grew the same
+control. `dashboard.js` may not name `#count-*` any more; `ui-modules.test.js`
+fails with two owners if it does. What stayed is list-shaped: rows, drag
+reordering, search, the empty state, and paging — which the dashboard does by
+REFETCHING, because it holds only the fortnight it asked for.
+
 **It fetches the window it is showing.** `/overview` takes an `end` date; paging
 back without it re-rendered an empty grid, because the entries for that window
 had never been loaded.
@@ -58,18 +67,49 @@ targets.
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears
-about it.** `detailCards` gates the nine builders in `ui/detail.js`; the ids come
+about it.** `detailCards` gates the ten builders in `ui/detail.js`; the ids come
 from `DETAIL_CARDS` (`shared/src/validate.js`) and not titles, because a card has
 no id and the titles are English prose #144 will translate.
+
+**"Recent days" is the one card you ACT on, and it is first for that reason.**
+It is the dashboard's tappable day strip for one habit — `ui/day-strip.js`,
+shared with the dashboard rather than copied — so a reminder can be answered
+without going through the calendar and the day editor behind it. Two things
+about it are not obvious:
+
+- **It needs no request, ever, including to page.** `open()` already fetches
+  `/habits/:id/entries` unwindowed, so `entriesByDate` / `skipSet` are the whole
+  history. That is why it pages by SLICING through `windowedChart` where the
+  dashboard pages by refetching a window — the dashboard holds only the
+  fortnight it asked for.
+- **Its host repaints CELLS IN PLACE (`repaintCells`), not the page.** The
+  dashboard's `repaint` is a full `paint()`, which is cheap there; here a
+  rebuild is two round trips and up to ten cards of SVG. Touching no nodes is
+  also what keeps focus on the button that was just pressed during the
+  optimistic step — `open()`'s later rebuild is what `focusKeyOf` /
+  `restoreFocus` (now in `ui/components.js`) are called for.
+
+Bounded to `STRIP_HISTORY_DAYS`: running from the habit's first entry is the
+browser-side shape of the `MAX_RANGE_DAYS` rule, and an imported row dated year
+0100 would ask for a ~700,000-element array. And `gridDays` caps its columns
+through `cappedColumns`, NOT `gridColumns` — that function's 7/10/14 ladder
+exists to protect the dashboard's habit-name column, which this card does not
+have.
+
+**Offline, the strip and the calendar card disagree about a day until
+reconnect**, and that is accepted rather than missed. `writeDay` ends in a
+refetch, which offline never runs; every other figure on the page is
+server-computed, so nothing local could move them anyway. The same staleness
+the dashboard row already has offline.
 
 **The stored shape is `{id, on}[]`, not a bare list of the ids that are on**
 (#163). Membership and order are two different decisions — hiding a card and
 moving it are not the same press — and a bare array of ids can only ever record
 one of them: normalising `['history','calendar']` down to canonical order to
 give the SERVER an opinion about ordering would throw the order away the moment
-anyone reordered anything. An object per id, always all nine, says which of the
-two questions each entry is answering, so a tenth card cannot later make "a bare
-id" ambiguous between "legacy, absent means hidden" and "new shape, absent means
+anyone reordered anything. An object per id, always all of them, says which of the
+two questions each entry is answering, so an ELEVENTH card cannot later make "a
+bare id" ambiguous between "legacy, absent means hidden" and "new shape, absent means
 new and visible" — a marked string (`'!history'`) still faces exactly that
 question with a longer list of ids. `[]` is read as the LEGACY shape and means
 nothing visible; reading it as the new shape (nothing named, so nothing to
@@ -77,7 +117,8 @@ hide) would invert unticking everything to everything shown, which is the one
 case `parseCardList`'s tests treat as the whole point of the change.
 
 **A legacy account is read tolerantly, and migrated only by a deliberate
-Done.** Nothing writes the new shape on its behalf otherwise: not a boot, not a
+Done** — which is why a legacy account gets `recentDays` OFF until it presses
+Done, deliberately. Nothing writes the new shape on its behalf otherwise: not a boot, not a
 `GET`, nothing scheduled. An account that saved `['history','calendar']` before
 this shipped keeps meaning exactly that — those two on, every other card off —
 for as long as it never opens the settings dialog, because every card added

@@ -47,6 +47,52 @@ export function subheading(text) {
   return h;
 }
 
+/* ---------- keeping focus across a repaint ---------- */
+
+/**
+ * The identity of a control that survives being rebuilt.
+ *
+ * Every focusable thing a rebuild recreates carries a `data-focus-key` that
+ * names *what it is* rather than where it sat, so the restore still lands
+ * after a reorder moves the row or a refetch rebuilds the grid. A key that no
+ * longer exists — the column you were on after paging away — simply does not
+ * match, which is the right answer rather than a special case.
+ *
+ * Here rather than in `dashboard.js`, where this pair lived while the grid was
+ * the only thing that rebuilt itself under the keyboard. It is generic, knows
+ * nothing about habits, and both the dashboard (rows, drag handles, paging
+ * arrows, starters) and a habit's own page now need it — the second because a
+ * tap on its day strip refetches and rebuilds every card, which is the same
+ * "focus drops to `<body>` and the next Tab starts from the top of the page"
+ * the dashboard's own comment records.
+ */
+export function focusKeyOf(el) {
+  return el instanceof HTMLElement ? el.dataset.focusKey ?? null : null;
+}
+
+export function restoreFocus(root, key) {
+  if (!key) return;
+
+  // Compared rather than selected: a key carries a habit name or a date, and
+  // building a selector out of either needs escaping that is easy to get
+  // wrong and pointless here.
+  const match = [...root.querySelectorAll('[data-focus-key]')]
+    .find((el) => el.dataset.focusKey === key);
+  if (!match) return;
+
+  // The control can survive but stop being operable — pressing Today disables
+  // it, since there is nowhere left to jump to. `.focus()` on a disabled
+  // button is a no-op, so fall back to its nearest working neighbour rather
+  // than leaving the keyboard at the top of the document.
+  if (!/** @type {HTMLButtonElement} */ (match).disabled) {
+    match.focus();
+    return;
+  }
+  const sibling = [...(match.parentElement?.querySelectorAll('[data-focus-key]') ?? [])]
+    .find((el) => !(/** @type {HTMLButtonElement} */ (el).disabled));
+  /** @type {HTMLElement} */ (sibling)?.focus();
+}
+
 export function segmented(options, active, onChange) {
   const wrap = document.createElement('div');
   wrap.className = 'seg';
@@ -113,11 +159,15 @@ export function cardInnerWidth(container) {
  * @param {(slice: Array) => Node} opts.render
  * @param {(item: any) => string} [opts.labelOf]  for the range readout
  * @param {() => void} opts.redraw
+ * @param {number} [opts.capacity]  columns, when the caller has already decided
+ *   — the day strip caps `columnsForWidth`'s answer by the account's
+ *   `gridDays`, which is a preference this component has no business reading.
+ *   Everything else about the paging is unchanged, including the clamp.
  */
 export function windowedChart(opts) {
   const { card: host, key, items, density, width, render, labelOf, redraw } = opts;
 
-  const capacity = columnsForWidth(width, density);
+  const capacity = opts.capacity ?? columnsForWidth(width, density);
   const win = windowSlice(items, capacity, state.chartOffsets[key] ?? 0);
   // Write the clamped value back, so paging past an end does not leave a
   // stale offset that shifts the window on the next render.

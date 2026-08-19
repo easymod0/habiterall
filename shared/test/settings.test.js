@@ -225,6 +225,18 @@ test('a legacy list means membership is visibility, and carries NO order of its 
   // has to keep meaning nothing visible.
   assert.deepEqual(parseCardList([]), DETAIL_CARDS.map((id) => ({ id, on: false })),
     'an empty legacy list must leave every card off, not turn every card on');
+
+  // A card that shipped AFTER a legacy value was stored is off, and that is
+  // the deliberate policy rather than an oversight — "a legacy account is read
+  // tolerantly, and migrated only by a deliberate Done". Asserted as a literal
+  // `false` on the newest card, because the two derived assertions above are
+  // both built from DETAIL_CARDS and would keep passing if the legacy branch
+  // started defaulting an unmentioned id to ON.
+  assert.deepEqual(
+    parseCardList(['history']).find((c) => c.id === 'recentDays'),
+    { id: 'recentDays', on: false },
+    'a card newer than a legacy stored value stays off until a deliberate Done'
+  );
 });
 
 test('a new-shape list keeps its own order, and a card left out is inserted at its canonical position', () => {
@@ -234,6 +246,10 @@ test('a new-shape list keeps its own order, and a card left out is inserted at i
     { id: 'frequency', on: true },
     { id: 'strength', on: false },
     { id: 'history', on: true },
+    // Deliberately NOT first, though it is first in DETAIL_CARDS: a card whose
+    // canonical position is index 0 is exactly the one whose stored order
+    // would be silently "corrected" by a normaliser that reordered at all.
+    { id: 'recentDays', on: true },
     { id: 'weekdayMonths', on: false },
     { id: 'awards', on: true },
     { id: 'calendar', on: true },
@@ -252,8 +268,32 @@ test('a new-shape list keeps its own order, and a card left out is inserted at i
     .map((id) => ({ id, on: true }));
   const result = parseCardList(missingCalendar);
   const insertedAt = result.findIndex((c) => c.id === 'calendar');
-  assert.equal(insertedAt, 1, 'calendar must land right after strength, its canonical predecessor');
+  assert.equal(insertedAt, 2, 'calendar must land right after strength, its canonical predecessor');
   assert.deepEqual(result[insertedAt], { id: 'calendar', on: true });
+
+  // The card at DETAIL_CARDS index 0 has NO predecessor to land after, which
+  // is a different branch — `predecessorIndex` is -1 and the insert falls back
+  // to the front. A tenth card shipping at the top of the page is exactly how
+  // an existing account gets it with no migration, so it is asserted by index
+  // rather than left to the general case above.
+  const missingFirst = DETAIL_CARDS
+    .filter((id) => id !== 'recentDays')
+    .map((id) => ({ id, on: true }));
+  const withFirst = parseCardList(missingFirst);
+  assert.equal(withFirst.findIndex((c) => c.id === 'recentDays'), 0,
+    'a card with no canonical predecessor must land at the front');
+  assert.deepEqual(withFirst[0], { id: 'recentDays', on: true });
+
+  // ...and a RUN of missing leading ids lands as a run, in order. The loop
+  // walks DETAIL_CARDS, so by the time 'strength' looks for its predecessor
+  // 'recentDays' has already been inserted — which is the only reason the two
+  // do not both pile up at index 0 in the wrong order.
+  const missingBoth = DETAIL_CARDS
+    .filter((id) => id !== 'recentDays' && id !== 'strength')
+    .map((id) => ({ id, on: true }));
+  assert.deepEqual(parseCardList(missingBoth).slice(0, 2),
+    [{ id: 'recentDays', on: true }, { id: 'strength', on: true }],
+    'consecutive missing ids must land as a run, in DETAIL_CARDS order');
 });
 
 test('dupes collapse first-wins, unknown ids and __proto__ are dropped, and a mixed list is refused', () => {
@@ -317,6 +357,9 @@ test('the client and server card normalisers agree, over the same examples', () 
     // them would notice a mirror that instead did `e.on === true`.
     [
       { id: 'strength', on: 1 },
+      // Not first, and truthy-but-not-`true`, so this example also fails a
+      // mirror that special-cases the card with no canonical predecessor.
+      { id: 'recentDays', on: 'x' },
       { id: 'calendar', on: 0 },
       { id: 'streaks', on: 'yes' },
       { id: 'resilience', on: null },
@@ -349,11 +392,14 @@ test('the client and server card normalisers agree, over the same examples', () 
   }
 });
 
-test('the default order encodes its two arguments', () => {
+test('the default order encodes its three arguments', () => {
   // Named in the assertion message, so reordering the builders table in
   // ui/detail.js (step 2) cannot silently move the default order in step 1's
   // registry without a test noticing.
   const order = DETAIL_CARDS;
+  assert.equal(order[0], 'recentDays',
+    'the one card you ACT on rather than read comes first — a reminder brings '
+    + 'you here to answer, not to read');
   assert.equal(order[order.indexOf('strength') + 1], 'calendar',
     'calendar must sit directly under the score — immediately after strength');
   assert.equal(order[order.indexOf('resilience') + 1], 'awards',

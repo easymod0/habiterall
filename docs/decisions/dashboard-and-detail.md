@@ -140,3 +140,85 @@ so a Kotlin default would be the drift `notMirrored` exists to prevent rather
 than the mirror that prevents it.
 
 
+
+## The day strip on a habit's own page ("Recent days")
+
+Arriving at a habit from a reminder, there was no way to record that day without
+opening the calendar card and the day editor behind it — two presses and a
+dialog to answer a yes/no question the notification had already asked. The
+dashboard has had the right control since the beginning; it just was not
+reachable from the one page that names a single habit.
+
+**The reuse could not be an import, and that decided the shape.** `dashboard.js`
+imports `detail.js` to open a habit, so `detail.js` importing `dashboard.js` is
+the cycle `ui/store.js` exists to break. The alternative to a third module was
+writing the strip fresh on top of `ui/toggle.js`, which is a real option — the
+tap RULES already live in a shared module — but it duplicates ~280 lines in
+which four separate rules exist because a wrong version shipped: the avoided
+inversion in `paintCheckbox`, asking whether the entry map HOLDS a date rather
+than what it holds, the SKIP sentinel counting only for a boolean habit, and the
+optimistic paint happening before the await. The amount dialog could not have
+been duplicated at all — it is built on ids that must have exactly one owner.
+
+So `ui/day-strip.js`, and the extraction landed as its own commit verified by
+running all 30 existing browser suites UNCHANGED. Anything red there would have
+been a botched move rather than a feature.
+
+**Storage stays the caller's.** The two surfaces hold the same day in different
+shapes: `/overview` returns `{date: value}` plus a `skips` ARRAY and flattens a
+skip onto the SKIP wire value, while `/habits/:id/entries` returns rows carrying
+`status` separately. A host answers what a day currently is, applies a change to
+its own model and hands back an undo, and says how to repaint and how to reload.
+It is a module-level singleton, never a per-render closure — the amount dialog
+outlives a rebuild, which is why `counting` already held a habit id rather than
+the habit.
+
+**The three writers collapsed into one.** `writeDay(host, habit, date, to)` over
+a `'clear' | 'skip' | number` union — the same vocabulary the method and body
+already switch on — so optimistic-before-await, `e.queued` standing while
+anything else rolls back, skips and entries moving together, and the trailing
+refetch each exist once instead of three times.
+
+**The two `repaint`s differ on purpose.** The dashboard's is `paint()`, which
+also redraws each row's score and streak line and is cheap. The detail page's is
+`repaintCells`, which re-runs the paint over existing nodes and replaces no DOM
+at all — a rebuild there is two round trips and up to ten cards of SVG, far too
+much to spend on a tap, and touching no nodes is what keeps keyboard focus on
+the button that was just pressed.
+
+**`refresh` is single-flight, and that is correctness rather than tuning.**
+`open()` is two requests and a full rebuild, so three quick taps fire three of
+them and nothing guarantees the third resolves last — a later-started reload can
+finish first and leave OLDER data painted. The hazard predates the strip (two
+fast presses on ‹ Earlier do it) but the strip makes rapid re-entry normal.
+
+**Paging deliberately did not move.** The dashboard refetches a window; the
+detail page holds its whole history already and slices it through
+`windowedChart`, which also gives it the offset in `state.chartOffsets` that
+`forget` knows how to clear. `gridDays` caps its columns through the new
+`cappedColumns` rather than `gridColumns`, whose 7/10/14 ladder exists to
+protect the dashboard's habit-name column — a column this card does not have.
+
+### Four things the tests found that reading did not
+
+- **The 4px gap between cells is part of the density.** `columnsForWidth`
+  DIVIDES the width by the figure it is given, so 44 claimed 23 columns fit a
+  1026px card when 23 of them need 1104px. Measured in a browser: the strip
+  overflowed into a horizontal scrollbar and the captions drifted up to 72px off
+  the squares they label, because `justify-content` resolves differently for a
+  row that overflows. 48 is the cell plus its gap, which is what
+  `MIN_SLOT.circle` has always meant by "diameter plus a gap".
+- **`.grid-dates` carries `justify-content: flex-end`** for the dashboard's grid
+  header, where it is right. Inside a card it right-aligns the captions while
+  `.checks` left-aligns the boxes.
+- **Three offline taps could not distinguish the rollback rule.** The cycle from
+  an unanswered day is unknown → done → no → done, so a build that rolled back a
+  QUEUED write — re-deriving `done` from `unknown` every time — finishes on the
+  same value as a correct one. Two taps is what separates them: 0 against 2.
+  Mutation-testing found this; the first version of the test passed against the
+  broken build.
+- **Hiding a card through a page RELOAD cannot test `forget`.** `open()` clears
+  `state.chartOffsets` wholesale whenever it opens a habit that was not already
+  open, so a reload puts every card back at today whether the `forget` entry
+  exists or not. The assertion has to be driven through the settings dialog, in
+  the page, which is what the calendar's equivalent test already did.
