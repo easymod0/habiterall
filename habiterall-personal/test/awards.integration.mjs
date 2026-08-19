@@ -130,8 +130,12 @@ ck('/overview does not compute it per habit', row.coverage === undefined,
 // pinned to the literal the fixture above produces — the 12-day run, held
 // together across its one bracketed skip — rather than merely typeof-checked,
 // the way cloud's equivalent assertion was strengthened in #183's step 2.
+// `score` is pinned too: it is the figure `unlogged` moves hardest, and until
+// now nothing at the route level checked that `summaryStats` was even handed
+// it — `stats.test.js`'s parity fixtures were the only place `unlogged`'s
+// wiring was covered at all.
 ck('  while still carrying the three summary figures it is for',
-  typeof row.score === 'number' && row.currentStreak === 12 && row.bestStreak === 12,
+  row.score === 0.443734 && row.currentStreak === 12 && row.bestStreak === 12,
   `${row.score} / ${row.currentStreak} / ${row.bestStreak}`);
 
 server.close();

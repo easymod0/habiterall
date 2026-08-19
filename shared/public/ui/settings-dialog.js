@@ -560,8 +560,10 @@ function refreshDeliveryNotices() {
  *
  * Named rather than inlined because the test for "did I remember to refetch?"
  * is not one a reader can run: the dashboard shows a plausible number either
- * way, just yesterday's. Anything added here that reaches `computeStats` on
- * the server belongs in this list.
+ * way, just yesterday's. Anything added here that reaches the server's stats
+ * arithmetic — `computeStats` on `/habits/:id/stats`, `summaryStats` on
+ * `/overview`, or a future third reader of the same figures — belongs in this
+ * list, whichever route it reaches through.
  */
 const SERVER_COMPUTED = ['atMostUnlogged'];
 

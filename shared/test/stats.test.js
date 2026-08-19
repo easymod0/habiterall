@@ -1004,9 +1004,24 @@ test('summaryStats matches the score and currentStreak computeStats would return
       ], opts: { end: END } },
     // No entries at all.
     { habit: boolHabit, entries: [], opts: { end: END } },
-    // unlogged: 'success', which only changes anything for an at-most habit.
+    // unlogged: 'success', on a one-day window with nothing to be unlogged
+    // ABOUT: the only entry stored is the window's one day, so there is no
+    // unknown day for the setting to read either way and both answers give
+    // the same pair. Kept as a one-day-window case, but it is not the
+    // `unlogged` cover — see the fixture below for that.
     { habit: atMostHabit, entries: [{ date: '2026-08-18', value: 6, status: '' }],
       opts: { end: END, unlogged: 'success' } },
+    // unlogged: 'success', with an UNKNOWN day inside the window: two stated
+    // days (10th and 18th) eight days apart on a target of 5, so days 11-17
+    // have no row at all. `unlogged: 'success'` credits those days as under
+    // the limit; the default reads them as misses. That is what makes this
+    // fixture separate on the axis the one above cannot — a wrong `unlogged`
+    // wiring inside `summaryStats` (e.g. always passing UNLOGGED_DEFAULT)
+    // changes the pair returned here but not the one-day-window case above.
+    { habit: atMostHabit, entries: [
+        { date: '2026-08-10', value: 2, status: '' },
+        { date: '2026-08-18', value: 2, status: '' },
+      ], opts: { end: END, unlogged: 'success' } },
     // An explicit `start` in opts, narrower than the entries' own span.
     { habit: boolHabit, entries: dailyRun, opts: { end: END, start: '2026-08-15' } },
     // A stored lapse: a row holding 0, status ''.
@@ -1019,6 +1034,17 @@ test('summaryStats matches the score and currentStreak computeStats would return
     // year's padding, which is what the post-clamp normalisation is for.
     { habit: boolHabit, entries: [{ date: '0999-12-31', value: YES }, ...dailyRun],
       opts: { end: END } },
+    // A best run that ENDED before `end`, with a shorter run live at `end` —
+    // `currentStreak !== bestStreak` here, which every other fixture in this
+    // list fails to distinguish (all nine have current === best, so a
+    // `summaryStats` that swapped in `bestStreak(streaks)` for
+    // `currentStreak(streaks, end)` passed every one of them). A 15-day run
+    // in July, a gap, then a live 3-day run ending on `end`.
+    { habit: boolHabit, entries: [
+        ...dateRange('2026-07-01', '2026-07-15').map((d) => ({ date: d, value: YES })),
+        { date: '2026-08-16', value: YES }, { date: '2026-08-17', value: YES },
+        { date: '2026-08-18', value: YES },
+      ], opts: { end: END } },
   ];
 
   for (const { habit, entries, opts } of fixtures) {
@@ -1048,6 +1074,24 @@ test('the 0999-12-31 fixture is pinned to a literal, not only to computeStats', 
   const opts = { end: '2026-08-18' };
   assert.deepEqual(summaryStats(boolHabit, entries, opts),
     { score: 0.381137, currentStreak: 9 });
+});
+
+test('the current-vs-best-streak fixture is pinned to a literal, not only to computeStats', () => {
+  // Parity alone cannot see this bug: `bestStreak(streaks)` and
+  // `currentStreak(streaks, end)` are both derived from the same `streaks`
+  // array, so a `summaryStats` that called the wrong one would still equal
+  // whatever `computeStats` computes IF `computeStats` made the same swap —
+  // and every fixture above this one has `current === best`, so the swap is
+  // invisible there regardless. This fixture's two numbers differ, and they
+  // are pinned as literals rather than compared only against a second call.
+  const entries = [
+    ...dateRange('2026-07-01', '2026-07-15').map((d) => ({ date: d, value: YES })),
+    { date: '2026-08-16', value: YES }, { date: '2026-08-17', value: YES },
+    { date: '2026-08-18', value: YES },
+  ];
+  const opts = { end: '2026-08-18' };
+  assert.deepEqual(summaryStats(boolHabit, entries, opts),
+    { score: 0.237667, currentStreak: 3 });
 });
 
 test('summaryStats returns exactly the two fields /overview reads, nothing more', () => {

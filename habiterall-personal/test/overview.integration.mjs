@@ -10,7 +10,7 @@
  *
  * This drives the real server against a throwaway database, because the split
  * is a property of the route rather than of the arithmetic underneath it —
- * `computeStats` was always given whatever date it was handed.
+ * `summaryStats` was always given whatever date it was handed.
  *
  *   node test/overview.integration.mjs
  */
