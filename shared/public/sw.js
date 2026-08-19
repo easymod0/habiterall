@@ -167,7 +167,18 @@ const sw = self;
 // outside `#view-error`. A blank page, and a reload serves the same pair.
 // One new export across two shell modules is the whole reason for this bump;
 // no new file was added, and nothing in index.html or style.css moved.
-const CACHE_VERSION = 'v20';
+// v21: the day cells moved out of `ui/dashboard.js` into a new module,
+// `ui/day-strip.js`, so a habit's own page can draw the same control (#…). This
+// bump is owed THREE times over, which is worth noting because any one of them
+// alone would have earned it. A new FILE, which a cold shell has never fetched.
+// Two new EXPORTS on `ui/components.js` — `focusKeyOf` and `restoreFocus`,
+// moved off dashboard.js and imported statically by both it and `ui/detail.js`
+// — which is v20's failure exactly: a shell holding the new dashboard.js over a
+// cached old components.js throws "does not provide an export named
+// 'focusKeyOf'" at module link time, BEFORE `start()` runs and therefore
+// outside `#view-error`. And `#count-*` changed owner, so a cached old
+// dashboard.js paired with a new app.js would wire the amount dialog twice.
+const CACHE_VERSION = 'v21';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -202,6 +213,7 @@ const SHELL = [
   '/shared/ui/data-dialog.js',
   '/shared/ui/dates.js',
   '/shared/ui/day-dialog.js',
+  '/shared/ui/day-strip.js',
   '/shared/ui/detail.js',
   '/shared/ui/habit-dialog.js',
   '/shared/ui/nudge.js',
