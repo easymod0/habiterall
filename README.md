@@ -22,7 +22,7 @@ reconnect.
 
 <div align="center">
 <img src="docs/screenshots/dashboard.png" width="900"
-     alt="The habiterall dashboard: four habits, each with its frequency, strength and current streak, beside two weeks of tappable squares — checkmarks for yes/no habits, numbers for measurable ones.">
+     alt="The habiterall dashboard in dark theme: six habits, each with an emoji icon, its frequency, its strength and — where it has one — its current streak, beside two weeks of tappable squares: checkmarks for yes/no habits, numbers for measurable ones, and red cells where a limit was exceeded.">
 <br><sub>Every screenshot in this README is the real app, with sample data.</sub>
 </div>
 
@@ -114,8 +114,9 @@ button in the header. The choice is stored on the account, so it follows you
 between browsers and travels in the JSON backup.
 
 <div align="center">
-<img src="docs/screenshots/dashboard-dark.png" width="820"
-     alt="The same dashboard in dark theme: the surrounding chrome goes near-black while each habit keeps its own colour, so the filled squares still read at a glance.">
+<img src="docs/screenshots/dashboard-light.png" width="820"
+     alt="The same dashboard in light theme: the surrounding chrome goes white while each habit keeps its own colour, so the filled squares still read at a glance.">
+<br><sub>The dashboard above is the same app in dark.</sub>
 </div>
 
 ### Statistics
@@ -139,7 +140,7 @@ Plus current streak, best streak, and total completions at a glance.
 
 <div align="center">
 <img src="docs/screenshots/statistics.png" width="820"
-     alt="A habit's detail view: strength 86%, current and best streak 8, 106 total; the strength curve rising over four months; a year-long calendar heatmap; and the ten best streaks listed by date.">
+     alt="A habit's detail view: strength 96%, current streak 15, best streak 29, 385 total done; the strength curve holding above 80% across five months; a fourteen-month calendar heatmap; and the ten best streaks listed by date, newest first.">
 </div>
 
 ### Bouncing back
@@ -162,7 +163,7 @@ separates them.
 
 <div align="center">
 <img src="docs/screenshots/bouncing-back.png" width="820"
-     alt="The Bouncing back card: back next day 100%, longest lapse 1 day, currently missed 1 day; a histogram showing all 14 lapses lasted a single day; and a survival curve ending at 93% of streaks reaching 7 days.">
+     alt="The Bouncing back card: back next day 90%, longest lapse 3 days, and the line 'after a miss you were back the next day 36 of 40 times'; a histogram showing 36 lapses lasted one day, three lasted two and one lasted three; and a survival curve falling from 2 days to 21, ending at 49% of streaks reaching 7 days.">
 </div>
 
 > Shown for **every** frequency: a miss is a day the habit fell *below its
@@ -1278,11 +1279,11 @@ A reminder has two halves, set in two places:
    not exclusive; pick as many as you like.
 
 <div align="center">
-<img src="docs/screenshots/reminder-time.png" width="420"
-     alt="The habit dialog's reminder field: an hour dropdown reading 07 (7 am), a minute dropdown reading 30, a box you can type into showing 07:30, a Clear button, one-tap presets for 07:00, 08:00, 12:00, 18:00 and 21:00, and below it the What the reminder asks field.">
+<img src="docs/screenshots/reminder-time.png" width="460"
+     alt="The Edit habit dialog: name, a one-character Icon field holding an emoji, description, type, frequency, colour, then the Reminder fieldset — an hour dropdown reading 07 (7 am), a minute dropdown reading 30, a box you can type into showing 07:30, a Clear button and one-tap presets for 07:00, 08:00, 12:00, 18:00 and 21:00 — and below it the What the reminder asks field reading 'Did you sit for ten minutes?'.">
 &nbsp;&nbsp;
-<img src="docs/screenshots/notifications.png" width="420"
-     alt="Settings, Notifications section: checkboxes for the Android app and a Discord channel, fields for a Discord channel id and a webhook URL, a reminder timezone, and a Send a test notification button.">
+<img src="docs/screenshots/notifications.png" width="370"
+     alt="Settings, Notifications section: checkboxes for the Android app, this browser, a Discord channel and an ntfy topic, with the Android, Discord and ntfy boxes ticked; fields for a Discord channel id, your Discord user id and a webhook URL; an ntfy topic URL reading https://ntfy.sh/habiterall-demo and an ntfy access token; a reminder timezone set to Europe/London; and a Send a test notification button.">
 <br><sub><b>When</b>, on the habit · <b>Where</b>, in settings</sub>
 </div>
 
@@ -1426,11 +1427,11 @@ means allowing *Install unknown apps* for whatever you download it with — that
 what every sideloaded app needs, not a warning about this one.
 
 <div align="center">
-<img src="docs/screenshots/dashboard-mobile.png" width="300"
-     alt="The web app at phone width: each habit is a card with its name, frequency, strength and streak, above a row of seven day squares.">
+<img src="docs/screenshots/dashboard-mobile.png" width="284"
+     alt="The web app at phone width in dark theme: each habit is a card with its emoji icon, name, frequency, strength and streak, above a row of seven day squares.">
 &nbsp;&nbsp;
-<img src="docs/screenshots/android-list.png" width="300"
-     alt="The native Android app: a Today list of four habits, each with its current streak and a reminder time or an Add reminder link, beside a scrolling row of day squares — checkmarks, amounts, and today outlined.">
+<img src="docs/screenshots/android-list.png" width="326"
+     alt="The native Android app in dark theme: a Today list of six habits, each with its current streak and a reminder time or an Add reminder link, beside a scrolling row of day squares — checkmarks, amounts, and today outlined.">
 <br><sub>The web app added to the home screen · the native app, which can answer from the shade</sub>
 </div>
 
@@ -1458,6 +1459,17 @@ setting says. It carries the same search described under
 [Features](#features), behind an icon in the top bar. Everything a web page does
 well — charts, the calendar, history editing — opens the server's own UI inside
 the app, so there is one implementation of the statistics rather than two.
+
+Its light and dark are the **phone's**, not the account's: the native screens
+follow the system setting, so they change with whatever the device is doing at
+sunset. The account's ⚙ → Theme still decides the web UI the app opens for the
+charts. Habit icons are a web surface only — the native list shows the name.
+
+<div align="center">
+<img src="docs/screenshots/android-list-light.png" width="326"
+     alt="The same native Today list in light theme: six habits on a white background, each keeping its own colour for the filled day squares, with reminder times and Add reminder links unchanged.">
+<br><sub>The native list with the phone set to light</sub>
+</div>
 
 > Plain `http://` is accepted only for private addresses (`10.x`,
 > `192.168.x`, `172.16–31.x`) so a LAN server works without a certificate;
@@ -1817,6 +1829,12 @@ Two of them decide how much there is to look at:
 
 A card with nothing in it yet — bouncing back on a habit with no history — stays
 hidden whichever way this is set.
+
+<div align="center">
+<img src="docs/screenshots/settings-cards.png" width="420"
+     alt="Settings, Statistics section: dropdowns for strength chart resolution and which bucket the history chart opens on, then a Cards on a habit's page fieldset listing all nine cards — habit strength, calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency, times per week — each with a ticked checkbox and an up and a down arrow button, and below it a History shows dropdown set to Percentage.">
+<br><sub>Which cards a habit's page draws, and in what order</sub>
+</div>
 
 If you saved this setting before card ordering existed, it records only which
 cards were on, so a card added since arrives **off**. Open ⚙ and press **Done**,
