@@ -45,10 +45,11 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  * all.
  *
  * The one rule `CHANNELS.ntfy.interactive` (below), `ntfyActions`
- * (`ntfy-answer.js`), `ntfyPayload`'s `click` and `discordPayload`'s
- * `embed.url` all ask, so there is exactly one answer to "is this an
- * `appUrl` we can build a link from, and what does it look like" rather than
- * several that can drift. A boolean predicate over the PARSED url, checked
+ * (`ntfy-answer.js`) and `appLink` (which is what `ntfyPayload`'s `click` and
+ * `discordPayload`'s `embed.url` ask, rather than reaching past it to here)
+ * all ask, so there is exactly one answer to "is this an `appUrl` we can build
+ * a link from, and what does it look like" rather than several that can drift.
+ * A boolean predicate over the PARSED url, checked
  * beside string concatenation of the RAW one, was exactly that drift: the
  * predicate accepted `'HTTPS://h.example'`, `'https:/h.example'` and a
  * value with leading whitespace (`new URL` normalises all three), while a
@@ -83,6 +84,50 @@ export function usableAppUrl(appUrl) {
   while (end > 0 && url.pathname[end - 1] === '/') end--;
 
   return `${url.origin}${url.pathname.slice(0, end)}`;
+}
+
+/**
+ * Where tapping a reminder should land: that habit's own page.
+ *
+ * `ntfyPayload`'s `click` and `discordPayload`'s `embed.url` both aimed at the
+ * site ROOT, which put the user on the dashboard with the habit still to find —
+ * the exact complaint `routes.js` exists to answer, arriving from the one
+ * surface that knows which habit it is talking about. A reminder is the
+ * strongest case for a deep link in the app: it names one habit and asks about
+ * one day.
+ *
+ * **This is a MIRROR of `parseRoute` (`ui/routes.js`), not an import of it, and
+ * the reason is the one `toggle.js`'s import above turns on.** That import is
+ * allowed because `toggle.js` is DOM-free by construction; `routes.js` is not —
+ * `go`, `current` and `init` read `location` and `history` and register on
+ * `window`. None of them is called from here, but a typecheck is not a call
+ * graph: importing the module pulls the whole file into the server project,
+ * which deliberately has no DOM lib (see tsconfig.json's own comment), and
+ * `npm run typecheck` fails with thirteen unresolved globals. So this is the
+ * usual answer for this repo instead — two declarations pinned by a test, as
+ * `CHANNELS` and `SETTING_VALUES` are — and the test is behavioural: it builds
+ * a link here and feeds the fragment to the REAL `parseRoute`, over a range of
+ * ids, so the two cannot drift without something going red.
+ *
+ * What is mirrored is the accepting half of `HABIT_RE` plus the bound under
+ * it: `#/habit/<id>` for a SAFE POSITIVE INTEGER. A link the app declines to
+ * open is a dead notification tap, and it is not hypothetical — **`sendTest`
+ * builds its stand-in habit with `id: 0`** in both editions, which
+ * `parseRoute` refuses.
+ *
+ * @param {unknown} appUrl this instance's own public address
+ * @param {unknown} habitId
+ * @returns {string|false} the habit's page, else the app root, else `false`
+ *   when there is no usable address — the same three-way answer both callers
+ *   already gave, so an absent link is still absent rather than invented.
+ */
+export function appLink(appUrl, habitId) {
+  const base = usableAppUrl(appUrl);
+  if (!base) return false;
+
+  return Number.isSafeInteger(habitId) && Number(habitId) > 0
+    ? `${base}/#/habit/${habitId}`
+    : `${base}/`;
 }
 
 /**
@@ -641,12 +686,13 @@ export function ntfyPayload({
     message: (lines.join('\n') || message.title).slice(0, 4000),
   };
 
-  // Tapping the notification opens the app, when the deployment has told us
-  // where it is. `usableAppUrl` both validates and normalises, so this
-  // cannot build a link the predicate never agreed to — see its own comment
-  // for why a parsed check beside a raw-string concatenation used to drift.
-  const appBase = usableAppUrl(appUrl);
-  if (appBase) payload.click = `${appBase}/`;
+  // Tapping the notification opens this habit's own page, when the deployment
+  // has told us where it is. `appLink` both validates and normalises the
+  // address and agrees with the app's own router about the fragment — see its
+  // comment for why a parsed check beside a raw-string concatenation used to
+  // drift, and for what a test send's `id: 0` does here.
+  const click = appLink(appUrl, habit.id);
+  if (click) payload.click = click;
 
   // Absent rather than an empty array when there is nothing to attach — the
   // same "no buttons" shape whether the cause is no `appUrl`, no `signAnswer`,
@@ -1483,13 +1529,14 @@ export function discordPayload({ habit, message, date = '', appUrl = '' }) {
     embed.fields = [{ name: 'Notes', value: description.slice(0, 1024) }];
   }
   if (date) embed.footer = { text: date };
-  // Makes the embed title a link into the app. Only when the deployment has
-  // told us its own address — guessing one would produce a dead link.
-  // `usableAppUrl` both validates and normalises (see its own comment for
-  // why a parsed check beside raw-string concatenation used to drift, and
-  // for the quadratic trap in a naive trailing-slash trim).
-  const appBase = usableAppUrl(appUrl);
-  if (appBase) embed.url = `${appBase}/`;
+  // Makes the embed title a link to this habit's own page. Only when the
+  // deployment has told us its own address — guessing one would produce a dead
+  // link. `appLink` both validates and normalises (see its own comment for why
+  // a parsed check beside raw-string concatenation used to drift, for the
+  // quadratic trap in a naive trailing-slash trim, and for the test send's
+  // `id: 0`).
+  const url = appLink(appUrl, habit.id);
+  if (url) embed.url = url;
 
   return {
     username: 'habiterall',

@@ -723,6 +723,31 @@ second clock a millisecond the other side of local midnight.
 cannot be enumerated. That is also why an accepted setting may differ from what
 was sent, and why `ui/settings.js` waits for the server's answer.
 
+**A reminder links to the habit it is about, and `appLink` is the one place
+that decides.** Both server-sent channels aimed at the site root — the
+dashboard, with the habit still to find, from the one surface that knows
+exactly which habit it means. `appLink` (`notify.js`) is `usableAppUrl` plus
+the fragment, asked by `ntfyPayload`'s `click` and `discordPayload`'s
+`embed.url`.
+
+It is a **mirror of `parseRoute`, not an import of it**, and that is the one
+interesting thing about it. `notify.js` may import `ui/toggle.js` because
+`toggle.js` is DOM-free by construction; `ui/routes.js` is not — `go`,
+`current` and `init` read `location` and `history` and register on `window`.
+None of them is called from the server, but a typecheck is not a call graph:
+the import pulls the whole file into a project with no DOM lib and
+`npm run typecheck` fails with thirteen unresolved globals. So it is the usual
+answer instead — two declarations pinned by a test — and the test is
+behavioural, building a link and feeding its fragment to the real `parseRoute`
+across a range of ids.
+
+**The bound is `Number.isSafeInteger(id) && id > 0`, and dropping either half
+ships a dead link.** `sendTest` builds its stand-in habit with `id: 0` in both
+editions, so the fallback to the root is on the path anybody presses. Note what
+the test asserts for a refused id: that the fragment is **absent**, not that it
+routes to the list — `#/habit/1.5` routes to the list too, so a route-only
+check passes a notification whose link names a habit the app has none of.
+
 ### Discord
 
 **Buttons need a bot; a webhook cannot carry them.** Discord accepts `components`
