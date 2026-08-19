@@ -22,6 +22,22 @@ const atMostHabit = {
   freq_numerator: 1, freq_denominator: 1, unit: 'cigarettes',
 };
 
+// Two stated at-most days eight days apart, with five UNKNOWN days between
+// them that `unlogged` reads oppositely — `success` credits them as under the
+// limit, the default reads them as misses. Shared between the parity fixture
+// list and the literal test pinning both readings, rather than inlined twice,
+// so an edit made to "make the fixtures consistent" (swapping the habit for
+// one where `unlogged` has nothing to read, say) invalidates both checks
+// instead of only the parity one.
+const unloggedSeparatesFixture = {
+  habit: atMostHabit,
+  entries: [
+    { date: '2026-08-10', value: 2, status: '' },
+    { date: '2026-08-18', value: 2, status: '' },
+  ],
+  end: '2026-08-18',
+};
+
 const map = (obj) => new Map(Object.entries(obj));
 
 /* ---------- date helpers ---------- */
@@ -988,6 +1004,7 @@ test('summaryStats matches the score and currentStreak computeStats would return
     { date: '2026-08-16', value: YES }, { date: '2026-08-17', value: YES },
     { date: '2026-08-18', value: YES },
   ];
+  const julyRun = dateRange('2026-07-01', '2026-07-15').map((d) => ({ date: d, value: YES }));
 
   const fixtures = [
     // A boolean daily habit with a normal run.
@@ -1018,10 +1035,10 @@ test('summaryStats matches the score and currentStreak computeStats would return
     // fixture separate on the axis the one above cannot — a wrong `unlogged`
     // wiring inside `summaryStats` (e.g. always passing UNLOGGED_DEFAULT)
     // changes the pair returned here but not the one-day-window case above.
-    { habit: atMostHabit, entries: [
-        { date: '2026-08-10', value: 2, status: '' },
-        { date: '2026-08-18', value: 2, status: '' },
-      ], opts: { end: END, unlogged: 'success' } },
+    // Shared with the literal test below pinning both readings, so an edit
+    // here invalidates that test too, not only this parity comparison.
+    { habit: unloggedSeparatesFixture.habit, entries: unloggedSeparatesFixture.entries,
+      opts: { end: unloggedSeparatesFixture.end, unlogged: 'success' } },
     // An explicit `start` in opts, narrower than the entries' own span.
     { habit: boolHabit, entries: dailyRun, opts: { end: END, start: '2026-08-15' } },
     // A stored lapse: a row holding 0, status ''.
@@ -1041,10 +1058,19 @@ test('summaryStats matches the score and currentStreak computeStats would return
     // `currentStreak(streaks, end)` passed every one of them). A 15-day run
     // in July, a gap, then a live 3-day run ending on `end`.
     { habit: boolHabit, entries: [
-        ...dateRange('2026-07-01', '2026-07-15').map((d) => ({ date: d, value: YES })),
+        ...julyRun,
         { date: '2026-08-16', value: YES }, { date: '2026-08-17', value: YES },
         { date: '2026-08-18', value: YES },
       ], opts: { end: END } },
+    // The July run ALONE, its trailing three days removed: `streaks` is
+    // non-empty (one 15-day run) but its last streak ended over a month
+    // before `end`, which none of the fixtures above reach — the one above
+    // has a run still LIVE at `end`, and every `atMostHabit` fixture that
+    // returns `currentStreak: 0` does so through `streaks.length === 0`,
+    // which returns before `currentStreak`'s gap check ever runs. This is
+    // the shape that check exists for: `daysBetween(last.end, end)` is
+    // large, so the answer is 0, not the length of the only streak there is.
+    { habit: boolHabit, entries: julyRun, opts: { end: END } },
   ];
 
   for (const { habit, entries, opts } of fixtures) {
@@ -1092,6 +1118,48 @@ test('the current-vs-best-streak fixture is pinned to a literal, not only to com
   const opts = { end: '2026-08-18' };
   assert.deepEqual(summaryStats(boolHabit, entries, opts),
     { score: 0.237667, currentStreak: 3 });
+});
+
+test('a streak that ended over a month ago pins currentStreak: 0 as a literal', () => {
+  // `currentStreak(streaks, anchor)` computes `gap = daysBetween(last.end,
+  // anchor)` and returns `gap <= 1 ? last.length : 0` — so the ANCHOR it is
+  // handed is itself an axis a fixture can fail to separate on, the same way
+  // `unlogged` and `bestStreak` above did. Every fixture above this one either
+  // has a streak still LIVE at `end` (`gap` comes out <= 1 no matter which
+  // date is passed as the anchor) or an empty `streaks` array (the gap check
+  // never runs), so a `summaryStats` calling `currentStreak(streaks, from)`
+  // instead of `currentStreak(streaks, end)` — `from` sits before every
+  // streak's end, so the gap comes out negative and the length is returned
+  // unconditionally — would answer every one of them the same as before. This
+  // fixture's one streak ended in July and nothing is live at `end`, so a
+  // wrong anchor answers 15 instead of the correct 0. Pinned as a literal,
+  // not only through the parity assertion above, so the check survives a
+  // change to `computeStats`'s own call sharing the same mistake.
+  const julyRun = dateRange('2026-07-01', '2026-07-15').map((d) => ({ date: d, value: YES }));
+  assert.deepEqual(summaryStats(boolHabit, julyRun, { end: '2026-08-18' }),
+    { score: 0.089848, currentStreak: 0 });
+});
+
+test('the unlogged-success fixture pins the SEPARATION between its two readings, not only the fixture', () => {
+  // This fixture is the only cover in the repo for `summaryStats`'s `unlogged`
+  // wiring, and it is defended above only by parity against a live
+  // `computeStats` — which is self-consistent: if the fixture stops
+  // separating (a habit swapped in for one where `unlogged` is inert, a date
+  // moved, anything), `summaryStats` and `computeStats` still agree with EACH
+  // OTHER over whatever pair comes out, and nothing fails. Demonstrated, not
+  // speculated: swap `unloggedSeparatesFixture.habit` for `numHabit` above (an
+  // at-least habit, where `unlogged` has nothing to read) and this exact
+  // fixture edit both keeps the whole suite green AND turns the
+  // UNLOGGED_DEFAULT mutation (7a) green again. Pinning both readings as
+  // literals — independently re-derived, not read off a passing run — is what
+  // survives that: this fails the moment the two readings collapse into one,
+  // whatever caused it, because it shares the fixture object with the parity
+  // list above rather than duplicating it.
+  const { habit, entries, end } = unloggedSeparatesFixture;
+  assert.deepEqual(summaryStats(habit, entries, { end, unlogged: 'success' }),
+    { score: 0.381137, currentStreak: 9 });
+  assert.deepEqual(summaryStats(habit, entries, { end }),
+    { score: 0.085815, currentStreak: 1 });
 });
 
 test('summaryStats returns exactly the two fields /overview reads, nothing more', () => {
