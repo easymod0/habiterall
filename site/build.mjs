@@ -315,9 +315,23 @@ export function sectionText(html, id) {
  * @returns {string}
  */
 export function stripHtml(html) {
-  return html
-    .replace(/<(script|style)[\s\S]*?<\/\1>/g, ' ')
-    .replace(/<[^>]*>/g, ' ')
+  let previous;
+  let text = html.replace(/<(script|style)[\s\S]*?<\/\1>/g, ' ');
+
+  // To a fixed point, for the reason spelled out over `withoutTags` in
+  // render.mjs: one pass over `<scr<script>ipt>` reintroduces what it removed.
+  //
+  // This is NOT a sanitizer and must not start being treated as one — its
+  // output is search-index text, and `site.js` puts it on the page through
+  // `textContent`, which cannot interpret markup however mangled it is. The
+  // loop is here so the function is not a worked example of the wrong pattern
+  // sitting one directory from the right one.
+  do {
+    previous = text;
+    text = text.replace(/<[^>]*>/g, ' ');
+  } while (text !== previous);
+
+  return text
     .replace(/&(amp|lt|gt|quot|#39|nbsp);/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();

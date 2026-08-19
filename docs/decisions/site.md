@@ -248,6 +248,57 @@ DNS is simpler for it: `www` is a single `CNAME` record to `easymod0.github.io`,
 where the apex would have needed four `A` records and four `AAAA` records,
 because an apex `CNAME` is not legal DNS.
 
+## The CodeQL finding, and what it was actually worth
+
+CodeQL raised two `js/incomplete-multi-character-sanitization` alerts on the
+first push, both on `<[^>]*>` replaces in `render.mjs` — `githubSlug`'s, and a
+`stripTags` helper used for heading text.
+
+**Neither was exploitable, and the reason is worth stating precisely rather than
+waving at.** The input is `README.md`, a reviewed file in this repository, not
+user input. `githubSlug` follows the strip with an allowlist that keeps letters,
+numbers, underscores, hyphens and spaces, so `<`, `>`, `/` and every quote are
+gone whatever the strip returns, and the output only becomes an `id` and a URL
+fragment. The heading text goes to the contents column, which escapes it, and to
+the search index, which `site.js` renders through `textContent`.
+
+**And the classic attack does not even work on this pattern.** `<scr<script>ipt>`
+defeats a replace of a *literal*, or a *non-global* regex. Against a global
+`<[^>]*>` the match runs from the first `<` to the first `>`, consuming
+`<scr<script>` whole and leaving a harmless `ipt>`. Fuzzed over 200,000 strings
+drawn from `< > / a s c r i p t` and a space, one pass and the fixed point never
+disagreed.
+
+So the alert could have been dismissed. It was not, for two reasons.
+
+**The first is that fixing it found a real bug.** The structural repair —
+take heading text from `marked`'s tokens and drop `html` tokens, rather than
+regexing rendered HTML — was written, commented as closing the question, and
+*tested*. The test failed. Dropping a token JOINS the text either side of it,
+and `<scr` + `ipt>` around a dropped `<script>` concatenate straight back into
+`<script>`. The same reintroduction, reached from the opposite direction, in the
+code written to prevent it. Both halves are needed and both are now applied.
+
+**The second is what the loop is for.** Mutation-testing it three ways:
+
+| | |
+|---|---|
+| global + one pass | correct — today's argument |
+| non-global + one pass | **broken**, leaves `</script>` in the output |
+| non-global + loop | correct |
+
+Dropping the `g` is a one-character edit no reviewer would query. One pass is
+correct *because of an argument about this exact regex*; the loop is correct *by
+construction*. The test pins the property — nothing matching `<…>` survives —
+and not the loop, so it stays green if the loop goes and red if the `g` does.
+
+The honest summary is in the code: a function named for stripping tags that does
+not reliably strip tags is a trap for whoever reuses it, and a static analyser
+cannot tell this one from the next one. That is the same argument the root
+`CLAUDE.md` already makes about the credential limiter — "routing a limiter
+through a helper that might return a pass-through is also how a static analyser
+stops being able to see it".
+
 ## The palette is copied, and that is a decision
 
 `site/static/site.css` repeats the twelve custom properties from

@@ -13,9 +13,11 @@ import {
   anchorIndex,
   dropTrailingRule,
   pageMarkdown,
+  renderMarkdown,
+  withoutTags,
 } from '../../site/render.mjs';
 import { withoutInstall, linkifyNotes, nextPage, latestDownload } from '../../site/releases.mjs';
-import { buildSite, sectionText } from '../../site/build.mjs';
+import { buildSite, sectionText, stripHtml } from '../../site/build.mjs';
 import { hostedCta } from '../../site/templates/layout.mjs';
 import { home } from '../../site/templates/home.mjs';
 import { screenshotAlts } from '../../site/render.mjs';
@@ -89,6 +91,82 @@ test('githubSlug matches the anchors README.md already links to', () => {
   assert.equal(githubSlug('Filling in the `.env`'), 'filling-in-the-env');
   assert.equal(githubSlug('Discord with buttons (recommended)'), 'discord-with-buttons-recommended');
   assert.equal(githubSlug('Coming from Loop Habit Tracker'), 'coming-from-loop-habit-tracker');
+});
+
+test('stripping tags cannot reintroduce the tag it stripped', () => {
+  // CodeQL's `js/incomplete-multi-character-sanitization`, raised against two
+  // single-pass `<[^>]*>` replaces here.
+  //
+  // What this pins is the PROPERTY — nothing matching `<…>` survives — and not
+  // the loop that currently delivers it. Making `withoutTags` a single pass
+  // again leaves this green, because against a GLOBAL pattern one pass already
+  // reaches the fixed point. Dropping the `g` does not: it leaves `</script>`
+  // in the output, and that is the mutation this test is really for. See the
+  // note over `withoutTags`.
+  //
+  // The invariant is a FIXED POINT — no `<…>` survives — and not "the output is
+  // empty". Worth being exact, because the obvious expectation is wrong and was
+  // written here first: one pass over `<scr<script>ipt>` matches from the FIRST
+  // `<` to the first `>`, so it removes `<scr<script>` and leaves `ipt>`. That
+  // trailing text is harmless and is not a tag; what matters is that no second
+  // pass finds anything, which is exactly what a reintroduction would be.
+  for (const nasty of [
+    '<scr<script>ipt>',
+    '<<a>b>hello',
+    '<scr<script>ipt>alert(1)</scr</script>ipt>',
+    '<<<div>>>',
+  ]) {
+    const cleaned = withoutTags(nasty);
+    assert.doesNotMatch(cleaned, /<[^>]*>/, `a tag survived stripping ${nasty}: ${cleaned}`);
+    assert.ok(!cleaned.includes('<script'), `stripping ${nasty} produced ${cleaned}`);
+  }
+
+  // `stripHtml` drops the CONTENT of a script/style element as well as its
+  // tags, so a malformed nesting can take neighbouring text with it — here the
+  // whole thing reduces to nothing rather than to "x". That is the safe
+  // direction and it costs only search-index text, over a README that contains
+  // no such construct; the assertion is the invariant, not the leftovers.
+  assert.doesNotMatch(stripHtml('<div><scr<script>ipt>x</scr</script>ipt></div>'), /[<>]/);
+
+  // What it does on the real thing: the words, and none of the markup.
+  assert.equal(
+    stripHtml('<p>Reminders go to an <code>ntfy</code> topic.</p>'),
+    'Reminders go to an ntfy topic.',
+  );
+
+  // And an ordinary heading still slugs the way it always did, which is the
+  // thing this function is actually for.
+  assert.equal(githubSlug('<b>Full</b> reference'), 'full-reference');
+});
+
+test('a heading anchor and its collected text are taken from tokens, not from HTML', () => {
+  // The structural half of the same finding: `tokenText` DROPS `html` tokens
+  // rather than pattern-matching them out, so nesting has nothing to defeat.
+  //
+  // Note what is NOT claimed. `marked` passes raw HTML through, deliberately and
+  // necessarily — README.md's screenshots are raw `<img>` inside
+  // `<div align="center">` and its API reference is a `<details>`, so a renderer
+  // that dropped inline HTML would delete half the manual. README.md is ours and
+  // arrives through review; this is the same trust model GitHub renders it under.
+  //
+  // What IS claimed is that the two values DERIVED from a heading — the `id`
+  // that becomes a URL fragment, and the text that reaches the contents column
+  // and the search index — carry no markup, whatever the heading contains.
+  const anchors = anchorIndex(splitHeadings(README));
+  /** @type {Array<{ level: number, text: string, id: string }>} */
+  const headings = [];
+
+  const html = renderMarkdown('## <scr<script>ipt>Danger</scr</script>ipt> here\n\ntext\n', {
+    anchors,
+    root,
+    headings,
+    lenient: true,
+  });
+
+  assert.match(html, /id="danger-here"/, `the anchor was poisoned: ${html}`);
+  assert.deepEqual(headings.map((h) => h.text), ['Danger here']);
+  assert.doesNotMatch(headings[0].text, /[<>]/);
+  assert.doesNotMatch(headings[0].id, /[<>]/);
 });
 
 /* ---------------------------------------------------------- the page map */

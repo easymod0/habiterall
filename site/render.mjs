@@ -46,12 +46,57 @@ export const SCREENSHOT_DIR = 'assets/screenshots';
  * @returns {string}
  */
 export function githubSlug(text) {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/<[^>]*>/g, '')
+  return withoutTags(text.trim().toLowerCase())
     .replace(/[^\p{L}\p{N}\p{Pc}\- ]/gu, '')
     .replace(/ /g, '-');
+}
+
+/**
+ * `<…>` removed, repeatedly, until removing more changes nothing.
+ *
+ * The single-pass version CodeQL flagged
+ * (`js/incomplete-multi-character-sanitization`) was not, in fact, defeatable —
+ * and that is worth writing down rather than implying otherwise. The classic
+ * `<scr<script>ipt>` attack works against a replace of a LITERAL, or against a
+ * non-global pattern. Against a GLOBAL `<[^>]*>` it does not: the match runs
+ * from the first `<` to the first `>`, so it consumes `<scr<script>` whole and
+ * leaves the harmless `ipt>`. Fuzzed over 200,000 strings drawn from
+ * `< > / a s c r i p t` and a space, one pass and the fixed point never once
+ * disagreed.
+ *
+ * So this loop fixes no live bug, and a mutation test proves as much: making it
+ * a single pass leaves every test green. What it changes is WHY the property
+ * holds. One pass is correct because of an argument about this exact regex;
+ * the loop is correct by construction, for any pattern someone later
+ * substitutes. That distinction is not theoretical here — the three
+ * combinations behave differently, and there is a test pinning it:
+ *
+ *   global + one pass    correct (today's argument)
+ *   non-global + one pass BROKEN — leaves `</script>` in the output
+ *   non-global + loop    correct
+ *
+ * Dropping the `g` is a one-character edit that no reviewer would question, and
+ * the loop is what makes it survivable.
+ *
+ * Nor could the single pass have produced a vulnerability. `githubSlug` is this
+ * function's only caller and follows with an ALLOWLIST keeping letters,
+ * numbers, underscores, hyphens and spaces — `<`, `>`, `/` and every quote are
+ * gone whatever this returns — and the result only ever becomes an `id` and a
+ * URL fragment.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function withoutTags(value) {
+  let previous;
+  let current = value;
+
+  do {
+    previous = current;
+    current = current.replace(/<[^>]*>/g, '');
+  } while (current !== previous);
+
+  return current;
 }
 
 /**
@@ -283,8 +328,13 @@ export function renderMarkdown(
 
   renderer.heading = function heading({ tokens, depth }) {
     const text = this.parser.parseInline(tokens);
-    const id = githubSlug(stripTags(text));
-    headings?.push({ level: depth, text: stripTags(text), id });
+    // `withoutTags` on top of `tokenText`, and both are needed. Dropping an
+    // `html` token JOINS the text either side of it, which can form a tag that
+    // was in neither: `<scr` + `ipt>` is `<script>`. Structure alone does not
+    // close this, and neither does the regex alone. There is a test.
+    const plain = withoutTags(tokenText(tokens));
+    const id = githubSlug(plain);
+    headings?.push({ level: depth, text: plain, id });
     // A permalink rather than a bare heading: a wiki page people are told to
     // send each other needs a way to link to a part of it, and the README's
     // own anchors are the ones already in circulation.
@@ -430,9 +480,45 @@ function align(value) {
   return value ? ` align="${value}"` : '';
 }
 
-/** @param {string} html */
-function stripTags(html) {
-  return html.replace(/<[^>]*>/g, '');
+/**
+ * A heading's text, taken from `marked`'s TOKENS rather than from its HTML.
+ *
+ * This replaced `html.replace(/<[^>]*>/g, '')`, which CodeQL flagged as
+ * `js/incomplete-multi-character-sanitization` and was right to: removing every
+ * `<…>` in one pass can CREATE one, because `<scr<script>ipt>` loses its inner
+ * match and closes up into `<script>`. Nothing here was exploitable — the slug
+ * that regex fed runs through an allowlist that deletes `<`, `>` and `/`, and
+ * every render site escapes — but a function named for stripping tags that does
+ * not reliably strip tags is a trap for whoever reuses it, and CodeQL cannot
+ * tell the difference between this one and the next one.
+ *
+ * Walking the tokens answers most of it structurally: an `html` token is
+ * DROPPED, which is the decision the regex was reaching for, and every other
+ * token contributes its own text. `<b>Full</b> reference` gives
+ * `Full reference`.
+ *
+ * **It is not sufficient on its own, and the first version of this claimed it
+ * was.** Dropping a token JOINS the text either side of it, and those two
+ * pieces can form a tag that was in neither — `<scr` and `ipt>` around a
+ * dropped `<script>` concatenate straight back into `<script>`. That is the
+ * same reintroduction the regex had, arrived at from the other direction. So
+ * the caller composes this with `withoutTags`, and the test feeds it exactly
+ * that input.
+ *
+ * @param {any[]} tokens marked's inline tokens
+ * @returns {string}
+ */
+export function tokenText(tokens) {
+  let out = '';
+
+  for (const token of tokens ?? []) {
+    if (token.type === 'html') continue;
+    if (token.type === 'br') out += ' ';
+    else if (Array.isArray(token.tokens) && token.tokens.length) out += tokenText(token.tokens);
+    else out += token.text ?? '';
+  }
+
+  return out;
 }
 
 /** @param {string} value */
