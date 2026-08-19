@@ -99,6 +99,27 @@ test('dateRange normalises a start that is not a real calendar day', () => {
     ['2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05']);
 });
 
+test('totalCompleted counts the same window the walked figures do, even when the earliest stored date is not a real day', () => {
+  // `computeStats` takes `from` as the earliest STORED entry when no window is
+  // named, and selects `totalCompleted` by STRING comparison against it while
+  // every other figure comes from the walked list. So an un-normalised `from`
+  // puts the two on different windows: '2026-02-30' >= '2026-02-30' is true and
+  // counts the phantom row, while the walk starts on 2026-03-02 and never looks
+  // that key up — a payload claiming a completion no other figure in it can
+  // justify. Normalising `from` is what keeps them on one window.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const entries = [{ date: '2026-02-30', value: YES }, { date: '2026-03-04', value: YES }];
+  const stats = computeStats(habit, entries, { end: '2026-03-05' });
+
+  // The window walked, and the count, agree: the phantom day is in neither.
+  assert.deepEqual(stats.history.map((h) => h.bucket),
+    ['2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05']);
+  assert.equal(stats.totalCompleted, 1);
+});
+
 test('addDays crosses month and year boundaries', () => {
   assert.equal(addDays('2026-01-31', 1), '2026-02-01');
   assert.equal(addDays('2026-12-31', 1), '2027-01-01');

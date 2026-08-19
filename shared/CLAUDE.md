@@ -192,6 +192,21 @@ earliest STORED entry when a caller names no window. An account holding such a
 row sees its derived figures move once. That is the phantom day leaving them,
 not a regression.
 
+`computeStats` therefore normalises `from` before it clamps, and that half is
+not optional: `totalCompleted` selects by STRING comparison against `from`
+while every other figure is read off the walked list, so an un-normalised
+`from` counts the phantom row in one figure and in none of the others —
+exactly the disagreement the note above `totalCompleted` says was fixed.
+
+**And `n` counts elapsed 24-hour spans while the loop takes calendar steps**,
+which agree everywhere except a zone that moved the date line WESTWARD and so
+lived one local calendar day twice — `Pacific/Kwajalein` in 1969. There the
+loop takes a step the elapsed count never saw and ends a day past `end`, so
+the walk trims anything beyond it. A DELETED day needs no counterpart: the
+elapsed count shrinks along with the calendar, which is why Apia round-trips
+untouched. Both cases are pinned in `test/timezones.test.js`, under their own
+zones, because neither is observable from anywhere else.
+
 **`onPaceSeries` pro-rates the requirement near the start** —
 `required = min(activeDays, num*activeDays/den)` — so a habit is not judged
 against history it does not have yet. Consequence worth knowing before touching

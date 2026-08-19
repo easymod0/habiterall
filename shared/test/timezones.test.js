@@ -152,3 +152,36 @@ test('dateRange omits the day Pacific/Apia deleted from its calendar', async () 
   assert.deepEqual(days,
     ['2011-12-28', '2011-12-29', '2011-12-31', '2012-01-01', '2012-01-02']);
 });
+
+/**
+ * The mirror image of the case above, and the only one that can make the walk
+ * run PAST its own end date.
+ *
+ * `n` counts elapsed 24-hour spans while the loop takes calendar steps. A zone
+ * that moved the date line WESTWARD lived one local calendar day twice, so the
+ * loop takes a step the elapsed count never saw and lands a day beyond `end` —
+ * measured under Pacific/Kwajalein across its 1969 transition, 32 elements
+ * ending 1969-10-02 for a range asked to stop on 1969-10-01. A deleted day (the
+ * Apia case) needs no counterpart, because there the elapsed count shrinks
+ * along with the calendar.
+ *
+ * Asserted as "never past `end`" rather than against a literal list, so this
+ * still says something on a machine whose tzdata spells that old transition
+ * differently.
+ */
+test('dateRange never runs past end in a zone that lived a day twice', async () => {
+  const src = new URL('../src/stats.js', import.meta.url).href;
+  const script = `
+    const { dateRange } = await import(${JSON.stringify(src)});
+    const days = dateRange('1969-09-01', '1969-10-01');
+    console.log(JSON.stringify({ last: days[days.length - 1], len: days.length }));
+  `;
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    ['--input-type=module', '-e', script],
+    { cwd: sharedRoot, env: childEnv({ TZ: 'Pacific/Kwajalein' }), maxBuffer: 1 << 20 }
+  );
+  const { last, len } = JSON.parse(stdout.trim());
+  assert.equal(last, '1969-10-01', `walk ended on ${last}, past the end it was given`);
+  assert.equal(len, 31);
+});

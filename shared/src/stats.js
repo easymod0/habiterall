@@ -64,6 +64,15 @@ export function dateRange(start, end) {
     out[i] = toISO(cur);
     cur.setDate(cur.getDate() + 1);
   }
+
+  // `n` counts elapsed 24-hour spans; the loop takes calendar steps. Those
+  // agree everywhere except a zone that moved the date line WESTWARD and so
+  // lived one local calendar day twice — Pacific/Kwajalein in 1969 is the
+  // reachable one — where the walk takes one step more than `n` saw and ends
+  // a day past `end`. A deleted day needs no counterpart: there the elapsed
+  // count shrinks with the calendar and both agree. Costs one comparison in
+  // the ordinary case, where the last element is already `end`.
+  while (out.length && out[out.length - 1] > end) out.pop();
   return out;
 }
 
@@ -927,6 +936,18 @@ export function computeStats(habit, entries,
 
   const earliest = addDays(end, -MAX_RANGE_DAYS);
   let from = start ?? firstEntry;
+
+  // `firstEntry` comes out of STORAGE, so it can be a date that is not a real
+  // day — `assertDate` refuses one on the way in, but a row predating that
+  // guard does not have to be a real day to be read back. `dateRange`
+  // normalises such a start (a walk from 2026-02-30 begins on 2026-03-02),
+  // and `totalCompleted` below selects by STRING comparison against `from`,
+  // so leaving it un-normalised makes the two disagree about which entries
+  // are inside the window — the exact disagreement the note down there says
+  // was fixed. Normalise before the clamps so both operate on a real date.
+  const asDate = fromISO(from);
+  if (!Number.isNaN(asDate.getTime())) from = toISO(asDate);
+
   if (from < earliest) from = earliest;
   if (from > end) from = end;
 
