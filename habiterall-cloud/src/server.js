@@ -11,13 +11,14 @@ import { LOCAL_IPS, createHealthProbe, sendHealth } from './health.js';
 import { throttleTouch } from './session-touch.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api } from './api.js';
-import { start as startNotifier } from './notifier.js';
+import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
   sameOriginOnly, warnOnUntrustedProxy,
 } from '@habiterall/shared/security.js';
+import { NTFY_ANSWER_PATH, handleNtfyAnswer } from '@habiterall/shared/ntfy-answer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -183,6 +184,36 @@ app.use(sameOriginOnly({
   allow: [new URL(process.env.PUBLIC_URL).origin],
   onReject: (req, origin) => log.warn('csrf.refused', { path: req.path, origin }),
 }));
+
+// ntfy's action buttons post here — an unauthenticated request, since ntfy's
+// subscribing device carries no session for this app at all. Mounted below
+// `sameOriginOnly` above, so the same origin check applies to it (a missing
+// `Origin` is allowed, exactly as for the Android client — see the comment
+// there — which is what ntfy's device sends too), and above the `/api` mount
+// below so it is never reached through `requireAuth`. It takes no body, only
+// the query string, so its position relative to `express.json()` below does
+// not matter either way; said here rather than left to whichever survives the
+// next edit.
+app.post(NTFY_ANSWER_PATH,
+  // Written inline with `rateLimit(...)` directly, deliberately NOT keyed by
+  // `perUser` below and not routed through any helper that could become a
+  // pass-through — same reason the credential limiter is never switchable:
+  // this is an unauthenticated, internet-reachable route, and a static
+  // analyser has to be able to see the bound. Keyed on the caller's IP, not
+  // on the account named in the code: that account has no session and never
+  // authenticated this request, so keying on it would let anyone who could
+  // read one topic's reminders starve a CHOSEN tenant's bucket by posting
+  // garbage codes naming that tenant's id, all day, from one address.
+  rateLimit({ ...RATE_LIMITS.ntfyAnswer, keyGenerator: (req) => ipKeyGenerator(req.ip) }),
+  async (req, res) => {
+    const result = await handleNtfyAnswer(String(req.query.c ?? ''), {
+      ...ntfyAnswerAdapter(), log,
+    });
+    const body = {};
+    if (result.text) body.text = result.text;
+    if (result.error) body.error = result.error;
+    res.status(result.status).json(body);
+  });
 
 /* ---------- rate limits ---------- */
 

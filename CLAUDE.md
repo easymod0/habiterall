@@ -254,6 +254,7 @@ Several layers, and they catch different things:
 | Habit JSON shape | `npm run test:apishape -w habiterall-personal` | nothing |
 | Reminders | `npm run test:notify` | nothing |
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
+| ntfy button answers, over the real route | `npm run test:ntfyanswer -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |

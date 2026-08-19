@@ -40,6 +40,52 @@ import { isAvoided } from '../public/ui/toggle.js';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * The normalised base an ntfy button — or any other link back into the
+ * app — may be built from, or `false` if `appUrl` cannot be used for one at
+ * all.
+ *
+ * The one rule `CHANNELS.ntfy.interactive` (below), `ntfyActions`
+ * (`ntfy-answer.js`), `ntfyPayload`'s `click` and `discordPayload`'s
+ * `embed.url` all ask, so there is exactly one answer to "is this an
+ * `appUrl` we can build a link from, and what does it look like" rather than
+ * several that can drift. A boolean predicate over the PARSED url, checked
+ * beside string concatenation of the RAW one, was exactly that drift: the
+ * predicate accepted `'HTTPS://h.example'`, `'https:/h.example'` and a
+ * value with leading whitespace (`new URL` normalises all three), while a
+ * builder that concatenated the raw string produced a link the predicate had
+ * never actually validated — and since ntfy only clears a notification on a
+ * successful request, that shape is a button that neither records nor ever
+ * clears. Parsing once and returning what was parsed is what makes the
+ * builders agree with the predicate BY CONSTRUCTION, rather than by two
+ * checks staying in sync — they used to disagree for `'habits.example.com'`
+ * (no scheme) and `'ftp://…'` too, before either read a parsed url at all.
+ *
+ * The trailing slash on the pathname is counted off rather than matched with
+ * `/\/+$/`, which is unanchored at the start and quadratic on a run of
+ * slashes — `notify.test.js` times it on a 200,000-slash string.
+ *
+ * @param {unknown} appUrl
+ * @returns {string|false} `${origin}${pathname}`, with no trailing slash —
+ *   so a deployment served under a subpath (`https://h.example/app/`) keeps
+ *   `/app`, and a bare root keeps nothing to append a further slash to.
+ */
+export function usableAppUrl(appUrl) {
+  if (typeof appUrl !== 'string' || appUrl === '') return false;
+  let url;
+  try {
+    url = new URL(appUrl);
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(url.protocol)) return false;
+
+  let end = url.pathname.length;
+  while (end > 0 && url.pathname[end - 1] === '/') end--;
+
+  return `${url.origin}${url.pathname.slice(0, end)}`;
+}
+
+/**
  * The notification destinations.
  *
  * `delivery` is the whole reason this registry exists:
@@ -65,7 +111,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  *   label: string,
  *   delivery: 'device'|'server',
  *   configKeys: string[],
- *   interactive?: boolean,
+ *   interactive?: boolean | ((settings: Record<string, any>, ctx: {appUrl?: string}) => boolean),
  *   ready?: (settings: Record<string, any>, ctx: {bot?: boolean}) => boolean,
  * }>}
  */
@@ -131,25 +177,37 @@ export const CHANNELS = {
     // reason to call this destination unconfigured.
     configKeys: ['ntfyTopicUrl'],
     /**
-     * NOT interactive, and that is a decision rather than a gap.
+     * Interactive when there is somewhere for the button to report back to.
      *
-     * ntfy can carry action buttons, and an ntfy action is an HTTP request the
-     * SUBSCRIBING DEVICE makes — to a URL written into the notification, from
-     * wherever that phone happens to be, carrying whatever the message told it
-     * to carry. Answering a reminder that way means this server standing up an
-     * inbound endpoint that anything able to reach it may call, authorised by
-     * nothing but the contents of the request. That is precisely the shape
-     * `discord-gateway.js` exists to avoid — a self-hosted instance behind a
-     * router has no inbound port and no hostname — and the rule that saves the
-     * Discord buttons has no counterpart here: "a press is authorised by the
-     * CHANNEL it came from, not by its `custom_id`" needs a channel to resolve
-     * an account from, and an ntfy topic is a URL somebody typed.
+     * ntfy's action buttons are an HTTP request the SUBSCRIBING DEVICE makes —
+     * to a URL written into the notification, from wherever that phone happens
+     * to be. That used to be the reason this destination shipped with no
+     * buttons at all: an inbound endpoint authorised by nothing but the
+     * contents of the request is exactly the shape `discord-gateway.js` exists
+     * to avoid, and the rule that saves the Discord buttons has no counterpart
+     * here — "a press is authorised by the CHANNEL it came from" needs a
+     * channel to resolve an account from, and an ntfy topic is a URL somebody
+     * typed.
      *
-     * So this destination TELLS you and the app is where you answer. Making it
-     * interactive is a separate decision with a real authorisation question
-     * attached, and the paragraph above is the one to re-read first.
+     * The button now points at OUR OWN `POST /notify/ntfy/answer`
+     * (`shared/src/ntfy-answer.js`), carrying an HMAC over the account, habit,
+     * date, action and value, signed with the instance secret. So the request
+     * still comes from the subscriber's device, but what authorises the write
+     * is the code, not the caller — the same trust boundary a webhook URL or a
+     * Discord bot token gives the other channels, expressed as a capability
+     * instead. `ctx.appUrl` is what the button needs to be reachable at all;
+     * with none, there is nowhere to point it and this stays `false`. See
+     * `docs/decisions/ntfy-answers.md` for the reasoning in full, including
+     * what is still true from the old design: the topic still gates who can
+     * *see* the reminder, and on public ntfy.sh — no per-topic ACL — the HMAC
+     * alone carries the burden of gating who can *answer* it.
+     *
+     * `usableAppUrl`, not a bare `Boolean(ctx.appUrl)` — the same test
+     * `ntfyActions` uses to decide whether it has anywhere to point a button,
+     * so the two cannot disagree about a value like `'habits.example.com'`
+     * (no scheme) or an `ftp://` URL.
      */
-    interactive: false,
+    interactive: (settings, ctx = {}) => Boolean(usableAppUrl(ctx.appUrl)),
   },
 };
 
@@ -539,6 +597,16 @@ export function ntfyTarget(raw, env = globalThis.process?.env ?? {}) {
 }
 
 /**
+ * ntfy accepts at most three actions on a message. Asserted again here rather
+ * than trusted from the caller: `ntfyActions` (ntfy-answer.js) already builds
+ * no more than this, but `notify.js` must not import that module (see the
+ * comment on `postNtfy` in notify-send.js, which is what actually calls it,
+ * for why), so the payload keeps its own belt in case that guarantee is ever
+ * weakened at the call site — a fourth action must not silently ride along.
+ */
+const MAX_NTFY_PAYLOAD_ACTIONS = 3;
+
+/**
  * The body of an ntfy publish.
  *
  * Everything the Discord embed carries, flattened: ntfy has a title and a
@@ -551,8 +619,12 @@ export function ntfyTarget(raw, env = globalThis.process?.env ?? {}) {
  * @param {string} args.topic
  * @param {string} [args.date] local date the reminder is for
  * @param {string} [args.appUrl] public URL of this habiterall, if known
+ * @param {object[]} [args.actions] ntfy action buttons, already built (and
+ *   signed) by the caller — this builder attaches them and nothing else.
  */
-export function ntfyPayload({ habit, message, topic, date = '', appUrl = '' }) {
+export function ntfyPayload({
+  habit, message, topic, date = '', appUrl = '', actions,
+}) {
   const lines = [];
   if (message.subtitle) lines.push(message.subtitle);
   if (message.body) lines.push(message.body);
@@ -570,12 +642,17 @@ export function ntfyPayload({ habit, message, topic, date = '', appUrl = '' }) {
   };
 
   // Tapping the notification opens the app, when the deployment has told us
-  // where it is. Counted off rather than matched with `/\/+$/`, for the reason
-  // `discordPayload` gives: that pattern is quadratic on a string of slashes.
-  if (/^https?:\/\//.test(appUrl)) {
-    let end = appUrl.length;
-    while (end > 0 && appUrl[end - 1] === '/') end--;
-    payload.click = `${appUrl.slice(0, end)}/`;
+  // where it is. `usableAppUrl` both validates and normalises, so this
+  // cannot build a link the predicate never agreed to — see its own comment
+  // for why a parsed check beside a raw-string concatenation used to drift.
+  const appBase = usableAppUrl(appUrl);
+  if (appBase) payload.click = `${appBase}/`;
+
+  // Absent rather than an empty array when there is nothing to attach — the
+  // same "no buttons" shape whether the cause is no `appUrl`, no `signAnswer`,
+  // or simply nothing passed in.
+  if (Array.isArray(actions) && actions.length) {
+    payload.actions = actions.slice(0, MAX_NTFY_PAYLOAD_ACTIONS);
   }
 
   return payload;
@@ -790,6 +867,31 @@ export function channelConfigured(id, settings = {}, ctx = {}) {
   const channel = CHANNELS[id];
   if (channel.ready) return channel.ready(settings, ctx);
   return channel.configKeys.every((key) => String(settings[key] ?? '') !== '');
+}
+
+/**
+ * Whether a channel's buttons can currently record an answer.
+ *
+ * Most entries carry a plain boolean; ntfy's is a predicate on the
+ * deployment, exactly like `ready` above is a predicate on it — its buttons
+ * post back to this instance's OWN address, so there is nothing for one to
+ * record where none is known. A caller reading `CHANNELS[id].interactive`
+ * directly would get a function back for one entry and a boolean for the
+ * rest; this is the one place that decides which, so nothing else has to.
+ *
+ * `Object.hasOwn`, for the reason `channelConfigured` already has one: `id`
+ * can come from a request body and `CHANNELS['__proto__']` is a truthy object
+ * with no `interactive` of its own.
+ *
+ * @param {string} id
+ * @param {Record<string, any>} [settings]
+ * @param {{appUrl?: string}} [ctx]
+ * @returns {boolean}
+ */
+export function channelInteractive(id, settings = {}, ctx = {}) {
+  if (!Object.hasOwn(CHANNELS, id)) return false;
+  const { interactive } = CHANNELS[id];
+  return typeof interactive === 'function' ? interactive(settings, ctx) : Boolean(interactive);
 }
 
 /**
@@ -1383,14 +1485,11 @@ export function discordPayload({ habit, message, date = '', appUrl = '' }) {
   if (date) embed.footer = { text: date };
   // Makes the embed title a link into the app. Only when the deployment has
   // told us its own address — guessing one would produce a dead link.
-  // Trailing slashes are counted off rather than matched: `/\/+$/` is unanchored
-  // at the start, so on a string of many slashes the engine retries from every
-  // one of them — quadratic work for a one-line normalisation.
-  if (/^https?:\/\//.test(appUrl)) {
-    let end = appUrl.length;
-    while (end > 0 && appUrl[end - 1] === '/') end--;
-    embed.url = `${appUrl.slice(0, end)}/`;
-  }
+  // `usableAppUrl` both validates and normalises (see its own comment for
+  // why a parsed check beside raw-string concatenation used to drift, and
+  // for the quadratic trap in a naive trailing-slash trim).
+  const appBase = usableAppUrl(appUrl);
+  if (appBase) embed.url = `${appBase}/`;
 
   return {
     username: 'habiterall',

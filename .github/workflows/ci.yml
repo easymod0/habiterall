@@ -366,6 +366,20 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/notify.integration.mjs
 
+      # Boots the real server.js, because only that can show that this
+      # unauthenticated route is reachable at all, that the origin guard
+      # mounted above it in server.js applies here too, and that its own
+      # inline (non-switchable) limiter actually bites. The cross-tenant
+      # question — a code minted for one account cannot reach another's habit
+      # — is a Postgres RLS question and is covered in notify.integration.mjs
+      # instead, beside the rest of that file's withUser checks.
+      - name: Answering an ntfy button, over the real route
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/ntfy-answer.integration.mjs
+
   roundtrip:
     name: Backup round-trip (personal)
     runs-on: ubuntu-latest

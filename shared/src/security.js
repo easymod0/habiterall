@@ -128,6 +128,20 @@ export const RATE_LIMITS = {
     windowMs: 60 * 60 * 1000, limit: 20,
     message: { error: 'too many imports, try again later' },
   },
+  /**
+   * The ntfy answer route (`NTFY_ANSWER_PATH`) takes no session at all — it is
+   * reached by ntfy's own device, not by the app — so this is the only bound
+   * standing between an internet-reachable, unauthenticated endpoint and
+   * someone trying codes against it. 30/minute is a human pressing buttons;
+   * both editions mount this inline with `rateLimit(...)`, never through a
+   * helper that can become a pass-through, for the same reason the credential
+   * limiter is never switchable — see the comment beside each mount.
+   */
+  ntfyAnswer: {
+    windowMs: 60 * 1000, limit: 30,
+    standardHeaders: true, legacyHeaders: false,
+    message: { error: 'too many attempts, try again later' },
+  },
 };
 
 /** Methods that cannot change state, and so need no origin check. */

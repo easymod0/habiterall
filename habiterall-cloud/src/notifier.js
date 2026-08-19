@@ -22,8 +22,8 @@
 
 import { withNotifierScope, withUser } from './db/pool.js';
 import {
-  answeredIds, answerText, CHANNELS, needsServerDelivery, serverChannels,
-  resolveTimeZone,
+  answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
+  serverChannels, resolveTimeZone,
   zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
@@ -32,7 +32,8 @@ import {
 import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
-import { entryWrite, parseEntry } from '@habiterall/shared/validate.js';
+import { answerBody, entryWrite, parseEntry } from '@habiterall/shared/validate.js';
+import { signNtfyAnswer } from '@habiterall/shared/ntfy-answer.js';
 import { log } from '@habiterall/shared/log.js';
 
 /** Channels this server delivers itself; the scan filters on these. */
@@ -335,10 +336,7 @@ export function interactionAdapter() {
         const habit = rows[0];
         if (!habit) return { ok: false, error: 'That habit no longer exists.' };
 
-        const body = action === 'skip' ? { status: 'skip' }
-          : action === 'yes' ? { value: YES }
-            : action === 'no' ? { value: UNSET }
-              : { value };
+        const body = answerBody(habit, { action, value });
 
         let parsed;
         try {
@@ -370,6 +368,78 @@ export function interactionAdapter() {
   };
 }
 
+/* ---------- answering from an ntfy button ---------- */
+
+/**
+ * The adapter `handleNtfyAnswer` needs for this edition.
+ *
+ * `today` and `record` are exactly `interactionAdapter()`'s — neither one
+ * depends on how the account was resolved, so they are reused rather than
+ * given a second definition of what a press means to storage.
+ */
+export function ntfyAnswerAdapter() {
+  const { today, record } = interactionAdapter();
+  return {
+    secret: () => process.env.SESSION_SECRET,
+
+    /**
+     * A genuine cross-tenant lookup — unlike personal's single implicit user,
+     * this edition's code names an account by its numeric id, and any account
+     * may be the one that pressed the button. `resolveChannel` above is the
+     * pattern: validate the shape of the reference before it ever reaches a
+     * query, then scan through `withNotifierScope` (migration 008's
+     * `users_notifier_scan`, `FOR SELECT` only) exactly as the scheduler's own
+     * scan does.
+     */
+    async resolveAccount(ref) {
+      if (!/^\d+$/.test(String(ref ?? ''))) return null;
+
+      const { rows } = await withNotifierScope((db) =>
+        db.query(
+          `SELECT id, settings, device_time_zone FROM users
+            WHERE blocked = false AND id = $1`,
+          [Number(ref)]
+        )
+      );
+      if (rows.length !== 1) return null;
+
+      // `deviceZone` alongside the settings, for the same reason
+      // `resolveChannel` carries it: `today()` has to resolve the same three
+      // tiers the tick does, so a button press and a reminder never disagree
+      // about which day it is for this account.
+      return {
+        id: rows[0].id,
+        settings: rows[0].settings ?? {},
+        deviceZone: String(rows[0].device_time_zone ?? ''),
+      };
+    },
+
+    today: async (account) => today(account),
+    record: async (account, args) => record(account, args),
+  };
+}
+
+/**
+ * Signs an ntfy answer code for one account.
+ *
+ * Unlike personal, which has nothing to name and always signs the empty
+ * reference, this signs `account.id` — the numeric string
+ * `ntfyAnswerAdapter`'s `resolveAccount` above expects back.
+ *
+ * @param {{id: number}} account
+ * @param {{habitId: number, date?: string, action: string, value?: number,
+ *   test?: boolean}} fields matches `sendToChannel`'s `signAnswer` shape,
+ *   where `date` is optional for a test send; defaulted below because
+ *   `signNtfyAnswer` itself requires a string.
+ * @returns {string}
+ */
+function signAnswer(account, fields) {
+  return signNtfyAnswer({
+    secret: process.env.SESSION_SECRET, account: String(account.id), ...fields,
+    date: fields.date ?? '',
+  });
+}
+
 /**
  * Send a test message to every configured server-delivered destination for one
  * user.
@@ -397,7 +467,15 @@ export async function sendTest(userId, settings, deps = {}) {
   const results = [];
   for (const channel of serverChannels(settings, { bot: !!botToken })) {
     const result = await sendToChannel(
-      channel, { habit, settings, test: true, appUrl, botToken }, deps
+      channel,
+      {
+        habit, settings, test: true, appUrl, botToken,
+        // Live but inert: a `test: true` code is exempt from the habit-id and
+        // date checks and never reaches storage, so the test button
+        // exercises the whole interactive path rather than only the send.
+        signAnswer: (fields) => signAnswer({ id: userId }, fields),
+      },
+      deps
     );
     results.push({ channel, ok: result.ok, error: result.ok ? undefined : result.error });
     // A test is a real delivery attempt on the same path, so it answers the
@@ -426,11 +504,16 @@ export function start(env = process.env) {
     return null;
   }
 
+  // `ntfy_answers` said once, at startup, for the same reason `mode` is: with
+  // no `app_url` an ntfy reminder still goes out, just with no buttons on it,
+  // and nothing else says so — `channelInteractive` otherwise has no caller
+  // at all.
   log.info('notify.starting', {
     mode: config.botToken ? 'bot' : 'webhook',
     interval_ms: config.intervalMs,
     app_url: config.appUrl || '(unset)',
     max_accounts_per_tick: MAX_ACCOUNTS_PER_TICK,
+    ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
   });
 
   let lastPrunedDay = '';
@@ -452,6 +535,9 @@ export function start(env = process.env) {
     intervalMs: config.intervalMs,
     appUrl: config.appUrl,
     botToken: config.botToken,
+    // Travels the same route `botToken` and `appUrl` already do: no reaching
+    // into `process.env` from inside `shared/src` for it.
+    signAnswer,
     collect: async (instant) => {
       const accounts = await collect(instant);
 

@@ -839,12 +839,22 @@ puts the title in a `Title:` header, and a habit name is free text. The only
 header built here is the optional `Authorization`, refused outright if it could
 not go in one.
 
-**It ships as `interactive: false`, and that is a decision.** ntfy's action
-buttons would work — as an HTTP request the SUBSCRIBER's device makes, from
-wherever that phone is. That is an unauthenticated inbound endpoint, exactly what
-the gateway exists to avoid, and the rule that saves the Discord buttons has no
-counterpart: an ntfy topic is a URL somebody typed, not a channel to resolve an
-account from. A test pins the flag.
+**The button now comes to US, and that reverses an earlier decision.** ntfy's
+action buttons used to be refused because the obvious design routes them
+through the SUBSCRIBER's device — an HTTP request made from wherever that phone
+is, to whatever URL the message carried, authorised by nothing. That danger was
+real and is still why there is no ordinary inbound endpoint here otherwise. The
+button that ships instead is an `http` action pointed at habiterall's own
+`POST /notify/ntfy/answer`, carrying an HMAC over `(account, habit, date,
+action, value)` signed with the instance secret (`shared/src/ntfy-answer.js`) —
+so the code, not the topic, is what authorises the write, and it is bounded to
+answering the one question the reminder already asked, for a habit and date
+already visible in the same message. `interactive` is a predicate on `appUrl`:
+an instance with no public address gets no buttons, because the code has
+nowhere to be posted back to. The topic still gates who can *see* the
+reminder — ntfy.sh has no per-topic ACL, so on it the HMAC alone carries the
+whole burden of gating who can *answer*. `docs/decisions/ntfy-answers.md` has
+the long form.
 
 **The two server-sent channels are not alike about rate limits, and the tick is
 shared.** Discord limits per webhook, so a 429 is one account's own doing and the
