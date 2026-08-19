@@ -290,6 +290,23 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
     let written = 0;
     const skipped = [];
 
+    // Everything below is ONE transaction. Without it each `insertRep.run()`
+    // was its own implicit one under SQLite's default rollback-journal mode —
+    // a journal file created, written, fsynced and deleted once PER ROW, which
+    // measured at ~400-430 rows/sec on a native filesystem and inside a
+    // container alike, against ~500k in a transaction. On the account that
+    // reported it (9 habits, 2,308 entries) that is 5,386ms against 22ms, and
+    // this function is synchronous, so it is the event loop that was blocked
+    // for every caller the process had. See docs/decisions/import-and-loop.md.
+    //
+    // `BEGIN` sits AFTER the DDL and the Metadata insert rather than around
+    // them, so the schema stays committed independently of the rows: a second
+    // connection opened on this path mid-write can still see that `Habits` and
+    // `Repetitions` exist, which is the only reason the transaction is
+    // observable from outside — and observing it is how the test in
+    // test/export-loop.test.js pins this rather than timing it.
+    db.exec('BEGIN');
+
     habits.forEach((h, position) => {
       const isNumerical = h.type === 'numerical';
       // habiterall has no per-weekday reminder concept, so a reminder it does
@@ -357,6 +374,14 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
         written++;
       }
     });
+
+    // No rollback branch and no try/catch, because the `finally` below already
+    // is one. Verified rather than assumed: `DatabaseSync.close()` with a
+    // transaction still open rolls back cleanly and does not throw, so a throw
+    // partway through the loop discards a partial file exactly as it did
+    // before this transaction existed — and both editions' routes `unlinkSync`
+    // the temp file in a `finally` of their own on top of that.
+    db.exec('COMMIT');
 
     return { habits: habits.length, entries: written, skipped };
   } finally {

@@ -484,3 +484,50 @@ test('a clean account skips nothing, and two habits may hold the same day', asyn
   assert.equal(result.entries, 8, 'exactly what it always exported');
   unlinkSync(path);
 });
+
+/* ---------- the write is one transaction ---------- */
+
+const TXN_HABITS = [1, 2, 3].map((id) => ({
+  id, name: `Habit ${id}`, description: '', type: 'boolean', unit: '',
+  target_value: 0, target_type: 'at_least',
+  freq_numerator: 1, freq_denominator: 1, color: '#123456', archived: 0,
+}));
+
+const txnEntriesFor = (id) => Array.from({ length: 5 }, (_, i) => ({
+  date: `2026-01-0${i + 1}`, value: YES, status: '', notes: '',
+}));
+
+test('every row is written in one transaction, so one export is one fsync rather than one per entry', async () => {
+  // `entriesFor` is the one point `writeLoopDatabase` hands control to a
+  // caller mid-write, so it is where a second connection on the SAME path can
+  // ask what an outside reader would see right now. Unfixed, every
+  // `insertRep.run()` is its own implicit transaction, so by the time this
+  // runs for the SECOND habit the first habit's five rows are already
+  // committed and visible — the count climbs habit by habit: [0, 5, 10].
+  // Wrapped in one BEGIN/COMMIT, nothing is visible to an outside reader
+  // until the whole write finishes, so every observation reads 0.
+  const { DatabaseSync } = await import('node:sqlite');
+  const path = scratch('loop-txn');
+
+  const seen = [];
+  const result = await writeLoopDatabase(path, TXN_HABITS, (id) => {
+    const outside = new DatabaseSync(path, { readOnly: true });
+    seen.push(outside.prepare(`SELECT count(*) AS n FROM Repetitions`).get().n);
+    outside.close();
+    return txnEntriesFor(id);
+  });
+
+  assert.deepEqual(seen, [0, 0, 0],
+    'nothing is visible to an outside reader until COMMIT');
+
+  // The other half of the claim: a writer that dropped every row instead of
+  // committing them would also pass the assertion above, so the FINISHED file
+  // has to be checked too, not just what was invisible along the way.
+  assert.equal(result.entries, 15, 'every row was written, not merely hidden');
+  const raw = new DatabaseSync(path, { readOnly: true });
+  const total = raw.prepare(`SELECT count(*) AS n FROM Repetitions`).get().n;
+  raw.close();
+  assert.equal(total, 15, 'every row made it into the finished file');
+
+  unlinkSync(path);
+});
