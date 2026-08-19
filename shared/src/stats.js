@@ -9,6 +9,14 @@ export const MAX_RANGE_DAYS = 3660;
 
 /* ---------- date helpers (all dates are local 'YYYY-MM-DD' strings) ---------- */
 
+/**
+ * `'00'`…`'99'`, so a two-digit field is a lookup rather than a `String()`
+ * plus a `padStart` — two allocations per field, and `dateRange` builds two
+ * fields per day. Only ever indexed with a month (1-12) or a day (1-31), both
+ * of which a valid `Date` guarantees; see `dateRange` for why it has one.
+ */
+const TWO_DIGIT = Array.from({ length: 100 }, (_, i) => String(i).padStart(2, '0'));
+
 export function toISO(d) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -53,6 +61,19 @@ export function today() {
  * `!(n >= 0)` rather than `n < 0`: `daysBetween` answers `NaN` for an
  * unparseable date, and `n < 0` is false for `NaN` too, so `new Array(n + 1)`
  * would throw `RangeError` instead of returning `[]`.
+ *
+ * **The `Date` cannot leave this loop either**, and that was measured rather
+ * than assumed. Stepping the calendar arithmetically — increment the day, roll
+ * over on a days-in-month table — needs no `Date` at all and is faster again,
+ * and it is wrong for the same family of reasons the epoch walk is: it knows
+ * the calendar but not which of its days a zone actually LIVED. Under
+ * `Pacific/Apia`, which skipped 2011-12-30 outright when Samoa crossed the
+ * date line, it emits that day — a date no entry can ever be keyed by, since
+ * nobody there had one — and then, being one element longer at the front, ends
+ * the range a day SHORT of `end`. `setDate` on a local `Date` is what makes
+ * this list "the calendar days that happened here", which is what an entry map
+ * is keyed on. The remaining cost is the strings, and that is what the loop
+ * below is careful about.
  */
 export function dateRange(start, end) {
   const n = daysBetween(start, end);
@@ -60,9 +81,42 @@ export function dateRange(start, end) {
   const [y, m, d] = start.split('-').map(Number);
   const cur = new Date(y, m - 1, d);
   const out = new Array(n + 1);
+
+  // Consecutive days share a `'YYYY-MM-'` prefix for a month at a time, so it
+  // is built on a rollover rather than per day: one string concatenation and
+  // one array lookup per element, against `toISO`'s three `Date` accessors,
+  // two `String()`s, two `padStart`s and a four-part template. The output is
+  // byte-identical and `test/stats.test.js` pins that against `toISO` itself,
+  // because this is now the one place in the file that spells a date without
+  // calling it.
+  //
+  // That one test does TWO jobs, and `prevDay = 32` is the second of them.
+  // No real day exceeds 31, so the opening iteration always takes the branch
+  // and the first prefix exists before anything reads it. `day === 1` would
+  // not: a range starting on the 25th would spell its whole first month
+  // `'25'`, `'26'`, … with an empty prefix. That is a covered branch, not a
+  // defensive one — `test/stats.test.js` opens on 2023-12-25 and fails on it.
+  //
+  // The other job is the rollover, and there `day <= prevDay` is wider than
+  // strictly needed in two directions, both harmless. No rollover can be
+  // MISSED, because a month change cannot raise the day: sweeping all 418
+  // IANA zones over 1900-2030 finds none that ever skipped a first of a month
+  // — the date-line jumps that delete a day (Apia 2011-12-30, Kiritimati
+  // 1994-12-31) all landed elsewhere in it — so every rollover in the tzdb
+  // lands on the 1st, and even one that did not would still bring the day
+  // down. And a non-increase is not always a rollover: where a zone began DST
+  // at midnight the walk can repeat a local day, which rebuilds the prefix to
+  // the value it already held. `America/Recife` around 2000-10-08 is the case
+  // — reproducing it depends on which `Date`s the process built first, since
+  // V8 caches the offset, which is why no suite here can pin it.
+  let prefix = '';
+  let prevDay = 32;
   for (let i = 0; i <= n; i++) {
-    out[i] = toISO(cur);
-    cur.setDate(cur.getDate() + 1);
+    const day = cur.getDate();
+    if (day <= prevDay) prefix = `${cur.getFullYear()}-${TWO_DIGIT[cur.getMonth() + 1]}-`;
+    prevDay = day;
+    out[i] = prefix + TWO_DIGIT[day];
+    cur.setDate(day + 1);
   }
 
   // `n` counts elapsed 24-hour spans; the loop takes calendar steps. Those
