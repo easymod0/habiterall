@@ -165,23 +165,39 @@ test('dateRange omits the day Pacific/Apia deleted from its calendar', async () 
  * Apia case) needs no counterpart, because there the elapsed count shrinks
  * along with the calendar.
  *
- * Asserted as "never past `end`" rather than against a literal list, so this
- * still says something on a machine whose tzdata spells that old transition
- * differently.
+ * The PREMISE is asserted rather than assumed, and that is not ceremony here.
+ * `last === '1969-10-01'` and `len === 31` are also exactly what an ORDINARY
+ * range produces, so on a machine where this zone does not resolve — a
+ * stripped tzdata, a small-icu build — Node falls back silently and the whole
+ * test passes with the trim deleted. `daysBetween` answering 31 across a
+ * 30-step calendar span IS the repeated day, and it answers 30 under UTC, so
+ * checking it first means a runner that cannot see the property fails loudly
+ * instead of going quietly green. The Apia test above gets this for free from
+ * its literal list; this one has to ask.
  */
 test('dateRange never runs past end in a zone that lived a day twice', async () => {
   const src = new URL('../src/stats.js', import.meta.url).href;
   const script = `
-    const { dateRange } = await import(${JSON.stringify(src)});
+    const { dateRange, daysBetween } = await import(${JSON.stringify(src)});
     const days = dateRange('1969-09-01', '1969-10-01');
-    console.log(JSON.stringify({ last: days[days.length - 1], len: days.length }));
+    console.log(JSON.stringify({
+      elapsed: daysBetween('1969-09-01', '1969-10-01'),
+      last: days[days.length - 1],
+      len: days.length,
+    }));
   `;
   const { stdout } = await execFileAsync(
     process.execPath,
     ['--input-type=module', '-e', script],
     { cwd: sharedRoot, env: childEnv({ TZ: 'Pacific/Kwajalein' }), maxBuffer: 1 << 20 }
   );
-  const { last, len } = JSON.parse(stdout.trim());
+  const { elapsed, last, len } = JSON.parse(stdout.trim());
+
+  assert.equal(elapsed, 31,
+    `Pacific/Kwajalein did not resolve to a zone that lived 1969-09-30 twice `
+    + `(elapsed ${elapsed}, expected 31) — this machine's tzdata cannot see `
+    + 'the property under test, so the assertions below would pass vacuously');
+
   assert.equal(last, '1969-10-01', `walk ended on ${last}, past the end it was given`);
   assert.equal(len, 31);
 });
