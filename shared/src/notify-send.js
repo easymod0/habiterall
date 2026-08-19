@@ -24,6 +24,13 @@ import {
   takeUnusableZones, unreachableChannels,
 } from './notify.js';
 import { postReminder } from './discord.js';
+// `notify.js` must not import this — see the comment on `CHANNELS.ntfy` and on
+// `ntfyPayload`'s `actions` param. `ntfy-answer.js` imports `discord.js` (for
+// `MAX_ANSWER_AGE_DAYS`) and `discord.js` imports `notify.js`, so a
+// `notify.js -> ntfy-answer.js` edge would close a cycle; `notify-send.js`
+// sits above all three already (it imports both `notify.js` and
+// `discord.js`), so this is the right place to join them.
+import { ntfyActions } from './ntfy-answer.js';
 
 /** A webhook that hangs must not hold up the rest of the tick. */
 const SEND_TIMEOUT_MS = 10_000;
@@ -162,6 +169,13 @@ function stateKey(o) {
  * @property {Date|number} [instant]
  * @property {string} [appUrl] this deployment's public address, for the link
  * @property {string} [botToken] DISCORD_BOT_TOKEN, when the instance has one
+ * @property {(account: NotifyAccount, fields: {habitId: number, date?: string,
+ *   action: string, value?: number, test?: boolean}) => string} [signAnswer]
+ *   signs an ntfy answer code for one account — supplied by the edition,
+ *   travelling the same route `botToken` and `appUrl` already do. Bound to
+ *   the account in scope before it reaches `sendToChannel`, so nothing below
+ *   this ctx ever has to carry the account and the fields as two arguments.
+ *   Absent means no buttons, the same "nothing to answer with" as no `appUrl`.
  * @property {typeof globalThis.fetch} [fetch]
  * @property {Record<string, string|undefined>} [env] the process environment,
  *   for the one rule that lives there: which ntfy hosts this instance may post
@@ -258,12 +272,16 @@ export async function postWebhook(url, payload, deps = {}) {
  * @param {string} [args.date]
  * @param {string} [args.appUrl]
  * @param {boolean} [args.test]
+ * @param {(fields: {habitId: number, date?: string, action: string,
+ *   value?: number, test?: boolean}) => string} [args.signAnswer] bound to
+ *   this account already (see `deliverAccount`) — absent means no buttons,
+ *   the same as no `appUrl`.
  * @param {{fetch?: typeof globalThis.fetch, timeoutMs?: number,
  *   env?: Record<string, string|undefined>}} [deps]
  * @returns {Promise<SendResult>}
  */
 export async function postNtfy(args, deps = {}) {
-  const { habit, settings, date = '', appUrl = '', test = false } = args;
+  const { habit, settings, date = '', appUrl = '', test = false, signAnswer } = args;
   const doFetch = deps.fetch ?? globalThis.fetch;
   const timeoutMs = deps.timeoutMs ?? SEND_TIMEOUT_MS;
 
@@ -300,7 +318,20 @@ export async function postNtfy(args, deps = {}) {
   }
 
   const message = reminderMessage(habit, { test });
-  const payload = ntfyPayload({ habit, message, topic: target.topic, date, appUrl });
+  // No `sign` means no buttons, exactly as no `appUrl` does — `ntfyActions`
+  // itself refuses to build any without a `sign`, but skipping the call
+  // outright means a test with no adapter wired up sends the same payload it
+  // always did.
+  const actions = signAnswer
+    ? ntfyActions(habit, {
+      date, test, appUrl, sign: signAnswer,
+      // The account's own setting, exactly as `postReminder`'s bot-mode call
+      // reads it for Discord (`sendToChannel`, below) — so the shade, the
+      // grid and every channel with buttons agree about what answers exist.
+      skipDays: settings.skipDays === true,
+    })
+    : undefined;
+  const payload = ntfyPayload({ habit, message, topic: target.topic, date, appUrl, actions });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -373,11 +404,17 @@ export async function postNtfy(args, deps = {}) {
  * @param {string} [args.appUrl]
  * @param {boolean} [args.test]
  * @param {string} [args.botToken] this instance's bot token, if it has one
+ * @param {(fields: {habitId: number, date?: string, action: string,
+ *   value?: number, test?: boolean}) => string} [args.signAnswer] bound to
+ *   this account already; ntfy-only for now, passed straight through to
+ *   `postNtfy`.
  * @param {{fetch?: typeof globalThis.fetch}} [deps]
  * @returns {Promise<SendResult>}
  */
 export async function sendToChannel(channel, args, deps = {}) {
-  const { habit, settings, date = '', appUrl = '', test = false, botToken = '' } = args;
+  const {
+    habit, settings, date = '', appUrl = '', test = false, botToken = '', signAnswer,
+  } = args;
 
   if (CHANNELS[channel]?.delivery !== 'server') {
     // 'android' reaches here only if someone asks for it explicitly; it is
@@ -416,7 +453,7 @@ export async function sendToChannel(channel, args, deps = {}) {
   }
 
   if (channel === 'ntfy') {
-    return postNtfy({ habit, settings, date, appUrl, test }, deps);
+    return postNtfy({ habit, settings, date, appUrl, test, signAnswer }, deps);
   }
 
   return { ok: false, status: 0, error: `unknown channel ${channel}` };
@@ -562,6 +599,12 @@ export async function deliverAccount(account, ctx) {
       const payload = {
         habit: item.habit, settings, date: item.date,
         appUrl: ctx.appUrl, botToken: ctx.botToken,
+        // Bound to THIS account here, where it is in scope, so nothing below
+        // this line ever has to be handed the account and the fields
+        // separately. Absent `ctx.signAnswer` (an edition that has not wired
+        // one up) means `signAnswer` stays undefined on the payload too — the
+        // same "no buttons" outcome `postNtfy` already gives no `appUrl`.
+        signAnswer: ctx.signAnswer && ((fields) => ctx.signAnswer(account, fields)),
       };
       const startedAt = Date.now();
       let result = await sendToChannel(channel, payload, { fetch: ctx.fetch });

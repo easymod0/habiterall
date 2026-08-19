@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const {
-  parseHabit, parseEntry, assertDate, assertNotFuture,
+  parseHabit, parseEntry, entryWrite, answerBody, assertDate, assertNotFuture,
   ValidationError, LIMITS, DEFAULT_COLOR, parseIcon,
 } = await import('../src/validate.js');
+const { isCompleted } = await import('../src/stats.js');
 
 const SENTINELS = { UNSET: 0, YES: 2, SKIP: 3 };
 const boolHabit = { type: 'boolean' };
@@ -217,6 +218,86 @@ test('notes are clamped and always present', () => {
   assert.equal(parseEntry(numHabit, { value: 1 }, SENTINELS).notes, '');
   const long = parseEntry(numHabit, { value: 1, notes: 'n'.repeat(LIMITS.notes + 50) }, SENTINELS);
   assert.equal(long.notes.length, LIMITS.notes);
+});
+
+/* ---------- answerBody: a reminder press, all the way to storage ---------- */
+
+// #221 gave an avoided habit (show_as: 'avoid' + at_most + numerical) Clean /
+// Slipped buttons carrying the ordinary `yes` / `no` actions, correctly — but
+// `record()` in both editions mapped those actions with the fixed BOOLEAN
+// encoding (yes -> YES, no -> UNSET), which is inverted for an avoided habit:
+// `valueForState` already says a clean day stores 0 and a slip stores
+// `target + 1`. Assert the STORED VALUE and `isCompleted`, never the label —
+// `answerText` said "Clean" while the inverted code wrote a slip, so a label
+// assertion would have passed against the bug.
+function throughAnswer(habit, action, value) {
+  const body = answerBody(habit, { action, value });
+  const parsed = parseEntry(habit, body, SENTINELS);
+  const write = entryWrite(habit, parsed, SENTINELS);
+  return {
+    value: write.value,
+    completed: isCompleted(habit, { value: write.value, status: write.status }),
+  };
+}
+
+const avoid0 = { type: 'numerical', target_type: 'at_most', target_value: 0, show_as: 'avoid' };
+const avoid2 = { type: 'numerical', target_type: 'at_most', target_value: 2, show_as: 'avoid' };
+const atLeast8 = { type: 'numerical', target_type: 'at_least', target_value: 8 };
+
+test('avoided habit, target 0: Clean stores 0 and is completed', () => {
+  const r = throughAnswer(avoid0, 'yes');
+  assert.equal(r.value, 0);
+  assert.equal(r.completed, true);
+});
+
+test('avoided habit, target 0: Slipped stores target+1 (1) and is not completed', () => {
+  const r = throughAnswer(avoid0, 'no');
+  assert.equal(r.value, 1);
+  assert.equal(r.completed, false);
+});
+
+test('avoided habit, target 2: Clean stores 0 and is completed', () => {
+  const r = throughAnswer(avoid2, 'yes');
+  assert.equal(r.value, 0);
+  assert.equal(r.completed, true);
+});
+
+test('avoided habit, target 2: Slipped stores target+1 (3), not a hardcoded 1', () => {
+  // The row that proves `target + 1` rather than a fixed 1 — without it a
+  // hardcoded `1` in valueForState passes the target-0 case above too.
+  const r = throughAnswer(avoid2, 'no');
+  assert.equal(r.value, 3);
+  assert.equal(r.completed, false);
+});
+
+test('boolean habit: yes stores YES and is completed', () => {
+  const r = throughAnswer(boolHabit, 'yes');
+  assert.equal(r.value, 2);
+  assert.equal(r.completed, true);
+});
+
+test('boolean habit: no stores UNSET and is not completed', () => {
+  const r = throughAnswer(boolHabit, 'no');
+  assert.equal(r.value, 0);
+  assert.equal(r.completed, false);
+});
+
+test('a skip is never routed through valueForState, for any habit', () => {
+  for (const h of [boolHabit, numHabit, avoid0, avoid2]) {
+    const body = answerBody(h, { action: 'skip' });
+    assert.deepEqual(body, { status: 'skip' });
+    const parsed = parseEntry(h, body, SENTINELS);
+    const write = entryWrite(h, parsed, SENTINELS);
+    assert.equal(write.value, 0);
+    assert.equal(write.status, 'skip');
+    assert.equal(isCompleted(h, { value: write.value, status: write.status }), null);
+  }
+});
+
+test('an amount press carries its own number straight through', () => {
+  const r = throughAnswer(atLeast8, 'amount', 5);
+  assert.equal(r.value, 5);
+  assert.equal(r.completed, false);
 });
 
 /* ---------- dates ---------- */

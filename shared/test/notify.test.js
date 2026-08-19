@@ -6,7 +6,8 @@ import { dirname, join } from 'node:path';
 
 const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
-  answeredIds, callerDay, channelConfigured, discordPayload, dueReminders, enabledChannels,
+  answeredIds, callerDay, channelConfigured, channelInteractive, discordPayload,
+  dueReminders, enabledChannels,
   minutesOfDay, needsServerDelivery, ntfyAllowlist, ntfyAllowlistProblems,
   ntfyPayload, ntfyTarget,
   parseChannelList, parseDiscordWebhook, parseNtfyToken, parseNtfyUrl,
@@ -20,6 +21,8 @@ const { deliverAccount, postWebhook, resetSaid, runTick, sendToChannel, warnUnre
 const { parseSettings } = await import('../src/validate.js');
 
 const { daysBetween } = await import('../src/stats.js');
+
+const { ntfyActions } = await import('../src/ntfy-answer.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -465,12 +468,19 @@ test('a topic URL is split into the endpoint to post to and the topic to name', 
     'and an https URL to an http entry is posted over https, not downgraded');
 });
 
-test('ntfy is not interactive, and that is a decision', () => {
-  // Its action buttons would fire HTTP AT THIS SERVER from a subscriber's
-  // device, authorised by nothing but the request — the inbound endpoint
-  // discord-gateway.js exists to avoid. Pinned so that turning it on is a
-  // change somebody has to make deliberately.
-  assert.equal(CHANNELS.ntfy.interactive, false);
+test('ntfy interactivity is a predicate on appUrl, not a fixed decision', () => {
+  // #216 reversed the old fixed `false`: an ntfy action button now points back
+  // at THIS SERVER's own `/notify/ntfy/answer`, authorised by an HMAC code
+  // rather than nothing — but only once there is a public address for the
+  // button to name. With none, `interactive` still answers false and an
+  // instance gets no buttons at all, exactly the outcome the old fixed value
+  // gave every instance.
+  assert.equal(typeof CHANNELS.ntfy.interactive, 'function',
+    'a predicate, following the shape CHANNELS.discord.ready already uses');
+  assert.equal(channelInteractive('ntfy', {}), false, 'no ctx at all -> no appUrl -> false');
+  assert.equal(channelInteractive('ntfy', {}, {}), false);
+  assert.equal(
+    channelInteractive('ntfy', {}, { appUrl: 'https://habits.example.com' }), true);
   assert.equal(CHANNELS.ntfy.delivery, 'server');
   assert.deepEqual(CHANNELS.ntfy.configKeys, ['ntfyTopicUrl'],
     'the token is optional — a public topic needs none');
@@ -502,27 +512,73 @@ test('the ntfy payload carries what the embed does, and no free text in a header
   assert.ok(big.message.length <= 4000);
 });
 
-test('scope boundary: an avoided habit does not change ntfy — no buttons, no inverted text', () => {
-  // `reminderMessage` is shared by every server-delivered channel by design,
-  // so a "while I'm here" inversion of it for an avoided habit would silently
-  // change what ntfy sends too — and ntfy is explicitly out of scope for this
-  // fix (issue #148). This pins that boundary rather than leaving it assumed.
+test('ntfyPayload carries no actions key at all when none are supplied', () => {
+  // Absence, not an empty array — the same shape `coverage` uses when it is
+  // declined (root CLAUDE.md), so a caller with no `signAnswer` sends exactly
+  // the payload it always did.
+  const payload = ntfyPayload({
+    habit: habit(), message: reminderMessage(habit()), topic: 'habits', date: '2026-08-13',
+  });
+  assert.equal(payload.actions, undefined);
+
+  const empty = ntfyPayload({
+    habit: habit(), message: reminderMessage(habit()), topic: 'habits', date: '2026-08-13',
+    actions: [],
+  });
+  assert.equal(empty.actions, undefined);
+});
+
+test('ntfyPayload never carries more than three actions, even handed a fourth directly', () => {
+  // `ntfyActions` itself already guarantees at most three; this is the belt to
+  // its braces — the payload builder must not silently carry a fourth even if
+  // that upstream guarantee is ever weakened, so it re-caps rather than
+  // trusting its caller.
+  const fourActions = [1, 2, 3, 4].map((n) => ({
+    action: 'http', label: `Action ${n}`, url: `https://h.example/${n}`,
+    method: 'POST', headers: {}, body: '', clear: true,
+  }));
+  const payload = ntfyPayload({
+    habit: habit(), message: reminderMessage(habit()), topic: 'habits', date: '2026-08-13',
+    actions: fourActions,
+  });
+  assert.equal(payload.actions.length, 3);
+  assert.deepEqual(payload.actions.map((a) => a.label), ['Action 1', 'Action 2', 'Action 3']);
+});
+
+test('scope boundary: an avoided habit gets Clean/Slipped on ntfy too, and the TEXT still does not invert', () => {
+  // `reminderMessage` is shared by every server-delivered channel by design, so
+  // a "while I'm here" inversion of it for an avoided habit would silently
+  // change what ntfy sends too — #148's boundary, and it still holds: the
+  // message text below is unchanged. What #216 moved is the OTHER half — ntfy
+  // now has buttons, and an avoided habit gets the same Clean/Slipped
+  // substitution Discord's and Android's buttons already do, never a number
+  // pad asking the wrong question for something you are trying not to do.
   const avoided = habit({
     type: 'numerical', target_type: 'at_most', target_value: 0,
     show_as: 'avoid', unit: 'cigarettes',
+  });
+  const actions = ntfyActions(avoided, {
+    date: '2026-08-13',
+    appUrl: 'https://habits.example.com',
+    // The signer only needs to produce a string here — the button LABELS are
+    // the thing under test, and they never depend on what a code decodes to.
+    sign: () => 'signed',
   });
   const payload = ntfyPayload({
     habit: avoided,
     message: reminderMessage(avoided),
     topic: 'habits',
     date: '2026-08-13',
+    actions,
   });
   // Literal string, copied from `reminderMessage`'s own template (the em dash
   // is U+2014) — asserted rather than rebuilt, so this cannot pass by
   // agreeing with itself if the template changes.
   assert.match(payload.message, /Time to log this one — goal: at most 0 cigarettes\./);
-  // ntfy carries no buttons at all — the other half of "not in scope".
-  assert.equal(payload.actions, undefined);
+  // The buttons, not a number pad: Clean/Slipped, carrying the un-inverted
+  // `yes`/`no` actions (decoded in ntfy-answer.test.js; here only the labels
+  // that reach the phone are under test).
+  assert.deepEqual(payload.actions.map((a) => a.label), ['Clean', 'Slipped']);
 });
 
 /* ---------- channel lists and time zones ---------- */
@@ -1191,6 +1247,45 @@ test('ntfy failures are told apart, in ntfy\'s own words', async () => {
   assert.equal(timeout.ok, false);
   assert.ok(!timeout.permanent);
   assert.match(timeout.error, /no response within/);
+});
+
+/* ---------- ntfy's buttons, wired through postNtfy ---------- */
+
+test('with no signAnswer, an ntfy send carries no actions at all', async () => {
+  // The same "no buttons" outcome a missing `appUrl` already gives — an
+  // edition that has not wired a signer in yet must send exactly the payload
+  // it always did.
+  const fetch = fakeFetch([{ status: 200 }]);
+  await toNtfy(fetch, ntfySettings(), PUBLIC_NTFY, { appUrl: 'https://habits.example.com' });
+  assert.equal(fetch.calls[0].body.actions, undefined);
+});
+
+test("a signed ntfy send carries the account's skipDays setting on its buttons", async () => {
+  // `postDiscord`'s bot mode reads `settings.skipDays === true` for the same
+  // reason (`notify-send.js`) — the shade, the grid and every channel with
+  // buttons must agree about what answers exist.
+  const sign = (fields) => `code:${fields.action}:${fields.value ?? ''}`;
+  const fetch = fakeFetch([{ status: 200 }]);
+  await toNtfy(fetch, ntfySettings({ skipDays: true }), PUBLIC_NTFY, {
+    appUrl: 'https://habits.example.com', signAnswer: sign,
+  });
+  const labels = fetch.calls[0].body.actions.map((a) => a.label);
+  assert.deepEqual(labels, ['Yes', 'No', 'Skip']);
+
+  const withoutSkip = fakeFetch([{ status: 200 }]);
+  await toNtfy(withoutSkip, ntfySettings(), PUBLIC_NTFY, {
+    appUrl: 'https://habits.example.com', signAnswer: sign,
+  });
+  assert.deepEqual(withoutSkip.calls[0].body.actions.map((a) => a.label), ['Yes', 'No']);
+});
+
+test('a signed ntfy send never carries more than three actions on the wire', async () => {
+  const sign = (fields) => `code:${fields.action}:${fields.value ?? ''}`;
+  const fetch = fakeFetch([{ status: 200 }]);
+  await toNtfy(fetch, ntfySettings({ skipDays: true }), PUBLIC_NTFY, {
+    appUrl: 'https://habits.example.com', signAnswer: sign,
+  });
+  assert.ok(fetch.calls[0].body.actions.length <= 3);
 });
 
 /* ---------- a whole tick ---------- */

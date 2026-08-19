@@ -69,7 +69,7 @@ const CHANNEL_OPTIONS = [
     // cannot undo.
     onEnable: () => globalThis.Notification?.requestPermission?.() },
   { value: 'discord', label: 'Discord channel (sent by the server)' },
-  { value: 'ntfy', label: 'ntfy topic (sent by the server, nothing to click)' },
+  { value: 'ntfy', label: 'ntfy topic (sent by the server, with buttons to answer from)' },
 ];
 
 /**
@@ -475,7 +475,9 @@ export const SETTINGS = {
     label: 'ntfy topic URL',
     help: 'Where reminders are published. Subscribe to the same topic in the ' +
       'ntfy app. This server only posts to hosts its operator allows, so a URL ' +
-      'that snaps back to blank is one it has not been permitted to reach.',
+      'that snaps back to blank is one it has not been permitted to reach. ' +
+      'Anyone who can see this topic can answer these reminders, not just read ' +
+      'them — worse on public ntfy.sh, which has no per-topic access control.',
     type: 'text',
     default: '',
     placeholder: 'https://ntfy.sh/my-habits',

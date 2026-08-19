@@ -24,6 +24,7 @@ are already answered here, usually because they were the first thing tried.
 | `timezones.md` | `resolveTimeZone` vs `callerDay`, the device clock header |
 | `reminders.md` | the tick, `notify_log`, `notify_status`, the two warnings |
 | `outbound-urls.md` | Discord webhooks, the ntfy allowlist, gateway frames |
+| `ntfy-answers.md` | reversing "ntfy is notify-only": the HMAC capability, the button table, the query-string code, the inline limiters |
 | `connectivity.md` | `/healthz`, the connectivity watcher, bounded requests |
 | `auth.md` | the auth adapter, sign-in, sign-out, the security config |
 | `amounts.md` | parsing a typed amount, `numberFormat` |

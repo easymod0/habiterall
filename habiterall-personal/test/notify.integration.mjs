@@ -28,7 +28,10 @@ process.env.HABITERALL_DB = join(workdir, 'notify.db');
 const { app } = await import('../src/server.js');
 const notifier = await import('../src/notifier.js');
 const { deliverAccount } = await import('@habiterall/shared/notify-send.js');
-const { handleInteraction, INTERACTION } = await import('@habiterall/shared/discord.js');
+const { handleInteraction, INTERACTION, MAX_ANSWER_AGE_DAYS } = await import('@habiterall/shared/discord.js');
+const { signNtfyAnswer, NTFY_ANSWER_PATH } = await import('@habiterall/shared/ntfy-answer.js');
+const { RATE_LIMITS } = await import('@habiterall/shared/security.js');
+const { sessionSecret } = await import('../src/auth.js');
 
 const server = await new Promise((resolve) => {
   const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -370,6 +373,40 @@ try {
     afterNo.body.some((e) => e.date === day && e.value === 0 && e.status === ''),
     JSON.stringify(afterNo.body.filter((e) => e.date === day)));
 
+  // #221 gave an avoided habit (show_as: 'avoid' + at_most + numerical) Clean /
+  // Slipped buttons carrying the ordinary yes/no actions, but `record()` mapped
+  // them with the fixed boolean encoding — inverted for this habit shape, and
+  // invisible in the reply text, which says "Clean" either way. This is the
+  // "output that reached the platform" half: a real press, through the real
+  // adapter, read back from storage. Assert the STORED VALUE, never the label.
+  //
+  // `target_value: 2`, not 0 — a limit of 0 makes `target + 1` equal to a
+  // hardcoded 1, which would pass even with the fix reverted to `{ value: 1 }`.
+  // This edition is deliberately the one that carries the wiring proof: the
+  // cloud suite (habiterall-cloud/test/notify.integration.mjs) keeps its
+  // avoided fixture at `target_value: 0`, so the two together cover both the
+  // degenerate case and the one that actually pins `target + 1`.
+  const avoided = await api('/api/habits', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoking', type: 'numerical', target_type: 'at_most',
+      target_value: 2, show_as: 'avoid',
+    }),
+  });
+  const avoidedId = avoided.body.id;
+
+  await press(`hab|${avoidedId}|${day}|yes`);
+  const avoidedAfterYes = await api(`/api/habits/${avoidedId}/entries`);
+  ck('pressing Clean (yes) on an avoided habit stores 0, not YES',
+    avoidedAfterYes.body.some((e) => e.date === day && e.value === 0 && e.status === ''),
+    JSON.stringify(avoidedAfterYes.body.filter((e) => e.date === day)));
+
+  await press(`hab|${avoidedId}|${day}|no`);
+  const avoidedAfterNo = await api(`/api/habits/${avoidedId}/entries`);
+  ck('pressing Slipped (no) on an avoided habit stores target+1 (3), not UNSET',
+    avoidedAfterNo.body.some((e) => e.date === day && e.value === 3 && e.status === ''),
+    JSON.stringify(avoidedAfterNo.body.filter((e) => e.date === day)));
+
   const wrongChannel = [];
   await handleInteraction({
     id: 'i2', token: 't', type: INTERACTION.COMPONENT,
@@ -391,6 +428,166 @@ try {
   }, { ...adapter, respond: async (i, r) => { forged.push(r); } });
   ck('a habit id that is not ours is refused',
     /no longer exists/i.test(forged.at(-1)?.data?.content ?? ''), JSON.stringify(forged.at(-1)));
+
+  /* ---------- answering from an ntfy button ---------- */
+  //
+  // Reached over the real route (`NTFY_ANSWER_PATH`), not by calling
+  // `handleNtfyAnswer` directly — the point is to prove the MOUNTING as well as
+  // the handler: that the route sits where an unauthenticated request can reach
+  // it, that its own inline limiter bites regardless of
+  // `HABITERALL_RATE_LIMIT=off` (set for this whole file), and that the origin
+  // guard mounted above it applies here too.
+
+  const ntfySecret = sessionSecret();
+  let ntfyRequests = 0;
+  const postNtfy = async (code, { origin } = {}) => {
+    ntfyRequests++;
+    const headers = {};
+    if (origin !== undefined) headers.Origin = origin;
+    const res = await fetch(
+      `${base}${NTFY_ANSWER_PATH}?c=${encodeURIComponent(code)}`,
+      { method: 'POST', headers }
+    );
+    const body = res.status === 204 ? null : await res.json().catch(() => null);
+    return { status: res.status, body };
+  };
+  const ntfyCode = (fields) => signNtfyAnswer({ secret: ntfySecret, account: '', ...fields });
+  const shiftDay = (delta) => {
+    const d = new Date(`${day}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + delta);
+    return d.toISOString().slice(0, 10);
+  };
+
+  // A fresh habit per test below, so "nothing written" reads unambiguously off
+  // an otherwise-empty entry list rather than off a habit other tests already
+  // touched.
+  const freshHabit = async (name) => {
+    const created = await api('/api/habits', { method: 'POST', body: JSON.stringify({ name }) });
+    return created.body.id;
+  };
+
+  // A signed press records the entry, read back from storage.
+  const happyId = await freshHabit('ntfy happy path');
+  const happy = await postNtfy(ntfyCode({ habitId: happyId, date: day, action: 'yes' }));
+  ck('a signed ntfy press is accepted', happy.status === 200, JSON.stringify(happy));
+  const afterHappy = await api(`/api/habits/${happyId}/entries`);
+  ck('and the entry is recorded, read back from storage',
+    afterHappy.body.some((e) => e.date === day && e.value === 2),
+    JSON.stringify(afterHappy.body.filter((e) => e.date === day)));
+
+  // A forged code (the MAC does not verify) is refused and nothing is written.
+  const forgedNtfyId = await freshHabit('ntfy forged');
+  const validForForgery = ntfyCode({ habitId: forgedNtfyId, date: day, action: 'yes' });
+  // Flipping the LAST base64url character is not safe: a 16-byte MAC encodes to
+  // 22 characters, and the final one carries only 2 significant bits, the rest
+  // padding — so some characters (e.g. 'A' and 'B') decode to the identical MAC
+  // and "tampering" this way is a no-op about 1 time in 64. Flip a whole byte
+  // in the middle of the decoded MAC instead, which always changes the value.
+  const [version, payloadB64, macB64] = validForForgery.split('.');
+  const macBytes = Buffer.from(macB64, 'base64url');
+  macBytes[0] ^= 0xff;
+  const tamperedMac = `${version}.${payloadB64}.${macBytes.toString('base64url')}`;
+  const forgedNtfy = await postNtfy(tamperedMac);
+  ck('a forged code is refused with 403', forgedNtfy.status === 403, JSON.stringify(forgedNtfy));
+  const afterForgedNtfy = await api(`/api/habits/${forgedNtfyId}/entries`);
+  ck('and nothing was written for it',
+    !afterForgedNtfy.body.some((e) => e.date === day),
+    JSON.stringify(afterForgedNtfy.body));
+
+  // A reference to an account that does not exist (this edition has exactly
+  // one, named by the empty reference) gets the SAME 403 a forgery gets — the
+  // route must not be an oracle for which accounts exist.
+  const unknownAccountId = await freshHabit('ntfy unknown account');
+  const unknownAccountCode = signNtfyAnswer({
+    secret: ntfySecret, account: 'someone-else', habitId: unknownAccountId, date: day, action: 'yes',
+  });
+  const unknownAccount = await postNtfy(unknownAccountCode);
+  ck('an unknown account reference is refused with the identical 403',
+    unknownAccount.status === 403
+      && JSON.stringify(unknownAccount.body) === JSON.stringify(forgedNtfy.body),
+    JSON.stringify(unknownAccount));
+  const afterUnknownAccount = await api(`/api/habits/${unknownAccountId}/entries`);
+  ck('and nothing was written for it either',
+    !afterUnknownAccount.body.some((e) => e.date === day),
+    JSON.stringify(afterUnknownAccount.body));
+
+  // A habit that no longer exists: refused, and nothing written (there is
+  // nothing left to write to, which is the point).
+  const deletedId = await freshHabit('ntfy deleted');
+  await api(`/api/habits/${deletedId}`, { method: 'DELETE' });
+  const deletedCode = ntfyCode({ habitId: deletedId, date: day, action: 'yes' });
+  const deletedNtfy = await postNtfy(deletedCode);
+  ck('a deleted habit is refused, not recorded',
+    deletedNtfy.status === 400 && /no longer exists/i.test(deletedNtfy.body?.error ?? ''),
+    JSON.stringify(deletedNtfy));
+
+  // A date older than MAX_ANSWER_AGE_DAYS is stale — 410.
+  const staleId = await freshHabit('ntfy stale');
+  const staleDate = shiftDay(-(MAX_ANSWER_AGE_DAYS + 1));
+  const staleCode = ntfyCode({ habitId: staleId, date: staleDate, action: 'yes' });
+  const staleNtfy = await postNtfy(staleCode);
+  ck('a stale reminder answers 410', staleNtfy.status === 410, JSON.stringify(staleNtfy));
+  const afterStale = await api(`/api/habits/${staleId}/entries`);
+  ck('and nothing was written for a stale press',
+    afterStale.body.length === 0, JSON.stringify(afterStale.body));
+
+  // A date in the future is malformed intent, not staleness — 400.
+  const futureId = await freshHabit('ntfy future');
+  const futureDate = shiftDay(1);
+  const futureCode = ntfyCode({ habitId: futureId, date: futureDate, action: 'yes' });
+  const futureNtfy = await postNtfy(futureCode);
+  ck('a future-dated reminder answers 400', futureNtfy.status === 400, JSON.stringify(futureNtfy));
+  const afterFuture = await api(`/api/habits/${futureId}/entries`);
+  ck('and nothing was written for a future press',
+    afterFuture.body.length === 0, JSON.stringify(afterFuture.body));
+
+  // A test code — the button a "send a test notification" press carries — is
+  // live but inert: 200, and it never reaches storage.
+  const testId = await freshHabit('ntfy test-code target');
+  const testCode = ntfyCode({ habitId: testId, date: day, action: 'yes', test: true });
+  const testNtfy = await postNtfy(testCode);
+  ck('a test code is accepted', testNtfy.status === 200, JSON.stringify(testNtfy));
+  const afterTest = await api(`/api/habits/${testId}/entries`);
+  ck('and a test code writes nothing', afterTest.body.length === 0, JSON.stringify(afterTest.body));
+
+  // No Origin header (ntfy's subscribing device, like the Android client,
+  // sends none) is accepted; a foreign Origin is refused by the same guard
+  // that protects the rest of the app — its own test, not inherited from
+  // Android's.
+  const noOriginId = await freshHabit('ntfy no origin');
+  const noOrigin = await postNtfy(
+    ntfyCode({ habitId: noOriginId, date: day, action: 'yes' })
+  );
+  ck('no Origin header is accepted', noOrigin.status === 200, JSON.stringify(noOrigin));
+
+  const foreignOriginId = await freshHabit('ntfy foreign origin');
+  const foreignOrigin = await postNtfy(
+    ntfyCode({ habitId: foreignOriginId, date: day, action: 'yes' }),
+    { origin: 'https://evil.example' }
+  );
+  ck('a foreign Origin is refused, even with an otherwise-valid code',
+    foreignOrigin.status === 403 && /cross-origin/i.test(foreignOrigin.body?.error ?? ''),
+    JSON.stringify(foreignOrigin));
+  const afterForeignOrigin = await api(`/api/habits/${foreignOriginId}/entries`);
+  ck('and nothing was written for the cross-origin attempt',
+    afterForeignOrigin.body.length === 0, JSON.stringify(afterForeignOrigin.body));
+
+  // The limiter is written inline at the route rather than through the
+  // switchable `limit()` helper, specifically so it still bites with
+  // HABITERALL_RATE_LIMIT=off (set for this entire file) — proven behaviourally
+  // here, not by reading the source, because a source-text guard cannot see a
+  // renamed binding or a limiter quietly routed through the pass-through
+  // helper. Budgeted against requests this file has already sent through the
+  // same limiter (`ntfyRequests`), since they share one window and one key.
+  const junkCode = 'v1.notarealtoken.notarealmac12345678';
+  let saw429 = false;
+  const budget = RATE_LIMITS.ntfyAnswer.limit + 20 - ntfyRequests;
+  for (let i = 0; i < budget && !saw429; i++) {
+    const r = await postNtfy(junkCode);
+    if (r.status === 429) saw429 = true;
+  }
+  ck('the ntfy-answer limiter still bites with HABITERALL_RATE_LIMIT=off',
+    saw429, `sent ${ntfyRequests} requests total, limit is ${RATE_LIMITS.ntfyAnswer.limit}/min`);
 
   /* ---------- whose day is it ---------- */
   //

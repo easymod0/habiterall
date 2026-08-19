@@ -16,6 +16,12 @@ import {
   parseChannelList, parseDiscordWebhook, parseNtfyToken, parseNtfyUrl,
   parseSnowflake, parseTimeZone,
 } from './notify.js';
+// `notify.js` already reaches into `shared/public` for `isAvoided`
+// (`notify.js:36`), on the grounds that node can read anything on disk even
+// though the browser cannot see `shared/src` — the same grounds this import
+// stands on. `validate.js` -> `notify.js` -> `ui/toggle.js` adds no cycle:
+// nothing toggle.js imports reaches back here.
+import { DAY, valueForState } from '../public/ui/toggle.js';
 
 export const HABIT_TYPES = new Set(['boolean', 'numerical']);
 export const TARGET_TYPES = new Set(['at_least', 'at_most']);
@@ -309,6 +315,36 @@ export function entryWrite(habit, parsed, { UNSET, SKIP }) {
   }
 
   return { op: 'upsert', value, status: '', notes, reply: { value, notes } };
+}
+
+/**
+ * The `parseEntry` body an answered reminder means.
+ *
+ * A press carries `yes` / `no` / `skip` / `amount`, and both editions' button
+ * handlers used to turn those into `{value}` inline, with a fixed BOOLEAN
+ * encoding — `yes` -> YES, `no` -> UNSET. That is wrong for an avoided habit
+ * (`isAvoided`, `ui/toggle.js`), whose `yes` (labelled "Clean") means the
+ * SMALLEST value and whose `no` ("Slipped") means `target + 1`: the inline
+ * ternary stored the opposite of what the reply text claimed, silently,
+ * because a stored value and a label are two different things and nothing
+ * compared them. `valueForState` already has the right encoding for every
+ * habit shape and is already unit-tested — this is the one place both
+ * editions ask it, so the rule is asked once rather than copied twice with
+ * one exception (the avoided case) that only one copy remembered.
+ *
+ * `skip` returns before `valueForState` is reached on purpose:
+ * `valueForState` throws for `DAY.SKIP`, because a skip is the status column
+ * and never a value — see the throw's own comment.
+ *
+ * @param {import('./types.js').Habit} habit
+ * @param {{action: 'yes'|'no'|'skip'|'amount', value?: unknown}} answer
+ * @returns {{status: 'skip'} | {value: number|unknown}}
+ */
+export function answerBody(habit, { action, value }) {
+  if (action === 'skip') return { status: 'skip' };
+  if (action === 'yes') return { value: valueForState(habit, DAY.DONE) };
+  if (action === 'no') return { value: valueForState(habit, DAY.NO) };
+  return { value };                       // 'amount' — the number is the answer
 }
 
 /**

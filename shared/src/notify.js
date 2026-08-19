@@ -65,7 +65,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  *   label: string,
  *   delivery: 'device'|'server',
  *   configKeys: string[],
- *   interactive?: boolean,
+ *   interactive?: boolean | ((settings: Record<string, any>, ctx: {appUrl?: string}) => boolean),
  *   ready?: (settings: Record<string, any>, ctx: {bot?: boolean}) => boolean,
  * }>}
  */
@@ -131,25 +131,32 @@ export const CHANNELS = {
     // reason to call this destination unconfigured.
     configKeys: ['ntfyTopicUrl'],
     /**
-     * NOT interactive, and that is a decision rather than a gap.
+     * Interactive when there is somewhere for the button to report back to.
      *
-     * ntfy can carry action buttons, and an ntfy action is an HTTP request the
-     * SUBSCRIBING DEVICE makes — to a URL written into the notification, from
-     * wherever that phone happens to be, carrying whatever the message told it
-     * to carry. Answering a reminder that way means this server standing up an
-     * inbound endpoint that anything able to reach it may call, authorised by
-     * nothing but the contents of the request. That is precisely the shape
-     * `discord-gateway.js` exists to avoid — a self-hosted instance behind a
-     * router has no inbound port and no hostname — and the rule that saves the
-     * Discord buttons has no counterpart here: "a press is authorised by the
-     * CHANNEL it came from, not by its `custom_id`" needs a channel to resolve
-     * an account from, and an ntfy topic is a URL somebody typed.
+     * ntfy's action buttons are an HTTP request the SUBSCRIBING DEVICE makes —
+     * to a URL written into the notification, from wherever that phone happens
+     * to be. That used to be the reason this destination shipped with no
+     * buttons at all: an inbound endpoint authorised by nothing but the
+     * contents of the request is exactly the shape `discord-gateway.js` exists
+     * to avoid, and the rule that saves the Discord buttons has no counterpart
+     * here — "a press is authorised by the CHANNEL it came from" needs a
+     * channel to resolve an account from, and an ntfy topic is a URL somebody
+     * typed.
      *
-     * So this destination TELLS you and the app is where you answer. Making it
-     * interactive is a separate decision with a real authorisation question
-     * attached, and the paragraph above is the one to re-read first.
+     * The button now points at OUR OWN `POST /notify/ntfy/answer`
+     * (`shared/src/ntfy-answer.js`), carrying an HMAC over the account, habit,
+     * date, action and value, signed with the instance secret. So the request
+     * still comes from the subscriber's device, but what authorises the write
+     * is the code, not the caller — the same trust boundary a webhook URL or a
+     * Discord bot token gives the other channels, expressed as a capability
+     * instead. `ctx.appUrl` is what the button needs to be reachable at all;
+     * with none, there is nowhere to point it and this stays `false`. See
+     * `docs/decisions/ntfy-answers.md` for the reasoning in full, including
+     * what is still true from the old design: the topic still gates who can
+     * *see* the reminder, and on public ntfy.sh — no per-topic ACL — the HMAC
+     * alone carries the burden of gating who can *answer* it.
      */
-    interactive: false,
+    interactive: (settings, ctx = {}) => Boolean(ctx.appUrl),
   },
 };
 
@@ -539,6 +546,16 @@ export function ntfyTarget(raw, env = globalThis.process?.env ?? {}) {
 }
 
 /**
+ * ntfy accepts at most three actions on a message. Asserted again here rather
+ * than trusted from the caller: `ntfyActions` (ntfy-answer.js) already builds
+ * no more than this, but `notify.js` must not import that module (see the
+ * comment on `postNtfy` in notify-send.js, which is what actually calls it,
+ * for why), so the payload keeps its own belt in case that guarantee is ever
+ * weakened at the call site — a fourth action must not silently ride along.
+ */
+const MAX_NTFY_PAYLOAD_ACTIONS = 3;
+
+/**
  * The body of an ntfy publish.
  *
  * Everything the Discord embed carries, flattened: ntfy has a title and a
@@ -551,8 +568,12 @@ export function ntfyTarget(raw, env = globalThis.process?.env ?? {}) {
  * @param {string} args.topic
  * @param {string} [args.date] local date the reminder is for
  * @param {string} [args.appUrl] public URL of this habiterall, if known
+ * @param {object[]} [args.actions] ntfy action buttons, already built (and
+ *   signed) by the caller — this builder attaches them and nothing else.
  */
-export function ntfyPayload({ habit, message, topic, date = '', appUrl = '' }) {
+export function ntfyPayload({
+  habit, message, topic, date = '', appUrl = '', actions,
+}) {
   const lines = [];
   if (message.subtitle) lines.push(message.subtitle);
   if (message.body) lines.push(message.body);
@@ -576,6 +597,13 @@ export function ntfyPayload({ habit, message, topic, date = '', appUrl = '' }) {
     let end = appUrl.length;
     while (end > 0 && appUrl[end - 1] === '/') end--;
     payload.click = `${appUrl.slice(0, end)}/`;
+  }
+
+  // Absent rather than an empty array when there is nothing to attach — the
+  // same "no buttons" shape whether the cause is no `appUrl`, no `signAnswer`,
+  // or simply nothing passed in.
+  if (Array.isArray(actions) && actions.length) {
+    payload.actions = actions.slice(0, MAX_NTFY_PAYLOAD_ACTIONS);
   }
 
   return payload;
@@ -790,6 +818,31 @@ export function channelConfigured(id, settings = {}, ctx = {}) {
   const channel = CHANNELS[id];
   if (channel.ready) return channel.ready(settings, ctx);
   return channel.configKeys.every((key) => String(settings[key] ?? '') !== '');
+}
+
+/**
+ * Whether a channel's buttons can currently record an answer.
+ *
+ * Most entries carry a plain boolean; ntfy's is a predicate on the
+ * deployment, exactly like `ready` above is a predicate on it — its buttons
+ * post back to this instance's OWN address, so there is nothing for one to
+ * record where none is known. A caller reading `CHANNELS[id].interactive`
+ * directly would get a function back for one entry and a boolean for the
+ * rest; this is the one place that decides which, so nothing else has to.
+ *
+ * `Object.hasOwn`, for the reason `channelConfigured` already has one: `id`
+ * can come from a request body and `CHANNELS['__proto__']` is a truthy object
+ * with no `interactive` of its own.
+ *
+ * @param {string} id
+ * @param {Record<string, any>} [settings]
+ * @param {{appUrl?: string}} [ctx]
+ * @returns {boolean}
+ */
+export function channelInteractive(id, settings = {}, ctx = {}) {
+  if (!Object.hasOwn(CHANNELS, id)) return false;
+  const { interactive } = CHANNELS[id];
+  return typeof interactive === 'function' ? interactive(settings, ctx) : Boolean(interactive);
 }
 
 /**

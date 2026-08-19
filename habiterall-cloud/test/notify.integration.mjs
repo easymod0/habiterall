@@ -353,6 +353,78 @@ try {
       .then((r) => r.rows[0]?.status));
   check('and the entry is untouched', unchanged === '', JSON.stringify(unchanged));
 
+  // #221 gave an avoided habit (show_as: 'avoid' + at_most + numerical) Clean /
+  // Slipped buttons carrying the ordinary yes/no actions, but `record()` mapped
+  // them with the fixed boolean encoding — inverted for this habit shape, and
+  // invisible in the reply text, which says "Clean" either way. This is the
+  // "output that reached the platform" half: a real press, through the real
+  // adapter and `withUser`, read back from Postgres. Assert the STORED VALUE,
+  // never the label. Discord user restriction is dropped first, or this press
+  // would be refused for the same reason the impostor one above was.
+  await admin.query(
+    `UPDATE users SET settings = settings - 'discordUserId' WHERE id = $1`, [wired]
+  );
+  const avoidedHabit = await withUser(wired, (db) =>
+    db.query(
+      `INSERT INTO habits (user_id, name, type, target_type, target_value, show_as)
+       VALUES ($1, 'Smoking', 'numerical', 'at_most', 0, 'avoid') RETURNING id`,
+      [wired]
+    ).then((r) => r.rows[0].id));
+
+  await press(BOT_CHANNEL, `hab|${avoidedHabit}|${day}|yes`);
+  const avoidedAfterYes = await withUser(wired, (db) =>
+    db.query(`SELECT value, status FROM entries WHERE habit_id = $1 AND date = $2`,
+      [avoidedHabit, day]).then((r) => r.rows[0]));
+  check('pressing Clean (yes) on an avoided habit stores 0, not YES',
+    avoidedAfterYes?.status === '' && Number(avoidedAfterYes?.value) === 0,
+    JSON.stringify(avoidedAfterYes));
+
+  await press(BOT_CHANNEL, `hab|${avoidedHabit}|${day}|no`);
+  const avoidedAfterNo = await withUser(wired, (db) =>
+    db.query(`SELECT value, status FROM entries WHERE habit_id = $1 AND date = $2`,
+      [avoidedHabit, day]).then((r) => r.rows[0]));
+  check('pressing Slipped (no) on an avoided habit stores target+1 (1), not UNSET',
+    avoidedAfterNo?.status === '' && Number(avoidedAfterNo?.value) === 1,
+    JSON.stringify(avoidedAfterNo));
+
+  /* ---------- answering from an ntfy button: the tenancy question ---------- */
+  //
+  // ntfy's button carries no session and no channel to resolve an account
+  // from — the code IS the account, over an HMAC. The habit id riding beside
+  // it must never be trusted on its own: mint a code for `wired` naming
+  // `traveller`'s own habit and prove the write is scoped by `withUser`, not
+  // by the id in the payload. The general shape of the route (HTTP mounting,
+  // Origin handling, the inline limiter) is covered against a real server in
+  // ntfy-answer.integration.mjs; this is the one thing only Postgres can
+  // prove, so it stays beside the rest of this file's `withUser` checks.
+  console.log('--- ntfy: a code minted for one account cannot reach another\'s habit ---');
+  const { handleNtfyAnswer, signNtfyAnswer } = await import('@habiterall/shared/ntfy-answer.js');
+  process.env.SESSION_SECRET ??= 'cloud-notify-integration-secret';
+  const ntfyAdapter = notifier.ntfyAnswerAdapter();
+
+  const travellerSecretHabit = await mkHabit(traveller, 'Tokyo Secret Habit', '');
+  const tenancyCode = signNtfyAnswer({
+    secret: process.env.SESSION_SECRET, account: String(wired),
+    habitId: travellerSecretHabit, date: day, action: 'yes',
+  });
+  const tenancyResult = await handleNtfyAnswer(tenancyCode,
+    { ...ntfyAdapter, log: { error: () => {} } });
+  check('a valid code naming another account\'s habit id is refused, not honoured',
+    tenancyResult.status === 400 && /no longer exists/i.test(tenancyResult.error ?? ''),
+    JSON.stringify(tenancyResult));
+
+  const travellerUntouched = await withUser(traveller, (db) =>
+    db.query(`SELECT COUNT(*)::int c FROM entries WHERE habit_id = $1 AND date = $2`,
+      [travellerSecretHabit, day]).then((r) => r.rows[0].c));
+  check('the traveller\'s habit is untouched', travellerUntouched === 0,
+    `entries=${travellerUntouched}`);
+
+  const wiredGainedNothing = await withUser(wired, (db) =>
+    db.query(`SELECT COUNT(*)::int c FROM entries WHERE habit_id = $1`, [travellerSecretHabit])
+      .then((r) => r.rows[0].c));
+  check('and wired gained nothing either — RLS hides the row from that account entirely',
+    wiredGainedNothing === 0, `entries=${wiredGainedNothing}`);
+
   /* ---------- one account follows its device, another does not ---------- */
   //
   // The multi-tenant half of the same rule: two accounts, one on `auto` and one

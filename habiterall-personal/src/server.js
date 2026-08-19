@@ -10,13 +10,14 @@ import { SqliteStore } from './session-store.js';
 import {
   initAuth, mountAuth, requireAuth, mode, sessionSecret, state as authState,
 } from './auth.js';
-import { start as startNotifier } from './notifier.js';
+import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
   sameOriginOnly, warnOnUntrustedProxy,
 } from '@habiterall/shared/security.js';
+import { NTFY_ANSWER_PATH, handleNtfyAnswer } from '@habiterall/shared/ntfy-answer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -209,6 +210,34 @@ app.use('/api/import', requireAuth, importLimiter,
 app.use(express.json({ limit: '1mb' }));
 
 mountAuth(app, apiLimiter);
+
+// ntfy's action buttons post here — an unauthenticated request, since ntfy's
+// subscribing device carries no session for this app at all. Mounted below
+// `sameOriginOnly` above, so the same origin check applies to it (a missing
+// `Origin` is allowed, exactly as for the Android client — see the comment
+// there — which is what ntfy's device sends too), and above the `/api` mount
+// below so it is never reached through `requireAuth`. It takes no body, only
+// the query string, so its position relative to `express.json()` above does
+// not matter either way; said here rather than left to whichever survives the
+// next edit.
+app.post(NTFY_ANSWER_PATH,
+  // Written inline with `rateLimit(...)` directly, deliberately NOT through
+  // `limit()` above — same reason the credential limiter in auth.js never
+  // goes through it: this is an unauthenticated, internet-reachable route,
+  // and routing its limiter through a helper that can become a pass-through
+  // under HABITERALL_RATE_LIMIT=off is how CodeQL stopped being able to see
+  // that the credential route had no bound at all. This route is exactly that
+  // shape again.
+  rateLimit({ ...RATE_LIMITS.ntfyAnswer, keyGenerator: byIp }),
+  async (req, res) => {
+    const result = await handleNtfyAnswer(String(req.query.c ?? ''), {
+      ...ntfyAnswerAdapter(), log,
+    });
+    const body = {};
+    if (result.text) body.text = result.text;
+    if (result.error) body.error = result.error;
+    res.status(result.status).json(body);
+  });
 
 // Everything below needs a session — unless auth is off, in which case
 // `requireAuth` is a pass-through and this edition behaves exactly as it always

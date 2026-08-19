@@ -1292,7 +1292,7 @@ A reminder has two halves, set in two places:
 | **Android app** | the phone, as a local alarm | Yes / No / a count, from the shade — or tap the notification itself to open the app on that habit | yes | the [native app](android-native/README.md) |
 | **Discord (bot)** | your server | Yes / No / Skip buttons, and a box for an amount | no | a Discord application |
 | **Discord (webhook)** | your server | nothing — text only | no | a webhook URL |
-| **ntfy** | your server | nothing — it is notify-only, by design (see below) | no | a topic URL on a host whoever runs the instance allows |
+| **ntfy** | your server | Yes / No / a count, from the shade — a signed code, not the topic, authorises it (see below) | no | a topic URL on a host whoever runs the instance allows, and a public server address for the buttons |
 
 Nothing is sent for a habit you have already recorded that day.
 
@@ -1387,11 +1387,26 @@ for a certificate. It applies to that entry alone, so it does not allow plaintex
 to ntfy.sh — and it costs what plaintext always costs: the habit's name, its
 prompt and your ntfy token readable by anything on that network.
 
-**There is nothing to press on an ntfy notification, deliberately.** Answering
-from one would mean this server exposing an inbound HTTP endpoint that anything
-could call — the very thing the Discord bot's outbound socket exists to avoid. So
-the reminder tells you and the app is where you answer; for answering in place,
-use the Android app or the Discord bot.
+**An ntfy notification has buttons too, when the server has a public address**
+(`HABITERALL_PUBLIC_URL` / `PUBLIC_URL`) for them to report back to — without
+one, there is nowhere to point a button and the reminder is text-only, same as
+before. Each button is an HTTP request your phone makes back to your own
+server, carrying a signed code rather than anything the topic itself proves:
+the code names one account, one habit, one date and one answer, and is what
+authorises the write — not the topic, which anyone who can see it could
+otherwise use to answer for you. That is the real difference from the topic
+URL itself: **whoever can see the topic can see the reminder, but only the
+signed code in it can record an answer**, and on ntfy.sh — which has no
+per-topic access control — the code is carrying the whole weight of that
+distinction. A forged or stale code is refused and nothing is written; the
+worst a leaked one can do is answer the one question, for the one habit and
+date, that the reminder was already asking.
+
+Everything about answering matches the Discord buttons above: Yes / No / Skip
+or an amount box, an avoided habit's Clean / Slipped in their place, and up to
+two days late before it asks you to open the app instead. Sending a test
+notification exercises the same buttons, harmlessly — pressing one answers
+"Nothing — this was a test message" and writes nothing.
 
 The server checks once a minute. A reminder it slept through still goes out if it
 is under half an hour late and is dropped if it is more, so a day of downtime

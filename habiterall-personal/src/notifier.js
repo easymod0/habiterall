@@ -20,8 +20,10 @@ import {
 } from '@habiterall/shared/notify-send.js';
 import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
-import { entryWrite, parseEntry } from '@habiterall/shared/validate.js';
+import { answerBody, entryWrite, parseEntry } from '@habiterall/shared/validate.js';
+import { signNtfyAnswer } from '@habiterall/shared/ntfy-answer.js';
 import { log } from '@habiterall/shared/log.js';
+import { sessionSecret } from './auth.js';
 
 /** Rows older than this are of no interest; they are only a "did we?" record. */
 const KEEP_LOG_DAYS = 45;
@@ -233,10 +235,7 @@ export function interactionAdapter() {
       const habit = /** @type {any} */ (q.habitById.get(habitId));
       if (!habit) return { ok: false, error: 'That habit no longer exists.' };
 
-      const body = action === 'skip' ? { status: 'skip' }
-        : action === 'yes' ? { value: YES }
-          : action === 'no' ? { value: UNSET }
-            : { value };
+      const body = answerBody(habit, { action, value });
 
       let parsed;
       try {
@@ -252,6 +251,58 @@ export function interactionAdapter() {
       return { ok: true, habit, text: answerText(habit, { action, value }) };
     },
   };
+}
+
+/* ---------- answering from an ntfy button ---------- */
+
+/**
+ * The adapter `handleNtfyAnswer` needs for this edition.
+ *
+ * `today` and `record` are exactly `interactionAdapter()`'s — neither one
+ * depends on how the account was resolved, so they are reused rather than
+ * given a second definition of what a press means to storage.
+ */
+export function ntfyAnswerAdapter() {
+  const { today, record } = interactionAdapter();
+  return {
+    secret: () => sessionSecret(),
+
+    /**
+     * This edition has one implicit user, so the only reference that can name
+     * it is the EMPTY one `signNtfyAnswer` writes for it. Accepting an
+     * arbitrary reference here just because the cloud edition's cross-tenant
+     * lookup does would let an unauthenticated request pick any account.
+     *
+     * Async to match the adapter contract `handleNtfyAnswer` documents — the
+     * cloud edition's version genuinely awaits a query; this one has nothing
+     * to await, but the shape is the same for both.
+     */
+    async resolveAccount(ref) {
+      return ref === '' ? { id: null, settings: loadSettings() } : null;
+    },
+
+    today: async (account) => today(account),
+    record: async (account, args) => record(account, args),
+  };
+}
+
+/**
+ * Signs an ntfy answer code for the one account this edition has.
+ *
+ * `account` is accepted only to match the shape `deliverAccount` calls a
+ * `ctx.signAnswer` with — this edition has nothing to read from it, and the
+ * code's `account` field is always the empty reference `ntfyAnswerAdapter`'s
+ * `resolveAccount` requires.
+ *
+ * @param {any} account unused; see above
+ * @param {{habitId: number, date?: string, action: string, value?: number,
+ *   test?: boolean}} fields matches `sendToChannel`'s `signAnswer` shape,
+ *   where `date` is optional for a test send; defaulted below because
+ *   `signNtfyAnswer` itself requires a string.
+ * @returns {string}
+ */
+function signAnswer(account, fields) {
+  return signNtfyAnswer({ secret: sessionSecret(), account: '', ...fields, date: fields.date ?? '' });
 }
 
 /**
@@ -287,7 +338,14 @@ export async function sendTest(deps = {}) {
   for (const channel of channels) {
     const result = await sendToChannel(
       channel,
-      { habit: /** @type {any} */ (habit), settings, test: true, appUrl, botToken },
+      {
+        habit: /** @type {any} */ (habit), settings, test: true, appUrl, botToken,
+        // Live but inert: a `test: true` code is exempt from the habit-id and
+        // date checks and never reaches storage (`handleNtfyAnswer` returns
+        // before `record` for one), so the test button exercises the whole
+        // interactive path rather than only the send.
+        signAnswer: (fields) => signAnswer(null, fields),
+      },
       deps
     );
     results.push({ channel, ok: result.ok, error: result.ok ? undefined : result.error });
@@ -342,6 +400,9 @@ export function start(env = process.env) {
     intervalMs: config.intervalMs,
     appUrl: config.appUrl,
     botToken: config.botToken,
+    // Travels the same route `botToken` and `appUrl` already do: no reaching
+    // into `process.env` from inside `shared/src` for it.
+    signAnswer,
     collect: (instant) => {
       // Cheap, and it keeps the table from growing without bound in a
       // long-lived install.
