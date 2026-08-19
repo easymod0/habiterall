@@ -28,9 +28,12 @@ are already answered here, usually because they were the first thing tried.
 | `auth.md` | the auth adapter, sign-in, sign-out, the security config |
 | `amounts.md` | parsing a typed amount, `numberFormat` |
 | `compose-and-env.md` | `extends`, the env templates, the discovery test |
+| `testing.md` | the browser fleet: worker counts, the sleep audit, the theme split |
 
-Each file is the original prose verbatim, sliced by topic. It was checked
-line-for-line against the pre-split `CLAUDE.md`; the split lost nothing.
+The first sixteen files are the original prose verbatim, sliced by topic and
+checked line-for-line against the pre-split `CLAUDE.md`; that split lost nothing.
+`testing.md` came later, when the browser-suite measurements had grown to a third
+of the root file's testing section with nowhere here to go.
 
 ## Adding to this
 

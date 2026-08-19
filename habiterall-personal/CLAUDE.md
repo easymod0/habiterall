@@ -35,8 +35,8 @@ Only what is coupled to storage:
   than installed so this edition keeps its no-native-module property
 - `public/app-entry.js` — three lines: `start()` with the shared adapter
 - `docker-compose.yml` — a build and nothing else. The environment block is in
-  `examples/docker-compose.personal.yml`, which this file `extends`; see the
-  root CLAUDE.md for why, and do not write one back in here
+  `examples/docker-compose.personal.yml`, which this file `extends`; see
+  `examples/CLAUDE.md` for why, and do not write one back in here
 
 The entire UI is in `shared/public/` and served by the static mounts in
 `src/server.js`. Do not copy `app.js`, `style.css`, or `index.html` back here.
@@ -89,7 +89,7 @@ limiter behind `requireAuth` never meets an unauthenticated caller anyway — wh
 gets this edition backwards: with auth off nothing else stands in front of the
 API, so the limiter is the only thing between an open instance and a client
 hammering a *synchronous* SQLite database until the event loop stops. The switch
-is for the browser suites, which reset fixtures across twenty-two runs from one
+is for the browser suites, which reset fixtures across thirty runs from one
 address and pass 300/minute long before they find a bug, and for a trusted LAN.
 It warns at startup when it is off.
 
@@ -238,7 +238,7 @@ docker compose up -d      # containerised
 
 `npm run test:browser` here starts the fleet the browser suites run on — one
 server per worker, each with a throwaway SQLite file, auth and the limiter off.
-They drive the app rather than the login, and twenty-nine suites resetting
+They drive the app rather than the login, and thirty suites resetting
 fixtures from one address is exactly the traffic shape the API limit exists to
 stop. `test/browser-fleet.mjs` is the script; the runner itself is shared.
 

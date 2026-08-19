@@ -18,7 +18,7 @@
  * it. A run that begins by creating the file cannot have that class of failure.
  *
  * Both auth and the rate limiter are off, for the reasons the CI workflow gives:
- * these suites drive the app rather than the login, and twenty-nine of them
+ * these suites drive the app rather than the login, and thirty of them
  * resetting fixtures from one address pass the read limit long before they find
  * a bug. The sign-in flow and the limits have their own jobs.
  */

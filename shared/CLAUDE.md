@@ -87,6 +87,10 @@ it.
 **A row holding 0 is still a success on an at-most habit** under either answer —
 that is the user saying "none today", which is the thing being asked for.
 
+**`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
+still works for boolean habits, where `3` is unambiguously a skip, and is wrong
+for numerical ones, where `3` is a real amount.
+
 **The rule is gated to at-most habits, and the gate is load bearing.** Ungated,
 `success` fell through to the ordinary predicate for every habit — and on an
 at-least habit with a target of **0**, `0 >= 0` is true while `dayCredit`'s
@@ -142,16 +146,24 @@ the same asymmetry `at_most_unlogged` and `show_as` already have.
 ## Scoring, streaks and stats
 
 **The score is a trailing-window ratio**, not per-day credit scaled by frequency.
-The earlier formula overshot for every non-daily habit and was hidden by a clamp;
-a single checkmark on a 1×/365d habit reported 100%. The decay constant is Loop's
-own, `0.5^(sqrt(frequency)/13)`, read from its source. A fixed 30-day half-life
-made a perfect habit take four months to look strong instead of one.
+It feeds an adherence ratio (always `[0,1]`) into an EWMA; do not "simplify" it
+back to scaling a day's credit by `1/frequency`, which overshot for every
+non-daily habit and was hidden by a clamp — a single checkmark on a 1×/365d
+habit reported 100%. The decay constant is Loop's own,
+`0.5^(sqrt(frequency)/13)`, read from its source: a 13-day half-life for a daily
+habit, slower for less frequent ones. A fixed 30-day half-life lived here for a
+while — the same shape, but so sluggish that a perfect habit took four months to
+look strong instead of one. `test/stats.test.js` pins the curve at days 13, 30
+and 60 so it cannot drift back.
 
 **Every date range is clamped**, and `computeStats` starts at
 `from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`). That
 window is derived inside `computeStats` and never returned, which is why anything
 needing a figure from it gets a returned field rather than walking the entries
-again — `computeRecovery` answers `longest` and `lastEnd` for that reason.
+again — `computeRecovery` answers `longest` and `lastEnd` for that reason. Every
+aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
+the unbounded `dateRange` on a distant-past entry turns one request into
+~700,000 iterations on a single-threaded server.
 
 **`onPaceSeries` pro-rates the requirement near the start** —
 `required = min(activeDays, num*activeDays/den)` — so a habit is not judged
@@ -183,6 +195,59 @@ never carried. There are **two** ways a skip lands outside a run: after the last
 on-pace day (kept out by the reset when the run closes) and before any run has
 STARTED (kept out by the guard on banking at all). The second was deletable with
 the whole suite green until `s x x x x x x x` was added.
+
+**Best streaks are selected by length but listed by date.** Two different
+questions: which runs to show, and how to order them. A list ordered by length
+reads as a leaderboard and hides whether the good runs were recent. Note the
+bar scale must come from `Math.max(...top)`, not `top[0]` — that stopped being
+the longest row the moment the ordering changed.
+
+**A streak and a lapse are made of "on pace", not "done today".** `onPaceSeries`
+asks whether the trailing `denominator`-day window holds enough completions,
+pro-rated by any skips inside it — the same window and the same pro-rating
+`computeScores` uses, so strength and streaks cannot disagree about whether a
+habit is being kept. For `num >= den` the window is one day and the
+requirement clamps to it, so this reduces exactly to `isCompleted` and daily
+habits behave as they always have; that degeneration is what makes the change
+safe, and `test/resilience.test.js` pins it.
+
+Consequences worth knowing. A streak counts CALENDAR days, so a 3×/week habit
+kept for a month is a 30-day streak rather than a 12-day one — that is what
+"I have kept this up for a month" means, and it keeps the number comparable
+with a daily habit's. The window is rolling, not calendar-aligned: three
+sessions crammed into Mon–Wed satisfy every day that week and then fall short
+the following Monday, because by then the trailing seven days hold only two.
+And this is a computation change only — nothing about storage, the schema or
+the Loop export moved.
+
+**Resilience applies at any frequency.** It used to return
+`{applicable: false}` for non-daily habits, because a miss meant "a day it was
+not done" and a 3×/week habit has four of those every week. `onPaceSeries`
+fixed the premise instead: a miss is a day the habit fell below its RATE.
+`applicable` is kept in the response shape but nothing sets it false. Two
+related rules in the same code: an *ongoing* lapse is excluded from recovery
+rate (being mid-slip is not the same as having failed to recover) and reported
+as `openRun` instead; and a rate of `null` means "nothing has ever been
+missed", which is a different claim from 100% and must not render as a number.
+
+**`weekStart` reaches every weekday axis, and for a long time it did not.**
+`startOfWeek` in stats.js has always honoured it, so the history and
+times-per-week charts bucketed on the right day — while `calendarWindow`
+snapped unconditionally to Saturday/Sunday and the weekday charts drew Sunday
+first. Someone whose week starts on Monday got a Sunday-anchored heatmap on the
+chart the detail view opens to, with the labels beside it saying otherwise. The
+setting's own help text says it is "used by the history and times-per-week
+charts", which is literally true and is exactly how it survived.
+
+`weekOrder` in charts.js is the one translation from `getDay()`'s Sunday-based
+numbering to the account's, and **both the labels and the data read through
+it**. Rotating the captions alone would have captioned Monday's row "Sunday"
+and left the bars where they were — a chart wrong in the one dimension it
+exists to show. The calendar heatmap needs neither, because its rows are
+positional: `calendarWindow` decides which day the column starts on and the
+grid fills sequentially from there. What it does need is the labels, and
+Home/End, which jumped to `getDay() === 0` and so walked off the top of a
+Monday-start grid.
 
 ## Awards
 
@@ -284,7 +349,12 @@ strength — because those are the words the cards either side already use.
 **Loop compatibility is exact and verified against a real backup**: timestamps
 are epoch millis at UTC midnight, `YES_AUTO(1)` counts as done, `NO(0)` is a
 stated lapse and keeps its row while `UNKNOWN(-1)` has none, and identity is
-`(issuer, subject)`.
+`(issuer, subject)`. None of it is guessable — it was read from the uhabits
+source. The last two used to be one thing, both dropped, and dropping `NO`
+discarded the only mark separating a day the user answered from a day nobody
+has, which on a backup from someone who does not use Loop's question marks is
+most of their history. `test/import.test.js` and `test/export-loop.test.js` pin
+all of it: if you change a conversion and those fail, the tests are right.
 
 **Only entry values scale by ×1000 — habit targets do not.** `Repetitions.value`
 of `2000` means 2, but `Habits.target_value` of `2` means 2. Scaling the target
@@ -407,6 +477,21 @@ defaulting off as Loop's own do, read from its source (`pref_skip_enabled`,
 `skipDays`: both grids, both day editors, the Discord buttons and the Android
 notification.
 
+**The CSV export must ship both files.** `Checkmarks.csv` has one column per
+habit and nothing that says what a habit *is*, so parsed alone every column
+defaults to boolean — and a measurable habit's `3` is then read as Loop's SKIP
+sentinel while `8` and `10` are dropped as unknown ones. That is why
+`/api/export.csv` returns a zip. `test/export-csv.test.js` pins the failure
+mode deliberately, so if the ambiguity ever goes away the test says so.
+
+**And `Habits.csv` is a SOURCE of habits, not only a lookup table.** It was read
+purely as metadata to decorate the columns of `Checkmarks.csv`, which meant the
+habits an account has were taken from the value grid alone — so an account whose
+habits have no entries exported a lone header line and restored as
+`400 no habits found in the uploaded file`. Its own habits, fully described in
+the other file, were parsed and thrown away. `parseZipExport` unions the two
+now, which also covers a habit named in one file and not the other.
+
 ## Reminders and destinations
 
 **A destination is either on-device or server-sent, and the difference is the
@@ -454,11 +539,23 @@ the dialog says "not delivered **since**". The wording is the **sender's own**;
 re-phrasing it in the UI is how the dialog and the log come to disagree about one
 404. `sendTest` records unconditionally, because a press is one deliberate act.
 
-**A skip is an answer, and both destinations have to agree.** `answeredIds` and
-`Reminders.needsReminder` are mirrors, and the rule is
-`isCompleted(...) !== false` rather than a truthiness test: `isCompleted` returns
-`null` for a skip. The phone once had a third rule of its own — "does a row exist
-for today?" — which silenced six-of-eight-glasses while the server kept asking.
+**A day that needs no reminder is one that has been ANSWERED, not one that has
+been completed, and there are THREE readers of that rule.** It is
+`isCompleted(...) !== false` rather than a truthiness test, because `isCompleted`
+returns `null` for a skip — falsy, so a truthiness test asked again about every
+day the user had explicitly skipped, while `false` is a real miss and still gets
+its nudge. `answeredIds` is the server's; the Kotlin `Reminders.needsReminder` is
+the phone's, mirrored for the same reason `ReminderTime` mirrors `ui/time.js`
+(two clients answering one question differently is indistinguishable from one of
+them being broken), and the phone once had a third rule of its own — "does a row
+exist for today?" — which silenced six-of-eight-glasses while the server kept
+asking. `isDayAnswered` in `public/ui/nudge.js` is the browser's, for the `web`
+destination, deciding from `state` with no network; it is pinned against
+`answeredIds` over shared fixtures in `test/nudge.test.js` rather than by
+reading, and its shape carries the rule the other two get for free — a nullish
+entry is `false` before anything else is asked, because `answeredIds` walks the
+rows that EXIST and an at-most habit whose unlogged days count as staying under
+would otherwise report every untouched day as answered.
 
 **Whose clock resolves in ONE place, with three tiers.** `resolveTimeZone`: the
 zone the account NAMED, else the zone its last client reported, else the
@@ -494,6 +591,16 @@ from `settings.notifyTimezone` was a SECOND place the clock was decided, and the
 two diverged the moment `auto` existed — the account carries its resolved
 `timeZone` now. And `new Intl.DateTimeFormat` THROWS for a zone it does not know,
 inside a loop that runs once per account, so `formatterFor` falls back.
+
+**The notifier reads its clock through `zonedClock`, never `new Date()`
+locally.** The zone decides two things, and the second is easy to miss: what
+time it is, *and* which calendar day the send is filed under. A server in UTC
+reminding someone in Auckland files it under the wrong date and re-sends hours
+later. Note `hourCycle: 'h23'` rather than `hour12: false` — en-US resolves the
+latter to h24 and formats midnight as `'24'`, so a 00:00 reminder is compared
+against 1440 minutes and never fires, with a correct-looking date beside it.
+`runTick` also *hands* the instant to `collect`, so the adapter cannot read a
+second clock a millisecond the other side of local midnight.
 
 **`SETTING_VALUES` rules are an array *or* a normaliser** — a URL and a timezone
 cannot be enumerated. That is also why an accepted setting may differ from what
@@ -567,7 +674,7 @@ reads as a bug, while an https entry never serves an http URL. A user's URL can
 never ask for plaintext; only the operator's list can offer it. The canonical
 entry therefore carries its scheme (`https://ntfy.sh`), and so must any lookup.
 
-**...and it names a BASE PATH.** The property worth copying
+**The BASE PATH is what pins the KIND of request.** The property worth copying
 from `parseDiscordWebhook` is not "it checks the host", it is that allowlisting a
 destination allows one KIND of request — so it pins the path too. The first
 version allowed any 1–4 dotless segments and posted to all but the last, which
@@ -631,157 +738,18 @@ at the sleep rather than fixed there.
 
 ## Traps
 
-**`dateRange` vs `boundedRange`.** Use `boundedRange` whenever the start date
-comes from stored data. `dateRange` is unbounded and a distant-past entry
-turns one request into ~700,000 iterations on a single-threaded server. Every
-aggregation in `stats.js` already uses the bounded form; keep it that way.
-
-**`isCompleted` / `dayCredit` take `{value, status}`.** Passing a bare number
-still works for boolean habits (where `3` is unambiguously a skip) but is
-wrong for numerical ones, where `3` is a real amount.
-
-**A missing day and a day holding 0 are different states, and only the display
-knows.** `unknown` is the absence of a row, `no` is a row with value 0, and
-`isCompleted` answers `false` for both — deliberately, so `questionMarks` costs
-nothing in the arithmetic. One thing it does cost, because a range that starts at
-the earliest stored entry now has an earlier one to start at: a lapse extends the
-window, and the unknown days after it read as misses, which is how a habit with
-one marked miss acquires a lapse in `computeRecovery` where it had none. The
-figures are right; the window is older. See the root CLAUDE.md for the whole of
-it. `stats.js` was the exception and did not know it: six of its passes wrote
-`entryMap.get(date) ?? UNSET`, which is harmless for an at-least habit and hands
-an at-most one a full success for a day nobody answered — a limit with no
-entries at all reported a 30-day streak. It reads the map directly now, and
-`normalizeEntry` answers `status: 'unknown'` for the absent day; what silence is
-worth there is the account's `atMostUnlogged` (default `miss`) unless the
-habit's own `at_most_unlogged` overrides it, which `unansweredCounts` resolves
-in the one place every caller already passes a habit through. A row holding 0 is
-untouched by that and stays a success, which is the whole distinction finally
-being worth a number rather than only a question mark.
-
-What must never happen is a *reader* collapsing them:
+**A READER must never collapse `unknown` into `no`.** The root `CLAUDE.md` has
+the four states, the ban on `?? UNSET` and what a stored lapse does to a window;
+what belongs here is the shape that makes the mistake unreachable.
 `habit.entries[date] ?? UNSET` reports every unanswered day as an answered "no",
 which starts the tap cycle in the wrong place and paints away the one difference
-the setting draws. Ask whether the map HOLDS the date (`Object.hasOwn`, or a null
-check in Kotlin), never what it holds. `ui/toggle.js`'s `dayStateOf` exists so
-that decision is written once.
-
-**The score constant is Loop's, read from its source.** It is
-`0.5^(sqrt(frequency)/13)` — a 13-day half-life for a daily habit, and slower
-for less frequent ones. A fixed 30-day half-life lived here for a while: the
-same shape, but so sluggish that a perfect habit took four months to look
-strong instead of one. `test/stats.test.js` pins the curve at days 13, 30 and
-60 so it cannot drift back.
-
-**Best streaks are selected by length but listed by date.** Two different
-questions: which runs to show, and how to order them. A list ordered by length
-reads as a leaderboard and hides whether the good runs were recent. Note the
-bar scale must come from `Math.max(...top)`, not `top[0]` — that stopped being
-the longest row the moment the ordering changed.
-
-**The score formula is deliberate.** It feeds a trailing-window adherence
-ratio (always `[0,1]`) into an EWMA. Do not "simplify" it back to scaling a
-day's credit by `1/frequency` — that overshoots for every non-daily habit and
-lets one completion saturate the score.
-
-**Loop's encoding is not guessable.** It was read from the uhabits source:
-epoch-millis UTC-midnight timestamps, ×1000 numerical scaling, `YES_AUTO(1)`
-counts as done, `NO(0)` is a stated lapse that **keeps its row**, and only
-`UNKNOWN(-1)` has none. Those last two used to be one thing — both dropped — and
-dropping `NO` discarded the only mark separating a day the user answered from a
-day nobody has, which on a backup from someone who does not use Loop's question
-marks is most of their history. See the root CLAUDE.md's four-state section.
-`test/import.test.js` and `test/export-loop.test.js` pin all of it — if you
-change a conversion and those fail, the tests are right.
-
-**A streak and a lapse are made of "on pace", not "done today".** `onPaceSeries`
-asks whether the trailing `denominator`-day window holds enough completions,
-pro-rated by any skips inside it — the same window and the same pro-rating
-`computeScores` uses, so strength and streaks cannot disagree about whether a
-habit is being kept. For `num >= den` the window is one day and the
-requirement clamps to it, so this reduces exactly to `isCompleted` and daily
-habits behave as they always have; that degeneration is what makes the change
-safe, and `test/resilience.test.js` pins it.
-
-Consequences worth knowing. A streak counts CALENDAR days, so a 3×/week habit
-kept for a month is a 30-day streak rather than a 12-day one — that is what
-"I have kept this up for a month" means, and it keeps the number comparable
-with a daily habit's. The window is rolling, not calendar-aligned: three
-sessions crammed into Mon–Wed satisfy every day that week and then fall short
-the following Monday, because by then the trailing seven days hold only two.
-And this is a computation change only — nothing about storage, the schema or
-the Loop export moved.
-
-**Resilience applies at any frequency.** It used to return
-`{applicable: false}` for non-daily habits, because a miss meant "a day it was
-not done" and a 3×/week habit has four of those every week. `onPaceSeries`
-fixed the premise instead: a miss is a day the habit fell below its RATE.
-`applicable` is kept in the response shape but nothing sets it false. Two
-related rules in the same code: an *ongoing* lapse is excluded from recovery
-rate (being mid-slip is not the same as having failed to recover) and reported
-as `openRun` instead; and a rate of `null` means "nothing has ever been
-missed", which is a different claim from 100% and must not render as a number.
-
-**`weekStart` reaches every weekday axis, and for a long time it did not.**
-`startOfWeek` in stats.js has always honoured it, so the history and
-times-per-week charts bucketed on the right day — while `calendarWindow`
-snapped unconditionally to Saturday/Sunday and the weekday charts drew Sunday
-first. Someone whose week starts on Monday got a Sunday-anchored heatmap on the
-chart the detail view opens to, with the labels beside it saying otherwise. The
-setting's own help text says it is "used by the history and times-per-week
-charts", which is literally true and is exactly how it survived.
-
-`weekOrder` in charts.js is the one translation from `getDay()`'s Sunday-based
-numbering to the account's, and **both the labels and the data read through
-it**. Rotating the captions alone would have captioned Monday's row "Sunday"
-and left the bars where they were — a chart wrong in the one dimension it
-exists to show. The calendar heatmap needs neither, because its rows are
-positional: `calendarWindow` decides which day the column starts on and the
-grid fills sequentially from there. What it does need is the labels, and
-Home/End, which jumped to `getDay() === 0` and so walked off the top of a
-Monday-start grid.
-
-**The CSV export must ship both files.** `Checkmarks.csv` has one column per
-habit and nothing that says what a habit *is*, so parsed alone every column
-defaults to boolean — and a measurable habit's `3` is then read as Loop's SKIP
-sentinel while `8` and `10` are dropped as unknown ones. That is why
-`/api/export.csv` returns a zip. `test/export-csv.test.js` pins the failure
-mode deliberately, so if the ambiguity ever goes away the test says so.
-
-**And `Habits.csv` is a SOURCE of habits, not only a lookup table.** It was read
-purely as metadata to decorate the columns of `Checkmarks.csv`, which meant the
-habits an account has were taken from the value grid alone — so an account whose
-habits have no entries exported a lone header line and restored as
-`400 no habits found in the uploaded file`. Its own habits, fully described in
-the other file, were parsed and thrown away. `parseZipExport` unions the two
-now, which also covers a habit named in one file and not the other.
-
-**A day that needs no reminder is one that has been ANSWERED, not one that has
-been completed.** `answeredIds` tests `isCompleted(...) !== false` because
-`isCompleted` returns `null` for a skip — falsy, so a truthiness test asked again
-about every day the user had explicitly skipped. `false` is a real miss and still
-gets its nudge. The Kotlin `Reminders.needsReminder` is the mirror of this, for
-the same reason `ReminderTime` mirrors `ui/time.js`: two clients answering one
-question differently is indistinguishable from one of them being broken.
-
-There are **three** of them now: `isDayAnswered` in `public/ui/nudge.js` is the
-browser's, for the `web` destination, which decides from `state` with no
-network. It is pinned against `answeredIds` over shared fixtures in
-`test/nudge.test.js` rather than by reading, and its shape carries the rule the
-other two get for free — a nullish entry is `false` before anything else is
-asked, because `answeredIds` walks the rows that EXIST and an at-most habit
-whose unlogged days count as staying under would otherwise report every
-untouched day as answered.
-
-**The notifier reads its clock through `zonedClock`, never `new Date()`
-locally.** The zone decides two things, and the second is easy to miss: what
-time it is, *and* which calendar day the send is filed under. A server in UTC
-reminding someone in Auckland files it under the wrong date and re-sends hours
-later. Note `hourCycle: 'h23'` rather than `hour12: false` — en-US resolves the
-latter to h24 and formats midnight as `'24'`, so a 00:00 reminder is compared
-against 1440 minutes and never fires, with a correct-looking date beside it.
-`runTick` also *hands* the instant to `collect`, so the adapter cannot read a
-second clock a millisecond the other side of local midnight.
+`questionMarks` draws. Ask whether the map HOLDS the date (`Object.hasOwn`, or a
+null check in Kotlin), never what it holds. `ui/toggle.js`'s `dayStateOf` exists
+so that decision is written once, and `normalizeEntry` answers
+`status: 'unknown'` for the absent day so nothing below it has to. `stats.js`
+was the exception and did not know it — six passes wrote `?? UNSET`, harmless
+for an at-least habit, and a limit with no entries at all reported a 30-day
+streak.
 
 **`shared/src` is not served to the browser.** Only `shared/public` is mounted,
 so `ui/settings.js` cannot import `notify.js` — the channel list is declared in
