@@ -1,0 +1,912 @@
+/*
+ * habiterall.ca
+ *
+ * The palette is the APP's palette, copied from `shared/public/style.css` —
+ * the same twelve custom properties, the same two themes. Copied rather than
+ * imported, and that is a decision: reading the app's stylesheet at build time
+ * would couple this site to every refactor of it, to prevent a drift whose
+ * worst case is that a marketing page's blue is one shade off. The app's file
+ * is the original; if these disagree, it wins.
+ *
+ * Everything below `--- site only ---` has no counterpart in the app: a site
+ * has a hero and a prose column, and an app has neither.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- from shared/public/style.css ---- */
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #eef0f4;
+  --border: #dcdfe6;
+  --text: #14181f;
+  --text-dim: #666e7d;
+  --accent: #3b82f6;
+  --danger: #dc2626;
+  --shadow: 0 1px 3px rgb(0 0 0 / 8%);
+  --radius: 10px;
+
+  /* ---- site only ---- */
+  --accent-ink: #ffffff;
+  --accent-soft: rgb(59 130 246 / 10%);
+  --accent-line: rgb(59 130 246 / 25%);
+  --radius-lg: 18px;
+  --shadow-lg: 0 18px 50px -18px rgb(15 22 36 / 25%);
+  --wrap: 1180px;
+  --prose: 74ch;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0f1216;
+  --surface: #171b21;
+  --surface-2: #1f242c;
+  --border: #2b313a;
+  --text: #e8eaed;
+  --text-dim: #9aa3af;
+  --shadow: 0 1px 3px rgb(0 0 0 / 40%);
+  --accent-soft: rgb(59 130 246 / 14%);
+  --accent-line: rgb(59 130 246 / 35%);
+  --shadow-lg: 0 18px 50px -18px rgb(0 0 0 / 65%);
+}
+
+/*
+ * The dark values a second time, for a visitor whose device prefers dark and
+ * whose JavaScript has not run — a first paint, or JS disabled entirely. The
+ * inline script in the page head resolves `system` to an explicit `data-theme`
+ * exactly as the app's `apply()` does, so this block is only ever the fallback,
+ * and `:not([data-theme='light'])` is what stops it overriding a deliberate
+ * choice of light on a dark device.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --bg: #0f1216;
+    --surface: #171b21;
+    --surface-2: #1f242c;
+    --border: #2b313a;
+    --text: #e8eaed;
+    --text-dim: #9aa3af;
+    --shadow: 0 1px 3px rgb(0 0 0 / 40%);
+    --accent-soft: rgb(59 130 246 / 14%);
+    --accent-line: rgb(59 130 246 / 35%);
+    --shadow-lg: 0 18px 50px -18px rgb(0 0 0 / 65%);
+  }
+}
+
+/* ---------- base ---------- */
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html {
+  scrollbar-gutter: stable;
+  /* Every in-page link on this site lands under a sticky header otherwise. */
+  scroll-padding-top: 80px;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4 {
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  font-weight: 650;
+  margin: 0 0 0.5em;
+}
+
+h1 { font-size: clamp(2rem, 1.5rem + 2vw, 2.9rem); }
+h2 { font-size: clamp(1.5rem, 1.25rem + 1vw, 2rem); }
+h3 { font-size: 1.15rem; }
+
+p { margin: 0 0 1em; }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+img { max-width: 100%; height: auto; }
+
+code, pre { font-family: var(--mono); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.dim { color: var(--text-dim); }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.skip:focus { left: 12px; top: 12px; }
+
+.wrap {
+  width: 100%;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---------- topbar ---------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  height: 62px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -0.03em;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.nav {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+  flex: 1;
+}
+
+.nav a {
+  padding: 7px 11px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 0.94rem;
+  font-weight: 500;
+}
+.nav a:hover { color: var(--text); background: var(--surface-2); }
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.ghost {
+  padding: 7px 11px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 0.94rem;
+  font-weight: 500;
+}
+.ghost:hover { color: var(--text); background: var(--surface-2); }
+
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 15px;
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--accent-line); }
+/*
+ * The glyph is the ELEMENT's, not the stylesheet's: `site.js` owns the
+ * three-state cycle and writes `data-icon`. The bare `content` below is what
+ * shows before that script runs, so the control is never an empty square.
+ */
+.theme-toggle::after { content: '◐'; }
+.theme-toggle[data-icon]::after { content: attr(data-icon); }
+
+/* ---------- buttons ---------- */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 22px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  font-size: 0.98rem;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+.button:hover { filter: brightness(1.08); transform: translateY(-1px); text-decoration: none; }
+
+.button.small { padding: 8px 15px; font-size: 0.9rem; border-radius: 8px; }
+
+.button.secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+}
+.button.secondary:hover { border-color: var(--accent-line); background: var(--surface-2); }
+
+/* ---------- hero ---------- */
+
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: clamp(48px, 7vw, 104px) 0 clamp(40px, 6vw, 80px);
+  background:
+    radial-gradient(70ch 40ch at 15% -10%, var(--accent-soft), transparent 70%),
+    linear-gradient(var(--surface-2), transparent 60%);
+  border-bottom: 1px solid var(--border);
+}
+
+.hero-inner {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: clamp(32px, 5vw, 64px);
+  align-items: center;
+}
+
+.eyebrow {
+  display: inline-block;
+  margin: 0 0 14px;
+  padding: 5px 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.hero h1 { margin-bottom: 0.4em; }
+
+.lead {
+  font-size: 1.1rem;
+  color: var(--text-dim);
+  max-width: 56ch;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 28px 0 0;
+}
+
+.cta-note {
+  margin: 14px 0 0;
+  font-size: 0.9rem;
+  color: var(--text-dim);
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  list-style: none;
+  margin: 30px 0 0;
+  padding: 0;
+  font-size: 0.87rem;
+  color: var(--text-dim);
+}
+.badges li { display: flex; align-items: center; gap: 7px; }
+.badges li::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.hero-shot img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+/* The phone capture is 390px wide and portrait; stretching it to fill a column
+   is worse than centring it at its own size. */
+@media (max-width: 620px) {
+  .hero-shot img { width: auto; max-width: 320px; margin: 0 auto; }
+}
+
+/* ---------- sections ---------- */
+
+.section { padding: clamp(52px, 7vw, 96px) 0; }
+.section.alt { background: var(--surface); border-block: 1px solid var(--border); }
+
+.section-title {
+  max-width: 24ch;
+  margin: 0 auto 44px;
+  text-align: center;
+}
+
+.section-more { margin: 32px 0 0; text-align: center; font-weight: 550; }
+.section-more a { text-decoration: none; }
+.section-more a:hover { text-decoration: underline; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 20px;
+}
+.grid.two { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
+.card {
+  padding: 26px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.section.alt .card { background: var(--bg); }
+.section:not(.alt) .card { background: var(--surface); }
+
+.card h3 { margin-bottom: 0.4em; }
+.card p:last-child { margin-bottom: 0; }
+
+.card-icon {
+  display: grid;
+  place-items: center;
+  width: 40px; height: 40px;
+  margin-bottom: 16px;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 19px;
+}
+
+.features .card p { color: var(--text-dim); margin-bottom: 0; }
+
+a.link-card {
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+a.link-card:hover { border-color: var(--accent-line); transform: translateY(-2px); }
+a.link-card h3 { color: var(--accent); }
+a.link-card p { color: var(--text-dim); margin: 0; font-size: 0.94rem; }
+
+.editions .card { display: flex; flex-direction: column; }
+.editions .card h3 { font-size: 1.4rem; }
+.editions .card > :last-child { margin-top: auto; }
+.editions .button { align-self: flex-start; margin-top: 18px; }
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: clamp(32px, 5vw, 64px);
+  align-items: center;
+}
+.split.reverse .split-copy { order: 2; }
+
+.split-copy p { color: var(--text-dim); }
+.split-copy .section-more { text-align: left; margin-top: 24px; }
+
+.split-shot img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.closing { text-align: center; }
+.closing-inner .lead { margin-inline: auto; }
+.closing .cta-row { justify-content: center; }
+
+/* ---------- prose (the generated wiki, and release notes) ---------- */
+
+.prose { max-width: var(--prose); }
+.prose > * { max-width: 100%; }
+
+.prose h2 {
+  margin-top: 2em;
+  padding-top: 0.6em;
+  border-top: 1px solid var(--border);
+}
+.prose h3 { margin-top: 1.9em; }
+.prose h4 { margin-top: 1.6em; font-size: 1rem; }
+.prose h2:first-child, .prose h3:first-child { margin-top: 0; border-top: 0; padding-top: 0; }
+
+.prose .anchor {
+  margin-left: 0.4em;
+  color: var(--border);
+  text-decoration: none;
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.prose :hover > .anchor, .prose .anchor:focus-visible { opacity: 1; color: var(--accent); }
+
+.prose ul, .prose ol { padding-left: 1.4em; margin: 0 0 1em; }
+.prose li { margin-bottom: 0.4em; }
+.prose li > ul, .prose li > ol { margin-top: 0.4em; }
+
+.prose blockquote {
+  margin: 1.5em 0;
+  padding: 2px 20px;
+  border-left: 3px solid var(--accent-line);
+  background: var(--accent-soft);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--text-dim);
+}
+.prose blockquote > :last-child { margin-bottom: 0; }
+
+.prose :not(pre) > code {
+  padding: 0.15em 0.4em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 0.88em;
+  /* `overflow-wrap` and NOT `word-break: break-word`: the latter breaks a token
+     at whatever character the line ends on, and these are identifiers where the
+     break point is the whole meaning. This one breaks only what genuinely
+     cannot fit — a long env var name in a narrow table cell.
+     It does not stop a break at an existing HYPHEN, which is ordinary line
+     breaking and why `YYYY-MM-DD` can still split across two lines. Left alone:
+     `white-space: nowrap` would stop it and let a long token overflow the page
+     sideways instead, which is the worse of the two. */
+  overflow-wrap: break-word;
+}
+
+pre {
+  margin: 1.4em 0;
+  padding: 16px 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font-size: 0.86rem;
+  line-height: 1.6;
+  tab-size: 2;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+
+/*
+ * Tables scroll rather than squash. The API reference is 20 rows of four
+ * columns and the configuration tables are wider still; at 360px a table that
+ * wraps every cell to one word per line is unreadable in a way that reads as a
+ * broken page rather than as a wide table.
+ */
+.prose .table-scroll {
+  overflow-x: auto;
+  margin: 1.4em 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.92rem;
+  /*
+   * A floor, not a width. Without it the table is exactly as wide as the phone
+   * and never scrolls — it just squeezes the description column to about eight
+   * characters, so every row grows to nine lines tall and the two narrow
+   * columns beside it are nine lines of empty space. Wider than the viewport
+   * and the scroll container does its job: the columns get room, the rows stay
+   * one or two lines, and the reader swipes sideways for the rest.
+   */
+  min-width: 46rem;
+}
+.prose th, .prose td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.prose thead th { background: var(--surface-2); font-weight: 650; white-space: nowrap; }
+.prose tbody tr:last-child td { border-bottom: 0; }
+
+.prose img {
+  display: block;
+  margin: 1.6em auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.prose div[align='center'] { text-align: center; }
+.prose div[align='center'] sub { display: inline-block; margin-top: -0.8em; color: var(--text-dim); }
+
+.prose details {
+  margin: 1.4em 0;
+  padding: 14px 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.prose details[open] { padding-bottom: 4px; }
+.prose summary { cursor: pointer; font-weight: 600; }
+.prose details > :last-child { margin-bottom: 0.8em; }
+
+.prose hr { border: 0; border-top: 1px solid var(--border); margin: 2.4em 0; }
+
+/* ---------- wiki layout ---------- */
+
+.wiki {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr) 200px;
+  gap: 44px;
+  align-items: start;
+  padding-block: 44px 72px;
+}
+
+.wiki-side, .wiki-toc {
+  position: sticky;
+  top: 86px;
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
+  font-size: 0.92rem;
+}
+
+.wiki-nav-mobile { display: none; }
+
+.wiki-nav-home {
+  display: block;
+  padding: 6px 10px;
+  margin-bottom: 18px;
+  border-radius: 7px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-weight: 600;
+}
+.wiki-nav-home:hover { background: var(--surface-2); color: var(--text); }
+
+.nav-group { margin-bottom: 22px; }
+.nav-group h2 {
+  margin: 0 0 8px;
+  padding-left: 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.nav-group ul { list-style: none; margin: 0; padding: 0; }
+.nav-group li { margin: 0; }
+.nav-group a {
+  display: block;
+  padding: 6px 10px;
+  border-radius: 7px;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+}
+.nav-group a:hover { background: var(--surface-2); color: var(--text); }
+.nav-group a[aria-current='page'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+
+.wiki-toc h2 {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.wiki-toc ul { list-style: none; margin: 0; padding: 0; }
+.wiki-toc a {
+  display: block;
+  padding: 4px 0 4px 12px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+  text-decoration: none;
+}
+.wiki-toc a:hover { color: var(--accent); border-left-color: var(--accent); }
+.wiki-toc .lvl-3 a { padding-left: 24px; font-size: 0.88em; }
+
+.wiki-body { min-width: 0; }
+.wiki-body > h1 { margin-bottom: 1em; }
+
+.wiki-seq {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 56px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.wiki-seq a {
+  flex: 1;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--text);
+  font-weight: 600;
+}
+.wiki-seq a:hover { border-color: var(--accent-line); }
+.wiki-seq a span { display: block; font-size: 0.78rem; font-weight: 500; color: var(--text-dim); }
+.wiki-seq .next { text-align: right; }
+
+.page-head { padding: 56px 0 40px; max-width: 62ch; }
+.page-head h1 { margin-bottom: 0.3em; }
+
+.wiki-index { padding-bottom: 80px; }
+.index-group { margin-bottom: 44px; }
+.index-group > h2 {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 16px;
+}
+/* Three across, not `auto-fit`: a group of two would otherwise stretch its two
+   cards to half the page each while the group under it shows three, and the
+   ragged column edges read as a layout bug rather than as two short groups. */
+.index-group .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.wiki-index .card { background: var(--surface); }
+
+/* ---------- search ---------- */
+
+.search { position: relative; margin-bottom: 24px; }
+
+.search input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.94rem;
+}
+.search input:focus { border-color: var(--accent); outline: none; }
+
+.search-results {
+  position: absolute;
+  z-index: 15;
+  left: 0; right: 0;
+  margin-top: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+.search-results a {
+  display: block;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
+  color: var(--text);
+}
+.search-results a:last-child { border-bottom: 0; }
+.search-results a:hover, .search-results a.active { background: var(--accent-soft); }
+.search-results strong { display: block; font-size: 0.94rem; }
+.search-results span { display: block; font-size: 0.82rem; color: var(--text-dim); }
+.search-empty { padding: 12px 14px; color: var(--text-dim); font-size: 0.9rem; }
+
+/* ---------- changelog ---------- */
+
+.changelog { padding-bottom: 80px; }
+.releases { border-left: 2px solid var(--border); margin-left: 6px; }
+
+.release { position: relative; padding: 0 0 44px 30px; }
+.release::before {
+  content: '';
+  position: absolute;
+  left: -7px; top: 10px;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 3px solid var(--bg);
+}
+.release-head h2 { margin-bottom: 0.15em; font-size: 1.5rem; }
+.release-head h2 a { text-decoration: none; color: var(--text); }
+.release-head h2 a:hover { color: var(--accent); }
+.release-head p { font-size: 0.88rem; margin-bottom: 1.2em; }
+
+.release-notes h3 {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 1.5em 0 0.6em;
+  border: 0;
+  padding: 0;
+}
+.release-notes h2 { border: 0; padding: 0; margin: 1.6em 0 0.6em; font-size: 1.05rem; }
+.release-notes ul { padding-left: 1.2em; }
+.release-notes li { font-size: 0.94rem; margin-bottom: 0.25em; }
+
+.tag {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  vertical-align: middle;
+}
+
+/* ---------- downloads ---------- */
+
+.downloads { padding-bottom: 80px; }
+
+.download-block {
+  padding: 32px 0;
+  border-top: 1px solid var(--border);
+  max-width: var(--prose);
+}
+.download-block h2 { margin-bottom: 0.5em; }
+.download-block .button { margin-right: 10px; margin-bottom: 8px; }
+
+/*
+ * Stacked, not side by side. `docker pull ghcr.io/easymod0/habiterall-personal:1.1.4`
+ * is about 55 characters; in half of a 74ch prose column it does not fit, and a
+ * <pre> that does not fit scrolls — so the command a visitor came here to copy
+ * was cut off mid-image-name with no sign that there was more.
+ */
+.download-block .grid { grid-template-columns: 1fr; gap: 16px; margin-bottom: 24px; }
+
+.image-tag h3 { font-size: 0.95rem; margin-bottom: 0.5em; }
+.image-tag pre { margin: 0; }
+
+.apk-list { list-style: none; margin: 0 0 1.2em; padding: 0; }
+.apk-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+/* ---------- gallery ---------- */
+
+.gallery { padding-bottom: 80px; }
+.shots { display: grid; gap: 44px; }
+
+.shot { margin: 0; }
+.shot img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  background: var(--surface);
+}
+.shot figcaption {
+  max-width: 76ch;
+  margin: 16px auto 0;
+  text-align: center;
+  font-size: 0.92rem;
+}
+.shot figcaption strong { display: block; margin-bottom: 4px; }
+
+/* ---------- footer ---------- */
+
+.footer {
+  margin-top: auto;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 56px 0 28px;
+  font-size: 0.92rem;
+}
+.footer-inner {
+  display: grid;
+  grid-template-columns: 2fr repeat(3, 1fr);
+  gap: 32px;
+  padding-bottom: 36px;
+}
+.footer nav { display: flex; flex-direction: column; gap: 9px; }
+.footer nav h2 {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.footer nav a { color: var(--text-dim); text-decoration: none; }
+.footer nav a:hover { color: var(--accent); }
+.footer .brand { margin-bottom: 10px; }
+.footer .dim p { margin: 0; }
+
+.footer-legal {
+  padding-top: 22px;
+  border-top: 1px solid var(--border);
+  font-size: 0.86rem;
+}
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 1180px) {
+  .wiki { grid-template-columns: 210px minmax(0, 1fr); gap: 36px; }
+  .wiki-toc { display: none; }
+}
+
+@media (max-width: 900px) {
+  .nav { display: none; }
+  .hero-inner, .split { grid-template-columns: 1fr; }
+  .split.reverse .split-copy { order: 0; }
+  .footer-inner { grid-template-columns: 1fr 1fr; }
+
+  .wiki { grid-template-columns: minmax(0, 1fr); gap: 0; padding-top: 24px; }
+  .wiki-side { display: none; }
+  .index-group .grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+  .wiki-nav-mobile {
+    display: block;
+    margin-bottom: 28px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .wiki-nav-mobile > summary {
+    padding: 12px 16px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .wiki-nav-mobile .wiki-nav { padding: 0 16px 12px; }
+  .wiki-toc { display: none; }
+}
+
+@media (max-width: 620px) {
+  .wrap { padding: 0 18px; }
+  body { font-size: 15px; }
+  .ghost { display: none; }
+  .cta-row .button { flex: 1; }
+  .footer-inner { grid-template-columns: 1fr; gap: 26px; }
+  .wiki-seq { flex-direction: column; }
+  .wiki-seq .next { text-align: left; }
+  .section-title { text-align: left; }
+  /* A 900px-wide screenshot inside a 360px viewport is a smudge; let the
+     phone-shaped captures be the ones that carry at this width. */
+  .prose img { border-radius: 6px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; scroll-behavior: auto !important; }
+  .button:hover { transform: none; }
+  a.link-card:hover { transform: none; }
+}

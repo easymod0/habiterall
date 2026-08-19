@@ -1,0 +1,108 @@
+# Builds habiterall.ca and publishes it to GitHub Pages.
+#
+# The site is GENERATED — from README.md, from docs/screenshots/, and from this
+# repository's own releases — so it has two kinds of trigger, and both matter:
+#
+#   push to master   the manual or the screenshots changed
+#   release          a tag was cut, so the changelog and downloads have moved
+#
+# Without the second, publishing v1.2.0 would leave habiterall.ca offering
+# v1.1.4 until somebody happened to edit the README.
+#
+# `ci.yml` has a `site` job that builds the same thing on every pull request,
+# with `--offline`. That is where a broken link fails; this workflow is only the
+# publishing half, and it deliberately does NOT pass `--offline` — a build that
+# cannot reach the Releases API must fail rather than deploy a site with no
+# changelog on it.
+#
+# FIRST RUN NEEDS ONE SETTING. Settings -> Pages -> Source: GitHub Actions. Until
+# that is done every run here fails at "Configure Pages" with a 404, which reads
+# like a workflow error and is not one.
+
+name: Site
+
+on:
+  push:
+    branches: [master]
+    # Only what the site is built FROM. A change to habiterall-cloud/src cannot
+    # alter a single byte of the output, and redeploying for it would put a
+    # deployment on every merge for no reason.
+    paths:
+      - 'README.md'
+      - 'docs/screenshots/**'
+      - 'site/**'
+      - 'examples/**'
+      - '.github/workflows/site.yml'
+
+  # A published release moves the changelog and the downloads page. `published`
+  # rather than `created`: a draft release is not announced, and `fetchReleases`
+  # drops drafts, so building for one would deploy an unchanged site.
+  release:
+    types: [published]
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  # `cancel-in-progress: false`, unlike ci.yml. Cancelling a deployment halfway
+  # is not the same as cancelling a test run: the pages artifact may already be
+  # uploaded, and what is live afterwards is whichever run happened to finish.
+  # Queueing costs a minute and is always defined.
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the site
+        env:
+          # Lifts the Releases API off the 60-requests-an-hour anonymous limit.
+          # Read-only, and the default token already has what this needs.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run site:build
+
+      # Fails with a 404 when Pages has never been enabled for the repository.
+      # See the note at the top of this file — it is a settings change, once.
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/dist
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Where it went
+        run: |
+          {
+            echo "### Deployed"
+            echo
+            echo "${{ steps.deployment.outputs.page_url }}"
+            echo
+            echo "The custom domain comes from \`site/static/CNAME\`, which the"
+            echo "build copies to the root of the artifact. If the URL above is"
+            echo "a github.io one, check Settings → Pages → Custom domain."
+          } >> "$GITHUB_STEP_SUMMARY"

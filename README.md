@@ -8,6 +8,8 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%E2%89%A526-brightgreen)
 
+**[habiterall.ca](https://www.habiterall.ca)** · [Sign in to the hosted app](https://app.habiterall.ca) · [Wiki](https://www.habiterall.ca/wiki/) · [Changelog](https://www.habiterall.ca/changelog/)
+
 </div>
 
 ---

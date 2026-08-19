@@ -28,7 +28,12 @@
   "include": [
     "shared/public/**/*.js",
     "habiterall-personal/public/**/*.js",
-    "habiterall-cloud/public/**/*.js"
+    "habiterall-cloud/public/**/*.js",
+
+    // habiterall.ca's one script: the theme control and wiki search. The
+    // generator that emits the pages around it is Node code and is in
+    // tsconfig.json.
+    "site/static/*.js"
   ],
   "exclude": ["node_modules", "**/node_modules"]
 }
