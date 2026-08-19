@@ -22,8 +22,8 @@
 
 import { withNotifierScope, withUser } from './db/pool.js';
 import {
-  answeredIds, answerText, CHANNELS, needsServerDelivery, serverChannels,
-  resolveTimeZone,
+  answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
+  serverChannels, resolveTimeZone,
   zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
@@ -504,11 +504,16 @@ export function start(env = process.env) {
     return null;
   }
 
+  // `ntfy_answers` said once, at startup, for the same reason `mode` is: with
+  // no `app_url` an ntfy reminder still goes out, just with no buttons on it,
+  // and nothing else says so — `channelInteractive` otherwise has no caller
+  // at all.
   log.info('notify.starting', {
     mode: config.botToken ? 'bot' : 'webhook',
     interval_ms: config.intervalMs,
     app_url: config.appUrl || '(unset)',
     max_accounts_per_tick: MAX_ACCOUNTS_PER_TICK,
+    ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
   });
 
   let lastPrunedDay = '';

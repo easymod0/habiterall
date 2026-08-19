@@ -29,7 +29,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { daysBetween } from './stats.js';
 import { MAX_ANSWER_AGE_DAYS } from './discord.js';
-import { ACTIONS } from './notify.js';
+import { ACTIONS, usableAppUrl } from './notify.js';
 import { DATE_RE } from './validate.js';
 // The one import reaching into `shared/public` that this file needs, mirroring
 // `notify.js:36` and for the same reason: node can read anything on disk, the
@@ -313,7 +313,9 @@ function numericCounts(habit, skipDays) {
 export function ntfyActions(habit, {
   date = '', skipDays = false, test = false, appUrl = '', sign,
 }) {
-  if (!/^https?:\/\//.test(appUrl)) return [];
+  // The same test `CHANNELS.ntfy.interactive` uses (`notify.js`), so the two
+  // cannot disagree about what counts as a usable `appUrl` — they used to.
+  if (!usableAppUrl(appUrl)) return [];
 
   // A non-test button's code carries `date`, and step 3's post-MAC shape
   // check in `verifyNtfyAnswer` rejects one that fails `DATE_RE` — so a

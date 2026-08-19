@@ -1399,14 +1399,20 @@ URL itself: **whoever can see the topic can see the reminder, but only the
 signed code in it can record an answer**, and on ntfy.sh — which has no
 per-topic access control — the code is carrying the whole weight of that
 distinction. A forged or stale code is refused and nothing is written; the
-worst a leaked one can do is answer the one question, for the one habit and
-date, that the reminder was already asking.
+worst a leaked one can do is record one of the answers that reminder offered,
+for that one habit and date, repeatedly, for up to two days — including over
+a correction you made later, with nothing in the app showing it happened.
+That is the same property Discord's buttons above already have (a press on an
+old Discord message is honoured too), not something particular to ntfy.
 
-Everything about answering matches the Discord buttons above: Yes / No / Skip
-or an amount box, an avoided habit's Clean / Slipped in their place, and up to
-two days late before it asks you to open the app instead. Sending a test
-notification exercises the same buttons, harmlessly — pressing one answers
-"Nothing — this was a test message" and writes nothing.
+Answering an ntfy notification is close to the Discord buttons above but not
+identical: Yes / No / a preset count rather than a free-typed amount (ntfy has
+no modal to open, so a numerical habit gets a few fixed presets instead of a
+number box), an avoided habit's Clean / Slipped in their place, and — with
+"answer with Skip" on — one preset gives up its slot to a Skip button. Up to
+two days late either way before it asks you to open the app instead. Sending a
+test notification exercises the same buttons, harmlessly — pressing one
+answers "Nothing — this was a test message" and writes nothing.
 
 The server checks once a minute. A reminder it slept through still goes out if it
 is under half an hour late and is dropped if it is more, so a day of downtime

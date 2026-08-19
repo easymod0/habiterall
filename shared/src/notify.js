@@ -40,6 +40,30 @@ import { isAvoided } from '../public/ui/toggle.js';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Whether `appUrl` is something an ntfy button can actually be pointed at.
+ *
+ * The one rule both `CHANNELS.ntfy.interactive` (below) and `ntfyActions`
+ * (`ntfy-answer.js`) ask, so there is exactly one answer to "is this an
+ * `appUrl` we can build a button URL from" rather than two that can drift —
+ * they used to: this predicate and `ntfyActions`'s own regex disagreed for
+ * `'habits.example.com'` (no scheme) and `'ftp://…'`, so `interactive` said
+ * yes while the button builder shipped nothing. `new URL` rather than a
+ * regex, so this and the actual URL construction in `ntfyActions` agree by
+ * construction rather than by two patterns staying in sync.
+ *
+ * @param {unknown} appUrl
+ * @returns {boolean}
+ */
+export function usableAppUrl(appUrl) {
+  if (typeof appUrl !== 'string' || appUrl === '') return false;
+  try {
+    return /^https?:$/.test(new URL(appUrl).protocol);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The notification destinations.
  *
  * `delivery` is the whole reason this registry exists:
@@ -155,8 +179,13 @@ export const CHANNELS = {
      * what is still true from the old design: the topic still gates who can
      * *see* the reminder, and on public ntfy.sh — no per-topic ACL — the HMAC
      * alone carries the burden of gating who can *answer* it.
+     *
+     * `usableAppUrl`, not a bare `Boolean(ctx.appUrl)` — the same test
+     * `ntfyActions` uses to decide whether it has anywhere to point a button,
+     * so the two cannot disagree about a value like `'habits.example.com'`
+     * (no scheme) or an `ftp://` URL.
      */
-    interactive: (settings, ctx = {}) => Boolean(ctx.appUrl),
+    interactive: (settings, ctx = {}) => usableAppUrl(ctx.appUrl),
   },
 };
 

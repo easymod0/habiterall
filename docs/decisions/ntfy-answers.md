@@ -109,17 +109,30 @@ What this buys is a **capability**, in the object-capability sense: the token
 IS the authorisation, not a pointer to look one up. Its bounded worst case,
 stated plainly, is what one leaked (or forwarded, or logged) code can do:
 
-> Record one answer — Yes, No, Skip, or one specific amount — for one named
-> habit, on one named date, for one named account. Nothing else. It cannot
-> read anything back (there is no response body worth exfiltrating — success
-> is a short confirmation string). It cannot enumerate habits, accounts or
-> dates it was not told. It cannot be replayed to different effect, because
-> every write this route makes is an upsert on `(habit, date)` — a second
-> press with the same code lands the same value it already recorded. It
-> cannot be used past `MAX_ANSWER_AGE_DAYS`, so a code that leaks long after
-> its reminder aged out is already inert. And it authorises nothing outside
-> `record()` — not settings, not habit creation, not deletion, not any other
-> route.
+> Record one of the answers that reminder offered — Yes, No, Skip, or one
+> specific amount — for one named habit, on one named date, for one named
+> account, repeatedly, for up to `MAX_ANSWER_AGE_DAYS` (2 days) — including
+> over a correction the user made later, with nothing in the app showing it
+> happened. It cannot read anything back (there is no response body worth
+> exfiltrating — success is a short confirmation string). It cannot enumerate
+> habits, accounts or dates it was not told. It cannot be used past
+> `MAX_ANSWER_AGE_DAYS`, so a code that leaks long after its reminder aged out
+> is already inert. And it authorises nothing outside `record()` — not
+> settings, not habit creation, not deletion, not any other route.
+>
+> **It is not replay-inert.** `record()` is an upsert on `(habit, date)`, so a
+> second press with the same code lands the same value it already recorded —
+> *if nothing else has written that row in between*. Nothing checks that: a
+> stored code is good for repeating its one answer at any point up to the age
+> limit, whatever the user has since logged for that day. A reminder that
+> offers `0 glasses` at 08:00, kept by whoever can read the topic, can
+> overwrite an `8` the user typed in at 20:05 that same evening — repeatable,
+> from any IP, for up to two days. This is not a defect specific to ntfy: it
+> is the same property Discord's buttons already have (`reminderComponents`'s
+> comment in `shared/src/notify.js` — "a press on a skip button in an OLD
+> message is still honoured"), and narrowing ntfy alone would make the two
+> channels disagree about a capability they are deliberately built the same
+> way. It is a channel-shaped trade, not a bug to fix here.
 
 That is a materially smaller blast radius than a stolen session cookie (every
 habit, every date, every setting, indefinitely) or a leaked webhook secret
@@ -141,9 +154,11 @@ bearing:
   useful side effect that a bearer code in the query string is *not* written
   to the access log by construction, where a code embedded in the path would
   be. Nothing about this route relies on that as its ONLY protection — the
-  code is one-shot-bounded and upsert-idempotent regardless of who reads it —
-  but it is a real second layer, free, from a rule that already existed for an
-  unrelated reason.
+  code is bounded to one habit, one date and `MAX_ANSWER_AGE_DAYS` regardless
+  of who reads it, which is what keeps the access log the wrong place to have
+  read it FROM rather than the reason a leak is harmless — but it is a real
+  second layer, free, from a rule that already existed for an unrelated
+  reason.
 - **A fixed path is what lets both the button-builder and the route mount
   import one shared constant with nothing to drift.** If the code were part of
   the path, the route would need a wildcard or a param matcher, which is one
@@ -266,3 +281,24 @@ mirrors the existing rule that `shared/src` has no edition-specific
 configuration reads of its own; the edition is what knows where its secret
 lives (`sessionSecret()` on personal, `process.env.SESSION_SECRET` on cloud),
 and `shared/src` only ever receives a closure that already has it bound in.
+
+## Known limitation: buttons only work from ntfy's native apps
+
+The button is an `http` action, and ntfy also ships a web app that renders the
+same notification in a browser tab — but a press made there cannot reach
+`POST /notify/ntfy/answer`. That handler runs as a same-origin `fetch()`
+carrying `Origin: https://ntfy.sh`, which `sameOriginOnly` refuses outright as
+cross-origin; and even waving the request through would not help, since the
+response is not CORS-enabled for that origin and the browser would block
+reading it regardless. Only ntfy's native apps (Android, iOS, desktop) issue
+the request the way a bare capability URL expects — with no `Origin` header at
+all, which is the same shape `sameOriginOnly` already has to let through for
+the Android client's own requests, for the same reason.
+
+This is recorded as a known limitation, not a TODO. Carving the origin check
+open for `https://ntfy.sh` specifically would name one browser-hosted origin
+as an exception inside a rule that otherwise protects a cookie session — and
+this route has no session to protect in the first place, so the actual gain
+is admitting one more class of caller to a route whose real defence is
+already the HMAC and the rate limiter, neither of which reads `Origin` at all.
+Not obviously worth doing.

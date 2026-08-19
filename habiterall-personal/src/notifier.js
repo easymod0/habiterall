@@ -12,8 +12,8 @@
 
 import { db, UNSET, YES, SKIP } from './db.js';
 import {
-  answeredIds, answerText, needsServerDelivery, resolveTimeZone, serverChannels,
-  zonedClock,
+  answeredIds, answerText, channelInteractive, needsServerDelivery, resolveTimeZone,
+  serverChannels, zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
   notifierConfig, sendToChannel, startNotifier, warnUnreachable,
@@ -378,10 +378,15 @@ export function start(env = process.env) {
 
   // Said once, at startup, because it is the difference between buttons and
   // plain text and there is no way to tell from the app which one you have.
+  // The identical argument applies to ntfy: with no `app_url` its buttons have
+  // nowhere to post back to, so an ntfy reminder still arrives but with none —
+  // and nothing else says so, since `channelInteractive` otherwise has no
+  // caller at all.
   log.info('notify.starting', {
     mode: config.botToken ? 'bot' : 'webhook',
     interval_ms: config.intervalMs,
     app_url: config.appUrl || '(unset)',
+    ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
   });
 
   // The gateway is only for receiving button presses, so it is opened only when

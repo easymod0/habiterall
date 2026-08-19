@@ -488,6 +488,27 @@ test('ntfy interactivity is a predicate on appUrl, not a fixed decision', () => 
   assert.equal(channelConfigured('ntfy', { ntfyTopicUrl: 'https://ntfy.sh/x' }), true);
 });
 
+test('the interactive predicate and the button builder agree about a usable appUrl', () => {
+  // They used to be two independent tests of the same question —
+  // `CHANNELS.ntfy.interactive` read `Boolean(ctx.appUrl)` while `ntfyActions`
+  // tested `/^https?:\/\//` — and disagreed for a scheme-less host and a
+  // non-http(s) scheme: `interactive` said yes, the builder shipped nothing.
+  // Pinning the WIRING, not just each half's own decision: for every value
+  // below, the predicate must be true exactly when the builder actually
+  // produces buttons.
+  const cases = [
+    '', 'habits.example.com', 'ftp://h.example', 'https://h.example', 'http://h.example',
+  ];
+  for (const appUrl of cases) {
+    const predicate = channelInteractive('ntfy', {}, { appUrl });
+    const built = ntfyActions(habit(), {
+      date: '2026-08-13', appUrl, sign: () => 'signed',
+    });
+    assert.equal(predicate, built.length > 0,
+      `appUrl=${JSON.stringify(appUrl)}: interactive=${predicate} builtActions=${built.length}`);
+  }
+});
+
 test('the ntfy payload carries what the embed does, and no free text in a header', () => {
   const payload = ntfyPayload({
     habit: habit({ name: 'Meditate', description: 'ten minutes' }),

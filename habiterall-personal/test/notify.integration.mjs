@@ -756,6 +756,32 @@ try {
   ck('and the tick was not abandoned before it looked at a habit',
     !/notify\.collect_failed/.test(said), said.slice(0, 400));
 
+  // `start()`'s own startup line, not a second log call — no
+  // HABITERALL_PUBLIC_URL / PUBLIC_URL is set anywhere in this suite, so ntfy's
+  // buttons have nowhere to post back to and the line has to say so, since
+  // nothing else does (root CLAUDE.md, "the operator has no way to know
+  // buttons are off").
+  const startLine = lines.find((l) => l.includes('"msg":"notify.starting"'));
+  ck('the startup line reports whether ntfy answers are reachable',
+    /"ntfy_answers":"off"/.test(startLine ?? ''), startLine ?? '(no notify.starting line captured)');
+
+  // ...and the other side of the same line: a configured public address turns
+  // it on, so this is a wired predicate and not a field that always reads
+  // "off".
+  const lines2 = [];
+  process.stdout.write = (chunk) => { lines2.push(String(chunk)); return true; };
+  try {
+    notifier.start({
+      ...process.env, HABITERALL_NOTIFY: 'on', HABITERALL_PUBLIC_URL: 'https://habits.example.com',
+    }).stop();
+    await new Promise((r) => setTimeout(r, 50));
+  } finally {
+    process.stdout.write = realWrite;
+  }
+  const startLine2 = lines2.find((l) => l.includes('"msg":"notify.starting"'));
+  ck('...and reachable once HABITERALL_PUBLIC_URL is set',
+    /"ntfy_answers":"on"/.test(startLine2 ?? ''), startLine2 ?? '(no notify.starting line captured)');
+
   console.log(`\n${fails ? `${fails} check(s) failed` : 'all checks passed'}`);
 } finally {
   server.close();
