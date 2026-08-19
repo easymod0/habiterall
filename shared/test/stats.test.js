@@ -31,6 +31,74 @@ test('dateRange is inclusive of both ends', () => {
     ['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04']);
 });
 
+// These lists are asserted as literals, never against a second implementation
+// of the walk (both would share the same bug), and they hold in every zone —
+// which is what makes the timezones.test.js sweep of this same file safe.
+test('dateRange across US spring forward', () => {
+  assert.deepEqual(dateRange('2026-03-06', '2026-03-12'), [
+    '2026-03-06', '2026-03-07', '2026-03-08', '2026-03-09',
+    '2026-03-10', '2026-03-11', '2026-03-12',
+  ]);
+});
+
+test('dateRange across US fall back', () => {
+  // This is the one that bites: an epoch `+= 86400000` walk repeats a day
+  // here under America/New_York, because the fall-back transition makes that
+  // calendar day 25 hours long. `setDate` does not.
+  assert.deepEqual(dateRange('2026-10-30', '2026-11-05'), [
+    '2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02',
+    '2026-11-03', '2026-11-04', '2026-11-05',
+  ]);
+});
+
+test('dateRange across Lord Howe\'s 30-minute DST transition', () => {
+  assert.deepEqual(dateRange('2026-04-02', '2026-04-08'), [
+    '2026-04-02', '2026-04-03', '2026-04-04', '2026-04-05',
+    '2026-04-06', '2026-04-07', '2026-04-08',
+  ]);
+});
+
+test('dateRange across a leap day', () => {
+  assert.deepEqual(dateRange('2024-02-27', '2024-03-02'),
+    ['2024-02-27', '2024-02-28', '2024-02-29', '2024-03-01', '2024-03-02']);
+});
+
+test('dateRange across a year boundary', () => {
+  assert.deepEqual(dateRange('2026-12-30', '2027-01-02'),
+    ['2026-12-30', '2026-12-31', '2027-01-01', '2027-01-02']);
+});
+
+test('dateRange returns [] rather than throwing on an unreadable date', () => {
+  // The first three make `daysBetween` answer NaN, and `NaN < 0` is false —
+  // so a `n < 0` guard lets NaN reach `new Array(NaN + 1)`, which throws
+  // RangeError where the old loop returned []. `!(n >= 0)` is false only for
+  // a non-negative number, which is why it is written that way.
+  assert.deepEqual(dateRange('', '2026-01-01'), []);
+  assert.deepEqual(dateRange('garbage', '2026-01-01'), []);
+  assert.deepEqual(dateRange('2026-01-01', 'nope'), []);
+  // Not a NaN case, despite looking like one: `new Date(2026, 12, 99)` rolls
+  // over to 2027-04-09 rather than failing, so this is an ordinary backwards
+  // range (-463) caught by the same guard. Pinned because the rollover is the
+  // surprise — an out-of-domain date does not stay out of domain.
+  assert.deepEqual(dateRange('2026-13-99', '2026-01-01'), []);
+});
+
+test('dateRange normalises a start that is not a real calendar day', () => {
+  // `assertDate` refuses these at every write path, so a range can only START
+  // on one by reading it back out of storage — a row predating that guard, a
+  // direct insert, or an import that went around it. `computeStats` takes
+  // `from` as the earliest STORED entry whenever a caller names no window,
+  // which is what makes this reachable rather than hypothetical.
+  //
+  // The walk used to push the string it was handed before normalising
+  // anything, so the list opened on 2026-02-30 — a day that does not exist —
+  // and then skipped 2026-03-02, the real day the rollover lands on. Building
+  // the Date up front means every element is a day that happened. This is a
+  // deliberate behaviour change, not a preserved one; see shared/CLAUDE.md.
+  assert.deepEqual(dateRange('2026-02-30', '2026-03-05'),
+    ['2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05']);
+});
+
 test('addDays crosses month and year boundaries', () => {
   assert.equal(addDays('2026-01-31', 1), '2026-02-01');
   assert.equal(addDays('2026-12-31', 1), '2027-01-01');

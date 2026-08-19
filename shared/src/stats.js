@@ -44,10 +44,26 @@ export function today() {
 
 /**
  * Every date from `start` to `end` inclusive, oldest first.
+ *
+ * Advances one local-time `Date` with `setDate`, the same mechanism
+ * `addDays` uses, rather than re-deriving each day from a string — that is
+ * what makes this cheap. An epoch `+= 86400000` walk looks equivalent and
+ * is not: it repeats a day across a fall-back DST transition, which is the
+ * same ±1 hour `daysBetween`'s Math.round note is defending against.
+ * `!(n >= 0)` rather than `n < 0`: `daysBetween` answers `NaN` for an
+ * unparseable date, and `n < 0` is false for `NaN` too, so `new Array(n + 1)`
+ * would throw `RangeError` instead of returning `[]`.
  */
 export function dateRange(start, end) {
-  const out = [];
-  for (let d = start; daysBetween(d, end) >= 0; d = addDays(d, 1)) out.push(d);
+  const n = daysBetween(start, end);
+  if (!(n >= 0)) return [];
+  const [y, m, d] = start.split('-').map(Number);
+  const cur = new Date(y, m - 1, d);
+  const out = new Array(n + 1);
+  for (let i = 0; i <= n; i++) {
+    out[i] = toISO(cur);
+    cur.setDate(cur.getDate() + 1);
+  }
   return out;
 }
 

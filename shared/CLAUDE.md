@@ -165,6 +165,33 @@ aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
 the unbounded `dateRange` on a distant-past entry turns one request into
 ~700,000 iterations on a single-threaded server.
 
+**`dateRange` walks one local-time `Date` with `setDate`, never an epoch
+integer.** It used to re-derive every day from a string — two `fromISO` calls
+and a `toISO` per element — measured at 92% of `computeScores`' total time;
+advancing a single `Date` instead is the same ~8x cheaper on every aggregation
+in this file, since all of them go through `boundedRange`. The obvious faster
+rewrite, `t += 86400000`, is wrong: it repeats `2026-11-01` under
+`America/New_York`'s fall-back transition, because that calendar day is 25
+hours long and an epoch walk cannot see the extra hour. The literals in
+`test/stats.test.js` hold in this repo's own zone under *either* walk, which is
+exactly why `test/timezones.test.js` exists — it sweeps both `stats.test.js`
+and `streaks.test.js` under fixed `TZ`s in a child process, because `TZ` is
+read once at process start and nothing short of a fresh process observes a
+changed one.
+
+**One input changed meaning with that rewrite, deliberately: a range that
+STARTS on a date which is not a real day.** The old walk pushed the string it
+was handed before normalising anything, so `dateRange('2026-02-30', …)` opened
+on 2026-02-30 — a day that does not exist — and then skipped 2026-03-02, the
+real day the rollover lands on. Building the `Date` up front normalises first,
+so the list is a contiguous run of days that happened. `assertDate` refuses
+such a date at every write path, so this is only reachable by reading one back
+out of storage — a row predating that guard, a direct insert, an import that
+went around it — and it matters because `computeStats` takes `from` as the
+earliest STORED entry when a caller names no window. An account holding such a
+row sees its derived figures move once. That is the phantom day leaving them,
+not a regression.
+
 **`onPaceSeries` pro-rates the requirement near the start** —
 `required = min(activeDays, num*activeDays/den)` — so a habit is not judged
 against history it does not have yet. Consequence worth knowing before touching
