@@ -79,6 +79,79 @@ export function cspDirectives(upgradeInsecure) {
 export const HSTS = { maxAge: 31536000, includeSubDomains: true };
 
 /**
+ * How long a shared-frontend asset may be reused without asking the server.
+ *
+ * Minutes, and deliberately not a year. Nothing under `shared/public/` carries
+ * a content hash in its URL — there is no build step to put one there — so this
+ * number is a promise that cannot be revoked once a browser has it. It also
+ * COMPOUNDS with the service worker: `shellFirst` revalidates with a plain
+ * `fetch(request)` in the default cache mode, so whatever is set here is added
+ * to how long an installed client goes on running the module it already has.
+ *
+ * Five minutes is long enough that a reload does not re-ask for thirty-odd
+ * modules and short enough that a bad deploy is over before anyone has finished
+ * reporting it. The bandwidth this trades away is worth approximately nothing:
+ * the service worker is already serving scripts from Cache Storage, so what
+ * this bounds is mostly conditional requests, not transfers.
+ */
+export const STATIC_MAX_AGE_MS = 5 * 60 * 1000;
+
+/**
+ * The four files that must never be held past a deploy.
+ *
+ * `sw.js` is how every OTHER file is ever replaced, so a stale copy of it pins
+ * a stale shell for as long as it lives. `index.html` and `style.css` are the
+ * two the service worker fetches NETWORK-first (`revalidateFirst` in
+ * `shared/public/sw.js`, on `request.mode === 'navigate'` and
+ * `destination === 'style'`) precisely so that a deploy appears in one load
+ * rather than two, with no window where new HTML renders against old CSS —
+ * caching them here would hand that fetch a disk copy and take the property
+ * back. `manifest.json` names the icons below, which outlive everything.
+ */
+const ALWAYS_REVALIDATE = /(?:^|\/)(?:index\.html|style\.css|sw\.js|manifest\.json)$/;
+
+/**
+ * The icons, which are the one safe long cache here: they are referenced by
+ * name from `manifest.json` and `index.html`, they are the only assets that do
+ * not compress, and they have changed twice in the life of the project.
+ *
+ * `immutable` is what makes this a real saving rather than a conditional
+ * request — but it also means a CHANGED icon must be a RENAMED icon. There is
+ * no revalidation to catch it otherwise.
+ */
+const IMMUTABLE = /(?:^|\/)icons\//;
+
+/**
+ * `express.static` options for the shared frontend, for both editions to spread
+ * into every mount that serves `shared/public/`.
+ *
+ * Here for the same reason the CSP is: what file may be held, and for how long,
+ * is a statement about `shared/public/` rather than about an edition, and both
+ * editions serve those files from the same directory. Two copies would be two
+ * chances to give the service worker a stale shell in exactly one edition.
+ *
+ * Matching is on the FILESYSTEM path express resolved, not on the URL, which is
+ * what makes one rule cover a file reachable at two URLs — `manifest.json` is
+ * served both from the root mount and under `/shared`, and it must revalidate
+ * either way.
+ */
+export const STATIC_CACHE = {
+  maxAge: STATIC_MAX_AGE_MS,
+  /**
+   * @param {{ setHeader: (name: string, value: string) => void }} res
+   * @param {string} filePath absolute path of the file being sent
+   */
+  setHeaders(res, filePath) {
+    const path = String(filePath).replace(/\\/g, '/');
+    if (ALWAYS_REVALIDATE.test(path)) {
+      res.setHeader('Cache-Control', 'no-cache');
+    } else if (IMMUTABLE.test(path)) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  },
+};
+
+/**
  * Session cookie shape, minus `secure` — which each edition decides for itself,
  * because a `Secure` cookie over plaintext HTTP is dropped silently and login
  * then breaks with no error on either side. Cloud reads its one public URL;

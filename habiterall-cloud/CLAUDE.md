@@ -400,3 +400,24 @@ use the same public HTTPS URL; locally, compose aliases the host via
 There isn't one here beyond `public/app-entry.js`. The UI lives in
 `shared/public/` and is served by the static mounts in `src/server.js`. Do not
 copy files back into this package.
+
+**Those mounts are ABOVE `app.use(session(...))`, for the same reason `/healthz`
+is and one more.** Nothing under `shared/public/` reads a session, so below the
+middleware every asset paid for a `session` SELECT plus a `rolling: true` touch
+UPDATE — thirty-odd round trips against Postgres per cold shell, to hand back
+files off a disk. The half that was visible from outside: `rolling` re-stamps the
+cookie on every response it reaches, so each asset went out carrying
+`Set-Cookie`, and **no shared cache will store a response that sets a cookie**.
+Read off the live instance, every asset came back `cf-cache-status: BYPASS` —
+the CDN declining to cache the whole frontend. `Cache-Control: public, max-age=0`,
+which is what `express.static` says when nothing passes `maxAge`, was
+independently enough to cause the same thing; `STATIC_CACHE`
+(`shared/src/security.js`) is the other half. The personal edition never had
+either, having always mounted static up there.
+
+The ordering is pinned in `shared/test/static-cache.test.js`, which reads both
+editions' `server.js`, because nothing here can be booted without a Postgres and
+an identity provider. The behavioural half — sign in, then check that an asset
+comes back with no `Set-Cookie` while `/api/me` still does — is
+`habiterall-personal/test/static-cache.integration.mjs`, over the same three
+lines.

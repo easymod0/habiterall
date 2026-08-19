@@ -233,6 +233,7 @@ npm run test:exportloop   # the Loop export survives a date that is not a day
 npm run test:auth         # the modes and their attacks, end to end (no browser)
 npm run test:credchange   # a session must not outlive its credential (restarts)
 npm run test:signin       # the sign-in view in Chrome; starts its own server
+npm run test:staticcache  # what a CDN is told about an asset, and that none sets a cookie
 docker compose up -d      # containerised
 ```
 
