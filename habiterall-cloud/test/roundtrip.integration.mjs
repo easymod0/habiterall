@@ -492,9 +492,17 @@ await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
 // only WHICH ids are on and left in canonical order would compare equal with
 // the order silently dropped — the "fixture holds a field's default" defect,
 // one axis short of catching it.
+//
+// Note what this does NOT cover, so nobody assumes it does: the value goes in
+// through a raw `UPDATE ... jsonb` below and comes back through
+// `portableSettings`, which only picks keys — `parseCardList` is never on this
+// path. Personal's copy of this fixture goes through a real `PUT
+// /api/settings` and so pins the normaliser too. This one is about the export
+// carrying a stored shape unnormalised, which is a different claim.
 const nonCanonicalDetailCards = [
   { id: 'history', on: true }, { id: 'calendar', on: true },
-  { id: 'strength', on: false }, { id: 'frequency', on: true },
+  { id: 'strength', on: false }, { id: 'recentDays', on: true },
+  { id: 'frequency', on: true },
   { id: 'weekdays', on: false }, { id: 'awards', on: true },
   { id: 'streaks', on: true }, { id: 'resilience', on: true },
   { id: 'weekdayMonths', on: true },

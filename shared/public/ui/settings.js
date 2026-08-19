@@ -384,10 +384,14 @@ export const SETTINGS = {
     // which the browser cannot import — and the order is load bearing, not
     // tidiness: `parseCardList` stores a NEW-SHAPE list close to verbatim, so
     // a default written in any other order would be normalised away on its
-    // first write. `calendar` immediately follows `strength` (sits directly
-    // under the score) and `awards` comes after `resilience` (a probability
-    // you can act on beats a trophy); test/settings.test.js pins both.
+    // first write. `recentDays` is FIRST — it is the only card you ACT on
+    // rather than read, and the reason it exists is arriving from a reminder
+    // and wanting to answer without hunting for the calendar. `calendar`
+    // immediately follows `strength` (sits directly under the score) and
+    // `awards` comes after `resilience` (a probability you can act on beats a
+    // trophy); test/settings.test.js pins all three.
     default: [
+      { id: 'recentDays', on: true },
       { id: 'strength', on: true },
       { id: 'calendar', on: true },
       { id: 'streaks', on: true },
@@ -403,6 +407,7 @@ export const SETTINGS = {
     // and the page name the same thing. Unchanged in shape and order — only
     // `default` and `type` above express the new stored shape.
     options: [
+      { value: 'recentDays', label: 'Recent days' },
       { value: 'strength', label: 'Habit strength' },
       { value: 'calendar', label: 'Calendar' },
       { value: 'streaks', label: 'Best streaks' },

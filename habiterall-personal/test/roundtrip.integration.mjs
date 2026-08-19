@@ -683,9 +683,16 @@ const getSettings = async () => (await (await api('/api/settings')).json());
 // would still compare equal with the order silently dropped on export or
 // import — the "fixture holds a field's default" defect, just one axis short
 // of catching it. This one is a non-canonical order with two cards off.
+// Every id must be named, and in a non-canonical order: this goes out through
+// a real `PUT /api/settings`, so `parseCardList` runs on it — and any id left
+// out would be INSERTED at its canonical position, leaving the stored value
+// something this fixture never wrote. `recentDays` sits mid-list rather than
+// first for that reason, and because a card whose canonical home is index 0 is
+// the one a normaliser that quietly re-sorted would move without anyone seeing.
 const nonCanonicalDetailCards = [
   { id: 'history', on: true }, { id: 'calendar', on: true },
-  { id: 'strength', on: false }, { id: 'frequency', on: true },
+  { id: 'strength', on: false }, { id: 'recentDays', on: true },
+  { id: 'frequency', on: true },
   { id: 'weekdays', on: false }, { id: 'awards', on: true },
   { id: 'streaks', on: true }, { id: 'resilience', on: true },
   { id: 'weekdayMonths', on: true },

@@ -13,14 +13,17 @@ import {
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
 import {
-  card, cardInnerWidth, habitIcon, segmented, subheading, windowedChart,
+  card, cardInnerWidth, focusKeyOf, habitIcon, restoreFocus, segmented,
+  subheading, windowedChart,
 } from '/shared/ui/components.js';
 import {
-  addDaysISO, formatDateShort, formatStamp, freqLabel, fromISOLocal,
-  targetLabel, todayISO,
+  addDaysISO, datesEndingOn, formatDateShort, formatStamp, freqLabel,
+  fromISOLocal, iso, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { isAvoided } from '/shared/ui/toggle.js';
 import { openDayDialog } from '/shared/ui/day-dialog.js';
+import { dateColumns, dayCells, repaintCells } from '/shared/ui/day-strip.js';
+import { columnsForWidth, cappedColumns } from '/shared/ui/window.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import { resampleScores } from '/shared/ui/resample.js';
 import * as routes from '/shared/ui/routes.js';
@@ -87,6 +90,147 @@ export async function open(id) {
   }
 }
 
+/* ---------- the day strip's view of this page ---------- */
+
+/**
+ * How far back the strip can be paged.
+ *
+ * A bound, not a preference. Running from the habit's first entry looks
+ * harmless until an imported row dated year 0100 asks the browser to build a
+ * ~700,000-element array of days — the client-side shape of `MAX_RANGE_DAYS`
+ * and the same attacker-controlled input, since a stored date is not something
+ * the app chose. A year is well past what anyone answers retrospectively from a
+ * strip; the calendar card is the surface for older history.
+ */
+const STRIP_HISTORY_DAYS = 365;
+
+/**
+ * One cell's footprint: `.check` is 44px — the minimum comfortable touch
+ * target, not a look — and `.checks` puts a 4px gap between them.
+ *
+ * **The gap is part of the figure, and leaving it out is visible.** A density
+ * is what `columnsForWidth` DIVIDES the width by, so 44 claims 23 columns fit
+ * a 1026px card when 23 of them actually need 1104px: measured, the strip
+ * overflowed into a horizontal scrollbar and the captions drifted up to 72px
+ * off the squares they label, because `justify-content` resolves differently
+ * for a row that overflows. `MIN_SLOT.circle` already carries its gap for the
+ * same reason — its comment says "diameter plus a gap".
+ *
+ * Passed with `reserved: 0`: that parameter exists for a chart's axis labels
+ * and this card has none, so the default 46 would silently cost it a column.
+ */
+const CELL_PX = 48;
+
+/**
+ * The page's own day maps, at module scope rather than inside `render`.
+ *
+ * `ui/day-strip.js`'s host has to be a singleton — the amount dialog outlives a
+ * rebuild, and a host closed over one render's locals would answer from maps
+ * that render has since orphaned. So the maps move out and each render
+ * reassigns them; nothing reads them before the first one.
+ */
+let openHabit = null;
+let openEntriesByDate = {};
+let openSkipSet = new Set();
+/** Where the strip's cells were appended, so a repaint can find them. */
+let stripRoot = null;
+
+/**
+ * This page, as `ui/day-strip.js` reads and writes it.
+ *
+ * The encoding is `/habits/:id/entries`', which is NOT the dashboard's: a skip
+ * is a row whose `status` is 'skip', carried in its own set, where `/overview`
+ * flattens it onto the SKIP wire value as well. Both hosts describe the same
+ * day; only their storage differs, which is the whole reason a host exists.
+ *
+ * @type {import('/shared/ui/day-strip.js').StripHost}
+ */
+const detailHost = {
+  // One habit is open at a time, so a request for any other is refused rather
+  // than searched for — a cell built before a different habit was opened must
+  // not write into the one now showing.
+  habit: (id) => (openHabit && openHabit.id === id ? openHabit : null),
+
+  read(id, date) {
+    if (!openHabit || openHabit.id !== id) return { value: undefined, isSkip: false };
+    return {
+      // Whether the map HOLDS the date, never what it holds.
+      value: Object.hasOwn(openEntriesByDate, date) ? openEntriesByDate[date] : undefined,
+      isSkip: openSkipSet.has(date),
+    };
+  },
+
+  edit(id, date, to) {
+    if (!openHabit || openHabit.id !== id) return () => {};
+    const had = Object.hasOwn(openEntriesByDate, date) ? openEntriesByDate[date] : undefined;
+    const wasSkip = openSkipSet.has(date);
+
+    if (to === 'clear') {
+      delete openEntriesByDate[date];
+    } else {
+      // `entryWrite` stores a skip as `{value: 0, status: 'skip'}`, so 0 is
+      // what the refetch will report beside the status — the optimistic state
+      // has to be the one that comes back, or the cell flickers on reload.
+      openEntriesByDate[date] = to === 'skip' ? 0 : to;
+    }
+    if (to === 'skip') openSkipSet.add(date);
+    else openSkipSet.delete(date);
+
+    return () => {
+      if (had === undefined) delete openEntriesByDate[date];
+      else openEntriesByDate[date] = had;
+      if (wasSkip) openSkipSet.add(date);
+      else openSkipSet.delete(date);
+    };
+  },
+
+  // Re-runs the paint over the cells that already exist and replaces no DOM at
+  // all. The dashboard's equivalent is a full `paint()`, which is cheap there;
+  // here a rebuild is two requests and up to ten cards of SVG, far too much to
+  // spend on a tap — and touching no nodes is also what keeps keyboard focus
+  // on the button that was just pressed.
+  repaint: () => {
+    if (stripRoot && openHabit) repaintCells(stripRoot, detailHost, openHabit);
+  },
+
+  refresh: () => refresh(openHabit?.id),
+};
+
+/**
+ * Reload the page, never more than once at a time.
+ *
+ * `open()` is two round trips and a full rebuild, so three quick taps would
+ * otherwise fire three of them — and nothing guarantees the third resolves
+ * last, which means a later-started reload can finish first and leave OLDER
+ * data on screen. The hazard predates the strip (two fast presses on ‹ Earlier
+ * do it) but the strip makes rapid re-entry the normal case.
+ *
+ * A request arriving mid-flight is remembered rather than dropped: the write
+ * that prompted it has already landed, so skipping the reload would leave the
+ * page a version behind with nothing to trigger another.
+ */
+let refreshing = null;
+let refreshAgain = false;
+function refresh(id) {
+  if (id == null) return Promise.resolve();
+  if (refreshing) {
+    refreshAgain = true;
+    return refreshing;
+  }
+  refreshing = (async () => {
+    try {
+      await open(id);
+    } finally {
+      refreshing = null;
+      if (refreshAgain) {
+        refreshAgain = false;
+        await refresh(id);
+      }
+    }
+  })();
+  return refreshing;
+}
+
 /** Delete every `state.chartOffsets` key a predicate matches. */
 function forgetOffsets(matches) {
   for (const key of Object.keys(state.chartOffsets)) {
@@ -115,6 +259,10 @@ function forgetOffsets(matches) {
  * `forget`.
  */
 const CARDS = new Map([
+  ['recentDays', {
+    build: buildRecentDaysCard,
+    forget: () => forgetOffsets((key) => key === 'recentDays'),
+  }],
   ['strength', {
     build: buildStrengthCard,
     // Prefix-matched, so hiding the strength card forgets every resolution
@@ -182,7 +330,17 @@ function render(stats, entries) {
   // that goes nowhere.
   routes.go({ view: 'habit', id: habit.id });
   const host = views.showDetail();
+
+  // Captured before the rebuild below destroys whatever had it. The day strip
+  // is the reason this page needs it at all: a tap there refetches and rebuilds
+  // every card, so without this the second tap of a cycle is unreachable from
+  // a keyboard — focus drops to <body> and the next Tab starts from the top of
+  // the page, which is the failure `dashboard.js` already had and fixed.
+  const focused = focusKeyOf(document.activeElement);
   host.replaceChildren();
+  // Nothing from the previous render survives it, and a stale node here would
+  // have `repaintCells` walking an orphan.
+  stripRoot = null;
 
   const entriesByDate = Object.fromEntries(entries.map((e) => [e.date, e.value]));
   // Computed unconditionally, same as `entriesByDate` above, rather than only
@@ -193,6 +351,12 @@ function render(stats, entries) {
   const notesByDate = Object.fromEntries(
     entries.filter((e) => e.notes).map((e) => [e.date, e.notes])
   );
+
+  // The same three, where `detailHost` can reach them after this render has
+  // returned — see the note on those declarations.
+  openHabit = habit;
+  openEntriesByDate = entriesByDate;
+  openSkipSet = skipSet;
 
   /* header */
   const head = document.createElement('div');
@@ -287,6 +451,77 @@ function render(stats, entries) {
     const built = CARDS.get(id)?.build?.(ctx);
     if (built) host.append(built);
   }
+
+  restoreFocus(host, focused);
+}
+
+/**
+ * The day strip: the dashboard's tappable cells, for this habit alone.
+ *
+ * The one card you ACT on rather than read, which is why it defaults to the top
+ * of the page. Arriving here from a reminder, the only way to record the day
+ * used to be the calendar card and the day editor behind it — two presses and a
+ * dialog to answer a yes/no question the notification had already asked.
+ *
+ * Everything it draws is already in memory: `/habits/:id/entries` is fetched
+ * unwindowed, so paging back costs no request. That is the whole reason this
+ * pages by slicing rather than the way the dashboard does, which refetches.
+ */
+function buildRecentDaysCard({ habit, entries, chartWidth }) {
+  const strip = card('Recent days', null);
+  const todayIso = todayISO();
+  const fits = columnsForWidth(chartWidth, CELL_PX, 0);
+
+  // How far back there is to page. Trimmed by comparing ISO strings against
+  // the habit's first entry rather than by counting days between two dates:
+  // the count is the thing this repo has got wrong twice (an epoch walk
+  // repeats a day under a fall-back transition, calendar arithmetic emits a
+  // day Apia never lived), and none of it is needed to answer "which of these
+  // days predate the habit".
+  //
+  // `entries` is ordered by date, so `[0]` is the earliest. Never fewer than
+  // one screenful, so a habit with no history at all still gets a full,
+  // tappable strip — which is exactly who this card is for.
+  const all = datesEndingOn(STRIP_HISTORY_DAYS, todayIso);
+  const first = entries.length ? entries[0].date : todayIso;
+  const firstIdx = all.findIndex((d) => iso(d) >= first);
+  const dates = all.slice(Math.min(
+    firstIdx === -1 ? all.length : firstIdx,
+    Math.max(0, all.length - fits)
+  ));
+
+  windowedChart({
+    card: strip,
+    key: 'recentDays',
+    items: dates,
+    density: CELL_PX,
+    // The account's `gridDays`, capping what the card's width allows — the
+    // setting means "at most this many days of grid" on both surfaces. The
+    // ladder `gridColumns` applies is NOT used here: it exists to protect the
+    // habit name beside the dashboard's cells, and this card has no name
+    // column.
+    capacity: cappedColumns(settings.get('gridDays'), fits),
+    width: chartWidth,
+    labelOf: (d) => formatDateShort(d),
+    redraw: () => refresh(habit.id),
+    render: (slice) => {
+      const shown = settings.get('dayOrder') === 'newest-left'
+        ? [...slice].reverse()
+        : slice;
+      const wrap = document.createElement('div');
+      wrap.className = 'day-strip';
+      wrap.append(dateColumns(shown, todayIso), dayCells(detailHost, habit, shown, todayIso));
+      // Where `detailHost.repaint` looks for the cells. Assigned on every
+      // render, and nulled by `render()` before the rebuild, so a tap can never
+      // repaint a strip that is no longer on the page.
+      stripRoot = wrap;
+      return wrap;
+    },
+  });
+
+  // Never null, unlike the cards that decline when they have no data: a habit
+  // with no history at all is exactly who this card is for.
+  return strip;
 }
 
 /**

@@ -362,7 +362,7 @@ export function answerBody(habit, { action, value }) {
  * browser. `test/settings.test.js` fails if the two lists drift.
  */
 export const DETAIL_CARDS = Object.freeze([
-  'strength', 'calendar', 'streaks', 'resilience', 'awards',
+  'recentDays', 'strength', 'calendar', 'streaks', 'resilience', 'awards',
   'history', 'weekdays', 'weekdayMonths', 'frequency',
 ]);
 

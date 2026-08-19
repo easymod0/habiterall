@@ -159,11 +159,15 @@ export function cardInnerWidth(container) {
  * @param {(slice: Array) => Node} opts.render
  * @param {(item: any) => string} [opts.labelOf]  for the range readout
  * @param {() => void} opts.redraw
+ * @param {number} [opts.capacity]  columns, when the caller has already decided
+ *   — the day strip caps `columnsForWidth`'s answer by the account's
+ *   `gridDays`, which is a preference this component has no business reading.
+ *   Everything else about the paging is unchanged, including the clamp.
  */
 export function windowedChart(opts) {
   const { card: host, key, items, density, width, render, labelOf, redraw } = opts;
 
-  const capacity = columnsForWidth(width, density);
+  const capacity = opts.capacity ?? columnsForWidth(width, density);
   const win = windowSlice(items, capacity, state.chartOffsets[key] ?? 0);
   // Write the clamped value back, so paging past an end does not leave a
   // stale offset that shifts the window on the next render.

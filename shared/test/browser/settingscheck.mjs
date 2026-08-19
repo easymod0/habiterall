@@ -230,8 +230,8 @@ try{
   const cardTitles = () => ev(
     `[...document.querySelectorAll('#view-detail .card-title')].map(t=>t.textContent)`);
 
-  await putSetting({ detailCards: ['strength', 'calendar', 'streaks', 'resilience',
-    'awards', 'history', 'weekdays', 'weekdayMonths', 'frequency'] });
+  await putSetting({ detailCards: ['recentDays', 'strength', 'calendar', 'streaks',
+    'resilience', 'awards', 'history', 'weekdays', 'weekdayMonths', 'frequency'] });
   await load();
   await openHabit();
   const allCards = await cardTitles();
@@ -270,15 +270,28 @@ try{
   // The calendar rather than a `windowedChart` card on purpose: its position is
   // `state.calEnd` and not `state.chartOffsets`, so a fix that clears only the
   // offsets passes every other assertion here and fails this one.
-  await putSetting({ detailCards: ['strength', 'calendar', 'streaks', 'resilience',
-    'awards', 'history', 'weekdays', 'weekdayMonths', 'frequency'] });
+  await putSetting({ detailCards: ['recentDays', 'strength', 'calendar', 'streaks',
+    'resilience', 'awards', 'history', 'weekdays', 'weekdayMonths', 'frequency'] });
   await load();
   await openHabit();
-  const calRange = () => ev(`document.querySelector('.cal-range')?.textContent ?? ''`);
+  // Scoped to the Calendar card BY TITLE, not `document.querySelector`.
+  // `windowedChart` gives every paging card the same `.cal-range` and
+  // `.cal-nav` classes, and Recent days is higher on the page and pages too —
+  // so an unscoped lookup here reads the wrong card's readout and clicks the
+  // wrong card's Earlier button, while every assertion below still passes.
+  // The same trap the block further down documents and scopes for.
+  const inCal = (sel) => `(()=>{
+    const c=[...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='Calendar');
+    return c?.querySelector(${JSON.stringify(sel)});})()`;
+  const calRange = () => ev(`${inCal('.cal-range')}?.textContent ?? ''`);
   const atToday = await calRange();
   for (const _ of [0, 1]) {
-    await ev(`[...document.querySelectorAll('.cal-nav button')]
-      .find(b=>b.textContent.includes('Earlier'))?.click()`);
+    await ev(`(()=>{
+      const c=[...document.querySelectorAll('#view-detail .card')]
+        .find(c=>c.querySelector('.card-title')?.textContent==='Calendar');
+      [...(c?.querySelectorAll('.cal-nav button') ?? [])]
+        .find(b=>b.textContent.includes('Earlier'))?.click();})()`);
     await sleep(700);
   }
   const pagedBack = await calRange();
@@ -297,7 +310,7 @@ try{
      await calRange() === '');
   await tickCalendar(true);
   for (let i = 0; i < 40; i++) {
-    if (await ev(`!!document.querySelector('.cal-range')`).catch(()=>0)) break;
+    if (await ev(`!!${inCal('.cal-range')}`).catch(()=>0)) break;
     await sleep(200);
   }
   await sleep(500);
@@ -382,6 +395,10 @@ try{
     { id: 'history', on: true },
     { id: 'awards', on: false },
     { id: 'strength', on: true },
+    // Off, and mid-list rather than first: a card whose canonical home is
+    // index 0 is the one a normaliser that quietly re-sorted would move, and
+    // the one an `off` entry could be "helpfully" turned back on for.
+    { id: 'recentDays', on: false },
     { id: 'weekdayMonths', on: false },
     { id: 'weekdays', on: true },
     { id: 'resilience', on: false },
@@ -398,7 +415,7 @@ try{
        ['History', 'Habit strength', 'By day of week', 'Calendar', 'Best streaks']),
      JSON.stringify(orderedTitles));
   ck('and the cards left `off` are not drawn at all',
-     ['Bouncing back', 'Awards', 'Weekday consistency', 'Times per week']
+     ['Bouncing back', 'Awards', 'Weekday consistency', 'Times per week', 'Recent days']
        .every((t) => !orderedTitles.includes(t)),
      JSON.stringify(orderedTitles));
 
@@ -408,6 +425,7 @@ try{
   // stored shape — step 1 already covers that.
   console.log('--- detail cards: the dialog reorders them ---');
   await putSetting({ detailCards: [
+    { id: 'recentDays', on: true },
     { id: 'strength', on: true }, { id: 'calendar', on: true },
     { id: 'streaks', on: true }, { id: 'resilience', on: true },
     { id: 'awards', on: true }, { id: 'history', on: true },

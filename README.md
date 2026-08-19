@@ -123,6 +123,7 @@ between browsers and travels in the JSON backup.
 
 | View | What it shows |
 |---|---|
+| **Recent days** | The dashboard's day squares for this one habit — tap to record without leaving the page. Pages back through history |
 | **Strength** | Loop's exponential-decay score, plotted by day / week / month / quarter / year |
 | **Calendar** | A clickable heatmap with streaks joined up, zoomable and pageable |
 | **History** | Completions by day / week / month / quarter / year, as a percentage or a count |
@@ -1846,14 +1847,14 @@ Two of them decide how much there is to look at:
 | Setting | Default | What it does |
 |---|---|---|
 | **Day columns** (Dashboard) | Fit the screen | How many days the dashboard grid shows **at most** — 5, 7, 10, 14, or as many as fit. A maximum, never a minimum: a phone asked for a fortnight still draws a week. Choosing fewer is how you get fat columns you can hit with a thumb |
-| **Cards on a habit's page** (Statistics) | All of them, in this order | Which of the nine cards a habit's page draws, and in what order: strength, calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency, times per week. Each row has ▲ / ▼ beside its tick. The four figures at the top always show, so unticking everything leaves a page rather than a blank one |
+| **Cards on a habit's page** (Statistics) | All of them, in this order | Which of the ten cards a habit's page draws, and in what order: recent days, strength, calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency, times per week. Each row has ▲ / ▼ beside its tick. The four figures at the top always show, so unticking everything leaves a page rather than a blank one |
 
 A card with nothing in it yet — bouncing back on a habit with no history — stays
 hidden whichever way this is set.
 
 <div align="center">
 <img src="docs/screenshots/settings-cards.png" width="420"
-     alt="Settings, Statistics section: dropdowns for strength chart resolution and which bucket the history chart opens on, then a Cards on a habit's page fieldset listing all nine cards — habit strength, calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency, times per week — each with a ticked checkbox and an up and a down arrow button, and below it a History shows dropdown set to Percentage.">
+     alt="Settings, Statistics section: dropdowns for strength chart resolution and which bucket the history chart opens on, then a Cards on a habit's page fieldset listing all ten cards — recent days, habit strength, calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency, times per week — each with a ticked checkbox and an up and a down arrow button, and below it a History shows dropdown set to Percentage.">
 <br><sub>Which cards a habit's page draws, and in what order</sub>
 </div>
 
