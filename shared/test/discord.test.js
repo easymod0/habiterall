@@ -20,6 +20,14 @@ const habit = (over = {}) => ({
   reminder_message: '', archived: false, ...over,
 });
 
+// All three of `isAvoided`'s questions are set on purpose — a two-of-three
+// fixture pins nothing, because the predicate would still read false and the
+// test would pass against the unfixed code.
+const avoid = (over = {}) => habit({
+  type: 'numerical', target_type: 'at_most', target_value: 0,
+  show_as: 'avoid', unit: 'cigarettes', ...over,
+});
+
 /** A fetch stand-in that records calls. */
 function fakeFetch(responses = [{ status: 204 }]) {
   const calls = [];
@@ -99,6 +107,34 @@ test('Skip is offered only when the account uses skip days', () => {
   assert.deepEqual(numeric.components.map((b) => b.label), ['Enter amount', 'Skip']);
 });
 
+test('an avoided habit gets Clean / Slipped, not a number pad', () => {
+  // 1. The button set: an avoided habit is numerical by definition, so the
+  // plain `type === 'numerical'` check must not be what decides this.
+  const [row] = reminderComponents(avoid(), { date: '2026-08-13' });
+  assert.deepEqual(row.components.map((b) => b.label), ['Clean', 'Slipped']);
+
+  // 2. The wiring, not the label — this is what catches an inversion hiding
+  // behind correct labels (CLAUDE.md: pinning the decision is not pinning the
+  // wiring). `yes` stays the good answer under `id('yes')`, `no` the bad one
+  // under `id('no')`, and `style` follows the action rather than the label.
+  assert.equal(parseAction(row.components[0].custom_id).action, 'yes');
+  assert.equal(parseAction(row.components[1].custom_id).action, 'no');
+  assert.equal(row.components[0].style, 3); // STYLE.success, on the Clean button
+
+  // 3. An ordinary at-most habit (not avoided) still gets the number pad —
+  // the issue's stated non-scope, asserted rather than assumed.
+  const [amount] = reminderComponents(avoid({ show_as: 'amount' }), { date: '2026-08-13' });
+  assert.deepEqual(amount.components.map((b) => b.label), ['Enter amount']);
+});
+
+test('Skip keeps its label on an avoided habit, and its action', () => {
+  // 4. The phone does not invert Skip either (R.string.action_skip is used
+  // for both), so neither does this.
+  const [row] = reminderComponents(avoid(), { date: '2026-08-13', skipDays: true });
+  assert.deepEqual(row.components.map((b) => b.label), ['Clean', 'Slipped', 'Skip']);
+  assert.equal(parseAction(row.components[2].custom_id).action, 'skip');
+});
+
 test('an answer reads back as what was recorded', () => {
   assert.equal(answerText(habit(), { action: 'yes' }), 'Done');
   assert.equal(answerText(habit(), { action: 'no' }), 'Not done');
@@ -106,6 +142,16 @@ test('an answer reads back as what was recorded', () => {
   assert.equal(answerText(habit({ unit: 'glasses' }), { action: 'amount', value: 6 }),
     '6 glasses');
   assert.equal(answerText(habit({ unit: '' }), { action: 'amount', value: 6 }), '6');
+});
+
+test('an avoided habit answers Clean / Slipped, and Skip/amount stay uninverted', () => {
+  // 5. `answerText` on an avoided habit.
+  assert.equal(answerText(avoid(), { action: 'yes' }), 'Clean');
+  assert.equal(answerText(avoid(), { action: 'no' }), 'Slipped');
+  // Uninverted on purpose: 'Skipped' means the same thing either way up, and
+  // an amount is a recorded number, not a judgement.
+  assert.equal(answerText(avoid(), { action: 'skip' }), 'Skipped');
+  assert.equal(answerText(avoid(), { action: 'amount', value: 3 }), '3 cigarettes');
 });
 
 /* ---------- posting as a bot ---------- */
