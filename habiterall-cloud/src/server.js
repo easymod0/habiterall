@@ -15,8 +15,8 @@ import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
-  cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
-  sameOriginOnly, warnOnUntrustedProxy,
+  cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, STATIC_CACHE, RATE_LIMITS,
+  trustProxy, sameOriginOnly, warnOnUntrustedProxy,
 } from '@habiterall/shared/security.js';
 import { NTFY_ANSWER_PATH, handleNtfyAnswer } from '@habiterall/shared/ntfy-answer.js';
 
@@ -149,6 +149,43 @@ const healthLimiter = rateLimit({
 app.get('/healthz', healthLimiter, async (req, res) => {
   sendHealth(res, await healthProbe());
 });
+
+/* ---------- static ---------- */
+
+const SHARED_PUBLIC = join(__dirname, '..', '..', 'shared', 'public');
+
+/*
+ * ABOVE the session middleware, exactly like `/healthz` above, and for that
+ * placement's reason plus one that was visible from outside.
+ *
+ * Nothing under `shared/public/` reads a session — these are the same files
+ * served to a signed-out browser — but mounted below `app.use(session)` every
+ * one of them paid for a `session` SELECT, and `rolling: true` added a touch
+ * UPDATE on top. A cold shell is thirty-odd requests, so that was thirty-odd
+ * round trips against Postgres to hand back files off a disk.
+ *
+ * The visible half: `rolling: true` re-sends the cookie on every response it
+ * reaches, so each of those assets went out carrying `Set-Cookie:
+ * habiterall.sid=...`, and no shared cache will store a response that sets a
+ * cookie. Read off production, every asset came back `cf-cache-status: BYPASS`
+ * — the CDN was declining to cache the entire frontend, and the origin was
+ * serving all of it on every load. `Cache-Control: public, max-age=0`, which
+ * is what express.static says when nothing sets `maxAge`, was independently
+ * enough to cause the same thing; `STATIC_CACHE` is the other half of the fix.
+ *
+ * The personal edition never had either problem, having always mounted static
+ * up here — which is the argument for keeping the two files in the same shape.
+ *
+ * The second mount also answers `/sw.js`, and it has to: a service worker may
+ * only control pages at or below its own path, so it is served from the origin
+ * root even though it lives in shared/. There was a dedicated route for it
+ * BELOW the static mounts, setting `Cache-Control: no-cache` where the static
+ * handler had already answered — so `/sw.js` went out with the default instead.
+ * `STATIC_CACHE` now states that rule where it can be seen to apply.
+ */
+app.use(express.static(join(__dirname, '..', 'public'), STATIC_CACHE));
+app.use(express.static(SHARED_PUBLIC, STATIC_CACHE));
+app.use('/shared', express.static(SHARED_PUBLIC, STATIC_CACHE));
 
 /* ---------- sessions ---------- */
 
@@ -293,25 +330,6 @@ app.use(express.json({ limit: '1mb' }));
 // Mounted before the router so the tighter limit applies first.
 app.use('/api/notify/test', requireAuth, notifyTestLimiter);
 app.use('/api', requireAuth, apiLimiter, api);
-
-/* ---------- static ---------- */
-
-const SHARED_PUBLIC = join(__dirname, '..', '..', 'shared', 'public');
-
-// This edition's own files (just the entry point) take precedence, then the
-// shared UI. The whole interface lives in shared/ so a fix lands in both
-// editions at once.
-app.use(express.static(join(__dirname, '..', 'public')));
-app.use(express.static(SHARED_PUBLIC));
-app.use('/shared', express.static(SHARED_PUBLIC));
-
-// A service worker may only control pages at or below its own path, so it has
-// to be served from the origin root even though it lives in shared/.
-app.get('/sw.js', (req, res) => {
-  res.type('application/javascript');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(join(SHARED_PUBLIC, 'sw.js'));
-});
 
 /* ---------- errors ---------- */
 

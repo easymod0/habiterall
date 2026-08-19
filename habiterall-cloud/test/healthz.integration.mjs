@@ -203,17 +203,38 @@ try {
   }
 
   console.log('\n--- the touch throttle, through the real server ---');
-  // A route BELOW the session middleware, so it does touch: the static shell.
-  // Not /api/*, which would need a provisioned user, and not /healthz, which is
-  // now above the middleware and would pass this without a throttle at all.
+  // A route BELOW the session middleware, so it does touch. This was `/` — the
+  // static shell — until the static mounts moved ABOVE the middleware so that
+  // assets stop carrying `Set-Cookie` and a CDN will cache them. That is
+  // precisely what the control below exists to notice, and it did: `/` is now
+  // answered before the session middleware is ever reached, so the row stopped
+  // moving and this suite failed rather than quietly asserting nothing.
+  //
+  // A path that matches NO route instead, which is the purest form of the thing
+  // being measured: it reaches the session middleware, which touches the row on
+  // response end whatever happens afterwards, and then reaches nothing else at
+  // all. Express answers 404 and the status is beside the point.
+  //
+  // Not `/api/me`, which is the obvious candidate and is wrong in a way worth
+  // writing down: this suite's session names `user.id` 1, no such user exists,
+  // so `isBlocked` reads it as blocked and `requireAuth` calls
+  // `req.session.destroy()` — which DELETES the row this block is watching, and
+  // `expireOf` then throws on an undefined row rather than failing an
+  // assertion. Not `/healthz` either, for the opposite reason: it is above the
+  // middleware and would pass this without a throttle at all.
+  //
+  // If a catch-all ever answers this path from above the middleware, the control
+  // below fails — which is correct, and is the same alarm that caught `/`.
+  //
   // Its own sid, untouched by anything above, so the throttle is guaranteed to
   // let the first write through and the control below is a real question.
-  const shell = () => fetch(`${base}/`, { headers: { cookie: cookieTouch } });
+  const shell = () =>
+    fetch(`${base}/__session-touch-probe__`, { headers: { cookie: cookieTouch } });
 
   // The control comes first, and it is the half that was missing: without it,
-  // "the column did not move" is also what a `/` that never reached the session
-  // middleware at all would say, and the assertion below would hold for a
-  // server with no session handling whatsoever.
+  // "the column did not move" is also what a request that never reached the
+  // session middleware at all would say, and the assertion below would hold for
+  // a server with no session handling whatsoever.
   const seeded = await expireOf(SID_TOUCH);
   await shell();                      // whatever the interval owes, pay it here
   await idle(1300);

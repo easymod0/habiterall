@@ -21,7 +21,7 @@ Postgres one.
 | `src/unzip.js` | minimal ZIP reader (Loop's CSV export) |
 | `src/zip.js` | minimal ZIP writer, for the CSV archive |
 | `src/constants.js` | `UNSET` / `YES` / `SKIP` wire values |
-| `src/security.js` | the CSP, the session cookie shape, the four rate limits, the `TRUST_PROXY` rule and `sameOriginOnly` — **data, not middleware**, so this package keeps its no-dependencies property |
+| `src/security.js` | the CSP, the session cookie shape, `STATIC_CACHE`, the four rate limits, the `TRUST_PROXY` rule and `sameOriginOnly` — **data, not middleware**, so this package keeps its no-dependencies property |
 | `src/password.js` | hashing, verification, and the one answer to "is auth on?". Personal's half of the shared sign-in flow; cloud uses none of it |
 | `src/log.js` | structured logging: one event per line, one stream, and the redaction that keeps personal data out |
 | `src/observe.js` | `logStartup`, `requestLog` and `watchRuntime` — an Express-shaped middleware that never imports Express |

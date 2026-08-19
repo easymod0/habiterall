@@ -14,8 +14,8 @@ import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import {
-  cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, RATE_LIMITS, trustProxy,
-  sameOriginOnly, warnOnUntrustedProxy,
+  cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, STATIC_CACHE, RATE_LIMITS,
+  trustProxy, sameOriginOnly, warnOnUntrustedProxy,
 } from '@habiterall/shared/security.js';
 import { NTFY_ANSWER_PATH, handleNtfyAnswer } from '@habiterall/shared/ntfy-answer.js';
 
@@ -80,17 +80,17 @@ const SHARED_PUBLIC = join(__dirname, '..', '..', 'shared', 'public');
 // This edition's own files (just the entry point) take precedence, then the
 // shared UI — index.html, style.css, app.js, charts, the PWA assets. The
 // whole interface lives in shared/ so a fix lands in both editions at once.
-app.use(express.static(join(__dirname, '..', 'public')));
-app.use(express.static(SHARED_PUBLIC));
-app.use('/shared', express.static(SHARED_PUBLIC));
-
-// A service worker may only control pages at or below its own path, so it has
-// to be served from the origin root even though it lives in shared/.
-app.get('/sw.js', (req, res) => {
-  res.type('application/javascript');
-  res.setHeader('Cache-Control', 'no-cache');   // always revalidate the SW itself
-  res.sendFile(join(SHARED_PUBLIC, 'sw.js'));
-});
+//
+// The second mount is also what answers `/sw.js`, and it has to: a service
+// worker may only control pages at or below its own path, so it is served from
+// the origin root even though it lives in shared/. There was a dedicated route
+// for that below this line, setting `Cache-Control: no-cache` — below, where
+// the static handler had already answered, so the header it set never reached
+// a client and `/sw.js` went out with express.static's default. `STATIC_CACHE`
+// now states that rule where it can be seen to apply, for every file it covers.
+app.use(express.static(join(__dirname, '..', 'public'), STATIC_CACHE));
+app.use(express.static(SHARED_PUBLIC, STATIC_CACHE));
+app.use('/shared', express.static(SHARED_PUBLIC, STATIC_CACHE));
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 

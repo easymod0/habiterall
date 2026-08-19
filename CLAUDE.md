@@ -259,6 +259,7 @@ Several layers, and they catch different things:
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |
 | Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
+| What a cache is told about an asset | `npm run test:staticcache -w habiterall-personal` | nothing |
 | Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | The probe reaches no session store | `npm run test:healthz -w habiterall-cloud` | Postgres |
