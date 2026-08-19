@@ -13,6 +13,16 @@ node scripts/capture-screenshots.mjs dashboard statistics
 It starts a throwaway personal-edition server, seeds it, drives headless Chrome
 and overwrites the PNGs below. Nothing is cropped or resized afterwards.
 
+**A pair in one `<div>` has a width budget, and busting it is silent.** Two
+`<img>` tags either side of an `&nbsp;` sit side by side only while they both
+fit GitHub's content column; past it the second one **wraps underneath**, which
+is not an error anywhere — it is simply a different, worse figure. The reminder
+pair shipped at `460 + 370` and stacked. **Keep a pair's two `width=` values
+under ~700 together**, and pick them so the two render at the same HEIGHT
+(`width = H × pngWidth ÷ pngHeight` for a chosen `H`), because the eye reads a
+ragged pair as one image having gone wrong. A single image needs none of this:
+over-wide, it is scaled down rather than moved.
+
 **Where the data came from.** The demo set in that script: six habits, each with
 an icon, covering every shape the UI draws differently — a daily yes/no, a
 3×/week one, an *at least 20 pages* measurable habit, and two *at most* habits

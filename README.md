@@ -1279,10 +1279,10 @@ A reminder has two halves, set in two places:
    not exclusive; pick as many as you like.
 
 <div align="center">
-<img src="docs/screenshots/reminder-time.png" width="460"
+<img src="docs/screenshots/reminder-time.png" width="375"
      alt="The Edit habit dialog: name, a one-character Icon field holding an emoji, description, type, frequency, colour, then the Reminder fieldset — an hour dropdown reading 07 (7 am), a minute dropdown reading 30, a box you can type into showing 07:30, a Clear button and one-tap presets for 07:00, 08:00, 12:00, 18:00 and 21:00 — and below it the What the reminder asks field reading 'Did you sit for ten minutes?'.">
 &nbsp;&nbsp;
-<img src="docs/screenshots/notifications.png" width="370"
+<img src="docs/screenshots/notifications.png" width="302"
      alt="Settings, Notifications section: checkboxes for the Android app, this browser, a Discord channel and an ntfy topic, with the Android, Discord and ntfy boxes ticked; fields for a Discord channel id, your Discord user id and a webhook URL; an ntfy topic URL reading https://ntfy.sh/habiterall-demo and an ntfy access token; a reminder timezone set to Europe/London; and a Send a test notification button.">
 <br><sub><b>When</b>, on the habit · <b>Where</b>, in settings</sub>
 </div>
