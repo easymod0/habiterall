@@ -13,8 +13,11 @@
  * yesterday, and the streak sits still at the moment it is being watched.
  *
  * This drives the real server, because the bug is in the routes rather than
- * in the arithmetic underneath them — `computeStats` and `assertNotFuture`
- * were always doing exactly as they were told.
+ * in the arithmetic underneath them — `assertNotFuture` guards the write,
+ * `computeStats` is what `/habits/:id/stats` reads, and `summaryStats` is what
+ * `/overview`'s streak below reads now, and all three were always doing
+ * exactly as they were told. (This is the only suite that checks
+ * `summaryStats`'s caller-day anchor at route level.)
  *
  * The two zones are chosen so this suite says the same thing at every hour.
  * Etc/GMT+12 and Pacific/Kiritimati are 26 hours apart, which is the whole

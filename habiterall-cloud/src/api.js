@@ -31,7 +31,7 @@ import {
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
-  computeStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
+  computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   today, addDays, daysBetween, MAX_RANGE_DAYS,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
@@ -391,9 +391,10 @@ api.get('/habits/:id/stats', route(async (req, res) => {
   });
 
   // Awards are a reading of the figures above and are computed HERE rather
-  // than inside `computeStats`, because `/overview` calls that once per habit
-  // and throws all but four of its fields away. Same reason, same place, in
-  // both editions — see the awards section of the root CLAUDE.md.
+  // than inside `computeStats`, because this is `computeStats`'s only caller
+  // now — `/overview` calls `summaryStats` for two numbers instead, and never
+  // sees an awards field to decline. Same reason, same place, in both
+  // editions — see the awards section of the root CLAUDE.md.
   //
   // `habit` and `unlogged` are the SAME pair `computeStats` was given: awards
   // read them for one gate, and a different answer there than here would
@@ -509,15 +510,15 @@ api.get('/overview', route(async (req, res) => {
       habits: habits.map((h) => {
         const all = byHabit.get(h.id) ?? [];
         const recent = all.filter((e) => e.date >= cutoff);
-        // `coverage: false` for the same reason this block is bounded at all:
-        // two fields of the result are read below — `score` and
-        // `currentStreak` — and the rest is discarded, once per habit. It is
-        // the only field `computeStats` lets a caller decline, because it is
-        // the only one that is its own pass over the window and is read by
-        // nothing here. Awards are out of this route for the same reason,
-        // stated at the `/stats` call site above.
-        const stats = computeStats(h, recent,
-          { end: summaryEnd, unlogged, coverage: false });
+        // Two numbers are read below — `score` and `currentStreak` — so this
+        // calls `summaryStats` rather than `computeStats`: the same window and
+        // the same two passes (`computeScores`, `computeStreaks`), with the
+        // five passes `computeStats` also runs — `computeHistory`,
+        // `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
+        // `computeResilience` — never started, once per habit, on the
+        // dashboard's hot path. Awards are out of this route for the same
+        // reason, stated at the `/stats` call site above.
+        const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
 
         const totalCompleted = totals.get(h.id) ?? 0;
 

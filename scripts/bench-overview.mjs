@@ -28,14 +28,15 @@
  * with `Math.round(x*1e6)/1e6` was a 7.4x win, and against the real module it
  * was 1.09x. A microbenchmark that isolates the arithmetic measures the
  * language and not the program. Every table here therefore reports the
- * WHOLE-MODULE call — `computeStats` exactly as `/overview` invokes it —
- * beside the pass breakdown, and a pass is only ever timed as the route's own
- * code calls it, with the same arguments and the same shared `streaks`.
+ * WHOLE-MODULE call — both `computeStats`, the old cost, and `summaryStats`,
+ * what `/overview` actually invokes now — beside the pass breakdown, and a
+ * pass is only ever timed as the route's own code calls it, with the same
+ * arguments and the same shared `streaks`.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  computeStats, computeScores, computeStreaks, bestStreak, currentStreak,
+  computeStats, summaryStats, computeScores, computeStreaks, bestStreak, currentStreak,
   computeHistory, computeWeekdays, computeWeekdayByMonth, computeFrequency,
   computeResilience, computeCoverage, computeMissRuns,
   boundedRange, addDays, UNLOGGED_DEFAULT,
@@ -52,7 +53,7 @@ const ROOT = join(import.meta.dirname, '..');
  */
 const END = '2026-06-30';
 
-/** `SUMMARY_WINDOW_DAYS` — what `computeStats` is given on `/overview`. */
+/** `SUMMARY_WINDOW_DAYS` — what `summaryStats` is given on `/overview` now; `computeStats` is still given it here too, for the old-cost row. */
 const WINDOW_DAYS = 400;
 
 /** `STREAK_HISTORY_DAYS` — what the separate `bestStreak` scan reads. */
@@ -324,6 +325,12 @@ function main() {
   const route = bench(() =>
     computeStats(HABIT, recent, { end: END, unlogged: UNLOGGED_DEFAULT, coverage: false }));
 
+  // #183's actual fix: this is what `/overview` calls now, timed the same way
+  // as the row above — same fixture, same `END`, same warmup — so the two are
+  // directly comparable rather than one being a cold call.
+  const summary = bench(() =>
+    summaryStats(HABIT, recent, { end: END, unlogged: UNLOGGED_DEFAULT }));
+
   /* --- #183: what the route keeps and what it throws away --- */
 
   const kept = bench(() => {
@@ -347,7 +354,8 @@ function main() {
   console.log(`## #183 — the five discarded passes\n`);
   console.log(`| pass | ms/habit | |`);
   console.log(`|---|---:|---|`);
-  console.log(`| \`computeStats\` (\`coverage: false\`) — what \`/overview\` calls | **${ms(route)}** | whole module |`);
+  console.log(`| \`computeStats\` (\`coverage: false\`) — what \`/overview\` used to call | ${ms(route)} | whole module |`);
+  console.log(`| \`summaryStats\` — what \`/overview\` calls now | **${ms(summary)}** | whole module |`);
   console.log(`| \`computeScores\` + \`computeStreaks\` | ${ms(kept)} | KEPT |`);
   for (const [name, t] of Object.entries(discarded)) {
     console.log(`| \`${name}\` | ${ms(t)} | discarded |`);
@@ -356,10 +364,13 @@ function main() {
   console.log(`| kept | ${ms(kept)} | ${pct(kept, passTotal)} |`);
   console.log(`| discarded | ${ms(discardedTotal)} | **${pct(discardedTotal, passTotal)}** |\n`);
 
-  // Declined by the route, so not one of the five — measured anyway, because
-  // `coverage: false` is the precedent every field in #183 would follow.
+  // No route declines this any more — `/overview` doesn't call `computeStats`
+  // at all now, so there is nothing left to opt a field out of there. Measured
+  // anyway because it is still `computeStats`'s own opt-out, paid on
+  // `/habits/:id/stats`, and #183 ended up as a second entry point rather than
+  // the per-field `fields` option that would have made this the precedent for.
   const coverage = bench(() => computeCoverage(recentMap, from, END).length);
-  console.log(`\`computeCoverage\` is ${ms(coverage)} ms/habit and \`/overview\` already declines it.\n`);
+  console.log(`\`computeCoverage\` is ${ms(coverage)} ms/habit — still \`computeStats\`'s opt-out; \`/overview\` no longer calls \`computeStats\` at all to decline it.\n`);
 
   // The passes are timed one at a time and `computeStats` is timed whole, so
   // they are two independent measurements of the same work and the remainder
@@ -373,9 +384,9 @@ function main() {
     `\`totalCompleted\`.\n`
   );
 
-  console.log(`Per request, at the route's measured \`computeStats\` cost:\n`);
+  console.log(`Per request — what \`/overview\` used to spend calling \`computeStats\`, against what \`summaryStats\` costs it now:\n`);
   for (const n of HABIT_COUNTS) {
-    console.log(`- ${n} habits — ${ms(route * n)} ms, of which ~${ms(discardedTotal * n)} ms is discarded`);
+    console.log(`- ${n} habits — was ${ms(route * n)} ms, now ${ms(summary * n)} ms, saving ~${ms((route - summary) * n)} ms`);
   }
   console.log('');
 
@@ -394,8 +405,10 @@ function main() {
   console.log(`|---|---:|`);
   console.log(`| \`computeStreaks\`(${HISTORY_DAYS}d) + \`bestStreak\` | **${ms(streakScan)}** |`);
   console.log(`| of which building the ${all.length}-row Map | ${ms(mapBuild)} |`);
-  console.log(`| \`/overview\` per-habit total (this + \`computeStats\`) | ${ms(route + streakScan)} |`);
-  console.log(`| \`bestStreak\`'s share of it | ${pct(streakScan, route + streakScan)} |\n`);
+  console.log(`| \`/overview\` per-habit total, old (this + \`computeStats\`) | ${ms(route + streakScan)} |`);
+  console.log(`| \`/overview\` per-habit total, now (this + \`summaryStats\`) | **${ms(summary + streakScan)}** |`);
+  console.log(`| \`bestStreak\`'s share of it, old | ${pct(streakScan, route + streakScan)} |`);
+  console.log(`| \`bestStreak\`'s share of it, now | **${pct(streakScan, summary + streakScan)}** |\n`);
 
   /* --- #198: the walk that used to be 89% of it --- */
 

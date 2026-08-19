@@ -454,9 +454,9 @@ await setSkipDays(false);
 ck('and storing it off again withdraws it',
   (await restAwardFor()) === undefined, JSON.stringify(await restAwardFor()));
 
-// `coverage` is on `/stats` and deliberately not on `/overview`, which runs
-// `computeStats` once per habit for four fields and would otherwise pay for a
-// whole extra pass over the window on the dashboard's hot path.
+// `coverage` is on `/stats` and deliberately not on `/overview`, which now
+// calls `summaryStats` once per habit for two fields rather than `computeStats`
+// for eleven and discarding the rest.
 const statsBody = await fetch(`${overviewBase}/api/habits/${habitId}/stats`)
   .then((r) => r.json());
 ck('/stats carries the coverage field', Array.isArray(statsBody.coverage),
@@ -464,8 +464,14 @@ ck('/stats carries the coverage field', Array.isArray(statsBody.coverage),
 const coverageRow = (await getOverview({ days: 7 })).habits.find((h) => h.id === habitId);
 ck('/overview does not compute it per habit', coverageRow.coverage === undefined,
   JSON.stringify(coverageRow.coverage));
+// Pinned to the value the fixture determines, not just its type: the rest day
+// above sits inside the run rather than beside it, so it bridges the streak
+// rather than ending it and `currentStreak` is still the full run length.
+// `score` is pinned too, alongside the streak — it is the figure `unlogged`
+// moves hardest, and the route-level wiring of `summaryStats`'s `unlogged`
+// argument was otherwise checked nowhere but `stats.test.js`'s own fixtures.
 ck('  while still carrying the summary figures it is for',
-  typeof coverageRow.score === 'number' && typeof coverageRow.currentStreak === 'number',
+  coverageRow.score === 0.381137 && coverageRow.currentStreak === RECENT_DAYS,
   `${coverageRow.score} / ${coverageRow.currentStreak}`);
 
 overviewServer.close();

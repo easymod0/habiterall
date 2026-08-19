@@ -676,23 +676,30 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
     assert.match(stripComments(src), /skipDays\s*[:=][^;\n]*(storedSkipDays|skip_days)/,
       `${edition} does not derive skipDays from the account's setting`);
 
-    // The other route calls `computeStats` too and throws all but four fields
-    // away, which is why `coverage` is declinable and why `/overview` declines
-    // it. Pinned by COUNT as well as by content: a third call site added later
-    // would otherwise pay for a pass nothing on that route reads, silently and
-    // once per habit.
+    // `/overview` no longer calls `computeStats` at all: it reads two numbers
+    // per habit and calls `summaryStats` for them instead, so the only
+    // `computeStats` call site left is `/stats`'s whole reading. Pinned by
+    // COUNT as well as by content: a third route added later that paid for
+    // `computeStats` and threw most of it away would otherwise slip in
+    // silently, once per habit.
     const statsCalls = callsIn(src, 'computeStats');
-    assert.equal(statsCalls.length, 2,
-      `${edition} has ${statsCalls.length} computeStats call sites, expected 2 `
-      + `(/stats and /overview): ${statsCalls.join(' | ')}`);
-    const declining = statsCalls.filter((c) => /coverage\s*:\s*false/.test(c));
-    assert.equal(declining.length, 1,
-      `${edition} should have exactly one computeStats call declining coverage, `
-      + `found ${declining.length}`);
-    // ...and it must be the one that is NOT feeding awards, or the badge is
-    // withheld from the only route that shows it.
-    assert.ok(!/granularity/.test(declining[0]),
-      `${edition} declined coverage on the route that computes awards: ${declining[0]}`);
+    assert.equal(statsCalls.length, 1,
+      `${edition} has ${statsCalls.length} computeStats call sites, expected 1 `
+      + `(/stats only): ${statsCalls.join(' | ')}`);
+    // ...and it must be the one feeding awards — the call with `granularity`,
+    // which `summaryStats` does not take — or the detail view lost a field
+    // nothing replaced.
+    assert.ok(/granularity/.test(statsCalls[0]),
+      `${edition}'s only computeStats call site is missing granularity, so it `
+      + `is not the /stats call: ${statsCalls[0]}`);
+
+    // `/overview`'s replacement, pinned the same way: exactly one call site,
+    // so a second one added later pays for the two passes twice per habit
+    // rather than once.
+    const summaryCalls = callsIn(src, 'summaryStats');
+    assert.equal(summaryCalls.length, 1,
+      `${edition} has ${summaryCalls.length} summaryStats call sites, expected 1 `
+      + `(/overview): ${summaryCalls.join(' | ')}`);
   }
 });
 

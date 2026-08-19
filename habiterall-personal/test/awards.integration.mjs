@@ -18,8 +18,8 @@
  *    key or an inverted read fails the first.
  * 2. `/stats` carries `coverage` and `/overview` does not. That asymmetry is a
  *    deliberate cost decision — coverage is its own pass over the window and
- *    `/overview` runs `computeStats` once per habit for four fields — and it
- *    is the kind of thing that is quietly undone by someone tidying an options
+ *    `/overview` calls `summaryStats` for two fields instead — and it is the
+ *    kind of thing that is quietly undone by someone tidying an options
  *    object.
  *
  *   node test/awards.integration.mjs
@@ -126,10 +126,16 @@ const row = rows.habits.find((h) => h.id === habit.id);
 ck('/overview does not compute it per habit', row.coverage === undefined,
   JSON.stringify(row.coverage));
 // The row is not empty of everything, or the check above would pass on a route
-// that had stopped working altogether.
+// that had stopped working altogether. `currentStreak` and `bestStreak` are
+// pinned to the literal the fixture above produces — the 12-day run, held
+// together across its one bracketed skip — rather than merely typeof-checked,
+// the way cloud's equivalent assertion was strengthened in #183's step 2.
+// `score` is pinned too: it is the figure `unlogged` moves hardest, and until
+// now nothing at the route level checked that `summaryStats` was even handed
+// it — `stats.test.js`'s parity fixtures were the only place `unlogged`'s
+// wiring was covered at all.
 ck('  while still carrying the three summary figures it is for',
-  typeof row.score === 'number' && typeof row.currentStreak === 'number'
-  && typeof row.bestStreak === 'number',
+  row.score === 0.443734 && row.currentStreak === 12 && row.bestStreak === 12,
   `${row.score} / ${row.currentStreak} / ${row.bestStreak}`);
 
 server.close();
