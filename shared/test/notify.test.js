@@ -502,6 +502,29 @@ test('the ntfy payload carries what the embed does, and no free text in a header
   assert.ok(big.message.length <= 4000);
 });
 
+test('scope boundary: an avoided habit does not change ntfy — no buttons, no inverted text', () => {
+  // `reminderMessage` is shared by every server-delivered channel by design,
+  // so a "while I'm here" inversion of it for an avoided habit would silently
+  // change what ntfy sends too — and ntfy is explicitly out of scope for this
+  // fix (issue #148). This pins that boundary rather than leaving it assumed.
+  const avoided = habit({
+    type: 'numerical', target_type: 'at_most', target_value: 0,
+    show_as: 'avoid', unit: 'cigarettes',
+  });
+  const payload = ntfyPayload({
+    habit: avoided,
+    message: reminderMessage(avoided),
+    topic: 'habits',
+    date: '2026-08-13',
+  });
+  // Literal string, copied from `reminderMessage`'s own template (the em dash
+  // is U+2014) — asserted rather than rebuilt, so this cannot pass by
+  // agreeing with itself if the template changes.
+  assert.match(payload.message, /Time to log this one — goal: at most 0 cigarettes\./);
+  // ntfy carries no buttons at all — the other half of "not in scope".
+  assert.equal(payload.actions, undefined);
+});
+
 /* ---------- channel lists and time zones ---------- */
 
 test('a channel list is normalised, not trusted', () => {

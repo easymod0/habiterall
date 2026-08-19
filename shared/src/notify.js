@@ -22,6 +22,18 @@
 
 import { TIME_RE } from './constants.js';
 import { isCompleted } from './stats.js';
+// The one import in this file that reaches into `shared/public`, mirroring
+// `discord.js:44`'s import of `ui/amount.js` and for the same reason (see the
+// comment there): the usual answer here is two declarations pinned by a test
+// (`CHANNELS`, `SETTING_VALUES`), but that is forced by a direction this does
+// not run in — the browser cannot see `shared/src`, while node can read
+// anything on disk. `toggle.js` meets the same conditions `amount.js` does:
+// DOM-free by construction (its own header says so) and already imported by a
+// node test (`toggle.test.js:154`). That is what keeps this file out of
+// `toggle.test.js:116`'s source-text guard — there is no third copy to drift,
+// so nothing there needs to watch this one. Depends on `toggle.js` staying
+// DOM-free; keep it that way.
+import { isAvoided } from '../public/ui/toggle.js';
 
 /** 'YYYY-MM-DD'. Kept local rather than imported from validate.js, which
  *  imports this file for its settings rules. */
@@ -1269,11 +1281,22 @@ const STYLE = { primary: 1, secondary: 2, success: 3, danger: 4 };
  * The buttons under a reminder.
  *
  * A yes/no habit gets Yes / No. A measurable one gets "Enter amount", which
- * opens a modal — there is no button that can mean "6". Skip joins either when
- * the account has skip days switched on, because "not applicable today" is a
- * distinct answer from both — and is absent when it does not, or the setting
- * would hide the step from the two clients that own a grid while offering it
- * from the shade of a third.
+ * opens a modal — there is no button that can mean "6". An AVOIDED habit
+ * (`isAvoided`) gets Clean / Slipped instead of a number pad: it is numerical
+ * by definition (`show_as: 'avoid'` requires `at_most` + `numerical`), so the
+ * plain `numerical` check above would always hand it the amount box — the
+ * wrong question for something you're trying not to do. This mirrors the
+ * Android client (`Notifications.kt`) rather than inventing a third answer.
+ * Skip joins either when the account has skip days switched on, because "not
+ * applicable today" is a distinct answer from both — and is absent when it
+ * does not, or the setting would hide the step from the two clients that own
+ * a grid while offering it from the shade of a third.
+ *
+ * The ACTIONS do not invert: `yes` is still the good answer and `no` the bad
+ * one (`custom_id` and `style` follow the action, never the label), only the
+ * LABEL and which button set is offered move. That is what keeps `encodeAction`,
+ * the stored `custom_id`s and the outbox meaning the same thing before and
+ * after this changed.
  *
  * A press on a skip button in an OLD message is still honoured: the message is
  * already sitting in a channel, the id in it says what it says, and refusing it
@@ -1288,12 +1311,13 @@ const STYLE = { primary: 1, secondary: 2, success: 3, danger: 4 };
  */
 export function reminderComponents(habit, { date = '', test = false, skipDays = false } = {}) {
   const id = (action) => encodeAction({ habitId: habit.id, date, action, test });
+  const avoided = isAvoided(habit);
 
-  const buttons = habit.type === 'numerical'
+  const buttons = habit.type === 'numerical' && !avoided
     ? [{ type: 2, style: STYLE.primary, label: 'Enter amount', custom_id: id('amount') }]
     : [
-      { type: 2, style: STYLE.success, label: 'Yes', custom_id: id('yes') },
-      { type: 2, style: STYLE.secondary, label: 'No', custom_id: id('no') },
+      { type: 2, style: STYLE.success, label: avoided ? 'Clean' : 'Yes', custom_id: id('yes') },
+      { type: 2, style: STYLE.secondary, label: avoided ? 'Slipped' : 'No', custom_id: id('no') },
     ];
 
   if (skipDays) {
@@ -1311,10 +1335,16 @@ export function reminderComponents(habit, { date = '', test = false, skipDays = 
  * @param {{action: string, value?: number}} answer
  */
 export function answerText(habit, { action, value }) {
+  // 'Skipped' means the same thing either way up, so it is not inverted — and
+  // it is checked first, before the avoided branches below can apply to it.
   if (action === 'skip') return 'Skipped';
-  if (action === 'no') return 'Not done';
-  if (action === 'yes') return 'Done';
+  if (action === 'no') return isAvoided(habit) ? 'Slipped' : 'Not done';
+  if (action === 'yes') return isAvoided(habit) ? 'Clean' : 'Done';
 
+  // The amount fallthrough is not inverted either. A press on a stale
+  // message's Enter-amount button still records a number, and "3 cigarettes"
+  // is not a judgement, it is the amount — stale presses are honoured on
+  // purpose.
   const unit = String(habit.unit ?? '').trim();
   return `${value}${unit ? ` ${unit}` : ''}`;
 }

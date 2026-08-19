@@ -120,9 +120,16 @@ The storage is an at-most target, so **the tap cycle did not change** — an
 avoided habit walks the same four states in the same order, and `nextDayState`
 and its Kotlin mirror were untouched. Only the ENCODING differs, in
 `valueForState`: a clean day is `0`, a slip is **`target + 1`** — the smallest
-amount that fails, so a limit of two coffees records three. Three surfaces invert
-(the grid's colours, the day editor's buttons, the notification's) and the
+amount that fails, so a limit of two coffees records three. Four surfaces invert
+(the grid's colours, the day editor's buttons, and the buttons on each reminder
+— the Android notification's and the Discord one's, which are separate surfaces
+and each offer Clean / Slipped in place of Yes / No or a number pad) and the
 ACTIONS deliberately do not: `ACTION_YES` is still the good answer.
+
+`shared/src/notify.js` reads `isAvoided` **by import** from `ui/toggle.js`
+rather than by mirror, so unlike the web/Kotlin pair there is no third copy to
+keep in step — see the comment above the import in `notify.js` for why that is
+safe (node can read `shared/public`; the browser cannot see `shared/src`).
 
 None of this is bad-habit support of the other kind. A limit of zero is how a bad
 habit is *expressible*; what is still missing is the interaction — answering by
