@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const {
   computeStreaks, currentStreak, bestStreak, computeHistory,
   computeWeekdays, computeFrequency, computeScores, computeStats, isCompleted,
-  dateRange, boundedRange, addDays, daysBetween, MAX_RANGE_DAYS,
+  dateRange, boundedRange, addDays, daysBetween, toISO, MAX_RANGE_DAYS,
 } = await import('../src/stats.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
@@ -97,6 +97,37 @@ test('dateRange normalises a start that is not a real calendar day', () => {
   // deliberate behaviour change, not a preserved one; see shared/CLAUDE.md.
   assert.deepEqual(dateRange('2026-02-30', '2026-03-05'),
     ['2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05']);
+});
+
+test('dateRange spells every element exactly as toISO does', () => {
+  // `dateRange` builds 'YYYY-MM-DD' itself — a month prefix cached across the
+  // rollover, plus a two-digit lookup — rather than calling `toISO` per
+  // element, because that walk is a quarter of an `/overview` request. That
+  // makes it the one place in this file which spells a date without going
+  // through `toISO`, and nothing else in the suite would notice the two
+  // drifting apart: every other assertion here is a literal, so a `toISO`
+  // that changed would break those and leave this agreeing with itself.
+  //
+  // The reference is the walk this replaced — `toISO` on a `setDate`-stepped
+  // Date — so the comparison is against the previous implementation rather
+  // than against a restatement of the new one.
+  //
+  // The span crosses two year boundaries and a leap February, and both ends
+  // sit in single-digit months, which is where the padding is.
+  const start = '2023-12-25', end = '2025-03-05';
+  const cur = new Date(2023, 11, 25);
+  const expected = [];
+  for (let i = 0, n = daysBetween(start, end); i <= n; i++) {
+    expected.push(toISO(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  assert.deepEqual(dateRange(start, end), expected);
+  // The literal, so this cannot pass by comparing two empty lists.
+  assert.equal(expected.length, 437);
+  assert.equal(expected[0], '2023-12-25');
+  assert.equal(expected.at(-1), '2025-03-05');
+  assert.ok(expected.includes('2024-02-29'));
 });
 
 test('totalCompleted counts the same window the walked figures do, even when the earliest stored date is not a real day', () => {

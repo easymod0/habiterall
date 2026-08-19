@@ -179,6 +179,35 @@ and `streaks.test.js` under fixed `TZ`s in a child process, because `TZ` is
 read once at process start and nothing short of a fresh process observes a
 changed one.
 
+**The `Date` cannot leave that loop, and what is left to save is the STRINGS.**
+Stepping the calendar arithmetically instead — increment the day, roll over on
+a days-in-month table — needs no `Date` at all and is faster again. It is wrong
+the same way the epoch walk is: it knows the calendar but not which of its days
+a zone actually LIVED. Under `Pacific/Apia`, which deleted 2011-12-30 outright,
+it emits a day no entry can be keyed by and then ends the range a day SHORT of
+`end`. `test/timezones.test.js` pins both that deletion and `Pacific/Kwajalein`
+repeating a day, which is what makes this checkable rather than a story. So the
+walk keeps `setDate` and spends its remaining effort on formatting: the
+`'YYYY-MM-'` prefix is rebuilt on a rollover rather than per day, and the two
+digit fields are a lookup rather than a `String()` plus a `padStart`. Measured
+at **1.28x on `boundedRange`** and ~8% of a whole `/overview` per-habit cost.
+That makes `dateRange` the one place in the file that spells a date without
+calling `toISO`, so a test compares every element against `toISO` directly —
+every other assertion in that suite is a literal and would pin the wrong half.
+
+**Building the list is still the largest single line item, and the reason is no
+longer how it is built.** One `computeStats` calls `boundedRange` **eight
+times** on the identical window — once each in `computeScores`, `computeHistory`,
+`computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency` and
+`computeCoverage`, and once per `onPaceSeries`, which `computeStreaks` and
+`computeMissRuns` each build separately. Seven is the `/overview` figure, which
+is what `coverage: false` buys there; `coverage` defaults to **true** and
+`/habits/:id/stats` pays for all eight. Sharing one walk, and one
+`onPaceSeries`, is worth more than any
+further tuning of the loop; it is filed rather than done because it changes
+signatures or adds a cache, and because it overlaps heavily with deleting the
+five discarded passes.
+
 **One thing changed meaning with that rewrite, deliberately: the FIRST
 element.** The old walk pushed the string it was handed before normalising
 anything, so element 0 was the raw `start` and every later element was
