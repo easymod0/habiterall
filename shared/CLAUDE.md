@@ -165,6 +165,65 @@ aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
 the unbounded `dateRange` on a distant-past entry turns one request into
 ~700,000 iterations on a single-threaded server.
 
+**`dateRange` walks one local-time `Date` with `setDate`, never an epoch
+integer.** It used to re-derive every day from a string — two `fromISO` calls
+and a `toISO` per element — measured at 92% of `computeScores`' total time;
+advancing a single `Date` instead is the same ~8x cheaper on every aggregation
+in this file, since all of them go through `boundedRange`. The obvious faster
+rewrite, `t += 86400000`, is wrong: it repeats `2026-11-01` under
+`America/New_York`'s fall-back transition, because that calendar day is 25
+hours long and an epoch walk cannot see the extra hour. The literals in
+`test/stats.test.js` hold in this repo's own zone under *either* walk, which is
+exactly why `test/timezones.test.js` exists — it sweeps both `stats.test.js`
+and `streaks.test.js` under fixed `TZ`s in a child process, because `TZ` is
+read once at process start and nothing short of a fresh process observes a
+changed one.
+
+**One thing changed meaning with that rewrite, deliberately: the FIRST
+element.** The old walk pushed the string it was handed before normalising
+anything, so element 0 was the raw `start` and every later element was
+`toISO`'d. The two differ exactly when `toISO(fromISO(start)) !== start`, which
+is a date that is not a real day (`dateRange('2026-02-30', …)` opened on
+2026-02-30 and then skipped 2026-03-02, the real day the rollover lands on) or
+a year before 1000, where `toISO` drops the padding and the old list was
+internally inconsistent — `0100-02-25` followed by `100-02-26`. Building the
+`Date` up front means every element is normalised, so the list is a contiguous
+run of days that happened, spelled one way.
+
+Only the first of those is reachable through the app: `boundedRange` clamps a
+low-year start long before `dateRange` sees it, while a phantom date survives
+the clamp. `assertDate` refuses one at every write path, so it takes a row
+predating that guard, a direct insert or an import that went around it — and
+it matters because `computeStats` takes `from` as the earliest STORED entry
+when a caller names no window. An account holding such a row sees its derived
+figures move once. That is the phantom day leaving them, not a regression.
+
+`computeStats` therefore normalises `from`, and that half is not optional:
+`totalCompleted` selects by STRING comparison against `from` while every other
+figure is read off the walked list, so an un-normalised `from` counts the
+phantom row in one figure and in none of the others — exactly the disagreement
+the note above `totalCompleted` says was fixed.
+
+**It normalises AFTER the two clamps, never before, and the ordering is the
+whole safety of it.** `toISO` pads the month and the day and **not the year**,
+so normalising `0999-12-31` yields `999-12-31` — which sorts ABOVE `2016-…`
+and sails straight past the `earliest` clamp that `MAX_RANGE_DAYS` is enforced
+by. `assertDate` accepts that date (999 is a real year and does not roll over,
+where `0050` does and is refused), so one `PUT /entries/0999-12-31` reached it:
+the payload collapsed to a single day and reported zero completions for a
+habit logged every other day, with nothing logged and no row findable through
+a UI that now showed no days at all. Clamped first, `from` is inside the
+window before anything reformats it.
+
+**And `n` counts elapsed 24-hour spans while the loop takes calendar steps**,
+which agree everywhere except a zone that moved the date line WESTWARD and so
+lived one local calendar day twice — `Pacific/Kwajalein` in 1969. There the
+loop takes a step the elapsed count never saw and ends a day past `end`, so
+the walk trims anything beyond it. A DELETED day needs no counterpart: the
+elapsed count shrinks along with the calendar, which is why Apia round-trips
+untouched. Both cases are pinned in `test/timezones.test.js`, under their own
+zones, because neither is observable from anywhere else.
+
 **`onPaceSeries` pro-rates the requirement near the start** —
 `required = min(activeDays, num*activeDays/den)` — so a habit is not judged
 against history it does not have yet. Consequence worth knowing before touching
