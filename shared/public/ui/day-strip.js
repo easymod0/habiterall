@@ -19,10 +19,12 @@
  * that must have exactly one owner, and this module is now it.
  *
  * **What deliberately does NOT live here is paging.** The dashboard pages by
- * refetching a window (`state.gridEnd` → `/overview?end=`), because it holds
- * only the fortnight it asked for; a habit's own page holds its whole history
- * already and pages by slicing memory through `windowedChart`. Two mechanisms,
- * one of which needs the network. Each host keeps its own.
+ * asking for a different window (`state.gridEnd` → `/overview?end=`), because
+ * it holds only the fortnight it requested; a habit's own page holds its whole
+ * history already and pages by slicing memory through `windowedChart`. Two
+ * mechanisms — and note it is what each ASKS FOR that differs, not whether
+ * either touches the network, since the detail page's `redraw` refetches like
+ * every other card on it. Each host keeps its own.
  *
  * ## The host
  *
