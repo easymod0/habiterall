@@ -44,14 +44,8 @@ once (~1,750 lines of frontend drifted apart before being merged back).
 ```bash
 npm install                 # once, at the root
 npm test                    # unit tests, all workspaces
-npm run test:browser        # UI suites — needs Chrome; starts its own servers
-npm run test:tenancy        # cloud isolation attacks — needs Postgres
-
 npm run typecheck           # JSDoc types via tsc --noEmit
 npm run docs:compose        # rewrite the README's compose blocks from examples/
-npm run test:cloud          # cloud API + Loop round trip — needs Postgres
-npm run test:notify         # reminder delivery + its watermark, against SQLite
-npm run test:roundtrip -w habiterall-personal   # backup fidelity, all formats
 
 npm run start:personal      # http://localhost:3000
 cd habiterall-cloud && docker compose up -d   # app :3100, Authentik :9000
@@ -59,14 +53,13 @@ cd habiterall-cloud && docker compose up -d   # app :3100, Authentik :9000
 cd android-native && ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-The native Android client needs JDK 21, Android SDK 37 and Gradle **9.7.0**
-— see `android-native/README.md`. The wrapper jar is generated rather than
-committed, so that version lives in `gradle-wrapper.properties` and CI reads it
-from there. AGP 9.3.1 requires Gradle ≥ 9.5 and nothing in the build may
-contradict that; Kotlin it only *defaults*, and the two compiler plugins in the
-root `build.gradle.kts` are what actually choose the compiler. `compileSdk` is
-37 while `targetSdk` stays 36 — the first is what `androidx.core` 1.19.0
-demands, the second is a runtime-behaviour opt-in and a separate decision.
+Every other suite — browser, cloud, tenancy, reminders, the round trips — is in
+the Testing table below, with what each one needs to run.
+
+The native Android client needs **JDK 21, Android SDK platform 37 and Gradle
+9.7.0** to generate the wrapper jar, which is not committed.
+`android-native/README.md` is the toolchain in full — what AGP pins and what it
+only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 
 ## Where the rest is written down
 
@@ -80,6 +73,7 @@ demands, the second is a runtime-behaviour opt-in and a separate decision.
 | reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md` |
 | `examples/`, compose, env | `examples/CLAUDE.md` | `compose-and-env.md` |
 | settings, client mirrors | here, below | `settings-and-mirrors.md` |
+| `shared/test/browser/` | here, below | `testing.md` |
 
 ## Rules that reach everywhere
 
@@ -295,58 +289,43 @@ is connection-refused, which rejects in ~3ms and passes against a build with no
 timeout in it at all. `responsive.mjs` checks every major view at 360 / 390 /
 768 / 1440px; most other suites only ever run at 1440.
 
-**`themecheck` is about colour; `themesync` is not.** They were one 1,042-line
-file whose name described a seventh of it: 13 of its 47 assertions are the
-palette not being frozen into an SVG at draw time, and the other 34 are the
-settings-durability model — the migration off `localStorage['habiterall-theme']`,
-the reconcile between this device and the account, a dialog choice beating an
-unconfirmed press, the outbox, a write that never answers. The theme is merely
-the only setting with both a pre-setting home on the device and a record of a
-press, so it is where that model is reachable; rename the setting and every
-block in `themesync` is unchanged. The blocks are deliberately NOT merged into
-shared setups — several look like near-duplicates and pin different halves, the
-record's FORMAT against the behaviour a reload shows, a write abandoned against
-a write refused, and each has a version that passes while the other fails.
+**`themecheck` is about colour; `themesync` is not.** The first is the palette
+not being frozen into an SVG at draw time; the second is the settings-durability
+model — the migration off `localStorage['habiterall-theme']`, the reconcile
+between this device and the account, a dialog choice beating an unconfirmed
+press, the outbox, a write that never answers. The theme is merely the setting
+where that model is reachable. Do not merge `themesync`'s blocks into shared
+setups: several look like near-duplicates and pin different halves, and each has
+a version that passes while the other fails.
 
 The browser suites reset to known fixtures before each run
 (`shared/test/browser/fixtures.mjs`). If one fails, check the fixtures before
 suspecting the app — several "failures" have been stale test data.
 
 **Wait for the app, never for a duration.** `waitUntil` (`chrome.mjs`) polls a
-predicate and THROWS naming what it wanted; a `sleep` after `Page.navigate` is
-a guess in both directions. Measured on the personal edition: a boot is ready in
-**52–95ms**, and the settings reconcile it performs lands within **7ms** of that,
-because `start()` awaits `settings.init()` before it renders — so a rendered
-dashboard is downstream of the whole of it, and it holds under a stubbed-out
-`/api/settings` too (49–67ms, *faster*). `themecheck` carried 26 fixed sleeps of
-1.2–3s against that: 53.8s, 56% of its runtime, and 99s became 46s — then 3.7s
-once the durability half moved to `themesync`. The predicate has to be everything the block depends on — a poll on a weak
-condition returns the instant the DOM has anything in it, which is worse than the
-sleep it replaced. Post-action settles are a different thing and stay: waiting to
-see that something did NOT happen has no predicate to poll.
+predicate and THROWS naming what it wanted; a `sleep` after `Page.navigate` is a
+guess in both directions. The predicate has to be everything the block depends
+on — a poll on a weak condition returns the instant the DOM has anything in it,
+which is worse than the sleep it replaced. Post-action settles are a different
+thing and stay: waiting to see that something did NOT happen has no predicate to
+poll.
 
 **The browser suites run in parallel, and a worker OWNS the instance it points
 at.** `fixtures.reset()` deletes every habit on its server, so the parallelism is
-the number of `--bases` and there is no flag that can put two workers on one
-instance. The default is **twice the core count, floor 4, ceiling 16** — these
-suites are mostly idle rather than CPU-bound (`themesync` waits 13s on a write
-that never answers), so a worker per core leaves the box waiting. Both ends are
-measured: a 4-core runner is fastest at 8 (126s at j=4, 90s at j=8, and flat to
-12 within a 3-8s variance), a 16-core box at 16 (41.2s at j=8, 36.6s at 16, then
-38.4s and 39.0s at 24 and 32 — slower AND failing). Past the ceiling there is
-nothing to win: no worker count beats the LONGEST SUITE, while every extra worker
-slows every suite. Raising it is therefore not the lever; making one of the two
-longest suites faster is. `npm run test:browser` is personal's fleet script — N servers, N
-throwaway SQLite files, N bases — while `run.mjs` stays edition-agnostic so cloud
-is pointed at the same way. Two consequences that have already cost something:
+the number of `--bases` and no flag can put two workers on one instance. The
+default is **twice the core count, floor 4, ceiling 16**, both ends measured —
+past the ceiling no worker count beats the LONGEST SUITE while every extra worker
+slows every suite, so raising it is not the lever; making one of the two longest
+suites faster is. `npm run test:browser` is personal's fleet script — N servers,
+N throwaway SQLite files, N bases — while `run.mjs` stays edition-agnostic so
+cloud is pointed at the same way. Two things that have already cost something:
 the base must be threaded through `reset({base})` rather than left in module
-state, because `reset` awaits ~240 times and a second worker's `useBase` lands
-in the middle of the first one's (measured: one instance holding both workers'
-fixtures, eight habits); and a suite's DevTools port is **assigned by the
-runner**, because two suites sharing a literal made the second attach to the
-first's browser and hang — `searchcheck`/`unknowncheck` and
-`notifycheck`/`nudgecheck` both did, invisibly, for as long as the run was
-serial.
+state, and a suite's DevTools port is **assigned by the runner**, because two
+suites sharing a literal made the second attach to the first's browser and hang.
+
+The measurements behind those two rules — boot timings, the sleep audit, the
+worker-count benchmarks and both bugs in full — are in
+`docs/decisions/testing.md`.
 
 ## Before you ship
 

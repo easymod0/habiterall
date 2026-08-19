@@ -145,12 +145,29 @@ uses, so a test looking one up must scope to a card by title.
 
 ## Amounts
 
-**Recording an amount is a control, not a `prompt()` and not a spinner.** The
-dashboard asked with `window.prompt()`, which blocks the event loop, cannot show
-a unit or a target, and is suppressed outright by a browser that decides the page
-makes too many dialogs. Both surfaces are `ui/count-field.js` over the rules in
-`ui/amount.js`. The dashboard keeps its own write path — `recordValue`, which
-paints before awaiting, because offline `api()` queues the write and THEN throws.
+**An amount is parsed — not asked for with `prompt()`, and not typed into
+`<input type="number">`.** The dashboard asked with `window.prompt()`, which
+blocks the event loop, cannot show a unit or a target, and is suppressed outright
+by a browser that decides the page makes too many dialogs. `type="number"` is the
+other wrong answer: it does not report what it cannot read, it filters the
+keystrokes it dislikes and hands back whatever survived. Measured in Chrome
+against the day editor's own attributes — typing `8,5` left `85` in the box, so
+eight and a half was recorded as eighty-five, and typing `abc` left `''`, which
+the day editor read as "no entry" and answered with a DELETE. The decimal comma
+is the one that matters, because `inputmode="decimal"` is what shows it and most
+of Europe's keyboards offer it; `HabitFormScreen.parseAmount` on the phone has a
+comment about the same input.
+
+So the box is `type="text"`, both surfaces are `ui/count-field.js` over the rules
+in `ui/amount.js`, and that module owns the reading — with the same three-answer
+convention `parseTimeInput` uses and the same trap in it: `''` (empty — a
+delete), `null` (unreadable — say so, write nothing) and a number, of which `0`
+is a real answer. Two of the three are falsy, so callers compare with `===`.
+`parseAmount` is also stricter than `Number()`, which `shared/CLAUDE.md` records
+as too generous about form — `1e3` is not a thing anyone types into a box asking
+how many glasses of water they drank. The dashboard keeps its own write path —
+`recordValue`, which paints before awaiting, because offline `api()` queues the
+write and THEN throws.
 
 **A refusal has to be actionable, and what it QUOTES has to be true of what it
 quoted.** `parseAmount` refuses `10,000` as ambiguous; `amountComplaint` names
@@ -159,16 +176,22 @@ specifics in the advice — the user's own number with the commas taken out. Nam
 the reading is what made the first version false (`1,500` was told it might be
 ten thousand). The suggestion is run through the parser before it is offered, and
 it decides the whole branch: `1,500 steps` is not ambiguous, it is not an amount,
-and a box may not suggest something it would then refuse.
+and a box may not suggest something it would then refuse. It lives beside the
+parser rather than in the view, because the phone and the web must not tell
+somebody to type different things about the same input.
 
 **Which character a decimal point is, is a DECISION with a device-shaped
 default.** `numberFormat`, whose `auto` resolves against `Intl` at parse time in
 `resolveNumberFormat`'s three tiers: the account's stated answer, else the
-device's, else the app's. A group is refused under **every** convention — the
-setting only moves which spelling is refused, never what is accepted, because
+device's, else the app's. It is passed IN rather than looked up, because a
+DOM-free module has no business reaching for a settings cache or for `Intl`. Only
+a three-digit group depends on it (`10.000`), which is why the default costs no
+existing caller anything — and a group is refused under **every** convention, so
+the setting only moves which spelling is refused, never what is accepted, because
 most accounts are on `auto` and a wrong guess that accepts costs a row out by a
 thousand that nothing reports. `formatAmount` takes it too, and groups at no
 size, so the control's output stays inside its own parser's domain.
+`docs/decisions/amounts.md` has the argument.
 
 `count-field.js` asks the settings cache and `Intl` at each read or write, never
 at import time — either can change while the module is loaded.
@@ -177,6 +200,14 @@ at import time — either can change while the module is loaded.
 reaching from `src` into `public`. "DOM-free so it can be tested without one" is
 now a contract with a server: a Discord modal is the same box arriving over a
 socket, and its own comma-to-dot `Number()` read `10,000` as **ten**.
+`docs/decisions/amounts.md` has the direction, and why it is not the usual
+two-declarations-and-a-test.
+
+**The step comes from the goal rather than being 1** — an eighth of the target,
+snapped to a round number, because 1 is right for "8 glasses" and useless for
+"10,000 steps". `test/browser/countcheck.mjs` follows a tap all the way to
+storage, which is the only thing that can catch the control and the database
+disagreeing about what was typed.
 
 ## The browser reminder (`web` channel)
 
@@ -354,50 +385,10 @@ editor. Written as direct calls those are circular imports; written as one
 element id may be reached for by two modules; `ui/views.js` exists because
 `#view-list` and `#view-detail` genuinely have three claimants. The same test
 walks the imports from the entry point and fails when `SHELL` in `sw.js` has
-fallen behind — with twenty-three modules where there was one, a hand-maintained
+fallen behind — with twenty-six modules where there was one, a hand-maintained
 precache list drifts silently.
 
 ## Traps
-
-**An amount is parsed, not typed into `<input type="number">`.** That input
-does not report what it cannot read — it filters the keystrokes it dislikes and
-hands back whatever survived. Measured in Chrome against the day editor's own
-attributes: typing `8,5` left `85` in the box, so eight and a half was recorded
-as eighty-five; typing `abc` left `''`, which the day editor read as "no entry"
-and answered with a DELETE. The decimal comma is the one that matters, because
-`inputmode="decimal"` is what shows it and most of Europe's keyboards offer it —
-`HabitFormScreen.parseAmount` on the phone has a comment about the same input.
-
-So the box is `type="text"` and `ui/amount.js` owns the reading, with the same
-three-answer convention `parseTimeInput` uses and the same trap in it: `''`
-(empty — a delete), `null` (unreadable — say so, write nothing) and a number, of
-which `0` is a real answer. Two of the three are falsy, so callers compare with
-`===`. `parseAmount` is also stricter than `Number()`, which the root CLAUDE.md
-already records as too generous about form — `1e3` is not a thing anyone types
-into a box asking how many glasses of water they drank.
-
-Which of the two separators is the decimal point is the account's
-`numberFormat`, resolved by `resolveNumberFormat` in three tiers — the stated
-answer, else the device's, else the app's own — and passed IN rather than looked
-up, because a DOM-free module has no business reaching for a settings cache or
-for `Intl`. Only a three-digit group depends on it (`10.000`), which is why the
-default costs no existing caller anything, and a group is refused under either
-convention rather than read. The root CLAUDE.md has the argument.
-
-It owns the reading for the SERVER too, which is what makes "DOM-free" a
-contract rather than a convenience: `src/discord.js` imports it, because a modal
-is the same box arriving over a socket and its own `Number()` reading recorded
-`10,000` as ten. The root CLAUDE.md has the direction and why it is not the
-usual two-declarations-and-a-test. `amountComplaint` lives beside the parser for
-the same reason — a refusal that cannot be acted on is barely better than the
-silent ten, and the phone and the web must not tell somebody to type different
-things about the same input.
-
-The step comes from the goal rather than being 1: an eighth of the target,
-snapped to a round number, because 1 is right for "8 glasses" and useless for
-"10,000 steps". `test/browser/countcheck.mjs` follows a tap all the way to
-storage, which is the only thing that can catch the control and the database
-disagreeing about what was typed.
 
 **A localised name is never indexed by a Gregorian field.** `getMonth()`,
 `getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
@@ -486,7 +477,7 @@ takes an input as well: `reportOffline`, called by `ui/api.js` when a write has
 to be queued. A failed request of our own is better evidence than a probe — it
 is the actual traffic — and it must come in through there rather than as a
 `setOffline` from outside, or the watcher's `last` stays `true` and it neither
-polls nor reports the transition. See the root CLAUDE.md.
+polls nor reports the transition. See `docs/decisions/connectivity.md`.
 
 And once it HAS said so, `api()` stops asking: a write finds `state.offline`
 already true and goes to the outbox without opening a socket. Tap one is what

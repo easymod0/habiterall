@@ -29,8 +29,8 @@ reconnect.
 ## Contents
 
 - [Which edition do I want?](#which-edition-do-i-want)
-- [Quick start](#quick-start) · [personal](#personal-edition) · [cloud](#cloud-edition)
 - [Features](#features) · [Statistics](#statistics) · [Bouncing back](#bouncing-back) · [Awards](#awards)
+- [Quick start](#quick-start) · [personal](#personal-edition) · [cloud](#cloud-edition)
 - [Reminders and notifications](#reminders-and-notifications)
 - [Install on a phone](#install-on-a-phone)
 - [Coming from Loop Habit Tracker](#coming-from-loop-habit-tracker)
@@ -58,6 +58,156 @@ The dividing line is **how many people**, not whether it faces the internet.
 The personal edition signs you in, so it is fine on a public address; what it
 does not do is keep two people's habits apart — everyone who signs in shares one
 set. That is what cloud is for.
+
+---
+
+## Features
+
+**Two habit types** — yes/no checkmarks, and measurable habits with a target
+and an *at least* / *at most* goal, so both "drink 8 glasses" and "at most 0
+cigarettes" work.
+
+**An optional icon** — one emoji beside the habit's name, on every screen and in
+a Discord or ntfy reminder. It decorates the name, never replaces it.
+
+**Habits you are trying not to do** — set **Show this habit as** to *Something to
+avoid* and an *at most* habit reads the right way up: a clean day fills in the
+habit's colour, a slip paints red and shows how far over you went, and the
+buttons read **Clean day** / **Slipped**, in the Android shade too. It is a way
+of *reading* a habit rather than a different kind of habit — the storage, the
+target and the Loop export are unchanged. A tap records a clean day as 0 and a
+slip as one over the limit; type the real number in the day editor when it
+matters.
+
+**Any frequency** — *n* times per *m* days. A habit held at exactly its target
+reaches full strength whether that is daily or 3×/week.
+
+**Edit any day** — click a square in the calendar to correct history, page back
+through months, or attach a note.
+
+**Skips** — neither success nor failure. A skipped day bridges a streak instead
+of breaking it and holds your score steady. Use it for illness or travel.
+
+**Archive** — retire a habit without deleting its history.
+
+**Reorder** — drag by the handle, or focus it and use ↑ / ↓.
+
+**Undo** — deleting a habit offers an Undo that restores every entry and note.
+
+**Reminders, where you want them** — set a time on a habit, choose what it
+*asks* ("Did you exercise today?"), and pick where it goes: the Android app, a
+Discord channel, an ntfy topic, or any combination. In Discord you answer with a
+button without leaving the chat. See
+[Reminders and notifications](#reminders-and-notifications).
+
+**Works offline** — check off habits with no signal and they queue on the device,
+syncing when you reconnect. The app spots the server coming back on its own, so a
+restart never leaves a page stranded.
+
+**Find a habit** — a search box appears once you have six or more. It folds case
+and accents, so "cafe" finds "Café", and it matches the description as well as
+the name. The Android app has the same search behind an icon in its top bar,
+offered from the first habit.
+
+**Light, dark, or follow the device** — three states, cycled by the ◐ / ☀ / ☾
+button in the header. The choice is stored on the account, so it follows you
+between browsers and travels in the JSON backup.
+
+<div align="center">
+<img src="docs/screenshots/dashboard-dark.png" width="820"
+     alt="The same dashboard in dark theme: the surrounding chrome goes near-black while each habit keeps its own colour, so the filled squares still read at a glance.">
+</div>
+
+### Statistics
+
+| View | What it shows |
+|---|---|
+| **Strength** | Loop's exponential-decay score, plotted by day / week / month / quarter / year |
+| **Calendar** | A clickable heatmap with streaks joined up, zoomable and pageable |
+| **History** | Completions by day / week / month / quarter / year, as a percentage or a count |
+| **Best streaks** | Your ten longest runs, listed newest first with the dates |
+| **Bouncing back** | What happens *after* a miss — see below |
+| **Awards** | What the history has already earned — see below |
+| **By day of week** | Which days you reliably miss |
+| **Weekday consistency** | The same, month by month, so you can see a weekday slipping |
+| **Times per week** | How many weeks each month hit 1×, 2×, 3× … |
+
+Every chart with a time axis pages through history rather than cramming years
+into one screen, and the number of columns follows the width you have.
+
+Plus current streak, best streak, and total completions at a glance.
+
+<div align="center">
+<img src="docs/screenshots/statistics.png" width="820"
+     alt="A habit's detail view: strength 86%, current and best streak 8, 106 total; the strength curve rising over four months; a year-long calendar heatmap; and the ten best streaks listed by date.">
+</div>
+
+### Bouncing back
+
+Streaks reward perfection and punish one bad day. **Bouncing back** measures
+the thing that actually decides whether a habit survives — what happens after
+you miss:
+
+- **Recovery rate** — of every lapse that ended, how often were you back the
+  very next day?
+- **How long lapses last** — misses clustered at one day mean a habit that
+  self-corrects; a fat tail means one that, once dropped, stays dropped.
+- **How far streaks get** — of all the streaks you started, what share reached
+  3 days? 7? 30? The cliff in that curve locates where this habit reliably
+  breaks, which "best streak: 23" cannot tell you.
+
+Two habits can both recover 100% of the time and still be nothing alike: one
+clears a week 86% of the time, the other 40%. Only the survival curve
+separates them.
+
+<div align="center">
+<img src="docs/screenshots/bouncing-back.png" width="820"
+     alt="The Bouncing back card: back next day 100%, longest lapse 1 day, currently missed 1 day; a histogram showing all 14 lapses lasted a single day; and a survival curve ending at 93% of streaks reaching 7 days.">
+</div>
+
+> Shown for **every** frequency: a miss is a day the habit fell *below its
+> rate*, so a 3×/week habit is judged on its rate rather than on the four days a
+> week it was never meant to run.
+
+### Awards
+
+A short row of badges under *Bouncing back*, for what a habit's history
+currently shows:
+
+- **Streaks** — the longest run you have managed, against the same ladder the
+  survival curve uses: 2, 3, 5, 7, 14, 21, 30, 60, 100 days. It reads your
+  *best* run, not the one you are on, so it does not go out the day a run ends.
+- **Strength** — 50%, 80% or 95%, whichever your strength curve has reached.
+  50% is about a fortnight of keeping a daily habit, 95% about two months. It
+  reads the curve's high point, so an ordinary bad week does not take it.
+- **Comebacks** — how many times you were back the next day after a miss, and
+  the longest lapse you have climbed out of. A recent one is flagged as new for
+  a week, because coming back is the moment worth noticing.
+- **Every day of the week** — you have kept this on all seven weekdays at least
+  once.
+- **A year of keeping it** — your first good run and your most recent are a
+  year or more apart. Importing a backup that already covers a year earns it on
+  arrival, because the record really is that long.
+- **No lapse over a day** — every lapse so far has lasted a single day. The
+  next two-day one ends it, which is why it is worded as a record.
+- **A month with no blanks** — every day of a whole month has an *answer*,
+  whatever it said: done, skipped and recorded-as-missed all count, and only a
+  day you never touched does not. The one badge a bad month can earn, which is
+  the point of it.
+- **A rest day inside a run** — a run of a week or more that held together across
+  days you deliberately skipped. Needs skip days switched on under ⚙.
+
+Badges are **worked out from your entries each time, never stored**, so there is
+nothing extra in your backup — restore anywhere and they follow the entries. The
+trade is that editing history can move one, including downwards: filling in a
+session you forgot changes what the earlier record looks like, and on a weekly or
+monthly goal that can lower a streak badge as easily as raise it. Nothing is
+miscounted; you are seeing a different history than you were.
+
+Nothing to switch on, and no card until a habit has something to show. One case
+is quiet on purpose: an *at most* habit set to treat unlogged days as kept gets
+no badges, since with almost nothing recorded they would be claims you know to
+be untrue. Its charts and figures are unchanged.
 
 ---
 
@@ -272,19 +422,14 @@ NTFY_ALLOWED_HOSTS=
 <!-- /generated -->
 </details>
 
-If you set `HABITERALL_USERNAME` and `HABITERALL_PASSWORD` above, sign in with
-them and that is the whole setup. If you left them blank you are asked to
-**create an account** on that first visit — and until somebody does, *anyone who
-can reach the port* can be that somebody. On a laptop or a home LAN that is
-exactly what you want and takes ten seconds. Anywhere reachable from the
-internet, fill the two variables in first, so there is no window to walk
-through.
-
-Sign-in can be turned off entirely with `HABITERALL_AUTH=off`, which restores
-what this edition did before it had any: every route open to whoever can reach
-it. That is a real option for a machine only you can talk to — see
-[Turning the guards off](#turning-the-guards-off) for that setting and the
-others alongside it.
+Set `HABITERALL_USERNAME` and `HABITERALL_PASSWORD` and you sign in with those.
+Leave them blank and the first visit asks you to **create an account** — which
+means that until somebody does, anyone who can reach the port can be that
+somebody. Fine on a laptop or a home LAN; anywhere reachable from the internet,
+fill the two variables in first so there is no window to walk through.
+`HABITERALL_AUTH=off` removes sign-in altogether, which is a real option for a
+machine only you can talk to — see
+[Turning the guards off](#turning-the-guards-off).
 
 Between the two files above, every variable this edition reads is accounted
 for — a test fails if the server grows one neither mentions. To update:
@@ -544,19 +689,17 @@ volumes:
 #### Filling in the `.env`
 
 **Two hostnames, not one.** `PUBLIC_URL` is where habiterall answers and
-`OIDC_ISSUER` is where Authentik does, and they must be different origins
-unless your proxy path-routes `/application/*`, `/if/*` and
-`/outpost.goauthentik.io/*` to Authentik. Point `auth.example.com` at the
-Authentik container's published port and `habits.example.com` at the app's.
-Putting the issuer on the app's own hostname produces a memorable failure: the
-proxy asks habiterall for Authentik's discovery document, the app is still
-starting — because it is waiting on that very document — and you get a 502
-that looks like a proxy fault rather than a configuration one.
+`OIDC_ISSUER` is where Authentik does, and they must be different origins unless
+your proxy path-routes `/application/*`, `/if/*` and `/outpost.goauthentik.io/*`
+to Authentik. Point `auth.example.com` at the Authentik container's port and
+`habits.example.com` at the app's. Put the issuer on the app's own hostname and
+you get a 502 that looks like a proxy fault: the proxy asks habiterall for
+Authentik's discovery document while the app is still waiting on that very
+document.
 
-Every secret ships as a `CHANGE_ME` line, and there are nine. Hex for the two
-database passwords and the OIDC pair, because those go into a connection URL or
-an `Authorization` header and base64's `/` ends a URL's authority — about half
-of generated passwords contain one:
+Every secret ships as a `CHANGE_ME` line, and there are nine. Use hex for the two
+database passwords and the OIDC pair — those go into a connection URL or an
+`Authorization` header, and base64's `/` ends a URL's authority:
 
 ```bash
 openssl rand -hex 32      # DB_OWNER_PASSWORD, APP_DB_PASSWORD,
@@ -572,10 +715,10 @@ configures the provider *with* them, so nothing is pasted back. Set
 and `AUTHENTIK_BOOTSTRAP_PASSWORD` to the first admin's password.
 
 > **Just trying it on your laptop?** Leave those three URLs at their
-> `http://localhost` defaults and set **`ALLOW_INSECURE_OIDC=true`**. Without
-> it the app exits at startup with *"OIDC_ISSUER uses plaintext http"* —
-> `openid-client` refuses a plaintext issuer, and rightly. Set it back to
-> `false` the moment the stack is behind TLS; the
+> `http://localhost` defaults and set **`ALLOW_INSECURE_OIDC=true`** — without
+> it the app exits with *"OIDC_ISSUER uses plaintext http"*, because
+> `openid-client` refuses a plaintext issuer. Set it back to `false` the moment
+> the stack is behind TLS; the
 > [production checklist](habiterall-cloud/SETUP.md) checks for it.
 
 <details>
@@ -952,24 +1095,19 @@ question for each of the four above:
 | **Entra ID** | The **same** list as the sign-in redirect URI; there is no second field. The *Front-channel logout URL* box is a different feature — single sign-out notification — and filling that in instead leaves a configuration that looks complete and is not |
 | **Authelia** | Nothing to register. It does not implement RP-initiated logout, so it advertises no `end_session_endpoint` |
 
-The bundled Authentik stack registers both entries itself, which is why nobody
-on the quickstart path meets any of this.
+The bundled Authentik stack registers both entries itself, so nobody on the
+quickstart path meets any of this.
 
-What a missing registration costs depends on which way the provider refuses.
-Some ignore the unregistered value and end the session anyway: you are signed
-out, but the browser is left on the provider's page rather than back here. The
-other kind rejects the logout request, and that one is worth the trouble of
-avoiding — this app's own session has already gone, so it returns to its
-sign-in screen looking entirely correct, while the provider's session, the
-credential that silently recreates yours, is still there. On a shared device
-that is the half that matters, and only being asked for a password again tells
-the two apart.
-
-Authelia is the case with nothing to get wrong and nothing to fix. With no
-end-session endpoint to build a URL from, `/auth/logout` hands back this app's
-own root: the habiterall session ends and Authelia's own outlives it, by design
-rather than by misconfiguration. Signing out of Authelia is a separate act
-until [authelia#5057](https://github.com/authelia/authelia/issues/5057) lands.
+Skipping the registration is worth avoiding because of how it fails. Some
+providers ignore the unregistered value and end the session anyway, leaving the
+browser on their page rather than back here. Others reject the logout outright —
+and there habiterall's own session has already gone, so the app returns to its
+sign-in screen looking entirely correct while the provider's session, the
+credential that silently recreates yours, is still live. On a shared device that
+is the half that matters, and only being asked for a password again tells the
+two apart. (Authelia is the exception with nothing to fix: it advertises no
+end-session endpoint, so its session outlives habiterall's by design, until
+[authelia#5057](https://github.com/authelia/authelia/issues/5057) lands.)
 
 Users are provisioned the first time each one signs in.
 
@@ -1083,242 +1221,48 @@ volumes:
 Then *Forward Hostname* is `habiterall` and *Forward Port* is `3000`.
 </details>
 
-Whichever you use: with one proxy in front, set **`TRUST_PROXY=1`**. Use the
-number of proxies if there are more, and `0` when the app is reached directly.
-The two editions default differently on purpose — cloud to `1`, because its
-documented deployment has TLS in front, and personal to `0`, because its
-quickstart is a port on a LAN with nothing in front at all.
+Whichever you use: with one proxy in front, set **`TRUST_PROXY=1`** — the number
+of proxies if there are more, `0` when the app is reached directly. Cloud
+defaults to `1` and personal to `0`, matching each edition's usual deployment.
 
-Getting it wrong is a bug in both directions. Too low and every caller looks
-like the proxy, so one client spends everyone's rate limit, the session cookie
-cannot be marked `Secure`, and a proxy that rewrites `Host` makes every write
-look cross-origin and get refused. Too high and `X-Forwarded-For` becomes the
-caller's to choose, which is the rate limiter's only key — forty guesses at the
-password walk through a limit of twenty by rotating one header. The server logs
-`trust_proxy` at startup and warns when a forwarded header arrives that it has
-been told not to believe.
+Both directions are a bug. Too low and every caller looks like the proxy, so one
+client spends everyone's rate limit, the session cookie cannot be `Secure`, and a
+proxy that rewrites `Host` makes every write look cross-origin. Too high and
+`X-Forwarded-For` becomes the caller's to choose — which is the rate limiter's
+only key, so forty guesses at the password walk through a limit of twenty by
+rotating one header. The server logs `trust_proxy` at startup and warns when it
+sees a forwarded header it has been told not to believe.
 
-One thing that follows and is easy to get wrong: **if you set `TRUST_PROXY=1`,
-the app's port must only be reachable through the proxy.** Leaving 3000 open on
-the LAN as a shortcut means anything on that LAN can send those headers itself.
-Set `BIND_ADDR=127.0.0.1` so the port is published to loopback only, or
-firewall it, and reach the app by its proxied name from inside the house as
-well as outside. If the proxy runs on a *different* host, leave `BIND_ADDR`
-empty and firewall to that host instead — loopback would put the app out of
-the proxy's reach too.
+It follows that **if you set `TRUST_PROXY=1`, the app's port must only be
+reachable through the proxy** — otherwise anything on the LAN can send those
+headers itself. Set `BIND_ADDR=127.0.0.1` to publish to loopback only, or, if the
+proxy is on a different host, leave `BIND_ADDR` empty and firewall to that host
+instead.
 
 ### Turning the guards off
 
-The personal edition is meant to be run on a laptop, a NAS or a LAN as readily
-as on the internet, so most of the hardening is a setting rather than a fact.
-For an instance only reachable over a VPN or a trusted network:
+The personal edition runs on a laptop, a NAS or a LAN as readily as on the
+internet, so most of the hardening is a setting. For an instance only reachable
+over a VPN or a trusted network:
 
 | Set | Effect |
 |---|---|
-| `HABITERALL_AUTH=off` | No sign-in at all. Every route is open to whoever can reach the port, exactly as this edition behaved before it had auth. The value must be **exactly** `off` — `false`, `0` and every typo leave it on, and the server says so at startup. |
-| `HABITERALL_RATE_LIMIT=off` | Removes the limits on the API, imports and test notifications. The limit on *login attempts* is deliberately not included and cannot be switched off. |
+| `HABITERALL_AUTH=off` | No sign-in at all — every route open to whoever can reach the port. Must be **exactly** `off`; `false`, `0` and every typo leave it on, and the server says so at startup. |
+| `HABITERALL_RATE_LIMIT=off` | Removes the limits on the API, imports and test notifications. The limit on *login attempts* is not included and cannot be switched off. |
 | `TRUST_PROXY=0` (the default) | Nothing in front is believed. Right for a direct port; see above. |
-| `HABITERALL_UPGRADE_INSECURE` unset (the default) | Browsers are **not** told to rewrite http to https. Leave it unset unless the instance is only ever reached over TLS — turning it on breaks a box that answers on both. |
-| `NODE_ENV` to anything but `production` | No HSTS header. A browser that sees one on a plain-http stack pins that hostname to https for a year, and `localhost` is a hostname a lot of other things use too. **Both published images bake in `NODE_ENV=production`**, so HSTS is *on* by default under Docker and unsetting it means saying so in the compose file; a clone started with `npm start` has it off already. |
+| `HABITERALL_UPGRADE_INSECURE` unset (the default) | Browsers are **not** told to rewrite http to https. Turning it on breaks a box that answers on both schemes. |
+| `NODE_ENV` to anything but `production` | No HSTS. A browser that sees HSTS on a plain-http stack pins that hostname to https for a year. **Both images bake in `NODE_ENV=production`**, so HSTS is on by default under Docker; a clone started with `npm start` has it off. |
 
 The session cookie needs nothing: it is marked `Secure` only on requests that
-actually arrived over TLS, so a plain-http LAN instance and an https one behind
-a proxy both work, including when they are the same instance.
+actually arrived over TLS, so one instance can serve a plain-http LAN and an
+https proxy at once.
 
-Two things have no switch, and both are load bearing rather than decorative.
-The **Content-Security-Policy** is what makes the frontend's design true —
-`connect-src 'self'` is the reason the browser cannot post to a Discord webhook
-and the server keeps time for reminders instead — so relaxing it changes the
-architecture, not a header. And the **cross-origin check** on writes costs a
-same-origin client nothing: browsers send `Origin` on every state-changing
-request, a request without one is allowed through (that is how the Android
-client posts), and what it refuses is a page on another site using your logged-in
-browser as a lever. Neither of those gets safer on a VPN.
-
----
-
-## Features
-
-**Two habit types** — yes/no checkmarks, and measurable habits with a target
-and an *at least* / *at most* goal, so both "drink 8 glasses" and "at most 0
-cigarettes" work.
-
-**An optional icon** — one emoji or character beside the habit's name, on the
-dashboard, the habit's own page, the day editor and the archive view, and in a
-Discord or ntfy reminder's title. It never replaces the name, only decorates it.
-
-**Habits you are trying not to do** — that last one reads backwards by default,
-so an *at most* habit can be shown the other way up. Set **Show this habit as**
-to *Something to avoid* on its edit screen: a clean day then fills in the
-habit's colour while a slip paints red and shows how far over you went, and the
-day editor's two buttons read **Clean day** / **Slipped** rather than Done / Not
-done. The Android notification inverts with it — **Clean** / **Slipped** in the
-shade, where a limit is answered without opening anything. Nothing about the
-storage moves. It is still an at-most
-target, the target still decides whether a day counts, and the Loop export
-carries exactly what it carried before — this is a way of *reading* a habit,
-not a different kind of habit. The tap cycle is unchanged too; only what a tap
-writes differs, so a clean day records 0 and a slip records one over the limit,
-the least the app is willing to claim on your behalf. Type the real number in
-the day editor when it matters.
-
-**Any frequency** — *n* times per *m* days. A habit held at exactly its target
-reaches full strength whether that is daily or 3×/week.
-
-**Edit any day** — click a square in the calendar to correct history, page
-back through months, or attach a note explaining why a day went the way it
-did.
-
-**Skips** — a skipped day is neither success nor failure. It bridges streaks
-instead of breaking them, and holds your score steady. Use it for illness or
-travel.
-
-**Archive** — retire a habit without deleting its history.
-
-**Reorder** — drag by the handle, or focus it and use ↑ / ↓.
-
-**Undo** — deleting a habit offers an Undo that restores it with every entry
-and note intact.
-
-**Reminders, where you want them** — set a time on a habit, choose what the
-reminder *asks* ("Did you exercise today?"), and pick where it goes under ⚙ →
-Notifications: the Android app, a Discord channel, an ntfy topic, or any
-combination of them. In Discord you can answer with a button without leaving
-the chat. See [Reminders and notifications](#reminders-and-notifications).
-
-**Works offline** — check off habits with no signal; they queue on the device
-and sync, in order, when you reconnect. Reconnection is automatic, and does not
-rely on the browser noticing: the app re-checks when you come back to the tab
-and keeps probing while it is down, so restarting the server does not leave a
-page stranded.
-
-**Find a habit** — once an account has six or more habits, a search box appears
-above the dashboard. It folds case and strips accents, so "cafe" finds "Café",
-and it matches the description as well as the name — a habit called "Gym" whose
-description says "swimming Tuesdays" is one people look for by the second. It
-filters what is already on screen, so it works offline and costs no request.
-The Android app offers the same search, but behind an icon in its top bar
-rather than a permanent row — a phone shows about four rows and can't spare a
-dashboard's vertical room — and it's offered as soon as the account holds any
-habits at all, not from six. Closing the field doesn't drop the filter: the
-icon stays lit and an "N of M" count stays on screen until you clear it. The
-fold is still near-identical.
-
-**Light, dark, or whatever this device is set to** — three states, not two, and
-the header's ◐ / ☀ / ☾ button cycles between them. *Follow this device* is
-somewhere you can go back to, which is the actual change: the old toggle wrote
-one of two values and following the system was the absence of both, so pressing
-it once was irreversible and a machine that goes dark at sunset quietly stopped
-doing so with nothing on screen to say why. The choice is stored on the account
-rather than on the device, so it follows you between browsers, and it travels in
-the JSON backup.
-
-<div align="center">
-<img src="docs/screenshots/dashboard-dark.png" width="820"
-     alt="The same dashboard in dark theme: the surrounding chrome goes near-black while each habit keeps its own colour, so the filled squares still read at a glance.">
-</div>
-
-### Statistics
-
-| View | What it shows |
-|---|---|
-| **Strength** | Loop's exponential-decay score, plotted by day / week / month / quarter / year |
-| **Calendar** | A clickable heatmap with streaks joined up, zoomable and pageable |
-| **History** | Completions by day / week / month / quarter / year, as a percentage or a count |
-| **Best streaks** | Your ten longest runs, listed newest first with the dates |
-| **Bouncing back** | What happens *after* a miss — see below |
-| **Awards** | What the history has already earned — see below |
-| **By day of week** | Which days you reliably miss |
-| **Weekday consistency** | The same, month by month, so you can see a weekday slipping |
-| **Times per week** | How many weeks each month hit 1×, 2×, 3× … |
-
-Every chart with a time axis pages through history rather than cramming years
-into one screen, and the number of columns follows the width you have.
-
-Plus current streak, best streak, and total completions at a glance.
-
-<div align="center">
-<img src="docs/screenshots/statistics.png" width="820"
-     alt="A habit's detail view: strength 86%, current and best streak 8, 106 total; the strength curve rising over four months; a year-long calendar heatmap; and the ten best streaks listed by date.">
-</div>
-
-### Bouncing back
-
-Streaks reward perfection and punish one bad day. **Bouncing back** measures
-the thing that actually decides whether a habit survives — what happens after
-you miss:
-
-- **Recovery rate** — of every lapse that ended, how often were you back the
-  very next day?
-- **How long lapses last** — misses clustered at one day mean a habit that
-  self-corrects; a fat tail means one that, once dropped, stays dropped.
-- **How far streaks get** — of all the streaks you started, what share reached
-  3 days? 7? 30? The cliff in that curve locates where this habit reliably
-  breaks, which "best streak: 23" cannot tell you.
-
-Two habits can both recover 100% of the time and still be nothing alike: one
-clears a week 86% of the time, the other 40%. Only the survival curve
-separates them.
-
-<div align="center">
-<img src="docs/screenshots/bouncing-back.png" width="820"
-     alt="The Bouncing back card: back next day 100%, longest lapse 1 day, currently missed 1 day; a histogram showing all 14 lapses lasted a single day; and a survival curve ending at 93% of streaks reaching 7 days.">
-</div>
-
-> Shown for **every** frequency. This used to be daily-only, because a miss
-> meant "a day it was not done" and a 3×/week habit has four of those a week —
-> a perfectly kept habit reported as lapsing continuously. A miss is now a day
-> the habit fell *below its rate*, which is a real failure whatever the
-> frequency, so there is nothing left to suppress.
-
-### Awards
-
-A short row of badges under *Bouncing back*, for what a habit's history
-currently shows:
-
-- **Streaks** — the longest run you have managed, against the same ladder the
-  survival curve uses: 2, 3, 5, 7, 14, 21, 30, 60, 100 days. It reads your
-  *best* run, not the one you are on, so it does not go out the day a run ends.
-- **Strength** — 50%, 80% or 95%, whichever your strength curve has reached.
-  50% is about a fortnight of keeping a daily habit, 95% about two months. It
-  reads the curve's high point, so an ordinary bad week does not take it.
-- **Comebacks** — how many times you were back the next day after a miss, and
-  the longest lapse you have climbed out of. A recent one is flagged as new for
-  a week, because coming back is the moment worth noticing.
-- **Every day of the week** — you have kept this on all seven weekdays at least
-  once.
-- **A year of keeping it** — your first good run and your most recent are a
-  year or more apart. Importing a backup that already covers a year earns it on
-  arrival, because the record really is that long.
-- **No lapse over a day** — every lapse so far has lasted a single day. The
-  next two-day one ends it, which is why it is worded as a record.
-- **A month with no blanks** — every day of a whole month has an *answer*,
-  whatever it said. A day you did it, a day you skipped and a day you recorded
-  as missed all count; only a day you never touched does not. It is the one
-  badge here that a bad month can earn, which is the point of it — and it is
-  a reason to log the days that went badly. A month counts from its last day
-  onwards, never before, so this never appears on the 3rd and vanishes on the
-  4th.
-- **A rest day inside a run** — a run of a week or more that held together
-  across days you deliberately skipped. Only shown if you have skipped days
-  switched on under ⚙, since that is what puts Skip on the grid in the first
-  place.
-
-They are **worked out from your entries each time, never stored.** That has one
-consequence worth knowing, because it can surprise you: a badge is a reading of
-the history *as it stands*, so editing your history can move one — including
-downwards. Filling in a session you forgot to log changes what the earlier part
-of the record looks like, and on a habit with a weekly or monthly goal that can
-lower a streak badge as easily as raise it. Nothing is miscounted; you are
-seeing a different history than you were.
-
-The upside of the same design is that there is nothing extra in your backup and
-nothing to keep in step: restore anywhere and the badges follow the entries.
-
-There is nothing to switch on, and no card at all until a habit has something to
-show. One case is deliberately quiet: an *at most* habit set to treat days you
-never logged as kept gets no badges, because with almost nothing recorded they
-would be claims you know to be untrue. Its charts and figures are unchanged.
+Two things have no switch. The **Content-Security-Policy** is what makes the
+frontend's design true — `connect-src 'self'` is why the browser cannot post to a
+Discord webhook and the server keeps time for reminders instead — so relaxing it
+changes the architecture, not a header. And the **cross-origin check** on writes
+costs a same-origin client nothing: what it refuses is another site using your
+logged-in browser as a lever. Neither gets safer on a VPN.
 
 ---
 
@@ -1409,70 +1353,53 @@ nothing to set up on the server. If both are configured, the bot wins.
 
 Two settings that matter here:
 
-- **Reminder timezone** — 08:00 on whose clock? The default is **Automatic —
-  follow this device**: whichever browser or phone last used the account, sent
-  on requests it was already making. That is right for almost everyone,
-  including a traveller, whose reminders move with them. Two other answers are
-  there when it is not: name a zone to pin reminders to it — the traveller who
-  wants to stay on home time — or pick **Server's own clock**, which is what the
-  default used to be and is the option to choose if you would rather no device
-  reported anything.
-- The webhook URL is checked against Discord's own hosts and rejected
-  otherwise. That is deliberate: your server is what makes the request, so
-  accepting any URL would turn this field into a way to make it fetch things on
-  the private network it sits in.
+- **Reminder timezone** — 08:00 on whose clock? The default, **Automatic —
+  follow this device**, uses whichever browser or phone last used the account, so
+  reminders travel with you. Name a zone instead to pin them to it, or pick
+  **Server's own clock** if you would rather no device reported anything.
+- The webhook URL is checked against Discord's own hosts. Your server makes the
+  request, so accepting any URL would turn this field into a way to make it fetch
+  things on the private network it sits in.
 
 ### ntfy
 
-[ntfy](https://ntfy.sh) is the destination that asks least of you: **no
-account, no bot, and no inbound port.** Your server POSTs the reminder to a
-topic, and your phone or desktop subscribes to that topic — which is the same
-property that makes the Discord bot an outbound socket rather than a webhook
-endpoint, arrived at from the other side. There is nothing to register and
-nothing to forward, and it works against ntfy.sh or against an ntfy the
-operator runs themselves.
+[ntfy](https://ntfy.sh) asks least of you: **no account, no bot, no inbound
+port.** Your server POSTs the reminder to a topic and your phone subscribes to
+it, against ntfy.sh or an ntfy you run yourself.
 
-Paste the topic URL into ⚙ → Notifications → **ntfy topic URL**, subscribe to
-the same topic in the ntfy app, and press **Send a test notification**. A
-protected topic also takes an **ntfy access token**; a public one needs none.
+Paste the topic URL into ⚙ → Notifications → **ntfy topic URL**, subscribe to the
+same topic in the ntfy app, and press **Send a test notification**. A protected
+topic also takes an **ntfy access token**; a public one needs none.
 
-**You cannot choose the host freely, and that is the real difference from
-pasting in a Discord webhook.** Your server is what makes the request, so
-whoever runs the instance decides which ntfy hosts it may be aimed at
-(`NTFY_ALLOWED_HOSTS` — see [Configuration](#configuration)); out of the box
+**You cannot choose the host freely** — that is the real difference from a
+Discord webhook. Your server makes the request, so whoever runs the instance
+decides which hosts it may be aimed at (`NTFY_ALLOWED_HOSTS`), and out of the box
 that is ntfy.sh alone. A URL on any other host is refused and the field snaps
-back to blank, so on a shared instance the host — and the base path, if the
-ntfy sits behind a reverse proxy under one — is something to ask your operator
-for. Everything after it is yours: the topic is the one part of the URL you
-choose.
+back to blank, so on a shared instance the host, and the base path if the ntfy
+sits behind a proxy, is something to ask your operator for. The topic is the part
+you choose.
 
-The same list decides the scheme, and it is https unless an entry says
-otherwise. **If you run an ntfy on your own network, `http://ntfy.lan:8080` in
-`NTFY_ALLOWED_HOSTS` lets the server post to it in plaintext** — there is no
-proxy in a hop that never leaves the LAN, and no reason to send one out to the
-internet and back to get a certificate onto it. Your phone can still reach the
-same ntfy through your proxy; the two are separate URLs. It applies to that
-entry alone, so allowing it for your own box does not allow it for ntfy.sh, and
-what it costs is what plaintext always costs: the habit's name, its prompt and
-your ntfy token are readable by anything that can see that network.
+That list also decides the scheme: https, unless an entry says `http://`. **If
+you run an ntfy on your own network, `http://ntfy.lan:8080` lets the server post
+to it in plaintext**, which saves routing a LAN hop out to the internet and back
+for a certificate. It applies to that entry alone, so it does not allow plaintext
+to ntfy.sh — and it costs what plaintext always costs: the habit's name, its
+prompt and your ntfy token readable by anything on that network.
 
-**There is nothing to press on an ntfy notification, deliberately.** ntfy can
-carry action buttons, and answering with one would mean this server exposing an
-HTTP endpoint that anything able to reach it could call — the inbound endpoint
-the Discord integration goes to some length to avoid. So the reminder tells you
-and the app is where you answer. If answering from the notification is what you
-want, the Android app and the Discord bot both do it.
+**There is nothing to press on an ntfy notification, deliberately.** Answering
+from one would mean this server exposing an inbound HTTP endpoint that anything
+could call — the very thing the Discord bot's outbound socket exists to avoid. So
+the reminder tells you and the app is where you answer; for answering in place,
+use the Android app or the Discord bot.
 
-The server checks once a minute. A reminder the server slept through is still
-sent if it is less than half an hour late, and dropped if it is more — waking
-up after a day of downtime should not fire a day of reminders at once.
+The server checks once a minute. A reminder it slept through still goes out if it
+is under half an hour late and is dropped if it is more, so a day of downtime
+does not fire a day of reminders at once.
 
 **When a destination stops working, ⚙ → Notifications says so.** A deleted
 webhook, a bot kicked from its channel or a revoked token fails permanently and
-is not retried, and nothing else about the habit changes to show it — so the
-dialog carries the last outcome per destination and reports it in the sender's
-own words, without your having to press anything. The test button is how you
-confirm the fix.
+is not retried, so the dialog carries the last outcome per destination in the
+sender's own words. The test button is how you confirm a fix.
 
 > The Android app needs no server involvement at all — it arms its own alarms
 > and fires them with the server unreachable. Unticking it there stops those
@@ -1494,11 +1421,9 @@ signs people in and shows whichever it reports: a username and password form for
 the personal edition, your identity provider's own page — in the app's own
 WebView, sharing one cookie store with the native API client — for cloud.
 
-The native APK is attached to every [release](../../releases), signed — a
-release that has no signing key fails rather than publishing an APK, because
-Android refuses to install an unsigned one at all. Installing it still means
-allowing *Install unknown apps* for whatever you download it with, which every
-sideloaded app needs and is not a warning about this one.
+The APK is attached to every [release](../../releases), signed. Installing it
+means allowing *Install unknown apps* for whatever you download it with — that is
+what every sideloaded app needs, not a warning about this one.
 
 <div align="center">
 <img src="docs/screenshots/dashboard-mobile.png" width="300"
@@ -1520,27 +1445,19 @@ to your dashboard, and check-offs that queue until you reconnect.
 
 ### The Android app
 
-**[`android-native/`](android-native/README.md) — native Kotlin client.**
-Exists for one reason the web cannot do: a reminder notification with **Yes /
+**[`android-native/`](android-native/README.md) — native Kotlin client.** It
+exists for the one thing the web cannot do: a reminder notification with **Yes /
 No / count buttons in it**. Tap one and the entry is recorded without the app
-ever coming to the foreground; if you are offline the write queues and retries.
-Reminders are local alarms, so they fire whether or not the server is
-reachable, and the reminder *times* live on the server so they follow your
-account to a new phone.
+coming to the foreground; offline, the write queues and retries. Reminders are
+local alarms, so they fire whether or not the server is reachable, while the
+reminder *times* live on the server and follow your account to a new phone.
 
-The list itself is native: a row of days per habit — its current streak beside
-the name, tappable squares back through a year of history, the whole grid
-scrolling together and running whichever way your `dayOrder` setting says. It
-carries the same search, behind an icon in the top bar rather than a permanent
-row — the phone doesn't have a dashboard's room to spare — offered from the
-first habit onward rather than six, with a near-identical fold of case and
-accents, matching the description as well as the name, and filtering what is
-already on screen so it works offline. Closing the field keeps a live filter
-in place: the icon shows active and an "N of M" count stays visible until it's
-cleared. Everything a web page does well —
-charts, the calendar, history editing — opens the server's own UI inside the
-app, so there is one implementation of the statistics rather than two, and
-tapping a habit lands on *that* habit's page rather than the dashboard.
+The list is native too — a row of days per habit, its streak beside the name,
+tappable squares back through a year, running whichever way your `dayOrder`
+setting says. It carries the same search described under
+[Features](#features), behind an icon in the top bar. Everything a web page does
+well — charts, the calendar, history editing — opens the server's own UI inside
+the app, so there is one implementation of the statistics rather than two.
 
 > Plain `http://` is accepted only for private addresses (`10.x`,
 > `192.168.x`, `172.16–31.x`) so a LAN server works without a certificate;
@@ -1564,23 +1481,21 @@ Use ⚙ → **Backup & Restore**, or, on an instance with sign-in off:
 curl -X POST --data-binary @"Loop Habits Backup.db" localhost:3000/api/import
 ```
 
-The conversion is verified against a real Loop export, not just their source:
-timestamps are epoch-millisecond UTC midnights, entry values are scaled by
-1000 while habit targets are not, `YES_AUTO` counts as done, and skips are
-preserved. All four of Loop's day states survive — including `NO`, a day you told
-Loop you had missed, which is kept apart from a day you never answered. Backups
-predating Loop's `unit`, `target_type` or `notes` columns import fine.
+The conversion is verified against a real Loop export rather than only their
+source, and all four of Loop's day states survive — including `NO`, a day you
+told Loop you had missed, which stays distinct from a day you never answered.
+Skips are preserved, and backups predating Loop's `unit`, `target_type` or
+`notes` columns import fine.
 
-Reminders come across too, in both directions. Loop's question becomes *What the
-reminder asks*, in every format. The reminder **time** is `.db` only — Loop's own
-`Habits.csv` has no columns for it — and only for a reminder Loop had set on
-**all seven days**, since there is no weekday mask here to hold anything
-narrower, and inventing a daily one would put a notification on your phone that
-Loop never had.
+Reminders come across in both directions: Loop's question becomes *What the
+reminder asks*, in every format. The reminder **time** is `.db` only, since
+Loop's `Habits.csv` has no columns for it, and only for a reminder Loop had set
+on **all seven days** — there is no weekday mask here, and inventing a daily one
+would put a notification on your phone that Loop never had.
 
-Loop keeps its *preferences* in Android, not in the backup, so nothing in the
-file can set yours — "Enable skip days" and "Show question marks" start off, as
-they do in Loop, and are yours to switch on under ⚙.
+Loop keeps its *preferences* in Android rather than in the backup, so nothing in
+the file can set yours: "Enable skip days" and "Show question marks" start off,
+as they do in Loop, and are yours to switch on under ⚙.
 
 **And back out again** — ⚙ → *Backup & Restore* → *Loop .db* writes a real Loop
 database you can restore on Android. You are not locked in.
@@ -1603,9 +1518,9 @@ name, `?mode=replace` clears first.
 
 The JSON backup carries your **settings** as well as your habits, and only a
 `replace` applies them — that mode means "make this account look like the file",
-while a merge is "add these habits to what I have" and leaves your preferences
-alone. It matters more than it sounds: *Show question marks* decides how the very
-rows in the same file are read.
+where a merge means "add these habits to what I have" and leaves your preferences
+alone. That matters more than it sounds, since a setting like *Show question
+marks* decides how the rows in the same file are read.
 
 **The whole database** — for disaster recovery, and the one to automate:
 
@@ -1632,9 +1547,9 @@ docker compose pull && docker compose up -d
 For the **personal** edition that is the whole story: a new binary against the
 same file, and the schema migrates itself on start.
 
-For the **cloud** edition, pin the image tag and bump it deliberately. It runs
+For the **cloud** edition, pin the image tag and bump it deliberately: it runs
 migrations on deploy, so tracking `latest` means taking a schema change at a
-moment you did not choose — and a migration is the one thing here that is not
+moment you did not choose, and a migration is the one thing here that is not
 trivially reversible. Take a dump first:
 
 ```bash
@@ -1646,29 +1561,20 @@ Migrations are numbered and recorded, so re-running is safe and applying twice
 does nothing.
 
 > **One upgrade moved numbers that were already on screen**, and this is where
-> to look if a streak vanished. Until this release, a day with **no row at all**
-> counted as a success on an *at most* habit — zero is under the limit, and an
-> unanswered day held no value — so a limit nobody had ever logged reported an
-> unbroken streak and a strength climbing toward 100%, both growing for as long
-> as it was ignored. An unanswered day now counts as a **miss**. Every at-most
+> to look if a streak vanished. Until then a day with **no row at all** counted
+> as a success on an *at most* habit — zero is under the limit — so a limit
+> nobody had ever logged reported an unbroken streak and a strength climbing
+> toward 100%. An unanswered day now counts as a **miss**, so every at-most
 > habit you were keeping by saying nothing lost its streak and most of its
-> strength the moment you upgraded, with nothing on the row to say why.
->
-> Nothing was miscounted in either direction; the days simply stopped being
-> credited to you for free. Days you had recorded as **0 are unaffected** —
-> that is a stated "none today", and it counts as staying under the limit under
-> either answer.
+> strength the moment you upgraded. Nothing was miscounted in either direction;
+> the days stopped being credited for free. Days you had recorded as **0 are
+> unaffected** — that is a stated "none today".
 >
 > If a habit really is "assume clean, record the exception", set **A day you
 > never log** to *Counts as staying under* on that habit's edit screen, or
-> change the account default under ⚙ → Tracking. Both are described in
-> [In-app settings](#in-app-settings).
->
-> One consequence of choosing that, so it does not read as a bug: **total done
-> counts answers, while the streak and the strength count days.** The total is
-> a count of rows and a day you never logged has none, so a limit kept by
-> saying nothing shows a streak, a strength and a full history bar beside a
-> total of zero. Both figures are right about their own question.
+> change the account default under ⚙ → Tracking. See
+> [In-app settings](#in-app-settings), which also covers what that choice does
+> to *total done*.
 
 ---
 
@@ -1700,26 +1606,32 @@ no file: `PORT`, because the port *inside* the container is fixed by the image
 and the published mapping — `APP_PORT` is the host-side knob — and `NODE_ENV`,
 which the image already sets.
 
+**The template is the authority on what each one means; this table is the index
+to it.** Where the two could disagree, the template wins — it is generated into
+this README from the file an operator actually runs, and the table is written by
+hand, which is exactly how its `NTFY_ALLOWED_HOSTS` row came to describe an
+older syntax than the one the server accepts.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HABITERALL_DB` | `./data/habiterall.db` | SQLite file path |
-| `TZ` | the host's, **`UTC` in a container** | The fallback clock. Reminders follow the account's own zone and a check-off follows the caller's; this is what either falls back to — see [the reminder scheduler](#both-editions-the-reminder-scheduler) |
+| `TZ` | the host's, **`UTC` in a container** | The fallback clock — see [the reminder scheduler](#both-editions-the-reminder-scheduler) |
 | `HABITERALL_AUTH` | on | Sign-in. Off only when set to **exactly** `off` |
 | `HABITERALL_USERNAME` | `admin` | The single account |
-| `HABITERALL_PASSWORD` | — | Its password. Set both before exposing the port, or the first visitor claims the instance. Nothing checks its length here — the 8-character minimum is on the in-app setup form only, so this is yours to get right |
-| `HABITERALL_PASSWORD_HASH` | — | The same thing pre-hashed, to keep the plaintext out of `docker inspect`. Wins if both are set |
+| `HABITERALL_PASSWORD` | — | Its password. Set both before exposing the port, or the first visitor claims the instance. Nothing checks its length here |
+| `HABITERALL_PASSWORD_HASH` | — | The same thing pre-hashed, to keep it out of `docker inspect`. Wins if both are set |
 | `HABITERALL_SESSION_SECRET` | generated, stored in the database | Set it to keep people signed in across a redeploy |
 | `TRUST_PROXY` | `0` | Reverse-proxy hops in front. See [Put HTTPS in front](#put-https-in-front) — wrong in either direction is a bug |
 | `HABITERALL_RATE_LIMIT` | on | `off` removes the API limits. The one on *login attempts* is not included and cannot be switched off |
 | `HABITERALL_UPGRADE_INSECURE` | off | `on` tells browsers to rewrite http to https. Only for an instance reached over TLS and nothing else |
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
-| `NTFY_ALLOWED_HOSTS` | `ntfy.sh` | Where an ntfy topic URL may point. An entry is `host`, `host:port` or `host/base/path`, and a user's URL may add exactly one topic segment to it. Naming your own replaces the default; `off` refuses every URL. Your server makes the request, so this is the whole guard |
+| `NTFY_ALLOWED_HOSTS` | `ntfy.sh` | Which hosts an ntfy topic URL may name. Your server makes the request, so this is the whole guard — see [ntfy](#ntfy) for the entry syntax |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
-| `BIND_ADDR` | empty | Which interface the published port appears on. Empty is every interface; `127.0.0.1` restricts it to a reverse proxy on this host. Not `0.0.0.0`, which is IPv4 only |
+| `BIND_ADDR` | empty | Which interface the published port appears on. Empty is every interface; `127.0.0.1` restricts it to a proxy on this host. Not `0.0.0.0`, which is IPv4 only |
 | `NODE_ENV` | `production` in both images | `production` turns on HSTS. See [Turning the guards off](#turning-the-guards-off) before unsetting it |
-| `MAX_PARSE_HABITS` | `10000` | Habits a single uploaded file may declare. A bound on a hostile file, not a product limit — see [Limits on an import](#limits-on-an-import) |
+| `MAX_PARSE_HABITS` | `10000` | Habits a single uploaded file may declare — see [Limits on an import](#limits-on-an-import) |
 | `MAX_PARSE_ENTRIES` | `250000` | Entries one file may declare, totalled across its habits |
 
 To set `HABITERALL_PASSWORD_HASH` and keep the plaintext out of your compose
@@ -1752,21 +1664,18 @@ by the image and the published mapping. `APP_PORT` is the host-side knob.
 
 ### Limits on an import
 
-`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` bound what a single uploaded file
-may *declare*, before anything is built from it. They exist because the row
-count of a SQLite file is a claim rather than a measurement: a few kilobytes
-can assert millions of rows, and reading them all takes the process out of
-service in a way no `try`/`catch` can answer.
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` bound what a single uploaded file may
+*declare*, before anything is built from it. A SQLite file's row count is a claim
+rather than a measurement, so a few kilobytes can assert millions of rows, and
+reading them all takes the process out of service in a way no `try`/`catch` can
+answer.
 
-They are not a product limit, and the defaults are far above any real account
-— 10,000 habits is fifty times cloud's own per-account cap, and 250,000 entries
-is roughly 68 habits answered every day since Loop shipped in 2016. They are
-settable because the personal edition has no other cap on either, so a fixed
-ceiling here would leave its importer refusing files its own API would happily
-have created one habit at a time.
+They are a defence, not a product limit, and the defaults sit far above any real
+account: 10,000 habits is fifty times cloud's own per-account cap, and 250,000
+entries is roughly 68 habits answered every day since Loop shipped in 2016.
+Raising them trades memory for generosity — both defaults together cost about
+90MB to parse.
 
-Raising them trades memory for generosity: a file sitting on both defaults
-costs roughly 90MB to parse, and half a million entries alone costs 143MB.
 ### Published images
 
 Every release publishes both editions to GitHub Container Registry, for
@@ -1778,11 +1687,10 @@ docker pull ghcr.io/easymod0/habiterall-cloud:latest
 ```
 
 Tags are `X.Y.Z`, `X.Y` and `latest`, so a deployment can pin as tightly as it
-likes — except below `1.0.0`, where the `X.Y` tag is dropped: a moving `1.4`
-promises that anything it points at is compatible with anything else it does,
-and 0.x carries no such guarantee. Docker Hub is published to as well when its
-credentials are configured —
-see [`.github/workflows/README.md`](.github/workflows/README.md).
+likes — except below `1.0.0`, where the `X.Y` tag is dropped, since a moving
+`1.4` promises a compatibility that 0.x does not carry. Docker Hub is published
+to as well when its credentials are configured; see
+[`.github/workflows/README.md`](.github/workflows/README.md).
 
 ### Both editions: the reminder scheduler
 
@@ -1904,18 +1812,16 @@ Two of them decide how much there is to look at:
 
 | Setting | Default | What it does |
 |---|---|---|
-| **Day columns** (Dashboard) | Fit the screen | How many days the dashboard grid shows **at most** — 5, 7, 10, 14, or as many as fit. It is a maximum and never a minimum: a phone asked for a fortnight still draws a week, because fourteen columns on a narrow screen leave nothing for the habit's name. Choosing fewer on a phone is how you get five fat columns you can hit with a thumb |
-| **Cards on a habit's page** (Statistics) | All of them, in this order | Which of the nine cards a habit's page draws, and in what order: the strength curve, the calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency and times per week. Each row has ▲ / ▼ buttons to move it up or down the list, alongside its tick. The four figures at the top are always shown, so unticking everything leaves a page rather than a blank one |
+| **Day columns** (Dashboard) | Fit the screen | How many days the dashboard grid shows **at most** — 5, 7, 10, 14, or as many as fit. A maximum, never a minimum: a phone asked for a fortnight still draws a week. Choosing fewer is how you get fat columns you can hit with a thumb |
+| **Cards on a habit's page** (Statistics) | All of them, in this order | Which of the nine cards a habit's page draws, and in what order: strength, calendar, best streaks, bouncing back, awards, history, by day of week, weekday consistency, times per week. Each row has ▲ / ▼ beside its tick. The four figures at the top always show, so unticking everything leaves a page rather than a blank one |
 
-A card with nothing in it yet — bouncing back on a habit with no history, awards
-on one that has not earned any — stays hidden whichever way this is set.
+A card with nothing in it yet — bouncing back on a habit with no history — stays
+hidden whichever way this is set.
 
-An account that saved this setting before ordering existed still records only
-which cards were on, so a card added to habiterall after that save arrives
-**off** rather than in its usual place. Opening ⚙ and pressing **Done** — even
-with nothing else changed — rewrites it, after which a newly added card arrives
-on, at its usual place in the order above. Nothing else does: no upgrade step
-and no background write will do it for you.
+If you saved this setting before card ordering existed, it records only which
+cards were on, so a card added since arrives **off**. Open ⚙ and press **Done**,
+even with nothing else changed, to rewrite it; after that a new card arrives on,
+in its usual place. Nothing does this for you in the background.
 
 Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 
@@ -1932,59 +1838,45 @@ other decides what a day nobody answered is worth:
 
 | Setting | Default | What it does |
 |---|---|---|
-| **Theme** (Dashboard) | Follow this device | *Follow this device*, *Light* or *Dark*. The ◐ / ☀ / ☾ button in the header cycles the same setting, and the glyph says which of the three it is on — the last step of the cycle is back to *Follow this device* from a value the device already matches, which is the same appearance by definition |
+| **Theme** (Dashboard) | Follow this device | *Follow this device*, *Light* or *Dark*, cycled by the header's ◐ / ☀ / ☾ button, whose glyph says which of the three it is on |
 | **On an "at most" habit, a day you never logged** (Tracking) | Counts as a miss | Whether a day with **no row at all** counts as having stayed under the limit. Read for an at-most habit and nothing else |
 
-That second one is the one place a *missing* answer is genuinely ambiguous. On
-an at-least habit an unanswered day is short of the target and there is nothing
-to ask; on a limit, zero is *under* the limit, so saying nothing could honestly
-mean either thing. "I didn't smoke today" is worth a tap and is most of the
-reward; "I had no soda" is not something anyone opens an app for, and recording
-the exception is the whole point of tracking it. Both are ordinary, so it is a
-setting rather than a rule.
+That second one is the one place a *missing* answer is genuinely ambiguous. On an
+at-least habit an unanswered day is simply short of the target; on a limit, zero
+is *under* the limit, so silence could honestly mean either thing. "I didn't
+smoke today" is worth a tap; "I had no soda" is not something anyone opens an app
+for. Both are ordinary, so it is a setting rather than a rule.
 
-Note what is **not** in question: a day you recorded as **0 is staying under the
-limit either way**. That is you saying "none today", which is the thing being
-asked for. Only the day nobody answered is in doubt.
+A day you recorded as **0 is staying under the limit either way** — that is you
+saying "none today". Only the day nobody answered is in doubt. If you choose
+*Counts as staying under*, expect **total done to count answers while the streak
+and strength count days**: a limit kept by saying nothing shows a streak, a
+strength and a full history bar beside a total of zero. Both are right about
+their own question.
 
-The account's answer is what most habits follow. A habit's own **A day you never
-log** field, on its edit screen beside the target, overrides it and ships set to
-*Use the account setting* — including on every habit that existed before this
-did, and on anything imported from Loop, whose backup carries no preferences at
-all.
-
-Both travel in habiterall's own JSON backup, and they have to: change what an
-unanswered day is worth and the same rows in the same file give back a
-different streak and a different strength. They come back by different routes,
-though. The habit's field is part of the habit, so it restores on a merge as
-well as a replace; the account setting is a *setting*, and only a **replace**
-applies those — a merge deliberately leaves your preferences alone. Merge a
-backup onto an account set the other way and the habits keep their own answers
-while the account keeps its.
+A habit's own **A day you never log** field, beside the target on its edit
+screen, overrides the account setting and ships set to *Use the account setting*.
+Both travel in the JSON backup — they have to, since they change what the same
+rows mean — but by different routes: the habit's field is part of the habit and
+restores on a merge, while the account setting only applies on a **replace**.
 
 One more decides what a number you type *means*:
 
 | Setting | Default | What it does |
 |---|---|---|
-| **Decimal separator** (Tracking) | Follow this device | Whether you write a decimal point as `1234.5` or `1234,5`, wherever an amount is typed. *Follow this device* reads it off the browser each time rather than storing what it found, so one account can be right on a laptop and on a phone — and choosing one explicitly is what to do when the device is not set up the way you write |
+| **Decimal separator** (Tracking) | Follow this device | Whether you write `1234.5` or `1234,5`, wherever an amount is typed. *Follow this device* reads it off the browser each time rather than storing what it found, so one account can be right on a laptop and a phone. Choose explicitly when the device is not set up the way you write |
 
-It matters because of what it makes `10.000` mean: ten, or ten thousand written
-with a separator. Neither reading can be assumed for everybody, and getting it
-wrong is not a display glitch — it is a stored number out by a factor of a
-thousand, with nothing on screen to say so.
+It matters because of what it makes `10.000` mean — ten, or ten thousand.
+Guessing wrong is not a display glitch but a stored number out by a factor of a
+thousand, with nothing on screen to say so. So a **thousands separator is refused
+rather than guessed at**, whichever way this is set, and the message says what to
+type instead. Anything with fewer than three digits after the separator (`8,5`,
+`8.5`) means the same under both conventions and is accepted under both — which
+is most of what anyone types — and amounts are written back the way you write
+them, so a field that accepts `8,5` does not redraw it as `8.5`.
 
-Whichever way it is set, a **thousands separator is refused rather than guessed
-at**, and the message says what to type instead. `10,000` on a *point* account
-and `10.000` on a *comma* one are one refusal seen from two sides. Anything with
-fewer than three digits after the separator — `8,5`, `8.5` — is the same number
-under both conventions and is accepted under both, which is most of what anyone
-types. The box also *writes* amounts back the way you write them, so a field
-that accepts `8,5` does not redraw it as `8.5`.
-
-It travels in the JSON backup, because it decides what the next amount you type
-will mean. The Android app does not read it yet — see issue #157, which has to
-give that client a single reader for a typed amount before it can have one
-answer.
+It travels in the JSON backup. The Android app does not read it yet; see issue
+#157.
 
 ---
 
@@ -2018,15 +1910,13 @@ habits store the amount. Skips are held in a separate `status` field, because a
 measurable habit may legitimately record the number 3.
 
 **A row is an answer, and `DELETE` is how a day goes back to having none.**
-`PUT {"value": 0}` records "not done" — a real answer, which is what makes
-question marks meaningful — so clearing a day is the `DELETE` above, not a `PUT`
-of zero. Four states in all: a row with `2` (done), a row with `status: "skip"`,
-a row with `0` (not done), and no row (nothing known). On every habit but one
-the last two are told apart by the display alone, and every statistic counts
-both as a miss. The exception is an **at most** habit, where zero is under the
-limit: there a row holding `0` is a success, and whether a day with no row is
-one as well is what the *at most* setting in
-[In-app settings](#in-app-settings) decides.
+`PUT {"value": 0}` records "not done", which is a real answer — so clearing a day
+is the `DELETE` above, not a `PUT` of zero. Four states in all: `2` (done),
+`status: "skip"`, `0` (not done), and no row (nothing known). The last two are
+told apart by the display alone and both count as a miss — except on an **at
+most** habit, where zero is under the limit, so a row holding `0` is a success
+and a day with no row is whatever the *at most* setting in
+[In-app settings](#in-app-settings) says.
 
 ```bash
 curl -X POST localhost:3000/api/habits -H 'Content-Type: application/json' \
@@ -2041,38 +1931,37 @@ examples above assume `HABITERALL_AUTH=off`, and otherwise want the session
 cookie. In cloud each one is additionally scoped to your own data.
 
 Outside that table: `GET /healthz` is unauthenticated in both, and `GET /api/me`
-reports which sign-in mode this instance is in — `none`, `password`, `setup` or
-`oidc`. A signed-out caller still gets that answer, because the `mode` rides the
-**401** as well as the 200; it is the one thing a client with no session has to
-know before it can draw anything. Sign-in itself differs: `POST /auth/login` and
-`POST /auth/setup` in personal, `GET /auth/login` → `GET /auth/callback` in
-cloud, with `POST /auth/logout` in both.
+reports the sign-in mode — `none`, `password`, `setup` or `oidc`. A signed-out
+caller still gets that answer, because the `mode` rides the **401** as well as
+the 200, and it is the one thing a client with no session needs before it can
+draw anything. Sign-in itself differs: `POST /auth/login` and `POST /auth/setup`
+in personal, `GET /auth/login` → `GET /auth/callback` in cloud, with
+`POST /auth/logout` in both.
 </details>
 
 ---
 
 ## Security
 
-**Both editions.** Sign-in is in the app rather than in a reverse proxy, so the
-Android client — which talks to `/api` outside the WebView and cannot fill in a
-proxy's login form — gets a `401` it can act on instead of an HTML page. Both
+**Both editions.** Sign-in lives in the app rather than in a reverse proxy, so
+the Android client — which talks to `/api` outside the WebView and cannot fill in
+a proxy's login form — gets a `401` it can act on instead of an HTML page. Both
 issue the same **opaque session cookie**, `httpOnly` + `SameSite=Lax`, stored
-server-side so it can be revoked instantly. `Secure` is decided **per request**
-in personal, so one instance can serve https from outside and plain http on the
-LAN; cloud derives it from its single `PUBLIC_URL`. Writes are
-additionally refused when the `Origin` is another site's, a request with no
-`Origin` being allowed through because that is the native client and not a
-forgery a browser can make. The session is regenerated on login. One shared CSP
+server-side so it can be revoked instantly, and regenerated on login. `Secure` is
+decided **per request** in personal, so one instance can serve https outside and
+plain http on the LAN; cloud derives it from `PUBLIC_URL`. Writes are refused
+when the `Origin` is another site's — a request with no `Origin` passes, since
+that is the native client and not a forgery a browser can make. One shared CSP
 with no inline scripts; rate limits on login, the API and imports, and the
 **limit on login attempts cannot be switched off**. **Imports cannot escape the
-importer** — ids inside an uploaded backup are ignored entirely.
+importer**: ids inside an uploaded backup are ignored entirely.
 
 **Cloud, additionally.** Isolation is enforced by **Postgres row-level
-security**, not by application code — a query that forgets its `WHERE` clause
-returns nothing rather than leaking. The app connects as a role that is not the
-table owner, cannot bypass RLS, cannot run DDL, and cannot create or delete
-users. **No passwords are stored**: authentication is delegated to an OIDC
-provider, which owns credentials, MFA and resets, users are keyed on
+security** rather than by application code, so a query that forgets its `WHERE`
+clause returns nothing rather than leaking. The app connects as a role that is
+not the table owner, cannot bypass RLS, cannot run DDL, and cannot create or
+delete users. **No passwords are stored** — authentication is delegated to an
+OIDC provider, which owns credentials, MFA and resets; users are keyed on
 `(issuer, subject)`, tokens never reach the browser, and the flow carries PKCE,
 state and a nonce.
 
@@ -2120,17 +2009,15 @@ including the auth, sign-in, reminder and API-shape suites. Every one runs on
 each pull request, alongside both Docker builds.
 
 **The main suite needs no configuration** — fork it, push, and everything runs.
-The only secrets anything needs are the four Android signing ones, and only to
-*sign* a released APK; see
-**[.github/workflows/README.md](.github/workflows/README.md)**.
+The only secrets are the four Android signing ones, and only to *sign* a released
+APK; see [`.github/workflows/README.md`](.github/workflows/README.md).
 
-The browser suites drive real Chrome and check things unit tests structurally
-cannot — a CSS rule silently defeating the `hidden` attribute, offline
-behaviour with the server stopped, and the layout at 360 / 390 / 768 / 1440px.
+The browser suites drive real Chrome and catch what unit tests structurally
+cannot: a CSS rule silently defeating the `hidden` attribute, offline behaviour
+with the server stopped, and the layout at 360 / 390 / 768 / 1440px.
 
-Contributor notes live in `CLAUDE.md` at the repo root and in each package;
-they record the non-obvious decisions, each of which was paid for with a real
-bug.
+Contributor notes live in `CLAUDE.md` at the repo root and in each package, with
+the long-form reasoning in `docs/decisions/`.
 
 ---
 

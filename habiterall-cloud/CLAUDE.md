@@ -200,7 +200,7 @@ same one and one copy is the point.
 
 `db`, `migrate` and `app` carry no environment block here: they `extends` the
 ones in `examples/docker-compose.cloud.yml` and add the build. That file is the
-one place this edition's variables are written down, and the root CLAUDE.md has
+one place this edition's variables are written down, and `examples/CLAUDE.md` has
 the whole argument. Only the top-level `volumes:` declarations are restated by
 hand; `depends_on` IS inherited — measured, where this used to hedge — so `app`
 writes just the `authentik-bootstrap` key and the other two merge in beside it.

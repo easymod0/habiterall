@@ -106,8 +106,15 @@ test('the proxy example forwards what the app needs', () => {
 test('the reverse-proxy guidance covers TRUST_PROXY once, outside the folds', () => {
   // It applies to every proxy, so it must not sit inside one proxy's <details>
   // — that is how it came to be read as an nginx-only setting.
-  const section = README.slice(README.indexOf('### Put HTTPS in front'),
-    README.indexOf('## Features'));
+  //
+  // The end bound is the section that FOLLOWS this one, and it is load bearing:
+  // it was `## Features`, which moved above Quick start when the README was
+  // reordered — leaving `slice(big, small)`, an empty string, and a check that
+  // could only ever pass by accident.
+  const start = README.indexOf('### Put HTTPS in front');
+  const stop = README.indexOf('## Reminders and notifications');
+  assert.ok(start !== -1 && stop > start, 'the HTTPS section is not where this expects');
+  const section = README.slice(start, stop);
   const after = section.slice(section.lastIndexOf('</details>'));
   assert.match(after, /TRUST_PROXY=1/,
     'TRUST_PROXY is not explained after the last collapsed proxy example');
