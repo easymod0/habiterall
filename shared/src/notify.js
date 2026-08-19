@@ -40,27 +40,49 @@ import { isAvoided } from '../public/ui/toggle.js';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
- * Whether `appUrl` is something an ntfy button can actually be pointed at.
+ * The normalised base an ntfy button — or any other link back into the
+ * app — may be built from, or `false` if `appUrl` cannot be used for one at
+ * all.
  *
- * The one rule both `CHANNELS.ntfy.interactive` (below) and `ntfyActions`
- * (`ntfy-answer.js`) ask, so there is exactly one answer to "is this an
- * `appUrl` we can build a button URL from" rather than two that can drift —
- * they used to: this predicate and `ntfyActions`'s own regex disagreed for
- * `'habits.example.com'` (no scheme) and `'ftp://…'`, so `interactive` said
- * yes while the button builder shipped nothing. `new URL` rather than a
- * regex, so this and the actual URL construction in `ntfyActions` agree by
- * construction rather than by two patterns staying in sync.
+ * The one rule `CHANNELS.ntfy.interactive` (below), `ntfyActions`
+ * (`ntfy-answer.js`), `ntfyPayload`'s `click` and `discordPayload`'s
+ * `embed.url` all ask, so there is exactly one answer to "is this an
+ * `appUrl` we can build a link from, and what does it look like" rather than
+ * several that can drift. A boolean predicate over the PARSED url, checked
+ * beside string concatenation of the RAW one, was exactly that drift: the
+ * predicate accepted `'HTTPS://h.example'`, `'https:/h.example'` and a
+ * value with leading whitespace (`new URL` normalises all three), while a
+ * builder that concatenated the raw string produced a link the predicate had
+ * never actually validated — and since ntfy only clears a notification on a
+ * successful request, that shape is a button that neither records nor ever
+ * clears. Parsing once and returning what was parsed is what makes the
+ * builders agree with the predicate BY CONSTRUCTION, rather than by two
+ * checks staying in sync — they used to disagree for `'habits.example.com'`
+ * (no scheme) and `'ftp://…'` too, before either read a parsed url at all.
+ *
+ * The trailing slash on the pathname is counted off rather than matched with
+ * `/\/+$/`, which is unanchored at the start and quadratic on a run of
+ * slashes — `notify.test.js` times it on a 200,000-slash string.
  *
  * @param {unknown} appUrl
- * @returns {boolean}
+ * @returns {string|false} `${origin}${pathname}`, with no trailing slash —
+ *   so a deployment served under a subpath (`https://h.example/app/`) keeps
+ *   `/app`, and a bare root keeps nothing to append a further slash to.
  */
 export function usableAppUrl(appUrl) {
   if (typeof appUrl !== 'string' || appUrl === '') return false;
+  let url;
   try {
-    return /^https?:$/.test(new URL(appUrl).protocol);
+    url = new URL(appUrl);
   } catch {
     return false;
   }
+  if (!/^https?:$/.test(url.protocol)) return false;
+
+  let end = url.pathname.length;
+  while (end > 0 && url.pathname[end - 1] === '/') end--;
+
+  return `${url.origin}${url.pathname.slice(0, end)}`;
 }
 
 /**
@@ -185,7 +207,7 @@ export const CHANNELS = {
      * so the two cannot disagree about a value like `'habits.example.com'`
      * (no scheme) or an `ftp://` URL.
      */
-    interactive: (settings, ctx = {}) => usableAppUrl(ctx.appUrl),
+    interactive: (settings, ctx = {}) => Boolean(usableAppUrl(ctx.appUrl)),
   },
 };
 
@@ -620,13 +642,11 @@ export function ntfyPayload({
   };
 
   // Tapping the notification opens the app, when the deployment has told us
-  // where it is. Counted off rather than matched with `/\/+$/`, for the reason
-  // `discordPayload` gives: that pattern is quadratic on a string of slashes.
-  if (/^https?:\/\//.test(appUrl)) {
-    let end = appUrl.length;
-    while (end > 0 && appUrl[end - 1] === '/') end--;
-    payload.click = `${appUrl.slice(0, end)}/`;
-  }
+  // where it is. `usableAppUrl` both validates and normalises, so this
+  // cannot build a link the predicate never agreed to — see its own comment
+  // for why a parsed check beside a raw-string concatenation used to drift.
+  const appBase = usableAppUrl(appUrl);
+  if (appBase) payload.click = `${appBase}/`;
 
   // Absent rather than an empty array when there is nothing to attach — the
   // same "no buttons" shape whether the cause is no `appUrl`, no `signAnswer`,
@@ -1465,14 +1485,11 @@ export function discordPayload({ habit, message, date = '', appUrl = '' }) {
   if (date) embed.footer = { text: date };
   // Makes the embed title a link into the app. Only when the deployment has
   // told us its own address — guessing one would produce a dead link.
-  // Trailing slashes are counted off rather than matched: `/\/+$/` is unanchored
-  // at the start, so on a string of many slashes the engine retries from every
-  // one of them — quadratic work for a one-line normalisation.
-  if (/^https?:\/\//.test(appUrl)) {
-    let end = appUrl.length;
-    while (end > 0 && appUrl[end - 1] === '/') end--;
-    embed.url = `${appUrl.slice(0, end)}/`;
-  }
+  // `usableAppUrl` both validates and normalises (see its own comment for
+  // why a parsed check beside raw-string concatenation used to drift, and
+  // for the quadratic trap in a naive trailing-slash trim).
+  const appBase = usableAppUrl(appUrl);
+  if (appBase) embed.url = `${appBase}/`;
 
   return {
     username: 'habiterall',

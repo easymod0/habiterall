@@ -133,6 +133,18 @@ stated plainly, is what one leaked (or forwarded, or logged) code can do:
 > message is still honoured"), and narrowing ntfy alone would make the two
 > channels disagree about a capability they are deliberately built the same
 > way. It is a channel-shaped trade, not a bug to fix here.
+>
+> **The same press also erases any note already on that date.** A button's
+> code carries no note — `answerBody` never sets one, `parseEntry` defaults an
+> absent note to `''`, and both upserts write `notes = excluded.notes` — so
+> recording `Done` over a day that already held `"coach said 10, only managed
+> 8"` leaves the value changed and the note gone. This is not specific to
+> ntfy either: the same upsert underlies Discord's buttons and the Android
+> notification's shade taps, so a leaked or kept ntfy code is not a new way to
+> lose a note, only a third door onto one that was already there. Changing
+> this means changing the shared entry-write rule (`entryWrite`,
+> `shared/src/validate.js`), which is tracked separately as **issue #224** and
+> is out of scope here.
 
 That is a materially smaller blast radius than a stolen session cookie (every
 habit, every date, every setting, indefinitely) or a leaked webhook secret

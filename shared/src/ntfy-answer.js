@@ -11,12 +11,14 @@
  * This file is that answer reversed: the button still comes to US, at
  * `NTFY_ANSWER_PATH`, and what authorises the request is an HMAC code over
  * exactly what it is allowed to change — one account, one habit, one date, one
- * action, one value. Replay is inert (`record` is an upsert, as it is for
- * Discord), and the capability is bounded to answering a question the user was
- * already being asked, for a habit and a date already visible in the same
- * message. Nothing here is a bearer token for the account: it cannot list
- * habits, cannot read anything, and cannot name a date outside
- * `MAX_ANSWER_AGE_DAYS`.
+ * action, one value. It is NOT replay-inert — `record` is an upsert, so a kept
+ * code can overwrite a later correction on the same date, repeatably, for up
+ * to `MAX_ANSWER_AGE_DAYS` — and the capability is bounded to answering a
+ * question the user was already being asked, for a habit and a date already
+ * visible in the same message. See `docs/decisions/ntfy-answers.md`'s
+ * worst-case paragraph for the bound in full. Nothing here is a bearer token
+ * for the account: it cannot list habits, cannot read anything, and cannot
+ * name a date outside `MAX_ANSWER_AGE_DAYS`.
  *
  * Pure logic — no express, no storage, no fetch — exactly like `discord.js`,
  * which `handleNtfyAnswer` is modelled on directly: read that file's
@@ -313,9 +315,16 @@ function numericCounts(habit, skipDays) {
 export function ntfyActions(habit, {
   date = '', skipDays = false, test = false, appUrl = '', sign,
 }) {
-  // The same test `CHANNELS.ntfy.interactive` uses (`notify.js`), so the two
-  // cannot disagree about what counts as a usable `appUrl` — they used to.
-  if (!usableAppUrl(appUrl)) return [];
+  // The same helper `CHANNELS.ntfy.interactive` uses (`notify.js`), and this
+  // builds from what it RETURNS rather than from the raw `appUrl` — a
+  // boolean predicate over the parsed url beside string concatenation of the
+  // raw one is exactly the drift `usableAppUrl`'s own comment describes: a
+  // value like `'https:/h.example'` or `'HTTPS://h.example'` passed the old
+  // predicate while the raw-string builder shipped a URL the predicate never
+  // actually validated, which — since ntfy only clears a notification on a
+  // successful request — is a button that neither records nor ever clears.
+  const base = usableAppUrl(appUrl);
+  if (!base) return [];
 
   // A non-test button's code carries `date`, and step 3's post-MAC shape
   // check in `verifyNtfyAnswer` rejects one that fails `DATE_RE` — so a
@@ -329,14 +338,6 @@ export function ntfyActions(habit, {
   // shape `notify_status` exists for. A `test: true` call is exempt: its
   // code never reaches storage, so it has no date to be wrong about.
   if (!test && !DATE_RE.test(date)) return [];
-
-  // Counted off in a `while` loop rather than matched with `/\/+$/`: that
-  // pattern is unanchored at the start and quadratic on a run of slashes —
-  // `ntfyPayload` and `discordPayload` both explain this and `notify.test.js`
-  // times it.
-  let end = appUrl.length;
-  while (end > 0 && appUrl[end - 1] === '/') end--;
-  const base = appUrl.slice(0, end);
 
   const avoided = isAvoided(habit);
   const unit = String(habit.unit ?? '').trim();

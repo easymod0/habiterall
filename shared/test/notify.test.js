@@ -509,6 +509,43 @@ test('the interactive predicate and the button builder agree about a usable appU
   }
 });
 
+test('a parsed check beside a raw-string builder still drifts — four spellings must agree', () => {
+  // #221's second review round: `usableAppUrl` asked `new URL(appUrl).protocol`
+  // — a PARSED question — while `ntfyActions`, `ntfyPayload` and `discordPayload`
+  // each built their link by concatenating the RAW `appUrl` after counting off
+  // trailing slashes. `new URL` accepts all four of these (a mixed-case scheme,
+  // an authority with only one slash after the colon, a schemeless-looking
+  // authority-only form, and leading whitespace) and normalises every one to the
+  // same origin — but the old raw-string builders shipped `HTTPS://h.ex/…`,
+  // `https:/h.ex/…` etc. unmodified: a URL the predicate never actually
+  // validated, and one a strict client refuses — and since ntfy only clears a
+  // notification on a SUCCESSFUL request, that shape is a button that neither
+  // records nor ever clears. All three surfaces must now agree, by construction,
+  // because all three ask the one helper for its normalised base.
+  const spellings = ['HTTPS://h.ex', 'https:/h.ex', 'https:h.ex', '  https://h.ex'];
+  const canonical = 'https://h.ex';
+
+  for (const appUrl of spellings) {
+    assert.equal(channelInteractive('ntfy', {}, { appUrl }), true,
+      `${JSON.stringify(appUrl)}: interactive should be true`);
+
+    const [action] = ntfyActions(habit(), {
+      date: '2026-08-13', appUrl, sign: () => 'signed',
+    });
+    assert.ok(action, `${JSON.stringify(appUrl)}: no button built`);
+    assert.equal(action.url.startsWith(`${canonical}/notify/ntfy/answer?c=`), true,
+      `${JSON.stringify(appUrl)}: button url = ${action.url}`);
+
+    const payload = ntfyPayload({
+      habit: habit(), message: reminderMessage(habit()), topic: 'habits', appUrl,
+    });
+    assert.equal(payload.click, `${canonical}/`, `${JSON.stringify(appUrl)}: payload.click`);
+
+    const discord = discordPayload({ habit: habit(), message: reminderMessage(habit()), appUrl });
+    assert.equal(discord.embeds[0].url, `${canonical}/`, `${JSON.stringify(appUrl)}: embed.url`);
+  }
+});
+
 test('the ntfy payload carries what the embed does, and no free text in a header', () => {
   const payload = ntfyPayload({
     habit: habit({ name: 'Meditate', description: 'ten minutes' }),
