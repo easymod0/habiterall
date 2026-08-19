@@ -225,4 +225,36 @@ turned "brush teeth at most 2 times" into "at most 0.002", which no entry could
 ever satisfy. Reading their source was not enough to catch this; it took a real
 export.
 
+**`writeLoopDatabase` writes its rows in one transaction, and issue #227 is the
+measurement.** It wrapped nothing and set no `journal_mode`, so every
+`insertRep.run()` was its own implicit transaction under SQLite's default
+rollback journal — a journal file created, written, fsynced and deleted once
+PER ROW, on a native filesystem and inside a container on overlay2 alike:
+
+| rows | as shipped | one transaction |
+|---|---|---|
+| 2,308 (the reporter's real account) | 5,386 ms | 22 ms |
+| 10,000 | 23,636 ms | 19 ms |
+| 20,000 | 48,255 ms | — |
+| 100,000 | ~4 min (extrapolated) | 110 ms |
+
+~400–430 rows/sec either way, versus 500k–900k rows/sec in one transaction.
+Two premises in the original report turned out not to hold, and both are worth
+keeping visible. The volume was never the cause: the account that surfaced this
+held 2,308 entries, well inside what any reasonable per-request bound would
+still have let through, so capping row counts would have changed nothing about
+this account's own export timing out. And the instance was never hung — the
+whole function is synchronous, so the measured cost is exactly a slow blocked
+event loop, which is what a synchronous per-row fsync predicts and recovers
+from on its own the moment the export finishes; a hang would not have.
+
+`BEGIN` sits after the DDL and the `Metadata` insert, not around them, so the
+schema is independently visible to a second connection opened on the file
+mid-write — the shape `test/export-loop.test.js` uses to observe the
+transaction from outside at all. And there is no explicit rollback branch:
+`DatabaseSync.close()` on a connection with an open transaction rolls back
+cleanly rather than throwing, verified by probe, so the pre-existing `finally
+{ db.close(); }` (and both editions' own `unlinkSync` of the temp file) already
+covers a throw mid-loop exactly as before.
+
 

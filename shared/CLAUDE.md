@@ -580,6 +580,24 @@ name is free text and a `\r\n` in one throws inside the route; and the log repor
 is `{habit, date, reason}` rather than a sentence, because its reader is a log,
 where names never go.
 
+**`writeLoopDatabase` writes the whole export as one transaction**, because
+without it every `insertRep.run()` was its own implicit one under SQLite's
+default rollback-journal mode — a journal file created, written, fsynced and
+deleted once PER ROW. Measured against the reporter's own account (9 habits,
+2,308 entries): 5,386ms autocommit versus 22ms in one transaction, in a
+container and out, at ~400-430 rows/sec either way against ~500k in one
+transaction — and the function is synchronous, so those milliseconds are the
+event loop, blocked, for anybody the instance is serving. `BEGIN` is placed
+AFTER the `CREATE TABLE`s and the `Metadata` insert, not around them, so the
+schema stays committed to the file independently of the rows: a second
+connection opened on the path mid-write can still see `Habits` and
+`Repetitions` exist, which is what `test/export-loop.test.js` depends on to
+observe the transaction from outside at all. There is no explicit rollback and
+no `try`/`catch` around it — `DatabaseSync.close()` with a transaction still
+open rolls back cleanly rather than throwing, so the existing `finally {
+db.close(); }` already discards a partial write exactly as it did before this
+existed.
+
 **Loop's backup carries no preferences** — they live in SharedPreferences — so
 nothing from a Loop file can set one. habiterall's own JSON does carry settings,
 because two of them decide what the rows in the same file MEAN. `PORTABLE_SETTINGS`
