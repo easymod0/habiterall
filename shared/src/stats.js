@@ -952,38 +952,18 @@ export function computeCoverage(entryMap, start, end) {
 /* ---------- top-level summary ---------- */
 
 /**
- * Every figure the detail view draws, over one window.
+ * The window every top-level summary shares: the entry map, keyed by date and
+ * holding `{value, status}`, and `from` — clamped to `MAX_RANGE_DAYS` and
+ * normalised to a real day. `computeStats` and `summaryStats` both call this
+ * rather than each carrying their own copy, so the clamp and the
+ * normalisation cannot drift between the detail view and the dashboard.
  *
- * **`coverage` is the one field a caller may decline, and the rule is the same
- * one that keeps `computeAwards` out of here.** Awards are computed at
- * `/habits/:id/stats` and nowhere else, because `/overview` calls this once per
- * habit and keeps `score` and `currentStreak` — so work that only the detail
- * view reads is paid for per habit on the dashboard's hot path and thrown away.
- * Coverage is the first field to make that cost visible rather than free: it is
- * its own pass over the window, measured at ~10% of a call, where every other
- * field here is either a pass the summary figures already need (`scores`,
- * `streaks`) or a cheap read of one. So `/overview` passes `coverage: false` in
- * both editions and the key is then ABSENT rather than empty — an empty array
- * would say "no month is fully answered", which is a claim, and this is the
- * absence of one. `computeAwards` reads `stats.coverage ?? []` and so degrades
- * to withholding the badge, which is the right answer for a caller that did not
- * ask for the figure.
- *
- * A test pins both editions' call sites, because a third route added later
- * would otherwise pay this quietly.
- *
- * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
- * @param {{start?: string, end?: string, granularity?: string,
- *           weekStart?: 'monday'|'sunday', unlogged?: string,
- *           coverage?: boolean}} [opts]
- * @returns {import('./types.js').Stats}
+ * @param {string|undefined} start
+ * @param {string} end
+ * @returns {{entryMap: Map<string, {value: *, status: string}>, from: string}}
  */
-export function computeStats(habit, entries,
-                             { start, end, granularity = 'day',
-                               weekStart = 'monday',
-                               unlogged = UNLOGGED_DEFAULT,
-                               coverage = true } = {}) {
+function resolveWindow(entries, start, end) {
   // Preserve `status` alongside the value so skips stay distinguishable from
   // a numerical habit legitimately recording the value 3.
   const entryMap = new Map(
@@ -1021,6 +1001,49 @@ export function computeStats(habit, entries,
   const asDate = fromISO(from);
   if (!Number.isNaN(asDate.getTime())) from = toISO(asDate);
 
+  return { entryMap, from };
+}
+
+/**
+ * Every figure the detail view draws, over one window.
+ *
+ * **`coverage` is the one field a caller may decline, and the rule is the same
+ * one that keeps `computeAwards` out of here.** Awards are computed at
+ * `/habits/:id/stats` and nowhere else, because that route is now the only
+ * caller of this function at all — `/overview` reads `score` and
+ * `currentStreak` off `summaryStats` instead, so the five passes only the
+ * detail view reads are no longer run per habit on the dashboard's hot path
+ * just to be thrown away. Coverage is the first field to make that cost
+ * visible rather than free: it is its own pass over the window, measured at
+ * ~10% of a call, where every other field here is either a pass the summary
+ * figures already need (`scores`, `streaks`) or a cheap read of one. The
+ * parameter is kept as the opt-out for a caller that wants this whole reading
+ * without its dearest optional pass — `/overview` no longer is one, but
+ * declining it still means the key is ABSENT rather than empty, since an empty
+ * array would say "no month is fully answered", which is a claim, and this is
+ * the absence of one. `computeAwards` reads `stats.coverage ?? []` and so
+ * degrades to withholding the badge, which is the right answer for a caller
+ * that did not ask for the figure.
+ *
+ * A test pins each edition's one remaining call site here — `/stats`, the one
+ * that still needs `granularity` — and its one `summaryStats` call site at
+ * `/overview`, because a third route added later must not quietly pay for
+ * passes it discards either way.
+ *
+ * @param {import('./types.js').Habit} habit
+ * @param {import('./types.js').Entry[]} entries
+ * @param {{start?: string, end?: string, granularity?: string,
+ *           weekStart?: 'monday'|'sunday', unlogged?: string,
+ *           coverage?: boolean}} [opts]
+ * @returns {import('./types.js').Stats}
+ */
+export function computeStats(habit, entries,
+                             { start, end, granularity = 'day',
+                               weekStart = 'monday',
+                               unlogged = UNLOGGED_DEFAULT,
+                               coverage = true } = {}) {
+  const { entryMap, from } = resolveWindow(entries, start, end);
+
   const scores = computeScores(habit, entryMap, from, end, unlogged);
   const streaks = computeStreaks(habit, entryMap, from, end, unlogged);
 
@@ -1056,5 +1079,32 @@ export function computeStats(habit, entries,
     // ...and spread rather than assigned, so a caller that declined it gets no
     // key at all. See the note on the parameter.
     ...(coverage ? { coverage: computeCoverage(entryMap, from, end) } : {}),
+  };
+}
+
+/**
+ * The two numbers `/overview` keeps, computed the same way `computeStats`
+ * does: `/overview` calls this once per habit and reads `score` and
+ * `currentStreak` off the dashboard's hot path, where `computeStats` is the
+ * detail view's whole reading, run once for the one habit it draws.
+ * `test/stats.test.js`'s parity test is what stops the two disagreeing —
+ * asserting that this always deep-equals the same two fields picked out of
+ * `computeStats` over the same arguments, so a future change to one pass
+ * cannot drift from the other unnoticed.
+ *
+ * @param {import('./types.js').Habit} habit
+ * @param {import('./types.js').Entry[]} entries
+ * @param {{start?: string, end?: string, unlogged?: string}} [opts]
+ * @returns {import('./types.js').SummaryStats}
+ */
+export function summaryStats(habit, entries, { start, end, unlogged = UNLOGGED_DEFAULT } = {}) {
+  const { entryMap, from } = resolveWindow(entries, start, end);
+
+  const scores = computeScores(habit, entryMap, from, end, unlogged);
+  const streaks = computeStreaks(habit, entryMap, from, end, unlogged);
+
+  return {
+    score: scores.length ? scores[scores.length - 1].score : 0,
+    currentStreak: currentStreak(streaks, end),
   };
 }

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 const {
   computeStreaks, currentStreak, bestStreak, computeHistory,
-  computeWeekdays, computeFrequency, computeScores, computeStats, isCompleted,
-  dateRange, boundedRange, addDays, daysBetween, toISO, MAX_RANGE_DAYS,
+  computeWeekdays, computeFrequency, computeScores, computeStats, summaryStats,
+  isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, MAX_RANGE_DAYS,
 } = await import('../src/stats.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
@@ -969,4 +969,107 @@ test('coverage is over the same window every other figure uses', () => {
     { '2026-01': '31/31', '2026-02': '28/28' });
   assert.deepEqual(coverageOf(rows, '2026-02-28', { start: '2026-01-15' }),
     { '2026-02': '28/28' });
+});
+
+/* ---------- summaryStats: the two-field entry point /overview uses ---------- */
+
+test('summaryStats matches the score and currentStreak computeStats would return', () => {
+  // Every fixture also exercises `computeStats` over the same arguments, so a
+  // change to `summaryStats`'s own wiring — the wrong entry map, a dropped
+  // `unlogged`, a different window — shows up as a divergence rather than a
+  // silent rename. `resolveWindow` is the one thing both call for the window
+  // itself, so this is not a test of that helper in isolation; see the
+  // '0999-12-31' fixture below for why it still needs a literal alongside it.
+  const END = '2026-08-18';
+  const dailyRun = [
+    { date: '2026-08-10', value: YES }, { date: '2026-08-11', value: YES },
+    { date: '2026-08-12', value: YES }, { date: '2026-08-13', value: YES },
+    { date: '2026-08-14', value: YES }, { date: '2026-08-15', value: YES },
+    { date: '2026-08-16', value: YES }, { date: '2026-08-17', value: YES },
+    { date: '2026-08-18', value: YES },
+  ];
+
+  const fixtures = [
+    // A boolean daily habit with a normal run.
+    { habit: boolHabit, entries: dailyRun, opts: { end: END } },
+    // An at-most habit: the unknown/no distinction this repo has been bitten
+    // by before, with an unlogged day sitting between two stated values.
+    { habit: atMostHabit, entries: [
+        { date: '2026-08-15', value: 2, status: '' },
+        { date: '2026-08-17', value: 0, status: '' },
+      ], opts: { end: END } },
+    // A numerical habit.
+    { habit: numHabit, entries: [
+        { date: '2026-08-17', value: 8 }, { date: '2026-08-18', value: 10 },
+      ], opts: { end: END } },
+    // No entries at all.
+    { habit: boolHabit, entries: [], opts: { end: END } },
+    // unlogged: 'success', which only changes anything for an at-most habit.
+    { habit: atMostHabit, entries: [{ date: '2026-08-18', value: 6, status: '' }],
+      opts: { end: END, unlogged: 'success' } },
+    // An explicit `start` in opts, narrower than the entries' own span.
+    { habit: boolHabit, entries: dailyRun, opts: { end: END, start: '2026-08-15' } },
+    // A stored lapse: a row holding 0, status ''.
+    { habit: boolHabit, entries: [...dailyRun, { date: '2026-08-09', value: 0, status: '' }],
+      opts: { end: END } },
+    // An entry older than MAX_RANGE_DAYS before end.
+    { habit: boolHabit, entries: [{ date: '2000-01-01', value: YES }, ...dailyRun],
+      opts: { end: END } },
+    // An entry dated '0999-12-31' — not a real day once toISO drops its
+    // year's padding, which is what the post-clamp normalisation is for.
+    { habit: boolHabit, entries: [{ date: '0999-12-31', value: YES }, ...dailyRun],
+      opts: { end: END } },
+  ];
+
+  for (const { habit, entries, opts } of fixtures) {
+    const { score, currentStreak: cs } = computeStats(habit, entries, opts);
+    assert.deepEqual(summaryStats(habit, entries, opts), { score, currentStreak: cs });
+  }
+});
+
+test('the 0999-12-31 fixture is pinned to a literal, not only to computeStats', () => {
+  // The parity assertion above compares `summaryStats` against a LIVE
+  // `computeStats` call, so a bug shared by both — one inside the window
+  // preamble both of them call — moves both readings the same way and the
+  // comparison still passes. This is the case that bites: normalising
+  // '0999-12-31' BEFORE the `earliest` clamp (rather than after) turns it into
+  // '999-12-31', which sorts ABOVE the clamp boundary and walks the entry
+  // straight into the score, changing what both functions return TOGETHER.
+  // The literal is what catches that; the comparison above is what catches
+  // `summaryStats` disagreeing with `computeStats` on its own.
+  const entries = [
+    { date: '0999-12-31', value: YES },
+    { date: '2026-08-10', value: YES }, { date: '2026-08-11', value: YES },
+    { date: '2026-08-12', value: YES }, { date: '2026-08-13', value: YES },
+    { date: '2026-08-14', value: YES }, { date: '2026-08-15', value: YES },
+    { date: '2026-08-16', value: YES }, { date: '2026-08-17', value: YES },
+    { date: '2026-08-18', value: YES },
+  ];
+  const opts = { end: '2026-08-18' };
+  assert.deepEqual(summaryStats(boolHabit, entries, opts),
+    { score: 0.381137, currentStreak: 9 });
+});
+
+test('summaryStats returns exactly the two fields /overview reads, nothing more', () => {
+  // This is the test that makes the saving real rather than a rename: adding
+  // any of the five discarded passes back onto the return object must fail it.
+  const stats = summaryStats(boolHabit, [{ date: '2026-08-18', value: YES }],
+    { end: '2026-08-18' });
+  assert.deepEqual(Object.keys(stats).sort(), ['currentStreak', 'score']);
+});
+
+test('an explicit start after end collapses the window to [end, end], not an empty one', () => {
+  // Neither route can hand `resolveWindow` this shape — both editions' /stats
+  // routes reject `start > end` with a 400 before `computeStats` is ever
+  // called — so this is not a live route bug. It is what keeps the shared
+  // helper correct for a caller that has no such guard, and the test exists
+  // so `if (from > end) from = end;` cannot be deleted from `resolveWindow`
+  // as dead code: every OTHER reader of the window goes through
+  // `boundedRange`, whose own `daysBetween(from, end) < 0` check absorbs an
+  // inverted window for free, but `totalCompleted` selects by STRING
+  // comparison against `from` directly and so is the one figure that
+  // diverges when the clamp is missing.
+  const entries = [{ date: '2026-08-18', value: YES }];
+  const stats = computeStats(boolHabit, entries, { start: '2026-08-20', end: '2026-08-18' });
+  assert.equal(stats.totalCompleted, 1);
 });

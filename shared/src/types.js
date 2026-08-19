@@ -120,9 +120,19 @@
  * @property {FrequencyBucket[]} frequency
  * @property {Resilience} resilience
  * @property {CoverageMonth[]} [coverage] absent when the caller declined it.
- *   `/overview` does, in both editions: it calls `computeStats` once per habit
- *   and keeps `score` and `currentStreak`, and coverage is its own pass over
- *   the window. See `computeStats`.
+ *   Coverage is its own pass over the window, worth declining for a caller
+ *   that does not read it — see `computeStats`. `/overview`, in both editions,
+ *   no longer calls `computeStats` at all: it calls `summaryStats` once per
+ *   habit and keeps `score` and `currentStreak`.
+ */
+
+/**
+ * The two fields `/overview` keeps, computed by `summaryStats` rather than
+ * `computeStats` because the dashboard reads only these two of the eleven the
+ * detail view's whole reading returns.
+ * @typedef {object} SummaryStats
+ * @property {number} score            latest strength, 0..1
+ * @property {number} currentStreak
  */
 
 /**

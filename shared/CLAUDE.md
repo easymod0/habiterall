@@ -200,13 +200,16 @@ longer how it is built.** One `computeStats` calls `boundedRange` **eight
 times** on the identical window — once each in `computeScores`, `computeHistory`,
 `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency` and
 `computeCoverage`, and once per `onPaceSeries`, which `computeStreaks` and
-`computeMissRuns` each build separately. Seven is the `/overview` figure, which
-is what `coverage: false` buys there; `coverage` defaults to **true** and
-`/habits/:id/stats` pays for all eight. Sharing one walk, and one
-`onPaceSeries`, is worth more than any
+`computeMissRuns` each build separately. `/habits/:id/stats` is the only route
+left that calls `computeStats`, and pays for all eight; `coverage` still
+defaults to **true** there. `/overview` no longer calls `computeStats` at
+all — it calls `summaryStats`, which walks the window **twice**, instrumented
+and counted rather than read off the two call sites it makes: once in
+`computeScores` and once in `computeStreaks`'s `onPaceSeries`. Sharing one
+walk, and one `onPaceSeries`, inside `computeStats` is worth more than any
 further tuning of the loop; it is filed rather than done because it changes
-signatures or adds a cache, and because it overlaps heavily with deleting the
-five discarded passes.
+signatures or adds a cache, and it stays filed regardless of what `/overview`
+calls, because `/habits/:id/stats` still needs every one of the eight.
 
 **One thing changed meaning with that rewrite, deliberately: the FIRST
 element.** The old walk pushed the string it was handed before normalising
@@ -270,11 +273,28 @@ which needs no comparison against the window's ends and survives `boundedRange`
 clamping the far one.
 
 **Coverage is an opt-out, and the first field to be one.** It is its own pass —
-~10-11% of a call, measured — and both `/overview` routes pass `coverage: false`
-because they keep four fields per habit and would discard it. The key is then
-**absent** rather than empty: an empty array claims no month is fully answered,
-where this is the absence of a claim. Every other field here is either a pass the
-summary figures already need or a cheap read of one.
+~10-11% of a call, measured — and the parameter exists for a caller that wants
+`computeStats`'s whole detail-view reading without its dearest optional pass.
+`/overview` is no longer that caller: both editions call `summaryStats` there
+now, an entry point that never had a `coverage` field to decline in the first
+place. Declined, the key is **absent** rather than empty: an empty array
+claims no month is fully answered, where this is the absence of a claim. Every
+other field here is either a pass the summary figures already need or a cheap
+read of one.
+
+**Two entry points share one window, and a parity test is the only thing
+keeping them from drifting.** `summaryStats` exists because `/overview` was
+paying for `computeStats`'s five discarded passes — `computeHistory`,
+`computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
+`computeResilience` — once per habit, per load, to keep two numbers. Both
+functions call the same `resolveWindow` and compute `scores`/`streaks` the
+same way; `test/stats.test.js`'s parity test asserts `summaryStats` always
+deep-equals the same two fields picked out of `computeStats` over identical
+arguments, so a change to one pass cannot silently disagree with the other.
+Measured on this machine (`npm run bench:overview`): `computeStats(coverage:
+false)` is 1.58 ms/habit and `summaryStats` is 0.29 ms/habit — an 82% cut per
+habit. Per request that is 31.6 ms down to 5.8 ms at 20 habits, and 79.0 ms
+down to 14.5 ms at 50.
 
 **A streak's `skips` counts only the skipped days INSIDE `[start, end]` of the
 run.** Skips are transparent to the loop, so a trailing one sits after `runEnd`
@@ -345,9 +365,11 @@ and `shared/src` is not served to the browser, so computing awards in the browse
 meant a second copy of the streak ladder — a badge at 20 days beside a survival
 bar at 21. `awards.js` is pure and both editions' `/habits/:id/stats` call it.
 
-**It is called in the two routes and not inside `computeStats`**, which is the
-one place it looks like it belongs: `/overview` calls that once per habit and
-keeps four of its fields.
+**It is called at the `/stats` route, in both editions, and not inside
+`computeStats`**, which is the one place it looks like it belongs:
+`computeStats` has exactly one caller now, and it is this one — `/overview`
+no longer calls `computeStats` at all, it calls `summaryStats` for two
+numbers, and its payload carries no `awards` field to decline.
 
 **Nothing here is counted a second way.** Every award is a reading of figures
 already on the payload, so an award needing something new gets a stats FIELD
