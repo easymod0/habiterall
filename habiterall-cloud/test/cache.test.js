@@ -318,6 +318,39 @@ test('forgetAccount forgets one account, not every account it prefixes', async (
     'the separator is what stops account 8 forgetting account 81');
 });
 
+test('the notifier forgets AFTER its transaction commits, not inside it', () => {
+  // `withUser` COMMITs after its callback returns (`db/pool.js`), so a
+  // `forgetAccount` inside the callback forgets before the write is visible to
+  // anything else — and leaves exactly the window the invalidation exists to
+  // close: a concurrent /overview clears the memo, opens its own transaction,
+  // cannot see the uncommitted row, and stores the pre-press dashboard, which
+  // the commit then lands behind. The router middleware states this same rule
+  // at its own registration, which is why it wraps `res.end` rather than
+  // invalidating on the way in.
+  //
+  // Source text, and blind the usual way: it cannot see a `withUser` that
+  // stopped committing on return, and it pins a SHAPE rather than an ordering.
+  // The behavioural half needs a read still computing when a write commits,
+  // which nothing over HTTP can arrange — the same limitation
+  // `overview-memo.integration.mjs` already states for the `/api` path, and
+  // the reason this is worth having at all.
+  const text = src('notifier.js');
+  const record = text.slice(
+    text.indexOf('async record(account,'),
+    text.indexOf('/* ---------- answering from an ntfy button')
+  );
+  assert.ok(record.length > 0, 'control: record() was found in notifier.js');
+  assert.match(record, /\}\s*finally\s*\{\s*forgetAccount\(account\.id\);\s*\}/,
+    'forgetAccount must run in a finally OUTSIDE withUser, so it follows the COMMIT');
+
+  const inside = record.slice(
+    record.indexOf('withUser(account.id'),
+    record.lastIndexOf('});')
+  );
+  assert.ok(!inside.includes('forgetAccount'),
+    'forgetAccount inside the withUser callback forgets before the write commits');
+});
+
 test('the /overview memo does not inherit a bound sized for 100-byte entries', () => {
   // Source text, and blind in the documented way — it cannot see a renamed
   // constant or 500 spelled as something else. Kept for the one thing it
