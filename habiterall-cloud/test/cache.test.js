@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { MAX_CACHED, remember } from '../src/cache.js';
+import { MAX_CACHED, createMemo, remember } from '../src/cache.js';
 
 const src = (name) =>
   readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
@@ -131,4 +131,111 @@ test('the stored shape carries `at`, which is what the TTL readers ask', () => {
   const time = clock(5_000);
   remember(map, 7, { blocked: false }, { ttlMs: TTL, now: time.now });
   assert.deepEqual(map.get(7), { blocked: false, at: 5_000 });
+});
+
+/* ---------- the memo ---------- */
+
+/** A computation that can be held open, so a burst can be assembled by hand. */
+const gate = () => {
+  let release;
+  const opened = new Promise((r) => { release = r; });
+  return { opened, release: (v) => release(v) };
+};
+
+test('a burst on a cold memo costs one computation, not one each', async () => {
+  let calls = 0;
+  const held = gate();
+  const memo = createMemo(async () => { calls++; return held.opened; }, { ttlMs: 2_000 });
+
+  // All arriving before any of them has resolved: the case the memo exists
+  // for, since that is what three tabs plus a focus event look like. A test
+  // that only asserted the SECOND SEQUENTIAL request was cheap would pass
+  // against a memo with no `inflight` at all.
+  const answers = Promise.all(Array.from({ length: 4 }, () => memo('u1:w', 'arg')));
+  held.release('payload');
+
+  assert.deepEqual(await answers, Array(4).fill('payload'));
+  assert.equal(calls, 1);
+});
+
+test('the memo expires, so a stale answer cannot outlive its window', async () => {
+  let calls = 0;
+  const time = clock();
+  const memo = createMemo(async () => `v${++calls}`, { ttlMs: 2_000, now: time.now });
+
+  assert.equal(await memo('u1:w'), 'v1');
+  time.advance(1_999);
+  assert.equal(await memo('u1:w'), 'v1');
+  time.advance(2);
+  assert.equal(await memo('u1:w'), 'v2');
+});
+
+test('two keys do not share an answer', async () => {
+  const memo = createMemo(async (arg) => arg, { ttlMs: 2_000 });
+  assert.equal(await memo('u1:2026-08-20', 'alice'), 'alice');
+  assert.equal(await memo('u2:2026-08-20', 'bob'), 'bob');
+  assert.equal(await memo('u1:2026-08-20', 'ignored'), 'alice');
+});
+
+test('forget drops one account and leaves the others alone', async () => {
+  const memo = createMemo(async (arg) => arg, { ttlMs: 2_000 });
+  await memo('1:w', 'first');
+  await memo('12:w', 'twelfth');
+
+  memo.forget('1:');
+
+  assert.equal(await memo('1:w', 'rebuilt'), 'rebuilt');
+  // The separator is load bearing: forgetting user 1 must not forget user 12.
+  assert.equal(await memo('12:w', 'ignored'), 'twelfth');
+});
+
+test('an answer computed before a write is never stored after it', async () => {
+  // The tap-then-refetch regression, at the memo's own level. A GET is already
+  // computing when a write lands; the write forgets, and the GET then settles
+  // holding a payload that predates the tap. Storing it hands the NEXT reader
+  // — the client's own refetch, which is the whole point of tapping — a
+  // dashboard with the tap missing, for the length of the TTL.
+  let calls = 0;
+  const held = gate();
+  const memo = createMemo(async () => { calls++; return held.opened; }, { ttlMs: 2_000 });
+
+  const inflight = memo('7:w');
+  memo.forget('7:');
+  held.release('before the write');
+
+  // The caller that started first still gets the answer it started for: it is
+  // a read that raced a write and it is not wrong.
+  assert.equal(await inflight, 'before the write');
+
+  // ...but nothing may inherit it.
+  const after = await memo('7:w');
+  assert.equal(calls, 2, 'the post-write read must recompute');
+  assert.notEqual(after, undefined);
+});
+
+test('a rejection is not cached', async () => {
+  let calls = 0;
+  const memo = createMemo(async () => {
+    calls++;
+    if (calls === 1) throw new Error('pool exhausted');
+    return 'recovered';
+  }, { ttlMs: 2_000 });
+
+  await assert.rejects(() => memo('u1:w'), /pool exhausted/);
+  // Remembering a failure for the TTL would turn one bad query into every
+  // caller's bad query for as long as it lasted — which is why this differs
+  // from health.js, where "the database did not answer" IS the result.
+  assert.equal(await memo('u1:w'), 'recovered');
+});
+
+test('a synchronous throw rejects rather than escaping', async () => {
+  const memo = createMemo(() => { throw new Error('built the key wrong'); }, { ttlMs: 2_000 });
+  await assert.rejects(() => memo('u1:w'), /built the key wrong/);
+  assert.equal(memo.size(), 0, 'and leaves no entry behind');
+});
+
+test('the memo is bounded by the same policy as the caches', async () => {
+  const memo = createMemo(async (arg) => arg, { ttlMs: 2_000, max: 5 });
+  for (let i = 0; i < 20; i++) await memo(`u${i}:w`, i);
+  assert.equal(memo.size(), 5);
 });

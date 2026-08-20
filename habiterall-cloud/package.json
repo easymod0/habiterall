@@ -18,6 +18,7 @@
     "test:claims": "node test/login-claims.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:ntfyanswer": "node test/ntfy-answer.integration.mjs",
+    "test:memo": "node test/overview-memo.integration.mjs",
     "test:roundtrip": "node test/roundtrip.integration.mjs"
   },
   "dependencies": {

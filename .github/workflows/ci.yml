@@ -385,6 +385,19 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/ntfy-answer.integration.mjs
 
+      # The `/overview` memo, over the real route. The unit tests next door
+      # prove the memo collapses a burst and refuses to store an answer
+      # computed before a write; only a booted server can show that the route
+      # uses it, that a write reaches `forget`, and that the key carries the
+      # caller's own day — which is the one input two devices on one account
+      # can disagree about while sending the same URL.
+      - name: The dashboard memo, and what invalidates it
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/overview-memo.integration.mjs
+
   roundtrip:
     name: Backup round-trip (personal)
     runs-on: ubuntu-latest

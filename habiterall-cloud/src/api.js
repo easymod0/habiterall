@@ -152,6 +152,44 @@ api.use(route(async (req, res, next) => {
 }));
 
 /**
+ * Forget an account's memoised dashboards when it writes anything.
+ *
+ * One rule for every non-safe method rather than a call in each of the nine
+ * mutating routes, because a list of routes is a list that drifts — and the
+ * cost of forgetting too much is one recomputation, where the cost of
+ * forgetting too little is a user's tap painted away. `POST /notify/test`
+ * writes nothing `/overview` reads and is invalidated anyway, on purpose.
+ *
+ * It is registered HERE, above every route, and not beside the memo it clears:
+ * Express runs middleware in registration order, so mounted below `/habits` it
+ * would never see a request those routes had already answered.
+ *
+ * It runs on the way OUT, wrapped around `res.end`, and both halves of that are
+ * deliberate. Invalidating before the handler would leave the window this
+ * exists to close — a concurrent read repopulating the memo from pre-write data
+ * between the invalidation and the COMMIT. Invalidating from the `finish` event
+ * would be a scheduling argument instead of an ordering one: `finish` fires
+ * from a later turn of the loop than the write it follows, so "the client
+ * cannot have refetched yet" would be a claim about timing rather than
+ * something the code makes true. Wrapping `res.end` makes it true — the memo is
+ * clear before the first byte of the answer leaves, which is before the client
+ * can know the write happened at all.
+ *
+ * Unconditional on status, so a write that failed halfway through still drops
+ * what it may have changed.
+ */
+api.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  const prefix = `${uid(req)}:`;
+  const end = res.end.bind(res);
+  res.end = (...args) => {
+    overviewMemo.forget(prefix);
+    return end(...args);
+  };
+  next();
+});
+
+/**
  * What day it is for the client making this request.
  *
  * Every route that asks "is this today?" asks it of the CALLER, not of the
@@ -423,6 +461,40 @@ api.get('/habits/:id/stats', route(async (req, res) => {
   });
 }));
 
+/**
+ * How long an `/overview` answer is served from memory before it is rebuilt.
+ *
+ * The dashboard is not requested once per user action. It is requested on every
+ * app open, on every `visibilitychange` — the PWA refetches on foreground —
+ * once per open tab, and again on reconnect after the offline banner clears. So
+ * three tabs plus a focus event is four identical computations within a few
+ * seconds, for an account whose data last changed hours ago, on the most
+ * expensive route the app has.
+ *
+ * Two seconds because a write INVALIDATES (see the middleware below), so this
+ * is not the window in which a user's own change can be missed — it is only how
+ * long two requests have to arrive within to share one answer. The intended end
+ * state is a version check rather than a timer, which turns the remaining
+ * staleness into none at all; that needs #192 and this needs nothing.
+ */
+const OVERVIEW_TTL_MS = 2_000;
+
+/**
+ * `/overview`, memoised per account, per window and per CALLER DAY.
+ *
+ * The last of those three is the subtle one and it is why the key is built by
+ * hand rather than from the query string. `summaryEnd` is the caller's own
+ * today, resolved from `X-Habiterall-Timezone` — so two devices on an account
+ * either side of a date boundary send the SAME URL and must not share an
+ * answer. `res.vary(DEVICE_ZONE_HEADER)` says exactly this to HTTP caches;
+ * a server-side memo has to say it in its key.
+ *
+ * Per process, so N replicas means N memos and a 1/N hit rate. That is fine and
+ * worth knowing before anyone reads a hit-rate metric and concludes it is
+ * broken.
+ */
+const overviewMemo = createMemo((arg) => buildOverview(arg), { ttlMs: OVERVIEW_TTL_MS });
+
 api.get('/overview', route(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
 
@@ -443,7 +515,27 @@ api.get('/overview', route(async (req, res) => {
   // surface that answers "as of when", and it has its own range controls.
   const summaryEnd = now;
 
-  const payload = await withUser(uid(req), async (db) => {
+  const user = uid(req);
+  // Every input `buildOverview` reads, spelled out. `days` is not in it because
+  // `start` is derived from it and two windows with the same ends are the same
+  // window; `summaryEnd` IS, even though it equals `end` on an unpaged
+  // dashboard, because paging back separates them.
+  const key = `${user}:${start}:${end}:${summaryEnd}:${archived}`;
+  res.json(await overviewMemo(key, { user, start, end, summaryEnd, archived }));
+}));
+
+/**
+ * The whole of what `/overview` returns, as a function of its inputs alone.
+ *
+ * Split out of the route so the memo above has something to memoise, and so
+ * nothing in here can reach for `req` — a payload that depended on a header the
+ * key does not carry is the one way this cache can be wrong.
+ *
+ * @param {{user: number, start: string, end: string, summaryEnd: string,
+ *   archived: boolean}} arg
+ */
+async function buildOverview({ user, start, end, summaryEnd, archived }) {
+  return withUser(user, async (db) => {
     const { rows: habits } = await db.query(
       `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
       [archived]
@@ -456,7 +548,7 @@ api.get('/overview', route(async (req, res) => {
     // below runs per habit and this is not a per-habit question.
     const { rows: [prefs] } = await db.query(
       `SELECT settings ->> 'atMostUnlogged' AS unlogged FROM users WHERE id = $1`,
-      [uid(req)]
+      [user]
     );
     const unlogged = unloggedFrom(prefs);
 
@@ -562,9 +654,7 @@ api.get('/overview', route(async (req, res) => {
       }),
     };
   });
-
-  res.json(payload);
-}));
+}
 
 /**
  * What a day with no row counts as on an at-most habit, from a `users` row.
