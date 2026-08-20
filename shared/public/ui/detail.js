@@ -7,8 +7,8 @@
  */
 
 import {
-  calendarChart, frequencyChart, historyChart, missDistributionChart,
-  scoreChart, shade, streakChart, survivalChart, weekdayChart, weekdayMonthChart,
+  calendarChart, frequencyChart, historyChart, MIN_STREAK, missDistributionChart,
+  scoreChart, shade, streakChart, streakDates, survivalChart, weekdayChart, weekdayMonthChart,
 } from '/shared/charts.js';
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
@@ -134,6 +134,19 @@ let openEntriesByDate = {};
 let openSkipSet = new Set();
 /** Where the strip's cells were appended, so a repaint can find them. */
 let stripRoot = null;
+/**
+ * The dates `render()` computed as inside a run, for `detailHost.repaint` to
+ * pass back into `repaintCells` — assigned in `buildRecentDaysCard` and reset
+ * to empty at the top of every `render()`, same as `stripRoot`. Kept as a
+ * `Set` rather than `null` so `repaintCells`' `inRun.has(date)` never needs a
+ * null guard of its own. An optimistic repaint after a tap therefore draws
+ * the SAME run set the last full render built the strip from: known
+ * staleness, not a bug — it is the pre-tap run set until `host.refresh()`
+ * lands and a real `render()` recomputes it, exactly how the score and streak
+ * tiles beside it already behave until the refetch answers.
+ * @type {Set<string>}
+ */
+let stripRuns = new Set();
 
 /**
  * This page, as `ui/day-strip.js` reads and writes it.
@@ -214,7 +227,7 @@ const detailHost = {
   // spend on a tap — and touching no nodes is also what keeps keyboard focus
   // on the button that was just pressed.
   repaint: () => {
-    if (stripRoot && openHabit) repaintCells(stripRoot, detailHost, openHabit);
+    if (stripRoot && openHabit) repaintCells(stripRoot, detailHost, openHabit, stripRuns);
   },
 
   refresh: () => refresh(openHabit?.id),
@@ -365,6 +378,7 @@ function render(stats, entries) {
   // Nothing from the previous render survives it, and a stale node here would
   // have `repaintCells` walking an orphan.
   stripRoot = null;
+  stripRuns = new Set();
 
   const entriesByDate = Object.fromEntries(entries.map((e) => [e.date, e.value]));
   // Computed unconditionally, same as `entriesByDate` above, rather than only
@@ -467,7 +481,16 @@ function render(stats, entries) {
   // `build` for an `on` entry.
   forgetHiddenPositions(cardList);
 
-  const ctx = { habit, stats, entries, color, chartWidth, entriesByDate, skipSet, notesByDate };
+  // One derivation, used by both cards that draw a run: the strip's faint
+  // tick and the calendar's own continuation stroke. `calendarChart` also
+  // recomputes `inStreak` internally from the same `streaks` array and the
+  // same `MIN_STREAK`, so the two cards read the one input and cannot
+  // disagree about what counts as a run — see #176.
+  const inRun = streakDates(stats.streaks, MIN_STREAK);
+
+  const ctx = {
+    habit, stats, entries, color, chartWidth, entriesByDate, skipSet, notesByDate, inRun,
+  };
   for (const { id, on } of cardList) {
     if (!on) continue;
     // A stored id this file does not know — an older shape, or a card since
@@ -504,7 +527,7 @@ function render(stats, entries) {
  * window jumps when something next draws it. Redrawing from `entries` in hand
  * is what would make the stronger claim true; it is not what this does.
  */
-function buildRecentDaysCard({ habit, entries, chartWidth }) {
+function buildRecentDaysCard({ habit, entries, chartWidth, inRun }) {
   const strip = card('Recent days', null);
   const todayIso = todayISO();
   const fits = columnsForWidth(chartWidth, CELL_PX, 0);
@@ -547,11 +570,14 @@ function buildRecentDaysCard({ habit, entries, chartWidth }) {
         : slice;
       const wrap = document.createElement('div');
       wrap.className = 'day-strip';
-      wrap.append(dateColumns(shown, todayIso), dayCells(detailHost, habit, shown, todayIso));
-      // Where `detailHost.repaint` looks for the cells. Assigned on every
-      // render, and nulled by `render()` before the rebuild, so a tap can never
-      // repaint a strip that is no longer on the page.
+      wrap.append(
+        dateColumns(shown, todayIso), dayCells(detailHost, habit, shown, todayIso, inRun));
+      // Where `detailHost.repaint` looks for the cells, and the run set it
+      // repaints them with. Both assigned on every render, and nulled by
+      // `render()` before the rebuild, so a tap can never repaint a strip that
+      // is no longer on the page.
       stripRoot = wrap;
+      stripRuns = inRun;
       return wrap;
     },
   });
@@ -606,7 +632,9 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
  * builder is called from: `test/settings.test.js`'s adjacency assertion pins
  * it, and any account is free to move it.
  */
-function buildCalendarCard({ habit, color, chartWidth, entriesByDate, skipSet, notesByDate, stats }) {
+function buildCalendarCard(
+  { habit, color, chartWidth, entriesByDate, skipSet, notesByDate, stats, inRun }
+) {
   const calCard = card('Calendar', null);
   const calHead = calCard.querySelector('.card-head');
 
@@ -693,7 +721,9 @@ function buildCalendarCard({ habit, color, chartWidth, entriesByDate, skipSet, n
 
   const calScroll = document.createElement('div');
   calScroll.className = 'chart-scroll';
-  calScroll.append(calendarChart(entriesByDate, color, habit, {
+  // Held rather than passed inline, so the legend below can ask it what it
+  // actually drew — see the "In a run" swatch's own comment.
+  const calSvg = calendarChart(entriesByDate, color, habit, {
     zoom,
     // The account's week, which `startOfWeek` in stats.js has always honoured
     // while the calendar snapped to Sunday regardless — so the heatmap and the
@@ -709,7 +739,8 @@ function buildCalendarCard({ habit, color, chartWidth, entriesByDate, skipSet, n
     onPick: (date) => openDayDialog(
       habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
     ),
-  }));
+  });
+  calScroll.append(calSvg);
   calCard.append(calScroll);
 
   // The legend has to describe the grid above it, and for an avoided habit that
@@ -741,6 +772,35 @@ function buildCalendarCard({ habit, color, chartWidth, entriesByDate, skipSet, n
     // so the legend and the grid cannot disagree about what this mark is.
     swatch(shade(color, 0.07));
     legend.append(document.createTextNode('Kept, unlogged'));
+  }
+
+  // Only when a run actually reaches an otherwise-blank cell IN THIS WINDOW —
+  // `inRun` is the habit's whole history, so a run of `MIN_STREAK`+ days
+  // months outside the drawn weeks (or a run made entirely of logged days,
+  // where every date is in `inRun` and no cell is blank) would gate this on a
+  // mark the grid does not carry. `calendarChart` already counts the cells it
+  // gave the continuation stroke and reports that count on the `<svg>` it
+  // returned, so asking IT is the one source that cannot disagree with what
+  // is on screen — recomputing the window here would be a second derivation
+  // of "which cells got the mark", and a second one to keep in step with the
+  // first. `getAttribute`, not `dataset`: the offline fake-DOM suites drive
+  // this against a minimal `document` that implements attributes only.
+  //
+  // Built inline rather than through `swatch()`: that helper's second
+  // argument is an opacity, blending toward the CARD, and this mark is a
+  // STROKE around the cell's own `--grid-empty` fill — the same distinction
+  // the "Kept, unlogged" swatch's own comment above makes, so describing this
+  // one as an opacity would be the same "two surfaces disagree" defect a
+  // second way. `shade(color, 0.55)` is the stroke `charts.js`'s calendar
+  // block itself paints; the legend borrows the cell's own value rather than
+  // writing a second description of it.
+  if (Number(calSvg.getAttribute('data-run-marks')) > 0) {
+    const sw = document.createElement('span');
+    sw.className = 'legend-swatch';
+    sw.style.background = 'var(--grid-empty)';
+    sw.style.boxShadow = 'inset 0 0 0 1px ' + shade(color, 0.55);
+    legend.append(sw);
+    legend.append(document.createTextNode('In a run'));
   }
 
   if (isAvoided(habit)) {

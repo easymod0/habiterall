@@ -24,6 +24,9 @@ import { isAvoided } from './ui/toggle.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 
+/** Shorter runs are noise, not an achievement. */
+export const MIN_STREAK = 3;
+
 /**
  * The seven `getDay()` indices in the order the rows are drawn.
  *
@@ -166,7 +169,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     skips = null,       // Set of skipped dates, kept out of the value space
     onPick = null,      // callback(date) -> makes cells clickable
     streaks = null,     // [{start, end, length}] to underline as runs
-    minStreak = 3,      // shorter runs are noise, not an achievement
+    minStreak = MIN_STREAK,
     unknownMark = false, // draw '?' on days with no entry (`questionMarks`)
     weekStart = 'monday', // which day a column begins on
   } = opts;
@@ -251,6 +254,12 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
             width: thick,
             height: GAP + 1,
             fill: link,
+            // Names the date this connector is FOR, the same idiom as the `?`
+            // glyph's `data-mark-for` below — so a test (or anything else)
+            // asking "where does the run reach" can find the connector and
+            // the cell it continues together, rather than re-deriving the
+            // grid's geometry to line them up itself.
+            'data-link-for': date,
           }));
         } else if (wk < weeks - 1) {
           // Last row to first: the run wraps to the top of the NEXT column,
@@ -271,6 +280,9 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
             rx: thick / 2,
             fill: link,
             'fill-opacity': 0.65,
+            // Same idiom as the within-column connector above: both tabs are
+            // half of the same wrap and both belong to this date.
+            'data-link-for': date,
           });
 
           svg.appendChild(tab(x, y + CELL - 0.5));
@@ -284,6 +296,9 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   let lastMonthText = null;
   const cursor = new Date(start);
   const cells = [];
+  // How many cells THIS pass actually gave the continuation stroke — see
+  // `data-run-marks` below, set from this count and not from `inStreak.size`.
+  let runMarks = 0;
 
   for (let wk = 0; wk < weeks; wk++) {
     for (let dow = 0; dow < 7; dow++) {
@@ -378,6 +393,19 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
         }
       }
 
+      // A day inside a run the connectors above already draw through, but
+      // which the branches above left painting nothing at all — `fill ===
+      // empty` reads the same binding those branches assign, not a string
+      // literal, so a cell that already drew something (a partial fill, an
+      // overage, a skip, a slip) is never a candidate. A future day is
+      // excluded the same way and needs no separate check: the `isFuture`
+      // branch above always assigns `fill = 'transparent'`, so this one
+      // predicate already carries that exclusion along with the rest — a
+      // stored 0 and a missing row both qualify, since a run is about pace
+      // and a stated lapse inside one still is.
+      const inRun = inStreak.has(date) && fill === empty;
+      if (inRun) label += ' — in a run';
+
       // `class` via setAttribute, like every other attribute here: the
       // offline render tests drive this module against a minimal fake DOM
       // whose nodes have no classList.
@@ -387,6 +415,17 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       if (isFuture) {
         rect.setAttribute('stroke', empty);
         rect.setAttribute('stroke-dasharray', '2 2');
+      }
+      // Solid, where the future-day stroke above is dashed, so the two read
+      // apart. `shade(color, 0.55)` is roughly half the connectors' own
+      // `shade(color, 1)` above, so the run's own line stays the dominant
+      // mark and this outline reads as its continuation. A stroke sits on no
+      // fill ramp, which is the whole reason this is a stroke and not a
+      // fill: the cell's fill slot is untouched, so `unknownMark` below still
+      // has its `?` to draw.
+      if (inRun) {
+        rect.setAttribute('stroke', shade(color, 0.55));
+        runMarks++;
       }
 
       if (onPick && !isFuture) {
@@ -432,6 +471,12 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // is what answers "nobody answered" now, and `?` on top of it would be
       // the same fact drawn twice in one cell where every other habit gets it
       // once.
+      //
+      // `inRun` deliberately has no place in this gate. It is a stroke, not a
+      // fill, so the cell's one fill slot is still `empty` and the glyph slot
+      // above it is still free — an in-run unlogged day carries BOTH the
+      // stroke and the `?`, unlike the kept-unlogged fill above, which took
+      // the glyph's only slot instead of drawing beside it.
       if (unknownMark && !isFuture && value == null && !isSkip && !habit.unlogged_is_success) {
         svg.appendChild(el('text', {
           x: x + CELL / 2,
@@ -491,6 +536,15 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     cells[cells.length - 1].setAttribute('tabindex', '0');
   }
 
+  // What the legend under this grid has to describe is THIS window, and the
+  // only honest source for that is what this pass actually drew — `inStreak`
+  // is the habit's whole history and can hold a run months outside these
+  // cells, or hold none at all in a window made entirely of logged days. Set
+  // unconditionally, including `"0"`: a caller reading a missing attribute as
+  // "no marks" cannot tell that apart from an older `charts.js` that never
+  // wrote one at all.
+  svg.setAttribute('data-run-marks', String(runMarks));
+
   attachCellPopover(svg);
 
   return svg;
@@ -503,7 +557,7 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
  * per-cell scan of the streak list would be ~740 cells times every streak in
  * the habit's history at the widest zoom.
  */
-function streakDates(streaks, minStreak) {
+export function streakDates(streaks, minStreak) {
   const dates = new Set();
   if (!streaks) return dates;
 

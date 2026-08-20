@@ -236,10 +236,71 @@ ever reach it.
 "Day states and habit shape" for why: `shared/src` is not served here, so no
 module in this directory could call `unansweredCounts` itself even by mistake.
 
-**Still open, on purpose.** Streak connectors drawn over an empty cell are
-issue #176, a different route (`inStreak`) to a similar-looking gap; and the
-credit window's missing far end is issue #223. Neither is this change's to
-fix. `docs/decisions/day-states.md` has the long form.
+**Issue #176 extends the same medium split to a run, not to a fill.** The rule
+is "where the cell would otherwise draw nothing at all", not "where the day is
+not a completion" — on the calendar that predicate is literally
+`fill === empty`, read against the same binding the branches above assign and
+never a string literal, so it inherits every exclusion those branches already
+encode without a separate case for any of them: a partial at-least fill, an
+over-limit number, a skip and a red slip already read as something and stay
+unmarked, and a future day needs no extra guard because the `isFuture` branch
+above always sets `fill = 'transparent'`. On the strip the same rule reads "no
+glyph and no background".
+
+**The calendar's run mark is a STROKE, never a fill, because 0.07 is already
+spoken for.** "Kept, unlogged" above sits at `shade(color, 0.07)`, under half
+of the at-most ramp's `Math.max(0.15, …)` floor and the at-least ramp's
+`Math.max(0.2, …)` one; a fill squeezed between 0.07 and 0.15 was on the table
+and rejected, because it would sit on the same ramp those floors describe and
+inherit a floor argument that has nothing to do with it. A stroke sits on no
+fill ramp at all, so it can collide with none of this —
+`shade(color, 0.55)`, chosen against the connectors' own `shade(color, 1)` so
+the run's own line stays the dominant mark and the stroke reads as its
+continuation.
+
+**That is also why the `?` survives the run mark on the calendar and not on
+the strip.** The stroke leaves the calendar cell's one fill still `empty` and
+its glyph slot still free, so `unknownMark`'s `?` keeps drawing underneath it
+— an in-run unlogged cell carries both. That is unlike the kept-unlogged fill
+above, which claims the calendar's one fill slot and does suppress the `?`. A
+checkbox has only the one glyph, full stop, so on the strip the in-run tick
+takes that slot exactly as the ghost tick above does, and the `?` loses to it
+the same way the ghost tick already wins there.
+
+**The "In a run" swatch asks the GRID what it drew, and that is the one thing
+about it that is not obvious.** `calendarChart` counts the cells it actually
+stroked and reports the number on the `<svg>` as `data-run-marks`; the legend
+gates on that rather than on `inRun.size`. The two differ, and reachably: the
+run set covers a habit's whole history while the card draws one window, so a
+habit whose only qualifying run is months back showed the swatch over a grid
+carrying nothing — reproduced by zooming in twice on an 11-day run from the
+previous December. Recomputing the window in `ui/detail.js` instead would be a
+second derivation of "which cells got the mark" and wrong a second way, since
+a run made entirely of logged days puts every date in `inRun` and leaves no
+cell blank to stroke. The count is set even when it is **zero**, so an absent
+attribute means an old `charts.js` rather than a quiet window — and the gate
+reads it through `Number(...)`, because `"0"` is a truthy string and that is
+precisely the shape a careless version of this ships.
+
+**The strip's in-run tick reuses the ghost tick's `✓` at 0.45, and the two are
+disjoint by construction, not by a check that enforces it.**
+`unansweredCounts` is `true` only for a non-boolean at-most habit, and there
+every unlogged day already IS a completion — the ghost tick — and every day
+holding a row renders its own number, so its glyph slot is never free for the
+run tick either. No cell can ever be a candidate for both, so no second
+opacity distinguishes them. This is the same shape of argument this section
+already makes for the boolean day-state branch above being unreachable: state
+it, do not add an arm for a case that cannot arise.
+
+**Still open, on purpose.** Streak connectors drawn over an empty cell was
+issue #176, addressed above — a different route (`inStreak`) from anything
+else in this section, and it left `unlogged_is_success`'s own fill untouched.
+It reaches the calendar and the detail page's own strip only: the dashboard's
+day squares and both Android grids (`DayGrid`, the widget) still draw these
+days blank, and stay that way until a follow-up ships the `/overview` streak
+ranges either would need. The credit window's missing far end is still issue
+#223, and it is not this one's to fix either. `docs/decisions/day-states.md`
+has the long form.
 
 ## Amounts
 

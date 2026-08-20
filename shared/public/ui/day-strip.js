@@ -78,6 +78,9 @@ const $ = (sel) => document.querySelector(sel);
  * @param value        what the entries map HELD, or `undefined` for no row
  * @param isSkip       whether the host reports this date as a skip
  * @param showUnknown  the `questionMarks` setting: draw `?` where there is no row
+ * @param inRun        whether this date sits inside a run of `MIN_STREAK`+ days
+ *   (`charts.js`'s `streakDates`) that this cell would otherwise draw as nothing
+ *   at all
  *
  * The skip flag is why this takes more than three arguments. `/overview`
  * flattens a skip onto the SKIP wire value so the grid has something paintable,
@@ -89,7 +92,23 @@ const $ = (sel) => document.querySelector(sel);
  * mean anything else and is what an imported Loop history carries — the same
  * rule as `normalizeEntry` in shared/src/stats.js.
  */
-function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
+/**
+ * The faint `✓` shared by the two things a checkbox can never draw at
+ * once: a habit whose unlogged days already count as kept, and a day inside
+ * a run that this cell would otherwise leave blank. One glyph, one opacity
+ * (0.45) serves both, because the two branches can never apply to the same
+ * cell — `unansweredCounts` is only ever true for a non-boolean at-most
+ * habit, and there every unlogged day is already a completion, so it never
+ * falls through to the `inRun` branch below. See #176 and
+ * `shared/public/CLAUDE.md`.
+ */
+function ghostTick(box, habit) {
+  box.style.color = habit.color;
+  box.style.opacity = '0.45';
+  box.textContent = '✓';
+}
+
+function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false, inRun = false) {
   box.textContent = '';
   box.style.background = 'var(--grid-empty)';
   box.style.color = '#fff';
@@ -113,11 +132,23 @@ function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
   // (`unansweredCounts`), so this checkbox never recomputes the precedence
   // itself. The ghost tick replaces the `?` rather than sitting beside it —
   // one glyph, one slot, the same rule `charts.js`'s calendar block follows.
+  //
+  // `inRun` is asked third, after the ghost tick and before `?`, and it is the
+  // same reason the ghost tick wins here: a checkbox holds ONE glyph. That is
+  // the opposite of `charts.js`'s calendar cell, where the run stroke is drawn
+  // OVER the `?` rather than instead of it, because a stroke sits outside the
+  // block's one fill slot and the glyph slot is a separate thing. There is
+  // nothing outside a checkbox's one glyph to draw a second mark in, so here
+  // the in-run tick takes the slot the `?` would have used.
   if (value == null) {
     if (habit.unlogged_is_success) {
-      box.style.color = habit.color;
-      box.style.opacity = '0.45';
-      box.textContent = '✓';
+      ghostTick(box, habit);
+    } else if (inRun) {
+      // `unansweredCounts` only ever returns true for a non-boolean at-most
+      // habit, where every unlogged day already takes the ghost tick above
+      // and never reaches here — so this branch and that one are disjoint by
+      // construction, and no habit shape can ever be a candidate for both.
+      ghostTick(box, habit);
     } else if (showUnknown) {
       box.style.color = 'var(--text-dim)';
       box.textContent = '?';
@@ -129,6 +160,11 @@ function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
     if (value === YES) {
       box.style.background = habit.color;
       box.textContent = '✓';
+    } else if (inRun) {
+      // A stored 0 (Loop's NO) inside a run — decision 4: a run is about
+      // pace, and a stated lapse inside one is on pace. Same tick as the
+      // ghost one; this cell's glyph slot was otherwise empty.
+      ghostTick(box, habit);
     }
     return;
   }
@@ -189,9 +225,16 @@ function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
  * @param {any} habit
  * @param {Date[]} dates  in the order they are to be drawn
  * @param {string} todayIso
+ * @param {Set<string>} [inRun]  dates inside a run of `MIN_STREAK`+ days
+ *   (`charts.js`'s `streakDates`), for the same faint tick the calendar's
+ *   connector stroke draws. Defaults to an empty set, which is what leaves
+ *   `ui/dashboard.js` — the OTHER caller of this function — undrawing nothing:
+ *   the dashboard strip is deliberately out of scope for #176 (see
+ *   `shared/public/CLAUDE.md`), and passing no set is how that stays true
+ *   without a second code path here.
  * @returns {HTMLElement} a `.checks` element
  */
-export function dayCells(host, habit, dates, todayIso) {
+export function dayCells(host, habit, dates, todayIso, inRun = new Set()) {
   const checks = document.createElement('div');
   checks.className = 'checks';
 
@@ -209,7 +252,7 @@ export function dayCells(host, habit, dates, todayIso) {
 
     const box = document.createElement('span');
     box.className = 'check-box';
-    paintCheckbox(box, habit, value, isSkip, settings.get('questionMarks'));
+    paintCheckbox(box, habit, value, isSkip, settings.get('questionMarks'), inRun.has(date));
 
     const day = document.createElement('span');
     day.className = 'check-day';
@@ -272,15 +315,18 @@ export function dateColumns(dates, todayIso) {
  * @param {ParentNode} root  the element the cells were appended under
  * @param {StripHost} host
  * @param {any} habit
+ * @param {Set<string>} [inRun]  same as `dayCells`'; defaults to an empty set
+ *   for the same reason — `ui/dashboard.js` calls this too and passes none.
  */
-export function repaintCells(root, host, habit) {
+export function repaintCells(root, host, habit, inRun = new Set()) {
   const showUnknown = settings.get('questionMarks');
   for (const btn of root.querySelectorAll('.check[data-date]')) {
     const date = /** @type {HTMLElement} */ (btn).dataset.date;
     const box = btn.querySelector('.check-box');
     if (!box) continue;
     const { value, isSkip } = host.read(habit.id, date);
-    paintCheckbox(/** @type {HTMLElement} */ (box), habit, value, isSkip, showUnknown);
+    paintCheckbox(
+      /** @type {HTMLElement} */ (box), habit, value, isSkip, showUnknown, inRun.has(date));
   }
 }
 

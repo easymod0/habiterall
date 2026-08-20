@@ -283,13 +283,106 @@ fire is a claim the tests cannot make honest.
 
 ### What is still open
 
-**Streak connectors drawn over an empty cell are issue #176**, arriving here by
-a different route (`inStreak`, `charts.js`). A kept-unlogged cell paints its own
-faint fill; whether a streak line should visually bridge it is that issue's
-question, not this one's, and this change does not touch `inStreak`.
+**Streak connectors drawn over an empty cell was issue #176, addressed
+below** — a different route (`inStreak`, `charts.js`) from anything in this
+section, and it left `unlogged_is_success`'s own fill untouched: a
+kept-unlogged cell still paints its own faint fill, independent of whatever
+the connector pass decides about the days around it.
 
 **The credit window's missing far end is issue #223.** Different layer again —
 this is about which cells paint which fill; #223 is about how far a range that
 starts at the earliest stored entry should reach, which the root `CLAUDE.md`
 already documents as "the model working" rather than a bug.
+
+## Issue #176 — a streak is linked through cells painted "no entry"
+
+`charts.js`'s calendar already draws connectors through a run
+(`inStreak`, built from `streakDates`), but the cell loop those connectors run
+over never asked `inStreak` at all — it is computed once per render and read
+only by the connector pass, twenty-some lines above the loop that decides each
+cell's own fill. So a kept 3-in-7 run painted as a few filled squares joined by
+a bar over cells that drew nothing: any day with no row (and, on a boolean or
+at-least habit, any day holding a stored 0) left `fill` at `empty`, regardless
+of whether a connector was crossing it. The reproducing habit was already in
+the fixtures — Gym, boolean, `freq_numerator: 3`, `freq_denominator: 7`, logged
+Mon/Wed/Fri for 60 days — where every Tue/Thu/Sat/Sun is unlogged, on pace, and
+inside one long run.
+
+`shared/src` needed no change. `onPaceSeries` and `computeStreaks` already put
+these days inside the run figure the server reports; this was a rendering gap
+only, sitting on top of a score and a streak count that were already right —
+the same shape #222 above found, one layer over.
+
+### The decisions, and why each one is what it is
+
+**A stroke on the calendar, a reused ghost tick on the strip — covered in "A
+day nobody answered, drawn as kept" above, not restated here.** Both issues
+are the same shape of question: a faint mark competing for a fill slot the
+ramp above already uses (0.07 / 0.15 / 0.2), or for a glyph slot a checkbox
+has only one of. What follows is what is specific to a RUN rather than to a
+single day's own verdict.
+
+**Rejected: a `shade(color, 0.12)` fill, squeezed between 0.07 ("Kept,
+unlogged") and the at-most ramp's 0.15 floor.** It would sit on the same fill
+ramp those floors describe, and a real over-target fill can legitimately land
+anywhere from 0.15 up — so a fill picked to read as "there is a run here"
+would be indistinguishable, at a glance, from a very faint recorded amount.
+The ramp already means something specific; asking it to also carry "this cell
+is inside a run" is the same collapse #222 rejected once, for a different
+reason.
+
+**Rejected: reusing 0.07 for two different meanings.** "Kept, unlogged" and
+"inside a run" are different facts about a cell — one about the day's own
+verdict, one about the days around it — and a `<title>` / popover that says
+both ("no entry — in a run") only works if there is one visual weight that
+answers both questions at once being asked for two different reasons; the
+existing 0.07 fill already answers one of them. A stroke, being on no ramp,
+answers the other without touching either number.
+
+**The rule is "where the cell draws nothing at all", not "where the day is not
+a completion".** A half-filled at-least cell, an over-limit number, a red slip
+and a skip already read as something on either surface, and marking them again
+would be a second mark on a cell that has already said something. On the
+calendar that predicate is `fill === empty` — read against the binding the
+paint branches themselves assign, not a string literal, so it inherits every
+exclusion those branches already encode. A future day needs no separate
+`!isFuture` guard on top of it: the `isFuture` branch above always assigns
+`fill = 'transparent'`, which already fails the `=== empty` test on its own.
+On the strip the same rule reads "no glyph and no background".
+
+**A stored `0` and a missing row both get the mark.** A run is about pace, and
+a stated lapse inside a kept run is still on pace — the same decision #222
+made about `unlogged_is_success` habits, applied here to every habit shape a
+run can reach. Neither branch reads an entry map for a verdict; both ask the
+same `fill === empty` / "no glyph, no background" question the rest of the
+mark already asks, never `entryMap.get(date) ?? UNSET`.
+
+### What was not extended, and why
+
+**The dashboard's own day-square strip.** `ui/day-strip.js`'s `dayCells` and
+`repaintCells` both take the run set as their last argument, defaulting to
+`new Set()` — which is what leaves `ui/dashboard.js`, their other caller,
+undrawing nothing. `/overview` ships only `bestStreak`, no per-day streak
+range, so marking a run on the dashboard would need that route to carry one,
+in both editions, which this issue did not ask for and Mark scoped out on
+purpose.
+
+**Android.** `android-native`'s payload carries `currentStreak` as a plain
+number and no per-day run data, so neither `DayGrid` nor the home-screen
+widget has anything to locate a run from. A follow-up issue is filed for
+Android's grid and widget together with the dashboard strip above, since both
+would need the same `/overview` streak-range payload this issue does not add.
+
+### What is still open
+
+**The calendar and the detail page's own "Recent days" strip draw a run now;
+the dashboard's day squares and both Android grids still draw these same days
+blank**, until the follow-up above ships whatever payload change either needs.
+Same habit, same run, three surfaces still disagreeing about it — the gap
+#222 found between the Calendar card and the History card, still open here in
+a different pair of surfaces.
+
+**The credit window's missing far end is still issue #223**, unrelated to
+this one: different layer again, about how far a range that starts at the
+earliest stored entry should reach rather than which cells carry a mark.
 
