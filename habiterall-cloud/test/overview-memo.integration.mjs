@@ -9,13 +9,18 @@
  * and drives it over HTTP, the way `healthz.integration.mjs` does and for the
  * same reason.
  *
- * The three things only this file can see:
+ * The four things only this file can see:
  *
  *  1. The memo is LIVE on the route — a change made out of band, behind the
  *     route's back, is not visible until the TTL has passed.
  *  2. A WRITE invalidates — the tap-then-refetch case, which is the one that
  *     can actually regress and the one that would paint a user's own tap away.
- *  3. The CALLER'S DAY is in the key — two devices on one account either side
+ *  3. A write that never touches the `/api` ROUTER invalidates as well. The
+ *     first version of this invalidation was `api.use(...)` and nothing else,
+ *     which is a rule about a router rather than about a write — and the ntfy
+ *     button posts above that router while Discord's never reaches Express at
+ *     all. Both are the same missing dashboard refresh.
+ *  4. The CALLER'S DAY is in the key — two devices on one account either side
  *     of a date boundary send the same URL and must not share an answer.
  *
  * What it does NOT see, stated rather than left to be discovered: whether the
@@ -33,6 +38,8 @@ import { createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import pg from 'pg';
+
+import { NTFY_ANSWER_PATH, signNtfyAnswer } from '@habiterall/shared/ntfy-answer.js';
 
 process.env.ADMIN_URL ??= 'postgres://owner:testpw@localhost:5432/habiterall';
 process.env.DATABASE_URL ??= 'postgres://habiterall_app:apptestpw@localhost:5432/habiterall';
@@ -247,6 +254,40 @@ try {
   ck('...and so is undoing it',
     afterUndo.body.habits[0]?.entries?.[today] === undefined,
     JSON.stringify(afterUndo.body.habits[0]?.entries));
+
+  console.log('\n--- a write that never touches the /api router invalidates too ---');
+  // The invalidation was `api.use(...)`, which is every non-safe method on the
+  // `/api` ROUTER — and that is not every write. `NTFY_ANSWER_PATH` is mounted
+  // in server.js ABOVE that router on purpose, so it is never reached through
+  // `requireAuth`, and it writes a real entry through the same `entryWrite`
+  // rule the API uses. Discord's button is the same write from further away
+  // still: it arrives on the gateway socket and never touches Express.
+  //
+  // So: press the button, then refetch with no wait, exactly as a PWA left
+  // open in another tab does when it foregrounds. Before the fix this served
+  // the day still blank for the length of the TTL.
+  //
+  // This suite can reach the ntfy half over HTTP; the Discord half shares the
+  // single `record` in `interactionAdapter()` that this proves, and driving it
+  // would need a gateway socket to fake.
+  const warm = await call('/overview');
+  ck('control: today is blank before the button is pressed',
+    warm.body.habits[0]?.entries?.[today] === undefined,
+    JSON.stringify(warm.body.habits[0]?.entries));
+
+  const code = signNtfyAnswer({
+    secret: SECRET, account: String(user), habitId, date: today, action: 'yes',
+  });
+  const pressed = await fetch(`${base}${NTFY_ANSWER_PATH}?c=${encodeURIComponent(code)}`,
+    { method: 'POST' });
+  ck('control: the button press was accepted', pressed.ok, `-> ${pressed.status}`);
+
+  const afterPress = await call('/overview');
+  ck('a button press outside the /api router is on the very next /overview',
+    afterPress.body.habits[0]?.entries?.[today] === 2,
+    JSON.stringify(afterPress.body.habits[0]?.entries));
+
+  await call(`/habits/${habitId}/entries/${today}`, { method: 'DELETE' });
 
   console.log('\n--- the caller\'s day is in the key ---');
   const dayLate = dayIn(ZONE_LATE);

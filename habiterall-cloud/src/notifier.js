@@ -20,6 +20,7 @@
  * from `habits.reminder_time` and needs no server at all.
  */
 
+import { forgetAccount } from './cache.js';
 import { withNotifierScope, withUser } from './db/pool.js';
 import {
   answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
@@ -329,6 +330,15 @@ export function interactionAdapter() {
      * storage rule as the HTTP API — `parseEntry` then `entryWrite`. A second
      * definition of "not done" living here is exactly the drift those two
      * functions exist to prevent.
+     *
+     * This is the one write path in this edition that is NOT on the `/api`
+     * router, and it is two of them: ntfy's button posts to a route mounted
+     * above that router, and Discord's arrives on the gateway socket without
+     * touching Express at all. Both land here. So the dashboard memo is
+     * invalidated here too, through the same `forgetAccount` the router's
+     * middleware calls — without it, pressing Done on a reminder while the PWA
+     * is open in a tab served that tab a dashboard computed before the press,
+     * with the day still blank, for the length of the TTL.
      */
     async record(account, { habitId, date, action, value }) {
       return withUser(account.id, async (db) => {
@@ -361,6 +371,11 @@ export function interactionAdapter() {
             [habitId, account.id, date, write.value, write.status, write.notes]
           );
         }
+
+        // After the write and inside `withUser`, so it cannot run for a press
+        // that threw on its way to storage. Forgetting too much would cost a
+        // recomputation; forgetting too little paints the press away.
+        forgetAccount(account.id);
 
         return { ok: true, habit, text: answerText(habit, { action, value }) };
       });

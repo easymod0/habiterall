@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { withUser } from './db/pool.js';
-import { createMemo, remember } from './cache.js';
+import { createMemo, forgetAccount, remember } from './cache.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
@@ -177,13 +177,18 @@ api.use(route(async (req, res, next) => {
  *
  * Unconditional on status, so a write that failed halfway through still drops
  * what it may have changed.
+ *
+ * Through `forgetAccount` rather than `overviewMemo.forget`, because this
+ * router is NOT every write path — `NTFY_ANSWER_PATH` is mounted above it and
+ * the Discord button never reaches Express. Those call the same function; see
+ * its comment in `cache.js`.
  */
 api.use((req, res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD') return next();
-  const prefix = `${uid(req)}:`;
+  const user = uid(req);
   const end = res.end.bind(res);
   res.end = (...args) => {
-    overviewMemo.forget(prefix);
+    forgetAccount(user);
     return end(...args);
   };
   next();
@@ -480,6 +485,33 @@ api.get('/habits/:id/stats', route(async (req, res) => {
 const OVERVIEW_TTL_MS = 2_000;
 
 /**
+ * How many dashboards the memo may hold — its OWN number, not `MAX_CACHED`.
+ *
+ * `MAX_CACHED` is 10,000 and is justified by an entry costing ~100 bytes,
+ * which is true of the two caches it was written for and false of this one. An
+ * entry here is a whole `/overview` payload — every habit row spread, plus an
+ * `entries` grid of up to 365 dated keys per habit, plus `skips`. Measured with
+ * `--expose-gc`, retained after a collection: **499 KB** at 20 habits × 365
+ * days and **1.2 MB** at 50 × 365. Ten thousand of those is ~4.9 GB, and this
+ * edition's container dies with every tenant on it.
+ *
+ * Nothing stops an account reaching that count either: `end` is any date up to
+ * the caller's today and `days` is 1–365, so every distinct window is a
+ * distinct key and there are far more than ten thousand of them. Paging back
+ * through a few years of history is the honest way to do it; the read
+ * limiter's 300 req/min is the dishonest one, and neither involves a write, so
+ * `forget` never fires.
+ *
+ * 500 is the backstop and not the working bound. The bound is the TTL sweep in
+ * `createMemo`: entries live `OVERVIEW_TTL_MS`, a computation holds one of
+ * `PG_POOL_MAX` = 10 connections while it runs, so the live set is what ten
+ * connections can produce in two seconds. This number is what that has to stay
+ * under, and 500 × 499 KB ≈ 250 MB is the arithmetic if the sweep ever stops
+ * working.
+ */
+const MAX_OVERVIEW_CACHED = 500;
+
+/**
  * `/overview`, memoised per account, per window and per CALLER DAY.
  *
  * The last of those three is the subtle one and it is why the key is built by
@@ -493,7 +525,9 @@ const OVERVIEW_TTL_MS = 2_000;
  * worth knowing before anyone reads a hit-rate metric and concludes it is
  * broken.
  */
-const overviewMemo = createMemo((arg) => buildOverview(arg), { ttlMs: OVERVIEW_TTL_MS });
+const overviewMemo = createMemo((arg) => buildOverview(arg), {
+  ttlMs: OVERVIEW_TTL_MS, max: MAX_OVERVIEW_CACHED, perAccount: true,
+});
 
 api.get('/overview', route(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);

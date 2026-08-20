@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9227);
 
@@ -125,12 +125,36 @@ try {
   // archived view.
   console.log('--- leaving an archive that has just emptied (#177) ---');
 
+  // This section waits for the APP rather than for a duration, which the rest
+  // of this file does not yet do. It is the section where it matters most: the
+  // suites run sixteen-wide, and a missed sleep budget here would report
+  // itself as "unarchiving the last archived habit lands on the active list"
+  // failing — a flake wearing the costume of the bug this fixes.
+  //
+  // The predicates are deliberately NEUTRAL — each one is true in both the
+  // fixed and the unfixed build. `paint()` opens with `grid.replaceChildren()`
+  // and the detail view's `render()` with `host.replaceChildren()`, so a mark
+  // put on what is on screen now cannot survive the next render of it — and
+  // "it re-rendered" says nothing about WHICH list was painted. Waiting on the
+  // fixed behaviour instead would make every `check()` below it tautological:
+  // the wait would time out or the check would pass, and it could never fail.
+  const ROWS = '#grid .habit-row';
+  const DETAIL = '#view-detail > *';
+  const mark = (sel) => ev(`(()=>{
+    const kids = [...document.querySelectorAll('${sel}')];
+    for (const k of kids) k.dataset.stale = '1';
+    return kids.length;
+  })()`);
+  const gone = (sel) => `!document.querySelector('${sel}[data-stale]')`;
+  const repainted = () => waitUntil(ev, gone(ROWS), { what: 'the dashboard to repaint' });
+
   // First the ordinary way out, from an archive that still has something in
   // it. The app title's tooltip says "Back to your habits" and it could not do
   // that: the archive is a session boolean rather than a route, so 'reload'
   // alone re-read `showArchived` and landed straight back here.
+  await mark(ROWS);
   await ev(`document.getElementById('btn-home').click()`);
-  await sleep(900);
+  await repainted();
   const home = await ev(`(()=>({
     label: document.getElementById('toggle-archived').textContent.trim(),
     rows: [...document.querySelectorAll('#grid .habit-row .habit-name')].map(n=>n.textContent),
@@ -141,8 +165,9 @@ try {
     JSON.stringify(home.rows));
 
   // Back into the archive for the trap itself.
+  await mark(ROWS);
   await ev(`document.getElementById('toggle-archived').click()`);
-  await sleep(800);
+  await repainted();
   check('control: back in the archive, with its one habit',
     await ev(`document.getElementById('toggle-archived').textContent.trim()`) === 'Show active');
 
@@ -152,19 +177,49 @@ try {
     const i=names.findIndex(n=>n.includes('Meditate'));
     rows[i].querySelector('.habit-meta').click();
   })()`);
-  await sleep(600);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#view-detail .btn')].some(b=>b.textContent==='Edit')`,
+    { what: "the habit's own page, with its Edit button" });
+
   await ev(`[...document.querySelectorAll('#view-detail .btn')].find(b=>b.textContent==='Edit').click()`);
-  await sleep(300);
+  await waitUntil(ev,
+    `document.getElementById('habit-dialog').open === true
+      && !!document.querySelector('#habit-dialog input[name=archived]')`,
+    { what: 'the edit dialog, with the archived checkbox in it' });
+
+  // Saving from a habit's own page emits 'change', NOT 'reload' — the dialog
+  // returns you to where the edit started, so nothing reloads the dashboard
+  // here and the grid underneath is still whatever the archive painted. The
+  // wait is therefore on the DETAIL view's own rebuild, which `on('change')`
+  // reaches through `open()` -> `render()` -> `host.replaceChildren()`, and
+  // only once the refetch behind it has answered.
+  //
+  // That rebuild is also a race the fixed sleep was hiding rather than
+  // avoiding: Back is one of the nodes it replaces, so a click that arrives
+  // first lands on a detached element and does nothing at all.
+  await mark(DETAIL);
   await ev(`(()=>{
     document.querySelector('#habit-dialog input[name=archived]').checked = false;
     document.getElementById('habit-form').requestSubmit();
   })()`);
-  await sleep(900);
+  await waitUntil(ev,
+    `document.getElementById('habit-dialog').open === false && ${gone(DETAIL)}`,
+    { what: 'the save to close its dialog and the habit page to rebuild under it' });
+
   // Saving from a habit's own page leaves you on that page, so Back is the
   // road out — and it is one of the three that used to lead straight back into
   // the archive.
+  //
+  // Gated on the VIEW switching as well as on the repaint, because against the
+  // unfixed build this Back lands on "No archived habits." — no rows, so
+  // nothing was marked and the repaint half is vacuously true. That is the
+  // case the checks below exist to reach and fail on, so the wait must not
+  // depend on it.
+  await mark(ROWS);
   await ev(`[...document.querySelectorAll('#view-detail .btn')].find(b=>b.textContent.includes('Back')).click()`);
-  await sleep(900);
+  await waitUntil(ev,
+    `document.getElementById('view-detail').hidden === true && ${gone(ROWS)}`,
+    { what: 'Back to leave the habit page and the dashboard to repaint' });
 
   const escaped = await ev(`(()=>({
     rows: [...document.querySelectorAll('#grid .habit-row .habit-name')].map(n=>n.textContent),

@@ -30,13 +30,22 @@
  */
 
 /**
- * How many entries a bounded cache may hold.
+ * How many entries a bounded cache may hold, for a cache of SMALL entries.
  *
- * Not tuned against anything: the cost of an entry is ~100 bytes and the cost
- * of the sweep is one pass over the map, so the number only has to be far
- * above any working set and far below "unbounded". Ten thousand accounts
- * active inside one TTL window is already a larger instance than this edition
- * has been measured on.
+ * Not tuned against anything: the cost of a `blockCache` or `lastReportedZone`
+ * entry is ~100 bytes and the cost of the sweep is one pass over the map, so
+ * the number only has to be far above any working set and far below
+ * "unbounded". Ten thousand accounts active inside one TTL window is already a
+ * larger instance than this edition has been measured on.
+ *
+ * **A cache whose entries are not ~100 bytes must pass its own `max`, and the
+ * default here is wrong for it.** This is a COUNT bound, so it converts to a
+ * memory bound only through the entry cost, and shipping it as a default let
+ * the `/overview` memo — whose entries are whole dashboards — inherit a number
+ * justified by an entry cost three orders of magnitude smaller. Measured: an
+ * `/overview` payload for 20 habits × 365 days retains 499 KB, and 50 × 365
+ * retains 1.2 MB, so ten thousand of them is ~4.9 GB. `MAX_OVERVIEW_CACHED`
+ * (`api.js`) is that cache's own number.
  */
 export const MAX_CACHED = 10_000;
 
@@ -100,10 +109,25 @@ export function remember(map, key, value, { ttlMs, max = MAX_CACHED, now = Date.
  * 500, and remembering that for the TTL would turn one failed query into every
  * caller's failed query for as long as it lasted.
  *
+ * **Residency tracks the TTL here, and `max` is a backstop rather than the
+ * bound.** `remember` sweeps only when the map is FULL, which is right for a
+ * cache of ~100-byte entries and wrong for one holding whole dashboards: an
+ * expired entry would sit there until entry `max` arrived, so a 2 s TTL would
+ * cap how long an answer is TRUSTED and not how long it is KEPT, and the map
+ * would fill to `max` and stay there. So a miss sweeps its own expired entries
+ * first. That pass costs one iteration per live key on the path that is about
+ * to run five queries and per-habit CPU, and what it buys is a live set of
+ * "what was asked for in the last `ttlMs`" — which, since a computation holds a
+ * pool connection, is bounded by `PG_POOL_MAX` × the TTL and not by `max` at
+ * all.
+ *
  * @param {(arg: any) => Promise<any>} compute
- * @param {{ttlMs: number, max?: number, now?: () => number}} opts
+ * @param {{ttlMs: number, max?: number, now?: () => number,
+ *   perAccount?: boolean}} opts
  */
-export function createMemo(compute, { ttlMs, max = MAX_CACHED, now = Date.now }) {
+export function createMemo(compute, {
+  ttlMs, max = MAX_CACHED, now = Date.now, perAccount = false,
+}) {
   /**
    * key -> `{at, value}` once settled, `{at, inflight}` while computing.
    * @type {Map<string, {at: number, value?: any, inflight?: Promise<any>}>}
@@ -118,6 +142,15 @@ export function createMemo(compute, { ttlMs, max = MAX_CACHED, now = Date.now })
     const hit = entries.get(key);
     if (hit?.inflight) return hit.inflight;
     if (hit && now() - hit.at < ttlMs) return Promise.resolve(hit.value);
+
+    // A miss, so everything expensive is ahead of this anyway: drop every entry
+    // no reader would trust, which is what makes the live set "the last `ttlMs`
+    // of traffic" rather than "`max` entries, forever". An in-flight
+    // placeholder is exempt however old it is — callers are awaiting it, and
+    // deleting it would fail the store-identity guard below and quietly turn
+    // every slow computation into an uncacheable one.
+    const cutoff = now() - ttlMs;
+    for (const [k, v] of entries) if (!v.inflight && v.at < cutoff) entries.delete(k);
 
     // `Promise.resolve().then(...)` rather than calling `compute` here, so a
     // synchronous throw lands in the rejection path with everything else
@@ -169,5 +202,42 @@ export function createMemo(compute, { ttlMs, max = MAX_CACHED, now = Date.now })
   /** For tests and for a gauge; nothing in a route should need it. */
   memo.size = () => entries.size;
 
+  if (perAccount) perAccountMemos.add(memo);
+
   return memo;
+}
+
+/**
+ * Every memo whose keys begin with `<account id>:`, so a write can forget one
+ * account's answers from wherever the write happened.
+ *
+ * @type {Set<{forget: (prefix: string) => void}>}
+ */
+const perAccountMemos = new Set();
+
+/**
+ * Forget everything cached for one account.
+ *
+ * **The invalidation is one rule per WRITE, not one per router.** It was
+ * `api.use(...)` alone, which is every non-safe method on the `/api` router and
+ * therefore not every write: `NTFY_ANSWER_PATH` is mounted in `server.js` ABOVE
+ * that router on purpose (so it is never reached through `requireAuth`), and
+ * the Discord button never touches Express at all — it arrives on the gateway
+ * socket. Both write a real entry through `interactionAdapter().record`, and
+ * neither cleared the memo, so pressing Done on a reminder while the app was
+ * open in a tab served that tab a dashboard computed before the press.
+ *
+ * The router middleware stays, because it is the only thing that can see the
+ * eight other mutating routes without a list that drifts. This is the second
+ * half: the ONE function every non-API write path calls. A third write path
+ * added tomorrow still has to call it — but it is now a named thing to call,
+ * rather than a router it has to be inside of.
+ *
+ * @param {number|string} userId
+ */
+export function forgetAccount(userId) {
+  // The separator is load bearing exactly as it is in `memo.forget`: `'1'`
+  // would forget user 12 as well.
+  const prefix = `${userId}:`;
+  for (const memo of perAccountMemos) memo.forget(prefix);
 }

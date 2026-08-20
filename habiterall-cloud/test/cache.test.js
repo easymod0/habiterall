@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { MAX_CACHED, createMemo, remember } from '../src/cache.js';
+import { MAX_CACHED, createMemo, forgetAccount, remember } from '../src/cache.js';
 
 const src = (name) =>
   readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
@@ -238,4 +238,107 @@ test('the memo is bounded by the same policy as the caches', async () => {
   const memo = createMemo(async (arg) => arg, { ttlMs: 2_000, max: 5 });
   for (let i = 0; i < 20; i++) await memo(`u${i}:w`, i);
   assert.equal(memo.size(), 5);
+});
+
+test('an expired entry goes on the next miss, not when the map fills', async () => {
+  const time = clock();
+  // `max` is deliberately far above anything this test reaches, because the
+  // bug was that `max` was the ONLY thing that ever removed an entry: the
+  // sweep in `remember` runs on a write and only when full, so with a bound of
+  // 500 nothing expired was dropped until entry 500 arrived. A 2s TTL then
+  // capped how long an answer was TRUSTED and not how long it was KEPT, and a
+  // cache of 499 KB dashboards sat at its bound for the life of the process.
+  const memo = createMemo(async (arg) => arg, { ttlMs: 2_000, max: 1_000, now: time.now });
+
+  for (let i = 0; i < 50; i++) await memo(`sweep${i}:w`, i);
+  assert.equal(memo.size(), 50, 'control: all fifty are resident while fresh');
+
+  time.advance(2_001);
+  await memo('sweepfresh:w', 'f');
+
+  assert.equal(memo.size(), 1, 'the fifty expired entries are gone, and max was never reached');
+});
+
+test('the sweep leaves an in-flight computation alone however old it is', async () => {
+  const time = clock();
+  const held = gate();
+  let calls = 0;
+  // Only the slow key is held open — the other has to be able to SETTLE, since
+  // settling it is what runs the sweep.
+  const memo = createMemo(async (arg) => {
+    if (arg !== 'slow') return arg;
+    calls++;
+    return held.opened;
+  }, { ttlMs: 2_000, now: time.now });
+
+  const inflight = memo('slow:w', 'slow');
+  time.advance(5_000);              // older than the TTL, and still computing
+  await memo('other:w', 'other');   // a miss, so it sweeps
+
+  held.release('answer');
+  assert.equal(await inflight, 'answer');
+
+  // Sweeping the placeholder would fail the store-identity guard, so the
+  // answer would never be stored — and every computation slower than the TTL
+  // would become silently uncacheable, which is the exact case the memo is
+  // most worth having.
+  assert.equal(await memo('slow:w', 'slow'), 'answer');
+  assert.equal(calls, 1, 'the settled answer was stored, not recomputed');
+});
+
+/* ---------- invalidation from outside the router ---------- */
+
+test('forgetAccount reaches a per-account memo, and only those', async () => {
+  const scoped = createMemo(async (arg) => arg, { ttlMs: 2_000, perAccount: true });
+  const plain = createMemo(async (arg) => arg, { ttlMs: 2_000 });
+
+  await scoped('90:w', 'before');
+  await plain('90:w', 'before');
+
+  forgetAccount(90);
+
+  // The ntfy button and the Discord button both write outside the `/api`
+  // router, so `api.use(...)` cannot be the only invalidation. This is what
+  // they call instead.
+  assert.equal(await scoped('90:w', 'after'), 'after', 'the registered memo forgot');
+  // The control, and it is the half that fails against a `forgetAccount` that
+  // just clears everything it can reach.
+  assert.equal(await plain('90:w', 'after'), 'before', 'an unregistered memo is untouched');
+});
+
+test('forgetAccount forgets one account, not every account it prefixes', async () => {
+  const memo = createMemo(async (arg) => arg, { ttlMs: 2_000, perAccount: true });
+  await memo('8:w', 'eight');
+  await memo('81:w', 'eighty-one');
+
+  forgetAccount(8);
+
+  assert.equal(await memo('8:w', 'rebuilt'), 'rebuilt');
+  assert.equal(await memo('81:w', 'ignored'), 'eighty-one',
+    'the separator is what stops account 8 forgetting account 81');
+});
+
+test('the /overview memo does not inherit a bound sized for 100-byte entries', () => {
+  // Source text, and blind in the documented way — it cannot see a renamed
+  // constant or 500 spelled as something else. Kept for the one thing it
+  // catches, which is the thing that happened: `createMemo` called with a TTL
+  // and nothing else, taking `MAX_CACHED` = 10,000 — a number justified in
+  // cache.js by an entry costing ~100 bytes — for a cache whose entries
+  // measure 499 KB at 20 habits × 365 days. Ten thousand of those is 4.9 GB.
+  //
+  // The behavioural halves are above: the sweep is what actually bounds
+  // residency, and `forgetAccount` is what the non-router writes call. Neither
+  // can see whether THIS memo asks for either, and no test can drive 500
+  // distinct dashboard windows through a real Postgres to find out.
+  const text = src('api.js');
+
+  // The literal, so this fails if the number is widened back toward MAX_CACHED.
+  assert.match(text, /const MAX_OVERVIEW_CACHED = 500;/,
+    'MAX_OVERVIEW_CACHED must be its own number, stated here');
+
+  const call = text.match(/createMemo\([\s\S]*?\}\);/)?.[0] ?? '';
+  assert.ok(call.includes('max: MAX_OVERVIEW_CACHED'),
+    'the overview memo must pass its own max, not inherit MAX_CACHED');
+  assert.ok(call.includes('perAccount: true'),
+    'the overview memo must be reachable by forgetAccount, or a button press cannot clear it');
 });
