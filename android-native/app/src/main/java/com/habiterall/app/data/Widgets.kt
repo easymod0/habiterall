@@ -50,6 +50,17 @@ object Widgets {
         val value: Double?,
         val skip: Boolean,
         /**
+         * Whether a day with NO ROW already counts as kept, for this habit —
+         * the server-resolved [Habit.unloggedIsSuccess]. Cached here for the
+         * same reason the shape fields above are: a tap happens with no
+         * network, and this is what tells [markFor] whether the day's ghost
+         * tick has to survive a refresh. Defaults to `false`, so a record
+         * written before this field existed, or a blank one still waiting on
+         * [refreshed], draws the fail-safe way until the next refresh fills
+         * it in.
+         */
+        val unloggedIsSuccess: Boolean = false,
+        /**
          * The habit is no longer on the account — deleted, or archived.
          *
          * Kept rather than dropped, because a widget the launcher still shows
@@ -77,6 +88,7 @@ object Widgets {
             targetType = targetType,
             showAs = showAs,
             color = color,
+            unloggedIsSuccess = unloggedIsSuccess,
         )
     }
 
@@ -164,6 +176,10 @@ object Widgets {
         val habit = record.habit
         return when {
             state == Grid.DayState.SKIPPED -> "–"
+            // The ghost tick replaces the `?` rather than sitting beside it,
+            // ahead of the `questionMarks` arm for the same reason `DayCell`
+            // puts its own version first: one glyph, one slot.
+            state == Grid.DayState.UNKNOWN && habit.unloggedIsSuccess -> "✓"
             state == Grid.DayState.UNKNOWN -> if (questionMarks) "?" else ""
             habit.isAvoided && state == Grid.DayState.DONE -> "✓"
             habit.isAvoided -> record.value?.let {
@@ -254,6 +270,9 @@ object Widgets {
         // unanswered day from a stated lapse further down.
         value = habit.valueOn(today),
         skip = habit.isSkipped(today),
+        // Server-resolved, and not this client's to compute — see
+        // `Habit.unloggedIsSuccess`.
+        unloggedIsSuccess = habit.unloggedIsSuccess,
     )
 
     /**
@@ -304,6 +323,10 @@ object Widgets {
         r.value?.toString() ?: "",
         if (r.skip) "1" else "0",
         if (r.gone) "1" else "0",
+        // Appended after `gone` for the same reason that field went on the
+        // end: a record written before this one existed has thirteen fields
+        // and must still draw.
+        if (r.unloggedIsSuccess) "1" else "0",
     ).joinToString("|")
 
     /**
@@ -343,6 +366,11 @@ object Widgets {
             // written before this field existed has twelve fields and must
             // still draw.
             gone = f.getOrNull(12) == "1",
+            // Same reasoning, one field later: a record written before this
+            // one existed has thirteen fields, and an absent flag means "not
+            // known to be kept" — the fail-safe direction, same as `Habit`'s
+            // own default — rather than a claim either way.
+            unloggedIsSuccess = f.getOrNull(13) == "1",
         )
     }
 

@@ -107,11 +107,18 @@ function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false) {
     return;
   }
 
-  // No row at all. Identical to a stated "no" unless question marks are on,
-  // which is the entire visible difference the setting makes: `value` is
-  // `undefined` here and `0` there, and both are a miss to every figure.
+  // No row at all. Identical to a stated "no" unless question marks are on —
+  // except on a habit whose unlogged days already count as kept, where a "no"
+  // is a real miss and this is not: `unlogged_is_success` is server-resolved
+  // (`unansweredCounts`), so this checkbox never recomputes the precedence
+  // itself. The ghost tick replaces the `?` rather than sitting beside it —
+  // one glyph, one slot, the same rule `charts.js`'s calendar block follows.
   if (value == null) {
-    if (showUnknown) {
+    if (habit.unlogged_is_success) {
+      box.style.color = habit.color;
+      box.style.opacity = '0.45';
+      box.textContent = '✓';
+    } else if (showUnknown) {
       box.style.color = 'var(--text-dim)';
       box.textContent = '?';
     }

@@ -31,6 +31,7 @@ class WidgetTest {
         date: String = today,
         value: Double? = null,
         skip: Boolean = false,
+        unloggedIsSuccess: Boolean = false,
     ) = Widgets.Record(
         widgetId = 7,
         habitId = habit.id,
@@ -44,6 +45,7 @@ class WidgetTest {
         date = date,
         value = value,
         skip = skip,
+        unloggedIsSuccess = unloggedIsSuccess,
     )
 
     private fun boolHabit() = Habit(id = 1, name = "Meditate")
@@ -194,6 +196,19 @@ class WidgetTest {
         assertEquals(Grid.DayState.UNKNOWN, Widgets.stateOn(fresh, today))
     }
 
+    @Test
+    fun `a refresh carries the server's resolved kept-unlogged flag onto the record`() {
+        // Not this client's to compute — a stale cached `false` would go on
+        // drawing a plain empty square after the account or the habit turned
+        // the setting on, until the process died and restarted.
+        val habit = waterHabit().copy(unloggedIsSuccess = true)
+        val fresh = Widgets.refreshed(record(waterHabit()), habit, today)
+        assertTrue(fresh.unloggedIsSuccess)
+
+        val back = Widgets.refreshed(fresh, waterHabit(), today)
+        assertFalse(back.unloggedIsSuccess)
+    }
+
     /* ---------- a habit that is no longer there ---------- */
 
     @Test
@@ -299,6 +314,29 @@ class WidgetTest {
         assertEquals(7, back.widgetId)
     }
 
+    @Test
+    fun `a record written before unloggedIsSuccess existed still reads`() {
+        // Thirteen fields is what every widget holds today; the fourteenth is
+        // this one, appended the same way `gone` was, and an absent flag must
+        // not read as a claim the day was kept.
+        val thirteen =
+            Widgets.encode(record(boolHabit())).split('|').take(13).joinToString("|")
+        val back = Widgets.decode(thirteen)
+        assertNotNull(back)
+        assertFalse(
+            "an absent field is not a claim the day is counted as kept",
+            back!!.unloggedIsSuccess,
+        )
+    }
+
+    @Test
+    fun `unloggedIsSuccess survives a round trip through the cache`() {
+        val kept = record(waterHabit(), unloggedIsSuccess = true)
+        assertTrue(Widgets.decode(Widgets.encode(kept))!!.unloggedIsSuccess)
+        val notKept = record(waterHabit(), unloggedIsSuccess = false)
+        assertFalse(Widgets.decode(Widgets.encode(notKept))!!.unloggedIsSuccess)
+    }
+
     /* ---------- what the cell says ---------- */
 
     @Test
@@ -339,6 +377,33 @@ class WidgetTest {
         assertEquals(
             "6",
             Widgets.markFor(record(waterHabit(), value = 6.0), Grid.DayState.NO, false),
+        )
+    }
+
+    @Test
+    fun `a day nobody answered on a kept-unlogged habit shows a ghost tick, not a question mark`() {
+        // `Habit.unloggedIsSuccess` cached on the record, mirroring `DayCell`
+        // state for state: the tick wins whether or not `questionMarks` is on,
+        // because it replaces the `?` rather than sitting beside it — one
+        // glyph, one slot.
+        val kept = record(waterHabit(), value = null, unloggedIsSuccess = true)
+        assertEquals("✓", Widgets.markFor(kept, Grid.DayState.UNKNOWN, questionMarks = false))
+        assertEquals("✓", Widgets.markFor(kept, Grid.DayState.UNKNOWN, questionMarks = true))
+
+        // The flag off is the ordinary rule: `questionMarks` alone decides.
+        val notKept = record(waterHabit(), value = null, unloggedIsSuccess = false)
+        assertEquals("", Widgets.markFor(notKept, Grid.DayState.UNKNOWN, questionMarks = false))
+        assertEquals("?", Widgets.markFor(notKept, Grid.DayState.UNKNOWN, questionMarks = true))
+
+        // A stored row is unaffected either way — the flag only ever answers
+        // for the day with NO row at all.
+        assertEquals(
+            "6",
+            Widgets.markFor(
+                record(waterHabit(), value = 6.0, unloggedIsSuccess = true),
+                Grid.DayState.NO,
+                questionMarks = true,
+            ),
         )
     }
 

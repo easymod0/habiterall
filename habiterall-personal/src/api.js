@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { db, UNSET, YES, SKIP } from './db.js';
 import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
-  today, addDays, daysBetween, MAX_RANGE_DAYS,
+  unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
@@ -377,7 +377,15 @@ api.get('/habits/:id/stats', (req, res) => {
   // not given it because the arithmetic has no opinion about it: a stored skip
   // bridges a run whether or not this account can record a new one.
   res.json({
-    habit, ...stats, awards: computeAwards(stats, end, habit, unlogged, skipDays),
+    // `unlogged_is_success` says whether a day with no row at all already
+    // counts as kept on this habit — resolved HERE, from the same account
+    // setting and habit override `unansweredCounts` already reads for the
+    // figures above, because `shared/src` is not served to the browser and no
+    // renderer can call `unansweredCounts` itself. Derived, not stored: it
+    // goes into no migration and no `*_HABIT_FIELDS` list.
+    habit: { ...habit, unlogged_is_success: unansweredCounts(habit, unlogged) },
+    ...stats,
+    awards: computeAwards(stats, end, habit, unlogged, skipDays),
   });
 });
 
@@ -489,6 +497,10 @@ api.get('/overview', (req, res) => {
         currentStreak: stats.currentStreak,
         bestStreak: bestStreak(allStreaks),
         totalCompleted,
+        // Same field, same reason as the `/stats` call site above: resolved
+        // server-side because no renderer can import `unansweredCounts`, and
+        // derived rather than stored.
+        unlogged_is_success: unansweredCounts(h, unlogged),
       };
     }),
   });

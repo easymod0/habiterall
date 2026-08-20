@@ -8,7 +8,7 @@
 
 import {
   calendarChart, frequencyChart, historyChart, missDistributionChart,
-  scoreChart, streakChart, survivalChart, weekdayChart, weekdayMonthChart,
+  scoreChart, shade, streakChart, survivalChart, weekdayChart, weekdayMonthChart,
 } from '/shared/charts.js';
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
@@ -727,6 +727,21 @@ function buildCalendarCard({ habit, color, chartWidth, entriesByDate, skipSet, n
     legend.append(sw);
     return sw;
   };
+
+  // Leading, in both branches: a fill the legend does not explain is the same
+  // defect as a legend advertising a fill the cells do not use, which is why
+  // the `isAvoided` branch beside it exists at all. `unlogged_is_success` is
+  // the same server-resolved flag the cells above read, so the legend cannot
+  // disagree with them about which habits this applies to.
+  if (habit.unlogged_is_success) {
+    // Not `swatch(color, 0.07)` like the ramp below: `opacity` blends toward
+    // the CARD, while the cell it describes blends toward `--grid-empty`
+    // (`shade`, charts.js) — two different colours for the same "0.07".
+    // Passing `shade(color, 0.07)` as the background is the cell's own value,
+    // so the legend and the grid cannot disagree about what this mark is.
+    swatch(shade(color, 0.07));
+    legend.append(document.createTextNode('Kept, unlogged'));
+  }
 
   if (isAvoided(habit)) {
     legend.append(document.createTextNode('Clean'));

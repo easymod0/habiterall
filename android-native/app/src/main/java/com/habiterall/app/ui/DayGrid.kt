@@ -46,6 +46,15 @@ import java.time.LocalDate
 private val SLIP = Color(0xFFDC2626)
 
 /**
+ * How full a kept-but-unlogged day looks — a faint version of the habit's own
+ * colour, clearly under the 0.35 a fallen-short measurable day gets, so it
+ * cannot be mistaken for a recorded amount. Not a new step on that ramp: it is
+ * one idea (a day nobody answered still counts) drawn once, regardless of
+ * whether the habit is shown as an amount or as something to avoid.
+ */
+private const val KEPT_UNLOGGED_ALPHA = 0.15f
+
+/**
  * The day grid: one row per habit, and one column per day.
  *
  * The habit's name is pinned and the days scroll, all of them together — a
@@ -82,7 +91,7 @@ private val MIN_TOUCH = 48.dp
  * and it left the one thing that matters, whether the day is already done,
  * entirely unspoken.
  */
-private fun describe(
+internal fun describe(
     habit: Habit,
     date: String,
     skipped: Boolean,
@@ -92,6 +101,12 @@ private fun describe(
 ): String {
     val state = when {
         skipped -> "skipped"
+        // A day nobody answered, on a habit where that already counts as
+        // kept (`unlogged_is_success`, server-resolved). Ahead of the plain
+        // "no entry" below because both facts have to survive to a screen
+        // reader, which has no faint tick to look at and would otherwise
+        // hear the same "no entry" it hears for a real miss.
+        unanswered && habit.unloggedIsSuccess -> "counted as kept, no entry"
         // Said whether or not question marks are on: a screen reader has no
         // square to look at, and "not done" for a day nobody has answered is the
         // same conflation the setting exists to undo.
@@ -258,6 +273,77 @@ fun HabitGridRow(
 }
 
 /**
+ * How full the square looks. A measurable habit that fell short shows a
+ * faint version of its own colour rather than nothing, because "8 of 20
+ * pages" is not the same day as one with no entry at all.
+ *
+ * Shown as something to avoid: a clean day is the achievement and a slip
+ * is the thing to see, so the colours are the other way up. Filling a slip
+ * with the habit's own colour — right for a habit read as an amount, where
+ * a bigger number is more done — reads as having done well.
+ *
+ * Pulled out of [DayCell] so it can be held to a test — the same reason
+ * `Widgets.markFor` is a plain function and not inline in `RemoteViews` code.
+ */
+internal fun dayFill(
+    habit: Habit,
+    color: Color,
+    skipped: Boolean,
+    value: Double?,
+    met: Boolean?,
+    unknown: Boolean,
+): Color = when {
+    skipped -> Color.Transparent
+    // No row at all, on a habit where that already counts as kept
+    // (`unlogged_is_success`, server-resolved) — ahead of the avoided branch
+    // below because this is one idea drawn once, not a second meaning for
+    // either shape of habit. Never true for a habit shape the rule cannot
+    // reach (boolean, or at-least), because the server never sets the flag
+    // there.
+    unknown && habit.unloggedIsSuccess -> color.copy(alpha = KEPT_UNLOGGED_ALPHA)
+    habit.isAvoided -> when {
+        met == true -> color
+        value != null -> SLIP
+        else -> Color.Transparent
+    }
+    met == true -> color
+    value != null && value > 0 -> color.copy(alpha = 0.35f)
+    else -> Color.Transparent
+}
+
+/**
+ * The glyph drawn in the square — a tick, a dash, a bare number, or the
+ * ambient "?" of `questionMarks`. Extracted for the same reason [dayFill] is.
+ */
+internal fun dayLabel(
+    habit: Habit,
+    questionMarks: Boolean,
+    skipped: Boolean,
+    value: Double?,
+    met: Boolean?,
+    unknown: Boolean,
+): String = when {
+    skipped -> "–"
+    // The ghost tick replaces the `?` rather than sitting beside it — one
+    // glyph, one slot, ahead of `questionMarks` for the same reason the fill
+    // above already answers "nobody answered" and does not need it repeated.
+    unknown && habit.unloggedIsSuccess -> "✓"
+    questionMarks && unknown -> "?"
+    // A clean day is a tick rather than a nought: the number says nothing
+    // on a limit of none, and the tick is what the day WAS. Over the limit
+    // the count is the answer, because how far over matters on a limit of
+    // two — except a bare 1 over a limit of 0, where the count adds nothing
+    // the cross does not already say.
+    habit.isAvoided && met == true -> "✓"
+    habit.isAvoided -> value?.let {
+        if (habit.targetValue == 0.0 && it == 1.0) "✗" else trimNumber(it)
+    } ?: ""
+    habit.isNumerical -> value?.let { trimNumber(it) } ?: ""
+    met == true -> "✓"
+    else -> ""
+}
+
+/**
  * One day of one habit.
  *
  * A tap cycles, a long press opens the day's own dialog. The long press is not
@@ -287,43 +373,8 @@ private fun DayCell(
     // empty square when it does not.
     val unknown = !skipped && habit.entries[date] == null
 
-    // How full the square looks. A measurable habit that fell short shows a
-    // faint version of its own colour rather than nothing, because "8 of 20
-    // pages" is not the same day as one with no entry at all.
-    // Shown as something to avoid: a clean day is the achievement and a slip
-    // is the thing to see, so the colours are the other way up. Filling a slip
-    // with the habit's own colour — right for a habit read as an amount, where
-    // a bigger number is more done — reads as having done well.
-    val avoided = habit.isAvoided
-
-    val fill = when {
-        skipped -> Color.Transparent
-        avoided -> when {
-            met == true -> color
-            value != null -> SLIP
-            else -> Color.Transparent
-        }
-        met == true -> color
-        value != null && value > 0 -> color.copy(alpha = 0.35f)
-        else -> Color.Transparent
-    }
-
-    val label = when {
-        skipped -> "–"
-        questionMarks && unknown -> "?"
-        // A clean day is a tick rather than a nought: the number says nothing
-        // on a limit of none, and the tick is what the day WAS. Over the limit
-        // the count is the answer, because how far over matters on a limit of
-        // two — except a bare 1 over a limit of 0, where the count adds nothing
-        // the cross does not already say.
-        avoided && met == true -> "✓"
-        avoided -> value?.let {
-            if (habit.targetValue == 0.0 && it == 1.0) "✗" else trimNumber(it)
-        } ?: ""
-        habit.isNumerical -> value?.let { trimNumber(it) } ?: ""
-        met == true -> "✓"
-        else -> ""
-    }
+    val fill = dayFill(habit, color, skipped, value, met, unknown)
+    val label = dayLabel(habit, questionMarks, skipped, value, met, unknown)
 
     // The whole column is the target, not the square drawn inside it: 34dp was
     // well under the 48dp minimum, and on a grid every neighbour is a valid
