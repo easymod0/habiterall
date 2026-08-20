@@ -136,6 +136,76 @@ table intact, and one asserts a request below the middleware does write the row,
 because otherwise "the column did not move" is also what a server with no
 session handling at all would say.
 
+## The dashboard is memoised, and a write is what clears it
+
+`/overview` is the most expensive route here — five queries, one of them an
+unbounded aggregate, plus per-habit synchronous CPU — and it is requested on
+every app open, on every `visibilitychange`, once per open tab and again on
+reconnect. Three tabs plus a focus event is four identical computations within
+a few seconds. `overviewMemo` (`src/api.js`, over `createMemo` in
+`src/cache.js`) is the same shape as the health probe, for the same reason,
+with the same `inflight` half doing the same job on a cold burst.
+
+**The key carries the caller's own DAY, and that is the subtle half.**
+`summaryEnd` is `callerToday(req)`, so two devices on one account either side of
+a date boundary send the *same URL* and must get different answers.
+`res.vary(DEVICE_ZONE_HEADER)` says this to HTTP caches; a server-side memo has
+to say it in its key. It is the same "whose day it is has two answers" trap the
+root `CLAUDE.md` names, arriving through a cache instead of through a route.
+
+**Invalidation is one rule for every non-safe method, not a call per route.** A
+list of the nine mutating routes is a list that drifts, and the two errors are
+not symmetrical: forgetting too much costs a recomputation, forgetting too
+little paints a user's own tap away on the refetch that follows it. It wraps
+`res.end` rather than listening for `finish`, so the memo is provably clear
+before the first byte of the answer leaves — `finish` fires from a later turn of
+the loop, which would make "the client cannot have refetched yet" a claim about
+scheduling instead of something the code makes true.
+
+**But `api.use(...)` is a rule about a ROUTER, and this edition writes from
+outside it — twice.** `NTFY_ANSWER_PATH` is mounted in `server.js` above the
+`/api` mount on purpose, so it is never reached through `requireAuth`, and a
+Discord button press arrives on the gateway socket without touching Express at
+all. Both write a real entry, both through `interactionAdapter().record` in
+`src/notifier.js`, and neither was cleared by the router middleware — so
+pressing **Done** on a reminder while the PWA sat open in a tab served that tab
+a dashboard computed before the press, day still blank, for the length of the
+TTL. `forgetAccount` (`src/cache.js`) is the one function both halves call; the
+middleware is still what covers the nine routes without a list. A new write path
+mounted above `/api` has to call it, and it is now a named thing to call rather
+than a router it has to be inside of.
+
+**Three per-user caches share one eviction policy** (`src/cache.js`): this memo,
+`blockCache` and `lastReportedZone`. The last two each carried a comment
+claiming a bound and had none — nothing removed an entry, so the real bound was
+"every account seen since the process started". `session-touch.js`'s map is
+deliberately not one of them: it bounds by clearing, because forgetting a
+session there costs one extra UPDATE.
+
+**Sharing a policy is not sharing a NUMBER, and this memo needed its own.**
+`MAX_CACHED` is 10,000 and cache.js justifies it by an entry costing ~100 bytes,
+which is true of the other two and false here: an `/overview` entry is a whole
+dashboard, measured at **499 KB** for 20 habits × 365 days and 1.2 MB for 50 ×
+365. Inherited, the bound was ~4.9 GB — reachable by an account paging back
+through its own history, since `end` and `days` make every window a distinct key
+and none of it involves a write, so `forget` never fires. `MAX_OVERVIEW_CACHED`
+is 500 and is a backstop; what actually bounds residency is the TTL sweep in
+`createMemo`, because `remember` sweeps only when FULL and a 2 s TTL otherwise
+caps how long an answer is *trusted* rather than how long it is *kept*.
+
+`test/cache.test.js` covers the memo in isolation, including the case only an
+injected computation can reach — a write landing while a read is still
+computing must not let that read's pre-write answer into the cache.
+`test/overview-memo.integration.mjs` boots the real server for the four things
+a unit test cannot see: that the route uses the memo at all, that a write
+reaches `forget`, that a write arriving OUTSIDE the `/api` router does too — it
+presses a real signed ntfy button — and that the caller's day is in the key.
+
+The TTL is two seconds and is meant to become a version check once #192 lands,
+which turns the remaining staleness into none. Note it is per PROCESS, so N
+replicas means N memos and a 1/N hit rate — worth knowing before reading a
+hit-rate metric and concluding it is broken.
+
 ## Which claim names the account
 
 `displayName` in `src/auth.js` (unexported) picks what the chip shows:

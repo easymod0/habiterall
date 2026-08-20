@@ -14,6 +14,7 @@
 
 import * as client from 'openid-client';
 import { withUser, withoutUser } from './db/pool.js';
+import { remember } from './cache.js';
 import { log } from '@habiterall/shared/log.js';
 
 const {
@@ -217,7 +218,14 @@ export function logoutUrl(idTokenHint) {
  */
 const BLOCK_CHECK_MS = 60_000;
 
-/** userId -> {blocked, at}. Small and bounded by the number of live users. */
+/**
+ * userId -> `{blocked, at}`, bounded by `remember` rather than by hope.
+ *
+ * The comment here used to claim it was "small and bounded by the number of
+ * live users", which is not a bound: nothing removed an entry, so an account
+ * that made one request and never came back sat here for the life of the
+ * container. See `cache.js`.
+ */
 const blockCache = new Map();
 
 /**
@@ -243,7 +251,7 @@ async function isBlocked(userId) {
     );
     // A vanished user is not a valid session.
     const blocked = rows.length === 0 ? true : rows[0].blocked === true;
-    blockCache.set(userId, { blocked, at: Date.now() });
+    remember(blockCache, userId, { blocked }, { ttlMs: BLOCK_CHECK_MS });
     return blocked;
   } catch {
     // Database trouble must not lock everyone out; fall back to the session

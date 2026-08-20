@@ -23,12 +23,58 @@ pg.types.setTypeParser(20, (v) => Number(v));
 // difference cost.
 assertConnectionString(process.env.DATABASE_URL, 'DATABASE_URL');
 
+/**
+ * How long one statement may run before Postgres cancels it.
+ *
+ * Nothing bounded a query before this. One pathological statement held one of
+ * ten pool connections until it finished or the client went away — and what
+ * reached the operator was OTHER requests failing their five-second checkout
+ * with a connection-timeout error naming nothing about the query responsible.
+ * The cause is invisible and the effect is everywhere, which is the confusing
+ * direction.
+ *
+ * Fifteen seconds is a DEFAULT rather than a measurement, and it is env-settable
+ * for that reason. The routes able to want more are the ones reading unbounded
+ * history — `/export`, `/export.csv`, `/export-loop.db` all read every row an
+ * account has — so an instance holding a decade for somebody may need to raise
+ * this, or those three may want their own longer timeout set per transaction.
+ * What is not defensible is the number that was here before, which was none.
+ */
+const STATEMENT_TIMEOUT_MS = Number(process.env.PG_STATEMENT_TIMEOUT_MS) || 15_000;
+
+/**
+ * How long a transaction may sit open doing nothing.
+ *
+ * The cheaper of the two to choose, and the more important: it fires only when
+ * a transaction is open and idle, which `withUser` should never produce. So
+ * anything this kills is a bug — an `fn` that awaited something non-database
+ * in the middle of a transaction, holding a pool connection across it.
+ */
+const IDLE_IN_TRANSACTION_MS = Number(process.env.PG_IDLE_TX_TIMEOUT_MS) || 30_000;
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: Number(process.env.PG_POOL_MAX) || 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,
+  // Passed through by `pg` as connection parameters, so they apply to every
+  // session the pool opens rather than needing a SET per checkout.
+  statement_timeout: STATEMENT_TIMEOUT_MS,
+  idle_in_transaction_session_timeout: IDLE_IN_TRANSACTION_MS,
   ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : undefined,
+});
+
+/**
+ * The two timeouts, for the startup log.
+ *
+ * They belong beside `pg_pool_max` for the same reason it is there: they are
+ * numbers an operator needs to see without reading the source, and a query
+ * cancelled at fifteen seconds is otherwise indistinguishable from one that
+ * failed for any other reason.
+ */
+export const poolTimeouts = () => ({
+  pg_statement_timeout_ms: STATEMENT_TIMEOUT_MS,
+  pg_idle_tx_timeout_ms: IDLE_IN_TRANSACTION_MS,
 });
 
 pool.on('error', (err) => {

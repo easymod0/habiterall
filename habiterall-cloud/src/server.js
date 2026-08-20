@@ -6,7 +6,7 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { pool, closePool, poolGauge } from './db/pool.js';
+import { pool, closePool, poolGauge, poolTimeouts } from './db/pool.js';
 import { LOCAL_IPS, createHealthProbe, sendHealth } from './health.js';
 import { throttleTouch } from './session-touch.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
@@ -369,6 +369,7 @@ async function start() {
       // The number that decides how many replicas Postgres can carry:
       // max × replicas must stay under the server's max_connections.
       pg_pool_max: Number(process.env.PG_POOL_MAX) || 10,
+      ...poolTimeouts(),
       notify: (process.env.HABITERALL_NOTIFY ?? 'on').toLowerCase(),
       discord_bot: !!process.env.DISCORD_BOT_TOKEN,
       log_level: log.level,
