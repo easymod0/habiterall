@@ -110,13 +110,87 @@ try {
   check('archived rows are visually marked', inArchive.dimmed === true);
   check('toggle flips to "Show active"', inArchive.label === 'Show active', inArchive.label);
 
+  // #177. Meditate is the ONLY archived habit, so unarchiving it empties the
+  // view we are standing in — and `paint()` hides `#list-head` when nothing is
+  // archived, which is where `#toggle-archived` lives. The archive became a
+  // room with no door: "No archived habits.", zero controls, and the three
+  // roads out all emit 'reload', which re-reads `showArchived` and lands right
+  // back here. F5 was the only escape.
+  //
+  // Driven through the REAL dialog and with no navigation anywhere in it,
+  // because both are what make this able to fail: a raw `fetch` plus a
+  // `Page.navigate` re-initialises `showArchived` to false and passes against
+  // the unfixed build — which is exactly what the section below this one does,
+  // and why it carries a comment conceding the dashboard "may have left" the
+  // archived view.
+  console.log('--- leaving an archive that has just emptied (#177) ---');
+
+  // First the ordinary way out, from an archive that still has something in
+  // it. The app title's tooltip says "Back to your habits" and it could not do
+  // that: the archive is a session boolean rather than a route, so 'reload'
+  // alone re-read `showArchived` and landed straight back here.
+  await ev(`document.getElementById('btn-home').click()`);
+  await sleep(900);
+  const home = await ev(`(()=>({
+    label: document.getElementById('toggle-archived').textContent.trim(),
+    rows: [...document.querySelectorAll('#grid .habit-row .habit-name')].map(n=>n.textContent),
+  }))()`);
+  check('#btn-home leaves the archive it is captioned to leave',
+    home.label === 'Show archived', home.label);
+  check('...onto the active list', !home.rows.some(r => r.includes('Meditate')),
+    JSON.stringify(home.rows));
+
+  // Back into the archive for the trap itself.
   await ev(`document.getElementById('toggle-archived').click()`);
   await sleep(800);
+  check('control: back in the archive, with its one habit',
+    await ev(`document.getElementById('toggle-archived').textContent.trim()`) === 'Show active');
+
+  await ev(`(()=>{
+    const rows=[...document.querySelectorAll('#grid .habit-row')];
+    const names=rows.map(r=>r.querySelector('.habit-name').textContent);
+    const i=names.findIndex(n=>n.includes('Meditate'));
+    rows[i].querySelector('.habit-meta').click();
+  })()`);
+  await sleep(600);
+  await ev(`[...document.querySelectorAll('#view-detail .btn')].find(b=>b.textContent==='Edit').click()`);
+  await sleep(300);
+  await ev(`(()=>{
+    document.querySelector('#habit-dialog input[name=archived]').checked = false;
+    document.getElementById('habit-form').requestSubmit();
+  })()`);
+  await sleep(900);
+  // Saving from a habit's own page leaves you on that page, so Back is the
+  // road out — and it is one of the three that used to lead straight back into
+  // the archive.
+  await ev(`[...document.querySelectorAll('#view-detail .btn')].find(b=>b.textContent.includes('Back')).click()`);
+  await sleep(900);
+
+  const escaped = await ev(`(()=>({
+    rows: [...document.querySelectorAll('#grid .habit-row .habit-name')].map(n=>n.textContent),
+    emptyArchive: !document.getElementById('empty-archived').hidden,
+    label: document.getElementById('toggle-archived').textContent.trim(),
+  }))()`);
+  check('unarchiving the last archived habit lands on the active list',
+    escaped.rows.some(r => r.includes('Meditate')), JSON.stringify(escaped.rows));
+  check('...and not on "No archived habits."', escaped.emptyArchive === false);
+  // The toggle's own label is the tell. Left on the archive it still reads
+  // "Show active", over a list with nothing on it and no way to press it.
+  check('...with the toggle back to "Show archived"', escaped.label === 'Show archived',
+    escaped.label);
+
+  // ...and the app is back in the state it started this section in, rather
+  // than in a half-archive: nothing is archived, so the toggle is hidden again
+  // exactly as the first check in this file asserts it is on a fresh account.
+  check('...and the toggle is hidden again, as on an account with no archive',
+    await ev(`document.getElementById('list-head').hidden === true`));
 
   console.log('--- notes via the calendar ---');
-  // The archive test left Meditate archived and may have left the dashboard
-  // on the archived view; unarchive and return to the active list so the
-  // habit lookup below is unambiguous.
+  // The section above ends with everything unarchived and the dashboard on the
+  // active list, so this is a belt-and-braces reset rather than a repair: it
+  // makes the habit lookup below unambiguous whatever that section leaves
+  // behind. Keep it — it is what stops a change up there silently breaking the
+  // notes checks instead of the archive ones.
   await ev(`(async()=>{
     const arch = await (await fetch('/api/habits?archived=true')).json();
     for (const h of arch) {
