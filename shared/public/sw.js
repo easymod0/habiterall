@@ -185,7 +185,17 @@ const sw = self;
 // cache, so without the bump a shell could hold the new `ui/detail.js` — whose
 // legend now claims a "Kept, unlogged" swatch — over a cached old `charts.js`
 // that never paints the block the legend is describing.
-const CACHE_VERSION = 'v22';
+// v23: a run of 3+ days now reads as one band over the days inside it nobody
+// ever logged (#176), on both the calendar and the "Recent days" strip.
+// `charts.js` gains two EXPORTS — `MIN_STREAK` and `streakDates` — and three
+// shell modules move together: `ui/day-strip.js`'s checkbox gains the faint
+// tick, `ui/detail.js` imports both new exports and computes the run set its
+// legend and its strip both read. Stale-while-revalidate could serve the new
+// legend, which now claims an "In a run" swatch, over a cached old `charts.js`
+// that never draws the stroke it describes — or a cached old `day-strip.js`
+// that never draws the tick — same failure shape as v22, one export further
+// upstream.
+const CACHE_VERSION = 'v23';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

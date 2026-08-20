@@ -136,6 +136,14 @@ between browsers and travels in the JSON backup.
 | **Weekday consistency** | The same, month by month, so you can see a weekday slipping |
 | **Times per week** | How many weeks each month hit 1×, 2×, 3× … |
 
+A run of three days or more now reads as one band instead of a few filled
+squares joined by bars over empty ones — on **Calendar** and on **Recent
+days**, each in its own vocabulary. The days inside a run that you never
+logged, including a day you logged as a miss, are outlined in the habit's
+colour on the heatmap; **Recent days** is a row of checkboxes, so there it is
+a faint checkmark instead, the same faint mark a kept-unlogged day already
+draws there. The dashboard's own day squares do not do this yet.
+
 Every chart with a time axis pages through history rather than cramming years
 into one screen, and the number of columns follows the width you have.
 

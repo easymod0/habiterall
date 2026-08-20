@@ -20,6 +20,10 @@
  *  - Offline, three taps advance the CYCLE rather than queueing the same write
  *    three times. That is the failure `writeDay`'s long comment exists to
  *    prevent, and it is invisible online because the refetch hides it.
+ *  - The in-run tick (#176) is asserted with `getComputedStyle`, not by reading
+ *    `textContent` alone — the ghost tick and a filled cell can share a glyph
+ *    and differ only in colour, opacity and background, none of which the fake
+ *    DOM in `atmost.mjs` or `rendercheck.mjs` can see.
  */
 
 import { mkdtempSync } from 'node:fs';
@@ -505,6 +509,246 @@ try {
   ck('keyboard focus is still on the cell after the tap rebuilds the page',
      focusKept.after === focusKept.before && focusKept.before !== null,
      JSON.stringify(focusKept));
+
+  /* ---------- a kept run reads as one band, not scattered ticks (#176) ---------- */
+
+  console.log('--- in-run ticks ---');
+  // `seeded.habit` (above) resolves to whichever boolean habit sorts first —
+  // Meditate, logged daily — which never has an unlogged day inside its
+  // window to test against. Gym is fetched by name for that reason: the
+  // fixtures log it Mon/Wed/Fri, so every other weekday in the strip sits
+  // inside its long on-pace run with no row of its own.
+  const gym = await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    return habits.find(h => h.name === 'Gym') ?? null;
+  })()`);
+  ck('the Gym fixture habit is present', !!gym, JSON.stringify(gym));
+
+  if (gym) {
+    await openHabit(gym.id);
+
+    // The box's colour and background are CSS values — a hex habit colour,
+    // `var(--grid-empty)` — so only the browser's OWN resolution of them is
+    // safe to compare against; a literal rgb string is "a constant" the two
+    // marks are not compared to.
+    const cellStyle = (date) => ev(`(() => {
+      const b = document.querySelector('${cellSel(date)} .check-box');
+      if (!b) return null;
+      const s = getComputedStyle(b);
+      return { text: b.textContent.trim(), opacity: s.opacity, color: s.color,
+               background: s.backgroundColor };
+    })()`);
+    const resolved = (cssValue) => ev(`(() => {
+      const d = document.createElement('div');
+      d.style.color = '${cssValue}';
+      document.body.append(d);
+      const c = getComputedStyle(d).color;
+      d.remove();
+      return c;
+    })()`);
+    const gymColor = await resolved(gym.color);
+    const emptyColor = await resolved('var(--grid-empty)');
+
+    const visible = await ev(
+      `[...document.querySelectorAll('#view-detail .day-strip .check[data-date]')]
+        .map(el => el.dataset.date)`);
+    const classified = visible.map((date) => (
+      { date, dow: new Date(`${date}T12:00:00`).getDay() }));
+    const loggedDow = new Set([1, 3, 5]); // Mon/Wed/Fri — fixtures.mjs's Gym schedule
+    const logged = classified.filter((d) => loggedDow.has(d.dow));
+    const unlogged = classified.filter((d) => !loggedDow.has(d.dow));
+    ck('the visible strip holds both logged and unlogged Gym days to compare',
+       logged.length >= 1 && unlogged.length >= 3,
+       `logged=${logged.length} unlogged=${unlogged.length}`);
+
+    const unloggedInRun = unlogged[0]?.date;
+    const tapDate = unlogged[1]?.date;
+    const storedZeroDate = unlogged[2]?.date;
+    const loggedDay = logged[0]?.date;
+
+    if (unloggedInRun) {
+      const ghost = await cellStyle(unloggedInRun);
+      ck('an unlogged day inside a kept run gets the faint tick, not a blank cell',
+         ghost?.text === '✓', JSON.stringify(ghost));
+      ck('...at ghost opacity (0.45)',
+         Math.abs(parseFloat(ghost?.opacity ?? '0') - 0.45) < 0.01, JSON.stringify(ghost));
+      ck("...in the habit's own colour", ghost?.color === gymColor,
+         `${ghost?.color} vs ${gymColor}`);
+      ck('...but its background is still the empty cell, not a filled one',
+         ghost?.background === emptyColor, `${ghost?.background} vs ${emptyColor}`);
+
+      if (loggedDay) {
+        const filled = await cellStyle(loggedDay);
+        ck('a logged day in the same strip is a solid tick',
+           filled?.text === '✓', JSON.stringify(filled));
+        ck("...on a background filled with the habit's colour — told apart from the "
+           + 'ghost tick, not each compared to a constant',
+           filled?.background === gymColor && filled?.background !== ghost?.background,
+           `filled=${filled?.background} ghost=${ghost?.background} habit=${gymColor}`);
+      }
+
+      // `questionMarks` restored afterward — fixtures reset settings, but a
+      // suite that leaks one poisons the next.
+      await ev(`fetch('/api/settings', { method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionMarks: true }) })`);
+      await openHabit(gym.id);
+      const withMarks = await cellStyle(unloggedInRun);
+      ck('with questionMarks on, that same in-run day still reads the tick, not ?',
+         withMarks?.text === '✓', JSON.stringify(withMarks));
+      await ev(`fetch('/api/settings', { method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionMarks: false }) })`);
+      await openHabit(gym.id);
+
+      // Decision 4: a STORED lapse (a real 0, not just an absent row) inside a
+      // run is still on pace, so it gets the same faint tick — the boolean
+      // branch's own `inRun` arm, distinct from the `value == null` one above.
+      if (storedZeroDate) {
+        await ev(`fetch('/api/habits/${gym.id}/entries/${storedZeroDate}', {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ value: 0 }) })`);
+        await openHabit(gym.id);
+        const lapse = await cellStyle(storedZeroDate);
+        ck('a stored lapse inside the same run still gets the tick, not a blank cell',
+           lapse?.text === '✓' && lapse?.background === emptyColor && lapse?.color === gymColor,
+           JSON.stringify(lapse));
+      }
+
+      // The wiring pin: tap a DIFFERENT unlogged day (adding a completion can
+      // only help or preserve on-paceness, never break the run being asserted).
+      // The write is held open first — same technique as "optimistic, not
+      // hopeful" above — because the paint that draws this tick during a
+      // request is `repaintCells`, and it is the ONLY consumer of the run set
+      // `render()` computed: reading the cell only after the request settles
+      // would pass even with that set dropped on the way in, since `refresh()`
+      // rebuilds the card through `dayCells` with a freshly computed run set
+      // regardless of what the optimistic paint drew in between.
+      if (tapDate) {
+        paused.length = 0;
+        await send('Fetch.enable',
+          { patterns: [{ urlPattern: `*/entries/${tapDate}`, requestStage: 'Request' }] },
+          sessionId);
+        await ev(`document.querySelector('${cellSel(tapDate)}').click()`);
+        await sleep(700);
+        const midFlight = await cellStyle(unloggedInRun);
+        ck("while a DIFFERENT day's write is held in flight, the untouched in-run cell "
+           + 'still reads the optimistic tick, not a blank one',
+           paused.length > 0 && midFlight?.text === '✓' && midFlight?.color === gymColor
+             && midFlight?.background === emptyColor
+             && Math.abs(parseFloat(midFlight?.opacity ?? '0') - 0.45) < 0.01,
+           `paused=${paused.length} ${JSON.stringify(midFlight)}`);
+
+        for (const p of paused) {
+          await send('Fetch.continueRequest', { requestId: p.requestId }, sessionId).catch(() => {});
+        }
+        await send('Fetch.disable', {}, sessionId);
+        await sleep(1200);
+
+        const stillGhost = await cellStyle(unloggedInRun);
+        ck('after a tap settles and the card rebuilds, the in-run tick is still drawn',
+           stillGhost?.text === '✓' && stillGhost?.color === gymColor
+             && stillGhost?.background === emptyColor,
+           JSON.stringify(stillGhost));
+      }
+    }
+
+    // The `MIN_STREAK` gate: a probe habit with exactly one entry ~12 days ago
+    // and a 3/7 frequency makes `onPaceSeries` a run of exactly 2 days (the
+    // entry day plus the day after) — one below `MIN_STREAK` — so the day
+    // after the entry must draw empty rather than a tick. Verified against
+    // `/api/habits/:id/stats` rather than assumed.
+    const localISO = (n) => {
+      const d = new Date();
+      d.setHours(12, 0, 0, 0);
+      d.setDate(d.getDate() - n);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+        + `-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const probeEntryDate = localISO(12);
+    const probeNextDate = localISO(11);
+    const probe = await ev(`(async () => {
+      const h = await (await fetch('/api/habits', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Strip run-length probe', type: 'boolean',
+          freq_numerator: 3, freq_denominator: 7, color: '#3b82f6' }),
+      })).json();
+      await fetch('/api/habits/' + h.id + '/entries/${probeEntryDate}', {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ value: 2 }) });
+      return h;
+    })()`);
+    ck('the run-length probe habit was created', !!probe?.id, JSON.stringify(probe));
+
+    if (probe?.id) {
+      const probeStats = await ev(
+        `(async () => (await fetch('/api/habits/${probe.id}/stats')).json())()`);
+      const streak = (probeStats?.streaks ?? []).find((s) => s.start === probeEntryDate);
+      ck('the probe entry produced exactly a 2-day on-pace run, as onPaceSeries predicts',
+         streak?.length === 2, JSON.stringify(streak ?? probeStats?.streaks));
+
+      await openHabit(probe.id);
+      const afterRun = await cellStyle(probeNextDate);
+      ck('the day after a run below MIN_STREAK draws empty, not a tick',
+         afterRun?.text === '' && afterRun?.background === emptyColor,
+         JSON.stringify(afterRun));
+    }
+
+    // The Calendar card's "In a run" legend swatch has to describe THIS
+    // window, not the habit's whole history — a run made entirely of LOGGED
+    // days has every one of its dates in `streakDates(...)` and no blank
+    // cell for the continuation stroke to land on, so a gate reading
+    // `inRun.size > 0` shows the swatch over a grid with no marked cell at
+    // all. Four consecutive days on a DAILY habit (freq 1/1) is what makes
+    // this reachable cheaply: `onPaceSeries`'s trailing window is one day,
+    // so nothing inside a daily streak is ever left unlogged — unlike Gym
+    // above, whose 3/7 schedule fills its run with the very unlogged days
+    // this suite uses to pin the tick itself.
+    const closedRunDates = [13, 12, 11, 10].map(localISO); // oldest first
+    const closedRun = await ev(`(async () => {
+      const h = await (await fetch('/api/habits', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Strip closed-run probe', type: 'boolean',
+          freq_numerator: 1, freq_denominator: 1, color: '#f59e0b' }),
+      })).json();
+      for (const d of ${JSON.stringify(closedRunDates)}) {
+        await fetch('/api/habits/' + h.id + '/entries/' + d, {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ value: 2 }) });
+      }
+      return h;
+    })()`);
+    ck('the closed-run probe habit was created', !!closedRun?.id, JSON.stringify(closedRun));
+
+    if (closedRun?.id) {
+      const closedStats = await ev(
+        `(async () => (await fetch('/api/habits/${closedRun.id}/stats')).json())()`);
+      const closedStreak =
+        (closedStats?.streaks ?? []).find((s) => s.start === closedRunDates[0]);
+      ck('the four logged days form one streak at or above MIN_STREAK',
+         closedStreak?.length >= 3, JSON.stringify(closedStreak ?? closedStats?.streaks));
+
+      await openHabit(closedRun.id);
+
+      // Read straight off the rendered page, not re-derived: `data-run-marks`
+      // is the count `calendarChart` itself gave the continuation stroke, and
+      // the legend is read the same way a user would — its text content.
+      const calProbe = await ev(`(() => {
+        const svg = document.querySelector('[aria-label="Completion calendar"]');
+        const legend = [...document.querySelectorAll('#view-detail .card')]
+          .find((c) => c.querySelector('.card-title')?.textContent === 'Calendar')
+          ?.querySelector('.legend');
+        return {
+          runMarks: svg?.getAttribute('data-run-marks') ?? null,
+          legendText: legend?.textContent ?? '',
+        };
+      })()`);
+      ck('an all-logged streak draws zero run marks in this window',
+         calProbe.runMarks === '0', JSON.stringify(calProbe));
+      ck('...and the legend does not claim an "In a run" mark absent from the grid',
+         !/In a run/.test(calProbe.legendText), JSON.stringify(calProbe));
+    }
+  }
 } catch (e) {
   ck('suite ran to completion', false, e.message);
 } finally {
