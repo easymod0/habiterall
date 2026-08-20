@@ -70,6 +70,17 @@ data class Habit(
     @SerialName("currentStreak") val currentStreak: Int = 0,
     @SerialName("bestStreak") val bestStreak: Int = 0,
     @SerialName("totalCompleted") val totalCompleted: Int = 0,
+    /**
+     * Whether a day with NO ROW already counts as kept, for THIS habit —
+     * `unansweredCounts` (shared/src/stats.js) resolved against the account's
+     * `atMostUnlogged` and this habit's own override. Response-only: it is not
+     * stored anywhere and does not belong on [HabitInput] or in `toInput()`,
+     * the way [score] and the streaks above do not either. Defaults to
+     * `false` so a habit from `/habits` (which does not carry it) or an older
+     * server degrades to the fail-safe direction — today's drawing, with
+     * nothing painted for an unanswered day.
+     */
+    @SerialName("unlogged_is_success") val unloggedIsSuccess: Boolean = false,
     /** date -> value, for the days the overview window covers. */
     val entries: Map<String, Double> = emptyMap(),
     /** dates that are skips, kept apart from `entries` for the reason above. */

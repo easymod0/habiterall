@@ -170,4 +170,126 @@ decay constant is Loop's own, `0.5^(sqrt(frequency)/13)` — read from its
 source, not guessed. A fixed 30-day half-life sat here for a while and made a
 perfect habit take four months to look strong instead of one.
 
+## Issue #222 — an unlogged day that counts as kept, drawn as one
+
+Everything above this heading is `unansweredCounts` deciding what an unlogged
+day is WORTH. None of it taught a single grid cell to draw the answer: every
+figure the server computes — score, streaks, history, weekday charts,
+times-per-week — read `success` correctly, and every cell any client painted
+still showed an empty square, because the renderers gate on the presence of a
+row and stop; they never asked the precedence at all. The repro that made this
+concrete: a daily at-most habit, target 2, `at_most_unlogged: 'success'`, one
+row 30 days ago and nothing since. The server reports a 31-day streak, a score
+of 0.809, and 31 of 31 history buckets completed. The Calendar card paints one
+filled square and thirty empty ones; the History card immediately under it
+paints thirty-one full bars. Same page, same window, opposite verdicts.
+
+### The decisions, and why each one is what it is
+
+**The cell does change, and the treatment is a faint MARK, not a new step on
+the ramp.** The alternative — folding an unlogged-but-kept day into the
+existing colour ramp, as if it were a recorded amount at some fractional
+strength — would have made the Less→More legend lie: that ramp means "how much
+was logged", and this day has nothing logged on it at all. A mark that reads
+as "this is a different KIND of fact" was the only option that leaves the ramp
+meaning what it already means.
+
+**Day cells (checkboxes) get a ghost `✓`; the calendar (blocks) gets a faint
+block.** These are not the same idea painted twice, they are one idea in two
+mediums. `ui/day-strip.js`'s cells and the Android widget's grid are a glyph
+medium: one character stands for the whole day, so the natural way to say
+"this counted as a check mark, faintly" is a faint check mark. `charts.js`'s
+calendar and `DayGrid`'s own cells are a block medium: a filled rectangle
+already IS the unit of meaning, at varying opacity for varying strength — so
+the natural way to say the same thing there is a faint fill, not a glyph
+stamped on top of a block that has never carried one. A design that put a
+ghost tick INSIDE the calendar block, or a tinted background behind the
+checkbox glyph, was considered and rejected for exactly this reason: it
+imports the other grid's vocabulary into a place that already has its own,
+which reads as two ideas rather than one.
+
+**The faint mark replaces the `?`, it does not sit beside it.** Both the
+checkbox and the calendar cell have exactly one slot for "what happened here"
+— one glyph, one fill — so `questionMarks`'s `?` is suppressed on precisely the
+days the new mark already claims: `charts.js`'s `unknownMark` block gates on
+`!habit.unlogged_is_success`, and `paintCheckbox`'s ghost-tick branch is
+checked before the `showUnknown` branch, so the tick wins when both would
+otherwise apply. This does lose something — "nobody answered" and "counted as
+kept anyway" were two separate facts, and one glyph cannot show both at once —
+so both survive in the one place that is not a glyph at all: the accessibility
+text. The calendar cell's `<title>` (what a screen reader gets; it never sees
+the fill) reads `` `${date}: counted as kept — no entry` ``, and Android's
+`describe(...)` reads `"counted as kept, no entry"` for the same cell. Neither
+fact is dropped; they are just no longer both visible glyphs.
+
+**0.07, chosen against the ramp's FLOOR, not picked from the ramp.** The
+at-most ramp's existing fills, for the habits this can ever reach (numerical,
+`target_type: 'at_most'`):
+
+| cell | fill |
+|---|---|
+| clean (`value <= target`) | `shade(color, 1)` — full |
+| over target | `shade(color, max(0.15, 1 - (value-target)/scale))` — 0.15 floor |
+| unlogged | `var(--grid-empty)` |
+
+`Math.max(0.15, …)` is the floor an over-target day can fall to, and it means
+something specific: a number WAS recorded, however badly the day went. 0.07 is
+under half of that floor, deliberately, so a kept-unlogged cell can never be
+mistaken for a recorded amount at a glance — it reads as categorically fainter,
+not as "a very bad day". (The `Math.max(0.2, …)` floor belongs to the
+at-least branch, which `unansweredCounts`'s gate means these habits can never
+reach; it is not the number this was chosen against.)
+
+Android's fill uses `alpha = 0.15f` for the kept-unlogged cell against its own
+existing `alpha = 0.35f` for a measurable habit that fell short — a different
+absolute number from the web's 0.07, and that is intentional rather than a
+drift between clients. The two ramps blend toward different things: the web's
+`shade` mixes toward `--grid-empty`, a themed near-white/near-black background,
+while Android's alpha blends the fill toward the CARD behind it. Matching the
+literal number across clients would not have matched the visual weight; what
+was matched instead is the RELATIVE position — under half of each client's own
+"a number was recorded" floor — which is what actually keeps the mark from
+being misread on either platform.
+
+**The renderers get the answer from a server-resolved boolean on the habit
+payload, `unlogged_is_success` — not a sixth mirror.** Two alternatives were on
+the table and both lost. One was a fifth copy of the precedence logic in
+`ui/toggle.js` (which already mirrors the tap cycle and is DOM-free by
+construction, so it was the obvious place to reach) plus a sixth in Kotlin, to
+match `unansweredCounts`. Both were rejected on the same ground `shared/CLAUDE.md`
+already states for every existing mirror: a client earns a copy of shared logic
+only when it must work OFFLINE with no server round trip available at all — the
+tap cycle, reminder-time parsing, `needsReminder`, the entry encoding, the
+channel default. Deciding what a day's FILL should be is not that: both editions'
+`/overview` and `/stats` routes already hold the exact pair `unansweredCounts`
+needs (the habit, and the account's resolved `unlogged` setting) for the score
+and the streaks on the same response, so resolving the boolean there costs each
+route one more call to a function it already imports, and ships the ANSWER
+rather than a reason for two more places to compute one. It goes stale in
+exactly the way `score` and `currentStreak` beside it already do — an offline
+client draws the account's last-known verdict until its next `/overview` — which
+is not a new offline-correctness cost, because nothing about this flag is truer
+offline than those figures already were.
+
+**The gate makes the boolean branch of every renderer unreachable, on
+purpose.** `unansweredCounts` returns `false` unless the habit is non-boolean
+AND `target_type === 'at_most'`, so `unlogged_is_success` can only ever be
+`true` for two paint branches: `isAvoided(habit)` (`show_as: 'avoid'` +
+at-most + numerical) and a plain at-most numerical habit. A boolean habit's
+day-state branch was deliberately given no matching arm in any of the four
+files that draw one (`charts.js`, `day-strip.js`, `DayGrid.kt`, `Widgets.kt`) —
+there is no habit shape that could ever reach it, and an arm that can never
+fire is a claim the tests cannot make honest.
+
+### What is still open
+
+**Streak connectors drawn over an empty cell are issue #176**, arriving here by
+a different route (`inStreak`, `charts.js`). A kept-unlogged cell paints its own
+faint fill; whether a streak line should visually bridge it is that issue's
+question, not this one's, and this change does not touch `inStreak`.
+
+**The credit window's missing far end is issue #223.** Different layer again —
+this is about which cells paint which fill; #223 is about how far a range that
+starts at the earliest stored entry should reach, which the root `CLAUDE.md`
+already documents as "the model working" rather than a bug.
 

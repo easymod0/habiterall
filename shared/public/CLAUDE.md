@@ -184,6 +184,56 @@ changed at all" sent a still-ticked History card back to today.
 `windowedChart` gives its range readout the same `.cal-range` class the calendar
 uses, so a test looking one up must scope to a card by title.
 
+## A day nobody answered, drawn as kept
+
+**The dashboard grid and the Calendar card get different treatments on
+purpose, because they are different mediums.** `ui/day-strip.js`'s cells are
+checkboxes — a glyph medium, one character per day — so a habit whose unlogged
+days already count as kept (`habit.unlogged_is_success`, resolved server-side
+by `unansweredCounts`) draws a ghost `✓` there, at 0.45 opacity in the habit's
+own colour. `charts.js`'s calendar is a heatmap — a block medium — so the same
+fact is a faint FILL, `shade(color, 0.07)`, not a glyph on top of a block. One
+idea, expressed once in each grid's own vocabulary; drawing a tick over the
+calendar block or a tinted square in the checkbox strip would be the same idea
+said twice, in a grid that has no use for the other's vocabulary.
+
+**The faint mark replaces the `?`, it does not sit beside it.** Both slots hold
+one glyph (the checkbox) or one fill (the calendar cell), so `questionMarks`'s
+`?` is suppressed on exactly the days the ghost tick or the faint fill already
+claims — see the gate at `charts.js`'s `unknownMark` block and the branch order
+inside `paintCheckbox`'s `value == null` case. The two facts this collapses —
+"nobody answered" and "counted as kept anyway" — do not disappear, they move to
+the one place both can still be read apart: the calendar cell's `<title>` (a
+screen reader gets only that, not the fill) says
+`` `${date}: counted as kept — no entry` ``, and the day-strip comment at the
+same branch says why a checkbox can carry only one glyph at a time.
+
+**0.07 is chosen against the ramp's floor, not from it.** The at-most ramp's
+`Math.max(0.15, …)` floor on an overage means "a number was recorded"; 0.07 is
+under half of that, specifically so a faint kept-unlogged cell can never be
+misread as a logged amount, however faint. It is not a fifth step on the
+Less→More legend — the ramp still means exactly what it means today — it is a
+new, separately-labelled swatch ("Kept, unlogged") in front of it, in both of
+`ui/detail.js`'s legend branches (the ramp, and `isAvoided`'s Clean/Slipped
+pair), because a fill the legend does not explain is the defect the `isAvoided`
+branch beside it already exists to avoid.
+
+**The gate makes the boolean branch unreachable, and that is not an oversight.**
+`unansweredCounts` returns `false` unless the habit is non-boolean AND
+`target_type === 'at_most'`, so only `isAvoided` habits and plain at-most
+numerical ones can ever carry `unlogged_is_success: true`. Do not add a
+matching arm to a boolean day's paint branch — there is no day shape that would
+ever reach it.
+
+**The flag is a payload field, not a fifth mirror.** See `shared/CLAUDE.md`'s
+"Day states and habit shape" for why: `shared/src` is not served here, so no
+module in this directory could call `unansweredCounts` itself even by mistake.
+
+**Still open, on purpose.** Streak connectors drawn over an empty cell are
+issue #176, a different route (`inStreak`) to a similar-looking gap; and the
+credit window's missing far end is issue #223. Neither is this change's to
+fix. `docs/decisions/day-states.md` has the long form.
+
 ## Amounts
 
 **An amount is parsed — not asked for with `prompt()`, and not typed into

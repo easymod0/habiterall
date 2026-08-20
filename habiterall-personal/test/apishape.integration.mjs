@@ -112,6 +112,88 @@ const exported = await (await fetch(`${base}/api/export`)).json();
 ck('GET /export returned the habit', exported.habits.length > 0);
 if (exported.habits.length) checkShape('GET /export', exported.habits[0]);
 
+/**
+ * `unlogged_is_success` — the flag `unansweredCounts` resolves onto the
+ * response, checked at both call sites (`/overview`, `/stats`). Its own unit
+ * tests pin the precedence rule; this is the wiring, which is exactly what a
+ * caller can get wrong without touching the rule at all. Every habit here
+ * carries no entries, so every day is unanswered on purpose.
+ */
+async function putSettings(patch) {
+  await fetch(`${base}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+async function makeHabit(body) {
+  return (await (await fetch(`${base}/api/habits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })).json());
+}
+
+async function overviewFlag(id) {
+  const body = await (await fetch(`${base}/api/overview?days=7`)).json();
+  return body.habits.find((h) => h.id === id)?.unlogged_is_success;
+}
+
+async function statsFlag(id) {
+  const body = await (await fetch(`${base}/api/habits/${id}/stats`)).json();
+  return body.habit.unlogged_is_success;
+}
+
+/**
+ * Assert a real JSON boolean, not merely a truthy or falsy value — a wrong
+ * implementation that echoes the raw setting string ("success"/"miss") would
+ * pass a `== expected` check on every row here.
+ */
+function ckFlag(label, id, expected) {
+  return Promise.all([
+    overviewFlag(id).then((v) => ck(`${label} (/overview)`, v === expected,
+      `got ${JSON.stringify(v)} (${typeof v})`)),
+    statsFlag(id).then((v) => ck(`${label} (/stats)`, v === expected,
+      `got ${JSON.stringify(v)} (${typeof v})`)),
+  ]);
+}
+
+await putSettings({ atMostUnlogged: 'success' });
+
+const numericalAtMostDefault = await makeHabit({
+  name: 'Soda (default)', type: 'numerical', target_type: 'at_most', target_value: 2,
+});
+await ckFlag('account success, habit default, numerical at-most -> true',
+  numericalAtMostDefault.id, true);
+
+const booleanHabit = await makeHabit({ name: 'Meditate', type: 'boolean' });
+await ckFlag('account success, habit default, boolean -> false', booleanHabit.id, false);
+
+const numericalAtLeast = await makeHabit({
+  name: 'Pushups', type: 'numerical', target_type: 'at_least', target_value: 20,
+});
+await ckFlag('account success, habit default, numerical at-least -> false',
+  numericalAtLeast.id, false);
+
+await putSettings({ atMostUnlogged: 'miss' });
+
+const habitOverridesSuccess = await makeHabit({
+  name: 'Soda (override success)', type: 'numerical', target_type: 'at_most',
+  target_value: 2, at_most_unlogged: 'success',
+});
+await ckFlag('account miss, habit success, numerical at-most -> true',
+  habitOverridesSuccess.id, true);
+
+await putSettings({ atMostUnlogged: 'success' });
+
+const habitOverridesMiss = await makeHabit({
+  name: 'Soda (override miss)', type: 'numerical', target_type: 'at_most',
+  target_value: 2, at_most_unlogged: 'miss',
+});
+await ckFlag('account success, habit miss, numerical at-most -> false',
+  habitOverridesMiss.id, false);
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

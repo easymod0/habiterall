@@ -84,6 +84,24 @@ every caller already has the habit in hand and none of them should have to
 remember it. It is exported for `awards.js`, which asks it rather than restating
 it.
 
+**The resolved verdict also rides on the `/overview` and `/stats` payload, as
+`unlogged_is_success`, and that is not a sixth thing to keep in step.** Both
+routes already hold the pair `unansweredCounts` needs — the habit and the
+account's resolved `unlogged` — for the figures beside it, so the field costs
+each route one more call to a function it already imports. It is deliberately
+NOT a mirror of the kind the root `CLAUDE.md` warns a client only earns when it
+must work offline: `shared/src` is not served to the browser, so no web
+renderer could call `unansweredCounts` itself, and Android holds no second copy
+of the precedence either — both clients hold the two INPUTS (the setting, the
+override) but not the RULE, and now they are handed the answer instead of a
+reason to restate it. It goes stale exactly the way `score` and
+`currentStreak` on the same payload already do — an offline device draws the
+account's last-known verdict until its next `/overview` — which costs no
+offline correctness that payload did not already cost. It is response-only:
+not in `parseHabit`, any `*_HABIT_FIELDS` list, `HabitInput`, or a migration.
+`docs/decisions/day-states.md` has the long form, including the alternatives
+that lost (a mirror in `ui/toggle.js` plus a Kotlin copy).
+
 **A row holding 0 is still a success on an at-most habit** under either answer —
 that is the user saying "none today", which is the thing being asked for.
 

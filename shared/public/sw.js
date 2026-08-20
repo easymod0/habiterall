@@ -178,7 +178,14 @@ const sw = self;
 // 'focusKeyOf'" at module link time, BEFORE `start()` runs and therefore
 // outside `#view-error`. And `#count-*` changed owner, so a cached old
 // dashboard.js paired with a new app.js would wire the amount dialog twice.
-const CACHE_VERSION = 'v21';
+// v22: an unlogged day that counts as kept is now drawn, not only computed —
+// `charts.js`'s calendar block, `ui/day-strip.js`'s checkbox and `ui/detail.js`'s
+// legend all read the same new `unlogged_is_success` field together. No new
+// file, but `shellFirst` is stale-while-revalidate into the running worker's
+// cache, so without the bump a shell could hold the new `ui/detail.js` — whose
+// legend now claims a "Kept, unlogged" swatch — over a cached old `charts.js`
+// that never paints the block the legend is describing.
+const CACHE_VERSION = 'v22';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

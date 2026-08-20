@@ -474,6 +474,73 @@ ck('  while still carrying the summary figures it is for',
   coverageRow.score === 0.381137 && coverageRow.currentStreak === RECENT_DAYS,
   `${coverageRow.score} / ${coverageRow.currentStreak}`);
 
+/* ---------- unlogged_is_success ---------- */
+
+console.log('\n--- unlogged_is_success ---');
+// `unansweredCounts`'s own unit tests (shared/test/stats.test.js) pin the
+// precedence rule; this is the WIRING at the two routes that resolve it onto
+// the response, which is exactly what can drift without the rule itself
+// changing at all. Every habit below carries no entries, so every day is
+// unanswered on purpose.
+const putSettings = (patch) => fetch(`${overviewBase}/api/settings`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(patch),
+});
+
+const overviewFlagFor = async (id) => {
+  const body = await getOverview({ days: 7 });
+  return body.habits.find((h) => h.id === id)?.unlogged_is_success;
+};
+const statsFlagFor = async (id) => {
+  const body = await fetch(`${overviewBase}/api/habits/${id}/stats`).then((r) => r.json());
+  return body.habit.unlogged_is_success;
+};
+
+// Assert a real JSON boolean, not merely a value that happens to be truthy or
+// falsy — an implementation that echoed the raw setting string would pass a
+// loose comparison on every row here.
+const ckFlag = async (label, id, expected) => {
+  const [ov, st] = await Promise.all([overviewFlagFor(id), statsFlagFor(id)]);
+  ck(`${label} (/overview)`, ov === expected, `got ${JSON.stringify(ov)} (${typeof ov})`);
+  ck(`${label} (/stats)`, st === expected, `got ${JSON.stringify(st)} (${typeof st})`);
+};
+
+await putSettings({ atMostUnlogged: 'success' });
+
+const numericalAtMostDefault = await postHabit({
+  name: 'Soda (default)', type: 'numerical', target_type: 'at_most', target_value: 2,
+});
+await ckFlag('account success, habit default, numerical at-most -> true',
+  numericalAtMostDefault.id, true);
+
+const booleanHabit = await postHabit({ name: 'Meditate', type: 'boolean' });
+await ckFlag('account success, habit default, boolean -> false', booleanHabit.id, false);
+
+const numericalAtLeast = await postHabit({
+  name: 'Pushups', type: 'numerical', target_type: 'at_least', target_value: 20,
+});
+await ckFlag('account success, habit default, numerical at-least -> false',
+  numericalAtLeast.id, false);
+
+await putSettings({ atMostUnlogged: 'miss' });
+
+const habitOverridesSuccess = await postHabit({
+  name: 'Soda (override success)', type: 'numerical', target_type: 'at_most',
+  target_value: 2, at_most_unlogged: 'success',
+});
+await ckFlag('account miss, habit success, numerical at-most -> true',
+  habitOverridesSuccess.id, true);
+
+await putSettings({ atMostUnlogged: 'success' });
+
+const habitOverridesMiss = await postHabit({
+  name: 'Soda (override miss)', type: 'numerical', target_type: 'at_most',
+  target_value: 2, at_most_unlogged: 'miss',
+});
+await ckFlag('account success, habit miss, numerical at-most -> false',
+  habitOverridesMiss.id, false);
+
 overviewServer.close();
 // The rows above would otherwise be counted by the checks that follow.
 await withUser(alice, (db) =>

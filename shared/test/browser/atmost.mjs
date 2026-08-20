@@ -91,5 +91,39 @@ const c6=paint({[d0]:1,[d1]:3},'#10b981',{...smoking,target_value:2});
 check('avoid: under the limit is clean', c6[d0]==='#10b981', c6[d0]);
 check('avoid: over the limit is a slip', c6[d1]==='var(--danger)', c6[d1]);
 
+// An unanswered day that already counts as kept (issue #222). One habit
+// carries all four kinds of day, so the fills are told apart from each other
+// rather than only from `empty`. `at_most_unlogged` is set to a non-default
+// value on purpose — a fixture holding a field's default compares equal to
+// itself and passes with the field dropped entirely — but the renderer never
+// reads it: `unlogged_is_success` is the server-resolved boolean it must go
+// by instead, per the flag's own contract.
+const dClean=ago(10), dZero=ago(11), dSlip=ago(12), dBare=ago(13);
+const kept={type:'numerical',target_value:2,target_type:'at_most',
+            at_most_unlogged:'success', unlogged_is_success:true, unit:'coffees'};
+const cKept=paint({[dClean]:1,[dZero]:0,[dSlip]:5},'#10b981',kept);
+check('logged clean day (value <= target) is full', cKept[dClean]==='#10b981', cKept[dClean]);
+check('a stored 0 is also full — a stated lapse is a real success on a limit',
+  cKept[dZero]==='#10b981', cKept[dZero]);
+check('a logged slip (over target) is on the 0.15-floor ramp',
+  cKept[dSlip]==='color-mix(in srgb, #10b981 15%, var(--grid-empty))', cKept[dSlip]);
+check('an unanswered day gets the literal 0.07 block — well under the 0.15 floor',
+  cKept[dBare]==='color-mix(in srgb, #10b981 7%, var(--grid-empty))', cKept[dBare]);
+
+// The `?` must not draw on the affected cell, and must still draw on the same
+// day for a habit resolved to `miss` — same dataset, same date, one flag apart.
+const paintMarks=(entries,habit)=>{
+  const svg=calendarChart(entries,'#10b981',habit,{weeks:4,skips:new Set(),unknownMark:true});
+  const marks=new Set();
+  svg.walk(n=>{ if(n.name==='text' && n.attrs['data-mark-for']) marks.add(n.attrs['data-mark-for']); });
+  return marks;
+};
+const missHabit={...kept, at_most_unlogged:'miss', unlogged_is_success:false};
+const keptMarks=paintMarks({[dClean]:1},kept);
+const missMarks=paintMarks({[dClean]:1},missHabit);
+check('unknownMark: absent on the day counted as kept', !keptMarks.has(dBare), [...keptMarks].join(','));
+check('unknownMark: still present on the same day resolved to miss',
+  missMarks.has(dBare), [...missMarks].join(','));
+
 console.log(fails===0?'\nALL AT-MOST CHECKS PASSED':`\n${fails} FAILED`);
 process.exit(fails===0?0:1);

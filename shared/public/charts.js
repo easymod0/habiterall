@@ -85,7 +85,7 @@ const themed = (name) => `var(${name})`;
  * CSS to resolve. `t >= 1` returns the colour itself: a mix with nothing to mix
  * is noise in the DOM, and the habit's own colour is not a theme colour.
  */
-function shade(hex, t) {
+export function shade(hex, t) {
   if (t >= 1) return hex;
   return `color-mix(in srgb, ${hex} ${Math.round(t * 100)}%, var(--grid-empty))`;
 }
@@ -318,6 +318,17 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       if (isFuture) {
         fill = 'transparent';
         label = `${shown}: in the future`;
+      } else if (value == null && habit.unlogged_is_success) {
+        // No row at all, on a habit where that already counts as kept —
+        // `unlogged_is_success` is server-resolved (`unansweredCounts`), so
+        // this never fires for a habit shape the rule does not reach. Faint
+        // rather than a new step on the ramp, and well under the 0.15 floor
+        // an overage can fall to, so it can never be mistaken for a recorded
+        // amount. Both facts stay in the label, because a screen reader gets
+        // only the <title> and a faint block and a full one read the same to
+        // it.
+        fill = shade(color, 0.07);
+        label = `${shown}: counted as kept — no entry`;
       } else if (value != null) {
         if (isSkip) {
           fill = themed('--surface-2');
@@ -416,7 +427,12 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // from the cell rather than fixed, because the same glyph has to sit in a
       // 24px square at the closest zoom and an 8px one at the widest. It is
       // deliberately not drawn on a future day: nothing is missing there yet.
-      if (unknownMark && !isFuture && value == null && !isSkip) {
+      //
+      // Nor on a day the cell above already painted as kept: the faint fill
+      // is what answers "nobody answered" now, and `?` on top of it would be
+      // the same fact drawn twice in one cell where every other habit gets it
+      // once.
+      if (unknownMark && !isFuture && value == null && !isSkip && !habit.unlogged_is_success) {
         svg.appendChild(el('text', {
           x: x + CELL / 2,
           y: y + CELL / 2,
