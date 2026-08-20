@@ -162,25 +162,49 @@ const detailHost = {
 
   edit(id, date, to) {
     if (!openHabit || openHabit.id !== id) return () => {};
-    const had = Object.hasOwn(openEntriesByDate, date) ? openEntriesByDate[date] : undefined;
-    const wasSkip = openSkipSet.has(date);
+    // The maps THIS write is against, captured rather than named again when the
+    // undo runs — and that is the whole of the rule below.
+    //
+    // `render()` reassigns all three bindings wholesale (one habit's maps are
+    // never mutated into another's), so a closure over the NAMES restores into
+    // whatever the page holds by the time it runs. The guard above cannot help:
+    // it has already returned. Tap a cell, navigate to another habit while the
+    // write is in flight, and let that write come back a real failure — a 401,
+    // a 5xx, a habit deleted from another device, anything ANSWERED, since only
+    // an unanswered request carries `queued` — and the rollback lands on the new
+    // habit's map for a date the two share. `writeDay` repaints straight after,
+    // so a cell is drawn from a value that was never this habit's, and the next
+    // tap on it cycles from there and writes that back.
+    //
+    // Re-checking `openHabit.id === id` inside the closure is the obvious fix
+    // and is not enough on its own: a `refresh()` for the SAME habit replaces
+    // the maps too and passes that check. Identity of the map answers both.
+    const entries = openEntriesByDate;
+    const skips = openSkipSet;
+    const had = Object.hasOwn(entries, date) ? entries[date] : undefined;
+    const wasSkip = skips.has(date);
 
     if (to === 'clear') {
-      delete openEntriesByDate[date];
+      delete entries[date];
     } else {
       // `entryWrite` stores a skip as `{value: 0, status: 'skip'}`, so 0 is
       // what the refetch will report beside the status — the optimistic state
       // has to be the one that comes back, or the cell flickers on reload.
-      openEntriesByDate[date] = to === 'skip' ? 0 : to;
+      entries[date] = to === 'skip' ? 0 : to;
     }
-    if (to === 'skip') openSkipSet.add(date);
-    else openSkipSet.delete(date);
+    if (to === 'skip') skips.add(date);
+    else skips.delete(date);
 
     return () => {
-      if (had === undefined) delete openEntriesByDate[date];
-      else openEntriesByDate[date] = had;
-      if (wasSkip) openSkipSet.add(date);
-      else openSkipSet.delete(date);
+      // Orphaned by a rebuild, so there is nothing here to undo: what replaced
+      // these maps was read from the server, and the write being rolled back
+      // never reached it. Restoring into the successor would be the corruption,
+      // not the repair. One test, because `render()` assigns the pair together.
+      if (entries !== openEntriesByDate) return;
+      if (had === undefined) delete entries[date];
+      else entries[date] = had;
+      if (wasSkip) skips.add(date);
+      else skips.delete(date);
     };
   },
 
@@ -464,8 +488,21 @@ function render(stats, entries) {
  * dialog to answer a yes/no question the notification had already asked.
  *
  * Everything it draws is already in memory: `/habits/:id/entries` is fetched
- * unwindowed, so paging back costs no request. That is the whole reason this
- * pages by slicing rather than the way the dashboard does, which refetches.
+ * unwindowed, so the slice a page lands on needs nothing the page does not
+ * already hold. That is why it pages by SLICING where the dashboard pages by
+ * asking for a different window — the dashboard holds only the fortnight it
+ * requested, and no `end` parameter reaches the server from here.
+ *
+ * What that does NOT mean is request-free, and an earlier version of this
+ * comment claimed it. `redraw` is `refresh(habit.id)` — the same full `open()`
+ * every other card on this page redraws through, two round trips — so paging
+ * spends a refetch to show a slice it already had. It is the page's one idiom
+ * rather than this card's own bug, and it costs something visible in exactly
+ * one place: offline, `page()` has already moved `state.chartOffsets` before
+ * `redraw` runs, the GET is not replayable, and `open()` toasts and returns
+ * without rendering. The position has moved and the strip has not, so the
+ * window jumps when something next draws it. Redrawing from `entries` in hand
+ * is what would make the stronger claim true; it is not what this does.
  */
 function buildRecentDaysCard({ habit, entries, chartWidth }) {
   const strip = card('Recent days', null);

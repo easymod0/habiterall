@@ -317,6 +317,85 @@ try {
        + JSON.stringify(await stored(seeded.day1, seeded.avoid)));
   }
 
+  /* ---------- a rollback belongs to the write it was made for ---------- */
+
+  console.log('--- the undo, after the page has moved on ---');
+  if (seeded.avoid) {
+    // `detailHost.edit` hands `writeDay` a closure that puts a day back when its
+    // request turns out not to have been made. What it puts back lives in maps
+    // that `render()` REPLACES wholesale, so the question is which habit's map
+    // the rollback lands in — and the answer used to be "whichever is open when
+    // it runs", because the closure named the bindings rather than holding the
+    // maps. The id guard in `edit` cannot see this: it has already returned.
+    //
+    // The navigation is a `location.hash` write and NOT `openHabit()`, which is
+    // the whole reason this is reachable. `Page.navigate` is a document load and
+    // takes the in-flight write's promise with it, so the `catch` that rolls
+    // back never runs and any build passes. A fragment change is same-document
+    // — the note above `openHabit` says so — and leaves the request paused, the
+    // module state alive, and a different habit on screen.
+    //
+    // The second habit is the avoided one because it CYCLES, so the corruption
+    // has somewhere to show up in storage: from a clean day (0) the next tap is
+    // a slip (target + 1), while from a day the map has lost it is `unknown`,
+    // whose next tap is the clean day again. Reading a deleted key as unknown is
+    // what makes those two differ. Both rest on the same default cycle the
+    // offline block below does — no skips, no question marks.
+    await ev(`(async () => {
+      await fetch('/api/habits/${seeded.habit}/entries/${seeded.day2}', { method: 'DELETE' });
+      await fetch('/api/habits/${seeded.avoid}/entries/${seeded.day2}', {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ value: 0 }) });
+    })()`);
+    await openHabit(seeded.habit);
+
+    paused.length = 0;
+    await send('Fetch.enable', { patterns: [{
+      urlPattern: `*/habits/${seeded.habit}/entries/${seeded.day2}`,
+      requestStage: 'Request',
+    }] }, sessionId);
+    await ev(`document.querySelector('${cellSel(seeded.day2)}').click()`);
+    await sleep(700);
+    ck('the first habit\'s write is held in flight', paused.length > 0, `paused=${paused.length}`);
+
+    await ev(`location.hash = '#/habit/${seeded.avoid}'`);
+    // The HEADING, not a cell: both habits paint this day as a tick — one
+    // optimistically, one from its stored clean day — so a cell cannot say which
+    // page arrived, and waiting on the wrong thing would pass instantly here.
+    await waitUntil(ev, `(() => {
+      const h = document.querySelector('#view-detail .detail-head h2');
+      return !!h && h.textContent.includes('Strip avoid probe')
+        && !!document.querySelector('${cellSel(seeded.day2)}');
+    })()`, { what: 'the avoided habit, open over the held write' });
+
+    // ANSWERED, so `api()` throws without `queued` and `writeDay` rolls back —
+    // the one path that runs the closure. A dropped connection is queued
+    // instead, the optimistic state is kept on purpose, and nothing undoes.
+    for (const p of paused) {
+      await send('Fetch.fulfillRequest', {
+        requestId: p.requestId,
+        responseCode: 500,
+        responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+        body: Buffer.from('{"error":"refused"}').toString('base64'),
+      }, sessionId).catch(() => {});
+    }
+    await send('Fetch.disable', {}, sessionId);
+    await sleep(1500);
+
+    const afterRollback = await box(seeded.day2);
+    ck('a failed write does not roll back into the habit now open',
+       afterRollback === '✓', `cell reads ${JSON.stringify(afterRollback)}`);
+
+    // The damage the paint only hints at. A corrupted cell is read back by the
+    // next tap, which computes the cycle from it — so the wrong value reaches
+    // storage for a day this habit's own writes never touched.
+    await tap(seeded.day2, 1600);
+    ck('...and the next tap on it still cycles from what the server holds',
+       (await stored(seeded.day2, seeded.avoid))?.value === seeded.avoidTarget + 1,
+       `expected ${seeded.avoidTarget + 1}, stored `
+       + JSON.stringify(await stored(seeded.day2, seeded.avoid)));
+  }
+
   /* ---------- offline ---------- */
 
   console.log('--- offline, the cycle still advances ---');
@@ -373,8 +452,6 @@ try {
     const back = await stripRange();
     ck('‹ Earlier moves the strip back', back !== atNow, `${atNow} -> ${back}`);
 
-    // Hiding the card must forget its position, exactly as the other paging
-    // cards do — that is the whole of its `forget` entry in the CARDS map.
     // Hiding the card must forget its position, exactly as the other paging
     // cards do — that is the whole of its `forget` entry in the CARDS map.
     //
