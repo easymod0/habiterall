@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { withUser } from './db/pool.js';
+import { createMemo, remember } from './cache.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
@@ -109,7 +110,14 @@ const route = (fn) => (req, res, next) => fn(req, res, next).catch(next);
  */
 const ZONE_CHECK_MS = 60_000;
 
-/** userId -> {zone, at}. Bounded by the accounts seen this process lifetime. */
+/**
+ * userId -> `{zone, at}`, bounded by `remember` rather than by its own comment.
+ *
+ * "Bounded by the accounts seen this process lifetime" is what this used to
+ * say, and that is a restatement of the leak rather than a bound. See
+ * `cache.js`, which is one policy for this, `blockCache` next door and the
+ * `/overview` memo below.
+ */
 const lastReportedZone = new Map();
 
 api.use(route(async (req, res, next) => {
@@ -135,7 +143,7 @@ api.use(route(async (req, res, next) => {
       ));
       // After the write, so a failure is retried on the next request rather
       // than remembered as done.
-      lastReportedZone.set(user, { zone, at: Date.now() });
+      remember(lastReportedZone, user, { zone }, { ttlMs: ZONE_CHECK_MS });
     } catch (err) {
       log.warn('settings.device_clock_not_stored', { user }, err);
     }

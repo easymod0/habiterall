@@ -52,6 +52,25 @@ const alice = await mkUser('ci-alice');
 const bob = await mkUser('ci-bob');
 console.log(`  alice=${alice}  bob=${bob}\n`);
 
+/* ---------- the pool's timeouts ---------- */
+
+// A configuration assertion, and it has to be made against a real session:
+// `pg` passes these through as connection PARAMETERS, so the only thing that
+// can say whether they arrived is Postgres. Reading `pool.options` back would
+// pin that the object was built and nothing about whether it took.
+{
+  const c = await pool.connect();
+  const shown = async (name) => (await c.query(`SHOW ${name}`)).rows[0][name];
+  // The literals, not the constants from pool.js: a test importing those would
+  // compare each with itself and pass with both parameters dropped.
+  ck('statement_timeout reaches the session', await shown('statement_timeout') === '15s',
+    await shown('statement_timeout'));
+  ck('idle_in_transaction_session_timeout reaches the session',
+    await shown('idle_in_transaction_session_timeout') === '30s',
+    await shown('idle_in_transaction_session_timeout'));
+  c.release();
+}
+
 /* ---------- habits and entries ---------- */
 
 console.log('--- habits ---');
