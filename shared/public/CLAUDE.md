@@ -225,7 +225,7 @@ numerical ones can ever carry `unlogged_is_success: true`. Do not add a
 matching arm to a boolean day's paint branch — there is no day shape that would
 ever reach it.
 
-**The flag is a payload field, not a fifth mirror.** See `shared/CLAUDE.md`'s
+**The flag is a payload field, not a sixth mirror.** See `shared/CLAUDE.md`'s
 "Day states and habit shape" for why: `shared/src` is not served here, so no
 module in this directory could call `unansweredCounts` itself even by mistake.
 

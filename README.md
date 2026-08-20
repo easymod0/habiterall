@@ -1903,9 +1903,9 @@ their own question.
 The day squares and the Calendar card now agree with that choice too, instead
 of drawing every unanswered day the same regardless of the setting. On a habit
 where a silent day counts as kept, the day squares — the dashboard, a habit's
-own page, and the Android widget — draw a faint checkmark where the `?` would
-otherwise go: one mark in that slot, not both, because a checkbox has room for
-only one. The Calendar card, being a heatmap rather than a row of checkboxes,
+own page, the Android app's own grid and its home-screen widget — draw a faint
+checkmark where the `?` would otherwise go: one mark in that slot, not both,
+because a checkbox has room for only one. The Calendar card, being a heatmap rather than a row of checkboxes,
 answers the same way in its own vocabulary: a faint fill in the habit's colour,
 well under the lightest fill an actual over-the-limit day can reach, so it can
 never be mistaken for a logged amount, plus a "Kept, unlogged" swatch in the
