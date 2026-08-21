@@ -21,6 +21,11 @@
 
 export const state = {
   habits: [],
+  // The account's own categories, `{id, name, color, position}[]`. Kept
+  // alongside `habits` for the same reason: `/overview` already reads it for
+  // the dashboard's (future, behind `groupByCategory`) sections, and the habit
+  // dialog's picker needs the same list rather than a fetch of its own.
+  categories: [],
   editingId: null,
   openHabitId: null,   // habit shown in the detail view, null on the dashboard
   // null means "use the saved setting". The per-habit toggles set these for

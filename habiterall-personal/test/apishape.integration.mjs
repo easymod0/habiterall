@@ -17,6 +17,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+// The clamp this suite fills to has to be the one the API enforces, not a
+// restated 30 that could drift from it.
+import { LIMITS } from '@habiterall/shared/validate.js';
 
 const workdir = mkdtempSync(join(tmpdir(), 'habiterall-shape-'));
 // These suites exercise the API, not sign-in or rate limiting, and auth now
@@ -193,6 +196,136 @@ const habitOverridesMiss = await makeHabit({
 });
 await ckFlag('account success, habit miss, numerical at-most -> false',
   habitOverridesMiss.id, false);
+
+/**
+ * Categories — a habit's group, and the field that carries it.
+ *
+ * `category_id` on a fresh habit must be JSON null and not merely falsy: a
+ * typed client (Api.kt's `Long?`) distinguishes null from 0, and 0 would be a
+ * category whose id is 0 rather than "no category at all".
+ */
+async function postJson(path, body) {
+  return fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+async function putJson(path, body) {
+  return fetch(`${base}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+const freshHabit = await makeHabit({ name: 'Category shape check', type: 'boolean' });
+ck("a fresh habit's category_id is JSON null, not merely falsy",
+  Object.is(freshHabit.category_id, null), JSON.stringify(freshHabit.category_id));
+
+/* ---- create / list / rename / recolour / delete a category ---- */
+
+const health = await (await postJson('/api/categories',
+  { name: 'Health', color: '#ff0000' })).json();
+ck('POST /categories creates it, with the name and colour sent',
+  health.name === 'Health' && health.color === '#ff0000', JSON.stringify(health));
+
+const listedCategories = await (await fetch(`${base}/api/categories`)).json();
+ck('GET /categories lists it', listedCategories.some((c) => c.id === health.id));
+
+const renamedAndRecoloured = await (await putJson(`/api/categories/${health.id}`,
+  { name: 'Wellness', color: '#00ff00' })).json();
+ck('PUT /categories/:id renames and recolours',
+  renamedAndRecoloured.name === 'Wellness' && renamedAndRecoloured.color === '#00ff00',
+  JSON.stringify(renamedAndRecoloured));
+
+/* ---- a category_id that shapes correctly but names nothing is a 400 ---- */
+
+const noSuchCategory = 999999;
+const postWithBadCategory = await postJson('/api/habits',
+  { name: 'Bad category on create', type: 'boolean', category_id: noSuchCategory });
+ck('POST /habits with a nonexistent category_id is 400',
+  postWithBadCategory.status === 400, String(postWithBadCategory.status));
+
+const habitToRecategorise = await makeHabit({ name: 'Recategorise me', type: 'boolean' });
+const putWithBadCategory = await putJson(`/api/habits/${habitToRecategorise.id}`,
+  { name: 'Recategorise me', type: 'boolean', category_id: noSuchCategory });
+ck('PUT /habits/:id with a nonexistent category_id is 400',
+  putWithBadCategory.status === 400, String(putWithBadCategory.status));
+
+/* ---- a duplicate name, folded, is a 409 ---- */
+
+const caseFoldedDuplicate = await postJson('/api/categories', { name: 'wellness' });
+ck("a second category differing from 'Wellness' only by case is 409",
+  caseFoldedDuplicate.status === 409, String(caseFoldedDuplicate.status));
+
+/* ---- deleting a category leaves its habits and their entries alone ---- */
+
+const toDelete = await (await postJson('/api/categories', { name: 'ToDelete' })).json();
+const habitWithCategory = await makeHabit(
+  { name: 'Read', type: 'boolean', category_id: toDelete.id }
+);
+ck('a habit created with a category_id keeps it',
+  habitWithCategory.category_id === toDelete.id, JSON.stringify(habitWithCategory.category_id));
+
+await fetch(`${base}/api/habits/${habitWithCategory.id}/entries/2026-01-01`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 2 }),
+});
+
+const deleteCategoryResp = await fetch(`${base}/api/categories/${toDelete.id}`,
+  { method: 'DELETE' });
+ck('DELETE /categories/:id succeeds',
+  deleteCategoryResp.status === 204, String(deleteCategoryResp.status));
+
+const survivingHabit = await (await fetch(`${base}/api/habits/${habitWithCategory.id}`)).json();
+ck("the habit survives its category's deletion, and comes back uncategorised",
+  Object.is(survivingHabit.category_id, null), JSON.stringify(survivingHabit.category_id));
+
+const survivingEntries = await (
+  await fetch(`${base}/api/habits/${habitWithCategory.id}/entries`)
+).json();
+ck('every one of its entries survives the deletion too',
+  survivingEntries.length === 1, JSON.stringify(survivingEntries));
+
+/* ---- PUT /habits/:id replaces: omitting category_id clears it ---- */
+
+const secondCategory = await (await postJson('/api/categories', { name: 'Second' })).json();
+const habitToClear = await makeHabit(
+  { name: 'Clear me', type: 'boolean', category_id: secondCategory.id }
+);
+ck('created with a category_id, it is set',
+  habitToClear.category_id === secondCategory.id, JSON.stringify(habitToClear.category_id));
+
+const clearedByOmission = await (await putJson(`/api/habits/${habitToClear.id}`,
+  { name: 'Clear me', type: 'boolean' })).json();
+ck('a PUT that omits category_id clears it (the replace rule)',
+  Object.is(clearedByOmission.category_id, null), JSON.stringify(clearedByOmission.category_id));
+
+const habitToKeep = await makeHabit(
+  { name: 'Keep me', type: 'boolean', category_id: secondCategory.id }
+);
+const keptByCarrying = await (await putJson(`/api/habits/${habitToKeep.id}`,
+  { name: 'Keep me', type: 'boolean', category_id: secondCategory.id })).json();
+ck('a PUT that carries category_id keeps it',
+  keptByCarrying.category_id === secondCategory.id, JSON.stringify(keptByCarrying.category_id));
+
+/* ---- LIMITS.categories is a ceiling, not a suggestion ----
+ * Last, deliberately: it fills the account to the ceiling, and every test
+ * above that creates a category needs room left to do it in. */
+
+const categoryCountBefore = (await (await fetch(`${base}/api/categories`)).json()).length;
+let filledToCeiling = true;
+for (let i = categoryCountBefore; i < LIMITS.categories; i++) {
+  const r = await postJson('/api/categories', { name: `Filler ${i}` });
+  if (r.status !== 201) { filledToCeiling = false; break; }
+}
+ck(`this account can be filled to LIMITS.categories (${LIMITS.categories})`, filledToCeiling);
+
+const overCeiling = await postJson('/api/categories', { name: 'One too many' });
+ck('a category past LIMITS.categories gives 400',
+  overCeiling.status === 400, String(overCeiling.status));
 
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }

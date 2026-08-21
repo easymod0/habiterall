@@ -53,6 +53,10 @@ export const FIXTURE = [
     reminder_message: 'Did you sit for ten minutes?',
     archived: false,
     icon: '🧘',
+    // A category, carried by NAME in both the JSON backup and the CSV pair.
+    // Different from Gym's below, so a comparison that ignored which category
+    // a habit held — rather than which one it was assigned — could not pass.
+    category: 'Health',
     entries: [
       { date: '2026-01-05', value: 2, status: '', notes: '' },
       { date: '2026-01-06', value: 2, status: '', notes: 'felt good' },
@@ -83,6 +87,12 @@ export const FIXTURE = [
     // actually exercises the grapheme rule end to end — through two databases
     // and a JSON export — which no unit test on `parseIcon` alone reaches.
     icon: '👨‍👩‍👧‍👦',
+    // Deliberately uncategorised, and stated rather than left off: a fixture
+    // habit that never mentions `category` at all is not asked about it (see
+    // `checkAgainstFixture`'s `Object.hasOwn` guard), which would pass
+    // whether or not uncategorised survives a round trip as `''` or as
+    // whatever the format's default happens to be.
+    category: '',
     entries: [
       { date: '2026-01-05', value: 8, status: '', notes: '' },
       // A literal 3 on a numerical habit. This is the regression that matters
@@ -145,6 +155,8 @@ export const FIXTURE = [
     reminder_time: '18:00',
     reminder_message: '',
     archived: false,
+    // The second, different category — see Meditate's above.
+    category: 'Fitness',
     entries: [
       { date: '2026-01-05', value: 2, status: '', notes: '' },
       { date: '2026-01-07', value: 2, status: '', notes: '' },
@@ -235,10 +247,14 @@ export const LOOP_HABIT_FIELDS = [
 export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
 
 /**
- * ...and what only the CSV pair can carry. Just the colour, for the reason
- * given above — Habits.csv writes the hex and the .db cannot.
+ * ...and what only the CSV pair can carry: the colour, for the reason given
+ * above — Habits.csv writes the hex and the .db cannot — and now `category`,
+ * for the same reason as `icon` and `at_most_unlogged` below but the other
+ * way round: `buildHabitsCsv` writes a `Category` column and
+ * `parseLoopHabitsCSV` reads it back, so THIS Loop format carries it, and the
+ * .db — which has no column and no concept of one — does not.
  */
-export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color'];
+export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color', 'category'];
 
 /**
  * Fields the lossless JSON backup must preserve exactly.
@@ -253,9 +269,18 @@ export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color'];
  * `icon` is the same shape as `at_most_unlogged`: Loop's model has no icon
  * field and no column to add one to, so a Loop round trip correctly returns
  * every habit's icon to `''`, and only this list watches it.
+ *
+ * `category` is carried by NAME here and in `CSV_HABIT_FIELDS`, and by neither
+ * Loop list: Loop's model has no concept of a category at all, so a `.db`
+ * round trip correctly returns every habit to uncategorised — the same
+ * asymmetry `icon` has against the .db, except `category` is NOT exclusive to
+ * this list the way `icon` and `at_most_unlogged` are, because the CSV pair
+ * carries it too. Appearing in both `CSV_HABIT_FIELDS` and here, rather than
+ * only here, is what says so.
  */
 export const JSON_HABIT_FIELDS = [
   ...LOOP_DB_HABIT_FIELDS, 'color', 'at_most_unlogged', 'show_as', 'icon',
+  'category',
 ];
 
 export function pick(obj, fields) {
@@ -265,7 +290,7 @@ export function pick(obj, fields) {
     // SQLite stores booleans as 0/1 and numbers may arrive as strings from pg.
     if (f === 'archived') v = Boolean(v === true || v === 1 || v === '1' || v === 't');
     else if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v) &&
-      f !== 'name' && f !== 'unit' && f !== 'icon') {
+      f !== 'name' && f !== 'unit' && f !== 'icon' && f !== 'category') {
       v = Number(v);
     } else if (f === 'target_value') v = Number(v);
     out[f] = v;

@@ -263,6 +263,61 @@ export function backupSettings(buf) {
   return settings;
 }
 
+/**
+ * The categories a habiterall JSON backup carries, if it is one.
+ *
+ * Same shape and guards as `backupSettings` beside it, and the same reason to
+ * be separate from `parseHabiterallJSON`'s result rather than a field on it:
+ * these do not go where the habits go. They are handed to each edition's
+ * `applyImport`, which resolves-or-creates them by `foldCategoryName` before a
+ * single habit is written, so a habit naming a category by NAME (see
+ * `normaliseImportedHabit` below) has something to resolve against.
+ *
+ * Returns `null` for every other format. Neither Loop format has anywhere to
+ * put a category — habiterall's own is the only backup that carries one.
+ *
+ * Capped at `LIMITS.categories`, the same ceiling `POST /categories` enforces,
+ * and non-objects are dropped the way `parseHabiterallJSON` filters its own
+ * `habits` array — a file is not to be trusted merely for being valid JSON.
+ *
+ * @param {Buffer} buf the raw request body
+ * @returns {Array<{name: string, color: string, position: number}>|null}
+ */
+export function backupCategories(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
+
+  const head = buf.toString('utf8').replace(/^﻿/, '').trimStart();
+  if (!head.startsWith('{')) return null;      // a bare habits array, or not JSON
+
+  let data;
+  try {
+    data = JSON.parse(head);
+  } catch {
+    return null;                               // parseUpload reports the error
+  }
+
+  const categories = data?.categories;
+  if (!Array.isArray(categories)) return null;
+
+  // A nameless category is nothing at all, the same rule `parseCategory`
+  // throws on for a typed-in one — a backup that repairs everything else
+  // still has no honest name to give an empty entry, so it is dropped rather
+  // than invented.
+  return categories
+    .filter((c) => c && typeof c === 'object' && !Array.isArray(c))
+    .map((c) => ({
+      name: String(c.name ?? '').trim().slice(0, LIMITS.name),
+      // The same regex `normalizeColor` below already validates a habit's own
+      // colour with — a category's is never a Loop palette index, so
+      // `normalizeColor` itself is the wrong tool despite being right there.
+      color: COLOR_RE.test(c.color ?? '') ? c.color : '#3b82f6',
+      position: c.position,
+    }))
+    .filter((c) => c.name)
+    .slice(0, LIMITS.categories)
+    .map((c, i) => ({ ...c, position: Number.isInteger(c.position) ? c.position : i }));
+}
+
 /* ---------- Loop .db backup ---------- */
 
 /**
@@ -582,6 +637,10 @@ function habitFromCsvMeta(name, meta = {}) {
     freq_denominator: meta.freq_denominator ?? 1,
     color: meta.color ?? '#3b82f6',
     archived: meta.archived ?? 0,
+    // habiterall's own dialect column, absent from every real Loop export —
+    // the same asymmetry every other field on this list does not have to
+    // account for, because Loop's Habits.csv has all of them.
+    category: meta.category ?? '',
     entries: [],
   };
 }
@@ -738,6 +797,10 @@ export function parseLoopHabitsCSV(text) {
   const cTType = idx('target type', 'targettype');
   const cTVal = idx('target value', 'targetvalue');
   const cArch = idx('archived?', 'archived');
+  // habiterall's own dialect only — no Loop version ever wrote this column, so
+  // it is inert for a real Loop export the way every column here is for a file
+  // that lacks it.
+  const cCategory = idx('category');
 
   const out = new Map();
   for (const row of rows.slice(1)) {
@@ -767,6 +830,7 @@ export function parseLoopHabitsCSV(text) {
       freq_denominator: cDen === -1 ? 1 : Math.max(1, Number(row[cDen]) || 1),
       color: normalizeColor(cColor === -1 ? undefined : (row[cColor] ?? '').trim()),
       archived: rawArch === 'true' || rawArch === '1' ? 1 : 0,
+      category: cCategory === -1 ? '' : (row[cCategory] ?? '').trim(),
     });
   }
   return out;
@@ -968,7 +1032,7 @@ export function entryValue(raw) {
  * including the fractional and the unbounded ones.
  *
  * @param {Record<string, any>} h a habit from any parser
- * @returns {import('./types.js').Habit & {archived: boolean}}
+ * @returns {import('./types.js').Habit & {archived: boolean, category: string}}
  */
 export function normaliseImportedHabit(h) {
   // The whole of parseHabit's frequency rule — integers with
@@ -1049,6 +1113,15 @@ export function normaliseImportedHabit(h) {
     // icon, so a Loop file always yields '' — the same asymmetry as
     // at_most_unlogged and show_as above.
     icon: parseIcon(h.icon),
+    // habiterall's own JSON and the CSV pair both carry this by NAME — a habit
+    // is matched by the name it is stored under, and a category is looked up
+    // by `foldCategoryName` the same way (see `shared/CLAUDE.md`) — and
+    // `applyImport` resolves the name to a `category_id` after this function
+    // has run, creating the category first if the account has none by that
+    // name. Loop's .db has no column and no concept of a category at all, so
+    // a Loop `.db` file always yields '', the same asymmetry `at_most_unlogged`,
+    // `show_as` and `icon` above already have.
+    category: String(h.category ?? '').trim().slice(0, LIMITS.name),
     archived: !!h.archived,
   };
 }

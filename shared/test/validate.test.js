@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 const {
   parseHabit, parseEntry, entryWrite, answerBody, assertDate, assertNotFuture,
-  ValidationError, LIMITS, DEFAULT_COLOR, parseIcon,
+  ValidationError, LIMITS, DEFAULT_COLOR, parseIcon, parseCategory,
+  foldCategoryName,
 } = await import('../src/validate.js');
 const { isCompleted } = await import('../src/stats.js');
 
@@ -174,6 +175,56 @@ test('a partial write clears a previously-set icon', () => {
   // through this function with no notion of "leave it".
   assert.equal(parseHabit({ name: 'x', icon: '\u{1F9D8}' }).icon, '\u{1F9D8}');
   assert.equal(parseHabit({ name: 'x' }).icon, '', 'an omitted icon must not survive a replace');
+});
+
+/* ---------- category_id on a habit ---------- */
+
+test('an absent category_id is null', () => {
+  assert.equal(parseHabit({ name: 'x' }).category_id, null);
+});
+
+test('anything not a positive safe integer is null, never coerced', () => {
+  for (const junk of ['3', 3.5, 0, -1, true, '__proto__']) {
+    assert.equal(
+      parseHabit({ name: 'x', category_id: junk }).category_id, null,
+      `category_id: ${JSON.stringify(junk)} must give null, not be coerced`,
+    );
+  }
+});
+
+test('a present positive integer id survives as itself', () => {
+  assert.equal(parseHabit({ name: 'x', category_id: 7 }).category_id, 7);
+});
+
+/* ---------- categories ---------- */
+
+test('a category name is required', () => {
+  assert.throws(() => parseCategory({}), ValidationError);
+  assert.throws(() => parseCategory({ name: '' }), ValidationError);
+  assert.throws(() => parseCategory({ name: '   ' }), ValidationError);
+});
+
+test('an over-long category name is capped at LIMITS.name', () => {
+  const cat = parseCategory({ name: 'x'.repeat(200) });
+  assert.equal(cat.name.length, LIMITS.name);
+  assert.equal(cat.name, 'x'.repeat(100));
+});
+
+test('a category colour must be a 6-digit hex, else the default', () => {
+  assert.equal(parseCategory({ name: 'Health', color: 'blue' }).color, DEFAULT_COLOR);
+  assert.equal(parseCategory({ name: 'Health', color: '#00ff88' }).color, '#00ff88');
+});
+
+test('foldCategoryName folds Unicode case, not only ASCII', () => {
+  // SQLite's NOCASE folds ASCII only; Postgres's lower() is Unicode-aware.
+  // This is the one rule both editions ask instead, so 'Élan' and 'élan' are
+  // the same category everywhere.
+  // Both sides asserted against a LITERAL, not only against each other: a
+  // `foldCategoryName` that returned a constant '' would satisfy an
+  // equality between its own two answers and nothing else.
+  assert.equal(foldCategoryName(' Élan '), 'élan');
+  assert.equal(foldCategoryName('élan'), 'élan');
+  assert.equal(foldCategoryName(' Élan '), foldCategoryName('élan'));
 });
 
 /* ---------- entries ---------- */

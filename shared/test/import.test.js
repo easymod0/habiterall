@@ -8,8 +8,12 @@ import { unlinkSync } from 'node:fs';
 const {
   loopTimestampToISO, convertLoopValue, normalizeColor, entryValue,
   parseCSV, parseLoopCheckmarksCSV, parseLoopHabitsCSV, parseLoopDatabase,
-  parseHabiterallJSON, MAX_PARSE_HABITS, MAX_PARSE_ENTRIES,
+  parseHabiterallJSON, MAX_PARSE_HABITS, MAX_PARSE_ENTRIES, backupCategories,
 } = await import('../src/import.js');
+// Declared here, rather than beside `normaliseImportedHabit` below, because
+// `backupCategories`'s own tests above need `LIMITS.categories` and
+// `LIMITS.name` too.
+const { LIMITS, parseHabit } = await import('../src/validate.js');
 
 const YES = 2, SKIP = 3;
 
@@ -1091,10 +1095,76 @@ test('a zip without a Checkmarks.csv says so', async () => {
   await assert.rejects(() => parseUpload(bogus), /Checkmarks\.csv/);
 });
 
+/* ---------- categories in a habiterall JSON backup ---------- */
+
+test('backupCategories reads categories from a real habiterall JSON backup', () => {
+  const buf = Buffer.from(JSON.stringify({
+    version: 1, app: 'habiterall',
+    categories: [
+      { name: 'Health', color: '#22c55e', position: 0 },
+      { name: 'Work', color: '#3b82f6', position: 1 },
+    ],
+    habits: [],
+  }));
+  assert.deepEqual(backupCategories(buf), [
+    { name: 'Health', color: '#22c55e', position: 0 },
+    { name: 'Work', color: '#3b82f6', position: 1 },
+  ]);
+});
+
+test('neither Loop format has anywhere to put a category, so backupCategories reads null', () => {
+  // Sniffed the same way `parseUpload` sniffs a real upload — backupCategories
+  // never gets far enough to open either file, because neither starts with a
+  // '{': there is no `categories` key to have found even in principle.
+  const loopDb = Buffer.from('SQLite format 3\0' + 'x'.repeat(20));
+  assert.equal(backupCategories(loopDb), null);
+
+  const zipMagic = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]);
+  assert.equal(backupCategories(zipMagic), null);
+});
+
+test('junk reads as no categories rather than throwing', () => {
+  assert.equal(backupCategories(Buffer.alloc(0)), null);
+  assert.equal(backupCategories(Buffer.from('not json at all')), null);
+  assert.equal(backupCategories(Buffer.from('{not valid json')), null);
+  // A `categories` key that is not an array at all — a file this repair
+  // path has no honest reading of, so it is treated as absent.
+  assert.equal(backupCategories(Buffer.from(JSON.stringify({ categories: 'nonsense' }))), null);
+  assert.deepEqual(backupCategories(Buffer.from(JSON.stringify({ categories: [] }))), []);
+});
+
+test('a malformed category entry is repaired or dropped, never thrown on', () => {
+  // The input is a file. `parseCategory` (validate.js) THROWS on an empty
+  // name because a person typing one can be told; this is the repair half,
+  // for a file that cannot be argued with, and a nameless entry is dropped
+  // rather than invented — the same asymmetry `normaliseImportedHabit` has
+  // against `parseHabit`.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [
+      { name: 'Health', color: 'not-a-colour' },
+      { name: '   ' },
+      'nonsense',
+      42,
+      { name: 'n'.repeat(500) },
+    ],
+  }));
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, 2, JSON.stringify(cats));
+  assert.equal(cats[0].name, 'Health');
+  assert.match(cats[0].color, /^#[0-9a-f]{6}$/i, 'an invalid colour repairs to the default');
+  assert.equal(cats[1].name.length, LIMITS.name, 'an over-long name is capped, not rejected');
+});
+
+test('backupCategories is capped at LIMITS.categories, the same ceiling POST /categories enforces', () => {
+  const many = Array.from({ length: LIMITS.categories + 10 },
+    (_, i) => ({ name: `Cat ${i}`, color: '#111111', position: i }));
+  const buf = Buffer.from(JSON.stringify({ categories: many }));
+  assert.equal(backupCategories(buf).length, LIMITS.categories);
+});
+
 /* ---------- repairing an imported habit ---------- */
 
 const { normaliseImportedHabit } = await import('../src/import.js');
-const { LIMITS, parseHabit } = await import('../src/validate.js');
 
 test('an imported habit is clamped to the limits the API enforces', () => {
   // The personal edition's writer applied NO length clamps, so it accepted
@@ -1121,6 +1191,20 @@ test('no Loop format has anywhere to put an icon, so one always parses to \'\'',
 
 test('a habiterall JSON backup\'s icon survives normalisation', () => {
   assert.equal(normaliseImportedHabit({ name: 'Meditate', icon: '🧘' }).icon, '🧘');
+});
+
+test('the .db format has no concept of a category, so one always parses to \'\'', () => {
+  // parseLoopDatabase's row shape never produces a `category` key — the same
+  // absence a real .db parse would hand this function.
+  assert.equal(normaliseImportedHabit({ name: 'Meditate' }).category, '');
+});
+
+test('a category name from a habiterall JSON backup or the CSV pair survives, and is capped', () => {
+  assert.equal(normaliseImportedHabit({ name: 'Meditate', category: 'Health' }).category, 'Health');
+  assert.equal(
+    normaliseImportedHabit({ name: 'Meditate', category: 'c'.repeat(500) }).category.length,
+    LIMITS.name
+  );
 });
 
 test('a frequency Loop permits but we do not is squared up, not dropped', () => {

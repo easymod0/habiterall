@@ -78,8 +78,8 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 
 | working in | read | archive |
 |---|---|---|
-| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md` |
-| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md` |
+| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md` |
+| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md` |
 | `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md` |
 | `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md` |

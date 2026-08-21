@@ -195,7 +195,18 @@ const sw = self;
 // that never draws the stroke it describes — or a cached old `day-strip.js`
 // that never draws the tick — same failure shape as v22, one export further
 // upstream.
-const CACHE_VERSION = 'v23';
+// v24: a habit gained a category (#65 phases 1+2). No new FILE — the picker
+// lives inside the existing `ui/habit-dialog.js` — but `index.html` IS in
+// `SHELL`, and it now carries the `<select name="category_id">` the form
+// reads. `shellFirst`'s stale-while-revalidate could serve the OLD
+// `index.html`, with no such control, alongside the NEW `habit-dialog.js`
+// that reads `form.category_id` unconditionally: `currentCategoryId()` throws
+// on the missing element the moment the dialog opens, before any save is
+// attempted. The reverse pairing is silent rather than loud — a new
+// `index.html` with the select, held against an old `habit-dialog.js` that
+// never populates or reads it — which is exactly why this is a version bump
+// and not a "the new file will just 404 and get refetched" shrug.
+const CACHE_VERSION = 'v24';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

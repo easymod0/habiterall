@@ -167,6 +167,9 @@ export async function load() {
   if (state.showArchived) params.set('archived', 'true');
   const data = await api(`/overview?${params}`);
   state.habits = data.habits;
+  // The habit dialog's category picker reads this rather than fetching its
+  // own copy — every load already carries it.
+  state.categories = data.categories;
   // Recorded beside them, because `habit.entries` means anything only for the
   // days this answer covered and nothing else in the payload says which those
   // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
@@ -269,72 +272,137 @@ export function paint() {
   if (settings.get('dayOrder') === 'newest-left') dates.reverse();
   renderGridHeader(dates, todayIso);
 
-  for (const habit of shown) {
-    const row = document.createElement('div');
-    row.className = 'habit-row' + (habit.archived ? ' archived' : '');
-    row.dataset.habitId = String(habit.id);
+  // `position` is one flat order and `persistOrder` sends a flat id list, so
+  // dragging while grouped would clump the habits by category permanently —
+  // an action that never said it would. Same reasoning as `!state.showArchived`
+  // and `!filtering` just above: dragging only means something in the list's
+  // one real order, and grouping is a VIEW of that order, not a second one.
+  const grouped = settings.get('groupByCategory');
 
-    // Drag handle. Reordering only makes sense in the active list, and only
-    // when there is more than one habit to move.
-    // ...and not while a filter is on. Dragging only means something in the
-    // list's real order: a drop against a filtered list computes a `position`
-    // from neighbours that are not the habit's actual neighbours, so the write
-    // lands somewhere nobody asked for and the rows appear to jump when the
-    // query is cleared. The order that goes to the server is the FULL list —
-    // `state.habits.map(h => h.id)` — so nothing is dropped from it; what a
-    // drop against a subset gets wrong is where in that list the habit lands.
-    const reorderable =
-      !state.showArchived && !filtering && state.habits.length > 1;
-    if (reorderable) {
-      const handle = document.createElement('button');
-      handle.className = 'drag-handle';
-      handle.type = 'button';
-      handle.draggable = true;
-      handle.textContent = '⠿';
-      handle.title = 'Drag to reorder — or focus and use ↑ / ↓';
-      handle.setAttribute('aria-label', `Reorder ${habit.name}. Use arrow up or arrow down.`);
-      handle.dataset.focusKey = `handle:${habit.id}`;
-      attachDragHandlers(handle, row, habit);
-      row.append(handle);
+  // Drag handle. Reordering only makes sense in the active list, only when
+  // there is more than one habit to move, only ungrouped (see above), and not
+  // while a filter is on. Dragging only means something in the list's real
+  // order: a drop against a filtered list computes a `position` from
+  // neighbours that are not the habit's actual neighbours, so the write lands
+  // somewhere nobody asked for and the rows appear to jump when the query is
+  // cleared. The order that goes to the server is the FULL list —
+  // `state.habits.map(h => h.id)` — so nothing is dropped from it; what a drop
+  // against a subset gets wrong is where in that list the habit lands.
+  const reorderable =
+    !state.showArchived && !filtering && !grouped && state.habits.length > 1;
+
+  if (grouped) {
+    // Every category in its own `position` order, an empty one still drawing
+    // its header (sections may be empty — no collapsing), then an
+    // always-present trailing Uncategorised section. `category_id` pointing
+    // at a category not in `state.categories` (deleted since this list was
+    // fetched) falls into Uncategorised rather than being dropped, so every
+    // habit in `shown` is drawn exactly once.
+    const byCategory = new Map(state.categories.map((c) => [c.id, []]));
+    const uncategorised = [];
+    for (const habit of shown) {
+      const bucket = habit.category_id != null && byCategory.get(habit.category_id);
+      (bucket || uncategorised).push(habit);
     }
-
-    const meta = document.createElement('div');
-    meta.className = 'habit-meta';
-    meta.setAttribute('role', 'button');
-    meta.tabIndex = 0;
-
-    const name = document.createElement('div');
-    name.className = 'habit-name';
-    const dot = document.createElement('span');
-    dot.className = 'habit-dot';
-    dot.style.background = habit.color;
-    const nameText = document.createElement('span');
-    nameText.className = 'habit-name-text';
-    nameText.textContent = habit.name;
-    const icon = habitIcon(habit);
-    name.append(dot, ...(icon ? [icon] : []), nameText);
-
-    const sub = document.createElement('div');
-    sub.className = 'habit-sub';
-    const bits = [
-      freqLabel(habit),
-      targetLabel(habit),
-      `${Math.round(habit.score * 100)}%`,
-      habit.currentStreak > 0 ? `🔥 ${habit.currentStreak}` : '',
-    ].filter(Boolean);
-    sub.textContent = bits.join(' · ');
-
-    meta.append(name, sub);
-    meta.addEventListener('click', () => openHabit(habit.id));
-    meta.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHabit(habit.id); }
-    });
-
-    row.append(meta, dayCells(listHost, habit, dates, todayIso));
-    grid.append(row);
+    for (const cat of state.categories) {
+      grid.append(sectionHeader(cat.name, cat.color, byCategory.get(cat.id).length, cat.id));
+      for (const habit of byCategory.get(cat.id)) grid.append(habitRow(habit, dates, todayIso, reorderable));
+    }
+    grid.append(sectionHeader('Uncategorised', null, uncategorised.length, null));
+    for (const habit of uncategorised) grid.append(habitRow(habit, dates, todayIso, reorderable));
+  } else {
+    for (const habit of shown) grid.append(habitRow(habit, dates, todayIso, reorderable));
   }
 
   restoreFocus(root, focused);
+}
+
+/**
+ * A section header drawn above a category's rows when `groupByCategory` is
+ * on. `color` is null for the trailing Uncategorised section, which has none.
+ */
+function sectionHeader(name, color, count, categoryId) {
+  const header = document.createElement('div');
+  header.className = 'category-section-header' + (categoryId == null ? ' uncategorised' : '');
+  header.dataset.categoryId = categoryId == null ? '' : String(categoryId);
+  // Same custom property the category chips set (habit-dialog.js) — a border
+  // has to stay legible whatever the category's own colour is, so it is
+  // never a filled background.
+  if (color) header.style.setProperty('--chip-color', color);
+
+  // Reuses the swatch class the habit dialog's own manage list already
+  // defines, rather than a second small coloured dot with its own rule.
+  const dot = document.createElement('span');
+  dot.className = 'category-swatch';
+  if (color) dot.style.background = color;
+  header.append(dot);
+
+  const label = document.createElement('span');
+  label.className = 'category-section-name';
+  label.textContent = name;
+  header.append(label);
+
+  const countEl = document.createElement('span');
+  countEl.className = 'category-section-count';
+  countEl.textContent = String(count);
+  header.append(countEl);
+
+  return header;
+}
+
+/** One habit row, built the same way whether the list is flat or grouped. */
+function habitRow(habit, dates, todayIso, reorderable) {
+  const row = document.createElement('div');
+  row.className = 'habit-row' + (habit.archived ? ' archived' : '');
+  row.dataset.habitId = String(habit.id);
+
+  if (reorderable) {
+    const handle = document.createElement('button');
+    handle.className = 'drag-handle';
+    handle.type = 'button';
+    handle.draggable = true;
+    handle.textContent = '⠿';
+    handle.title = 'Drag to reorder — or focus and use ↑ / ↓';
+    handle.setAttribute('aria-label', `Reorder ${habit.name}. Use arrow up or arrow down.`);
+    handle.dataset.focusKey = `handle:${habit.id}`;
+    attachDragHandlers(handle, row, habit);
+    row.append(handle);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'habit-meta';
+  meta.setAttribute('role', 'button');
+  meta.tabIndex = 0;
+
+  const name = document.createElement('div');
+  name.className = 'habit-name';
+  const dot = document.createElement('span');
+  dot.className = 'habit-dot';
+  dot.style.background = habit.color;
+  const nameText = document.createElement('span');
+  nameText.className = 'habit-name-text';
+  nameText.textContent = habit.name;
+  const icon = habitIcon(habit);
+  name.append(dot, ...(icon ? [icon] : []), nameText);
+
+  const sub = document.createElement('div');
+  sub.className = 'habit-sub';
+  const bits = [
+    freqLabel(habit),
+    targetLabel(habit),
+    `${Math.round(habit.score * 100)}%`,
+    habit.currentStreak > 0 ? `🔥 ${habit.currentStreak}` : '',
+  ].filter(Boolean);
+  sub.textContent = bits.join(' · ');
+
+  meta.append(name, sub);
+  meta.addEventListener('click', () => openHabit(habit.id));
+  meta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHabit(habit.id); }
+  });
+
+  row.append(meta, dayCells(listHost, habit, dates, todayIso));
+  return row;
 }
 
 /**

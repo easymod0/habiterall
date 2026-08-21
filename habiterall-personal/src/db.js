@@ -48,6 +48,11 @@ db.exec(`
     show_as       TEXT    NOT NULL DEFAULT 'amount',
     -- one grapheme, decided by parseIcon; '' = none
     icon          TEXT    NOT NULL DEFAULT '',
+    -- which of this account's categories the habit belongs to, or none.
+    -- Uncategorised is category_id IS NULL, never a category of its own; see
+    -- categories below. A habit PUT replaces this field along with every
+    -- other, so an omitted category_id is a stated clear (validate.js).
+    category_id   INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     position      INTEGER NOT NULL DEFAULT 0,
     archived      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -65,6 +70,26 @@ db.exec(`
     status    TEXT    NOT NULL DEFAULT '',
     notes     TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (habit_id, date)
+  );
+
+  -- A user's own habit groupings. Never seeded — an account starts with none,
+  -- and the six suggestion chips in the picker create one only when tapped
+  -- (LIMITS.categories caps how many, chip-created or typed, an account may
+  -- hold). Uncategorised is a STATE (habits.category_id IS NULL), not a row
+  -- here, so there is deliberately no "Other" category.
+  --
+  -- UNIQUE folds ASCII case only (SQLite NOCASE); the Unicode-aware check that
+  -- keeps 'Élan' and 'élan' one category in both editions is a route-level
+  -- lookup through foldCategoryName (validate.js), with this constraint kept
+  -- only as a backstop — a duplicate is a 409 from the route, not a 500 from
+  -- here.
+  CREATE TABLE IF NOT EXISTS categories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    color      TEXT    NOT NULL DEFAULT '#3b82f6',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(name COLLATE NOCASE)
   );
 
   -- Preferences. A single-row key/value table rather than a users table,
@@ -215,6 +240,15 @@ if (!habitColumns.has('at_most_unlogged')) {
 if (!habitColumns.has('icon')) {
   db.exec(`ALTER TABLE habits ADD COLUMN icon TEXT NOT NULL DEFAULT ''`);
   console.log('migrated habits: added icon');
+}
+if (!habitColumns.has('category_id')) {
+  // SQLite requires an added column to default NULL when it carries a foreign
+  // key — which is exactly what every pre-existing habit should become:
+  // uncategorised, not a category that has to be invented for it.
+  db.exec(
+    `ALTER TABLE habits ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL`
+  );
+  console.log('migrated habits: added category_id');
 }
 
 const entryColumns = new Set(

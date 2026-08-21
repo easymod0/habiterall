@@ -168,6 +168,28 @@ screen reader gets. It is in `JSON_HABIT_FIELDS` and in no Loop list: Loop's
 schema has nowhere to put it, so a Loop round trip correctly returns it to `''`,
 the same asymmetry `at_most_unlogged` and `show_as` already have.
 
+**A habit's `category_id` is a replace-rule field too, and its absent value is
+a stated clear.** Because `PUT /habits/:id` REPLACES, a write that omits
+`category_id` clears the habit's category exactly as an omitted `icon` clears
+that field — there is no partial-update path that leaves a category alone by
+not mentioning it. Every writer has to carry the current value forward on
+every edit, including a phone edit: Android's contribution here is
+carry-through only — it must never clear a category, and it gains neither a
+picker nor a grouped list this PR. `parseHabit` only ever produces a positive
+safe
+integer or `null` from it; it does not check the id refers to a category that
+exists — that lookup needs the caller's own rows, which is why it happens in
+the route (`resolveCategoryId`) and not in the shared parser.
+
+**Uncategorised is a state a habit is in, never a category it belongs to.**
+`category_id IS NULL` is the whole representation: there is no row named
+"Other" for it, no category a user can rename or delete on its behalf, and the
+dashboard's grouped view always draws it as a trailing section rather than
+omitting it — the same discipline the four day states get in the root
+`CLAUDE.md`. Deleting a category does not delete its habits: `ON DELETE SET
+NULL`, never `CASCADE`, moves them into that same uncategorised state with
+every entry and note untouched.
+
 ## Scoring, streaks and stats
 
 **The score is a trailing-window ratio**, not per-day credit scaled by frequency.

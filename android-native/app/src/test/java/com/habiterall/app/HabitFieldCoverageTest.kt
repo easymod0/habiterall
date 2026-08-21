@@ -3,6 +3,7 @@ package com.habiterall.app
 import com.habiterall.app.data.Habit
 import com.habiterall.app.ui.toDraft
 import com.habiterall.app.ui.toInput
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
@@ -79,6 +80,35 @@ class HabitFieldCoverageTest {
         showAs = "avoid",
         icon = "🧘",
         archived = true,
+        // Left at its Kotlin default (null) deliberately: this field is
+        // EXEMPT from the by-name loop below (see `jsonFieldExemptions`) and
+        // has its own dedicated test, which sets a non-default id itself.
+    )
+
+    /**
+     * Fields in `JSON_HABIT_FIELDS` this client's write models do not, and
+     * cannot, carry under that exact name — the `notMirrored`-with-a-reason
+     * shape `AppSettingsDefaultsTest` uses for a setting it does not read,
+     * applied here to a field instead of a key.
+     *
+     * `"category"` is the one entry. The habiterall JSON backup carries the
+     * category's NAME — a display join `/export` makes from the habit's own
+     * `category_id` at read time — while the WIRE, what `HabitInput` actually
+     * sends on a PUT, carries `category_id` itself: an integer foreign key,
+     * because the write is validated server-side against a `categories`
+     * table this client has no way to resolve a bare name against. So
+     * `sent.containsKey("category")` would fail forever, for a naming
+     * difference and not a dropped field.
+     *
+     * This is not the whole of the decision, only the half that says what to
+     * SKIP. `category_id is wired through both write bridges…` below is the
+     * other half — a positive assertion that the id itself really does reach
+     * the wire from the habit's own value — because an exemption with no
+     * replacement assertion is a hole, not a decision.
+     */
+    private val jsonFieldExemptions = mapOf(
+        "category" to
+            "the backup carries the category's NAME; the wire carries category_id",
     )
 
     /**
@@ -157,13 +187,17 @@ class HabitFieldCoverageTest {
         assertTrue(
             "parsed ${fields!!.size} fields out of JSON_HABIT_FIELDS — the shape " +
                 "this test reads it by must have changed",
-            fields.size >= 14,
+            fields.size >= 15,
         )
 
         val sent = writeJson.encodeToJsonElement(habit.toInput()).jsonObject
         val source = writeJson.encodeToJsonElement(habit).jsonObject
 
         for (field in fields) {
+            // See `jsonFieldExemptions`: "category" is a projection (the
+            // backup's NAME versus the wire's `category_id`), not a dropped
+            // field, and it has its own positive assertion below instead.
+            if (field in jsonFieldExemptions) continue
             assertTrue(
                 "`$field` is in JSON_HABIT_FIELDS but HabitInput does not send it at " +
                     "all. A habit PUT REPLACES, so this field is being RESET on the " +
@@ -207,7 +241,7 @@ class HabitFieldCoverageTest {
         assertTrue(
             "parsed ${fields!!.size} fields out of JSON_HABIT_FIELDS — the shape " +
                 "this test reads it by must have changed",
-            fields.size >= 14,
+            fields.size >= 15,
         )
 
         // Fields the form is known to legitimately transform rather than carry
@@ -220,6 +254,8 @@ class HabitFieldCoverageTest {
 
         for (field in fields) {
             if (field in formCoerced) continue
+            // See `jsonFieldExemptions`, and the first test's identical guard.
+            if (field in jsonFieldExemptions) continue
             assertTrue(
                 "`$field` is in JSON_HABIT_FIELDS but HabitFormScreen's Draft.toInput() " +
                     "does not send it at all. A habit PUT REPLACES, so editing a habit " +
@@ -236,5 +272,51 @@ class HabitFieldCoverageTest {
                 sentViaForm[field],
             )
         }
+    }
+
+    /**
+     * The replacement assertion `jsonFieldExemptions` promises for
+     * `"category"`: skipping the by-name check above must not mean skipping
+     * the WIRING. `category_id` — the wire's own name for the field — has to
+     * reach both bridges from the habit's own value, and a habit with no
+     * category has to say so explicitly rather than by omission.
+     *
+     * A dedicated `Json` config, `explicitNulls = true`: `writeJson` above
+     * turns nulls off so an unrelated field's Kotlin default does not clutter
+     * every other assertion in this file, but the whole point of the first
+     * assertion here is that an uncategorised write says `"category_id":null`
+     * on the wire rather than dropping the key — `parseHabit`
+     * (`shared/src/validate.js`) treats the two identically, so this client's
+     * ordinary `explicitNulls = false` costs nothing in production, but the
+     * assertion still has to look at the string to say so, per the brief for
+     * this test: assert the JSON, not the field.
+     */
+    @Test
+    fun `category_id is wired through both write bridges from the habit's own value`() {
+        val explicitNullJson = Json { encodeDefaults = true; explicitNulls = true }
+
+        val uncategorised = explicitNullJson.encodeToString(habit.toInput())
+        assertTrue(
+            "an uncategorised habit must send an explicit \"category_id\":null on the " +
+                "wire, not omit the key: $uncategorised",
+            uncategorised.contains("\"category_id\":null"),
+        )
+
+        val categorised = habit.copy(categoryId = 7L)
+
+        val viaToInput = explicitNullJson.encodeToString(categorised.toInput())
+        assertTrue(
+            "Habit.toInput() must wire category_id from the habit's own value, not " +
+                "drop it or reset it to HabitInput's default: $viaToInput",
+            viaToInput.contains("\"category_id\":7"),
+        )
+
+        val viaForm = explicitNullJson.encodeToString(categorised.toDraft().toInput())
+        assertTrue(
+            "HabitFormScreen's Draft.toInput() must wire category_id too — this is " +
+                "the second, independent write bridge, and it has its own chance to " +
+                "drop the field the way toInput() above once dropped icon: $viaForm",
+            viaForm.contains("\"category_id\":7"),
+        )
     }
 }

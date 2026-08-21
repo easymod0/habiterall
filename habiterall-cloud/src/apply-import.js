@@ -20,7 +20,7 @@
 import { withUser } from './db/pool.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import { entryValue, normaliseImportedHabit } from '@habiterall/shared/import.js';
-import { assertDate, LIMITS } from '@habiterall/shared/validate.js';
+import { assertDate, foldCategoryName, DEFAULT_COLOR, LIMITS } from '@habiterall/shared/validate.js';
 
 /** Ceilings so one upload cannot exhaust the database on a shared host. */
 const MAX_HABITS_PER_IMPORT = Number(process.env.MAX_HABITS_PER_IMPORT) || 200;
@@ -41,14 +41,44 @@ const MAX_ENTRIES_PER_IMPORT = Number(process.env.MAX_ENTRIES_PER_IMPORT) || 50_
  */
 const MAX_HABITS_PER_USER = Number(process.env.MAX_HABITS_PER_USER) || 200;
 
+// `categories.position` is a Postgres INTEGER (migration 015), so this is the
+// actual ceiling the column can hold — a bigger declared value would 22003
+// the whole import rather than fall back to appending. Personal mirrors this
+// same bound in its own writer so both editions draw the same "absurd" line.
+const MAX_CATEGORY_POSITION = 2_147_483_647;
+
+/**
+ * The file's own `position` is user-supplied and untrusted. `null`/`undefined`
+ * means "the file did not say" (append, same as before this step); a value
+ * that survives here is "the file said something usable" and is applied as
+ * written. Anything else — non-finite, negative, or bigger than
+ * `MAX_CATEGORY_POSITION` — falls back to appending too, the same distinction
+ * `normaliseImportedHabit` already draws elsewhere.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function saneDeclaredPosition(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > MAX_CATEGORY_POSITION) return null;
+  return n;
+}
+
 /**
  * Write a parsed habit list into the importing user's own account.
  *
  * @param {number} userId  authenticated user, from the session — never the file
  * @param {Array}  habits  parsed habits (shape from the shared parsers)
  * @param {'merge'|'replace'} mode
+ * @param {Array<{name: string, color: string, position?: number}>} categories
+ *   the file's own categories, from `backupCategories(buf)` — `[]` (never
+ *   `null`) for a format with nowhere to carry one. A habit's own `category`
+ *   is a NAME, not this array's index, and is resolved against it below —
+ *   see the personal edition's writer for the identical rule, mirrored here
+ *   inside the same `withUser` transaction rather than a second one.
  */
-export async function applyImport(userId, habits, mode = 'merge') {
+export async function applyImport(userId, habits, mode = 'merge', categories = []) {
   const result = {
     // `entriesKept` counts days the file wanted to mark as missed and the account
     // already had an answer for. Declared here so the reply shape is stable.
@@ -87,7 +117,68 @@ export async function applyImport(userId, habits, mode = 'merge') {
       // mean "everything of mine".
       await db.query('DELETE FROM entries');
       await db.query('DELETE FROM habits');
+      // A replace means "make this account look like the file", and that
+      // includes its categories — never a partial wipe that left a stray
+      // category behind with nothing pointing at it. RLS scopes this too.
+      await db.query('DELETE FROM categories');
     }
+
+    // Preloaded with whatever the account already has — empty right after the
+    // replace-mode wipe above, so the file's categories below always insert;
+    // on a merge, whatever already exists by folded name is found here first.
+    const { rows: existingCategories } = await db.query(
+      `SELECT id, name FROM categories`
+    );
+    const categoryIdByFold = new Map(
+      existingCategories.map((c) => [foldCategoryName(c.name), c.id])
+    );
+
+    /**
+     * Resolve NAME to a category id, creating one if the account (or this
+     * import, so far) has none by that folded name — and never renaming or
+     * recolouring one that already does. The same rule already written for
+     * settings: a merge may ADD what is missing and must not overwrite what
+     * is already there. Respects `LIMITS.categories`, the same ceiling
+     * `POST /categories` enforces.
+     *
+     * @param {string} name
+     * @param {string} color used only when a new category is actually created
+     * @param {unknown} [declaredPosition] the file's own `position` for this
+     *   category, if it declared one — a habit-derived category (named only
+     *   in a habit's `category` field) never has one and always appends.
+     * @returns {Promise<number | null>}
+     */
+    async function resolveOrCreateCategory(name, color, declaredPosition) {
+      const folded = foldCategoryName(name);
+      if (!folded) return null;
+      if (categoryIdByFold.has(folded)) return categoryIdByFold.get(folded);
+      if (categoryIdByFold.size >= LIMITS.categories) {
+        result.skipped.push(
+          `category "${name}" not created: at most ${LIMITS.categories} are allowed`);
+        return null;
+      }
+      // $4 is the file's own DECLARED position, or `null` when there isn't
+      // one — `COALESCE` falls through to the old append behaviour in that
+      // case, and also when the account has no categories yet to take a MAX
+      // of. RLS scopes the subquery to this user like everything else here.
+      const { rows } = await db.query(
+        `INSERT INTO categories (user_id, name, color, position)
+         VALUES ($1, $2, $3,
+                 COALESCE($4, (SELECT MAX(position) + 1 FROM categories), 0))
+         RETURNING id`,
+        [userId, name, color, saneDeclaredPosition(declaredPosition)]
+      );
+      const id = rows[0].id;
+      categoryIdByFold.set(folded, id);
+      return id;
+    }
+
+    // The file's own declared categories, each with its own colour — applied
+    // before any habit, so a habit naming one of these below almost never has
+    // to invent it. `backupCategories(buf)` already caps this at
+    // LIMITS.categories and drops anything nameless; the cap above is the
+    // backstop for a merge pushing the account's own total past it.
+    for (const c of categories) await resolveOrCreateCategory(c.name, c.color, c.position);
 
     // Bound the ACCOUNT, not just this upload. `POST /habits` enforces a
     // per-user limit and import did not, so repeated merges accumulated
@@ -162,13 +253,21 @@ export async function applyImport(userId, habits, mode = 'merge') {
       }
 
       if (habitId === null) {
+        // A merge matched by name touches nothing else about an existing
+        // habit, so the category is resolved (and, if needed, created) only
+        // for a habit actually being inserted — an existing one keeps
+        // whatever category_id it already has. `''` is uncategorised and
+        // resolves to null without touching the map at all.
+        const categoryId = clean.category
+          ? await resolveOrCreateCategory(clean.category, DEFAULT_COLOR)
+          : null;
         const { rows } = await db.query(
           `INSERT INTO habits (user_id, name, description, type, unit,
                                target_value, target_type, freq_numerator,
                                freq_denominator, color, reminder_time,
                                reminder_message, at_most_unlogged, show_as,
-                               icon, position, archived)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                               icon, position, archived, category_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
            RETURNING id`,
           [
             userId,                                   // from the session, always
@@ -188,6 +287,7 @@ export async function applyImport(userId, habits, mode = 'merge') {
             clean.icon,
             position++,
             clean.archived,
+            categoryId,
           ]
         );
         habitId = rows[0].id;

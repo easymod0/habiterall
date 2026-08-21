@@ -630,6 +630,17 @@ test('every setting is classified as portable or not', () => {
     'a setting cannot be both');
 });
 
+test('groupByCategory defaults to false', () => {
+  // Asserted as a literal rather than by importing some other constant that
+  // could be wrong the same way: a fresh account has no categories, and a
+  // grouped list with one section (Uncategorised, holding everything) is
+  // strictly worse than the flat list it would replace.
+  assert.equal(SETTINGS.groupByCategory.default, false);
+  assert.deepEqual(parseSettings({ groupByCategory: true }).accepted,
+    { groupByCategory: true });
+  assert.deepEqual(parseSettings({ groupByCategory: 'yes' }).accepted, {});
+});
+
 test('a backup carries no notification destination, in either direction', () => {
   // A backup file is emailed, synced and attached to bug reports, and
   // `discordWebhook` is a bearer capability for a channel. Out: it would sit in

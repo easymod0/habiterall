@@ -24,7 +24,7 @@ const { writeLoopDatabase } = await import('@habiterall/shared/export-loop.js');
 const { buildCsvArchive } = await import('@habiterall/shared/export-csv.js');
 const {
   parseLoopDatabase, parseHabiterallJSON,
-  parseLoopCheckmarksCSV, parseLoopHabitsCSV,
+  parseLoopCheckmarksCSV, parseLoopHabitsCSV, backupCategories,
 } = await import('@habiterall/shared/import.js');
 const { unzip } = await import('@habiterall/shared/unzip.js');
 // LIMITS because the clamp import must honour is the one the API enforces, so
@@ -72,6 +72,23 @@ console.log(`  alice=${alice}  bob=${bob}\n`);
 /** Seed the fixture into a user's account, directly. */
 async function seed(userId) {
   await withUser(userId, async (db) => {
+    // The fixture names a category by NAME (see roundtrip-fixture.mjs), and
+    // the column is `category_id` — the same shape `applyImport` resolves a
+    // backup's `category` against. Created here, once per distinct name,
+    // before any habit so the INSERT below has an id to write. Writing the
+    // columns by hand is the cost of not going through a route, same as
+    // every other field in this function's own header comment.
+    const categoryIds = new Map();
+    for (const name of new Set(FIXTURE.map((h) => h.category).filter(Boolean))) {
+      const { rows } = await db.query(
+        `INSERT INTO categories (user_id, name, color, position)
+         VALUES ($1, $2, $3, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
+         RETURNING id`,
+        [userId, name, '#3b82f6']
+      );
+      categoryIds.set(name, rows[0].id);
+    }
+
     for (const [i, h] of FIXTURE.entries()) {
       const { rows } = await db.query(
         // reminder_message was absent here while the fixture carried one, so
@@ -87,16 +104,20 @@ async function seed(userId) {
         // has to be written HERE, or this suite watches it in name only.
         // `icon` is the same trap one field later still: seeded as `h.icon ?? ''`
         // beside `show_as`, or every habit's icon compares '' against '' and the
-        // fidelity list watches nothing.
+        // fidelity list watches nothing. `category_id` is the same trap again,
+        // resolved against `categoryIds` above rather than left null, or every
+        // habit's category compares '' against '' and this suite watches
+        // nothing either.
         `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                              target_type, freq_numerator, freq_denominator, color,
                              reminder_time, reminder_message, at_most_unlogged,
-                             show_as, icon, position, archived)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+                             show_as, icon, position, archived, category_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
         [userId, h.name, h.description, h.type, h.unit, h.target_value,
           h.target_type, h.freq_numerator, h.freq_denominator, h.color,
           h.reminder_time ?? '', h.reminder_message ?? '',
-          h.at_most_unlogged ?? 'default', h.show_as ?? 'amount', h.icon ?? '', i, h.archived]
+          h.at_most_unlogged ?? 'default', h.show_as ?? 'amount', h.icon ?? '', i, h.archived,
+          categoryIds.get(h.category) ?? null]
       );
       const habitId = rows[0].id;
 
@@ -119,6 +140,12 @@ async function read(userId) {
     const { rows: entries } = await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status, notes
        FROM entries ORDER BY date`);
+    // The backup carries a category by NAME, not by id — see the /export
+    // route's own comment. `checkAgainstFixture` and `snapshot` both compare
+    // `category` as a name, so this reader has to produce the same field the
+    // real route does or every comparison would be against `undefined`.
+    const { rows: categoryRows } = await db.query(`SELECT id, name FROM categories`);
+    const categoryNames = new Map(categoryRows.map((c) => [c.id, c.name]));
 
     const byHabit = new Map(habits.map((h) => [h.id, []]));
     for (const e of entries) {
@@ -133,6 +160,7 @@ async function read(userId) {
       ...h,
       reminder_time: h.reminder_time ?? '',
       reminder_message: h.reminder_message ?? '',
+      category: categoryNames.get(h.category_id) ?? '',
       entries: byHabit.get(h.id) ?? [],
     }));
   });
@@ -476,6 +504,93 @@ ck('a name past the clamp is created once and merged into thereafter',
   longMerges[1].habitsCreated === 0 && longMerges[1].habitsMerged === 1 &&
   longMerges[2].habitsCreated === 0 && byLongName.length === 1,
   JSON.stringify(longMerges.map((r) => [r.habitsCreated, r.habitsMerged])));
+
+/* ---------- a merge never renames or recolours a category ---------- */
+
+console.log('\n--- category resolution on import ---');
+
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+const categoriesOf = async (u) => withUser(u, (db) =>
+  db.query(`SELECT id, name, color, position FROM categories ORDER BY position, id`)
+    .then((r) => r.rows));
+
+// Give the account's own "Health" a colour the file below does not have, the
+// same way a user would through the picker's manage list.
+const healthBefore = (await categoriesOf(alice)).find((c) => c.name === 'Health');
+await withUser(alice, (db) => db.query(
+  `UPDATE categories SET color = $1 WHERE id = $2`, ['#123456', healthBefore.id]));
+
+// A file that names the same category, by the same folded name, in a
+// different colour, and adds a new habit under it.
+const healthMergeFile = {
+  version: 1, app: 'habiterall',
+  categories: [{ name: 'health', color: '#ff0000', position: 0 }],
+  habits: [{ name: 'Yoga', type: 'boolean', category: 'health', entries: [] }],
+};
+await applyImport(alice, parseHabiterallJSON(healthMergeFile), 'merge',
+  backupCategories(Buffer.from(JSON.stringify(healthMergeFile), 'utf8')) ?? []);
+const afterMerge2 = await categoriesOf(alice);
+
+ck('a merge does not recolour a category that already exists',
+  afterMerge2.filter((c) => c.name === 'Health').length === 1 &&
+  afterMerge2.find((c) => c.name === 'Health').color === '#123456',
+  JSON.stringify(afterMerge2));
+const yoga = (await read(alice)).find((h) => h.name === 'Yoga');
+ck('and the new habit still resolves to the existing category, by folded name',
+  yoga.category_id === healthBefore.id, JSON.stringify(yoga));
+
+// A replace has nothing to preserve: the file's own categories become the
+// account's, spelling and colour included — 'health', not 'Health', because
+// a replace adopts the file's own name rather than the account's prior one.
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(healthMergeFile), 'replace',
+  backupCategories(Buffer.from(JSON.stringify(healthMergeFile), 'utf8')) ?? []);
+const afterReplace2 = await categoriesOf(alice);
+ck("a replace applies the file's colour",
+  afterReplace2.length === 1 && afterReplace2[0].name === 'health' &&
+  afterReplace2[0].color === '#ff0000',
+  JSON.stringify(afterReplace2));
+
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+
+/* ---------- a category's declared position survives a restore ---------- */
+
+console.log('\n--- category position on import ---');
+
+// Declared out of the order they are LISTED in the array, on purpose: if the
+// importer ignored `position` and simply appended each in array order (the
+// bug this section exists to catch), the categories would come back Zeta,
+// Alpha, Mid — the array's own order — and an assertion comparing against
+// that same order would pass whether or not `position` was ever read. Sorted
+// by the POSITION field the file actually states, the right order is
+// Alpha, Mid, Zeta.
+const positionedFile = {
+  version: 1, app: 'habiterall',
+  categories: [
+    { name: 'Zeta', color: '#3b82f6', position: 2 },
+    { name: 'Alpha', color: '#22c55e', position: 0 },
+    { name: 'Mid', color: '#ef4444', position: 1 },
+  ],
+  habits: [
+    // Named only in a habit's own `category` field, so it never appears in
+    // the `categories` array above and so declares no position at all — it
+    // must still append, after every declared one.
+    {
+      name: 'Undeclared', type: 'boolean',
+      category: 'Undeclared Category', entries: [],
+    },
+  ],
+};
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(positionedFile), 'replace',
+  backupCategories(Buffer.from(JSON.stringify(positionedFile), 'utf8')) ?? []);
+const positioned = await categoriesOf(alice);
+
+ck('a category restores at the position the file declared, not the order it was listed',
+  positioned.map((c) => c.name).join(',') === 'Alpha,Mid,Zeta,Undeclared Category',
+  JSON.stringify(positioned.map((c) => [c.name, c.position])));
 
 await wipe(alice);
 await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
