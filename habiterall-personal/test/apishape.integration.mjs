@@ -239,6 +239,23 @@ ck('PUT /categories/:id renames and recolours',
   renamedAndRecoloured.name === 'Wellness' && renamedAndRecoloured.color === '#00ff00',
   JSON.stringify(renamedAndRecoloured));
 
+/* ---- fix round item 4: the URL id's SHAPE answers before its EXISTENCE,
+ * in both editions, on the two category routes that take one ---- */
+
+const putBadShape = await putJson('/api/categories/abc', { name: 'x' });
+ck('PUT /categories/abc (not a number) is 400, not a 404 from Number(NaN)',
+  putBadShape.status === 400, String(putBadShape.status));
+const deleteBadShape = await fetch(`${base}/api/categories/abc`, { method: 'DELETE' });
+ck('DELETE /categories/abc is 400 too',
+  deleteBadShape.status === 400, String(deleteBadShape.status));
+
+const putMissing = await putJson('/api/categories/999999', { name: 'x' });
+ck('PUT /categories/999999 (well-shaped, absent) is 404',
+  putMissing.status === 404, String(putMissing.status));
+const deleteMissing = await fetch(`${base}/api/categories/999999`, { method: 'DELETE' });
+ck('DELETE /categories/999999 is 404 too',
+  deleteMissing.status === 404, String(deleteMissing.status));
+
 /* ---- a category_id that shapes correctly but names nothing is a 400 ---- */
 
 const noSuchCategory = 999999;
@@ -258,6 +275,73 @@ ck('PUT /habits/:id with a nonexistent category_id is 400',
 const caseFoldedDuplicate = await postJson('/api/categories', { name: 'wellness' });
 ck("a second category differing from 'Wellness' only by case is 409",
   caseFoldedDuplicate.status === 409, String(caseFoldedDuplicate.status));
+
+/* ---- fix round 2, item 3: the fold is unpinned through HTTP unless a
+ * NON-ASCII pair is asked, not only the ASCII one above ----
+ *
+ * 'Wellness' vs 'wellness' differs only by ASCII letter case, which SQLite's
+ * own `NOCASE` collation already folds — so that assertion alone stayed
+ * green with `categoryNameTaken` deleted from the route entirely, because the
+ * DB constraint answered the 409 on its own and nothing here could tell the
+ * two apart. 'Élan' vs 'élan' differs by a NON-ASCII letter (É/é, outside
+ * NOCASE's ASCII range), so NOCASE treats them as two different names and
+ * the INSERT would simply succeed — this pair can only ever be caught by the
+ * route's own `categoryNameTaken`, which folds through `foldCategoryName`,
+ * the one rule both editions ask instead so cloud's Postgres `lower()` and
+ * this edition agree about it. Losing that call is silent on the ASCII case
+ * and loud only here, which is why both stay in the suite.
+ */
+const elanRes = await postJson('/api/categories', { name: 'Élan', color: '#333333' });
+ck("POST /categories creates 'Élan'", elanRes.status === 201, String(elanRes.status));
+const elan = await elanRes.json();
+const elanFoldedRes = await postJson('/api/categories', { name: 'élan', color: '#444444' });
+ck("THE assertion: 'élan' after 'Élan' is 409 — NOCASE alone would let this " +
+  'pair through, so this can only be caught by the route\'s own ' +
+  'categoryNameTaken/foldCategoryName check',
+  elanFoldedRes.status === 409, String(elanFoldedRes.status));
+await fetch(`${base}/api/categories/${elan.id}`, { method: 'DELETE' });
+
+/* ---- fix round item 2(b): a unique-constraint violation the route's own
+ * check misses is a 409, not a 500 ----
+ *
+ * Doing this "with the fold deliberately bypassed" means the ROUTE's own
+ * `categoryNameTaken` must say "not taken" while the INSERT still collides —
+ * and, having fixed item 2(a), that pairing is no longer reachable through
+ * any HTTP request: `foldCategoryName` is now plain `toLowerCase()`, and
+ * SQLite's `NOCASE` collation can only ever call two strings equal when they
+ * differ by ASCII letter case alone, which `toLowerCase()` always agrees on
+ * regardless of host locale. Two names the route's own check would ever MISS
+ * are therefore also two names `NOCASE` would never collide on — which is
+ * this fix working, not a gap in it. The only way left to reach the
+ * constraint is to bypass the route's check entirely, exactly as a genuine
+ * race between two concurrent requests would (unreachable here too: every
+ * handler in this edition is synchronous end to end, so nothing can
+ * interleave between the check and the INSERT within one process — the race
+ * this backstop also exists for is real on the cloud edition's async routes,
+ * not this one). So this drives the actual SQLite constraint directly,
+ * through the same `db` this running server has open, and asserts the
+ * MAPPING this item added — `isCategoryNameConflict` — is what a route
+ * hitting this now-otherwise-unreachable case would answer with.
+ */
+const { db: liveDb, isCategoryNameConflict } = await import('../src/db.js');
+liveDb.prepare(`INSERT INTO categories (name, color, position) VALUES (?, ?, 0)`)
+  .run('Zzz Race Category', '#111111');
+let raceErr = null;
+try {
+  liveDb.prepare(`INSERT INTO categories (name, color, position) VALUES (?, ?, 0)`)
+    .run('zzz race category', '#222222');
+} catch (e) { raceErr = e; }
+ck('the DB constraint itself fires for a byte-identical NOCASE duplicate',
+  raceErr !== null, String(raceErr));
+ck('and isCategoryNameConflict recognises it — this is the mapping the ' +
+  'route\'s try/catch calls to answer 409 instead of the constraint\'s own 500',
+  !!raceErr && isCategoryNameConflict(raceErr), String(raceErr?.message));
+ck('…and does not mistake an unrelated constraint for this one',
+  !isCategoryNameConflict(new Error('NOT NULL constraint failed: habits.name')));
+// Clean up the row inserted straight through `db`, bypassing the route.
+await fetch(`${base}/api/categories`).then((r) => r.json()).then((cats) =>
+  Promise.all(cats.filter((c) => c.name === 'Zzz Race Category')
+    .map((c) => fetch(`${base}/api/categories/${c.id}`, { method: 'DELETE' }))));
 
 /* ---- deleting a category leaves its habits and their entries alone ---- */
 

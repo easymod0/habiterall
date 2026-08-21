@@ -80,9 +80,13 @@ db.exec(`
   --
   -- UNIQUE folds ASCII case only (SQLite NOCASE); the Unicode-aware check that
   -- keeps 'Élan' and 'élan' one category in both editions is a route-level
-  -- lookup through foldCategoryName (validate.js), with this constraint kept
-  -- only as a backstop — a duplicate is a 409 from the route, not a 500 from
-  -- here.
+  -- lookup through foldCategoryName (validate.js — plain toLowerCase(), not
+  -- toLocaleLowerCase(), which would tailor the fold to whichever locale this
+  -- host happens to be running rather than matching this NOCASE and
+  -- Postgres's lower() consistently). This constraint stays only as a
+  -- backstop for a race the route check missed, or a fold that disagrees
+  -- with SQLite's ASCII-only NOCASE — see isCategoryNameConflict below, which
+  -- is what turns hitting it into a 409 rather than a 500.
   CREATE TABLE IF NOT EXISTS categories (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT    NOT NULL,
@@ -271,5 +275,37 @@ if (!entryColumns.has('status')) {
 export const UNSET = 0;
 export const YES = 2;
 export const SKIP = 3;
+
+/**
+ * Whether ERR is node:sqlite reporting the categories table's own
+ * `UNIQUE(name COLLATE NOCASE)` constraint (above) refusing an INSERT or
+ * UPDATE — the DB-level backstop firing on a race the route's own
+ * `categoryNameTaken` check missed, or on a name whose only difference from
+ * an existing one is outside ASCII case, which this constraint cannot fold
+ * the way `foldCategoryName` does.
+ *
+ * Matched on the SQLite constraint-violation code AND the column named at
+ * the END of the message, not on the message alone: `errcode` narrows to a
+ * UNIQUE violation of any kind, and anchoring the column name to the end
+ * narrows it to a violation whose LAST (here, only) column is this table's
+ * own `name` — so a caller cannot mistake some other table's collision for a
+ * duplicate category name. It does NOT, on its own, distinguish every
+ * possible future second constraint on this table: node:sqlite lists every
+ * column a compound UNIQUE names, in order, so a hypothetical
+ * `UNIQUE(name, position)` violation would read
+ * `"... categories.name, categories.position"` — caught by an unanchored
+ * match, correctly excluded by this one, because `position` and not `name`
+ * is the column actually named last. A compound constraint whose LAST column
+ * happened to be `name` would still match; there is no such constraint on
+ * this table today, so this is a bound on what this check happens to answer
+ * for a message shaped like SQLite's own, not a proof that it always will.
+ *
+ * @param {any} err
+ * @returns {boolean}
+ */
+export function isCategoryNameConflict(err) {
+  return err?.code === 'ERR_SQLITE_ERROR' && err.errcode === 2067 &&
+    /categories\.name$/.test(String(err?.message ?? ''));
+}
 
 export default db;

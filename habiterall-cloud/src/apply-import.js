@@ -17,7 +17,7 @@
  * single-user and multi-user editions.
  */
 
-import { withUser } from './db/pool.js';
+import { withUser, isCategoryNameConflict } from './db/pool.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import { entryValue, normaliseImportedHabit } from '@habiterall/shared/import.js';
 import { assertDate, foldCategoryName, DEFAULT_COLOR, LIMITS } from '@habiterall/shared/validate.js';
@@ -161,13 +161,58 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
       // one — `COALESCE` falls through to the old append behaviour in that
       // case, and also when the account has no categories yet to take a MAX
       // of. RLS scopes the subquery to this user like everything else here.
-      const { rows } = await db.query(
-        `INSERT INTO categories (user_id, name, color, position)
-         VALUES ($1, $2, $3,
-                 COALESCE($4, (SELECT MAX(position) + 1 FROM categories), 0))
-         RETURNING id`,
-        [userId, name, color, saneDeclaredPosition(declaredPosition)]
-      );
+      //
+      // Wrapped in its own SAVEPOINT: Postgres, unlike SQLite, poisons the
+      // WHOLE transaction the instant one statement inside it errors — every
+      // later query would answer `25P02 current transaction is aborted`
+      // rather than run at all. This function is called once per category
+      // inside the ONE transaction `withUser` opened for the whole import,
+      // and a caught conflict here has to let every category and habit AFTER
+      // it still be attempted, not just avoid throwing itself.
+      let rows;
+      try {
+        await db.query('SAVEPOINT category_insert');
+        ({ rows } = await db.query(
+          `INSERT INTO categories (user_id, name, color, position)
+           VALUES ($1, $2, $3,
+                   COALESCE($4, (SELECT MAX(position) + 1 FROM categories), 0))
+           RETURNING id`,
+          [userId, name, color, saneDeclaredPosition(declaredPosition)]
+        ));
+        await db.query('RELEASE SAVEPOINT category_insert');
+      } catch (err) {
+        // Undo just this statement's damage to the transaction, whether or
+        // not what follows recognises the error — an unrecognised one still
+        // has to leave the transaction usable for `withUser`'s own ROLLBACK.
+        await db.query('ROLLBACK TO SAVEPOINT category_insert').catch(() => {});
+        // `ROLLBACK TO` rewinds the WORK done since the savepoint; it does not
+        // retire the savepoint itself, so without this the NEXT call's own
+        // `SAVEPOINT category_insert` nests inside this one instead of
+        // replacing it. `resolveOrCreateCategory` runs once per habit for a
+        // habit-derived name, and `LIMITS.categories` only gates SUCCESSES, so
+        // a file of N habits each naming a distinct colliding category leaves
+        // N live subtransactions open in the one transaction `withUser` opened
+        // for the whole import — Postgres degrades past roughly 64 of them via
+        // the subtransaction SLRU. Released unconditionally, alongside the
+        // rollback above, for the same reason that one runs before the error
+        // is even looked at: whether or not it is recognised, the transaction
+        // still has to come out of this function in a state `withUser`'s own
+        // ROLLBACK — or the next iteration's fresh SAVEPOINT — can rely on.
+        await db.query('RELEASE SAVEPOINT category_insert').catch(() => {});
+        // The map above already covers an exact fold match; this is what
+        // catches a name whose only difference from an existing one disagrees
+        // with Postgres's own `lower()` backstop, or a genuine race. Recorded
+        // as a skip rather than left to throw: without the savepoint above,
+        // an uncaught constraint violation here took every habit and entry
+        // the file was ever going to add down with it, not only the category
+        // that collided.
+        if (isCategoryNameConflict(err)) {
+          result.skipped.push(
+            `category "${name}" not created: a category with that name already exists`);
+          return null;
+        }
+        throw err;
+      }
       const id = rows[0].id;
       categoryIdByFold.set(folded, id);
       return id;

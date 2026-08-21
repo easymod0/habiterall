@@ -128,6 +128,278 @@ try {
     return { value: select.value, text: opt ? opt.textContent : null };
   })()`);
 
+  /* ---------- a cold deep link must not clear the category on save (issue #65 fix round, item 1) ----------
+   *
+   * The bug: `app.js`'s boot never runs `dashboard.load()` on a deep link
+   * straight to `#/habit/<id>` — only `detail.open()` — so `state.categories`
+   * is still its boot default of `[]` the moment `openDialog` first renders
+   * the picker. Pressing Save with nothing changed used to send
+   * `category_id: null`, and `PUT /habits/:id` REPLACES: the category was
+   * gone, silently.
+   *
+   * This has to boot AT the deep link with no dashboard visit first —
+   * `openHabitByName` above cannot be used, because clicking a `.habit-row`
+   * IS a dashboard visit, precisely the path that already worked. Less
+   * obviously, `Page.navigate`-ing the MAIN tab to a URL differing only by
+   * its fragment is not that either: the app's own `hashchange` listener
+   * (`ui/routes.js`) handles it as an in-page route change, same document,
+   * same `state` — nothing reloads and `state.categories` keeps whatever the
+   * main tab's own dashboard visit above already put there. A cold boot needs
+   * a target that has never loaded this origin at all, so this opens a BRAND
+   * NEW tab straight at the deep link, exactly as `routecheck.mjs` does for
+   * the same reason, and leaves the main tab and its dashboard untouched.
+   *
+   * Proving the guard specifically needs the picker's OWN refetch to
+   * provably not have landed yet — and a real network hold (CDP `Fetch`)
+   * cannot promise that here: this app registers a service worker, and
+   * `sw.js`'s `/api/*` handler fetches from INSIDE the worker's own target,
+   * invisible to a `Fetch` domain enabled on the page's session alone (see
+   * `hangcheck.mjs` for the technique that DOES reach it, at the cost of
+   * attaching to that second target — more machinery than this needs). JS's
+   * own execution model gives the same guarantee for free: `fetch()` cannot
+   * possibly resolve before control returns to the event loop, so reading the
+   * select and pressing Save inside ONE synchronous script — no `await`
+   * between the click that starts `openDialog`'s refetch and the submit —
+   * proves the picker's own network answer had no opportunity to land,
+   * regardless of how fast the network or the worker actually is.
+   */
+  console.log('--- a cold deep link keeps its category (issue #65 fix round, item 1) ---');
+
+  const deepLinkCategory = await ev(`(async()=>{
+    const r = await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Deep Link Category', color: '#7c3aed' }) });
+    return r.json();
+  })()`);
+  const deepLinkHabit = await ev(`(async()=>{
+    const r = await fetch('/api/habits', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Deep Link Habit', type: 'boolean',
+        category_id: ${JSON.stringify(deepLinkCategory.id)} }) });
+    return r.json();
+  })()`);
+  ck('fixture habit carries the fixture category to start',
+    deepLinkHabit.category_id === deepLinkCategory.id, JSON.stringify(deepLinkHabit));
+
+  // A fresh target: nothing has ever loaded this origin in it, so its boot is
+  // genuinely cold — no dashboard visit, and `state.categories` starts `[]`.
+  const { targetId: coldTargetId } = await send('Target.createTarget', { url: 'about:blank' });
+  const { sessionId: coldSessionId } =
+    await send('Target.attachToTarget', { targetId: coldTargetId, flatten: true });
+  await send('Page.enable', {}, coldSessionId);
+  const coldEv = async (e) => {
+    const r = await send('Runtime.evaluate',
+      { expression: e, awaitPromise: true, returnByValue: true }, coldSessionId);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
+    return r.result.value;
+  };
+
+  await send('Page.navigate', { url: `${APP}/#/habit/${deepLinkHabit.id}` }, coldSessionId);
+  await waitUntil(coldEv,
+    `!document.getElementById('view-detail').hidden && ${byText('#view-detail button', 'Edit')} &&
+     document.querySelector('.detail-head h2')?.textContent.includes('Zzz Deep Link Habit')`,
+    { what: "the deep-linked habit's own page, with no dashboard ever painted" });
+
+  // The whole premise of the bug: no dashboard load happened on the way here.
+  const gridPainted = await coldEv(`!!document.getElementById('grid').children.length`);
+  ck('…and, provably, the dashboard grid never painted at all', !gridPainted, String(gridPainted));
+
+  // Click Edit and press Save in the SAME synchronous script, with no
+  // `await` anywhere between them — see the comment above for why that is
+  // what makes the timing airtight rather than merely likely. The select's
+  // value is read in the same breath, right after the click and right before
+  // the submit, so it reports exactly what `openDialog` rendered before its
+  // own `refreshCategoryPicker` fetch could possibly have answered.
+  const pickedBeforeFetch = await coldEv(`(()=>{
+    ${byText('#view-detail button', 'Edit')}.click();
+    const select = document.querySelector('#habit-form [name=category_id]');
+    const picked = { value: select.value, text: select.options[select.selectedIndex]?.textContent };
+    document.getElementById('habit-form').requestSubmit();
+    return picked;
+  })()`);
+  ck('the guard keeps the real category selected, before the picker\'s own fetch could possibly land',
+    pickedBeforeFetch.value === String(deepLinkCategory.id),
+    JSON.stringify(pickedBeforeFetch));
+
+  await waitUntil(coldEv, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the no-op edit to save' });
+
+  const afterColdSave = await coldEv(`(async()=>{
+    const r = await fetch('/api/habits/${deepLinkHabit.id}');
+    return r.json();
+  })()`);
+  ck('THE assertion: saving with nothing changed did not clear the category',
+    afterColdSave.category_id === deepLinkCategory.id, JSON.stringify(afterColdSave));
+
+  // Second half: given ordinary time to land (nothing is held now — the
+  // dialog is closed, but the select this ran against is still in the DOM),
+  // `openDialog`'s own refetch replaces the placeholder with the real name.
+  // Without that refetch ever having been driven, `state.categories` would
+  // still be `[]` and this would time out rather than ever seeing the name.
+  await waitUntil(coldEv, `(()=>{
+    const select = document.querySelector('#habit-form [name=category_id]');
+    const opt = [...select.options].find(o => o.value === ${JSON.stringify(String(deepLinkCategory.id))});
+    return opt?.textContent === 'Zzz Deep Link Category';
+  })()`, { what: "openDialog's own refetch to land and replace the placeholder with the real name" });
+
+  await coldEv(`(async()=>{
+    await fetch('/api/habits/${deepLinkHabit.id}', { method: 'DELETE' });
+    await fetch('/api/categories/${deepLinkCategory.id}', { method: 'DELETE' });
+  })()`);
+  await send('Target.closeTarget', { targetId: coldTargetId });
+
+  /* ---------- a late refetch from a CLOSED dialog must not write its stale
+     category into a DIFFERENT habit (fix round 2, item 1) ----------
+   *
+   * The bug the round-1 fix above introduced: `openDialog`'s fire-and-forget
+   * `refreshCategoryPicker` call used to capture `habit?.category_id ?? null`
+   * EAGERLY at fire time. Its continuation runs whenever the GET happens to
+   * land, with no check that the dialog it started from is still open, still
+   * for the same habit, or untouched since — `renderCategorySelect` sets
+   * `select.value` UNCONDITIONALLY for a non-null `wanted`. Edit habit A,
+   * close it, edit a DIFFERENTLY categorised habit B, and A's late answer
+   * forces the live select back to A's category. `saveHabit` reads that
+   * value SYNCHRONOUSLY at submit, so Save commits the wrong `category_id`
+   * with nothing on screen to say so — the shape of commit `2f456f5` (#244):
+   * a rollback belongs to the write it was made for, not to whichever habit
+   * is open when it runs.
+   *
+   * Reproducing this needs A's own refetch to still be unresolved once B's
+   * dialog is showing its own value, and needs it to resolve again — not
+   * before, not never — while B is open. Real network timing cannot promise
+   * either half, and CDP's `Fetch` domain cannot reach this specific GET at
+   * all: it intercepts at the network layer, and this app's `GET /api/*`
+   * traffic is answered by the SERVICE WORKER's `networkFirst`, running
+   * inside the worker's own target, invisible to `Fetch` enabled on the page
+   * session alone (see the cold-deep-link comment above, which hits the same
+   * wall for the opposite reason). Replacing the PAGE's own `window.fetch`
+   * intercepts the call before the browser routes it anywhere, worker
+   * included, and releases it on a signal this script controls rather than
+   * the clock — matching only the one GET behind `openDialog`'s own refetch
+   * for A, by method and path, so B's own refetch and every other request
+   * still goes straight to the real network.
+   */
+  console.log('--- a late refetch from a closed dialog does not write into a different habit (fix round 2, item 1) ---');
+
+  const raceCatA = await ev(`(async()=>{
+    const r = await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Race Category A', color: '#f43f5e' }) });
+    return r.json();
+  })()`);
+  const raceCatB = await ev(`(async()=>{
+    const r = await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Race Category B', color: '#22c55e' }) });
+    return r.json();
+  })()`);
+  const raceHabitA = await ev(`(async()=>{
+    const r = await fetch('/api/habits', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Race Habit A', type: 'boolean',
+        category_id: ${JSON.stringify(raceCatA.id)} }) });
+    return r.json();
+  })()`);
+  const raceHabitB = await ev(`(async()=>{
+    const r = await fetch('/api/habits', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Race Habit B', type: 'boolean',
+        category_id: ${JSON.stringify(raceCatB.id)} }) });
+    return r.json();
+  })()`);
+
+  // A real reload, not a route change: `state.categories` has to come from a
+  // genuine `dashboard.load()` holding both fixtures before the exploit
+  // below runs — deliberately NOT the cold-boot case above, so each dialog's
+  // own synchronous render resolves straight to the real name, no
+  // placeholder in play, and the only thing left to race is the LATE
+  // continuation this block is about.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Zzz Race Habit B')`,
+    { what: 'the dashboard to load with both race fixtures' });
+
+  const picked = await ev(`(()=>{
+    const realFetch = window.fetch.bind(window);
+    window.__realFetch = realFetch;
+    window.__raceGetLanded = false;
+    let capturedA = false;
+    const held = new Promise((res) => { window.__releaseA = res; });
+    // Matches only the GET behind A's own refetch, by method and path — B's
+    // own refetch (fired below) is a second, unheld call to the same path and
+    // must resolve normally, since it is not what this is testing.
+    window.fetch = (url, opts) => {
+      const isCategoriesGet = String(url).endsWith('/api/categories') &&
+        (!opts || (opts.method ?? 'GET').toUpperCase() === 'GET');
+      if (isCategoriesGet && !capturedA) {
+        capturedA = true;
+        return held.then(() => realFetch(url, opts)).then((res) => {
+          // Set on the SAME chain \`api()\`'s own \`await fetch(...)\` resolves
+          // through, so observing this true from Node means that resolution
+          // has already been scheduled — the render it leads to is a
+          // synchronous continuation of it, and every later poll in this
+          // suite is itself a further CDP round trip, which is far longer
+          // than the microtasks between the two.
+          window.__raceGetLanded = true;
+          return res;
+        });
+      }
+      return realFetch(url, opts);
+    };
+    return (async () => {
+      const hd = await import('/shared/ui/habit-dialog.js');
+      // A's own picker refetch fires here and is held above, unresolved.
+      hd.openDialog(${JSON.stringify(raceHabitA)});
+      document.getElementById('dialog-cancel').click();
+      // B's own picker refetch fires here too — a second, unheld GET.
+      hd.openDialog(${JSON.stringify(raceHabitB)});
+      const select = document.querySelector('#habit-form [name=category_id]');
+      return { value: select.value, text: select.options[select.selectedIndex]?.textContent };
+    })();
+  })()`);
+  ck("opening B shows B's own category, not a placeholder",
+    picked.text === 'Zzz Race Category B', JSON.stringify(picked));
+
+  // Release A's held GET now that B's dialog is the one open and showing its
+  // own value — this is the exact moment the round-1 bug clobbers it.
+  await ev(`window.__releaseA()`);
+  await waitUntil(ev, `window.__raceGetLanded === true`,
+    { what: "A's held categories GET to actually land" });
+
+  const afterRace = await ev(`(()=>{
+    const select = document.querySelector('#habit-form [name=category_id]');
+    return { value: select.value, text: select.options[select.selectedIndex]?.textContent };
+  })()`);
+  ck("THE assertion: A's late-landing refetch did not overwrite B's live selection with A's category",
+    afterRace.value === String(raceCatB.id), JSON.stringify(afterRace));
+
+  await ev(`window.fetch = window.__realFetch;
+    document.getElementById('habit-form').requestSubmit(); true`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the no-op edit on B to save' });
+
+  const afterRaceSave = await ev(`(async()=>{
+    const r = await fetch('/api/habits/${raceHabitB.id}');
+    return r.json();
+  })()`);
+  ck('THE assertion: B kept its OWN category after saving with nothing changed',
+    afterRaceSave.category_id === raceCatB.id, JSON.stringify(afterRaceSave));
+
+  await ev(`(async()=>{
+    await fetch('/api/habits/${raceHabitA.id}', { method: 'DELETE' });
+    await fetch('/api/habits/${raceHabitB.id}', { method: 'DELETE' });
+    await fetch('/api/categories/${raceCatA.id}', { method: 'DELETE' });
+    await fetch('/api/categories/${raceCatB.id}', { method: 'DELETE' });
+  })()`);
+  // The cleanup above went straight through the API, same as the top-of-suite
+  // one: `state.categories` still holds the two race fixtures until something
+  // re-fetches it, and the next block's "no category exists yet" check reads
+  // that state, not the server, through `renderCategoryManage`.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
+    { what: 'the dashboard after the race block\'s cleanup' });
+
   /* ---------- create a category from a chip, and assign it to a habit ---------- */
 
   await ev(`document.getElementById('btn-new').click()`);
@@ -359,6 +631,57 @@ try {
   // by category permanently, from an action that never said it would.
   ck('no drag handle while grouped',
     grouping.dragHandles === 0, String(grouping.dragHandles));
+
+  /* ---------- no section headers over the empty state or a no-match search
+     (fix round item 5) — grouping is still on from the block above ---------- */
+
+  // A search that matches nothing. The box itself may be hidden below
+  // SEARCH_FROM habits, but `state.query` is what `paint()` reads regardless
+  // — setting it directly through the running module rather than the DOM
+  // control is what lets this run at any habit count.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.query = 'zzz-nothing-here-matches-this';
+    dash.paint();
+    return true;
+  })()`);
+  const noMatchGrouped = await ev(`(()=>({
+    headers: document.querySelectorAll('#grid .category-section-header').length,
+    sentenceVisible: !document.getElementById('empty-nomatch').hidden,
+  }))()`);
+  ck('grouped, searching past every result: no section headers, just the sentence',
+    noMatchGrouped.headers === 0 && noMatchGrouped.sentenceVisible,
+    JSON.stringify(noMatchGrouped));
+
+  // An empty ACCOUNT, without touching any fixture: switching to the archived
+  // list is an account with zero habits on it, since nothing here is
+  // archived, and it is still `groupByCategory: true`.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.query = '';
+    state.showArchived = true;
+    await dash.load();
+    return true;
+  })()`);
+  const emptyGrouped = await ev(`(()=>({
+    headers: document.querySelectorAll('#grid .category-section-header').length,
+    archivedEmptyVisible: !document.getElementById('empty-archived').hidden,
+  }))()`);
+  ck('grouped, and the account (the archived list) is empty: no section headers either',
+    emptyGrouped.headers === 0 && emptyGrouped.archivedEmptyVisible,
+    JSON.stringify(emptyGrouped));
+
+  // Back to the active list — the next block's own navigation would reset
+  // this anyway, but leaving it set is not this test's to risk.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.showArchived = false;
+    await dash.load();
+    return true;
+  })()`);
 
   /* ---------- turning the setting back off restores the flat list ---------- */
 

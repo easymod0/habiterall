@@ -10,7 +10,7 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { withUser } from './db/pool.js';
+import { withUser, isCategoryNameConflict } from './db/pool.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
@@ -342,6 +342,16 @@ api.get('/categories', route(async (req, res) => {
   res.json(rows);
 }));
 
+/**
+ * The order every category route below follows, and the reason it is
+ * written down rather than left to be re-derived per route: SHAPE (a
+ * positive integer id, else 400, `categoryId` above) before EXISTENCE (else
+ * 404) before the BODY through `parseCategory` (else its own 400) before the
+ * DUPLICATE name (else 409). `PUT /categories/:id` used to parse the body
+ * before checking existence, which personal never did; this is the order
+ * both editions now share, so add a route here later in that same sequence
+ * rather than inventing a new one.
+ */
 api.post('/categories', route(async (req, res) => {
   const c = parseCategory(req.body);
 
@@ -355,13 +365,22 @@ api.post('/categories', route(async (req, res) => {
     if (count >= LIMITS.categories) {
       throw httpError(400, `at most ${LIMITS.categories} categories are allowed`);
     }
-    const { rows } = await db.query(
-      `INSERT INTO categories (user_id, name, color, position)
-       VALUES ($1, $2, $3, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
-       RETURNING *`,
-      [uid(req), c.name, c.color]
-    );
-    return rows[0];
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO categories (user_id, name, color, position)
+         VALUES ($1, $2, $3, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
+         RETURNING *`,
+        [uid(req), c.name, c.color]
+      );
+      return rows[0];
+    } catch (err) {
+      // The route's own check above covers the ordinary path; this is what
+      // catches a fold that disagrees with Postgres's own lower() backstop,
+      // or a genuine race between two requests, rather than surfacing the
+      // constraint violation as an unexplained 500.
+      if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+      throw err;
+    }
   });
 
   res.status(201).json(created);
@@ -369,23 +388,29 @@ api.post('/categories', route(async (req, res) => {
 
 api.put('/categories/:id', route(async (req, res) => {
   const id = categoryId(req);
-  const c = parseCategory(req.body);
 
   const updated = await withUser(uid(req), async (db) => {
-    // Existence checked first, matching the personal edition's ordering: a
+    // Existence checked BEFORE the body is parsed, matching the personal
+    // edition's ordering — see the comment above `POST /categories`. A
     // request naming a category that is not (or no longer) the caller's own
-    // gets a 404 rather than a 409 it happened to also collide on.
+    // gets a 404 rather than a 400 from a body it will never use.
     const { rows: existing } = await db.query(`SELECT id FROM categories WHERE id = $1`, [id]);
     if (!existing.length) throw httpError(404, 'category not found');
 
+    const c = parseCategory(req.body);
     if (await categoryNameTaken(db, c.name, id)) {
       throw httpError(409, 'category already exists');
     }
-    const { rows } = await db.query(
-      `UPDATE categories SET name = $1, color = $2 WHERE id = $3 RETURNING *`,
-      [c.name, c.color, id]
-    );
-    return rows[0];
+    try {
+      const { rows } = await db.query(
+        `UPDATE categories SET name = $1, color = $2 WHERE id = $3 RETURNING *`,
+        [c.name, c.color, id]
+      );
+      return rows[0];
+    } catch (err) {
+      if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+      throw err;
+    }
   });
 
   res.json(updated);

@@ -181,14 +181,22 @@ export function parseIcon(value) {
  * as backstops; a duplicate is a 409 from the route, not a 500 from a
  * constraint violation.
  *
- * `toLocaleLowerCase()` (no fixed locale) rather than `toLowerCase()`, for the
- * same Unicode-aware folding Postgres's `lower()` already does.
+ * Plain `toLowerCase()`, never `toLocaleLowerCase()`. `toLowerCase()` is
+ * ALREADY full Unicode Default Case Conversion with no locale argument
+ * needed (`'É'.toLowerCase() === 'é'`) — the only thing a locale argument
+ * adds is host-locale TAILORING (Turkish/Azeri's dotless `ı`, Lithuanian's
+ * accent-sensitive casing), which is the wrong direction twice over: the
+ * same account would fold names differently depending on which server
+ * answers it, and a tailored fold is a *looser* match to Postgres's
+ * locale-independent `lower()` and SQLite's `NOCASE` backstop than the
+ * plain form already is. So `toLowerCase()` is the CLOSER match to `lower()`,
+ * not the looser one — this used to reason the other way round.
  *
  * @param {unknown} name
  * @returns {string}
  */
 export function foldCategoryName(name) {
-  return String(name ?? '').trim().toLocaleLowerCase();
+  return String(name ?? '').trim().toLowerCase();
 }
 
 /**

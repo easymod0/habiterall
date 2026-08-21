@@ -291,7 +291,14 @@ export function paint() {
   const reorderable =
     !state.showArchived && !filtering && !grouped && state.habits.length > 1;
 
-  if (grouped) {
+  // Sections are drawn over `shown`, which the empty state and the no-match
+  // sentence above have already decided there is nothing worth grouping in:
+  // an account with no habits gets six empty headers under the onboarding
+  // panel, and searching past every result gets "No habits match that."
+  // sitting above a full set of headers each reading 0 — a section list
+  // answering a question the sentence above it already answered the other
+  // way. Neither state has a `shown` to partition in the first place.
+  if (grouped && !isEmpty && !noMatch) {
     // Every category in its own `position` order, an empty one still drawing
     // its header (sections may be empty — no collapsing), then an
     // always-present trailing Uncategorised section. `category_id` pointing

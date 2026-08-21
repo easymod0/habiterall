@@ -253,6 +253,23 @@ export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
  * way round: `buildHabitsCsv` writes a `Category` column and
  * `parseLoopHabitsCSV` reads it back, so THIS Loop format carries it, and the
  * .db — which has no column and no concept of one — does not.
+ *
+ * `category` in this list, and in `JSON_HABIT_FIELDS` below, pins only the
+ * ASSIGNMENT — which habit belongs to which NAMED category — because a
+ * `Category` column is a string, not a foreign key, and a habit's own row is
+ * the only place the CSV pair carries one. The archive has no second file for
+ * categories themselves, so a CSV round trip cannot see either of a
+ * category's other two properties: every restored category is invented fresh
+ * at `DEFAULT_COLOR` (a colour the file never wrote down), in whatever order
+ * `resolveOrCreateCategory` first meets its name (a position the file never
+ * wrote down either) — so exporting an account with Health `#10b981` and
+ * Fitness `#f59e0b` and restoring that CSV in replace mode brings both back
+ * `#3b82f6`, in a different order, still correctly grouping the same habits
+ * under Health and Fitness. `'category'` pinning the assignment says nothing
+ * about that loss, because colour and position are not FIELDS on a habit for
+ * this list to watch — see `docs/decisions/categories.md`'s per-format
+ * fidelity rule for the full statement, and the JSON backup below for the one
+ * format that carries a category's colour and declared position too.
  */
 export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color', 'category'];
 

@@ -5,7 +5,7 @@
  * storage-specific half, so the shared parsers stay database-agnostic.
  */
 
-import { db, UNSET, YES, SKIP } from './db.js';
+import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
 // Loop stores colours as a palette index, so imported habits need the same
 // index -> hex mapping the parsers use.
 import { entryValue, normaliseImportedHabit } from '@habiterall/shared/import.js';
@@ -158,7 +158,25 @@ export function applyImport(habits, mode = 'merge', categories = []) {
           `category "${name}" not created: at most ${LIMITS.categories} are allowed`);
         return null;
       }
-      const info = insertCategory.run(name, color, saneDeclaredPosition(declaredPosition));
+      let info;
+      try {
+        info = insertCategory.run(name, color, saneDeclaredPosition(declaredPosition));
+      } catch (err) {
+        // The map above already covers an exact fold match; this is what
+        // catches a name whose only difference from an existing category is
+        // outside ASCII case, which SQLite's NOCASE backstop cannot fold the
+        // way `foldCategoryName` does. Recorded as a skip rather than left to
+        // throw: the whole import runs in one transaction (BEGIN, above in
+        // applyImport), so an uncaught constraint violation here used to roll
+        // back every habit and entry the file was ever going to add, not
+        // only the category that collided.
+        if (isCategoryNameConflict(err)) {
+          result.skipped.push(
+            `category "${name}" not created: a category with that name already exists`);
+          return null;
+        }
+        throw err;
+      }
       // node:sqlite may hand back a bigint; the column is a small integer.
       const id = Number(info.lastInsertRowid);
       categoryIdByFold.set(folded, id);

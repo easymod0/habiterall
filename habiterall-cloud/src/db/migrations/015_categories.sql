@@ -18,9 +18,19 @@
 -- 'Élan' and 'élan' collide here where SQLite's ASCII-only NOCASE would treat
 -- them as different categories. That divergence is exactly why the uniqueness
 -- check a request gets 409'd by is the route-level `foldCategoryName`
--- (shared/src/validate.js), not this index: this stays a backstop, and the
--- shared function is what makes both editions draw the same line for a name
--- written in either case fold.
+-- (shared/src/validate.js — plain toLowerCase(), which is ALREADY full
+-- Unicode case folding and so is the closer match to this lower(), not
+-- toLocaleLowerCase(), which would tailor the fold to whichever locale the
+-- APP's host happens to be running instead), not this index: this stays a
+-- backstop for a race or a fold disagreement, caught in the route
+-- (`isCategoryNameConflict`, db/pool.js) and mapped to 409 rather than left
+-- to surface as this constraint's own 500. The shared function draws the
+-- SAME line as this lower() for every input the two constraints can tell
+-- apart — not for every input, full stop: U+0130 (İ) is the known
+-- divergence, where JS's toLowerCase() answers 'i' plus a combining dot and
+-- glibc's lower() answers a bare 'i', so 'İstanbul' imported into an account
+-- already holding 'Istanbul' skips the category here and creates a second
+-- one in the personal edition (docs/decisions/categories.md).
 CREATE TABLE IF NOT EXISTS categories (
   id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id    BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,

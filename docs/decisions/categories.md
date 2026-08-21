@@ -52,6 +52,44 @@ in the habit dialog's category picker, each with its own default colour so a
 freshly grouped dashboard is not six identical-looking headers, and a chip
 only creates its category the moment it is tapped.
 
+**A category's own colour and declared position are carried faithfully by
+exactly one backup format, and that is a per-format fidelity gap like every
+other one this project already keeps a list for — not a bug in the other
+two.** A habit's `category` field is a NAME, and the three formats disagree
+about whether there is anywhere else to put the rest of what a category is:
+
+- **Loop's `.db` carries no concept of a category at all.** There is no
+  column and no table for one, so a `.db` round trip correctly returns every
+  habit to uncategorised — the same asymmetry `icon` and `at_most_unlogged`
+  already have against this format, for the same reason (nowhere to write
+  it down).
+- **The CSV pair carries the ASSIGNMENT only.** `buildHabitsCsv` writes a
+  `Category` column of names, and `parseLoopHabitsCSV` reads it back — so a
+  habit's grouping survives — but the archive has no second file for
+  categories themselves, so `backupCategories` answers `null` for a zip and
+  neither colour nor position travels with it. Both import routes pass `[]`
+  in that case, and `resolveOrCreateCategory` invents each restored category
+  fresh: `DEFAULT_COLOR`, and whatever position it happens to be met in while
+  habits are being restored. Export an account with Health `#10b981` and
+  Fitness `#f59e0b`, restore that zip in replace mode, and both come back
+  `#3b82f6` in a different order — the section headers survive as headers,
+  correctly grouping the same habits, but distinguishable no longer.
+- **The JSON backup is the only format that carries a category's colour and
+  its declared `position`,** as a `categories` array alongside `habits` — so
+  "a replace applies the file's own list, including each category's declared
+  position" is a claim about THIS format and not the other two. A replace
+  restore of a JSON backup is the one round trip where Health and Fitness
+  come back the colours and the order they were exported with.
+
+This is a documentation gap, not a behaviour one — `Habits.csv` is Loop-shaped
+on purpose (see the `.db`/CSV split above and `shared/CLAUDE.md`'s import
+rules), and widening it with a colour column is a bigger cost than the loss.
+What was wrong is that the CSV gap went unwritten while the code shipped
+claiming a category "restores" without saying which of its three properties
+that verb covers for which format. `shared/test/roundtrip-fixture.mjs`'s
+`CSV_HABIT_FIELDS` comment states the same rule where the round-trip suites
+that would otherwise let it drift can see it.
+
 **The duplicate-name check is a route-level `foldCategoryName`, with the DB
 constraints kept only as backstops.** SQLite's `NOCASE` collation folds ASCII
 case only; Postgres's `lower()` is Unicode-aware. Concretely, `UNIQUE(name
@@ -62,17 +100,69 @@ That is exactly the class of edition divergence `shared/src/validate.js`
 exists to prevent — the same input succeeding in one edition and failing in
 the other, silently, depending on which database happens to be running. So
 `foldCategoryName` is one function in shared code (`String(name ??
-'').trim().toLocaleLowerCase()`, which is Unicode-aware in both Node and the
-browser) and both editions' routes look up `categoryByFoldedName` /
-`WHERE lower(name) = lower($1)`-equivalent through it before ever reaching the
-`INSERT`. The DB-level `UNIQUE` constraints stay, but only as a backstop
-against a race between two concurrent requests passing the route check at
-once — a duplicate that reaches the constraint is answered as a **409**, not
-allowed to surface as the constraint's own 500. Note this means personal's DB
-constraint is *stricter* than the route check in one direction (ASCII-only
-NOCASE would let through a pair the route already folds together) which is
-fine: the route is what a client sees, and the constraint only ever fires on
-a race the route already meant to refuse.
+'').trim().toLowerCase()`) and both editions' routes look up
+`categoryByFoldedName` / `WHERE lower(name) = lower($1)`-equivalent through it
+before ever reaching the `INSERT`.
+
+That draws the SAME line for every input the two DB-level constraints can
+tell apart — it does not make the two editions agree for every input, full
+stop, and nothing here should be read as claiming it does. `toLowerCase()`
+and glibc's `lower()` are two independent implementations of Unicode case
+folding, and U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE) is where they
+part: JS's `toLowerCase()` answers `'i̇'` — a bare `i` plus a combining dot,
+U+0069 U+0307 — while glibc's `lower()` answers a bare `i`, U+0069 alone.
+Importing `İstanbul` into an account already holding `Istanbul` therefore
+folds to two different strings under `foldCategoryName` and to the SAME
+string under Postgres's `lower()`: the route-level lookup misses the existing
+row and tries to create a new one, and in cloud that INSERT is what walks
+straight into the `lower()`-backed unique index as a genuine collision —
+caught as a 409 by the route, or as a constraint violation `apply-import.js`'s
+own savepoint has to roll back cleanly for. Personal has no such backstop for
+this pair (`NOCASE` is ASCII-only and does not see `İ` vs `I` either), so the
+same import there creates a second, genuinely distinct category. Not a bug in
+`foldCategoryName` to fix — a fold agreeing with both databases on every
+codepoint at once does not exist to reach for — but the reason the INSERT
+path has to survive a collision cleanly rather than assume the route-level
+check already ruled one out.
+
+That is plain `toLowerCase()`, deliberately never `toLocaleLowerCase()`. A
+first version of this reasoned the other way round — "`toLocaleLowerCase()`
+for the same Unicode-aware folding Postgres's `lower()` already does" — and
+that reasoning was backwards. `toLowerCase()` with no locale argument is
+*already* full Unicode Default Case Conversion (`'É'.toLowerCase() ===
+'é'`); the only thing a locale argument adds is host-locale TAILORING —
+Turkish and Azeri's dotless `ı`, Lithuanian's accent-sensitive casing — which
+is wrong in both directions at once here. It makes the same account fold
+names differently depending on which server happens to answer a request, and
+it is a *looser* match to Postgres's locale-independent `lower()` and
+SQLite's `NOCASE` than the plain, locale-free form already is. Plain
+`toLowerCase()` is the closer match, not the looser one.
+
+The DB-level `UNIQUE` constraints stay, but only as a backstop against a race
+between two concurrent requests passing the route check at once, or against
+`foldCategoryName` disagreeing with a constraint it is only an approximation
+of (NOCASE's ASCII-only fold, in personal's direction). A duplicate that
+reaches the constraint is caught and answered as a **409**
+(`isCategoryNameConflict` in each edition's storage module,
+`habiterall-personal/src/db.js` and `habiterall-cloud/src/db/pool.js`), matched
+on the driver's own report of *which* constraint fired — node:sqlite's error
+code plus the column named in its message, Postgres's `23505` plus
+`err.constraint` — rather than allowed to surface as that constraint's own
+500. `resolveOrCreateCategory` in both editions' `apply-import.js` catches the
+same conflict, because that INSERT runs inside the whole import's one
+transaction and an uncaught constraint violation there took every habit and
+entry down with it, not only the category that collided. Note which way round personal's asymmetry actually runs: the ROUTE is the
+stricter of the two, because `toLowerCase()` folds the whole of Unicode while
+`NOCASE` folds ASCII alone — so `Élan` and `élan` are one category to the
+route and two to the constraint. The consequence is that in personal the
+constraint can only fire on a genuine RACE: any pair NOCASE would reject
+differs by ASCII case alone, and that is a pair `foldCategoryName` has already
+refused. The 409 mapping there is live for the race and otherwise unreachable
+through any single request — measured, by removing the route's own duplicate
+check and watching every existing assertion still pass. In cloud it is
+reachable both ways, because `lower()` and `toLowerCase()` are two
+implementations of Unicode case folding rather than one, and they need not
+agree on every codepoint.
 
 **`CACHE_VERSION` moved to `v24` even though no file was added under
 `shared/public/`.** The usual trigger for a bump is a new file joining `sw.js`'s

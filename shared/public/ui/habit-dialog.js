@@ -55,6 +55,34 @@ function currentCategoryId() {
  * it still exists — a delete elsewhere in the account can remove the very
  * category this form had chosen.
  *
+ * A non-null WANTED may never fall back to `''` (none) for want of a list
+ * that simply has not landed. `state.categories` starts `[]` and stays that
+ * way until `dashboard.load()` or `refreshCategoryPicker` populates it — and
+ * a cold deep link to a habit's own page (`#/habit/42`, opened straight from
+ * a reminder, an Android tap, or a reload) runs NEITHER before this dialog
+ * opens: `app.js`'s boot skips `dashboard.load()` entirely on that path. This
+ * function used to build the `<select>` from that empty list and then fall
+ * `select.value` to `''` because the wanted id matched nothing in it — so
+ * pressing Save with nothing changed sent `category_id: null`, and
+ * `PUT /habits/:id` REPLACES: the habit's category was gone, silently, with
+ * nothing on screen to say so. This is the half that has to hold OFFLINE,
+ * where the fetch behind `refreshCategoryPicker` cannot land at all — it is
+ * not belt-and-braces alongside that refetch, it is what saves a device that
+ * never gets an answer.
+ *
+ * The placeholder below is for a real, EXPLICIT id only — `wanted` itself,
+ * never the `select.value` fallback. `wanted === null` is its own answer
+ * ("this form has no category, stated" — the delete-category handler passes
+ * it deliberately once the form's own category is the one just removed) and
+ * must still be free to land on "(none)"; only `wanted === undefined` falls
+ * back to whatever the control already showed. `openDialog`'s fire-and-forget
+ * refetch is exactly that call site: its continuation can land long after the
+ * dialog it started from has closed, been reused for a different habit, or
+ * had its own control hand-changed, and none of that is visible to a value
+ * captured when the fetch was fired — reading `select.value` at render time
+ * instead means the late answer can only ever re-confirm whichever habit's
+ * dialog is actually open, never overwrite it with a stale one.
+ *
  * @param {number | null} [wanted]
  */
 function renderCategorySelect(wanted) {
@@ -71,7 +99,18 @@ function renderCategorySelect(wanted) {
     opt.textContent = c.name;
     select.append(opt);
   }
-  select.value = state.categories.some((c) => String(c.id) === want) ? want : '';
+  const known = state.categories.some((c) => String(c.id) === want);
+  // Resolvable names come from the loop above; this only ever fires for an id
+  // that loop could not find, so there is nothing here to label it with but a
+  // neutral placeholder — a real name arrives, if it exists, the moment
+  // `state.categories` does and this function runs again.
+  if (wanted != null && !known) {
+    const placeholder = document.createElement('option');
+    placeholder.value = want;
+    placeholder.textContent = '(current category)';
+    select.append(placeholder);
+  }
+  select.value = (known || wanted != null) ? want : '';
 }
 
 /** The manage list: one row per category, ✎ for rename+recolour, ✕ to delete. */
@@ -189,7 +228,14 @@ function renderCategoryManage() {
 async function refreshCategoryPicker(selected) {
   state.categories = await api('/categories');
   renderCategorySelect(selected);
-  renderCategoryManage();
+  // A rename row owns an input this rebuild would tear out from under
+  // whoever is typing in it — the "`change` never fires on a removed input"
+  // failure `shared/public/CLAUDE.md` documents for the settings dialog.
+  // Load-bearing for `openDialog`'s fire-and-forget call below: that
+  // continuation can land at any point after the user has moved on to a
+  // DIFFERENT habit, or has pressed ✎ on this one, and must not rebuild the
+  // list either dialog is showing mid-edit.
+  if (editingCategoryId == null) renderCategoryManage();
 }
 
 /**
@@ -205,8 +251,17 @@ async function useOrCreateCategory(name, color) {
     return await api('/categories', { method: 'POST', body: JSON.stringify({ name, color }) });
   } catch (err) {
     if (err.message !== 'category already exists') throw err;
+    // A third copy of `foldCategoryName` (shared/src/validate.js), and an
+    // unavoidable one: `shared/src` is not served to the browser (see
+    // shared/CLAUDE.md), so this file cannot import the original the way the
+    // two server routes and `apply-import.js` do. Kept character-for-character
+    // the same rule — `.trim()` included, so a name differing only by
+    // surrounding whitespace still resolves to the account's existing
+    // category — because the whole point of asking twice is that both
+    // answers must agree.
+    const folded = name.trim().toLowerCase();
     const existing = (await api('/categories'))
-      .find((c) => c.name.toLowerCase() === name.toLowerCase());
+      .find((c) => c.name.trim().toLowerCase() === folded);
     if (existing) return existing;
     throw err;
   }
@@ -243,6 +298,36 @@ export function openDialog(habit = null) {
   syncTypeFields();
   dialog.showModal();
   f.name.focus();
+
+  // `state.categories` can still be the boot default of `[]` here — the
+  // deep-link path this dialog exists to fix runs no `dashboard.load()`
+  // before it — so drive a real fetch rather than trust whatever happened to
+  // be in state already. Not awaited: the dialog opens on whatever is
+  // rendered above (never savable-but-wrong, thanks to the guard in
+  // `renderCategorySelect`) instead of spinning on a network round trip, and
+  // OFFLINE this simply never resolves — which is exactly the case that
+  // guard, not this call, is what protects. Failure is swallowed rather than
+  // surfaced: the picker already shows something correct either way, so
+  // there is nothing actionable to tell the user about a fetch they did not
+  // ask for.
+  //
+  // Called with NO argument, deliberately, and not with `habit?.category_id`
+  // eagerly captured here: this promise settles whenever the GET lands, which
+  // can be after Escape, after a different habit's dialog has opened, or
+  // after a hand change to the control — none of which this closure can see,
+  // since it captured nothing about which dialog is open when it resolves.
+  // `renderCategorySelect(undefined)` reads `select.value` AT RENDER TIME
+  // instead, which is whatever the live dialog is actually showing in every
+  // one of those cases, so the late answer can only ever re-confirm the
+  // control's own current value rather than force a stale one over it. The
+  // cold deep link above still resolves to the real name: this function's own
+  // synchronous `renderCategorySelect(habit?.category_id ?? null)` has
+  // already put the real id in the control as the placeholder's value, so
+  // when `state.categories` lands moments later the undefined-wanted render
+  // finds that same id in the now-populated list and swaps the placeholder
+  // for the real name — see `renderCategorySelect`'s own doc comment for why
+  // an explicit `wanted` and a read-back `select.value` agree here.
+  refreshCategoryPicker().catch(() => {});
 }
 
 function syncTypeFields() {
@@ -470,7 +555,9 @@ export function init() {
         emit('reload');
         categoryHint(`Added "${cat.name}" — pick it above to use it.`);
       } catch (err) {
-        categoryHint(err.message, true);
+        // `err.queued` is the outbox working, not a failure — see the
+        // `category-new-add` handler below for the whole reasoning.
+        categoryHint(err.message, !err.queued);
       }
     });
     chips.append(chip);
@@ -493,7 +580,11 @@ export function init() {
       emit('reload');
       categoryHint(`Added "${cat.name}" — pick it above to use it.`);
     } catch (err) {
-      categoryHint(err.message, true);
+      // A queued write is the outbox doing its job, not an error: `api()`
+      // marks it `queued` (shared/public/ui/api.js), and "Saved offline —
+      // will sync when you reconnect" read in the error class made the one
+      // path that is actually working look like the one that is broken.
+      categoryHint(err.message, !err.queued);
     }
   });
 }

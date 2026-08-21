@@ -680,6 +680,20 @@ Abandoned, not replayed, and reported as *indeterminate* is the honest shape; th
 dialog closes and reloads the list on that error, so "check whether it was
 created" is something the user can see rather than a thing they are told to do.
 
+**`POST /categories` is replayable, and it ALSO yields a second row on a
+literal reading of "arrives twice safely" — the reasoning above is not "any
+create is fine to replay", or `POST /habits` would not need its own
+exception.** What makes this one different is that a second attempt cannot
+succeed *silently*: the account's own name is unique (`categoryNameTaken`,
+backed by the DB constraint `isCategoryNameConflict` maps to 409 rather than
+letting surface as a 500), so a staged write that lands twice gets the second
+attempt refused as a duplicate of the first, and the outbox drops every 4xx as
+a permanent failure rather than retrying it — never a second category with the
+same name. `POST /habits` has no name uniqueness to fall back on; two habits
+named the same thing are simply two habits. Do not relax the duplicate-name
+check on this route without re-reading this paragraph — it is not merely a
+validation nicety, it is what keeps this write safe to stage and replay at all.
+
 A GET still goes to the network, because
 the service worker may hold a cached copy and skipping the request throws that
 away — stale beats blank. And `POST /habits` is excluded **by the same

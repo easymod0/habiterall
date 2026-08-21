@@ -3,7 +3,7 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { db, UNSET, YES, SKIP } from './db.js';
+import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
 import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
@@ -341,6 +341,24 @@ api.post('/habits/reorder', (req, res) => {
 /* ---------- categories ---------- */
 
 /**
+ * A category id from the URL. The SHAPE check has to run before EXISTENCE —
+ * see the ordering comment above the two routes below — or a non-numeric id
+ * and one that is merely absent answer identically: `Number('abc')` is `NaN`,
+ * which matches no row and used to fall straight through to the same 404 a
+ * real, missing id gets. Cloud already drew this line (`categoryId` there);
+ * this is the same function, so the two editions answer `/categories/abc`
+ * alike.
+ *
+ * @param {import('express').Request} req
+ * @returns {number}
+ */
+function categoryId(req) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid category id');
+  return id;
+}
+
+/**
  * Whether NAME already names a category other than EXCLUDE_ID.
  *
  * Folded through `foldCategoryName` — the one shared rule, so this and the
@@ -362,28 +380,52 @@ api.get('/categories', (req, res) => {
   res.json(q.allCategories.all());
 });
 
+/**
+ * The order every category route below follows, and the reason it is
+ * written down rather than left to be re-derived per route: SHAPE (a
+ * positive integer id, else 400) before EXISTENCE (else 404) before the BODY
+ * through `parseCategory` (else its own 400) before the DUPLICATE name (else
+ * 409). Cloud's `PUT /categories/:id` used to parse the body before checking
+ * existence; this is the order both editions now share, so add a route here
+ * later in that same sequence rather than inventing a new one.
+ */
 api.post('/categories', (req, res) => {
   const c = parseCategory(req.body);
   if (categoryNameTaken(c.name, null)) throw httpError(409, 'category already exists');
   if (/** @type {any} */ (q.countCategories.get()).n >= LIMITS.categories) {
     throw httpError(400, `at most ${LIMITS.categories} categories are allowed`);
   }
-  const info = q.insertCategory.run(c.name, c.color);
+  let info;
+  try {
+    info = q.insertCategory.run(c.name, c.color);
+  } catch (err) {
+    // The route's own check above covers the ordinary path; this is what
+    // catches a fold that disagrees with SQLite's ASCII-only NOCASE backstop,
+    // or a genuine race between two requests, rather than surfacing the
+    // constraint violation as an unexplained 500.
+    if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+    throw err;
+  }
   res.status(201).json(q.categoryById.get(info.lastInsertRowid));
 });
 
 api.put('/categories/:id', (req, res) => {
-  const id = Number(req.params.id);
+  const id = categoryId(req);
   if (!q.categoryById.get(id)) throw httpError(404, 'category not found');
 
   const c = parseCategory(req.body);
   if (categoryNameTaken(c.name, id)) throw httpError(409, 'category already exists');
-  q.updateCategory.run(c.name, c.color, id);
+  try {
+    q.updateCategory.run(c.name, c.color, id);
+  } catch (err) {
+    if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+    throw err;
+  }
   res.json(q.categoryById.get(id));
 });
 
 api.delete('/categories/:id', (req, res) => {
-  const id = Number(req.params.id);
+  const id = categoryId(req);
   if (!q.categoryById.get(id)) throw httpError(404, 'category not found');
   // ON DELETE SET NULL, never CASCADE (db.js): this is tidying up a label,
   // not a request to destroy every habit that wore it. Its habits, and every
