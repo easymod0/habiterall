@@ -94,6 +94,17 @@ of breaking it and holds your score steady. Use it for illness or travel.
 
 **Reorder** — drag by the handle, or focus it and use ↑ / ↓.
 
+**Categories** — put a habit under a label of your own, one category per habit,
+each with a name and a colour. Set it from the habit's own edit screen: six
+starter suggestions (Health, Work, Fitness, Mind, Social, Home) show as chips
+and create the category the first time you tap one, but nothing is created for
+you on a fresh account. Turn on **Group by category** (⚙ → Dashboard, off by
+default) to draw one section per category, in the order you made them, with an
+always-present **Uncategorised** section last for every habit with no label —
+uncategorised is something the dashboard shows you, never a category you
+create or manage yourself. Deleting a category never deletes its habits: they
+fall back to uncategorised with every entry and note untouched.
+
 **Undo** — deleting a habit offers an Undo that restores every entry and note.
 
 **Reminders, where you want them** — set a time on a habit, choose what it
@@ -1950,7 +1961,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 
 ## API
 
-20 endpoints, identical in both editions. Dates are local calendar dates
+25 endpoints, identical in both editions. Dates are local calendar dates
 (`YYYY-MM-DD`).
 
 <details>
@@ -1962,6 +1973,9 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 | `POST` | `/habits` | Create |
 | `GET` `PUT` `DELETE` | `/habits/:id` | Read, update, delete (cascades to entries) |
 | `POST` | `/habits/reorder` | Reorder — `{ "order": [id, …] }` |
+| `GET` `POST` | `/categories` | List, create a habit's group (name + colour) |
+| `PUT` `DELETE` | `/categories/:id` | Rename/recolour, or delete (habits survive, uncategorised) |
+| `POST` | `/categories/reorder` | Reorder — `{ "order": [id, …] }` |
 | `GET` | `/habits/:id/entries` | Every entry for a habit |
 | `PUT` | `/habits/:id/entries/:date` | Record a value, a skip, or a note |
 | `DELETE` | `/habits/:id/entries/:date` | Clear a day |

@@ -88,6 +88,14 @@ export async function reset({ days = 60, base = BASE } = {}) {
   // order and alignment assertions would fail for no visible reason.
   await at('/settings', { method: 'DELETE' }).catch(() => {});
 
+  // Categories are their own table and outlive a habit delete on purpose
+  // (ON DELETE SET NULL, never CASCADE) — so without this they otherwise
+  // accumulate across every suite that runs against one instance, the same
+  // leftover-state problem this function exists to prevent for habits.
+  for (const c of await at('/categories')) {
+    await at(`/categories/${c.id}`, { method: 'DELETE' });
+  }
+
   for (const q of ['', '?archived=true']) {
     for (const h of await at(`/habits${q}`)) {
       await at(`/habits/${h.id}`, { method: 'DELETE' });

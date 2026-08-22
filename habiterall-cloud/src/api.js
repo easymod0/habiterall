@@ -10,7 +10,7 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { withUser } from './db/pool.js';
+import { withUser, isCategoryNameConflict } from './db/pool.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
@@ -23,11 +23,11 @@ import {
 import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
-import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
+import { backupSettings, backupCategories, parseUpload } from '@habiterall/shared/import.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
-  assertNotFuture,
+  assertNotFuture, parseCategory, foldCategoryName, LIMITS,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
@@ -163,6 +163,35 @@ api.use(route(async (req, res, next) => {
  */
 const callerToday = (req) => callerDay(req.get(DEVICE_ZONE_HEADER));
 
+/**
+ * Resolve an already-parsed habit's `category_id` into something safe to
+ * store. `parseHabit` has already decided the SHAPE — a positive safe
+ * integer or `null`, with anything malformed folded to `null` and no 400 —
+ * so this only decides EXISTENCE, a database question the shared validator
+ * has no connection to answer.
+ *
+ * A null/absent id passes straight through as the stated clear it is. A
+ * present id that names nothing is a 400: storing it anyway would leave a
+ * habit pointing at a category that was never created, and `ON DELETE SET
+ * NULL` would have nothing to ever fire on.
+ *
+ * The SELECT runs on DB, already inside `withUser` — RLS scopes it to the
+ * caller's own categories, so an id that belongs to another user is
+ * indistinguishable from one that does not exist at all, and gives the same
+ * 400 rather than an existence oracle.
+ *
+ * @param {{query: Function}} db - already inside `withUser`
+ * @param {{category_id?: number | null}} body - the output of `parseHabit`
+ * @returns {Promise<number | null>}
+ */
+async function resolveCategoryId(db, body) {
+  const id = body.category_id ?? null;
+  if (id === null) return null;
+  const { rows } = await db.query(`SELECT id FROM categories WHERE id = $1`, [id]);
+  if (!rows.length) throw httpError(400, 'category not found');
+  return id;
+}
+
 /* ---------- habits ---------- */
 
 api.get('/habits', route(async (req, res) => {
@@ -180,6 +209,8 @@ api.post('/habits', route(async (req, res) => {
   const h = parseHabit(req.body);
 
   const created = await withUser(uid(req), async (db) => {
+    const categoryId = await resolveCategoryId(db, h);
+
     const { rows: [{ count }] } = await db.query(
       `SELECT COUNT(*)::int AS count FROM habits`
     );
@@ -191,14 +222,14 @@ api.post('/habits', route(async (req, res) => {
       `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                            target_type, freq_numerator, freq_denominator, color,
                            reminder_time, reminder_message, at_most_unlogged,
-                           show_as, icon, archived, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                           show_as, icon, category_id, archived, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
                COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
        RETURNING *`,
       [uid(req), h.name, h.description, h.type, h.unit, h.target_value,
        h.target_type, h.freq_numerator, h.freq_denominator, h.color,
        h.reminder_time, h.reminder_message, h.at_most_unlogged, h.show_as,
-       h.icon, h.archived]
+       h.icon, categoryId, h.archived]
     );
     return rows[0];
   });
@@ -216,16 +247,19 @@ api.put('/habits/:id', route(async (req, res) => {
   const id = habitId(req);
 
   const updated = await withUser(uid(req), async (db) => {
+    const categoryId = await resolveCategoryId(db, h);
+
     const { rows } = await db.query(
       `UPDATE habits SET name=$1, description=$2, type=$3, unit=$4,
               target_value=$5, target_type=$6, freq_numerator=$7,
               freq_denominator=$8, color=$9, reminder_time=$10,
               reminder_message=$11, at_most_unlogged=$12, show_as=$13,
-              icon=$14, archived=$15
-       WHERE id = $16 RETURNING *`,
+              icon=$14, category_id=$15, archived=$16
+       WHERE id = $17 RETURNING *`,
       [h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
        h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-       h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, h.archived, id]
+       h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId,
+       h.archived, id]
     );
     return rows[0];
   });
@@ -273,6 +307,148 @@ api.post('/habits/reorder', route(async (req, res) => {
     return db.query(
       `SELECT * FROM habits WHERE archived = false ORDER BY position, id`
     ).then((r) => r.rows);
+  });
+
+  res.json(rows);
+}));
+
+/* ---------- categories ---------- */
+
+/**
+ * Whether NAME already names a category other than EXCLUDE_ID, for the
+ * caller whose scope DB is already inside.
+ *
+ * Folded through `foldCategoryName` — the one shared rule, so this and the
+ * personal edition's SQLite `NOCASE` check agree on 'Élan' vs 'élan' rather
+ * than each drawing its own line. `LIMITS.categories` keeps this a scan of at
+ * most 30 rows, so there is no reason to push it into SQL — Postgres's own
+ * `lower()` unique index (migration 015) stays a backstop.
+ *
+ * @param {{query: Function}} db
+ * @param {string} name
+ * @param {number | null} excludeId
+ * @returns {Promise<boolean>}
+ */
+async function categoryNameTaken(db, name, excludeId) {
+  const folded = foldCategoryName(name);
+  const { rows } = await db.query(`SELECT id, name FROM categories`);
+  return rows.some((c) => c.id !== excludeId && foldCategoryName(c.name) === folded);
+}
+
+api.get('/categories', route(async (req, res) => {
+  const rows = await withUser(uid(req), (db) =>
+    db.query(`SELECT * FROM categories ORDER BY position, id`).then((r) => r.rows)
+  );
+  res.json(rows);
+}));
+
+/**
+ * The order every category route below follows, and the reason it is
+ * written down rather than left to be re-derived per route: SHAPE (a
+ * positive integer id, else 400, `categoryId` above) before EXISTENCE (else
+ * 404) before the BODY through `parseCategory` (else its own 400) before the
+ * DUPLICATE name (else 409). `PUT /categories/:id` used to parse the body
+ * before checking existence, which personal never did; this is the order
+ * both editions now share, so add a route here later in that same sequence
+ * rather than inventing a new one.
+ */
+api.post('/categories', route(async (req, res) => {
+  const c = parseCategory(req.body);
+
+  const created = await withUser(uid(req), async (db) => {
+    if (await categoryNameTaken(db, c.name, null)) {
+      throw httpError(409, 'category already exists');
+    }
+    const { rows: [{ count }] } = await db.query(
+      `SELECT COUNT(*)::int AS count FROM categories`
+    );
+    if (count >= LIMITS.categories) {
+      throw httpError(400, `at most ${LIMITS.categories} categories are allowed`);
+    }
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO categories (user_id, name, color, position)
+         VALUES ($1, $2, $3, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
+         RETURNING *`,
+        [uid(req), c.name, c.color]
+      );
+      return rows[0];
+    } catch (err) {
+      // The route's own check above covers the ordinary path; this is what
+      // catches a fold that disagrees with Postgres's own lower() backstop,
+      // or a genuine race between two requests, rather than surfacing the
+      // constraint violation as an unexplained 500.
+      if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+      throw err;
+    }
+  });
+
+  res.status(201).json(created);
+}));
+
+api.put('/categories/:id', route(async (req, res) => {
+  const id = categoryId(req);
+
+  const updated = await withUser(uid(req), async (db) => {
+    // Existence checked BEFORE the body is parsed, matching the personal
+    // edition's ordering — see the comment above `POST /categories`. A
+    // request naming a category that is not (or no longer) the caller's own
+    // gets a 404 rather than a 400 from a body it will never use.
+    const { rows: existing } = await db.query(`SELECT id FROM categories WHERE id = $1`, [id]);
+    if (!existing.length) throw httpError(404, 'category not found');
+
+    const c = parseCategory(req.body);
+    if (await categoryNameTaken(db, c.name, id)) {
+      throw httpError(409, 'category already exists');
+    }
+    try {
+      const { rows } = await db.query(
+        `UPDATE categories SET name = $1, color = $2 WHERE id = $3 RETURNING *`,
+        [c.name, c.color, id]
+      );
+      return rows[0];
+    } catch (err) {
+      if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+      throw err;
+    }
+  });
+
+  res.json(updated);
+}));
+
+api.delete('/categories/:id', route(async (req, res) => {
+  const id = categoryId(req);
+  // ON DELETE SET NULL, never CASCADE (migration 015): this is tidying up a
+  // label, not a request to destroy every habit that wore it. Its habits,
+  // and every entry on them, survive — uncategorised.
+  const gone = await withUser(uid(req), (db) =>
+    db.query(`DELETE FROM categories WHERE id = $1 RETURNING id`, [id])
+      .then((r) => r.rowCount > 0)
+  );
+  if (!gone) throw httpError(404, 'category not found');
+  res.status(204).end();
+}));
+
+api.post('/categories/reorder', route(async (req, res) => {
+  const order = req.body.order;
+  if (!Array.isArray(order) || order.some((n) => !Number.isInteger(Number(n)))) {
+    throw httpError(400, 'order must be an array of category ids');
+  }
+  if (order.length > LIMITS.categories) {
+    throw httpError(400, `order may not exceed ${LIMITS.categories} ids`);
+  }
+
+  const rows = await withUser(uid(req), async (db) => {
+    const ids = order.map((id) => Number(id));
+    if (ids.length) {
+      await db.query(
+        `UPDATE categories SET position = v.position
+           FROM (SELECT * FROM unnest($1::bigint[], $2::int[]) AS t(id, position)) AS v
+          WHERE categories.id = v.id`,
+        [ids, ids.map((_, i) => i)]
+      );
+    }
+    return db.query(`SELECT * FROM categories ORDER BY position, id`).then((r) => r.rows);
   });
 
   res.json(rows);
@@ -440,7 +616,14 @@ api.get('/overview', route(async (req, res) => {
       `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
       [archived]
     );
-    if (!habits.length) return { start, end, habits: [] };
+    // One extra SELECT, read once for the whole payload for the same reason
+    // `unlogged` is below: the dashboard groups by category behind
+    // `groupByCategory`, and every habit on the page needs the same list. Read
+    // even with no habits — a category with none yet still draws its header.
+    const { rows: categories } = await db.query(
+      `SELECT * FROM categories ORDER BY position, id`
+    );
+    if (!habits.length) return { start, end, categories, habits: [] };
 
     const ids = habits.map((h) => h.id);
 
@@ -515,6 +698,7 @@ api.get('/overview', route(async (req, res) => {
     return {
       start,
       end,
+      categories,
       habits: habits.map((h) => {
         const all = byHabit.get(h.id) ?? [];
         const recent = all.filter((e) => e.date >= cutoff);
@@ -655,7 +839,7 @@ api.get('/notify/status', route(async (req, res) => {
 /* ---------- export ---------- */
 
 api.get('/export', route(async (req, res) => {
-  const { data, settings } = await withUser(uid(req), async (db) => {
+  const { data, categories, settings } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
       `SELECT * FROM habits ORDER BY archived, position, id`
     );
@@ -663,6 +847,14 @@ api.get('/export', route(async (req, res) => {
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status, notes
        FROM entries ORDER BY habit_id, date`
     );
+    const { rows: categoryRows } = await db.query(
+      `SELECT * FROM categories ORDER BY position, id`
+    );
+    // The backup carries a category by NAME, not by id: an id is meaningless
+    // once restored somewhere else (or nowhere, on a Loop round trip), and a
+    // name is what `normaliseImportedHabit` and `backupCategories` (import.js)
+    // already agree the wire format is.
+    const categoryNames = new Map(categoryRows.map((c) => [c.id, c.name]));
     const byHabit = new Map(habits.map((h) => [h.id, []]));
     for (const e of entries) {
       const { habit_id, ...rest } = e;
@@ -681,7 +873,14 @@ api.get('/export', route(async (req, res) => {
       // query, because a backup that silently omits a NEW column is the worse
       // failure of the two: migration 009 added `reminder_message`, and a
       // hand-kept SELECT list is exactly what would have left it behind.
-      data: habits.map(({ user_id, ...h }) => ({ ...h, entries: byHabit.get(h.id) ?? [] })),
+      data: habits.map(({ user_id, ...h }) => ({
+        ...h,
+        category: categoryNames.get(h.category_id) ?? '',
+        entries: byHabit.get(h.id) ?? [],
+      })),
+      // A user's own categories, so a backup can recreate them by name rather
+      // than by an id that means nothing once restored — see apply-import.js.
+      categories: categoryRows.map((c) => ({ name: c.name, color: c.color, position: c.position })),
       settings: rows[0]?.settings ?? {},
     };
   });
@@ -695,6 +894,7 @@ api.get('/export', route(async (req, res) => {
     app: 'habiterall',
     exported_at: new Date().toISOString(),
     habits: data,
+    categories,
     // Part of the account, and two of them now decide what the rows MEAN — see
     // the personal edition's export for the whole reasoning. Filtered: a webhook
     // URL is a capability, and a backup file travels.
@@ -704,19 +904,28 @@ api.get('/export', route(async (req, res) => {
 
 /** All checkmarks as a single Loop-shaped CSV. */
 api.get('/export.csv', route(async (req, res) => {
-  const { habits, entries } = await withUser(uid(req), async (db) => {
+  const { habits, entries, categoryRows } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
       `SELECT * FROM habits ORDER BY archived, position, id`);
     const { rows: entries } = await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
        FROM entries ORDER BY date`);
-    return { habits, entries };
+    const { rows: categoryRows } = await db.query(`SELECT id, name FROM categories`);
+    return { habits, entries, categoryRows };
   });
 
   const byHabit = new Map(habits.map((h) => [h.id, []]));
   for (const e of entries) byHabit.get(e.habit_id)?.push(e);
 
-  const body = buildCsvArchive(habits, (id) => byHabit.get(id) ?? []);
+  // `buildHabitsCsv` reads `h.category` by NAME, the same as `/export`
+  // above — a raw habit row only carries `category_id`, which means nothing
+  // once restored elsewhere (or nowhere, on a Loop round trip).
+  const categoryNames = new Map(categoryRows.map((c) => [c.id, c.name]));
+  const withCategory = habits.map((h) => ({
+    ...h, category: categoryNames.get(h.category_id) ?? '',
+  }));
+
+  const body = buildCsvArchive(withCategory, (id) => byHabit.get(id) ?? []);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
@@ -788,7 +997,11 @@ api.post('/import', route(async (req, res) => {
   const habits = await parseUpload(buf);
   if (!habits.length) throw httpError(400, 'no habits found in the uploaded file');
 
-  const result = await applyImport(uid(req), habits, mode);
+  // `[]`, never `null`, for a format with nowhere to carry a category — see
+  // the personal edition's route and `apply-import.js`'s own comment for why
+  // a habit's `category` is resolved against this by NAME rather than by any
+  // id the file happens to carry.
+  const result = await applyImport(uid(req), habits, mode, backupCategories(buf) ?? []);
 
   // Replace mode only — "make this account look like the file". A merge adds
   // habits to what is already here and must not rewrite the rest of the
@@ -827,6 +1040,13 @@ api.post('/import', route(async (req, res) => {
 function habitId(req) {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid habit id');
+  return id;
+}
+
+/** A category id from the URL, validated the same way `habitId` is. */
+function categoryId(req) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid category id');
   return id;
 }
 

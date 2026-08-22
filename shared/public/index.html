@@ -201,6 +201,51 @@
         <input name="description" maxlength="500" autocomplete="off">
       </label>
 
+      <!--
+        A habit belongs to at most one category; "(none)" is that state and
+        never a category of its own — see the Uncategorised note in
+        shared/CLAUDE.md. The rest of the block manages the account's
+        categories in place, so a section header (issue #65 phase 2) never
+        needs its own screen.
+      -->
+      <div class="category-field" id="category-field">
+        <label>Category
+          <select name="category_id" id="category-select">
+            <option value="">(none)</option>
+          </select>
+        </label>
+
+        <!--
+          Six starting points, not seeded rows — an account with no habits yet
+          gets no empty sections (see "Do not seed default categories" in
+          docs/decisions/categories.md). Each carries its own default colour so
+          a dashboard grouped by category (phase 2) has distinguishable headers
+          from the first tap, rather than six blue ones.
+        -->
+        <div class="category-chips" id="category-chips" role="group"
+             aria-label="Suggested categories"></div>
+
+        <div class="category-new">
+          <input type="text" id="category-new-name" maxlength="100"
+                 autocomplete="off" placeholder="New category">
+          <!-- Reuses the habit's own colour control, one row up. -->
+          <input type="color" id="category-new-color" value="#3b82f6"
+                 aria-label="New category colour">
+          <button type="button" id="category-new-add" class="btn btn-sm">Add</button>
+        </div>
+        <p class="field-hint" id="category-hint"></p>
+
+        <!--
+          Manage the account's categories without leaving this dialog. ✎ edits
+          name AND colour — a section header is only as useful as it is
+          distinguishable, so a rename control with no colour control would
+          leave every header one colour. ✕ deletes the label only: its habits,
+          and every entry on them, keep their history and become uncategorised
+          (ON DELETE SET NULL, never CASCADE).
+        -->
+        <ul class="category-manage" id="category-manage"></ul>
+      </div>
+
       <label>Type
         <select name="type">
           <option value="boolean">Yes / No</option>

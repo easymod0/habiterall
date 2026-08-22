@@ -76,6 +76,22 @@ deletes one. It carries an error string straight from Discord, which is why the
 tenancy suite attacks it: a leak would hand one account a running commentary on
 another's destinations.
 
+**`categories` (migration 015) is the one habit-adjacent table whose grant
+includes DELETE.** Same shape as `notify_status` — ordinary owner policy,
+`user_id` leads the key, `FORCE ROW LEVEL SECURITY`, the owner policy on
+`app_current_user_id()` for both `USING` and `WITH CHECK` — but the grant is
+`SELECT, INSERT, UPDATE, DELETE`, because a category is a label its owner
+manages and can remove, where `notify_status` is upserted in place and nothing
+ever deletes a row. `habits.category_id` is `ON DELETE SET NULL`, never
+`CASCADE`: removing a category must not take its habits' history with it.
+That foreign key runs inside Postgres with RLS not applied to its own check,
+so it is not a tenancy boundary by itself — a DB-layer write can point a
+habit's `category_id` at another account's category and the constraint will
+not stop it. That is exactly why the route resolves `category_id` against the
+caller's own rows before the insert or update, and why the tenancy suite
+attacks the DB layer directly rather than trusting the route to always be the
+caller.
+
 **A button press is authorised by its channel.** `interactionAdapter` in
 `src/notifier.js` resolves the account from `interaction.channel_id` — through
 the notifier scope, since it spans users — and everything after that runs in

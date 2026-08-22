@@ -352,6 +352,66 @@ try {
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({gridDays:'auto'})}).then(r=>r.ok)`);
 
+  /* ---------- the grouped dashboard (#65), at every width ---------- */
+  //
+  // A section header is a row shape `#grid` never drew before this feature —
+  // its own padding, its coloured left border and its count text — and none
+  // of the checks above ever turn `groupByCategory` on, so this is the only
+  // pass that could catch it overflowing a narrow phone.
+  console.log('\n--- grouped dashboard ---');
+  await ev(`(async()=>{
+    const cats = await (await fetch('/api/categories')).json();
+    for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
+    const a = await (await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Health', color: '#10b981' }) })).json();
+    const b = await (await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Work', color: '#f59e0b' }) })).json();
+    const habits = await (await fetch('/api/habits')).json();
+    // One habit into each category; the rest stay Uncategorised, so that
+    // trailing section actually has something in it too.
+    await fetch('/api/habits/' + habits[0].id, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...habits[0], category_id: a.id }) });
+    await fetch('/api/habits/' + habits[1].id, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...habits[1], category_id: b.id }) });
+    await fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupByCategory: true }) });
+  })()`);
+
+  for (const vp of VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
+    await send('Page.navigate', { url: APP }, sessionId);
+    for (let i = 0; i < 80; i++) {
+      if (await ev(`document.querySelectorAll('#grid .category-section-header').length >= 3`).catch(() => 0)) break;
+      await sleep(200);
+    }
+    await sleep(400);
+
+    const probe = await ev(LAYOUT_PROBE);
+    ck(`${vp.label}: grouped dashboard does not scroll sideways`,
+      probe.pageScrollsSideways === false, JSON.stringify(probe.overflowing));
+    ck(`${vp.label}: nothing overflows the viewport while grouped`,
+      probe.overflowing.length === 0, JSON.stringify(probe.overflowing));
+
+    const headers = await ev(
+      `document.querySelectorAll('#grid .category-section-header').length`);
+    ck(`${vp.label}: both categories plus the trailing Uncategorised section are drawn`,
+      headers === 3, String(headers));
+  }
+
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupByCategory: false }) });
+    const cats = await (await fetch('/api/categories')).json();
+    for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
+  })()`);
+
   console.log(fails === 0 ? '\nALL RESPONSIVE CHECKS PASSED' : `\n${fails} RESPONSIVE CHECK(S) FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

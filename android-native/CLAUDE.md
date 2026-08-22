@@ -99,6 +99,25 @@ reaches storage, so there is no shared truth for the two to have drifted out
 of — only two different "is this control worth its space" answers to two
 budgets that are not comparable.
 
+**`category_id` is carried, not mirrored, and that is the whole of this
+client's part in categories.** A category never runs from an alarm — the
+notification path never asks which one a habit is in — so there is nothing here
+to work offline and no sixth mirror to justify. What there IS is the replace
+hazard: `PUT /habits/:id` runs the body through `parseHabit`, which defaults
+every absent field, so a write that omits `category_id` CLEARS a category set
+on the web. `Habit`, `HabitInput`, `Draft`, `Habit.toInput()`,
+`Habit.toDraft()` and `Draft.toInput()` therefore all carry it untouched, for
+exactly the reason `icon` and `at_most_unlogged` do. There is no picker: setting
+a category is a web action, which is a rendering gap and not a data one.
+
+`HabitFieldCoverageTest` reads `JSON_HABIT_FIELDS` out of
+`shared/test/roundtrip-fixture.mjs` and would demand a field called `category`,
+because that is what the BACKUP carries — a name, resolved from the id at export
+time. The wire carries `category_id`. So `category` is exempt there, in a map
+with its reason, paired with a positive assertion that `category_id` itself
+reaches the wire from the habit's own value through BOTH bridges. An exemption
+with no replacement assertion is a hole; that pairing is the decision.
+
 **`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two
 clients disagreeing about diacritic folding costs a search result, not a wrong

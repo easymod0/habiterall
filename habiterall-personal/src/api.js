@@ -3,7 +3,7 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { db, UNSET, YES, SKIP } from './db.js';
+import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
 import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
@@ -21,12 +21,12 @@ const SUMMARY_WINDOW_DAYS = 400;
 const STREAK_HISTORY_DAYS = 1830;
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
-import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
+import { backupSettings, backupCategories, parseUpload } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
-  assertNotFuture,
+  assertNotFuture, parseCategory, foldCategoryName, LIMITS,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
@@ -110,19 +110,37 @@ const q = {
   insertHabit: db.prepare(`
     INSERT INTO habits (name, description, type, unit, target_value, target_type,
                         freq_numerator, freq_denominator, color, reminder_time,
-                        reminder_message, at_most_unlogged, show_as, icon, position)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        reminder_message, at_most_unlogged, show_as, icon,
+                        category_id, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
   `),
   updateHabit: db.prepare(`
     UPDATE habits SET name = ?, description = ?, type = ?, unit = ?,
       target_value = ?, target_type = ?, freq_numerator = ?,
       freq_denominator = ?, color = ?, reminder_time = ?, reminder_message = ?,
-      at_most_unlogged = ?, show_as = ?, icon = ?, archived = ?
+      at_most_unlogged = ?, show_as = ?, icon = ?, category_id = ?, archived = ?
     WHERE id = ?
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
   setPosition: db.prepare(`UPDATE habits SET position = ? WHERE id = ?`),
+  // Categories: a user's own habit groupings, never seeded — see db.js.
+  allCategories: db.prepare(`SELECT * FROM categories ORDER BY position, id`),
+  categoryById: db.prepare(`SELECT * FROM categories WHERE id = ?`),
+  // Folded in JS (foldCategoryName), not in SQL: the same rule has to answer
+  // identically in the cloud edition's Postgres, so one function decides it
+  // for both rather than two different COLLATE/lower() expressions agreeing
+  // by coincidence. This reads every category and filters here, which is fine
+  // at LIMITS.categories's ceiling of 30 rows.
+  categoriesForFold: db.prepare(`SELECT id, name FROM categories`),
+  insertCategory: db.prepare(`
+    INSERT INTO categories (name, color, position)
+    VALUES (?, ?, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
+  `),
+  updateCategory: db.prepare(`UPDATE categories SET name = ?, color = ? WHERE id = ?`),
+  deleteCategory: db.prepare(`DELETE FROM categories WHERE id = ?`),
+  setCategoryPosition: db.prepare(`UPDATE categories SET position = ? WHERE id = ?`),
+  countCategories: db.prepare(`SELECT COUNT(*) AS n FROM categories`),
   // `status` is carried alongside `value` rather than folded into it: a
   // numerical habit may legitimately record 3, which must never be mistaken
   // for the SKIP sentinel.
@@ -212,6 +230,29 @@ function httpError(status, message) {
 }
 
 /**
+ * Resolve an already-parsed habit's `category_id` into something safe to
+ * store. `parseHabit` has already decided the SHAPE — a positive safe
+ * integer or `null`, with anything malformed (a string, a float, 0, a
+ * negative id, `true`, a crafted `'__proto__'`) folded to `null` and no 400 —
+ * so this only decides EXISTENCE, which is a database question the shared
+ * validator has no connection to answer.
+ *
+ * A null/absent id passes straight through as the stated clear it is. A
+ * present id that names nothing is a 400: storing it anyway would leave a
+ * habit pointing at a category that was never created, and `ON DELETE SET
+ * NULL` would have nothing to ever fire on.
+ *
+ * @param {{category_id?: number | null}} body - the output of `parseHabit`
+ * @returns {number | null}
+ */
+function resolveCategoryId(body) {
+  const id = body.category_id ?? null;
+  if (id === null) return null;
+  if (!q.categoryById.get(id)) throw httpError(400, 'category not found');
+  return id;
+}
+
+/**
  * node:sqlite returns loosely-typed rows; this is the one place we assert the
  * shape our own schema guarantees.
  * @param {unknown} row
@@ -228,10 +269,11 @@ api.get('/habits', (req, res) => {
 
 api.post('/habits', (req, res) => {
   const h = habitRow(req.body);
+  const categoryId = resolveCategoryId(h);
   const info = q.insertHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value,
     h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon
+    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId
   );
   res.status(201).json(toApiHabit(q.habitById.get(info.lastInsertRowid)));
 });
@@ -247,10 +289,12 @@ api.put('/habits/:id', (req, res) => {
   if (!q.habitById.get(id)) throw httpError(404, 'habit not found');
 
   const h = habitRow(req.body);
+  const categoryId = resolveCategoryId(h);
   q.updateHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
     h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, h.archived, id
+    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId,
+    h.archived, id
   );
   res.json(toApiHabit(q.habitById.get(id)));
 });
@@ -292,6 +336,123 @@ api.post('/habits/reorder', (req, res) => {
     throw e;
   }
   res.json(q.allHabits.all(0).map(toApiHabit));
+});
+
+/* ---------- categories ---------- */
+
+/**
+ * A category id from the URL. The SHAPE check has to run before EXISTENCE —
+ * see the ordering comment above the two routes below — or a non-numeric id
+ * and one that is merely absent answer identically: `Number('abc')` is `NaN`,
+ * which matches no row and used to fall straight through to the same 404 a
+ * real, missing id gets. Cloud already drew this line (`categoryId` there);
+ * this is the same function, so the two editions answer `/categories/abc`
+ * alike.
+ *
+ * @param {import('express').Request} req
+ * @returns {number}
+ */
+function categoryId(req) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid category id');
+  return id;
+}
+
+/**
+ * Whether NAME already names a category other than EXCLUDE_ID.
+ *
+ * Folded through `foldCategoryName` — the one shared rule, so this and the
+ * cloud edition's `lower()`-based Postgres check agree on 'Élan' vs 'élan'
+ * rather than each drawing its own line. `LIMITS.categories` keeps this a
+ * scan of at most 30 rows, so there is no reason to push it into SQL.
+ *
+ * @param {string} name
+ * @param {number | null} excludeId
+ * @returns {boolean}
+ */
+function categoryNameTaken(name, excludeId) {
+  const folded = foldCategoryName(name);
+  return /** @type {any[]} */ (q.categoriesForFold.all())
+    .some((c) => c.id !== excludeId && foldCategoryName(c.name) === folded);
+}
+
+api.get('/categories', (req, res) => {
+  res.json(q.allCategories.all());
+});
+
+/**
+ * The order every category route below follows, and the reason it is
+ * written down rather than left to be re-derived per route: SHAPE (a
+ * positive integer id, else 400) before EXISTENCE (else 404) before the BODY
+ * through `parseCategory` (else its own 400) before the DUPLICATE name (else
+ * 409). Cloud's `PUT /categories/:id` used to parse the body before checking
+ * existence; this is the order both editions now share, so add a route here
+ * later in that same sequence rather than inventing a new one.
+ */
+api.post('/categories', (req, res) => {
+  const c = parseCategory(req.body);
+  if (categoryNameTaken(c.name, null)) throw httpError(409, 'category already exists');
+  if (/** @type {any} */ (q.countCategories.get()).n >= LIMITS.categories) {
+    throw httpError(400, `at most ${LIMITS.categories} categories are allowed`);
+  }
+  let info;
+  try {
+    info = q.insertCategory.run(c.name, c.color);
+  } catch (err) {
+    // The route's own check above covers the ordinary path; this is what
+    // catches a fold that disagrees with SQLite's ASCII-only NOCASE backstop,
+    // or a genuine race between two requests, rather than surfacing the
+    // constraint violation as an unexplained 500.
+    if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+    throw err;
+  }
+  res.status(201).json(q.categoryById.get(info.lastInsertRowid));
+});
+
+api.put('/categories/:id', (req, res) => {
+  const id = categoryId(req);
+  if (!q.categoryById.get(id)) throw httpError(404, 'category not found');
+
+  const c = parseCategory(req.body);
+  if (categoryNameTaken(c.name, id)) throw httpError(409, 'category already exists');
+  try {
+    q.updateCategory.run(c.name, c.color, id);
+  } catch (err) {
+    if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+    throw err;
+  }
+  res.json(q.categoryById.get(id));
+});
+
+api.delete('/categories/:id', (req, res) => {
+  const id = categoryId(req);
+  if (!q.categoryById.get(id)) throw httpError(404, 'category not found');
+  // ON DELETE SET NULL, never CASCADE (db.js): this is tidying up a label,
+  // not a request to destroy every habit that wore it. Its habits, and every
+  // entry on them, survive — uncategorised.
+  q.deleteCategory.run(id);
+  res.status(204).end();
+});
+
+api.post('/categories/reorder', (req, res) => {
+  const order = req.body.order;
+  if (!Array.isArray(order)) throw httpError(400, 'order must be an array of category ids');
+  if (order.length > LIMITS.categories) {
+    throw httpError(400, `order may not exceed ${LIMITS.categories} ids`);
+  }
+  if (order.some((n) => !Number.isFinite(Number(n)))) {
+    throw httpError(400, 'order must contain only category ids');
+  }
+  const tx = db.prepare('BEGIN');
+  tx.run();
+  try {
+    order.forEach((id, i) => q.setCategoryPosition.run(i, Number(id)));
+    db.prepare('COMMIT').run();
+  } catch (e) {
+    db.prepare('ROLLBACK').run();
+    throw e;
+  }
+  res.json(q.allCategories.all());
 });
 
 /* ---------- entries ---------- */
@@ -443,6 +604,10 @@ api.get('/overview', (req, res) => {
   res.json({
     start,
     end,
+    // One extra SELECT, read once for the whole payload for the same reason
+    // `unlogged` is above: the dashboard groups by category behind
+    // `groupByCategory`, and every habit on the page needs the same list.
+    categories: q.allCategories.all(),
     habits: habits.map((h) => {
       // The dashboard summary only needs a bounded lookback: with a 30-day
       // half-life the score has long since converged, and streaks that matter
@@ -619,11 +784,28 @@ api.get('/notify/status', (req, res) => {
 
 api.get('/export', (req, res) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
+  // The backup carries a category by NAME, not by id: an id is meaningless
+  // once restored somewhere else (or nowhere, on a Loop round trip), and a
+  // name is what `normaliseImportedHabit` and `backupCategories` (import.js)
+  // already agree the wire format is.
+  // Read once and used twice below — the habit-by-habit name lookup and the
+  // top-level list are two views of the same rows, and this handler asked for
+  // them separately.
+  const categories = /** @type {any[]} */ (q.allCategories.all());
+  const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
   const payload = {
     version: 1,
     app: 'habiterall',
     exported_at: new Date().toISOString(),
-    habits: habits.map((h) => ({ ...toApiHabit(h), entries: q.entriesFor.all(h.id) })),
+    habits: habits.map((h) => ({
+      ...toApiHabit(h),
+      category: categoryNames.get(h.category_id) ?? '',
+      entries: q.entriesFor.all(h.id),
+    })),
+    // A user's own categories, so a backup can recreate them by name rather
+    // than by an id that means nothing once restored — see apply-import.js.
+    categories: categories
+      .map((c) => ({ name: c.name, color: c.color, position: c.position })),
     // Preferences travel with the data. They are the account, not the device —
     // and two of them (skipDays, questionMarks) now decide what the same rows
     // MEAN, so a backup that dropped them restored a history the app then read
@@ -651,7 +833,16 @@ api.get('/export', (req, res) => {
  */
 api.get('/export.csv', (req, res) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
-  const body = buildCsvArchive(habits, (id) => q.entriesFor.all(id));
+  // `buildHabitsCsv` reads `h.category` by NAME, the same as `/export`
+  // above — a raw habit row only carries `category_id`, which means nothing
+  // once restored elsewhere (or nowhere, on a Loop round trip).
+  const categoryNames = new Map(
+    /** @type {any[]} */ (q.allCategories.all()).map((c) => [c.id, c.name])
+  );
+  const withCategory = habits.map((h) => ({
+    ...h, category: categoryNames.get(h.category_id) ?? '',
+  }));
+  const body = buildCsvArchive(withCategory, (id) => q.entriesFor.all(id));
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
@@ -727,7 +918,11 @@ api.post('/import', (req, res, next) => {
   parseUpload(buf)
     .then((habits) => {
       if (!habits.length) throw httpError(400, 'no habits found in the uploaded file');
-      const result = applyImport(habits, mode);
+      // `[]`, never `null`, for a format with nowhere to carry a category —
+      // `applyImport` iterates this before a single habit is written; see its
+      // own comment for why a habit's `category` is resolved against it by
+      // NAME rather than by any id the file happens to carry.
+      const result = applyImport(habits, mode, backupCategories(buf) ?? []);
 
       // Replace mode only: it means "make this account look like the file", and
       // the file's preferences are part of that. A merge is "add these habits to

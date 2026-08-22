@@ -242,6 +242,16 @@ export const SETTINGS = {
       { value: 'newest-right', label: 'Oldest first (today on the right)' },
     ],
   },
+  groupByCategory: {
+    section: 'Dashboard',
+    label: 'Group by category',
+    help: 'Draw one section per category, with an Uncategorised section last.',
+    type: 'toggle',
+    // False by default: a new install has no categories, and a grouped list
+    // with one section (Uncategorised, holding everything) is strictly worse
+    // than the flat list it would replace.
+    default: false,
+  },
   gridDays: {
     section: 'Dashboard',
     label: 'Day columns',

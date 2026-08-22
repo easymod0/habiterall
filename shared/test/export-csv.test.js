@@ -211,6 +211,54 @@ test('without Habits.csv the checkmarks alone are ambiguous', () => {
   assert.equal(jan2.status, 'skip');
 });
 
+test('Habits.csv writes a Category column, in the category\'s NAME', () => {
+  const habits = [
+    { ...HABITS[0], category: 'Health' },
+    { ...HABITS[1], category: '' },
+  ];
+  const csv = buildHabitsCsv(habits);
+  assert.match(csv, /^Position,.*,Category$/m, 'the header names the column last');
+
+  const meta = parseLoopHabitsCSV(csv);
+  assert.equal(meta.get('Water').category, 'Health');
+  assert.equal(meta.get('Gym, early').category, '', 'uncategorised writes an empty cell');
+});
+
+test('a category name with a comma survives the quoting, like a habit name does', () => {
+  const habits = [{ ...HABITS[0], category: 'Health, fitness' }];
+  const meta = parseLoopHabitsCSV(buildHabitsCsv(habits));
+  assert.equal(meta.get('Water').category, 'Health, fitness');
+});
+
+test('a real Loop Habits.csv has no Category column, and parses every other field anyway', () => {
+  // The inertness claim `idx(...aliases)` makes for every other column here,
+  // verified rather than assumed: a file with none of habiterall's own
+  // columns must still read as a habit, with `category` simply absent.
+  const loopCsv = [
+    'Position,Name,Type,Question,Description,FrequencyNumerator,' +
+      'FrequencyDenominator,Color,Unit,Target Type,Target Value,Archived?',
+    '0,Water,NUMERICAL,How much?,Hydrate,1,1,#22c55e,glasses,AT_LEAST,8,false',
+  ].join('\n') + '\n';
+  const meta = parseLoopHabitsCSV(loopCsv);
+  const water = meta.get('Water');
+  assert.equal(water.category, '', 'no Category column at all reads as uncategorised');
+  assert.equal(water.type, 'numerical', 'every other column still parses');
+  assert.equal(water.unit, 'glasses');
+  assert.equal(water.target_value, 8);
+  assert.equal(water.reminder_message, 'How much?');
+});
+
+test('a category survives the full CSV pair, through parseLoopCheckmarksCSV as well', () => {
+  // `habitFromCsvMeta` is the second list `category` has to be added to — its
+  // own KDoc warns that a field missing from it is dropped however well
+  // Habits.csv parsed it, which is exactly the trap a column-only test would
+  // miss.
+  const habits = [{ ...HABITS[0], category: 'Health' }];
+  const meta = parseLoopHabitsCSV(buildHabitsCsv(habits));
+  const parsed = parseLoopCheckmarksCSV(buildCheckmarksCsv(habits, entriesFor), meta);
+  assert.equal(parsed.find((h) => h.name === 'Water').category, 'Health');
+});
+
 test('buildCsvArchive contains both files', () => {
   const members = unzip(buildCsvArchive(HABITS, entriesFor));
   assert.deepEqual([...members.keys()].sort(), ['Checkmarks.csv', 'Habits.csv']);

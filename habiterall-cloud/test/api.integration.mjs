@@ -227,10 +227,10 @@ ck('the JSON backup carries no user_id',
 // shape rather than forbidding extra keys, so it does not catch it either.
 // Closing that needs the list to live somewhere both editions assert against.
 const PORTABLE_HABIT_KEYS = [
-  'archived', 'at_most_unlogged', 'color', 'created_at', 'description', 'entries',
-  'freq_denominator', 'freq_numerator', 'icon', 'id', 'name', 'position',
-  'reminder_message', 'reminder_time', 'show_as', 'target_type', 'target_value',
-  'type', 'unit',
+  'archived', 'at_most_unlogged', 'category', 'category_id', 'color', 'created_at',
+  'description', 'entries', 'freq_denominator', 'freq_numerator', 'icon', 'id', 'name',
+  'position', 'reminder_message', 'reminder_time', 'show_as', 'target_type',
+  'target_value', 'type', 'unit',
 ];
 ck('and describes a habit exactly as the personal edition does',
   JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),
@@ -348,6 +348,82 @@ ck('PUT /habits/:id replaces, and carries every OTHER field unchanged',
   wrongOnUpdate.length === 0, wrongOnUpdate.join('; '));
 ck('  and the one field that was meant to change, did',
   updated2.archived === false, JSON.stringify(updated2.archived));
+
+/* ---------- categories over HTTP ---------- */
+
+console.log('--- categories over HTTP ---');
+// Same reason as the block above: `resolveCategoryId` and `categoryNameTaken`
+// are pinned as functions in shared/test/validate.test.js, but pinning the
+// decision does not pin that the ROUTE calls it. This drives the real
+// handler, over the same router the fake session above already mounts.
+
+const freshHabitForCategory = await postHabit({ name: 'Category shape check', type: 'boolean' });
+ck("a fresh habit's category_id is JSON null, not merely falsy",
+  Object.is(freshHabitForCategory.category_id, null),
+  JSON.stringify(freshHabitForCategory.category_id));
+
+const nonexistentCategoryId = 999999;
+const badCategoryOnCreate = await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Bad category', type: 'boolean', category_id: nonexistentCategoryId }),
+});
+ck('POST /habits with a nonexistent category_id is 400 over the real route',
+  badCategoryOnCreate.status === 400, String(badCategoryOnCreate.status));
+
+// bob's own category. RLS makes it indistinguishable from one that does not
+// exist at all, so alice's request must get the SAME 400 as the one above —
+// this is `resolveCategoryId`'s existence check, not a second rule.
+const bobsCategory = await withUser(bob, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO categories (user_id, name) VALUES ($1, 'Bobs Category') RETURNING id`,
+    [bob]
+  );
+  return rows[0].id;
+});
+const foreignCategoryOnCreate = await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Foreign category', type: 'boolean', category_id: bobsCategory }),
+});
+ck("POST /habits with another user's category_id is 400, same as a missing one",
+  foreignCategoryOnCreate.status === 400, String(foreignCategoryOnCreate.status));
+
+const postCategory = (body) => fetch(`${overviewBase}/api/categories`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+}).then((r) => r.json());
+
+const wellness = await postCategory({ name: 'Wellness', color: '#22c55e' });
+ck('POST /categories creates it, with the name and colour sent',
+  wellness.name === 'Wellness' && wellness.color === '#22c55e', JSON.stringify(wellness));
+
+const caseFoldedDuplicate = await fetch(`${overviewBase}/api/categories`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'wellness' }),
+});
+ck("a second category differing from 'Wellness' only by case is 409",
+  caseFoldedDuplicate.status === 409, String(caseFoldedDuplicate.status));
+
+const habitWithCategory = await postHabit({
+  name: 'Read', type: 'boolean', category_id: wellness.id,
+});
+ck('a habit created with a category_id keeps it',
+  habitWithCategory.category_id === wellness.id, JSON.stringify(habitWithCategory.category_id));
+
+const deleteCategoryResp = await fetch(`${overviewBase}/api/categories/${wellness.id}`,
+  { method: 'DELETE' });
+ck('DELETE /categories/:id succeeds', deleteCategoryResp.status === 204,
+  String(deleteCategoryResp.status));
+
+// ON DELETE SET NULL, never CASCADE: the habit survives its category's
+// deletion, uncategorised — the route's comment says so, this drives it.
+const survivingHabit = await fetch(`${overviewBase}/api/habits/${habitWithCategory.id}`)
+  .then((r) => r.json());
+ck("the habit survives its category's deletion, and comes back uncategorised",
+  Object.is(survivingHabit.category_id, null), JSON.stringify(survivingHabit.category_id));
 
 /* ---------- and which day that device is ON ---------- */
 

@@ -31,6 +31,7 @@ are already answered here, usually because they were the first thing tried.
 | `compose-and-env.md` | `extends`, the env templates, the discovery test |
 | `testing.md` | the browser fleet: worker counts, the sleep audit, the theme split |
 | `site.md` | habiterall.ca: why the wiki is generated from the README, the link check, the changelog source |
+| `categories.md` | one category per habit, `ON DELETE SET NULL`, uncategorised as a state, the case-fold divergence |
 
 The first sixteen files are the original prose verbatim, sliced by topic and
 checked line-for-line against the pre-split `CLAUDE.md`; that split lost nothing.

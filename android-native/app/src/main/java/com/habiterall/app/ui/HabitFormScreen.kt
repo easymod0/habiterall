@@ -91,6 +91,14 @@ internal data class Draft(
     val atMostUnlogged: String = "default",
     val showAs: String = "amount",
     val icon: String = "",
+    /**
+     * No form control here — a picker is issue #65 phase 2's Android half
+     * and out of scope for this screen, same as [icon] above. Carried through
+     * untouched for the same PUT-replaces reason: this is the bridge the
+     * file's own KDoc on [Draft] warns about, and `icon` was missed here the
+     * first time.
+     */
+    val categoryId: Long? = null,
     val archived: Boolean = false,
 )
 
@@ -110,6 +118,7 @@ internal fun Habit.toDraft() = Draft(
     atMostUnlogged = atMostUnlogged,
     showAs = showAs,
     icon = icon,
+    categoryId = categoryId,
     archived = archived,
 )
 
@@ -223,6 +232,8 @@ internal fun Draft.toInput() = HabitInput(
     // out of scope for this screen. Carried through untouched for the same
     // PUT-replaces reason as atMostUnlogged and showAs above.
     icon = icon,
+    // No form control here either — see the KDoc on Draft.categoryId above.
+    categoryId = categoryId,
     archived = archived,
 )
 

@@ -59,12 +59,26 @@ const api = async (path, init) => {
 /* ---------- seed the fixture through the public API ---------- */
 
 async function seed() {
+  // The fixture names a category by NAME (see roundtrip-fixture.mjs), and the
+  // API takes `category_id` — the same shape `applyImport` resolves against a
+  // file's categories. Created here, once per distinct name, before any habit
+  // so `POST /api/habits` below has an id to send.
+  const categoryIds = new Map();
+  for (const name of new Set(FIXTURE.map((h) => h.category).filter(Boolean))) {
+    const created = await (await api('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })).json();
+    categoryIds.set(name, created.id);
+  }
+
   // The database is a fresh temp file, so there is nothing to clear first.
   for (const h of FIXTURE) {
     const created = await (await api('/api/habits', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(h),
+      body: JSON.stringify({ ...h, category_id: categoryIds.get(h.category) ?? null }),
     })).json();
 
     for (const e of h.entries) {
@@ -80,10 +94,15 @@ async function seed() {
 
     // Archive last: an archived habit may not accept entry writes.
     if (h.archived) {
+      // A PUT replaces every field, category_id included — the fixture has
+      // no archived habit with a category today, but an omitted id here
+      // would silently clear one the moment that changes.
       await api(`/api/habits/${created.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...h, archived: true }),
+        body: JSON.stringify({
+          ...h, archived: true, category_id: categoryIds.get(h.category) ?? null,
+        }),
       });
     }
   }
@@ -304,6 +323,14 @@ ck('Loop: every restored habit has icon === \'\', the format has nowhere to put 
 /* ---------- CSV ---------- */
 
 console.log('\n--- CSV archive (Habits.csv + Checkmarks.csv) ---');
+
+// Back to the lossless snapshot first: the Loop .db section above left the
+// account in whatever state a Loop restore produces, and Loop's model has no
+// category at all — every habit came back uncategorised. `color` happens to
+// survive that hop unchanged because the fixture's colours are already exact
+// Loop palette entries, which is what let this section skip a restore of its
+// own for as long as `category` was not one of the fields it watched.
+await restore(jsonBackup, 'replace');
 
 const csvZip = Buffer.from(await (await api('/api/export.csv')).arrayBuffer());
 ck('the CSV export is a zip', csvZip.subarray(0, 2).toString() === 'PK',
@@ -813,6 +840,91 @@ ck('a name past the clamp is created once and merged into thereafter',
   longMerges[1].habitsCreated === 0 && longMerges[1].habitsMerged === 1 &&
   longMerges[2].habitsCreated === 0 && byLongName.length === 1,
   JSON.stringify(longMerges.map((r) => [r.habitsCreated, r.habitsMerged])));
+
+/* ---------- a merge never renames or recolours a category ---------- */
+
+console.log('\n--- category resolution on import ---');
+
+await restore(jsonBackup, 'replace');
+const getCategories = async () => (await (await api('/api/categories')).json());
+
+// Give the account's own "Health" a colour the file below does not have, the
+// same way a user would through the picker's manage list.
+const healthBefore = (await getCategories()).find((c) => c.name === 'Health');
+await api(`/api/categories/${healthBefore.id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Health', color: '#123456' }),
+});
+
+// A file that names the same category, by the same folded name, in a
+// different colour, and adds a new habit under it.
+const healthMergeFile = JSON.stringify({
+  version: 1, app: 'habiterall',
+  categories: [{ name: 'health', color: '#ff0000', position: 0 }],
+  habits: [{
+    name: 'Yoga', type: 'boolean', category: 'health', entries: [],
+  }],
+});
+await restore(Buffer.from(healthMergeFile, 'utf8'), 'merge');
+const afterMerge2 = await getCategories();
+
+ck('a merge does not recolour a category that already exists',
+  afterMerge2.filter((c) => c.name === 'Health').length === 1 &&
+  afterMerge2.find((c) => c.name === 'Health').color === '#123456',
+  JSON.stringify(afterMerge2));
+const yoga = (await (await api('/api/habits')).json()).find((h) => h.name === 'Yoga');
+ck('and the new habit still resolves to the existing category, by folded name',
+  yoga.category_id === healthBefore.id, JSON.stringify(yoga));
+
+// A replace has nothing to preserve: the file's own categories become the
+// account's, spelling and colour included — 'health', not 'Health', because
+// a replace adopts the file's own name rather than the account's prior one.
+await restore(Buffer.from(healthMergeFile, 'utf8'), 'replace');
+const afterReplace2 = await getCategories();
+ck('a replace applies the file\'s colour',
+  afterReplace2.length === 1 && afterReplace2[0].name === 'health' &&
+  afterReplace2[0].color === '#ff0000',
+  JSON.stringify(afterReplace2));
+
+await restore(jsonBackup, 'replace');
+
+/* ---------- a category's declared position survives a restore ---------- */
+
+console.log('\n--- category position on import ---');
+
+// Declared out of the order they are LISTED in the array, on purpose: if the
+// importer ignored `position` and simply appended each in array order (the
+// bug this section exists to catch), the categories would come back Zeta,
+// Alpha, Mid — the array's own order — and an assertion comparing against
+// that same order would pass whether or not `position` was ever read. Sorted
+// by the POSITION field the file actually states, the right order is
+// Alpha, Mid, Zeta.
+const positionedFile = JSON.stringify({
+  version: 1, app: 'habiterall',
+  categories: [
+    { name: 'Zeta', color: '#3b82f6', position: 2 },
+    { name: 'Alpha', color: '#22c55e', position: 0 },
+    { name: 'Mid', color: '#ef4444', position: 1 },
+  ],
+  habits: [
+    // Named only in a habit's own `category` field, so it never appears in
+    // the `categories` array above and so declares no position at all — it
+    // must still append, after every declared one.
+    {
+      name: 'Undeclared', type: 'boolean',
+      category: 'Undeclared Category', entries: [],
+    },
+  ],
+});
+await restore(Buffer.from(positionedFile, 'utf8'), 'replace');
+const positioned = await getCategories();
+
+ck('a category restores at the position the file declared, not the order it was listed',
+  positioned.map((c) => c.name).join(',') === 'Alpha,Mid,Zeta,Undeclared Category',
+  JSON.stringify(positioned.map((c) => [c.name, c.position])));
+
+await restore(jsonBackup, 'replace');
 
 /* ---------- done ---------- */
 
