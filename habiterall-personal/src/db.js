@@ -255,6 +255,21 @@ if (!habitColumns.has('category_id')) {
   console.log('migrated habits: added category_id');
 }
 
+// Indexed because `habits.category_id` is the REFERENCING side of a foreign
+// key with `ON DELETE SET NULL`: deleting a category obliges SQLite to find
+// every habit pointing at it, and without an index that is a full scan of
+// `habits`. Deletes are rare and this table is one account's, so this is
+// cheap insurance rather than a measured win — but the cost of the index is
+// smaller still, since nothing writes `category_id` in bulk.
+//
+// Declared HERE and not beside the other `CREATE INDEX` lines in the schema
+// above, and that placement is the whole point: those run in the same `exec`
+// as the `CREATE TABLE`s, which is BEFORE the `PRAGMA table_info` guard that
+// adds this column to a database that predates it. An index on a column that
+// does not exist yet throws, so it would have taken out every upgrade while
+// passing on every fresh install.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_habits_category ON habits(category_id)`);
+
 const entryColumns = new Set(
   db.prepare(`PRAGMA table_info(entries)`).all().map((c) => c.name)
 );

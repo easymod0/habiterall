@@ -788,9 +788,11 @@ api.get('/export', (req, res) => {
   // once restored somewhere else (or nowhere, on a Loop round trip), and a
   // name is what `normaliseImportedHabit` and `backupCategories` (import.js)
   // already agree the wire format is.
-  const categoryNames = new Map(
-    /** @type {any[]} */ (q.allCategories.all()).map((c) => [c.id, c.name])
-  );
+  // Read once and used twice below — the habit-by-habit name lookup and the
+  // top-level list are two views of the same rows, and this handler asked for
+  // them separately.
+  const categories = /** @type {any[]} */ (q.allCategories.all());
+  const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
   const payload = {
     version: 1,
     app: 'habiterall',
@@ -802,7 +804,7 @@ api.get('/export', (req, res) => {
     })),
     // A user's own categories, so a backup can recreate them by name rather
     // than by an id that means nothing once restored — see apply-import.js.
-    categories: /** @type {any[]} */ (q.allCategories.all())
+    categories: categories
       .map((c) => ({ name: c.name, color: c.color, position: c.position })),
     // Preferences travel with the data. They are the account, not the device —
     // and two of them (skipDays, questionMarks) now decide what the same rows

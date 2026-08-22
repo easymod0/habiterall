@@ -73,3 +73,19 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON categories TO habiterall_app;
 -- (validate.js's parseHabit, same rule icon's comment already states).
 ALTER TABLE habits ADD COLUMN IF NOT EXISTS category_id BIGINT
   REFERENCES categories(id) ON DELETE SET NULL;
+
+-- Postgres does NOT index the referencing side of a foreign key for you — only
+-- the referenced side, via the primary key. `ON DELETE SET NULL` above obliges
+-- it to find every habit pointing at a category being deleted, so without this
+-- index that delete is a sequential scan of `habits`.
+--
+-- It matters more here than in the personal edition, for a reason that is easy
+-- to miss: `habits` holds EVERY tenant's rows in one table, and a foreign-key
+-- check runs internally with RLS not applied to it — the same property that
+-- makes this FK not a tenancy boundary. So one account deleting one category
+-- scans every account's habits, not its own.
+--
+-- Not a measured bottleneck: habits are capped per user and category deletes
+-- are rare. It is cheap insurance, and the index costs less than the scan it
+-- removes because nothing writes `category_id` in bulk.
+CREATE INDEX IF NOT EXISTS habits_category_id_idx ON habits (category_id);
