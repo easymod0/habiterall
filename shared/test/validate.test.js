@@ -261,47 +261,36 @@ test('foldCategoryName calls .toLowerCase() in its own SOURCE, never toLocaleLow
     'foldCategoryName must not call toLocaleLowerCase — it folds differently per host locale');
 });
 
-test("the browser's third copy of the fold (habit-dialog.js's useOrCreateCategory) " +
-  'matches foldCategoryName, method for method', () => {
-  // `shared/src` is not served to the browser (shared/CLAUDE.md), so
-  // `useOrCreateCategory` cannot import `foldCategoryName` and carries its own
-  // copy instead — a THIRD one, after this file's rule and the two server
-  // routes'. The repo's own answer for a shared rule the browser cannot
-  // import is two declarations PLUS a test — `CHANNELS` has
-  // `notify.test.js`, `SETTING_VALUES` has `settings.test.js`, the entry
-  // sentinels have `toggle.test.js` reading the declaration out of source —
-  // and this is that test for the fold. It matters here specifically because
-  // the two copies had ALREADY drifted once before round 1 with nothing
-  // catching it: the browser's held `toLocaleLowerCase()` and no `.trim()`.
+test('the browser holds NO copy of the fold — the category picker asks the server ' +
+  'and reads its answer (source guard)', () => {
+  // This test used to assert the opposite: that `habit-dialog.js`'s own
+  // `useOrCreateCategory` chained `.trim().toLowerCase()` exactly as
+  // `foldCategoryName` does, on the reasoning that `shared/src` is not served
+  // to the browser (shared/CLAUDE.md) so a third hand-written copy was
+  // unavoidable. The import is unavoidable; the copy was not. That copy ran in
+  // exactly one place — after a 409 from `POST /categories`, resolving the
+  // chip's name to the row the server had just refused to duplicate — which
+  // means it could only ever run when a server that had ALREADY computed the
+  // answer had just replied, and never offline, where the POST is queued and
+  // throws `err.queued` instead. The root CLAUDE.md's rule for a hand-copied
+  // rule is that a client earns one only if it must work OFFLINE, and this
+  // one plainly did not; it had also already drifted once (holding
+  // `toLocaleLowerCase()` and no `.trim()`) before anything caught it. The
+  // chip now reports the 409 and says to pick the existing category, so the
+  // rule lives in `foldCategoryName` and the two editions' routes alone.
+  //
+  // A source guard, and only half the answer, per the root CLAUDE.md: it
+  // cannot see a fold written some other way, and it says nothing about what
+  // the chip DOES with the refusal. `categorycheck.mjs`'s "a chip for a
+  // category that already exists says so, and not in the error class" is the
+  // behavioural half that watches the branch this leaves in place.
   const dialogSrc = readFileSync(
     new URL('../public/ui/habit-dialog.js', import.meta.url), 'utf8');
-  const fnStart = dialogSrc.indexOf('async function useOrCreateCategory');
-  assert.ok(fnStart !== -1,
-    "useOrCreateCategory not found in habit-dialog.js — update this guard's anchor");
-  const fnEnd = dialogSrc.indexOf('\n}\n', fnStart);
-  const body = dialogSrc.slice(fnStart, fnEnd);
-
-  const validateSrc = readFileSync(new URL('../src/validate.js', import.meta.url), 'utf8');
-  const foldFn = /export function foldCategoryName\([^)]*\)\s*\{([^}]*)\}/.exec(validateSrc);
-  assert.ok(foldFn, "foldCategoryName's declaration was not found");
-
-  // Both sides must chain the exact same two calls, TRIM then LOWERCASE — not
-  // merely mention "trim" and "lowercase" somewhere each, which a chain-blind
-  // check could not tell from `.toLowerCase().trim()` silently reordering the
-  // operation on one side only.
-  const chain = /\.trim\(\)\.toLowerCase\(\)/;
-  assert.match(foldFn[1], chain,
-    'foldCategoryName no longer chains .trim().toLowerCase() — update this guard to match, ' +
-    'and check useOrCreateCategory still agrees with whatever it does instead');
-  const dialogChains = [...body.matchAll(new RegExp(chain.source, 'g'))];
-  // Two call sites: the create attempt's own fold, and the case-insensitive
-  // lookup in the 409 fallback — both have to use it, or one path folds and
-  // the other does not.
-  assert.ok(dialogChains.length >= 2,
-    "habit-dialog.js's useOrCreateCategory calls .trim().toLowerCase() "
-    + `${dialogChains.length} time(s), expected at least 2`);
-  assert.doesNotMatch(body, /toLocaleLowerCase/,
-    "the browser's copy must not fold with a locale-aware method");
+  assert.doesNotMatch(dialogSrc, /toLowerCase|toLocaleLowerCase/,
+    'habit-dialog.js folds a name itself again — that is a third copy of ' +
+    'foldCategoryName, and the browser does not earn one: the branch that ' +
+    'wanted it is unreachable offline. Let the route answer, and see ' +
+    'docs/decisions/categories.md');
 });
 
 /* ---------- entries ---------- */

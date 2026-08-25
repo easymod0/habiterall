@@ -256,6 +256,30 @@ const deleteMissing = await fetch(`${base}/api/categories/999999`, { method: 'DE
 ck('DELETE /categories/999999 is 404 too',
   deleteMissing.status === 404, String(deleteMissing.status));
 
+/* ---- ...and so does every id in the list `POST /categories/reorder` takes.
+ * Cloud asks `Number.isInteger` of each; this edition asked
+ * `Number.isFinite`, so `[1.5]` was a 400 there and a 200 here — and a 200
+ * that moved nothing, because `setCategoryPosition` matches no row for a
+ * fractional id. A reorder that reports success and applies to nothing is
+ * exactly the failure a client cannot see, and this was the one category
+ * route left out of the shape-before-existence alignment above. ---- */
+
+const reorderFraction = await postJson('/api/categories/reorder', { order: [1.5] });
+ck('POST /categories/reorder with a fractional id is 400, the same as in cloud',
+  reorderFraction.status === 400, String(reorderFraction.status));
+
+const reorderText = await postJson('/api/categories/reorder', { order: ['abc'] });
+ck('...and a non-numeric one is 400 too',
+  reorderText.status === 400, String(reorderText.status));
+
+// A no-op reorder: the account's own ids, in the order it already has them,
+// so this asserts the guard above still lets a real request through without
+// moving anything the assertions below read.
+const currentOrder = (await (await fetch(`${base}/api/categories`)).json()).map((c) => c.id);
+const reorderOk = await postJson('/api/categories/reorder', { order: currentOrder });
+ck('a well-shaped reorder still succeeds',
+  reorderOk.status === 200, String(reorderOk.status));
+
 /* ---- a category_id that shapes correctly but names nothing is a 400 ---- */
 
 const noSuchCategory = 999999;

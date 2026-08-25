@@ -164,6 +164,40 @@ reachable both ways, because `lower()` and `toLowerCase()` are two
 implementations of Unicode case folding rather than one, and they need not
 agree on every codepoint.
 
+**The browser holds no copy of that fold, and the suggestion chips are what
+made one tempting.** A chip is a shortcut — tap `Health` and get a category
+called Health — so the obvious behaviour when the account already holds that
+name in some other casing is to hand back the existing row and select it. That
+needs the client to answer *which stored name IS this one*, which is
+`foldCategoryName`, and `shared/src` is not served to the browser
+(`shared/CLAUDE.md`), so having the answer in `habit-dialog.js` means writing
+the rule out a third time by hand. A first version did exactly that
+(`name.trim().toLowerCase()`, in a `useOrCreateCategory` helper) and called it
+unavoidable. It is not: what is unavoidable is the *import*, not the copy.
+
+The rule for a hand-copied rule is the one in the root `CLAUDE.md` — a client
+mirrors a rule only if it must work OFFLINE — and this one fails it in the
+plainest possible way. The branch is reached only after a 409 from
+`POST /categories`, i.e. only when a server that has already computed the
+answer has just replied; offline the POST is queued and throws `err.queued`
+instead, so the code could never run on a device with no network. A mirror
+that cannot be reached offline is buying nothing that a round trip does not
+already provide, and costing the standing price of every copy: when
+`foldCategoryName` next changes, nothing fails if this line is missed. It
+already changed once during this work — `toLocaleLowerCase()` to
+`toLowerCase()`, above — which is the whole argument in one event.
+
+So the chip POSTs, and on a 409 it says *"Health" already exists — pick it
+above to use it* and refreshes the picker, which is what puts the existing
+category in the list if it was created on another device. One extra click, for
+a name the account already has, in exchange for the rule living in one file.
+The two alternatives that would remove even that click both cost more than it
+is worth: returning the conflicting row in the 409 body means teaching
+`api()` to stop discarding response bodies (it throws `new Error(body.error)`
+and keeps nothing else), which is a shared-surface change reaching every
+caller in the app; and resolving server-side with a `POST /categories?upsert`
+is a second way for one route to mean two things.
+
 **`CACHE_VERSION` moved to `v24` even though no file was added under
 `shared/public/`.** The usual trigger for a bump is a new file joining `sw.js`'s
 `SHELL`, which did not happen here. What did happen: `index.html` gained the

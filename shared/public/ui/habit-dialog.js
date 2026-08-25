@@ -72,10 +72,11 @@ function currentCategoryId() {
  *
  * The placeholder below is for a real, EXPLICIT id only — `wanted` itself,
  * never the `select.value` fallback. `wanted === null` is its own answer
- * ("this form has no category, stated" — the delete-category handler passes
- * it deliberately once the form's own category is the one just removed) and
- * must still be free to land on "(none)"; only `wanted === undefined` falls
- * back to whatever the control already showed. `openDialog`'s fire-and-forget
+ * ("this form has no category, stated" — `openDialog` passes it for every
+ * uncategorised habit and every create, and the delete-category handler
+ * passes it once the form's own category is the one just removed) and must
+ * still be free to land on "(none)"; only `wanted === undefined` falls back
+ * to whatever the control already showed. `openDialog`'s fire-and-forget
  * refetch is exactly that call site: its continuation can land long after the
  * dialog it started from has closed, been reused for a different habit, or
  * had its own control hand-changed, and none of that is visible to a value
@@ -83,11 +84,31 @@ function currentCategoryId() {
  * instead means the late answer can only ever re-confirm whichever habit's
  * dialog is actually open, never overwrite it with a stale one.
  *
+ * That distinction is written `!== undefined`, and it MUST NOT be written
+ * `!= null`, which is the same expression for both and is how this shipped
+ * once: `openDialog` calls this as `habit?.category_id ?? null`, so every
+ * uncategorised habit arrived as `null` and took the fall-back branch. The
+ * `<select>` is one persistent element and nothing resets it between opens —
+ * `<dialog>.close()` does not reset a form and there is no `form.reset()`
+ * here — so the value it fell back to was the PREVIOUS dialog's. Edit a
+ * habit in Health, cancel, open an uncategorised one and its picker read
+ * "Health"; Save with nothing else changed and `PUT /habits/:id` REPLACES,
+ * so the habit was committed into a category nobody had chosen for it. Same
+ * for "New habit" straight after editing a categorised one. It needed no
+ * race and no slow network, unlike the two failures the paragraphs above
+ * describe — which is why `categorycheck` walking both of those still saw
+ * nothing: every habit in those blocks carries a category, so `wanted` was a
+ * number, and the create block is preceded by a `Page.navigate` that throws
+ * the stale value away.
+ *
  * @param {number | null} [wanted]
  */
 function renderCategorySelect(wanted) {
   const select = form.category_id;
-  const want = wanted != null ? String(wanted) : select.value;
+  // A real id the caller named, as opposed to a stated `null` or the absent
+  // argument — the one case that may keep the control's own current value.
+  const pinned = wanted !== undefined && wanted !== null;
+  const want = pinned ? String(wanted) : (wanted === undefined ? select.value : '');
   select.replaceChildren();
   const none = document.createElement('option');
   none.value = '';
@@ -104,13 +125,13 @@ function renderCategorySelect(wanted) {
   // that loop could not find, so there is nothing here to label it with but a
   // neutral placeholder — a real name arrives, if it exists, the moment
   // `state.categories` does and this function runs again.
-  if (wanted != null && !known) {
+  if (pinned && !known) {
     const placeholder = document.createElement('option');
     placeholder.value = want;
     placeholder.textContent = '(current category)';
     select.append(placeholder);
   }
-  select.value = (known || wanted != null) ? want : '';
+  select.value = (known || pinned) ? want : '';
 }
 
 /** The manage list: one row per category, ✎ for rename+recolour, ✕ to delete. */
@@ -236,35 +257,6 @@ async function refreshCategoryPicker(selected) {
   // DIFFERENT habit, or has pressed ✎ on this one, and must not rebuild the
   // list either dialog is showing mid-edit.
   if (editingCategoryId == null) renderCategoryManage();
-}
-
-/**
- * Create a category by name, or hand back the one that already answers to it
- * (by any casing) — a suggestion chip is a shortcut to get started, not a
- * second way to hit the 409 a typed duplicate gets.
- *
- * @param {string} name
- * @param {string} color
- */
-async function useOrCreateCategory(name, color) {
-  try {
-    return await api('/categories', { method: 'POST', body: JSON.stringify({ name, color }) });
-  } catch (err) {
-    if (err.message !== 'category already exists') throw err;
-    // A third copy of `foldCategoryName` (shared/src/validate.js), and an
-    // unavoidable one: `shared/src` is not served to the browser (see
-    // shared/CLAUDE.md), so this file cannot import the original the way the
-    // two server routes and `apply-import.js` do. Kept character-for-character
-    // the same rule — `.trim()` included, so a name differing only by
-    // surrounding whitespace still resolves to the account's existing
-    // category — because the whole point of asking twice is that both
-    // answers must agree.
-    const folded = name.trim().toLowerCase();
-    const existing = (await api('/categories'))
-      .find((c) => c.name.trim().toLowerCase() === folded);
-    if (existing) return existing;
-    throw err;
-  }
 }
 
 /** @param habit  null opens the create form */
@@ -550,11 +542,40 @@ export function init() {
     chip.textContent = s.name;
     chip.addEventListener('click', async () => {
       try {
-        const cat = await useOrCreateCategory(s.name, s.color);
+        const cat = await api('/categories', {
+          method: 'POST',
+          body: JSON.stringify({ name: s.name, color: s.color }),
+        });
         await refreshCategoryPicker(currentCategoryId());
         emit('reload');
         categoryHint(`Added "${cat.name}" — pick it above to use it.`);
       } catch (err) {
+        // The account already holds this name in some casing, which is not a
+        // failure the user has to do anything about: the category the chip
+        // was reaching for exists. Refresh the picker — that is what puts it
+        // in the list when it was created on another device — and say to pick
+        // it, in the ordinary hint class rather than the error one.
+        //
+        // Deliberately NOT resolved to the existing row and selected for
+        // them. Finding it means asking which stored name IS this one, which
+        // is `foldCategoryName` (shared/src/validate.js) — and `shared/src`
+        // is not served to the browser, so having the answer here at all
+        // means a third hand-written copy of the rule the two editions' routes
+        // share. This client does not earn one: a mirror is for a rule that
+        // must work with no network (the tap cycle, `needsReminder`), and this
+        // branch is unreachable offline, where the POST is queued and throws
+        // `err.queued` instead of ever seeing a 409. One click is the whole
+        // cost, and only for a name the account already has.
+        //
+        // Matched on the server's own sentence because that is all `api()`
+        // keeps of a failed response (`shared/public/ui/api.js` throws
+        // `new Error(body.error)`); both editions answer this route with that
+        // exact literal, and both have a test on the 409.
+        if (err.message === 'category already exists') {
+          await refreshCategoryPicker(currentCategoryId()).catch(() => {});
+          categoryHint(`"${s.name}" already exists — pick it above to use it.`);
+          return;
+        }
         // `err.queued` is the outbox working, not a failure — see the
         // `category-new-add` handler below for the whole reasoning.
         categoryHint(err.message, !err.queued);

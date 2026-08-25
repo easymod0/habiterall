@@ -440,7 +440,13 @@ api.post('/categories/reorder', (req, res) => {
   if (order.length > LIMITS.categories) {
     throw httpError(400, `order may not exceed ${LIMITS.categories} ids`);
   }
-  if (order.some((n) => !Number.isFinite(Number(n)))) {
+  // `Number.isInteger`, matching cloud's own check on this route — not
+  // `isFinite`, which accepted `1.5` here and 400'd there, so one edition
+  // answered a malformed reorder with a 200 that silently moved nothing
+  // (`setCategoryPosition` matches no row for a fractional id). An id is the
+  // one thing every other category route already agrees the shape of; this
+  // was the route left out of that alignment.
+  if (order.some((n) => !Number.isInteger(Number(n)))) {
     throw httpError(400, 'order must contain only category ids');
   }
   const tx = db.prepare('BEGIN');

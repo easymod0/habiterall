@@ -110,7 +110,17 @@ try {
         .find(r => r.querySelector('.habit-name').textContent.trim() === ${JSON.stringify(name)});
       row.querySelector('.habit-meta').click();
     })()`);
-    await waitUntil(ev, `!document.getElementById('view-detail').hidden && ${byText('#view-detail button', 'Edit')}`,
+    // The habit's own NAME, not merely "a detail view with an Edit button on
+    // it" — this helper is called from a detail view as well as from the
+    // dashboard, and that weaker predicate was already satisfied by the page
+    // this click is leaving. It returned instantly, Edit reopened the dialog
+    // for the PREVIOUS habit, and the block below then asked its question of
+    // the wrong form. Caught by that block on its first run; every earlier
+    // caller navigates first, which is why nothing had tripped on it yet.
+    await waitUntil(ev,
+      `!document.getElementById('view-detail').hidden`
+      + ` && document.querySelector('#view-detail h2')?.textContent.includes(${JSON.stringify(name)})`
+      + ` && !!${byText('#view-detail button', 'Edit')}`,
       { what: `${name}'s own page` });
     await ev(`${byText('#view-detail button', 'Edit')}.click()`);
     await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
@@ -700,6 +710,88 @@ try {
     flat.headers === 0, JSON.stringify(flat));
   ck('and the drag handle is back',
     flat.dragHandles > 0, JSON.stringify(flat));
+
+  /* ---------- review round 3: one dialog must not inherit the last one's
+     category ----------
+
+     The third defect on this `<select>`, and the first that needs no race at
+     all. `openDialog` renders the picker as
+     `renderCategorySelect(habit?.category_id ?? null)`, so an UNCATEGORISED
+     habit — and every create — arrives as `null`; written `!= null`, that is
+     the same branch as the absent argument, which deliberately keeps whatever
+     the control is already showing. The `<select>` is one persistent element
+     in `index.html`, `<dialog>.close()` does not reset a form and this module
+     has no `form.reset()`, so what it kept was the PREVIOUS dialog's value.
+
+     Neither of the two blocks above can see it: the race block gives BOTH its
+     habits a category, so `wanted` is a number on either open, and the create
+     block earlier in this suite is preceded by a `Page.navigate` that throws
+     the stale value away. This block deliberately never navigates.
+
+     Mutation target: `wanted !== undefined && wanted !== null` back to
+     `wanted != null` in `renderCategorySelect` (habit-dialog.js). */
+
+  // `Work` is this suite's own habit's category, from the undo block above.
+  await openHabitByName(HABIT_NAME);
+
+  // While a categorised dialog is open: the chip for a category the account
+  // ALREADY holds. The 409 is the server's answer and not the user's problem,
+  // so it reads as an ordinary hint rather than an error — and it must not
+  // disturb the selection this form arrived with.
+  // Mutation target: the `category already exists` branch in the chip handler.
+  await ev(`${byText('#category-chips button', 'Work')}.click()`);
+  await waitUntil(ev, `document.getElementById('category-hint').textContent.includes('already exists')`,
+    { what: 'the chip to report the category it could not create again' });
+  const dupHint = await ev(`(()=>{
+    const hint = document.getElementById('category-hint');
+    return { text: hint.textContent, isError: hint.classList.contains('error') };
+  })()`);
+  ck('a chip for a category that already exists says so, and not in the error class',
+    dupHint.isError === false && dupHint.text.includes('pick it above'),
+    JSON.stringify(dupHint));
+
+  const carriedFrom = await selectedCategoryOption();
+  ck('sanity: the categorised habit is showing its OWN category, so there is ' +
+     'a real value here for the next dialog to inherit',
+    carriedFrom.text === 'Work', JSON.stringify(carriedFrom));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the categorised habit\'s dialog to close' });
+
+  // No navigation between the two opens — that is the whole point.
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the create dialog to open' });
+  const createPicker = await selectedCategoryOption();
+  ck('THE assertion: "New habit" opens on "(none)", not on the category the ' +
+     'habit edited just before it was in',
+    createPicker.value === '', JSON.stringify(createPicker));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the create dialog to close' });
+
+  // Re-arm the control with a real category, then open an UNCATEGORISED
+  // habit — the case that ends in a committed wrong value rather than a
+  // visibly odd create form, because `PUT /habits/:id` REPLACES.
+  await openHabitByName(HABIT_NAME);
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the categorised habit\'s dialog to close again' });
+
+  await openHabitByName('Gym');
+  const uncategorisedPicker = await selectedCategoryOption();
+  ck('THE assertion: an uncategorised habit opens on "(none)" after a ' +
+     'categorised one, with no reload in between',
+    uncategorisedPicker.value === '', JSON.stringify(uncategorisedPicker));
+
+  await ev(`document.getElementById('habit-form').requestSubmit()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the no-op edit on the uncategorised habit to save' });
+  const gymAfterSave = await fetchHabit('Gym');
+  ck('THE assertion: saving it with nothing changed leaves it uncategorised',
+    gymAfterSave && gymAfterSave.category_id === null, JSON.stringify(gymAfterSave));
 
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {
