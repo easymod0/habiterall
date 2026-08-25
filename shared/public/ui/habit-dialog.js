@@ -72,17 +72,24 @@ function currentCategoryId() {
  *
  * The placeholder below is for a real, EXPLICIT id only — `wanted` itself,
  * never the `select.value` fallback. `wanted === null` is its own answer
- * ("this form has no category, stated" — `openDialog` passes it for every
- * uncategorised habit and every create, and the delete-category handler
- * passes it once the form's own category is the one just removed) and must
- * still be free to land on "(none)"; only `wanted === undefined` falls back
- * to whatever the control already showed. `openDialog`'s fire-and-forget
- * refetch is exactly that call site: its continuation can land long after the
- * dialog it started from has closed, been reused for a different habit, or
- * had its own control hand-changed, and none of that is visible to a value
- * captured when the fetch was fired — reading `select.value` at render time
- * instead means the late answer can only ever re-confirm whichever habit's
- * dialog is actually open, never overwrite it with a stale one.
+ * ("this form has no category, stated": `openDialog` passes it for every
+ * uncategorised habit and every create) and must still be free to land on
+ * "(none)"; only `wanted === undefined` falls back to whatever the control
+ * already showed.
+ *
+ * **`openDialog`'s own synchronous first render is the ONLY caller that names
+ * a `wanted` at all, and that is a rule rather than a coincidence.** It is the
+ * one place an id is known to belong to the dialog being drawn, because
+ * nothing is awaited between deciding it and drawing it. Every other path
+ * here goes through `refreshCategoryPicker`, which takes no argument for
+ * exactly this reason — read its comment before adding one back. Its
+ * fire-and-forget call at the end of `openDialog` is the case that makes the
+ * distinction matter: that continuation can land long after the dialog it
+ * started from has closed, been reused for a different habit, or had its own
+ * control hand-changed, and none of that is visible to a value captured when
+ * the fetch was fired — reading `select.value` at render time instead means
+ * the late answer can only ever re-confirm whichever habit's dialog is
+ * actually open, never overwrite it with a stale one.
  *
  * That distinction is written `!== undefined`, and it MUST NOT be written
  * `!= null`, which is the same expression for both and is how this shipped
@@ -169,10 +176,19 @@ function renderCategoryManage() {
             body: JSON.stringify({ name: nameInput.value, color: colorInput.value }),
           });
           editingCategoryId = null;
-          await refreshCategoryPicker(currentCategoryId());
+          // No argument — see `refreshCategoryPicker`. A rename changes a
+          // category's NAME, never which one this form has chosen, so there
+          // is nothing to force here and forcing it is what goes wrong.
+          await refreshCategoryPicker();
           emit('reload');
         } catch (err) {
-          categoryHint(err.message, true);
+          // A queued write is the outbox doing its job, not a failure — the
+          // same reading the two add handlers below already give it. `PUT
+          // /categories/:id` is `replayable()` (ui/api.js: everything but
+          // `POST /habits`), so offline this throws "Saved offline — will
+          // sync when you reconnect", and showing that in the error class
+          // made the one path that IS working look like the broken one.
+          categoryHint(err.message, !err.queued);
         }
       });
 
@@ -216,15 +232,21 @@ function renderCategoryManage() {
         try {
           await api(`/categories/${c.id}`, { method: 'DELETE' });
           // ON DELETE SET NULL (db.js): its habits survive, uncategorised. If
-          // this form was pointed at the category just removed, follow that
-          // back to "(none)" so Save cannot submit an id that no longer
-          // exists.
-          const keep = form.category_id.value === String(c.id)
-            ? null : currentCategoryId();
-          await refreshCategoryPicker(keep);
+          // this form was pointed at the category just removed, it follows
+          // that back to "(none)" so Save cannot submit an id that no longer
+          // exists — and it does so with NO argument, because the refetched
+          // list is what answers this rather than anything captured here. A
+          // deleted id is not in the list, so `known` is false and the
+          // control falls to "(none)" on its own; any OTHER id still is, and
+          // is kept. This used to compute the answer eagerly instead
+          // (`form.category_id.value === String(c.id) ? null : …`), which was
+          // right about the outcome and wrong about the timing — see
+          // `refreshCategoryPicker`.
+          await refreshCategoryPicker();
           emit('reload');
         } catch (err) {
-          categoryHint(err.message, true);
+          // Queued is not failed — see the rename handler above.
+          categoryHint(err.message, !err.queued);
         }
       });
 
@@ -244,11 +266,32 @@ function renderCategoryManage() {
  * too so the dashboard is not one edit behind if it repaints from state
  * before its own reload finishes.
  *
- * @param {number | null} [selected]  category to keep selected, if it exists
+ * **It takes no argument, and that is the fix for a defect this file has now
+ * shipped twice.** It used to accept a `selected` id, and every caller
+ * evaluated one eagerly — `currentCategoryId()`, read from whichever dialog
+ * was open at the click. There is an `await` on the line below, so by the time
+ * the render happens that dialog may have been cancelled and another habit's
+ * opened in its place, and `renderCategorySelect` would then force the FIRST
+ * habit's category onto the second one's control. Press Save on it with
+ * nothing else changed and `PUT /habits/:id` REPLACES: the second habit is
+ * committed into a category chosen for a different one.
+ *
+ * Round 2 found exactly this and fixed `openDialog`'s call by passing nothing;
+ * the four handlers in this file that also call it were left as they were, so
+ * the same bug survived at four sites with a test covering only the fifth.
+ * Removing the parameter is what makes it unrepresentable rather than
+ * remembered — with no argument, `renderCategorySelect` reads `select.value`
+ * at RENDER time, which is whatever dialog is genuinely open, and a late
+ * answer can only ever re-confirm it. Nothing is lost by it: a rename changes
+ * a name, an add does not assign, and a delete's own "fall back to (none)" is
+ * answered by the refetched list not holding the deleted id.
+ * `renderCategorySelect`'s explicit-id path now has exactly ONE caller —
+ * `openDialog`'s synchronous first render, the only place a wanted id is known
+ * to belong to the dialog being drawn, because no `await` separates them.
  */
-async function refreshCategoryPicker(selected) {
+async function refreshCategoryPicker() {
   state.categories = await api('/categories');
-  renderCategorySelect(selected);
+  renderCategorySelect();
   // A rename row owns an input this rebuild would tear out from under
   // whoever is typing in it — the "`change` never fires on a removed input"
   // failure `shared/public/CLAUDE.md` documents for the settings dialog.
@@ -546,7 +589,12 @@ export function init() {
           method: 'POST',
           body: JSON.stringify({ name: s.name, color: s.color }),
         });
-        await refreshCategoryPicker(currentCategoryId());
+        // No argument — see `refreshCategoryPicker`. Creating a category
+        // does not assign it (the chip is a shortcut to HAVING one, not to
+        // wearing it), so this form's own selection is unchanged and reading
+        // it back at render time is the only reading that is still true when
+        // the refetch lands.
+        await refreshCategoryPicker();
         emit('reload');
         categoryHint(`Added "${cat.name}" — pick it above to use it.`);
       } catch (err) {
@@ -572,7 +620,7 @@ export function init() {
         // `new Error(body.error)`); both editions answer this route with that
         // exact literal, and both have a test on the 409.
         if (err.message === 'category already exists') {
-          await refreshCategoryPicker(currentCategoryId()).catch(() => {});
+          await refreshCategoryPicker().catch(() => {});
           categoryHint(`"${s.name}" already exists — pick it above to use it.`);
           return;
         }
@@ -597,7 +645,8 @@ export function init() {
         body: JSON.stringify({ name, color: $('#category-new-color').value }),
       });
       nameField.value = '';
-      await refreshCategoryPicker(currentCategoryId());
+      // No argument — see `refreshCategoryPicker`, and the chip handler above.
+      await refreshCategoryPicker();
       emit('reload');
       categoryHint(`Added "${cat.name}" — pick it above to use it.`);
     } catch (err) {

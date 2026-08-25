@@ -793,6 +793,98 @@ try {
   ck('THE assertion: saving it with nothing changed leaves it uncategorised',
     gymAfterSave && gymAfterSave.category_id === null, JSON.stringify(gymAfterSave));
 
+  /* ---------- review round 4: the SAME late-answer bug as round 2, at the
+     four call sites round 2 did not touch ----------
+
+     Round 2 fixed `openDialog`'s own `refreshCategoryPicker()` by passing NO
+     argument, so the render reads `select.value` live instead of forcing an
+     id captured before the fetch. The block above (:261) pins that one call.
+     It is not the only one: `refreshCategoryPicker` has its own internal
+     `await api('/categories')`, and the rename-Save, delete, chip and
+     new-name handlers all call it with an EAGERLY EVALUATED
+     `currentCategoryId()`. That id is read from whichever dialog is open at
+     the click, and forced onto whichever dialog is open when the GET lands —
+     which need not be the same one.
+
+     This drives the chip handler because it is one click, but the shape is
+     shared by all four. Held with the same technique as round 2's block:
+     patch `window.fetch`, hold exactly the GET the chip's own refresh fires,
+     and let every other request through so the second dialog can open
+     normally.
+
+     Mutation target: put `currentCategoryId()` back as the argument to any of
+     the four `refreshCategoryPicker()` calls in habit-dialog.js. */
+
+  await openHabitByName(HABIT_NAME);
+  const raceHostBefore = await selectedCategoryOption();
+  ck('sanity: the dialog the chip is clicked from is showing its own category',
+    raceHostBefore.text === 'Work', JSON.stringify(raceHostBefore));
+
+  await ev(`(()=>{
+    window.__realFetch = window.__realFetch || window.fetch;
+    const realFetch = window.__realFetch;
+    window.__holdNext = false;
+    window.__heldLanded = false;
+    window.__releaseHeld = null;
+    window.__held = new Promise((r) => { window.__releaseHeld = r; });
+    window.fetch = (url, opts) => {
+      const isCategoriesGet = String(url).endsWith('/api/categories') &&
+        (!opts || (opts.method ?? 'GET').toUpperCase() === 'GET');
+      // Only the ONE GET fired while the flag is up — the chip handler's own
+      // refresh. Every other request, including the second dialog's own
+      // opening fetch, goes straight through, or the second dialog could not
+      // render at all and this would be testing nothing.
+      if (isCategoriesGet && window.__holdNext) {
+        window.__holdNext = false;
+        return window.__held.then(() => realFetch(url, opts)).then((res) => {
+          window.__heldLanded = true;
+          return res;
+        });
+      }
+      return realFetch(url, opts);
+    };
+    return true;
+  })()`);
+
+  // Arm, then click a chip for a category the account does not have yet: the
+  // POST lands, and the refresh that follows it is the request now held.
+  await ev(`window.__holdNext = true; ${byText('#category-chips button', 'Mind')}.click(); true`);
+  await waitUntil(ev, `window.__holdNext === false`,
+    { what: "the chip's own categories refetch to be fired and held" });
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: "the chip's own dialog to close while its refresh is still in flight" });
+
+  // A DIFFERENT habit, with a DIFFERENT category of its own — so a clobber
+  // shows up as a wrong value rather than as an empty one.
+  await openHabitByName('Meditate');
+  const otherDialog = await selectedCategoryOption();
+  ck('the second dialog opens on its own category, before the held answer lands',
+    otherDialog.text === 'Fitness', JSON.stringify(otherDialog));
+
+  await ev(`window.__releaseHeld()`);
+  await waitUntil(ev, `window.__heldLanded === true`,
+    { what: "the held categories GET to land into the dialog it did not come from" });
+
+  const afterHeldLanded = await selectedCategoryOption();
+  ck('THE assertion: a category mutation made from ANOTHER habit\'s dialog does ' +
+     'not stamp that habit\'s category onto this one',
+    afterHeldLanded.text === 'Fitness', JSON.stringify(afterHeldLanded));
+
+  await ev(`window.fetch = window.__realFetch;
+    document.getElementById('habit-form').requestSubmit(); true`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the no-op edit on the second habit to save' });
+  const meditateAfter = await fetchHabit('Meditate');
+  const fitness = await ev(`(async()=>{
+    const cats = await (await fetch('/api/categories')).json();
+    return cats.find(c => c.name === 'Fitness') ?? null;
+  })()`);
+  ck('THE assertion: and saving it with nothing changed keeps its OWN category',
+    meditateAfter && fitness && meditateAfter.category_id === fitness.id,
+    JSON.stringify({ saved: meditateAfter?.category_id, fitness: fitness?.id }));
+
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {
   console.log('ERROR:', e.message);
