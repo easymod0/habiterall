@@ -1784,7 +1784,7 @@ test('summariseByCategory: an unknown category_id lands in Uncategorised, not dr
     { id: 12, name: 'Sleep', score: 0.2, category_id: null },
   ];
   const firstEntry = new Map([[10, '2026-01-01'], [11, '2026-01-01'], [12, '2026-01-01']]);
-  const result = summariseByCategory(categories, payloads, firstEntry);
+  const result = summariseByCategory(categories, payloads, firstEntry, '2026-06-01');
 
   const totalCounted = result.reduce((sum, section) => sum + section.members, 0);
   assert.equal(totalCounted, payloads.length,
@@ -1797,7 +1797,7 @@ test('summariseByCategory: an unknown category_id lands in Uncategorised, not dr
 
 test('summariseByCategory: Uncategorised is always present with id: null, and an empty category still gets a section', () => {
   const categories = [{ id: 1, name: 'Health', color: '#fff' }];
-  const result = summariseByCategory(categories, [], new Map());
+  const result = summariseByCategory(categories, [], new Map(), '2026-06-01');
 
   assert.equal(result.length, 2, 'the one known category plus Uncategorised');
 
@@ -1808,4 +1808,56 @@ test('summariseByCategory: Uncategorised is always present with id: null, and an
   const health = result.find((s) => s.id === 1);
   assert.ok(health, 'an empty category still draws a section');
   assert.equal(health.members, 0);
+});
+
+test('summariseByCategory: a member whose firstEntry is AFTER the reading day is not landed', () => {
+  // The defect this pins: `landed` used to be `firstEntry.get(h.id) != null`,
+  // which asks only "does this member have an entry at all" — true for a
+  // habit whose only entry is dated tomorrow relative to the day the route is
+  // reading. `landedAt` (`computeCategoryStats`'s `section`) asks the RIGHT
+  // question — has this member landed BY the day being read — and this must
+  // match it: `first != null && first <= day`.
+  const categories = [{ id: 1, name: 'Health', color: '#fff' }];
+  const day = '2026-06-15';
+  const payloads = [
+    { id: 10, name: 'Daily', score: 0.7, category_id: 1 },
+    { id: 11, name: 'Future', score: 0, category_id: 1 }, // score is 0: a
+    // one-day window with no entry on it, exactly what `resolveWindow`
+    // clamping `from` to `end` for an unlanded member produces.
+  ];
+  const firstEntry = new Map([
+    [10, '2026-01-01'],
+    [11, '2026-06-16'], // one day AFTER `day`
+  ]);
+
+  const result = summariseByCategory(categories, payloads, firstEntry, day);
+  const health = result.find((s) => s.id === 1);
+
+  assert.equal(health.members, 2, 'both members are counted');
+  assert.equal(health.unloggedExcluded, 1,
+    'the future-dated member is excluded, not averaged in at its 0 score');
+  assert.equal(health.mean, 0.7,
+    'the mean is over the landed member alone — averaging the future-dated ' +
+    'one in at 0 would report 0.35');
+  assert.equal(health.best.id, 10);
+  assert.equal(health.worst.id, 10);
+});
+
+test('summariseByCategory: a member whose firstEntry EQUALS the reading day is landed', () => {
+  const categories = [{ id: 1, name: 'Health', color: '#fff' }];
+  const day = '2026-06-15';
+  const payloads = [
+    { id: 10, name: 'Daily', score: 0.7, category_id: 1 },
+    { id: 11, name: 'JustLanded', score: 0.3, category_id: 1 },
+  ];
+  const firstEntry = new Map([
+    [10, '2026-01-01'],
+    [11, day], // firstEntry === day, the boundary in the other direction
+  ]);
+
+  const result = summariseByCategory(categories, payloads, firstEntry, day);
+  const health = result.find((s) => s.id === 1);
+
+  assert.equal(health.unloggedExcluded, 0, 'a member landing ON the reading day already counts');
+  assert.equal(health.mean, 0.5, 'both members are averaged in: (0.7 + 0.3) / 2');
 });

@@ -882,10 +882,65 @@ ck('?archived=true carries no categorySummaries, same as the personal edition',
   !('categorySummaries' in archivedOverviewCloud),
   JSON.stringify(Object.keys(archivedOverviewCloud)));
 
+// The WIRING, not just the rule: `summariseByCategory` must be handed
+// `summaryEnd` — the same day `score` beside it was computed against —
+// rather than merely asked "does this member have an entry at all". A unit
+// test on `summariseByCategory` (shared/test/stats.test.js) cannot prove the
+// route passes that day; only a real write through the public API, read back
+// from a different caller's "today", can. `Pacific/Kiritimati` (UTC+14) and
+// `Pacific/Midway` (UTC-11) are 25 hours apart, so their calendar dates can
+// NEVER be the same — this is deterministic, not a one-in-twenty-four race.
+// Do not "simplify" this to two closer zones; that turns the test into one
+// that usually asserts nothing.
+const ZONE_AHEAD = 'Pacific/Kiritimati';
+const ZONE_BEHIND = 'Pacific/Midway';
+const zoneToday = (zone) => new Intl.DateTimeFormat('en-CA', {
+  timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+}).format(new Date());
+ck('the two zones are never on the same calendar day',
+  zoneToday(ZONE_AHEAD) !== zoneToday(ZONE_BEHIND),
+  `${zoneToday(ZONE_AHEAD)} vs ${zoneToday(ZONE_BEHIND)}`);
+
+const putAsZone = (zone, path, body) => fetch(`${overviewBase}${path}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json', 'X-Habiterall-Timezone': zone },
+  body: JSON.stringify(body),
+}).then((r) => r.json());
+const getAsZone = (zone, params) => fetch(
+  `${overviewBase}/api/overview?${new URLSearchParams(params)}`,
+  { headers: { 'X-Habiterall-Timezone': zone } }
+).then((r) => r.json());
+
+const summaryFuture = await postHabit(
+  { name: 'Overview Summary from ahead', type: 'boolean', category_id: summaryCategory.id });
+// Dated that zone's own today — accepted by the write guard for THAT caller —
+// which is ahead of `ZONE_BEHIND`'s today by the argument above.
+await putAsZone(ZONE_AHEAD, `/api/habits/${summaryFuture.id}/entries/${zoneToday(ZONE_AHEAD)}`,
+  { value: 2 });
+// `summaryLogged` gets a second entry dated `ZONE_BEHIND`'s own today, so its
+// landed status under the Midway-anchored read below does not depend on how
+// this host's own clock happens to relate to either zone — only
+// `summaryFuture`'s landing is left to the real gap between the two.
+await putAsZone(ZONE_BEHIND, `/api/habits/${summaryLogged.id}/entries/${zoneToday(ZONE_BEHIND)}`,
+  { value: 2 });
+
+const behindOverview = await getAsZone(ZONE_BEHIND, { days: 7 });
+const behindSummary = behindOverview.categorySummaries?.find((s) => s.id === summaryCategory.id);
+const behindLoggedRow = behindOverview.habits.find((h) => h.id === summaryLogged.id);
+const behindFutureRow = behindOverview.habits.find((h) => h.id === summaryFuture.id);
+
+ck('a member whose only entry is dated ahead of the reading day is excluded',
+  behindSummary?.unloggedExcluded === 2, // summaryNeverLogged + summaryFuture
+  JSON.stringify(behindSummary));
+ck("the mean does not average in the future-dated member's own score",
+  behindSummary?.mean === behindLoggedRow?.score,
+  `${behindSummary?.mean} vs ${behindLoggedRow?.score} `
+  + `(future member's own score ${behindFutureRow?.score})`);
+
 // Same reason as the block above: the import-isolation checks below count
 // every entry alice has.
 await withUser(alice, (db) => db.query(
-  `DELETE FROM entries WHERE habit_id = $1`, [summaryLogged.id]
+  `DELETE FROM entries WHERE habit_id = ANY($1)`, [[summaryLogged.id, summaryFuture.id]]
 ));
 
 /* ---------- and which day that device is ON ---------- */

@@ -772,7 +772,7 @@ api.get('/overview', route(async (req, res) => {
       // summarise yet — an empty category still draws its header.
       return {
         start, end, categories, habits: [],
-        ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map()) }),
+        ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
       };
     }
 
@@ -907,7 +907,7 @@ api.get('/overview', route(async (req, res) => {
       end,
       categories,
       habits: habitPayloads,
-      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry) }),
+      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
     };
   });
 

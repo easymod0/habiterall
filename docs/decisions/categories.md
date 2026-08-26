@@ -522,8 +522,23 @@ falls into Uncategorised, and Uncategorised (`id: null`) is always present,
 even with no members — pulled out a second time so both editions' `/overview`
 call the one function rather than each restating that sentence for itself.
 `section()` and `summariseByCategory` are now both callers of
-`summariseMembers`, and cannot silently disagree about which members are
-landed.
+`summariseMembers`, and both ask the same RULE for which members are landed:
+has this member landed by the day being read, not merely does it have an
+entry at all. That is agreement about the rule rather than about the date —
+`section()` asks it of `landsOn`, `firstEntry` clamped forward to the
+member's warm-up start and then normalised, while `summariseByCategory` asks
+it of the raw lifetime `MIN(date)` a route reads straight off storage.
+`summariseByCategory` did not carry a reading day at first, and asked only
+whether a member had an entry AT ALL — so a habit whose only entry was
+dated after the day `/overview` was reading (a write from a device ahead in
+time, then a read from one behind it) counted as landed, and its `score` for
+that day is 0 with nothing behind it: `resolveWindow` clamps `from` to `end`
+for a member that has not started yet, and `computeScores` walks a single
+day with no entry on it. Averaged in, that reported 16% for a two-habit
+category against `#/categories`' 31% with the same habit correctly excluded
+— the exact failure this phase exists to prevent, arrived at through the one
+input `section()` never has to ask about: whose "today" a write happened
+under.
 
 **The never-logged exclusion cannot be reconstructed in the browser, which is
 why it has to be computed server-side and merely drawn client-side.**

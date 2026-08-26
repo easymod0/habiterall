@@ -1232,24 +1232,32 @@ export function summariseMembers(rows) {
  * @param {import('./types.js').Category[]} categories
  * @param {any[]} payloads - the response's own `habits`, already carrying `score`
  * @param {Map<number, string|null>} firstEntry - habit id -> that habit's
- *   lifetime earliest entry date, or absent/null if it has none. Used for a
- *   null check only — must never reach `addDays`, `dateRange` or
+ *   lifetime earliest entry date, or absent/null if it has none. Compared
+ *   against `day` as a STRING — must never reach `addDays`, `dateRange` or
  *   `boundedRange` (root `CLAUDE.md`).
+ * @param {string} day - the reading the route computed every payload's
+ *   `score` as of (`summaryEnd`), so a member whose earliest entry is AFTER
+ *   it is not yet landed even though it has one. Matches `landedAt`'s rule
+ *   in `computeCategoryStats`'s `section` below: has this member landed by
+ *   the day being read, not merely does it have an entry at all.
  * @returns {import('./types.js').CategorySummaryRow[]}
  */
-export function summariseByCategory(categories, payloads, firstEntry) {
+export function summariseByCategory(categories, payloads, firstEntry, day) {
   const byCategory = new Map(categories.map((c) => [c.id, []]));
   const uncategorised = [];
   for (const h of payloads) {
     const bucket = h.category_id != null && byCategory.get(h.category_id);
     (bucket || uncategorised).push(h);
   }
-  const summarise = (members) => summariseMembers(members.map((h) => ({
-    id: h.id,
-    name: h.name,
-    score: h.score,
-    landed: firstEntry.get(h.id) != null,
-  })));
+  const summarise = (members) => summariseMembers(members.map((h) => {
+    const first = firstEntry.get(h.id);
+    return {
+      id: h.id,
+      name: h.name,
+      score: h.score,
+      landed: first != null && first <= day,
+    };
+  }));
   return [
     ...categories.map((c) => ({ id: c.id, ...summarise(byCategory.get(c.id)) })),
     { id: null, ...summarise(uncategorised) },

@@ -815,7 +815,7 @@ api.get('/overview', (req, res) => {
   // `computeCategoryStats` makes.
   const categorySummaries = archived
     ? undefined
-    : summariseByCategory(categories, habitPayloads, firstEntry);
+    : summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd);
 
   res.json({
     start,

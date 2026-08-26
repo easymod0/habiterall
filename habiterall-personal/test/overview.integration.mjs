@@ -69,6 +69,21 @@ const put = (path, body) => fetch(`${base}/api${path}`, {
 const overview = (params) =>
   fetch(`${base}/api/overview?${new URLSearchParams(params)}`).then((r) => r.json());
 
+const overviewAs = (params, zone) =>
+  fetch(`${base}/api/overview?${new URLSearchParams(params)}`,
+    { headers: { 'X-Habiterall-Timezone': zone } }).then((r) => r.json());
+
+const putAs = (path, body, zone) => fetch(`${base}/api${path}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json', 'X-Habiterall-Timezone': zone },
+  body: JSON.stringify(body),
+}).then((r) => r.json());
+
+/** That zone's own "today", read the same way `callerDay` reads it. */
+const todayIn = (zone) => new Intl.DateTimeFormat('en-CA', {
+  timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+}).format(new Date());
+
 const habit = await post('/habits', { name: 'Anchor', type: 'boolean' });
 
 // A run of completions ending today, and nothing at all in the month before
@@ -131,6 +146,38 @@ ck('the mean is the logged member\'s own score from this same payload',
 const uncategorised = grouped.categorySummaries.find((s) => s.id === null);
 ck('Uncategorised is always present, with id: null',
   uncategorised !== undefined, JSON.stringify(grouped.categorySummaries));
+
+// The wiring, not just the rule: `summariseByCategory` must be handed
+// `summaryEnd` — the same reading day `score` beside it was computed
+// against — rather than merely "does this member have an entry at all".
+// `Pacific/Kiritimati` (UTC+14) and `Pacific/Midway` (UTC-11) are 25 hours
+// apart, so their calendar dates can NEVER be the same — this is
+// deterministic, not a one-in-twenty-four race. Do not "simplify" this to
+// two closer zones; that turns the test into one that usually asserts
+// nothing.
+//
+// `logged` also gets a second entry, dated Midway's OWN today, so its landed
+// status under the Midway-anchored read below does not depend on how the
+// suite's host clock happens to relate to either zone — only `futureHabit`'s
+// landing is left to the real gap between the two zones.
+const futureHabit = await post('/habits',
+  { name: 'FromAhead', type: 'boolean', category_id: category.id });
+await putAs(`/habits/${futureHabit.id}/entries/${todayIn('Pacific/Kiritimati')}`,
+  { value: 2 }, 'Pacific/Kiritimati');
+await putAs(`/habits/${logged.id}/entries/${todayIn('Pacific/Midway')}`,
+  { value: 2 }, 'Pacific/Midway');
+
+const behind = await overviewAs({ days: 7 }, 'Pacific/Midway');
+const behindSummary = behind.categorySummaries.find((s) => s.id === category.id);
+const behindLoggedRow = behind.habits.find((h) => h.id === logged.id);
+const behindFutureRow = behind.habits.find((h) => h.id === futureHabit.id);
+
+ck('a member whose only entry is dated ahead of the reading day is excluded',
+  behindSummary && behindSummary.unloggedExcluded === 2, // neverLogged + futureHabit
+  JSON.stringify(behindSummary));
+ck('the mean does not average in the future-dated member\'s own score',
+  behindSummary && behindSummary.mean === behindLoggedRow.score,
+  `${behindSummary && behindSummary.mean} vs ${behindLoggedRow.score} (future member\'s own score ${behindFutureRow.score})`);
 
 const archivedOverview = await overview({ days: 7, archived: 'true' });
 ck('?archived=true carries no categorySummaries',
