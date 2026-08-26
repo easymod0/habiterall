@@ -706,25 +706,54 @@ private fun SectionLabel(text: String) {
 @OptIn(ExperimentalLayoutApi::class)   // FlowRow, for the same reason ReminderTimeField uses one
 @Composable
 private fun CategoryPicker(categories: List<Category>, selectedId: Long?, onPick: (Long?) -> Unit) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = selectedId == null,
-            onClick = { onPick(null) },
-            label = { Text("None") },
-        )
-        categories.forEach { category ->
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
-                selected = selectedId == category.id,
-                onClick = { onPick(category.id) },
-                label = { Text(category.name) },
+                selected = selectedId == null,
+                onClick = { onPick(null) },
+                label = { Text("None") },
             )
+            categories.forEach { category ->
+                FilterChip(
+                    selected = selectedId == category.id,
+                    onClick = { onPick(category.id) },
+                    label = { Text(category.name) },
+                )
+            }
+            // Two different inputs reach here and only one of them means the
+            // category is gone. `categories` empty is the list not having
+            // arrived yet — the overflow menu reaches Archive, and Archive's
+            // own edit, while MainActivity's first `/overview` fetch is still
+            // in flight or has failed — and saying "not in your list" for that
+            // case is the one thing this chip must never say, because it is
+            // the only enabled-looking control left once "None" is the other
+            // option, and tapping "None" here is the silent clear this whole
+            // mechanism exists to prevent.
+            if (selectedId != null && categories.none { it.id == selectedId }) {
+                FilterChip(
+                    selected = true,
+                    enabled = false,
+                    onClick = {},
+                    label = {
+                        Text(
+                            if (categories.isEmpty()) "Categories haven't loaded yet (#$selectedId)"
+                            else "Not in your list (#$selectedId)"
+                        )
+                    },
+                )
+            }
         }
-        if (selectedId != null && categories.none { it.id == selectedId }) {
-            FilterChip(
-                selected = true,
-                enabled = false,
-                onClick = {},
-                label = { Text("Not in your list (#$selectedId)") },
+        // Nothing else on this screen says where a category comes from — the
+        // picker is pick-only, on purpose (see the KDoc above) — so an account
+        // with none yet gets a line saying so, the same way the reminder
+        // message field's supportingText explains an otherwise-silent control.
+        // Only drawn when there is nothing to pick from; a full list needs no
+        // such hint.
+        if (categories.isEmpty()) {
+            Text(
+                "Categories are made in the web app.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

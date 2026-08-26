@@ -583,7 +583,7 @@ class HabitListTest {
      * establish twenty habits is enough to observe at this screen size.
      */
     @Test
-    fun `grouped, a restored scroll position past the item count snaps to top`() {
+    fun `grouped, a restored position past the habit count but inside the item count is kept`() {
         val twenty = manyHabits(20)
         show(habits = twenty, rows = twenty, grouped = true, initialScrollIndex = 20)
 

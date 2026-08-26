@@ -208,7 +208,7 @@ fun HabitList(
     // A notification tap wins over a filter: a query live when one arrives is
     // cleared first, on the (separate) pass that follows, rather than have the
     // habit it names hunted for in a list a live query may have narrowed past
-    // it. `query` has to be a key and not just read: keyed on `visible` alone,
+    // it. `query` has to be a key and not just read: keyed on `listRows` alone,
     // a query that happens to match every habit produces a list that is
     // `equals` to the unfiltered one once it clears, so the effect would never
     // re-run and `onFocused()` would never fire — the focus left pending for
@@ -219,7 +219,7 @@ fun HabitList(
     // pass that looks for it. `searchOpen` joins `query` as both a guard and a
     // key for the identical reason: a tap arriving with the field expanded but
     // no text typed would otherwise leave the field open over a list the user
-    // never filtered, and keyed on `visible` alone this effect would not even
+    // never filtered, and keyed on `listRows` alone this effect would not even
     // re-run to collapse it once `query` had nothing to change.
     //
     // This one guard stays `query.isNotBlank()` rather than `filtering`, and
@@ -229,7 +229,7 @@ fun HabitList(
     // text, and leaving it there means the next thing typed is appended to it.
     // Being the wider predicate costs one extra pass and ends in the same
     // empty box.
-    LaunchedEffect(focusHabit, visible, loaded, query, searchOpen) {
+    LaunchedEffect(focusHabit, listRows, loaded, query, searchOpen) {
         if (focusHabit == null || !loaded) return@LaunchedEffect
         if (query.isNotBlank() || searchOpen) {
             onQueryChange("")

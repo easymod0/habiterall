@@ -1,9 +1,11 @@
 package com.habiterall.app
 
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -112,8 +114,11 @@ class HabitFormScreenTest {
 
     /**
      * The load-bearing case. `categories` does not carry id 7 — deleted since
-     * the overview was last fetched, or the form opened before one landed —
-     * and the habit's own category must survive a save nobody touched.
+     * the overview was last fetched — and the habit's own category must
+     * survive a save nobody touched. A non-empty `categories` that merely
+     * lacks id 7 is genuinely "the category is gone", so this is where the
+     * "not in your list" wording belongs — see the sibling test below for the
+     * other input that reaches the same disabled chip and must NOT say this.
      */
     @Test
     fun `an unresolvable category id is kept across an untouched save, and None is not selected`() {
@@ -122,6 +127,7 @@ class HabitFormScreenTest {
         compose.onNodeWithText("None").assertIsNotSelected()
         compose.onNodeWithText("Health").assertIsNotSelected()
         compose.onNodeWithText("Work").assertIsNotSelected()
+        compose.onNodeWithText("Not in your list (#7)").assertIsSelected()
 
         compose.onNodeWithText("Save").performClick()
         compose.waitForIdle()
@@ -131,5 +137,43 @@ class HabitFormScreenTest {
             7L,
             saved?.categoryId,
         )
+    }
+
+    /**
+     * The other input that reaches the same disabled chip: a form opened
+     * before the account's first `/overview` fetch has landed, where
+     * `categories` is empty rather than merely missing id 7. Reusing "not in
+     * your list" here would tell a user their category is gone when it has
+     * only not loaded yet — the defect this pair of tests exists to catch.
+     */
+    @Test
+    fun `an unresolvable category id with no categories loaded yet reads as not-loaded, not gone`() {
+        show(existing = Habit(id = 9, name = "Water", categoryId = 7), categories = emptyList())
+
+        compose.onNodeWithText("None").assertIsNotSelected()
+        compose.onNodeWithText("Categories haven't loaded yet (#7)").assertIsSelected()
+
+        compose.onNodeWithText("Save").performClick()
+        compose.waitForIdle()
+
+        assertEquals(
+            "an untouched save must keep the habit's own category id even before categories loaded",
+            7L,
+            saved?.categoryId,
+        )
+    }
+
+    @Test
+    fun `an account with no categories yet says where one comes from`() {
+        show(categories = emptyList())
+
+        compose.onNodeWithText("Categories are made in the web app.").assertExists()
+    }
+
+    @Test
+    fun `a full category list does not draw the where-they-come-from hint`() {
+        show()
+
+        compose.onAllNodesWithText("Categories are made in the web app.").assertCountEquals(0)
     }
 }
