@@ -549,6 +549,22 @@ precache list drifts silently.
 
 ## Traps
 
+**A text box added inside a dialog's `<form>` inherits Enter, and Enter means
+that form's submit button.** The habit dialog manages the account's categories
+in place, so its "New category" and rename boxes sit inside `#habit-form` —
+where Enter closed the dialog, WROTE THE HABIT, and dropped the category that
+had just been typed, inventing a whole habit from the form's defaults on the
+create path. Nothing said so: `saveHabit` succeeds on its own terms and
+`#category-hint` is written only by the category handlers. `enterPresses`
+(`ui/habit-dialog.js`) routes the key to the button beside the box rather than
+calling `preventDefault` alone — a box where Enter does nothing is its own bug
+report. Ask this of any control added to a sub-form of a dialog next.
+
+And pinning it needs a REAL key event: implicit submission is the browser's
+own behaviour on a trusted keypress, so a `new KeyboardEvent('keydown')` from
+script does not trigger it and a test built on one passes against the
+unguarded code. `categorycheck.mjs` drives CDP `Input.dispatchKeyEvent`.
+
 **A localised name is never indexed by a Gregorian field.** `getMonth()`,
 `getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
 `MONTHS[d.getMonth()]` or `String(d.getDate())` silently assumes the locale's
@@ -679,6 +695,20 @@ dialog spin until the OS gave up while the create may or may not have landed.
 Abandoned, not replayed, and reported as *indeterminate* is the honest shape; the
 dialog closes and reloads the list on that error, so "check whether it was
 created" is something the user can see rather than a thing they are told to do.
+
+**`POST /categories` is replayable, and it ALSO yields a second row on a
+literal reading of "arrives twice safely" — the reasoning above is not "any
+create is fine to replay", or `POST /habits` would not need its own
+exception.** What makes this one different is that a second attempt cannot
+succeed *silently*: the account's own name is unique (`categoryNameTaken`,
+backed by the DB constraint `isCategoryNameConflict` maps to 409 rather than
+letting surface as a 500), so a staged write that lands twice gets the second
+attempt refused as a duplicate of the first, and the outbox drops every 4xx as
+a permanent failure rather than retrying it — never a second category with the
+same name. `POST /habits` has no name uniqueness to fall back on; two habits
+named the same thing are simply two habits. Do not relax the duplicate-name
+check on this route without re-reading this paragraph — it is not merely a
+validation nicety, it is what keeps this write safe to stage and replay at all.
 
 A GET still goes to the network, because
 the service worker may hold a cached copy and skipping the request throws that

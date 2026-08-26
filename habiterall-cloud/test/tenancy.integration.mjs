@@ -196,6 +196,43 @@ try {
 } catch { victimOk = false; }
 check('bob can still write and clear that day', victimOk);
 
+/* ---------- categories ---------- */
+
+console.log('--- categories: isolated like everything else ---');
+
+const bobCategory = await withUser(bob.id, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO categories (user_id, name) VALUES ($1, 'Bob Category') RETURNING id`,
+    [bob.id]
+  );
+  return rows[0].id;
+});
+
+const aliceSeesBobCategory = await withUser(alice.id, (db) =>
+  db.query('SELECT * FROM categories WHERE id = $1', [bobCategory]).then(r => r.rows.length));
+check("alice cannot SELECT bob's category", aliceSeesBobCategory === 0,
+  `rows=${aliceSeesBobCategory}`);
+
+// This one does NOT get blocked, and that is the point of the check. Postgres
+// runs a foreign-key check internally, with RLS not applied to that internal
+// lookup — so alice's own habit can carry bob's category id and the INSERT
+// succeeds outright. The FK is therefore not a tenancy boundary at all; it is
+// exactly why the route validates existence itself (resolveCategoryId) rather
+// than trusting the constraint to 400 on a foreign id.
+const aliceHabitWithBobsCategory = await withUser(alice.id, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO habits (user_id, name, type, category_id)
+     VALUES ($1, 'FK is not RLS', 'boolean', $2) RETURNING id`,
+    [alice.id, bobCategory]
+  );
+  return rows[0].id;
+});
+check(
+  "a DB-layer INSERT succeeds pointing alice's habit at bob's category id " +
+  '(the FK check runs inside Postgres with RLS not applied to it)',
+  Number.isInteger(aliceHabitWithBobsCategory)
+);
+
 /* ---------- the reminder scheduler's scope ---------- */
 //
 // Migration 008 adds the only policy in the schema that lets a query see more

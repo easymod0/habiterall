@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 const {
   parseHabit, parseEntry, entryWrite, answerBody, assertDate, assertNotFuture,
-  ValidationError, LIMITS, DEFAULT_COLOR, parseIcon,
+  ValidationError, LIMITS, DEFAULT_COLOR, parseIcon, parseCategory,
+  foldCategoryName, parseCategoryId,
 } = await import('../src/validate.js');
 const { isCompleted } = await import('../src/stats.js');
 
@@ -174,6 +176,160 @@ test('a partial write clears a previously-set icon', () => {
   // through this function with no notion of "leave it".
   assert.equal(parseHabit({ name: 'x', icon: '\u{1F9D8}' }).icon, '\u{1F9D8}');
   assert.equal(parseHabit({ name: 'x' }).icon, '', 'an omitted icon must not survive a replace');
+});
+
+/* ---------- category_id on a habit ---------- */
+
+test('an absent category_id is null', () => {
+  assert.equal(parseHabit({ name: 'x' }).category_id, null);
+});
+
+test('anything not a positive safe integer is null, never coerced', () => {
+  for (const junk of ['3', 3.5, 0, -1, true, '__proto__']) {
+    assert.equal(
+      parseHabit({ name: 'x', category_id: junk }).category_id, null,
+      `category_id: ${JSON.stringify(junk)} must give null, not be coerced`,
+    );
+  }
+});
+
+test('a present positive integer id survives as itself', () => {
+  assert.equal(parseHabit({ name: 'x', category_id: 7 }).category_id, 7);
+});
+
+/* ---------- categories ---------- */
+
+test('a category name is required', () => {
+  assert.throws(() => parseCategory({}), ValidationError);
+  assert.throws(() => parseCategory({ name: '' }), ValidationError);
+  assert.throws(() => parseCategory({ name: '   ' }), ValidationError);
+});
+
+test('an over-long category name is capped at LIMITS.name', () => {
+  const cat = parseCategory({ name: 'x'.repeat(200) });
+  assert.equal(cat.name.length, LIMITS.name);
+  assert.equal(cat.name, 'x'.repeat(100));
+});
+
+test('a category colour must be a 6-digit hex, else the default', () => {
+  assert.equal(parseCategory({ name: 'Health', color: 'blue' }).color, DEFAULT_COLOR);
+  assert.equal(parseCategory({ name: 'Health', color: '#00ff88' }).color, '#00ff88');
+});
+
+test('parseCategoryId takes an id spelled as text, and refuses one that merely coerces', () => {
+  // The spellings a URL segment and a reorder list legitimately arrive in.
+  assert.equal(parseCategoryId(7), 7);
+  assert.equal(parseCategoryId('7'), 7);
+
+  // The whole point of the `typeof` gate. `Number()` answers 0 for each of the
+  // first three and 1 for `true`, so `Number.isInteger(Number(n))` — what both
+  // editions' reorder routes asked — said YES to every one of them: `[null]`
+  // reached the UPDATE as id 0 and moved nothing while reporting success, and
+  // `[true]` moved whichever category is id 1. Asserted as LITERAL `null`
+  // rather than as falsy, because 0 is falsy too and is exactly the wrong
+  // answer this is about.
+  assert.equal(parseCategoryId(null), null);
+  assert.equal(parseCategoryId(undefined), null);
+  assert.equal(parseCategoryId(''), null);
+  assert.equal(parseCategoryId([]), null);
+  assert.equal(parseCategoryId(['1']), null);
+  assert.equal(parseCategoryId({}), null);
+  assert.equal(parseCategoryId(true), null);
+  assert.equal(parseCategoryId(false), null);
+
+  // Not an id, in the ways an id can fail to be one.
+  assert.equal(parseCategoryId('abc'), null);
+  assert.equal(parseCategoryId(1.5), null);
+  assert.equal(parseCategoryId('1.5'), null);
+  assert.equal(parseCategoryId(0), null);
+  assert.equal(parseCategoryId(-3), null);
+  assert.equal(parseCategoryId(NaN), null);
+  assert.equal(parseCategoryId(Infinity), null);
+
+  // Past 2^53 an id stops round-tripping through a double: this literal and
+  // its neighbour are one value in JS and two rows in Postgres. `9007199254740993`
+  // is written out rather than computed, so the boundary is pinned rather than
+  // restated from the same expression the implementation uses.
+  assert.equal(parseCategoryId(9007199254740993), null);
+  assert.equal(parseCategoryId('9007199254740993'), null);
+  assert.equal(parseCategoryId(9007199254740991), 9007199254740991);
+});
+
+test('foldCategoryName folds Unicode case, not only ASCII', () => {
+  // SQLite's NOCASE folds ASCII only; Postgres's lower() is Unicode-aware.
+  // This is the one rule both editions ask instead, so 'Élan' and 'élan' are
+  // the same category everywhere.
+  // Both sides asserted against a LITERAL, not only against each other: a
+  // `foldCategoryName` that returned a constant '' would satisfy an
+  // equality between its own two answers and nothing else.
+  assert.equal(foldCategoryName(' Élan '), 'élan');
+  assert.equal(foldCategoryName('élan'), 'élan');
+  assert.equal(foldCategoryName(' Élan '), foldCategoryName('élan'));
+});
+
+test('foldCategoryName folds with the DOTTED i, never a host locale\'s own', () => {
+  // Plain toLowerCase() (no locale argument) always answers the dotted 'i' —
+  // a Turkish- or Azeri-locale HOST would instead fold 'Ideas' to a dotless
+  // 'ıdeas' under toLocaleLowerCase(), which is exactly the host-tailoring
+  // this function must not do: the same account would fold names differently
+  // depending on which server happened to answer, and would disagree with
+  // Postgres's locale-independent lower() and SQLite's NOCASE besides.
+  assert.equal(foldCategoryName('Ideas'), 'ideas');
+});
+
+test('foldCategoryName calls .toLowerCase() in its own SOURCE, never toLocaleLowerCase (source guard)', () => {
+  // A companion to the test above, not a replacement for it — and the reason
+  // it has to exist at all. `'Ideas'.toLocaleLowerCase()` answers 'ideas' on
+  // this host's (and CI's) default ICU locale exactly the way `.toLowerCase()`
+  // does — `LC_ALL` cannot move a process's already-started default locale —
+  // so the behavioural test above passed with `toLocaleLowerCase()` restored,
+  // silently proving nothing, while its own comment kept describing a
+  // divergence this host is structurally unable to produce. Only a host whose
+  // DEFAULT locale is Turkish or Azeri folds 'Ideas' to a dotless 'ı', and
+  // nothing here can spin one up to demonstrate it behaviourally. Reading
+  // which method the source calls is what is left: a guard on WHICH FUNCTION
+  // RUNS, not on what it returns, so it catches exactly the regression the
+  // behavioural test cannot — which is also why that test stays rather than
+  // being deleted as redundant.
+  const src = readFileSync(new URL('../src/validate.js', import.meta.url), 'utf8');
+  const fn = /export function foldCategoryName\([^)]*\)\s*\{[^}]*\}/.exec(src);
+  assert.ok(fn, "foldCategoryName's declaration was not found — update this guard's regex");
+  assert.match(fn[0], /\.toLowerCase\(/,
+    'foldCategoryName must fold with .toLowerCase(), not a locale-aware method');
+  assert.doesNotMatch(fn[0], /toLocaleLowerCase/,
+    'foldCategoryName must not call toLocaleLowerCase — it folds differently per host locale');
+});
+
+test('the browser holds NO copy of the fold — the category picker asks the server ' +
+  'and reads its answer (source guard)', () => {
+  // This test used to assert the opposite: that `habit-dialog.js`'s own
+  // `useOrCreateCategory` chained `.trim().toLowerCase()` exactly as
+  // `foldCategoryName` does, on the reasoning that `shared/src` is not served
+  // to the browser (shared/CLAUDE.md) so a third hand-written copy was
+  // unavoidable. The import is unavoidable; the copy was not. That copy ran in
+  // exactly one place — after a 409 from `POST /categories`, resolving the
+  // chip's name to the row the server had just refused to duplicate — which
+  // means it could only ever run when a server that had ALREADY computed the
+  // answer had just replied, and never offline, where the POST is queued and
+  // throws `err.queued` instead. The root CLAUDE.md's rule for a hand-copied
+  // rule is that a client earns one only if it must work OFFLINE, and this
+  // one plainly did not; it had also already drifted once (holding
+  // `toLocaleLowerCase()` and no `.trim()`) before anything caught it. The
+  // chip now reports the 409 and says to pick the existing category, so the
+  // rule lives in `foldCategoryName` and the two editions' routes alone.
+  //
+  // A source guard, and only half the answer, per the root CLAUDE.md: it
+  // cannot see a fold written some other way, and it says nothing about what
+  // the chip DOES with the refusal. `categorycheck.mjs`'s "a chip for a
+  // category that already exists says so, and not in the error class" is the
+  // behavioural half that watches the branch this leaves in place.
+  const dialogSrc = readFileSync(
+    new URL('../public/ui/habit-dialog.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(dialogSrc, /toLowerCase|toLocaleLowerCase/,
+    'habit-dialog.js folds a name itself again — that is a third copy of ' +
+    'foldCategoryName, and the browser does not earn one: the branch that ' +
+    'wanted it is unreachable offline. Let the route answer, and see ' +
+    'docs/decisions/categories.md');
 });
 
 /* ---------- entries ---------- */

@@ -53,6 +53,19 @@
  *   validate.js; '' means none. Never a second name field
  * @property {number} [position]       display order
  * @property {boolean|0|1} archived    boolean in Postgres, 0/1 in SQLite
+ * @property {number|null} [category_id] which Category this habit belongs
+ *   to, or null for uncategorised. A habit PUT REPLACES, so an absent value is
+ *   a stated clear — see `parseHabit` in validate.js. At most one category per
+ *   habit; grouping a list needs a partition, not a set of memberships
+ */
+
+/**
+ * @typedef {object} Category
+ * @property {number} id
+ * @property {number} [user_id]        cloud only; absent in the personal edition
+ * @property {string} name
+ * @property {string} color            #rrggbb
+ * @property {number} [position]       display order
  */
 
 /**

@@ -63,6 +63,13 @@ data class Habit(
     @SerialName("show_as") val showAs: String = "amount",
     /** See [HabitInput.icon]. */
     val icon: String = "",
+    /**
+     * The user-created category this habit belongs to, or `null` for
+     * uncategorised. See [HabitInput.categoryId]: this client carries the id
+     * only — no picker, no grouped list, issue #65 phase 2's Android half is
+     * out of scope for this PR.
+     */
+    @SerialName("category_id") val categoryId: Long? = null,
     val position: Int = 0,
     val archived: Boolean = false,
     // Present on /overview only.
@@ -161,6 +168,10 @@ data class Habit(
         // unarchiving, and setting a reminder from the list. `HabitApiTest`
         // compares the two encodings rather than restating this list.
         atMostUnlogged = atMostUnlogged,
+        // No picker on this client, but a habit PUT still REPLACES — omitting
+        // this would clear a category set on the web the next time either of
+        // the two callers above touches the habit from a phone.
+        categoryId = categoryId,
         archived = archived,
     )
 }
@@ -224,6 +235,18 @@ data class HabitInput(
      * to `''` on the next write, however it got here.
      */
     val icon: String = "",
+    /**
+     * A positive id naming a category, or `null` for uncategorised. Carried
+     * here for the usual reason — a habit PUT REPLACES, so leaving this out
+     * clears a category set on another client — and for no other: this
+     * client has no picker and no grouped list (issue #65 phase 2's Android
+     * half), so the only two writers that touch it are the ones that flip one
+     * thing about a habit they already fetched, and both must carry the value
+     * forward untouched. `null` here and an absent key are the same thing to
+     * `parseHabit` (`shared/src/validate.js`) — both resolve to "no category"
+     * — so this client's `explicitNulls = false` on write costs nothing.
+     */
+    @SerialName("category_id") val categoryId: Long? = null,
     val archived: Boolean = false,
 )
 

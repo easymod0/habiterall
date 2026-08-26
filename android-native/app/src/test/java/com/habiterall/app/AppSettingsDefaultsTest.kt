@@ -216,6 +216,11 @@ class AppSettingsDefaultsTest {
         // whole of it: unify the three readers, then choose between the device
         // tier and a real mirror.
         "numberFormat" to "three Kotlin readers that do not yet agree — see #157",
+        // Whether the WEB dashboard draws one section per category. This
+        // client's list is not grouped and gains no picker or grouped list in
+        // this phase (issue #65 phase 2's Android half is explicitly out), so
+        // a default here would be a value nothing on this client reads.
+        "groupByCategory" to "the native list is not grouped, so a default here would be a value nothing on this client reads",
     )
 
     /**

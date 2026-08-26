@@ -341,6 +341,27 @@ body {
 
 .grid { display: flex; flex-direction: column; gap: 10px; }
 
+/* One per category, drawn directly into `#grid` when `groupByCategory` is on
+   (dashboard.js). Left border rather than a filled background, for the same
+   reason the category chip's border is — a header has to stay legible
+   whatever the category's own colour is. */
+.category-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-left: 3px solid var(--chip-color, var(--accent));
+}
+.category-section-header:first-child { margin-top: 0; }
+/* The trailing Uncategorised section has no colour of its own to border with. */
+.category-section-header.uncategorised { border-left-color: var(--border); }
+.category-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.category-section-count { flex: none; color: var(--text-dim); }
+
 /* Flex rather than a fixed grid: the drag handle is absent in the archived
    view and when there is only one habit, and the row must still line up. */
 .habit-row {
@@ -698,6 +719,61 @@ dialog select {
   padding: 7px 9px;
 }
 dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
+
+/* ---------- category field (habit dialog) ---------- */
+
+.category-field { margin-bottom: 11px; }
+.category-field label { margin-bottom: 4px; }
+
+.category-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+/* A coloured left edge, not a filled chip — a label has to stay legible
+   whatever the suggestion's own colour is, the same reason the "New" pill in
+   detail.js takes --accent rather than a per-habit colour. */
+.category-chip { border-left: 3px solid var(--chip-color, var(--accent)); }
+
+.category-new {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.category-new input[type='text'] { flex: 1; min-width: 0; margin-top: 0; }
+.category-new input[type='color'] { margin-top: 0; flex: none; width: 44px; }
+
+.category-manage {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.category-manage-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; }
+.category-swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.category-manage-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.category-manage-row input[type='text'] { flex: 1; min-width: 0; margin-top: 0; }
+.category-manage-row input[type='color'] {
+  margin-top: 0;
+  flex: none;
+  width: 36px;
+  height: 32px;
+}
+#category-hint.error { color: var(--danger); }
 
 .freq {
   border: 1px solid var(--border);

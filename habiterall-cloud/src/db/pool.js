@@ -136,6 +136,26 @@ export async function withoutUser(fn) {
   }
 }
 
+/**
+ * Whether ERR is Postgres reporting `categories_user_name_key` (migration
+ * 015's `UNIQUE INDEX ON categories (user_id, lower(name))`) refusing an
+ * INSERT or UPDATE — the DB-level backstop firing on a race the route's own
+ * `categoryNameTaken` check missed.
+ *
+ * `23505` is `unique_violation`'s SQLSTATE and is not enough on its own: any
+ * unique index anywhere could raise it. Matched together with `constraint`,
+ * the specific index name pg surfaces from the server's error fields, so a
+ * caller cannot mistake some other table's collision (or a future second
+ * constraint on this one) for a duplicate category name and quietly
+ * swallow it.
+ *
+ * @param {any} err
+ * @returns {boolean}
+ */
+export function isCategoryNameConflict(err) {
+  return err?.code === '23505' && err.constraint === 'categories_user_name_key';
+}
+
 export async function closePool() {
   await pool.end();
 }

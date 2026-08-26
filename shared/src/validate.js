@@ -93,6 +93,13 @@ export const LIMITS = {
    * and a four-person family with skin tones (19).
    */
   icon: 32,
+  /**
+   * A user's own categories, per account. Six suggestion chips ship in the
+   * picker, but they are not seeded — an account can create at most this many
+   * of its own, chip-created or typed. Mark's answer; not derived from
+   * anything else here.
+   */
+  categories: 30,
 };
 
 /**
@@ -165,6 +172,98 @@ export function parseIcon(value) {
 }
 
 /**
+ * The one rule for whether two category names are the SAME category, so both
+ * editions agree. SQLite's `NOCASE` collation folds ASCII only and Postgres's
+ * `lower()` is Unicode-aware, so `Élan` and `élan` would be one category in
+ * cloud and two in personal if the DB constraint alone decided it — the exact
+ * divergence this file exists to prevent. The uniqueness check is therefore a
+ * route-level lookup through this function, with the DB constraints kept only
+ * as backstops; a duplicate is a 409 from the route, not a 500 from a
+ * constraint violation.
+ *
+ * Plain `toLowerCase()`, never `toLocaleLowerCase()`. `toLowerCase()` is
+ * ALREADY full Unicode Default Case Conversion with no locale argument
+ * needed (`'É'.toLowerCase() === 'é'`) — the only thing a locale argument
+ * adds is host-locale TAILORING (Turkish/Azeri's dotless `ı`, Lithuanian's
+ * accent-sensitive casing), which is the wrong direction twice over: the
+ * same account would fold names differently depending on which server
+ * answers it, and a tailored fold is a *looser* match to Postgres's
+ * locale-independent `lower()` and SQLite's `NOCASE` backstop than the
+ * plain form already is. So `toLowerCase()` is the CLOSER match to `lower()`,
+ * not the looser one — this used to reason the other way round.
+ *
+ * @param {unknown} name
+ * @returns {string}
+ */
+export function foldCategoryName(name) {
+  return String(name ?? '').trim().toLowerCase();
+}
+
+/**
+ * A category id arriving as TEXT — a URL segment, or one entry in the list
+ * `POST /categories/reorder` takes — as a number, or `null` when it is not
+ * the shape of one.
+ *
+ * Deliberately NOT the rule `parseHabit` applies to `body.category_id`, and
+ * the difference is where the id came from. There it arrives inside a JSON
+ * body, where a number is the only honest spelling and a string is a client
+ * bug, so anything else folds to "no category". Here it arrives as text by
+ * construction (`req.params.id` is always a string) or in a list a client may
+ * reasonably spell either way, so a numeric string is normal and is coerced.
+ *
+ * What it refuses is a value that merely COERCES to an id. Both editions
+ * asked `Number.isInteger(Number(n))` of every entry in a reorder list, and
+ * `Number()` answers 0 for `null`, `''` and `[]`, and 1 for `true` — so
+ * `{order: [true]}` passed the shape check and then moved whichever category
+ * is id 1, and `{order: [null]}` passed it and answered 200 having matched no
+ * row at all. A reorder that reports success and applies to something nobody
+ * named is precisely the failure a client cannot see, which is the reasoning
+ * the fractional-id check beside it was already added for. The `typeof` gate
+ * is what makes those unrepresentable rather than filtered one spelling at a
+ * time.
+ *
+ * `Number.isSafeInteger`, not `Number.isInteger`: past 2^53 an id no longer
+ * round-trips through a double, so `9007199254740993` and its neighbour are
+ * one value here and two rows in Postgres. That is the bound `parseHabit`
+ * already draws for this same field, so the two now agree.
+ *
+ * It is here rather than per edition because it is a pure rule over a value —
+ * the two copies of `categoryId(req)` were per edition only because they take
+ * an Express request, and that was already one rule written twice.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+export function parseCategoryId(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * Validate and normalise a category payload.
+ *
+ * An EMPTY name throws; an over-long one is capped at `LIMITS.name`. That
+ * split is deliberate and it is the one place this disagrees with
+ * `parseHabit`, which throws on both: a category is a short label typed into a
+ * picker, so trimming a pasted-in essay to 100 characters is what the user
+ * meant, while a nameless category is nothing at all. The cap is what the
+ * section header can draw; the throw is what has no answer.
+ *
+ * @param {Record<string, any>} [body]
+ * @returns {{name: string, color: string}}
+ */
+export function parseCategory(body = {}) {
+  const name = String(body.name ?? '').trim().slice(0, LIMITS.name);
+  if (!name) throw new ValidationError('name is required');
+
+  return {
+    name,
+    color: COLOR_RE.test(body.color ?? '') ? body.color : DEFAULT_COLOR,
+  };
+}
+
+/**
  * Validate and normalise a habit payload.
  *
  * Returns a plain object with every field present and coerced. Throws
@@ -227,6 +326,15 @@ export function parseHabit(body = {}) {
     // it". See parseIcon for what one grapheme means and why over-long input
     // is dropped rather than sliced.
     icon: parseIcon(body.icon),
+    // A habit PUT REPLACES, so an omitted category is a stated clear — the
+    // same rule `icon`'s comment states just above. Anything that is not a
+    // positive safe integer (a string, a float, 0, a negative id, `true`, a
+    // crafted `'__proto__'`) is `null` rather than a 400: whether the id
+    // NAMES a category is a question for the route (`resolveCategoryId`),
+    // which is where an unknown id becomes a 400. This only decides the
+    // SHAPE of what may be stored.
+    category_id: Number.isSafeInteger(body.category_id) && body.category_id > 0
+      ? body.category_id : null,
     archived: !!body.archived,
   };
 }
@@ -483,6 +591,12 @@ export const SETTING_VALUES = {
   dayOrder: ['newest-right', 'newest-left'],
   weekStart: ['monday', 'sunday'],
   confirmDelete: [true, false],
+  // Whether the dashboard draws one section per category (plus a trailing
+  // Uncategorised one) instead of a flat list. Off by default: a fresh
+  // account has no categories, and a grouped list with one section — the
+  // trailing Uncategorised one, holding everything — is strictly worse than
+  // the flat list it would replace.
+  groupByCategory: [true, false],
   // How many day columns the dashboard grid shows. A CAP and not an absolute —
   // `gridColumns` in ui/window.js takes the smaller of this and what the
   // viewport fits, because the per-width ladder is the fix for a real layout
@@ -603,6 +717,12 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'weekStart',
   'confirmDelete',
   'calendarZoom',
+  // A display preference carrying no capability, like `theme` — it decides
+  // whether the dashboard is drawn in sections or as a flat list, not what any
+  // row MEANS. A category referenced by `category_id` on a habit already
+  // travels with that habit; this only says how the same data is arranged on
+  // screen after the restore.
+  'groupByCategory',
   // Both are display preferences carrying no capability, so they travel for the
   // reason `theme` and `calendarZoom` do. Neither changes what a row MEANS —
   // restoring them moves no figure, only how much of the page you are shown.
