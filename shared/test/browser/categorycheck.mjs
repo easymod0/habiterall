@@ -894,6 +894,135 @@ try {
     meditateAfter && fitness && meditateAfter.category_id === fitness.id,
     JSON.stringify({ saved: meditateAfter?.category_id, fitness: fitness?.id }));
 
+  /* ---------- review round 6: Enter inside a category box is that box's own
+     action, never the habit form's Save ----------
+
+     Both category text controls live INSIDE `#habit-form` — the picker manages
+     the account's categories in place rather than on a screen of its own — and
+     that form has a `type="submit"` Save button. So Enter in either of them was
+     an implicit submission: the dialog closed, the HABIT was written, and the
+     category just typed was never created (or, from the rename box, never
+     sent). On the create path used below it wrote a whole habit out of the
+     form's defaults. Nothing reported it, because `saveHabit` succeeds on its
+     own terms and `#category-hint` is only ever written by the category
+     handlers — the one surface that could have said something stayed blank.
+
+     A REAL key event (`Input.dispatchKeyEvent`), not a synthesised one: implicit
+     submission is the browser's own behaviour on a trusted keypress, and a
+     `new KeyboardEvent('keydown')` dispatched from script does not trigger it —
+     so a script-made event passes against the unguarded build and pins nothing.
+
+     The wait afterwards is a predicate satisfied in BOTH worlds — the hint
+     filling in (guarded) OR the dialog closing (unguarded) — so a regression
+     fails the checks below BY NAME rather than timing out inside `waitUntil`.
+
+     Mutation target: either `enterPresses(...)` call in `habit-dialog.js`. The
+     `#category-new-name` one fails checks 1-3, the rename one fails 4-6. */
+
+  const ENTER_CATEGORY = 'Zzz Enter Category';
+  const ENTER_RENAMED = 'Zzz Enter Renamed';
+  const ENTER_HABIT = 'Zzz Enter Habit';
+
+  const pressEnter = async () => {
+    for (const type of ['keyDown', 'keyUp']) {
+      await send('Input.dispatchKeyEvent', {
+        type,
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        ...(type === 'keyDown' ? { text: '\r' } : {}),
+      }, sessionId);
+    }
+  };
+  const habitNames = () => ev(`(async()=>
+    (await (await fetch('/api/habits')).json()).map(h => h.name))()`);
+  const categoryNames = () => ev(`(async()=>
+    (await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+
+  // The CREATE dialog, because that is where the unguarded submit is loudest:
+  // there is no habit yet, so Enter did not merely re-save one, it invented a
+  // whole habit from the form's defaults.
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the create dialog to open for the Enter checks' });
+
+  const habitsBeforeEnter = await habitNames();
+  await ev(`(()=>{
+    const f = document.getElementById('habit-form');
+    f.name.value = ${JSON.stringify(ENTER_HABIT)};
+    const box = document.getElementById('category-new-name');
+    box.value = ${JSON.stringify(ENTER_CATEGORY)};
+    box.focus();
+    return true;
+  })()`);
+  await pressEnter();
+  await waitUntil(ev,
+    `document.getElementById('category-hint').textContent.includes('Added')
+     || document.getElementById('habit-dialog').open === false`,
+    { what: "the Add to answer, or the form to submit if the key was not caught" });
+
+  const afterNewEnter = await ev(`(()=>({
+    open: document.getElementById('habit-dialog').open,
+    typedStillThere: document.getElementById('category-new-name').value,
+    hint: document.getElementById('category-hint').textContent,
+  }))()`);
+  ck('THE assertion: Enter in the "New category" box does not submit the habit form',
+    afterNewEnter.open === true, JSON.stringify(afterNewEnter));
+  ck('…and it presses Add, so the category the user typed is actually created',
+    (await categoryNames()).includes(ENTER_CATEGORY),
+    JSON.stringify(await categoryNames()));
+  ck('…and no habit was written behind it',
+    !(await habitNames()).includes(ENTER_HABIT),
+    JSON.stringify({ before: habitsBeforeEnter, after: await habitNames() }));
+
+  // The rename box, built fresh by `renderCategoryManage` on every ✎, which is
+  // why its guard cannot be wired once at `init` the way the box above is.
+  await waitUntil(ev,
+    `[...document.querySelectorAll('.category-manage-name')]
+       .some(n => n.textContent.trim() === ${JSON.stringify(ENTER_CATEGORY)})`,
+    { what: 'the new category to appear in the manage list' });
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('.category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name')
+        ?.textContent.trim() === ${JSON.stringify(ENTER_CATEGORY)});
+    row.querySelector('.category-edit').click();
+    return true;
+  })()`);
+  await waitUntil(ev, `!!document.querySelector('.category-edit-name')`,
+    { what: 'the rename row to open for the Enter check' });
+  await ev(`(()=>{
+    const box = document.querySelector('.category-edit-name');
+    box.value = ${JSON.stringify(ENTER_RENAMED)};
+    box.focus();
+    // Blanked so the wait below is about THIS keypress and not the "Added"
+    // sentence the block above left behind — the same stale-hint trap the
+    // queued-rename block further down documents.
+    document.getElementById('category-hint').textContent = '';
+    return true;
+  })()`);
+  await pressEnter();
+  await waitUntil(ev,
+    `!document.querySelector('.category-edit-name')
+     || document.getElementById('habit-dialog').open === false`,
+    { what: 'the rename to answer, or the form to submit if the key was not caught' });
+
+  const afterRenameEnter = await ev(
+    `document.getElementById('habit-dialog').open`);
+  ck('THE assertion: Enter in the rename box does not submit the habit form either',
+    afterRenameEnter === true, `open=${afterRenameEnter}`);
+  ck('…and it presses that row\'s own Save, so the rename really lands',
+    (await categoryNames()).includes(ENTER_RENAMED)
+      && !(await categoryNames()).includes(ENTER_CATEGORY),
+    JSON.stringify(await categoryNames()));
+  ck('…and still no habit was written behind it',
+    !(await habitNames()).includes(ENTER_HABIT),
+    JSON.stringify(await habitNames()));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the create dialog to close after the Enter checks' });
+
   /* ---------- review round 5: a QUEUED category write is DURABLE, so the two
      controls have to move with it ----------
 

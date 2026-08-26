@@ -232,3 +232,28 @@ PR, and #65 stays open on phase 3 for it — but shipping a formula now would
 have meant picking an answer to a question this change was not asked to
 answer, and picking the wrong one is harder to walk back once a chart has
 been drawn from it.
+
+**Both category text boxes live inside `#habit-form`, so Enter had to be
+routed rather than left to the browser.** The picker manages the account's
+categories in place — a section header is not worth a screen of its own — and
+that puts the "New category" name box and every rename box inside a form whose
+Save button is a `type="submit"`. Enter in either of them is therefore an
+implicit submission, which is the browser doing exactly what the markup says:
+the dialog closed, the HABIT was written, and the category just typed was
+never created. From the create form it was worse than lossy — it invented a
+whole habit out of the form's defaults, because Enter does not wait for the
+rest of the form to be filled in. Nothing reported any of it: `saveHabit`
+succeeds on its own terms, and `#category-hint` is written only by the
+category handlers, so the one surface that could have said something stayed
+blank. `enterPresses` (`ui/habit-dialog.js`) sends the key to the button
+beside the box instead of calling `preventDefault` alone — a box where Enter
+does nothing is its own bug report, and Enter after typing a name is the
+gesture rather than an edge case. It is wired at `init` for the new-category
+box and inside `renderCategoryManage` for a rename box, because the second is
+built fresh on every ✎.
+
+Worth knowing before pinning anything like it: the browser only does implicit
+submission for a TRUSTED keypress, so a `new KeyboardEvent('keydown')`
+dispatched from script does not reproduce it at all and a test built on one
+passes against the unguarded code. `categorycheck`'s round-6 block drives CDP
+`Input.dispatchKeyEvent` for that reason.

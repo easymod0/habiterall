@@ -45,6 +45,41 @@ function categoryHint(message, isError = false) {
   hint.classList.toggle('error', isError);
 }
 
+/**
+ * Make Enter in INPUT press BUTTON, instead of submitting the habit form.
+ *
+ * Both of this dialog's category text boxes — the "New category" name and a
+ * manage row's rename box — live INSIDE `#habit-form`, because the picker
+ * manages the account's categories in place rather than on a screen of its
+ * own. That form has a `type="submit"` Save button, so Enter in either box is
+ * an implicit submission: the dialog closed, the HABIT was written, and the
+ * category that had just been typed was never created — a rename never sent.
+ * On the create path it also wrote a half-configured habit out of the form's
+ * defaults. Nothing said so, because `saveHabit` succeeds on its own terms and
+ * `#category-hint` is only ever written by the category handlers, so the one
+ * surface that could have reported it stayed blank.
+ *
+ * Enter after typing a name is the gesture, not an edge case, which is why
+ * this routes the key rather than merely calling `preventDefault` — a box
+ * where Enter does nothing is its own bug report. The button is the same one
+ * a click goes through, so there is one handler per action and no second copy
+ * of what Add or Save means.
+ *
+ * `isComposing` is excluded: mid-composition an IME uses Enter to COMMIT the
+ * candidate, and stealing it there would submit a half-typed name in the
+ * scripts that need one most.
+ *
+ * @param {HTMLInputElement} input
+ * @param {HTMLButtonElement} button
+ */
+function enterPresses(input, button) {
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    button.click();
+  });
+}
+
 /** The form's own selection, as a number or null — never `''`. */
 function currentCategoryId() {
   return form.category_id.value ? Number(form.category_id.value) : null;
@@ -226,6 +261,11 @@ function renderCategoryManage() {
         editingCategoryId = null;
         renderCategoryManage();
       });
+
+      // Enter in the rename box means this row's Save, never the habit form's
+      // — see `enterPresses`. Wired after `save` exists rather than beside the
+      // input, because the whole point is that the key goes to the button.
+      enterPresses(nameInput, save);
 
       li.append(nameInput, colorInput, save, cancel);
     } else {
@@ -694,6 +734,11 @@ export function init() {
     });
     chips.append(chip);
   }
+
+  // Enter in the "New category" box means Add, never the habit form's Save —
+  // see `enterPresses`. Wired once, here, for the reason the chips are built
+  // once: neither depends on which habit the dialog is showing.
+  enterPresses($('#category-new-name'), $('#category-new-add'));
 
   $('#category-new-add').addEventListener('click', async () => {
     const nameField = $('#category-new-name');
