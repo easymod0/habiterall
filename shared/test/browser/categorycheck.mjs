@@ -864,8 +864,17 @@ try {
     otherDialog.text === 'Fitness', JSON.stringify(otherDialog));
 
   await ev(`window.__releaseHeld()`);
-  await waitUntil(ev, `window.__heldLanded === true`,
-    { what: "the held categories GET to land into the dialog it did not come from" });
+  // `__heldLanded` is set when the RESPONSE resolves, which is one `res.json()`
+  // and two microtasks before `state.categories` is assigned and the picker is
+  // re-rendered — so waiting on it alone returns before the clobber this block
+  // is looking for could have happened, and the block would then be pinning the
+  // CDP round trip rather than the fix. The rendered option list is the effect
+  // itself: "Mind" is the category the chip above created, so it can only be in
+  // the `<select>` once the held answer has been rendered into it.
+  await waitUntil(ev,
+    `window.__heldLanded === true && [...document.querySelectorAll(
+      '#habit-form [name=category_id] option')].some(o => o.textContent === 'Mind')`,
+    { what: "the held categories GET to land AND be rendered into the dialog it did not come from" });
 
   const afterHeldLanded = await selectedCategoryOption();
   ck('THE assertion: a category mutation made from ANOTHER habit\'s dialog does ' +
@@ -884,6 +893,188 @@ try {
   ck('THE assertion: and saving it with nothing changed keeps its OWN category',
     meditateAfter && fitness && meditateAfter.category_id === fitness.id,
     JSON.stringify({ saved: meditateAfter?.category_id, fitness: fitness?.id }));
+
+  /* ---------- review round 5: a QUEUED category write is DURABLE, so the two
+     controls have to move with it ----------
+
+     Round 4 established that `PUT` and `DELETE /categories/:id` are
+     `replayable()` and recoloured their hint accordingly. That is half of it.
+     `api()` stages a replayable write BEFORE it attempts it ("Durable BEFORE
+     the attempt", ui/api.js) and nothing dequeues on a later click, so a queued
+     category write WILL land — while both handlers went on painting the world
+     as it was before it.
+
+     The delete half is a data loss rather than a display bug, and it needs no
+     race:
+
+       1. offline, press ✕ on the category THIS form is pointed at. The DELETE
+          is staged; the hint says "Saved offline".
+       2. the picker still offers that category, so `saveHabit` reads its id
+          through `currentCategoryId()` and the habit's own PUT is staged
+          BEHIND the delete.
+       3. on reconnect the outbox replays in seq order: the delete lands, then
+          the PUT reaches `resolveCategoryId`, which answers 400 — and
+          `offline.js` drops every 4xx as permanently inapplicable.
+       4. `PUT /habits/:id` REPLACES, so the whole habit edit is gone, behind a
+          "1 change could not be synced" toast that names neither the habit nor
+          the field.
+
+     Offline here is a rejecting `window.fetch` rather than CDP throttling,
+     because that is what `api()` actually sees: the first refusal flips
+     `state.offline` through `reportUnreachable()`, so every write after it
+     takes the pre-empt branch exactly as it would in a real outage. It also
+     leaves this suite's own bookkeeping `fetch`es (below) able to run by
+     flipping one flag.
+
+     Mutation target: delete either `if (err.queued) { … }` block in
+     `habit-dialog.js`. The delete one fails checks 3-6 here with the habit
+     written away as Work's id and then dropped; the rename one fails checks
+     7-8 with the row still in edit mode. */
+
+  const RENAMED_HABIT = 'Zzz Category Habit R5';
+
+  await ev(`(()=>{
+    window.__realFetch = window.__realFetch || window.fetch;
+    const realFetch = window.__realFetch;
+    window.__offline = false;
+    window.fetch = (url, opts) => window.__offline
+      ? Promise.reject(new TypeError('Failed to fetch'))
+      : realFetch(url, opts);
+    return true;
+  })()`);
+  // A clean outbox, so every assertion below is about writes this block made.
+  await ev(`(async()=>{
+    const { clearAll } = await import('/shared/offline.js');
+    await clearAll();
+    return true;
+  })()`);
+
+  await openHabitByName(HABIT_NAME);
+  const beforeOutage = await selectedCategoryOption();
+  ck('sanity: the form is pointed at the category it is about to delete',
+    beforeOutage.text === 'Work', JSON.stringify(beforeOutage));
+
+  // The ✕ that belongs to Work's OWN row — every row has one, so it is found
+  // through the row rather than by the glyph.
+  await ev(`window.__offline = true; true`);
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('.category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name').textContent.trim() === 'Work');
+    row.querySelector('.category-delete').click();
+    return true;
+  })()`);
+  await waitUntil(ev,
+    `document.getElementById('category-hint').textContent.includes('Saved offline')`,
+    { what: 'the delete to be staged in the outbox and reported as queued' });
+
+  const hintClass = await ev(
+    `document.getElementById('category-hint').classList.contains('error')`);
+  ck('a queued delete is not painted as an error (round 4, still holding)',
+    hintClass === false, `error=${hintClass}`);
+
+  const afterQueuedDelete = await ev(`(()=>{
+    const select = document.querySelector('#habit-form [name=category_id]');
+    const opt = select.options[select.selectedIndex];
+    return {
+      value: select.value,
+      text: opt ? opt.textContent : null,
+      stillOffered: [...select.options].some(o => o.textContent === 'Work'),
+      stillManaged: [...document.querySelectorAll('.category-manage-name')]
+        .some(n => n.textContent.trim() === 'Work'),
+    };
+  })()`);
+  ck('THE assertion: a queued delete takes the category out of the picker, so ' +
+     'Save cannot submit an id the replay is about to destroy',
+    afterQueuedDelete.value === '' && afterQueuedDelete.stillOffered === false,
+    JSON.stringify(afterQueuedDelete));
+  ck('…and out of the manage list beside it',
+    afterQueuedDelete.stillManaged === false, JSON.stringify(afterQueuedDelete));
+
+  // A real edit, so what a dropped replay costs is visible rather than
+  // inferred: this name is the thing that survives or does not.
+  await ev(`(()=>{
+    const f = document.getElementById('habit-form');
+    f.name.value = ${JSON.stringify(RENAMED_HABIT)};
+    f.requestSubmit();
+    return true;
+  })()`);
+  await waitUntil(ev, `(async()=>{
+    const { pending } = await import('/shared/offline.js');
+    return (await pending()).some(i => i.method === 'PUT' && i.url.startsWith('/api/habits/'));
+  })()`, { what: 'the habit edit to be staged behind the delete' });
+
+  const queued = await ev(`(async()=>{
+    const { pending } = await import('/shared/offline.js');
+    return (await pending()).sort((a, b) => a.seq - b.seq)
+      .map(i => ({ url: i.url, method: i.method, body: i.body }));
+  })()`);
+  const putIndex = queued.findIndex((i) => i.method === 'PUT' && i.url.startsWith('/api/habits/'));
+  const delIndex = queued.findIndex((i) => i.method === 'DELETE' && i.url.startsWith('/api/categories/'));
+  const habitPut = queued[putIndex];
+  ck('the mechanism: the delete replays BEFORE the habit write that follows it',
+    delIndex !== -1 && putIndex > delIndex, JSON.stringify(queued.map((i) => i.method + ' ' + i.url)));
+  ck('THE assertion: the queued habit write carries no category id at all',
+    !!habitPut && JSON.parse(habitPut.body).category_id === null,
+    habitPut ? habitPut.body : 'no habit PUT queued');
+
+  /* The rename half: the row used to stay in edit mode beside a Cancel button
+     that only resets local state — an undo that does not exist, since the PUT
+     is already staged and nothing dequeues on a click. */
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('.category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name').textContent.trim() === 'Fitness');
+    row.querySelector('.category-edit').click();
+    return true;
+  })()`);
+  await waitUntil(ev, `!!document.querySelector('.category-edit-name')`,
+    { what: 'the rename row to open' });
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('.category-manage-row')]
+      .find(r => r.querySelector('.category-edit-name'));
+    row.querySelector('.category-edit-name').value = 'Wellness';
+    [...row.querySelectorAll('button')].find(b => b.textContent === 'Save').click();
+    return true;
+  })()`);
+  await waitUntil(ev,
+    `document.getElementById('category-hint').textContent.includes('Saved offline')`,
+    { what: 'the rename to be staged and reported as queued' });
+
+  const afterQueuedRename = await ev(`(()=>({
+    stillEditing: !!document.querySelector('.category-edit-name'),
+    names: [...document.querySelectorAll('.category-manage-name')].map(n => n.textContent.trim()),
+    error: document.getElementById('category-hint').classList.contains('error'),
+  }))()`);
+  ck('THE assertion: a queued rename closes its row, so no Cancel is offered ' +
+     'for a write that is already committed to the outbox',
+    afterQueuedRename.stillEditing === false, JSON.stringify(afterQueuedRename));
+  ck('…and the list shows the name that was typed rather than the one it replaced',
+    afterQueuedRename.names.includes('Wellness') && !afterQueuedRename.names.includes('Fitness'),
+    JSON.stringify(afterQueuedRename.names));
+
+  /* Reconnect and drain. `flush()` is called directly rather than through the
+     watcher because the watcher is a poll with a backoff and this suite has no
+     business waiting on one; the replay path it exercises is the same. */
+  await ev(`window.__offline = false; true`);
+  const flushed = await ev(`(async()=>{
+    const { flush } = await import('/shared/offline.js');
+    const r = await flush();
+    return { sent: r.sent, failed: r.failed.map(f => f.status), remaining: r.remaining };
+  })()`);
+  ck('THE assertion: nothing in the outbox is refused on replay',
+    flushed.failed.length === 0 && flushed.remaining === 0, JSON.stringify(flushed));
+
+  const survivor = await fetchHabit(RENAMED_HABIT);
+  ck('THE assertion: the habit edit made behind the queued delete survives it',
+    !!survivor && survivor.category_id === null,
+    JSON.stringify({ found: !!survivor, category_id: survivor?.category_id }));
+
+  const renamedOnServer = await ev(`(async()=>{
+    const cats = await (await fetch('/api/categories')).json();
+    return { names: cats.map(c => c.name), work: cats.some(c => c.name === 'Work') };
+  })()`);
+  ck('…and both queued category writes actually landed',
+    renamedOnServer.names.includes('Wellness') && renamedOnServer.work === false,
+    JSON.stringify(renamedOnServer));
 
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {

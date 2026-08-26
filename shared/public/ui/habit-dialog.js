@@ -188,6 +188,32 @@ function renderCategoryManage() {
           // `POST /habits`), so offline this throws "Saved offline — will
           // sync when you reconnect", and showing that in the error class
           // made the one path that IS working look like the broken one.
+          //
+          // Saying so is not enough on its own, because `editingCategoryId`
+          // is cleared on the line after the `await` and so not at all here:
+          // the row stayed in edit mode, beside a Cancel button that only
+          // resets local state. The write is already staged in the outbox by
+          // then and nothing dequeues on a click, so that Cancel offered an
+          // undo that does not exist — press it and the rename still lands on
+          // reconnect. Close the row instead, and paint the name and colour
+          // that were typed, the same optimistic paint the delete branch
+          // below makes for the same reason. `nameInput.maxLength` is what
+          // lets `.trim()` alone agree with `parseCategory`'s trim-then-cap
+          // (nothing longer can be in the box), and a rename refused on
+          // replay — a 409 for a name another device took meanwhile — is
+          // taken back by the reconnect flush's own reload. An empty box is
+          // left alone rather than painted: the server will refuse it, and a
+          // nameless row is not a better guess than the name still there.
+          if (err.queued) {
+            editingCategoryId = null;
+            const local = state.categories.find((x) => x.id === c.id);
+            const typed = nameInput.value.trim();
+            if (local && typed) {
+              local.name = typed;
+              local.color = colorInput.value;
+            }
+            repaintCategories();
+          }
           categoryHint(err.message, !err.queued);
         }
       });
@@ -245,7 +271,27 @@ function renderCategoryManage() {
           await refreshCategoryPicker();
           emit('reload');
         } catch (err) {
-          // Queued is not failed — see the rename handler above.
+          // Queued is not failed — see the rename handler above. But saying so
+          // is not enough here, because a queued DELETE is DURABLE and will
+          // land: `api()` stages it before the attempt and nothing dequeues on
+          // a later click. Leave the control offering this category and
+          // `saveHabit` reads `currentCategoryId()` as its id, so the habit's
+          // own `PUT` queues behind the delete and replays AFTER it — where
+          // `resolveCategoryId` answers 400 and `offline.js` drops every 4xx as
+          // permanently inapplicable. `PUT /habits/:id` REPLACES, so what is
+          // dropped is the whole habit edit and not merely its category, and
+          // the only surface is a "1 change could not be synced" toast that
+          // names neither. Dropping the row from `state.categories` and
+          // repainting is the same optimistic paint on a queued write that
+          // `recordValue` already makes, and `ON DELETE SET NULL` is what makes
+          // it the answer the server will agree with; the dashboard behind this
+          // dialog is reconciled by the reconnect flush's own `emit('reload')`
+          // (`ui/connectivity.js`), which is also what takes this back if the
+          // replay is refused.
+          if (err.queued) {
+            state.categories = state.categories.filter((x) => x.id !== c.id);
+            repaintCategories();
+          }
           categoryHint(err.message, !err.queued);
         }
       });
@@ -291,14 +337,31 @@ function renderCategoryManage() {
  */
 async function refreshCategoryPicker() {
   state.categories = await api('/categories');
+  repaintCategories();
+}
+
+/**
+ * Repaint both category controls from `state.categories` as it stands, with no
+ * fetch at all.
+ *
+ * It is the half of `refreshCategoryPicker` that happens once its GET has
+ * landed — and the ONLY half a queued write can have, because offline that GET
+ * never lands. Both of this file's queued branches below call it, so "what the
+ * two controls show after the list has changed" stays one rule rather than
+ * being restated at each of them.
+ *
+ * The picker is rendered with NO argument, for the reason
+ * `refreshCategoryPicker` takes none: see there.
+ *
+ * A rename row owns an input this rebuild would tear out from under whoever is
+ * typing in it — the "`change` never fires on a removed input" failure
+ * `shared/public/CLAUDE.md` documents for the settings dialog. Load-bearing for
+ * `openDialog`'s fire-and-forget refresh: that continuation can land at any
+ * point after the user has moved on to a DIFFERENT habit, or has pressed ✎ on
+ * this one, and must not rebuild the list either dialog is showing mid-edit.
+ */
+function repaintCategories() {
   renderCategorySelect();
-  // A rename row owns an input this rebuild would tear out from under
-  // whoever is typing in it — the "`change` never fires on a removed input"
-  // failure `shared/public/CLAUDE.md` documents for the settings dialog.
-  // Load-bearing for `openDialog`'s fire-and-forget call below: that
-  // continuation can land at any point after the user has moved on to a
-  // DIFFERENT habit, or has pressed ✎ on this one, and must not rebuild the
-  // list either dialog is showing mid-edit.
   if (editingCategoryId == null) renderCategoryManage();
 }
 
