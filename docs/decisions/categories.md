@@ -501,3 +501,52 @@ about that path. `go()` was left alone.
   importer (13.5 seconds on one file), and this route would run it against
   however many habits an account has. Entries are one `SELECT` bucketed into a
   Map, exactly as `/overview` reads them.
+
+## Phase 4 — a summary on the grouped dashboard's own headers (#65)
+
+**"No new endpoint" was true about the arithmetic and false about the rule.**
+Phase 3 already computed a mean, a spread and an `unloggedExcluded` count for
+`#/categories`; putting the same three figures on a grouped section header
+therefore looked like reading numbers already on the wire. It is not:
+`computeCategoryStats`'s `section()` closure decided which members count
+towards that mean, and until this phase its only caller was the comparison
+route itself. `/overview` is a different route with a different payload, and
+copying the ARITHMETIC into it rather than the RULE would have re-created
+exactly the failure this project has already paid for once, in
+`foldCategoryName` — two implementations of the same decision, agreeing today
+and free to drift the moment one of them changes. `summariseMembers`
+(`shared/src/stats.js`, beside `extremeMember`) is that arithmetic pulled out
+of `section()`'s closure with nothing about it changed; `summariseByCategory`
+is the partition rule beside it — a `category_id` naming no known category
+falls into Uncategorised, and Uncategorised (`id: null`) is always present,
+even with no members — pulled out a second time so both editions' `/overview`
+call the one function rather than each restating that sentence for itself.
+`section()` and `summariseByCategory` are now both callers of
+`summariseMembers`, and cannot silently disagree about which members are
+landed.
+
+**The never-logged exclusion cannot be reconstructed in the browser, which is
+why it has to be computed server-side and merely drawn client-side.**
+`summaryStats` — what `/overview` already calls for each habit's `score` —
+answers `0` for a habit with no entries at all, the same number it answers for
+one logged with only stated lapses (`value: 0`); `totalCompleted` counts
+completions rather than answers, so it cannot tell the two apart either. A
+renderer holding only that payload has no way to ask "has this habit ever been
+logged" — nothing on the wire says so — which is the premise check this phase
+opened with, and the reason the exclusion could not simply move into
+`dashboard.js` alongside the rest of the header. The grouped lifetime
+`MIN(date)` query (`q.firstEntryPerHabit` in personal, the same
+`to_char(MIN(date), 'YYYY-MM-DD')` shape in cloud) already ran for
+`/categories/stats`, so `/overview` reads the same query rather than inventing
+a second way to ask the same thing; the date it returns never reaches
+`addDays`, `dateRange` or `boundedRange` — a null check only, the same
+constraint the header comment on `computeCategoryStats` already put on
+`firstEntry` there.
+
+**`categorySummaries` is absent, never empty, under `?archived=true`** — the
+same opt-out shape `coverage` already has on `computeStats`. An empty array
+would claim every category holds nobody worth averaging; the truth is that
+mode fetched only archived habits and has nothing active to say anything about.
+`dashboard.js` tolerates the key's absence for a second reason besides: an
+older cached payload, served by `shellFirst`'s stale-while-revalidate before
+the client's next fetch lands, may carry no such key either.

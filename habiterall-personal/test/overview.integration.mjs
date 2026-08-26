@@ -107,6 +107,36 @@ ck('today\'s window still carries its entries',
   Object.keys(today.entries).length === 7,
   String(Object.keys(today.entries).length));
 
+// `categorySummaries`: which members count is the same rule
+// `computeCategoryStats` uses for `#/categories` — a never-logged member is
+// excluded from the mean rather than averaged in at a strength of 0.
+const category = await post('/categories', { name: 'Health', color: '#336699' });
+const logged = await post('/habits',
+  { name: 'Logged', type: 'boolean', category_id: category.id });
+const neverLogged = await post('/habits',
+  { name: 'Never logged', type: 'boolean', category_id: category.id });
+await put(`/habits/${logged.id}/entries/${daysAgo(0)}`, { value: 2 });
+
+const grouped = await overview({ days: 7 });
+const summary = grouped.categorySummaries.find((s) => s.id === category.id);
+const loggedRow = grouped.habits.find((h) => h.id === logged.id);
+
+ck('a never-logged member is excluded, not averaged in at 0',
+  summary && summary.members === 2 && summary.unloggedExcluded === 1,
+  JSON.stringify(summary));
+ck('the mean is the logged member\'s own score from this same payload',
+  summary && summary.mean === loggedRow.score,
+  `${summary && summary.mean} vs ${loggedRow.score}`);
+
+const uncategorised = grouped.categorySummaries.find((s) => s.id === null);
+ck('Uncategorised is always present, with id: null',
+  uncategorised !== undefined, JSON.stringify(grouped.categorySummaries));
+
+const archivedOverview = await overview({ days: 7, archived: 'true' });
+ck('?archived=true carries no categorySummaries',
+  !('categorySummaries' in archivedOverview),
+  JSON.stringify(Object.keys(archivedOverview)));
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

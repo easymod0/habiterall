@@ -652,6 +652,130 @@ try {
   ck('no drag handle while grouped',
     grouping.dragHandles === 0, String(grouping.dragHandles));
 
+  /* ---------- summarising each section (issue #65 step 4) ----------
+
+     Still the same load: `Work` holds only `HABIT_NAME`, created moments ago
+     and never logged; `Fitness` holds only `Meditate`, which the fixture
+     seed logs on every day but every ninth. That gives one category whose
+     mean is null (`—`) and one with a real percentage, from a single real
+     `/overview` response rather than anything staged. */
+
+  const figures = await ev(`(()=>{
+    const byName = Object.fromEntries(
+      [...document.querySelectorAll('#grid .category-section-header')]
+        .map(h => [h.querySelector('.category-section-name').textContent, h]));
+    const read = (name) => {
+      const header = byName[name];
+      const figure = header?.querySelector('.category-section-figure');
+      return {
+        ariaLabel: header ? header.getAttribute('aria-label') : null,
+        mean: figure ? figure.querySelector('.category-section-mean').textContent : null,
+        spread: figure?.querySelector('.category-section-spread')
+          ? figure.querySelector('.category-section-spread').textContent : null,
+        title: figure ? figure.title : null,
+      };
+    };
+    return { work: read('Work'), fitness: read('Fitness') };
+  })()`);
+  ck('a never-logged category draws an em dash for its mean, not a percentage',
+    figures.work.mean === '—', JSON.stringify(figures.work));
+  ck('its title reuses the never-logged wording ui/categories.js already settled on',
+    figures.work.title != null && figures.work.title.includes('never logged'),
+    JSON.stringify(figures.work));
+  ck('the header names the same reason in its OWN aria-label, not only a tooltip',
+    figures.work.ariaLabel != null && figures.work.ariaLabel.includes('Work')
+      && figures.work.ariaLabel.includes('never logged'),
+    JSON.stringify(figures.work));
+  ck('a category with a logged member draws a real mean percentage',
+    figures.fitness.mean != null && /^\d+%$/.test(figures.fitness.mean),
+    JSON.stringify(figures.fitness));
+  // Fitness holds exactly one member (Meditate), so `best === worst`
+  // (`summariseMembers`'s tie rule) and the spread must be that ONE number,
+  // never `NN–NN%`.
+  ck('a one-member category draws one spread number, not a range',
+    figures.fitness.spread === figures.fitness.mean, JSON.stringify(figures.fitness));
+
+  // The Uncategorised section has three members (Gym, Read, "No late-night
+  // snacks") with different scores, so it is the one that can actually catch
+  // `best` and `worst` swapped in the spread. The expected string is built
+  // from a fresh, independent `/overview` fetch — not from anything
+  // `dashboard.js` itself computed — so a swap in the RENDERER still shows up
+  // even though the arithmetic behind `mean`/`best`/`worst` is out of scope
+  // for this suite (that is `stats.test.js`'s job).
+  // Mutation target: swap `best` and `worst` in `sectionHeader`'s spread.
+  const overview = await ev(`(async()=>(await (await fetch('/api/overview?days=7')).json()))()`);
+  const uncategorised = overview.categorySummaries.find((s) => s.id === null);
+  const pctOf = (v) => `${Math.round(v * 100)}%`;
+  const expectedSpread = uncategorised.best.score === uncategorised.worst.score
+    ? pctOf(uncategorised.best.score)
+    : `${pctOf(uncategorised.worst.score)}–${pctOf(uncategorised.best.score)}`;
+  const uncategorisedFigure = await ev(`(()=>{
+    const headers = [...document.querySelectorAll('#grid .category-section-header')];
+    const header = headers.find(h => h.classList.contains('uncategorised'));
+    const figure = header?.querySelector('.category-section-figure');
+    return {
+      mean: figure ? figure.querySelector('.category-section-mean').textContent : null,
+      spread: figure ? figure.querySelector('.category-section-spread').textContent : null,
+    };
+  })()`);
+  ck('the Uncategorised spread reads worst–best, matching a fresh /overview fetch',
+    uncategorisedFigure.spread === expectedSpread,
+    JSON.stringify({ uncategorisedFigure, expectedSpread, uncategorised }));
+  ck('and its mean matches the same fetch',
+    uncategorisedFigure.mean === pctOf(uncategorised.mean),
+    JSON.stringify({ uncategorisedFigure, uncategorised }));
+
+  // A query that matches only Meditate — Fitness still draws a header with a
+  // real count (1), so this is unlike the no-match case below: the headers
+  // stay, and it is the FIGURES that must vanish, because a mean drawn over
+  // the unfiltered category would disagree with the count sitting right
+  // beside it. Mutation target: drop `!filtering` from `summarised`.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.query = 'Meditate';
+    dash.paint();
+    return true;
+  })()`);
+  const whileFiltering = await ev(`(()=>({
+    headers: document.querySelectorAll('#grid .category-section-header').length,
+    figures: document.querySelectorAll('#grid .category-section-figure').length,
+  }))()`);
+  ck('section headers stay while filtering, but every figure disappears',
+    whileFiltering.headers > 0 && whileFiltering.figures === 0,
+    JSON.stringify(whileFiltering));
+
+  // Same figures, same real `categorySummaries` still sitting in `state` —
+  // only the client-side archived flag changes, exactly as `reorderable`
+  // reads `state.showArchived` for its own guard. No refetch: `paint()`
+  // alone is enough to prove the guard, and cheaper than restaging an
+  // archived habit through the API.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.query = '';
+    state.showArchived = true;
+    dash.paint();
+    return true;
+  })()`);
+  const whileArchivedShown = await ev(`(()=>({
+    headers: document.querySelectorAll('#grid .category-section-header').length,
+    figures: document.querySelectorAll('#grid .category-section-figure').length,
+  }))()`);
+  ck('and every figure disappears while archived habits are shown, too',
+    whileArchivedShown.headers > 0 && whileArchivedShown.figures === 0,
+    JSON.stringify(whileArchivedShown));
+
+  // Restored before the next block, which makes its own assumptions about
+  // `state.query` and `state.showArchived` starting clean.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.showArchived = false;
+    dash.paint();
+    return true;
+  })()`);
+
   /* ---------- no section headers over the empty state or a no-match search
      (fix round item 5) — grouping is still on from the block above ---------- */
 

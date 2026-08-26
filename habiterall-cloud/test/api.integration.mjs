@@ -840,6 +840,54 @@ await withUser(alice, (db) => db.query(
     avoidHabit.id]]
 ));
 
+/* ---------- /overview's own categorySummaries ----------
+ *
+ * Same three assertions habiterall-personal's overview.integration.mjs pins,
+ * over the SAME rule — a never-logged member is excluded from the mean
+ * rather than averaged in at 0 — asked of /overview rather than
+ * /categories/stats this time. The two editions must answer this request
+ * identically, which is the whole reason `summariseMembers` lives in
+ * shared/src with two callers rather than being reimplemented here.
+ */
+
+console.log('\n--- overview categorySummaries ---');
+
+const summaryCategory = await postCategory({ name: 'Overview Summary', color: '#0891b2' });
+const summaryLogged = await postHabit(
+  { name: 'Overview Summary logged', type: 'boolean', category_id: summaryCategory.id });
+const summaryNeverLogged = await postHabit(
+  { name: 'Overview Summary never logged', type: 'boolean', category_id: summaryCategory.id });
+await logDay(summaryLogged.id, isoDaysAgo(0));
+
+const groupedOverview = await getOverview({ days: 7 });
+const overviewSummary = groupedOverview.categorySummaries
+  ?.find((s) => s.id === summaryCategory.id);
+const summaryLoggedRow = groupedOverview.habits.find((h) => h.id === summaryLogged.id);
+
+ck("a never-logged member is excluded from /overview's own mean, not averaged in at 0",
+  overviewSummary?.members === 2 && overviewSummary?.unloggedExcluded === 1,
+  JSON.stringify(overviewSummary));
+ck("the mean is the logged member's own score from this same /overview payload",
+  overviewSummary?.mean === summaryLoggedRow?.score,
+  `${overviewSummary?.mean} vs ${summaryLoggedRow?.score}`);
+ck('sanity: the never-logged habit really is on the payload, just excluded',
+  groupedOverview.habits.some((h) => h.id === summaryNeverLogged.id), '');
+
+const overviewUncategorised = groupedOverview.categorySummaries?.find((s) => s.id === null);
+ck('Uncategorised is always present on /overview too, with id: null',
+  overviewUncategorised !== undefined, JSON.stringify(groupedOverview.categorySummaries));
+
+const archivedOverviewCloud = await getOverview({ days: 7, archived: 'true' });
+ck('?archived=true carries no categorySummaries, same as the personal edition',
+  !('categorySummaries' in archivedOverviewCloud),
+  JSON.stringify(Object.keys(archivedOverviewCloud)));
+
+// Same reason as the block above: the import-isolation checks below count
+// every entry alice has.
+await withUser(alice, (db) => db.query(
+  `DELETE FROM entries WHERE habit_id = $1`, [summaryLogged.id]
+));
+
 /* ---------- and which day that device is ON ---------- */
 
 // The header decides more than where a reminder lands: every route that asks

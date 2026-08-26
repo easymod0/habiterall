@@ -171,6 +171,13 @@ export async function load() {
   // The habit dialog's category picker reads this rather than fetching its
   // own copy — every load already carries it.
   state.categories = data.categories;
+  // Each grouped section's mean/spread, one row per category plus a trailing
+  // `id: null` for Uncategorised. `?archived=true` sends no such key at all —
+  // that mode has nothing active to average — and an older cached payload
+  // (the service worker's stale-while-revalidate) may hold none either, so
+  // this is read as `undefined` rather than assumed present; see `summarised`
+  // and `sectionHeader` below.
+  state.categorySummaries = data.categorySummaries;
   // Recorded beside them, because `habit.entries` means anything only for the
   // days this answer covered and nothing else in the payload says which those
   // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
@@ -300,6 +307,16 @@ export function paint() {
   const reorderable =
     !state.showArchived && !filtering && !grouped && state.habits.length > 1;
 
+  // Same reasoning as `reorderable` just above, and the same two guards:
+  // showing archived habits or a filtered subset would draw a mean over a
+  // different set than the count sitting right beside it, and a dashboard
+  // figure must never include archived habits when `#/categories` excludes
+  // them from the very same aggregation. `state.categorySummaries` can still
+  // be absent even when this is true — `?archived=true` sends no such key and
+  // neither does an older cached payload — and `sectionHeader` treats that the
+  // same way, by drawing no figures at all.
+  const summarised = grouped && !state.showArchived && !filtering;
+
   // Sections are drawn over `shown`, which the empty state and the no-match
   // sentence above have already decided there is nothing worth grouping in:
   // an account with no habits gets six empty headers under the onboarding
@@ -320,11 +337,18 @@ export function paint() {
       const bucket = habit.category_id != null && byCategory.get(habit.category_id);
       (bucket || uncategorised).push(habit);
     }
+    // `null` when `summarised` is false, or when it is true but the payload
+    // carries no matching row (or no `categorySummaries` at all) — both read
+    // as "nothing to draw" rather than a crash.
+    const summaryFor = (id) => (summarised
+      ? state.categorySummaries?.find((s) => s.id === id) ?? null
+      : null);
     for (const cat of state.categories) {
-      grid.append(sectionHeader(cat.name, cat.color, byCategory.get(cat.id).length, cat.id));
+      grid.append(sectionHeader(
+        cat.name, cat.color, byCategory.get(cat.id).length, cat.id, summaryFor(cat.id)));
       for (const habit of byCategory.get(cat.id)) grid.append(habitRow(habit, dates, todayIso, reorderable));
     }
-    grid.append(sectionHeader('Uncategorised', null, uncategorised.length, null));
+    grid.append(sectionHeader('Uncategorised', null, uncategorised.length, null, summaryFor(null)));
     for (const habit of uncategorised) grid.append(habitRow(habit, dates, todayIso, reorderable));
   } else {
     for (const habit of shown) grid.append(habitRow(habit, dates, todayIso, reorderable));
@@ -333,11 +357,24 @@ export function paint() {
   restoreFocus(root, focused);
 }
 
+/** English plurals — the same trivial rule `ui/categories.js` keeps its own
+ * copy of, for the counts this header says out loud. */
+const plural = (n, word) => (n === 1 ? word : `${word}s`);
+
+const pct = (v) => `${Math.round(v * 100)}%`;
+
 /**
  * A section header drawn above a category's rows when `groupByCategory` is
  * on. `color` is null for the trailing Uncategorised section, which has none.
+ *
+ * `summary` is this section's `{members, unloggedExcluded, mean, best, worst}`
+ * from `/overview`'s `categorySummaries` (see `summariseMembers`,
+ * `shared/src/stats.js`) — or `null`, when there is nothing to draw: while
+ * filtering, while showing archived, or when the payload carried no matching
+ * row at all. `null` draws exactly what this header always drew, count and
+ * all.
  */
-function sectionHeader(name, color, count, categoryId) {
+function sectionHeader(name, color, count, categoryId, summary) {
   const header = document.createElement('div');
   header.className = 'category-section-header' + (categoryId == null ? ' uncategorised' : '');
   header.dataset.categoryId = categoryId == null ? '' : String(categoryId);
@@ -362,6 +399,55 @@ function sectionHeader(name, color, count, categoryId) {
   countEl.className = 'category-section-count';
   countEl.textContent = String(count);
   header.append(countEl);
+
+  if (summary) {
+    const figure = document.createElement('span');
+    figure.className = 'category-section-figure';
+
+    const meanEl = document.createElement('span');
+    meanEl.className = 'category-section-mean';
+
+    // `title` and the sentence below both use the two never-logged sentences
+    // `ui/categories.js` already settled on (`sectionCard`, ~line 259-283) —
+    // an empty category has nobody to average, a category with members has
+    // members with no strength YET, which is not a strength of zero.
+    let sentence;
+    if (summary.mean === null) {
+      meanEl.textContent = '—';
+      const reason = summary.members === 0
+        ? 'No habits in this category yet.'
+        : `${summary.members} ${plural(summary.members, 'habit')}, `
+          + `${summary.unloggedExcluded === 1 ? 'never logged' : 'none logged yet'}`
+          + ' — no strength to average.';
+      figure.title = reason;
+      figure.append(meanEl);
+      sentence = reason;
+    } else {
+      meanEl.textContent = pct(summary.mean);
+      const spreadEl = document.createElement('span');
+      spreadEl.className = 'category-section-spread';
+      // A one-member category has `best === worst` by construction
+      // (`summariseMembers`), and any tie reads the same way: one number,
+      // never `62–62%`.
+      const spread = summary.best.score === summary.worst.score
+        ? pct(summary.best.score)
+        : `${pct(summary.worst.score)}–${pct(summary.best.score)}`;
+      spreadEl.textContent = spread;
+      const excluded = summary.unloggedExcluded
+        ? ` · ${summary.unloggedExcluded} ${plural(summary.unloggedExcluded, 'habit')} never logged, left out`
+        : '';
+      const detail = `${pct(summary.mean)} average over ${summary.members} `
+        + `${plural(summary.members, 'habit')}, spread ${spread}${excluded}`;
+      figure.title = detail;
+      figure.append(meanEl, spreadEl);
+      sentence = detail;
+    }
+    header.append(figure);
+    // The header is not a table row — there is no cell structure an assistive
+    // technology could read the figures against — so the whole sentence is
+    // named here rather than left to be read off the child text nodes.
+    header.setAttribute('aria-label', `${name}, ${sentence}`);
+  }
 
   return header;
 }

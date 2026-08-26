@@ -160,6 +160,34 @@
  */
 
 /**
+ * The mean, spread and n over one set of category members, at a single
+ * reading — what `summariseMembers` returns. The same shape `CategorySection`
+ * carries for its own aggregate figures, factored out so a second caller can
+ * ask the identical question without re-implementing which members count.
+ * @typedef {object} MemberSummary
+ * @property {number} members          rows handed in, landed or not
+ * @property {number} unloggedExcluded members that have NEVER been logged,
+ *   counted here instead of averaged in as a zero
+ * @property {number|null} mean        equal weight per habit, over the
+ *   members that have landed; null when none have, never 0
+ * @property {CategoryMember|null} best
+ * @property {CategoryMember|null} worst
+ */
+
+/**
+ * One row of `summariseByCategory` — a `MemberSummary` named by category id.
+ * `id: null` is Uncategorised, always present and always last, the same
+ * convention `CategorySection` uses for the same reason.
+ * @typedef {object} CategorySummaryRow
+ * @property {number|null} id
+ * @property {number} members
+ * @property {number} unloggedExcluded
+ * @property {number|null} mean
+ * @property {CategoryMember|null} best
+ * @property {CategoryMember|null} worst
+ */
+
+/**
  * One bucket of a category's aggregate strength, on the axis shared by every
  * category in the same response.
  * @typedef {object} CategorySeriesPoint

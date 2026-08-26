@@ -1183,6 +1183,80 @@ function extremeMember(rows, better) {
 }
 
 /**
+ * The mean, spread and n over one set of category members, at a single
+ * reading. This is the one aggregation rule `computeCategoryStats`'s `section`
+ * and a caller needing only a header figure — never a whole comparison —
+ * both call, so the two cannot silently disagree about which members count.
+ *
+ * **A member that has never been logged has no strength, which is not a
+ * strength of zero.** Averaging one in would report that your health got
+ * worse on the day you decided to do more about it, so a member is counted
+ * into `mean`, `best` and `worst` only once `landed` is true, and until then
+ * it is counted into `unloggedExcluded` instead. `mean` is `null` — never
+ * `0` — when nothing has landed, which covers an empty set too; `best` and
+ * `worst` are `null` then as well. Ties keep the first member seen, so a
+ * one-member category has `best === worst`. See `computeCategoryStats`'s own
+ * header comment for the long-form reasoning and the landing rule itself —
+ * this function does not decide what "landed" means, it only aggregates over
+ * whatever the caller already decided.
+ *
+ * @param {Array<{id: number, name: string, score: number, landed: boolean}>} rows
+ * @returns {import('./types.js').MemberSummary}
+ */
+export function summariseMembers(rows) {
+  const landed = rows.filter((r) => r.landed);
+  return {
+    members: rows.length,
+    unloggedExcluded: rows.length - landed.length,
+    mean: landed.length
+      ? landed.reduce((sum, r) => sum + r.score, 0) / landed.length
+      : null,
+    best: extremeMember(landed, (a, b) => a > b),
+    worst: extremeMember(landed, (a, b) => a < b),
+  };
+}
+
+/**
+ * `categorySummaries`: the mean, spread and n over each category's own
+ * members, from the SAME `habits` array `/overview` already returns — never a
+ * second scoring pass. Which members count is the one rule `summariseMembers`
+ * states and `#/categories` (`computeCategoryStats`'s `section`) also calls,
+ * so the two agree by construction about MEMBERSHIP even though the scores
+ * themselves are two different windows (see that function's header comment).
+ *
+ * The partition matches `computeCategoryStats` and the grouped dashboard: a
+ * `category_id` naming no row in `categories` falls into Uncategorised rather
+ * than being dropped, and Uncategorised (`id: null`) is always present, even
+ * with no members.
+ *
+ * @param {import('./types.js').Category[]} categories
+ * @param {any[]} payloads - the response's own `habits`, already carrying `score`
+ * @param {Map<number, string|null>} firstEntry - habit id -> that habit's
+ *   lifetime earliest entry date, or absent/null if it has none. Used for a
+ *   null check only — must never reach `addDays`, `dateRange` or
+ *   `boundedRange` (root `CLAUDE.md`).
+ * @returns {import('./types.js').CategorySummaryRow[]}
+ */
+export function summariseByCategory(categories, payloads, firstEntry) {
+  const byCategory = new Map(categories.map((c) => [c.id, []]));
+  const uncategorised = [];
+  for (const h of payloads) {
+    const bucket = h.category_id != null && byCategory.get(h.category_id);
+    (bucket || uncategorised).push(h);
+  }
+  const summarise = (members) => summariseMembers(members.map((h) => ({
+    id: h.id,
+    name: h.name,
+    score: h.score,
+    landed: firstEntry.get(h.id) != null,
+  })));
+  return [
+    ...categories.map((c) => ({ id: c.id, ...summarise(byCategory.get(c.id)) })),
+    { id: null, ...summarise(uncategorised) },
+  ];
+}
+
+/**
  * Which of an account's categories is holding up, over one window.
  *
  * **There is no category-level score formula and there must not be one.** The
@@ -1460,17 +1534,25 @@ export function computeCategoryStats(categories, members,
 
   const section = (id, name, color, rows, archived) => {
     const rates = rows.map((r) => r.rate).filter((r) => r !== null);
-    const landed = landedAt(rows, lastDay);
+    // The one aggregation rule, asked at `lastDay` — the same landing rule
+    // `landedAt` applies below, restated per-row because `summariseMembers`
+    // takes a plain array rather than closing over a day.
+    const summary = summariseMembers(rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      score: r.scoreAt.get(lastDay),
+      landed: r.landsOn !== null && r.landsOn <= lastDay,
+    })));
     return {
       id,
       name,
       color,
-      members: rows.length,
+      members: summary.members,
       archivedExcluded: archived,
-      unloggedExcluded: rows.length - landed.length,
-      mean: meanScoreAt(landed, lastDay),
-      best: extremeMember(landed, (a, b) => a > b),
-      worst: extremeMember(landed, (a, b) => a < b),
+      unloggedExcluded: summary.unloggedExcluded,
+      mean: summary.mean,
+      best: summary.best,
+      worst: summary.worst,
       series: buckets.map((bucket) => {
         const day = refDay.get(bucket);
         const at = landedAt(rows, day);

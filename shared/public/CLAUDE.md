@@ -64,6 +64,22 @@ different things by width: above 640px `.check` is a fixed 44px so the gain is
 room for the NAME; under 640px the row shares evenly and the gain is thumb
 targets.
 
+**A grouped section header's mean and spread hide under the same two guards
+`reorderable` already answers to, and for the same reason.** `reorderable`
+(`dashboard.js:299`) is false while a search filter is on and while archived
+habits are shown, because a drag write reorders the wrong set otherwise;
+`summarised` sits right beside it and refuses the same two things, because a
+mean over a filtered or an archive-inflated set is a figure over a different
+set of habits than the count sitting right next to it, and because `#/categories`
+already excludes archived habits from the same aggregation — a dashboard figure
+that included them would disagree with the comparison view about the same
+category. `summarised` can still be true while there is nothing to draw:
+`state.categorySummaries` is read as possibly `undefined` even then —
+`?archived=true` sends no such key at all, and an older cached payload under
+`shellFirst`'s stale-while-revalidate may carry none either — and `sectionHeader`
+treats a missing summary exactly like `summarised` being false, by drawing the
+header it always drew and nothing more.
+
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears

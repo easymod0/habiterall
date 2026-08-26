@@ -8,6 +8,7 @@ import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
+  summariseByCategory,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
@@ -703,15 +704,26 @@ api.get('/overview', (req, res) => {
   const summaryEnd = now;
 
   // Archived habits are hidden by default but can be requested explicitly.
-  const habits = /** @type {any[]} */ (req.query.archived === 'true'
-    ? q.allHabits.all(1)
-    : q.allHabits.all(0));
+  const archived = req.query.archived === 'true';
+  const habits = /** @type {any[]} */ (archived ? q.allHabits.all(1) : q.allHabits.all(0));
   const rows = q.entriesInRange.all(start, end);
 
   // Read once for the whole payload rather than per habit: it is one answer
   // for the account, and this loop already runs once per habit on the
   // dashboard's hot path.
   const unlogged = storedUnlogged();
+
+  // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
+  // (`q.firstEntryPerHabit`), reused here so a section header can tell "never
+  // logged" from "scored zero" — the bounded windows below cannot answer that,
+  // and `first_date` is used for a null check only, never `addDays` or
+  // `dateRange` (root CLAUDE.md). Skipped entirely in archived mode: that
+  // fetch has nothing active to average, so `categorySummaries` is omitted
+  // below rather than computed and discarded.
+  const firstEntry = archived ? null : new Map(
+    /** @type {any[]} */ (q.firstEntryPerHabit.all())
+      .map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+  );
 
   // For the grid the frontend only needs something paintable, so skips are
   // flattened onto the SKIP wire value here. Scoring never uses this map.
@@ -730,73 +742,87 @@ api.get('/overview', (req, res) => {
     }
   }
 
+  // One extra SELECT, read once for the whole payload for the same reason
+  // `unlogged` is above: the dashboard groups by category behind
+  // `groupByCategory`, and every habit on the page needs the same list.
+  const categories = /** @type {any[]} */ (q.allCategories.all());
+
+  const habitPayloads = habits.map((h) => {
+    // The dashboard summary only needs a bounded lookback: with a 30-day
+    // half-life the score has long since converged, and streaks that matter
+    // here are recent. This keeps the dashboard O(window) rather than
+    // O(lifetime) per habit.
+    // Bounded, not lifetime. Reading every entry per habit made the
+    // dashboard O(lifetime x habits) and, worse, fed an unbounded array
+    // into computeStreaks — hundreds of thousands of iterations of
+    // synchronous work on a single-threaded server.
+    //
+    // Both lookbacks count back from `summaryEnd`, not from the grid's
+    // `end`: these three figures describe the habit today.
+    const entries = /** @type {any} */ (
+      q.entriesForSince.all(h.id, addDays(summaryEnd, -STREAK_HISTORY_DAYS))
+    );
+    const windowed = /** @type {any} */ (
+      q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
+    );
+    // Two numbers are read below — `score` and `currentStreak` — so this
+    // calls `summaryStats` rather than `computeStats`: the same window and
+    // the same two passes (`computeScores`, `computeStreaks`), with the five
+    // passes `computeStats` also runs — `computeHistory`, `computeWeekdays`,
+    // `computeWeekdayByMonth`, `computeFrequency`, `computeResilience` — never
+    // started, once per habit, on the dashboard's hot path. Awards are out of
+    // this route for the same reason, stated at the `/stats` call site above.
+    const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged });
+
+    // Counted in SQLite rather than by walking every row in JS. The
+    // expression mirrors isCompleted exactly, including that a skip is
+    // "not applicable" and never a completion — passing `e.value` instead
+    // of the whole row is what made this edition count skips as done on
+    // at_most habits while cloud did not.
+    const totalCompleted = /** @type {any} */ (
+      q.countCompleted.get(
+        h.id, h.type, h.target_type, h.target_value, h.target_value
+      )
+    ).n;
+
+    const allStreaks = computeStreaks(
+      h,
+      new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
+      entries.length ? entries[0].date : summaryEnd,
+      summaryEnd,
+      unlogged
+    );
+
+    return {
+      ...toApiHabit(h),
+      entries: byHabit.get(h.id) ?? {},
+      skips: skipsByHabit.get(h.id) ?? [],
+      score: stats.score,
+      currentStreak: stats.currentStreak,
+      bestStreak: bestStreak(allStreaks),
+      totalCompleted,
+      // Same field, same reason as the `/stats` call site above: resolved
+      // server-side because no renderer can import `unansweredCounts`, and
+      // derived rather than stored.
+      unlogged_is_success: unansweredCounts(h, unlogged),
+    };
+  });
+
+  // The mean is over `habitPayloads`' own `score` — the same number drawn on
+  // the row beneath each header — never a second scoring pass. See
+  // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
+  // rule — the same one the grouped dashboard makes (`dashboard.js`) and
+  // `computeCategoryStats` makes.
+  const categorySummaries = archived
+    ? undefined
+    : summariseByCategory(categories, habitPayloads, firstEntry);
+
   res.json({
     start,
     end,
-    // One extra SELECT, read once for the whole payload for the same reason
-    // `unlogged` is above: the dashboard groups by category behind
-    // `groupByCategory`, and every habit on the page needs the same list.
-    categories: q.allCategories.all(),
-    habits: habits.map((h) => {
-      // The dashboard summary only needs a bounded lookback: with a 30-day
-      // half-life the score has long since converged, and streaks that matter
-      // here are recent. This keeps the dashboard O(window) rather than
-      // O(lifetime) per habit.
-      // Bounded, not lifetime. Reading every entry per habit made the
-      // dashboard O(lifetime x habits) and, worse, fed an unbounded array
-      // into computeStreaks — hundreds of thousands of iterations of
-      // synchronous work on a single-threaded server.
-      //
-      // Both lookbacks count back from `summaryEnd`, not from the grid's
-      // `end`: these three figures describe the habit today.
-      const entries = /** @type {any} */ (
-        q.entriesForSince.all(h.id, addDays(summaryEnd, -STREAK_HISTORY_DAYS))
-      );
-      const windowed = /** @type {any} */ (
-        q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
-      );
-      // Two numbers are read below — `score` and `currentStreak` — so this
-      // calls `summaryStats` rather than `computeStats`: the same window and
-      // the same two passes (`computeScores`, `computeStreaks`), with the five
-      // passes `computeStats` also runs — `computeHistory`, `computeWeekdays`,
-      // `computeWeekdayByMonth`, `computeFrequency`, `computeResilience` — never
-      // started, once per habit, on the dashboard's hot path. Awards are out of
-      // this route for the same reason, stated at the `/stats` call site above.
-      const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged });
-
-      // Counted in SQLite rather than by walking every row in JS. The
-      // expression mirrors isCompleted exactly, including that a skip is
-      // "not applicable" and never a completion — passing `e.value` instead
-      // of the whole row is what made this edition count skips as done on
-      // at_most habits while cloud did not.
-      const totalCompleted = /** @type {any} */ (
-        q.countCompleted.get(
-          h.id, h.type, h.target_type, h.target_value, h.target_value
-        )
-      ).n;
-
-      const allStreaks = computeStreaks(
-        h,
-        new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
-        entries.length ? entries[0].date : summaryEnd,
-        summaryEnd,
-        unlogged
-      );
-
-      return {
-        ...toApiHabit(h),
-        entries: byHabit.get(h.id) ?? {},
-        skips: skipsByHabit.get(h.id) ?? [],
-        score: stats.score,
-        currentStreak: stats.currentStreak,
-        bestStreak: bestStreak(allStreaks),
-        totalCompleted,
-        // Same field, same reason as the `/stats` call site above: resolved
-        // server-side because no renderer can import `unansweredCounts`, and
-        // derived rather than stored.
-        unlogged_is_success: unansweredCounts(h, unlogged),
-      };
-    }),
+    categories,
+    habits: habitPayloads,
+    ...(categorySummaries ? { categorySummaries } : {}),
   });
 });
 
