@@ -1032,6 +1032,25 @@ try {
     const row = [...document.querySelectorAll('.category-manage-row')]
       .find(r => r.querySelector('.category-edit-name'));
     row.querySelector('.category-edit-name').value = 'Wellness';
+    // Blanked in the SAME evaluate as the click, because the hint still reads
+    // "Saved offline" from the queued DELETE above: nothing between there and
+    // here clears it (\`categoryHint('')\` runs in \`openDialog\` alone, and no
+    // dialog is reopened in between), so the wait below was a predicate that
+    // was ALREADY TRUE — it returned on its first poll and the read after it
+    // raced the handler rather than waiting for it. Offline, \`api()\` never
+    // reaches \`fetch\`: it pre-empts, stages to IndexedDB and throws, so the
+    // continuation that closes the row arrives on an IDB completion TASK, and
+    // a loaded box can schedule that after the next CDP command. This is the
+    // CI failure exactly — \`stillEditing: true\` beside a rename that then
+    // landed on replay — reproduced locally by deferring that one task.
+    //
+    // \`categoryHint\` is the LAST statement in the queued branch, after
+    // \`editingCategoryId = null\` and \`repaintCategories()\`, so the sentence
+    // appearing again means the row is already closed. That ordering is what
+    // keeps this a wait rather than a second copy of the assertion: delete the
+    // \`if (err.queued)\` block and the hint is still set, so the checks below
+    // fail BY NAME instead of hanging in \`waitUntil\`.
+    document.getElementById('category-hint').textContent = '';
     [...row.querySelectorAll('button')].find(b => b.textContent === 'Save').click();
     return true;
   })()`);
