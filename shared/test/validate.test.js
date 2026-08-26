@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 const {
   parseHabit, parseEntry, entryWrite, answerBody, assertDate, assertNotFuture,
   ValidationError, LIMITS, DEFAULT_COLOR, parseIcon, parseCategory,
-  foldCategoryName,
+  foldCategoryName, parseCategoryId,
 } = await import('../src/validate.js');
 const { isCompleted } = await import('../src/stats.js');
 
@@ -214,6 +214,45 @@ test('an over-long category name is capped at LIMITS.name', () => {
 test('a category colour must be a 6-digit hex, else the default', () => {
   assert.equal(parseCategory({ name: 'Health', color: 'blue' }).color, DEFAULT_COLOR);
   assert.equal(parseCategory({ name: 'Health', color: '#00ff88' }).color, '#00ff88');
+});
+
+test('parseCategoryId takes an id spelled as text, and refuses one that merely coerces', () => {
+  // The spellings a URL segment and a reorder list legitimately arrive in.
+  assert.equal(parseCategoryId(7), 7);
+  assert.equal(parseCategoryId('7'), 7);
+
+  // The whole point of the `typeof` gate. `Number()` answers 0 for each of the
+  // first three and 1 for `true`, so `Number.isInteger(Number(n))` — what both
+  // editions' reorder routes asked — said YES to every one of them: `[null]`
+  // reached the UPDATE as id 0 and moved nothing while reporting success, and
+  // `[true]` moved whichever category is id 1. Asserted as LITERAL `null`
+  // rather than as falsy, because 0 is falsy too and is exactly the wrong
+  // answer this is about.
+  assert.equal(parseCategoryId(null), null);
+  assert.equal(parseCategoryId(undefined), null);
+  assert.equal(parseCategoryId(''), null);
+  assert.equal(parseCategoryId([]), null);
+  assert.equal(parseCategoryId(['1']), null);
+  assert.equal(parseCategoryId({}), null);
+  assert.equal(parseCategoryId(true), null);
+  assert.equal(parseCategoryId(false), null);
+
+  // Not an id, in the ways an id can fail to be one.
+  assert.equal(parseCategoryId('abc'), null);
+  assert.equal(parseCategoryId(1.5), null);
+  assert.equal(parseCategoryId('1.5'), null);
+  assert.equal(parseCategoryId(0), null);
+  assert.equal(parseCategoryId(-3), null);
+  assert.equal(parseCategoryId(NaN), null);
+  assert.equal(parseCategoryId(Infinity), null);
+
+  // Past 2^53 an id stops round-tripping through a double: this literal and
+  // its neighbour are one value in JS and two rows in Postgres. `9007199254740993`
+  // is written out rather than computed, so the boundary is pinned rather than
+  // restated from the same expression the implementation uses.
+  assert.equal(parseCategoryId(9007199254740993), null);
+  assert.equal(parseCategoryId('9007199254740993'), null);
+  assert.equal(parseCategoryId(9007199254740991), 9007199254740991);
 });
 
 test('foldCategoryName folds Unicode case, not only ASCII', () => {

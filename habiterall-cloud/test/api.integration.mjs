@@ -425,6 +425,69 @@ const survivingHabit = await fetch(`${overviewBase}/api/habits/${habitWithCatego
 ck("the habit survives its category's deletion, and comes back uncategorised",
   Object.is(survivingHabit.category_id, null), JSON.stringify(survivingHabit.category_id));
 
+/* ---------- an entry in a reorder list that merely COERCES to an id ----------
+ *
+ * `Number.isInteger(Number(n))` — what both editions asked — says YES to
+ * `null`, `''` and `[]` (all 0), to `true` (1), and to `[7]`, because
+ * `Number(['7'])` is 7. `parseCategoryId` (shared/src/validate.js) is the
+ * shape rule now, the same one `/categories/:id` asks of the URL, and the two
+ * editions ask it in the same order so a malformed reorder cannot be a 400
+ * here and a 200 there.
+ *
+ * The nested-array case is the one asserted BEHAVIOURALLY rather than by
+ * status, and deliberately so: it is the only spelling whose coerced id this
+ * account actually owns. `[true]` coerces to id 1, which under RLS belongs to
+ * whoever holds it — the UPDATE simply matches no row here, so in this edition
+ * that spelling can only ever be a 200 that moved nothing, never a wrong
+ * write. The personal edition, with one account and no RLS, is where `[true]`
+ * moves a real category, and its own suite pins that. Both statuses are
+ * checked in both, because the alignment is the point.
+ */
+
+const reorderPost = (order) => fetch(`${overviewBase}/api/categories/reorder`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ order }),
+});
+const categoryIds = () => fetch(`${overviewBase}/api/categories`)
+  .then((r) => r.json()).then((rows) => rows.map((c) => c.id));
+
+const reorderFirst = await postCategory({ name: 'Zzz Reorder A' });
+const reorderSecond = await postCategory({ name: 'Zzz Reorder B' });
+// A deliberate order, so "nothing moved" is a fact about this list rather
+// than a coincidence of whatever order the rows were created in.
+await reorderPost([reorderSecond.id, reorderFirst.id]);
+const pinnedOrder = await categoryIds();
+ck('sanity: the account is in a deliberate order, B before A',
+  pinnedOrder[0] === reorderSecond.id && pinnedOrder[1] === reorderFirst.id,
+  JSON.stringify({ pinnedOrder, a: reorderFirst.id, b: reorderSecond.id }));
+
+for (const [label, entry] of [
+  ['`true`', true], ['`null`', null], ["`''`", ''], ['`[]`', []],
+]) {
+  const resp = await reorderPost([entry]);
+  ck(`POST /categories/reorder with ${label} is 400, not a 200 that moved nothing`,
+    resp.status === 400, String(resp.status));
+}
+
+const nestedResp = await reorderPost([[reorderFirst.id]]);
+ck('POST /categories/reorder with a NESTED id is 400 — Number([7]) is 7, an id ' +
+   'this account really owns',
+  nestedResp.status === 400, String(nestedResp.status));
+
+const afterRefusals = await categoryIds();
+ck('THE assertion: not one of the five refused requests moved a category',
+  JSON.stringify(afterRefusals) === JSON.stringify(pinnedOrder),
+  JSON.stringify({ pinnedOrder, afterRefusals }));
+
+const reorderStillWorks = await reorderPost([reorderFirst.id, String(reorderSecond.id)]);
+ck('a well-shaped reorder still succeeds, spelled as a number OR as a string',
+  reorderStillWorks.status === 200, String(reorderStillWorks.status));
+const afterRealReorder = await categoryIds();
+ck('...and it actually moved them',
+  afterRealReorder[0] === reorderFirst.id && afterRealReorder[1] === reorderSecond.id,
+  JSON.stringify(afterRealReorder));
+
 /* ---------- and which day that device is ON ---------- */
 
 // The header decides more than where a reminder lands: every route that asks

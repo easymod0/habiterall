@@ -200,6 +200,47 @@ export function foldCategoryName(name) {
 }
 
 /**
+ * A category id arriving as TEXT — a URL segment, or one entry in the list
+ * `POST /categories/reorder` takes — as a number, or `null` when it is not
+ * the shape of one.
+ *
+ * Deliberately NOT the rule `parseHabit` applies to `body.category_id`, and
+ * the difference is where the id came from. There it arrives inside a JSON
+ * body, where a number is the only honest spelling and a string is a client
+ * bug, so anything else folds to "no category". Here it arrives as text by
+ * construction (`req.params.id` is always a string) or in a list a client may
+ * reasonably spell either way, so a numeric string is normal and is coerced.
+ *
+ * What it refuses is a value that merely COERCES to an id. Both editions
+ * asked `Number.isInteger(Number(n))` of every entry in a reorder list, and
+ * `Number()` answers 0 for `null`, `''` and `[]`, and 1 for `true` — so
+ * `{order: [true]}` passed the shape check and then moved whichever category
+ * is id 1, and `{order: [null]}` passed it and answered 200 having matched no
+ * row at all. A reorder that reports success and applies to something nobody
+ * named is precisely the failure a client cannot see, which is the reasoning
+ * the fractional-id check beside it was already added for. The `typeof` gate
+ * is what makes those unrepresentable rather than filtered one spelling at a
+ * time.
+ *
+ * `Number.isSafeInteger`, not `Number.isInteger`: past 2^53 an id no longer
+ * round-trips through a double, so `9007199254740993` and its neighbour are
+ * one value here and two rows in Postgres. That is the bound `parseHabit`
+ * already draws for this same field, so the two now agree.
+ *
+ * It is here rather than per edition because it is a pure rule over a value —
+ * the two copies of `categoryId(req)` were per edition only because they take
+ * an Express request, and that was already one rule written twice.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+export function parseCategoryId(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
  * Validate and normalise a category payload.
  *
  * An EMPTY name throws; an over-long one is capped at `LIMITS.name`. That

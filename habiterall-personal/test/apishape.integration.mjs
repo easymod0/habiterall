@@ -280,6 +280,53 @@ const reorderOk = await postJson('/api/categories/reorder', { order: currentOrde
 ck('a well-shaped reorder still succeeds',
   reorderOk.status === 200, String(reorderOk.status));
 
+/* ---- ...and so is an entry that merely COERCES to an id.
+ *
+ * `Number.isInteger(Number(n))` — what both editions asked after the
+ * fractional-id fix above — answers YES to `null`, `''` and `[]` (all 0) and
+ * to `true` (1). Neither is a rejected value that happens to be harmless:
+ * id 0 matches no row, so the request answered 200 having moved nothing, and
+ * id 1 is a real row in this account, so `[true]` MOVED a category nobody
+ * named. `parseCategoryId` (shared/src/validate.js) is the shape rule now,
+ * the same one `/categories/:id` asks of the URL.
+ *
+ * The status is only half of it — a 400 proves the guard fired, not that the
+ * table is untouched — so the list is put in a deliberate order first and
+ * compared afterwards. Two extra categories exist for that: with one row the
+ * "before" and "after" orders are equal whatever the route does, which is a
+ * check that cannot fail. ---- */
+
+const reorderA = await (await postJson('/api/categories', { name: 'Zzz Reorder A' })).json();
+const reorderB = await (await postJson('/api/categories', { name: 'Zzz Reorder B' })).json();
+const ids = (await (await fetch(`${base}/api/categories`)).json()).map((c) => c.id);
+await postJson('/api/categories/reorder', { order: [...ids].reverse() });
+const pinned = (await (await fetch(`${base}/api/categories`)).json()).map((c) => c.id);
+ck('sanity: the account is in a deliberate order, and id 1 is no longer first',
+  pinned.length >= 3 && pinned.includes(1) && pinned[0] !== 1, JSON.stringify(pinned));
+
+const reorderBool = await postJson('/api/categories/reorder', { order: [true] });
+ck('POST /categories/reorder with `true` is 400 — Number(true) is 1, a real id here',
+  reorderBool.status === 400, String(reorderBool.status));
+
+const reorderNull = await postJson('/api/categories/reorder', { order: [null] });
+ck('...and `null` is 400 — Number(null) is 0, which matched no row and answered 200',
+  reorderNull.status === 400, String(reorderNull.status));
+
+const reorderEmptyString = await postJson('/api/categories/reorder', { order: [''] });
+ck("...and '' is 400 too", reorderEmptyString.status === 400, String(reorderEmptyString.status));
+
+const afterRefusals = (await (await fetch(`${base}/api/categories`)).json()).map((c) => c.id);
+ck('THE assertion: not one of the three refused requests moved a category',
+  JSON.stringify(afterRefusals) === JSON.stringify(pinned),
+  JSON.stringify({ pinned, afterRefusals }));
+
+// Put the account back the way this block found it, so the ceiling test below
+// counts what it expects to.
+for (const id of [reorderA.id, reorderB.id]) {
+  await fetch(`${base}/api/categories/${id}`, { method: 'DELETE' });
+}
+await postJson('/api/categories/reorder', { order: currentOrder });
+
 /* ---- a category_id that shapes correctly but names nothing is a 400 ---- */
 
 const noSuchCategory = 999999;

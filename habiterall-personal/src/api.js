@@ -26,7 +26,7 @@ import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
-  assertNotFuture, parseCategory, foldCategoryName, LIMITS,
+  assertNotFuture, parseCategory, parseCategoryId, foldCategoryName, LIMITS,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
@@ -345,16 +345,18 @@ api.post('/habits/reorder', (req, res) => {
  * see the ordering comment above the two routes below — or a non-numeric id
  * and one that is merely absent answer identically: `Number('abc')` is `NaN`,
  * which matches no row and used to fall straight through to the same 404 a
- * real, missing id gets. Cloud already drew this line (`categoryId` there);
- * this is the same function, so the two editions answer `/categories/abc`
- * alike.
+ * real, missing id gets.
+ *
+ * The shape itself is `parseCategoryId` (shared/src/validate.js), which cloud
+ * asks too — the rule was written out in both editions, which is one rule in
+ * two places even when the two copies agree.
  *
  * @param {import('express').Request} req
  * @returns {number}
  */
 function categoryId(req) {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid category id');
+  const id = parseCategoryId(req.params.id);
+  if (id === null) throw httpError(400, 'invalid category id');
   return id;
 }
 
@@ -440,19 +442,23 @@ api.post('/categories/reorder', (req, res) => {
   if (order.length > LIMITS.categories) {
     throw httpError(400, `order may not exceed ${LIMITS.categories} ids`);
   }
-  // `Number.isInteger`, matching cloud's own check on this route — not
-  // `isFinite`, which accepted `1.5` here and 400'd there, so one edition
-  // answered a malformed reorder with a 200 that silently moved nothing
-  // (`setCategoryPosition` matches no row for a fractional id). An id is the
-  // one thing every other category route already agrees the shape of; this
-  // was the route left out of that alignment.
-  if (order.some((n) => !Number.isInteger(Number(n)))) {
+  // `parseCategoryId`, the same rule `categoryId` above asks of the URL — not
+  // `isFinite(Number(n))`, which accepted `1.5` here and 400'd it in cloud, and
+  // not `Number.isInteger(Number(n))` either, which answers YES to `null`,
+  // `''` and `[]` (all 0) and to `true` (1). Every one of those reached
+  // `setCategoryPosition` as an id nobody named: 0 matches no row and reports
+  // 200 having moved nothing, and 1 moves whichever category happens to be
+  // id 1. A reorder that reports success and applies to something the caller
+  // did not name is the failure a client cannot see, which is what this check
+  // was added for in the first place.
+  const ids = order.map((n) => parseCategoryId(n));
+  if (ids.some((id) => id === null)) {
     throw httpError(400, 'order must contain only category ids');
   }
   const tx = db.prepare('BEGIN');
   tx.run();
   try {
-    order.forEach((id, i) => q.setCategoryPosition.run(i, Number(id)));
+    ids.forEach((id, i) => q.setCategoryPosition.run(i, id));
     db.prepare('COMMIT').run();
   } catch (e) {
     db.prepare('ROLLBACK').run();

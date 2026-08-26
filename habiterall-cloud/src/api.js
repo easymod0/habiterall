@@ -27,7 +27,7 @@ import { backupSettings, backupCategories, parseUpload } from '@habiterall/share
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
-  assertNotFuture, parseCategory, foldCategoryName, LIMITS,
+  assertNotFuture, parseCategory, parseCategoryId, foldCategoryName, LIMITS,
   DATE_RE,
 } from '@habiterall/shared/validate.js';
 import {
@@ -431,15 +431,23 @@ api.delete('/categories/:id', route(async (req, res) => {
 
 api.post('/categories/reorder', route(async (req, res) => {
   const order = req.body.order;
-  if (!Array.isArray(order) || order.some((n) => !Number.isInteger(Number(n)))) {
-    throw httpError(400, 'order must be an array of category ids');
-  }
+  if (!Array.isArray(order)) throw httpError(400, 'order must be an array of category ids');
   if (order.length > LIMITS.categories) {
     throw httpError(400, `order may not exceed ${LIMITS.categories} ids`);
   }
+  // `parseCategoryId`, the same rule `categoryId` below asks of the URL — not
+  // `Number.isInteger(Number(n))`, which answers YES to `null`, `''` and `[]`
+  // (all 0) and to `true` (1), so every one of those reached the UPDATE as an
+  // id nobody named. See the personal edition's copy of this route for the
+  // whole reasoning; the two are checked in the same order, with the same
+  // three sentences, because a reorder refused in one edition and accepted in
+  // the other is the divergence `shared/src/validate.js` exists to prevent.
+  const ids = order.map((n) => parseCategoryId(n));
+  if (ids.some((id) => id === null)) {
+    throw httpError(400, 'order must contain only category ids');
+  }
 
   const rows = await withUser(uid(req), async (db) => {
-    const ids = order.map((id) => Number(id));
     if (ids.length) {
       await db.query(
         `UPDATE categories SET position = v.position

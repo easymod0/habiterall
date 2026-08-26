@@ -257,3 +257,22 @@ submission for a TRUSTED keypress, so a `new KeyboardEvent('keydown')`
 dispatched from script does not reproduce it at all and a test built on one
 passes against the unguarded code. `categorycheck`'s round-6 block drives CDP
 `Input.dispatchKeyEvent` for that reason.
+
+**A reorder id has to be the shape of an id, not merely coerce to one.**
+`POST /categories/reorder` asked `Number.isInteger(Number(n))` of every entry
+in both editions — tightened from `isFinite` in an earlier round precisely so
+a fractional id could not report success and move nothing. It left the same
+hole one spelling over: `Number()` answers 0 for `null`, `''` and `[]`, 1 for
+`true`, and 7 for `[7]`. Id 0 matches no row, so the request answered 200
+having moved nothing; id 1 and a nested real id are rows that exist, so the
+request moved a category nobody had named. In the personal edition that is any
+category; in cloud RLS narrows it to one of the caller's own, which makes it a
+wrong write rather than a cross-tenant one — the nested spelling is the case
+that reaches a real row there, and is what that suite asserts behaviourally.
+`parseCategoryId` (`shared/src/validate.js`) is the one shape rule now, asked
+by both editions' reorder routes and by both copies of `categoryId(req)`; it
+gates on `typeof` first, so those spellings are unrepresentable rather than
+filtered one at a time. It is deliberately NOT the rule `parseHabit` applies to
+`body.category_id`, which refuses a numeric STRING: there the id arrives in a
+JSON body where a number is the only honest spelling, and here it arrives as
+text by construction.

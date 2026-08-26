@@ -948,6 +948,16 @@ at the sleep rather than fixed there.
 
 ## Traps
 
+**An id that COERCES is not an id.** `Number()` answers 0 for `null`, `''` and
+`[]`, 1 for `true`, and 7 for `[7]`, so `Number.isInteger(Number(n))` accepts
+all of them — which is how `POST /categories/reorder` came to move a category
+nobody had named in one edition and answer 200 having moved nothing in the
+other. `parseCategoryId` gates on `typeof` FIRST, which makes those spellings
+unrepresentable rather than filtered one at a time, and both editions ask it
+so a malformed reorder cannot be a 400 in one and a 200 in the other. Note it
+is deliberately not the rule `parseHabit` applies to `body.category_id`: there
+the id arrives in a JSON body, where a number is the only honest spelling.
+
 **A READER must never collapse `unknown` into `no`.** The root `CLAUDE.md` has
 the four states, the ban on `?? UNSET` and what a stored lapse does to a window;
 what belongs here is the shape that makes the mistake unreachable.
