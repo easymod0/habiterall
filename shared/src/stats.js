@@ -1108,3 +1108,303 @@ export function summaryStats(habit, entries, { start, end, unlogged = UNLOGGED_D
     currentStreak: currentStreak(streaks, end),
   };
 }
+
+/* ---------- comparing categories ---------- */
+
+/**
+ * How much history a category comparison scores each member over BEFORE the
+ * window it was asked for.
+ *
+ * `computeScores` starts its EWMA at `score = 0` on the first day of the range
+ * it is handed, so a comparison starting cold at the requested `start` reports
+ * every habit weaker than its own page does — `ui/detail.js` sends no `start`
+ * to `/habits/:id/stats`, so a habit's strength there is always converged from
+ * its first entry. Two surfaces disagreeing about the same habit is
+ * indistinguishable from one of them being broken, so each member's series is
+ * computed over `[start - SCORE_WARMUP_DAYS, end]` and sliced back to
+ * `[start, end]` for the response.
+ *
+ * 400 days, which is the number both editions' `/overview` already spends on
+ * the same problem (`SUMMARY_WINDOW_DAYS` in each `api.js`). Declared here and
+ * imported by both routes rather than spelled once per edition: a warm-up that
+ * drifted between the two would have one edition report a habit weaker than
+ * the other, which is the defect class this repo names most often.
+ */
+export const SCORE_WARMUP_DAYS = 400;
+
+/**
+ * The widest window a CATEGORY COMPARISON may be asked for — its own ceiling,
+ * tighter than `MAX_RANGE_DAYS`.
+ *
+ * `MAX_RANGE_DAYS` bounds a route that walks ONE habit. A comparison walks
+ * every habit the account has, so the same span buys a cost multiplied by the
+ * habit count: at 50 habits a 3,660-day window is ~385,000 synchronous
+ * day-steps before the warm-up is even added, which is the order of the single
+ * year-0100 entry the root `CLAUDE.md` records blocking the event loop for 32
+ * seconds. Five years halves the worst case and is the number
+ * `STREAK_HISTORY_DAYS` already is for the same "far beyond any real history"
+ * reason.
+ *
+ * Declared here and imported by both editions' routes rather than spelled once
+ * per edition: a ceiling that drifted between the two would have one refuse a
+ * URL the other served, which is the defect class this repo names most often.
+ */
+export const MAX_COMPARE_DAYS = 1830;
+
+/**
+ * The window a category comparison covers when the caller names no start.
+ *
+ * A year, against the five-year ceiling above — the same shape `/overview`
+ * has, where `days` defaults to 30 against a cap of 365. The ORDINARY request
+ * must not be the worst case the route can be asked for: at the ceiling, the
+ * plainest possible question would cost 1,831 daily buckets per category. A
+ * caller who wants five years says so.
+ *
+ * Shared for the same reason the ceiling is, and it is the same divergence
+ * arriving by the other door: two editions answering a `start`-less URL with
+ * different bucket counts is one request served two ways. `SUMMARY_WINDOW_DAYS`
+ * and `STREAK_HISTORY_DAYS` are still spelled once per edition with a comment
+ * claiming they match — that is a guard that cannot see a renamed binding, and
+ * it is precedent for a pattern to stop repeating rather than to follow.
+ */
+export const COMPARE_WINDOW_DAYS = 365;
+
+/**
+ * The strongest and the weakest member of one category.
+ * Ties keep the first member seen, so a category of one has `best === worst`,
+ * which is the correct answer rather than a degenerate one.
+ */
+function extremeMember(rows, better) {
+  let chosen = null;
+  for (const row of rows) if (chosen === null || better(row.score, chosen.score)) chosen = row;
+  return chosen && { id: chosen.id, name: chosen.name, score: chosen.score };
+}
+
+/**
+ * Which of an account's categories is holding up, over one window.
+ *
+ * **There is no category-level score formula and there must not be one.** The
+ * per-habit score is an EWMA over a trailing-window adherence ratio whose decay
+ * carries a `sqrt(frequency)` term, and that term is exactly what makes a
+ * 3x/week habit's number comparable with a daily one's. A category has as many
+ * frequencies as it has members, plus a mix of boolean/numerical and
+ * at_least/at_most, so there is no single frequency `computeScores` could be
+ * handed for one. What is aggregated is therefore the members' own strengths,
+ * **equal weight per habit** — never per entry, which would let one daily
+ * member drown a weekly one, and never re-derived from raw entries.
+ *
+ * **`members` and the spread ride beside the `mean`, which is never shown
+ * alone**: `best`/`worst` are the spread and `members` is the n.
+ *
+ * **A habit that has NEVER been logged has no strength, which is not a strength
+ * of zero.** Averaging one in would report that your health got worse on the
+ * day you decided to do more about it — so a member is counted into `mean`,
+ * `best` and `worst` only once it has an entry, and until then it is counted
+ * into `unloggedExcluded` instead. Adding a habit to a category raises
+ * `members` and raises `unloggedExcluded`; it moves no figure downward. That is
+ * the same shape of claim `recovery.rate === null` already makes — undefined,
+ * not zero — and this file already refuses to average that one into a number.
+ * `mean` is `null` when no member has landed, which covers an empty category
+ * too.
+ *
+ * That is "never logged" and not "nothing in the entry slice", and the two are
+ * only the same question when the caller hands over a whole history: see
+ * `firstEntry` on a member below. An ABANDONED habit — logged for years, then
+ * dropped — has a genuine strength near zero and belongs in the mean, because
+ * it really is dragging its category down.
+ *
+ * **Uncategorised is always present and always last**, `id: null`, even with no
+ * members at all. It is a state a habit is in and never a category it belongs
+ * to (see `shared/CLAUDE.md`), the same discipline the four day states get in
+ * the root one — and a habit whose `category_id` names no category in
+ * `categories`, deleted between the two reads, lands there too, so every member
+ * is counted exactly once. It carries `name: null` and `color: null`: naming it
+ * is the view's job, exactly as it already is on the grouped dashboard, and
+ * `shared/src` holds no prose.
+ *
+ * **A member contributes to a bucket only once its first entry has landed**,
+ * and an absent member is never counted as 0 — a habit added in March must read
+ * as a line starting in March, not as a category that was doing half as well
+ * all of January. `members` per bucket is what says how many the value is over.
+ *
+ * A bucket's value is read on the LAST day of the bucket that the window holds,
+ * not averaged across its days. A score is a level, not a rate: "where this
+ * category stood at the end of that month" is the reading. Together with the
+ * landing rule above that makes `series.at(-1).value === mean` unconditionally
+ * — the same members, the same day, the same arithmetic — because a chart whose
+ * last point disagrees with the number printed over it reads as a bug whichever
+ * of the two is right.
+ *
+ * `recoveryRate` is over the REQUESTED window and carries no warm-up: it counts
+ * closed lapses rather than converging on them, so unlike the score it means
+ * exactly what the window says. A member whose `rate` is `null` has no CLOSED
+ * lapse in that window — it has never missed, or has never been logged, or its
+ * only lapse is still open — and that is a different claim from 100%, so it is
+ * excluded from the mean and counted into `recoveryExcluded`. A category where
+ * every member says so answers `null` rather than 0. `recoveryExcluded` is
+ * therefore its own count and not a restatement of `unloggedExcluded`: they
+ * overlap on a never-logged member and agree about nothing else.
+ *
+ * Archived habits are excluded from every figure here and counted into
+ * `archivedExcluded`, so the view can say what it left out. That is derived
+ * from the members handed in, which is the only way a pure function can answer
+ * it — a caller that filters them out in SQL will see 0 and have nothing to
+ * report.
+ *
+ * @param {import('./types.js').Category[]} categories in the order to report
+ *   them; Uncategorised is appended and is not one of these
+ * @param {Array<{habit: import('./types.js').Habit,
+ *                entries: import('./types.js').Entry[],
+ *                firstEntry?: string|null}>} members every habit the account
+ *   has, with its entries from `start - SCORE_WARMUP_DAYS`. `firstEntry` is
+ *   that habit's LIFETIME earliest entry date, or `null` if it has none —
+ *   supply it, because a truncated `entries` slice cannot answer it and a
+ *   habit last logged before the slice would otherwise read as never logged.
+ *   Omit the key to derive it from `entries`.
+ * @param {{start?: string, end?: string, granularity?: string,
+ *          weekStart?: 'monday'|'sunday', unlogged?: string}} [opts]
+ * @returns {import('./types.js').CategoryStats}
+ */
+export function computeCategoryStats(categories, members,
+                                     { start, end, granularity = 'day',
+                                       weekStart = 'monday',
+                                       unlogged = UNLOGGED_DEFAULT } = {}) {
+  // `Object.hasOwn` for the same reason `computeHistory` needs it: granularity
+  // is a query parameter, and `BUCKETERS['valueOf']` is an inherited function.
+  const bucketOf = Object.hasOwn(BUCKETERS, granularity)
+    ? BUCKETERS[granularity]
+    : BUCKETERS.day;
+
+  // The one axis every category's series is drawn on, built exactly as
+  // `computeHistory` builds its buckets so the two align at a shared
+  // granularity. `refDay` is the last day of each bucket the window holds.
+  const dates = boundedRange(start, end);
+  const buckets = [];
+  const refDay = new Map();
+  for (const date of dates) {
+    const key = bucketOf(date, weekStart);
+    if (!refDay.has(key)) buckets.push(key);
+    refDay.set(key, date);
+  }
+
+  const active = [];
+  let archivedExcluded = 0;
+  for (const member of members) {
+    if (member.habit.archived) archivedExcluded++;
+    else active.push(member);
+  }
+
+  // `dates` is already clamped, so the warm-up is derived from ITS first day
+  // rather than from `start`: that keeps `addDays` off an unvalidated string,
+  // and it guarantees the warm range covers every visible day, since
+  // `boundedRange` re-clamps the earlier start to the same MAX_RANGE_DAYS
+  // boundary. Every `refDay` therefore has a score point.
+  const warmStart = dates.length ? addDays(dates[0], -SCORE_WARMUP_DAYS) : null;
+
+  const readings = active.map(({ habit, entries, firstEntry: lifetimeFirst }) => {
+    // `status` is preserved alongside the value for the reason `resolveWindow`
+    // states: a skip must stay distinguishable from a numerical habit
+    // legitimately recording 3.
+    const entryMap = new Map(
+      entries.map((e) => [e.date, { value: e.value, status: e.status ?? '' }])
+    );
+
+    // **The habit's LIFETIME earliest entry, which `entries` cannot answer.** A
+    // route fetches from `start - SCORE_WARMUP_DAYS`, so a habit last logged
+    // two years ago — still active, never archived — has nothing in that slice
+    // and derives `null` here. It would then be reported as never logged, which
+    // is false about a habit with years behind it, and excluded from the mean,
+    // which makes the category read healthier than it is. "Has never been
+    // logged" and "has nothing in the window I happened to fetch" are different
+    // questions and the landing rule asks the first, so the caller supplies the
+    // answer (`MIN(date)`, indexed and cheap) and this prefers it.
+    //
+    // Derived from `entries` only when the key is ABSENT, so the function stays
+    // usable standalone and a caller that has the whole history in hand need
+    // not restate it. An explicit `null` is a caller saying the habit truly has
+    // no entry at all, and is not the same as omitting the key.
+    //
+    // Don't assume the caller sorted the entries.
+    const firstEntry = lifetimeFirst !== undefined
+      ? lifetimeFirst
+      : (entries.length
+        ? entries.reduce((min, e) => (e.date < min ? e.date : min), entries[0].date)
+        : null);
+
+    const scoreAt = new Map();
+    let rate = null;
+    if (dates.length) {
+      for (const point of computeScores(habit, entryMap, warmStart, end, unlogged)) {
+        scoreAt.set(point.date, point.score);
+      }
+      rate = computeRecovery(
+        computeMissRuns(habit, entryMap, dates[0], end, unlogged), end
+      ).rate;
+    }
+
+    return {
+      id: habit.id,
+      name: habit.name,
+      categoryId: habit.category_id,
+      firstEntry,
+      scoreAt,
+      score: dates.length ? scoreAt.get(dates[dates.length - 1]) : 0,
+      rate,
+    };
+  });
+
+  // The same partition the grouped dashboard makes, and for the same reason:
+  // a `category_id` pointing at a category that is not in `categories` falls
+  // into Uncategorised rather than being dropped.
+  const byCategory = new Map(categories.map((c) => [c.id, []]));
+  const uncategorised = [];
+  for (const reading of readings) {
+    const bucket = reading.categoryId != null && byCategory.get(reading.categoryId);
+    (bucket || uncategorised).push(reading);
+  }
+
+  // The landing rule, asked once and used by every figure that reads a
+  // strength: the headline mean, the spread, and each bucket of the series.
+  // `mean` and `series.at(-1).value` are therefore the same arithmetic over the
+  // same members on the same day, which is what makes them equal rather than
+  // nearly equal — see the note above about a chart's last point disagreeing
+  // with the number printed over it.
+  const lastDay = dates.length ? dates[dates.length - 1] : null;
+  const landedAt = (rows, day) =>
+    day === null ? [] : rows.filter((r) => r.firstEntry !== null && r.firstEntry <= day);
+  const meanScoreAt = (rows, day) =>
+    rows.length ? rows.reduce((sum, r) => sum + r.scoreAt.get(day), 0) / rows.length : null;
+
+  const section = (id, name, color, rows) => {
+    const rates = rows.map((r) => r.rate).filter((r) => r !== null);
+    const landed = landedAt(rows, lastDay);
+    return {
+      id,
+      name,
+      color,
+      members: rows.length,
+      unloggedExcluded: rows.length - landed.length,
+      mean: meanScoreAt(landed, lastDay),
+      best: extremeMember(landed, (a, b) => a > b),
+      worst: extremeMember(landed, (a, b) => a < b),
+      series: buckets.map((bucket) => {
+        const day = refDay.get(bucket);
+        const at = landedAt(rows, day);
+        return { bucket, value: meanScoreAt(at, day), members: at.length };
+      }),
+      recoveryRate: rates.length
+        ? rates.reduce((sum, r) => sum + r, 0) / rates.length
+        : null,
+      recoveryExcluded: rows.length - rates.length,
+    };
+  };
+
+  return {
+    buckets,
+    archivedExcluded,
+    categories: [
+      ...categories.map((c) => section(c.id, c.name, c.color, byCategory.get(c.id))),
+      section(null, null, null, uncategorised),
+    ],
+  };
+}

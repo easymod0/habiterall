@@ -649,7 +649,11 @@ async function applyDraft() {
     // `habit-dialog` uses for the same reason: 'reload' goes to the dashboard,
     // so emitting it over an open habit would navigate away from the page the
     // user is on — and that page has already refetched on the 'change' above.
-    if (SERVER_COMPUTED.some((key) => key in changed) && state.openHabitId == null) {
+    //
+    // The comparison view is the third answer to "what is showing": it has no
+    // habit open either, and it has already refetched on the 'change' above.
+    if (SERVER_COMPUTED.some((key) => key in changed)
+        && state.openHabitId == null && !state.openCategories) {
       emit('reload');
     }
     return true;

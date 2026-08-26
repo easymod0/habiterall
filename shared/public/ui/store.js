@@ -28,6 +28,13 @@ export const state = {
   categories: [],
   editingId: null,
   openHabitId: null,   // habit shown in the detail view, null on the dashboard
+  // The category comparison is showing. It is a THIRD answer to the question
+  // `openHabitId == null` used to settle on its own — "is the dashboard what
+  // the user is looking at?" — which two guards ask before repainting or
+  // reloading the list. Left out, opening Settings from the comparison and
+  // pressing Done emits a 'change' the dashboard answers by painting itself
+  // over a view nobody had left.
+  openCategories: false,
   // null means "use the saved setting". The per-habit toggles set these for
   // the session, so trying a different view does not rewrite your default —
   // same arrangement as calZoom below.

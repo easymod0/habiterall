@@ -233,6 +233,112 @@ check(
   Number.isInteger(aliceHabitWithBobsCategory)
 );
 
+/* ---------- attack: read another account through GET /categories/stats ------
+ *
+ * The one route that reads EVERY habit and EVERY category the caller has, with
+ * a `SELECT * FROM habits` carrying no `WHERE` at all — deliberately, because
+ * it must hand `computeCategoryStats` the archived ones too. RLS is the whole
+ * of what scopes it, so this is the route where a query left outside `withUser`
+ * would hand one account another's habit names in `best`/`worst` rather than
+ * merely a count.
+ *
+ * Driven over the real router, unlike everything above it: what is under attack
+ * here is what reaches the RESPONSE. Alice's `FK is not RLS` habit, created
+ * just above, points at BOB's category id — the FK check runs inside Postgres
+ * with RLS not applied to it, so that row exists — which makes it the sharpest
+ * probe available: a route that resolved a habit's category by id without
+ * scoping the lookup would name bob's category on alice's payload.
+ */
+
+console.log('--- attack: another account through GET /categories/stats ---');
+
+const express = (await import('express')).default;
+const { api } = await import('../src/api.js');
+
+const tenancyApp = express();
+tenancyApp.use(express.json());
+tenancyApp.use((req, _res, next) => { req.session = { user: { id: alice.id } }; next(); });
+tenancyApp.use('/api', api);
+const tenancyServer = await new Promise((resolve) => {
+  const s = tenancyApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const tenancyBase = `http://127.0.0.1:${tenancyServer.address().port}`;
+
+// Bob's category is given a name nothing else in this file uses, so "absent
+// from the response" can be asked of the whole payload as text and not only of
+// the fields this test happened to think of.
+await withUser(bob.id, (db) => db.query(
+  `UPDATE categories SET name = 'Bob Private Category' WHERE id = $1`, [bobCategory]));
+
+// Alice needs a category and a habit in it, and that is not scene-setting: with
+// none, every "bob's category is absent" check below passes against a route
+// that reads NO categories at all — which is what a `SELECT` left outside
+// `withUser` would do here, since RLS fails closed and returns nothing. Her own
+// section being present and populated is the control that makes the rest of
+// this block able to fail.
+// A habit of her own rather than one of the survivors: the replace-mode import
+// above deleted alice's original, so which of her rows still exists is not this
+// block's business to know.
+const aliceCategory = await withUser(alice.id, async (db) => {
+  const { rows: [cat] } = await db.query(
+    `INSERT INTO categories (user_id, name) VALUES ($1, 'Alice Own Category') RETURNING id`,
+    [alice.id]
+  );
+  await db.query(
+    `INSERT INTO habits (user_id, name, type, category_id) VALUES ($1,$2,'boolean',$3)`,
+    [alice.id, 'Alice Compared Habit', cat.id]
+  );
+  return cat.id;
+});
+
+// A one-day window: the sections and the counts are what is under attack, and
+// a year of buckets would make every failure below unreadable.
+const compare = await fetch(
+  `${tenancyBase}/api/categories/stats?start=2026-01-01&end=2026-01-01`
+).then((r) => r.json());
+// The substring checks read the WHOLE payload, buckets and all; what is printed
+// on a failure is the sections alone.
+const compareText = JSON.stringify(compare);
+const sections = JSON.stringify(compare.categories?.map(
+  (c) => ({ id: c.id, name: c.name, members: c.members, best: c.best?.name })));
+
+// The control, first: the route really does read categories, and it read
+// alice's. Without this, every absence check below is satisfied by a payload
+// carrying no categories at all.
+const own = compare.categories.find((c) => c.id === aliceCategory);
+check("alice's own category is a section on her comparison, with its habit in it",
+  own?.name === 'Alice Own Category' && own?.members === 1, sections);
+
+check("bob's category is not a section on alice's comparison",
+  !compare.categories.some((c) => c.id === bobCategory), sections);
+check("...and its name appears nowhere in the payload at all",
+  !compareText.includes('Bob Private Category'), sections);
+check("bob's habit is not named as anybody's best or worst",
+  !compareText.includes('Bob Secret Habit'), sections);
+
+// The other direction of the same leak: alice's habit DOES point at bob's
+// category id, and a section keyed on that id must not appear. It falls into
+// Uncategorised instead — `computeCategoryStats` folds a category_id naming no
+// category the caller can see into the trailing section, so the member is
+// counted exactly once rather than dropped or filed under a foreign label.
+const uncategorised = compare.categories.at(-1);
+check('the trailing section is Uncategorised, carrying id null',
+  Object.is(uncategorised?.id, null), JSON.stringify(uncategorised?.id));
+check("alice's habit pointing at bob's category id lands there, not in a " +
+  "section named after bob's category",
+  uncategorised?.members >= 1, sections);
+
+// And the counts are alice's own. Bob has one habit; if any of his had been
+// read, the member counts across every section would exceed what alice owns.
+const aliceHabitCount = await withUser(alice.id, (db) =>
+  db.query(`SELECT COUNT(*)::int c FROM habits`).then((r) => r.rows[0].c));
+const counted = compare.categories.reduce((n, c) => n + c.members, 0)
+  + compare.archivedExcluded;
+check('every habit the payload counts is one alice owns',
+  counted === aliceHabitCount, `counted=${counted} alice owns=${aliceHabitCount}`);
+
+tenancyServer.close();
+
 /* ---------- the reminder scheduler's scope ---------- */
 //
 // Migration 008 adds the only policy in the schema that lets a query see more

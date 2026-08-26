@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { LIST, current, go, hashFor, init, parseRoute } from '../public/ui/routes.js';
+import { CATEGORIES, LIST, current, go, hashFor, init, parseRoute } from '../public/ui/routes.js';
 
 /* ---------- parsing ---------- */
 
@@ -16,6 +16,26 @@ test('no fragment is the dashboard', () => {
   assert.deepEqual(parseRoute(''), LIST);
   assert.deepEqual(parseRoute('#'), LIST);
   assert.deepEqual(parseRoute(undefined), LIST);
+});
+
+test('the comparison fragment names the comparison', () => {
+  assert.deepEqual(parseRoute('#/categories'), { view: 'categories' });
+  assert.deepEqual(parseRoute('/categories'), { view: 'categories' });
+  assert.deepEqual(parseRoute(' #/categories '), { view: 'categories' });
+});
+
+test('a near miss at the comparison is the dashboard', () => {
+  // Anchored at both ends, like HABIT_RE: the comparison is one page over the
+  // whole account, so anything after it names nothing.
+  for (const hash of [
+    '#/categories/',
+    '#/categories/4',
+    '#/category',
+    '#/CATEGORIES',
+    '#categories',
+  ]) {
+    assert.deepEqual(parseRoute(hash), LIST, hash);
+  }
 });
 
 test('anything unrecognised is the dashboard, never an error', () => {
@@ -61,6 +81,13 @@ test('the dashboard has no fragment', () => {
   // Not '#': a bare hash survives a copy-paste looking like a mistake.
   assert.equal(hashFor(LIST), '');
   assert.equal(hashFor(undefined), '');
+});
+
+test('the comparison route and its fragment round trip', () => {
+  // The literal, not `hashFor(CATEGORIES)` fed back to itself: a round trip
+  // through two functions that agree with each other pins neither spelling.
+  assert.equal(hashFor(CATEGORIES), '#/categories');
+  assert.deepEqual(parseRoute('#/categories'), CATEGORIES);
 });
 
 /* ---------- writing the URL ---------- */
@@ -152,6 +179,42 @@ test('a route already showing writes nothing', () => {
   const list = fakeUrl('');
   go(LIST);
   assert.deepEqual(list.calls, []);
+});
+
+test('opening the comparison from the dashboard pushes one entry', () => {
+  const { calls } = fakeUrl('');
+  go(CATEGORIES);
+  assert.deepEqual(calls, [['push', '#/categories']]);
+
+  // ...and Back from it unwinds that one push, exactly as a habit's does.
+  go(LIST);
+  assert.deepEqual(calls, [['push', '#/categories'], ['back']]);
+});
+
+test('the comparison is PUSHED, never written over the entry showing', () => {
+  // Replacing looks like the tidier way to keep the stack one deep, and it is
+  // the wrong one: a same-document open counts an entry in
+  // `WebBackStack.floorAfterShow`, so a habit opened from a notification sets
+  // the floor at that entry — replace, and `currentIndex` stays AT the floor
+  // and the next system Back closes the screen instead of reaching the
+  // dashboard. What keeps the stack one deep is the button being absent while
+  // a habit is open (`syncEntry` in ui/categories.js), not what this writes.
+  const { calls } = fakeUrl('');
+  go(CATEGORIES);
+  assert.deepEqual(calls, [['push', '#/categories']],
+    'a push, so Back has an entry of its own to leave through');
+  assert.equal(calls.filter(([kind]) => kind === 'replace').length, 0);
+});
+
+test('a traversal onto the comparison leaves that entry unwindable', () => {
+  // Forward onto it is as much "our" entry as opening it was — the same rule
+  // the habit above has, and dropping it brings the duplicate-list bug back
+  // through the Forward button.
+  const { calls, fire } = fakeUrl('');
+  globalThis.location.hash = '#/categories';
+  fire();
+  go(LIST);
+  assert.deepEqual(calls, [['back']]);
 });
 
 test('current() reads the address bar', () => {

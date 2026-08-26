@@ -33,6 +33,7 @@ import {
 import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
+  computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
@@ -340,6 +341,139 @@ api.get('/categories', route(async (req, res) => {
     db.query(`SELECT * FROM categories ORDER BY position, id`).then((r) => r.rows)
   );
   res.json(rows);
+}));
+
+/**
+ * Which of this account's categories is holding up, over one window.
+ *
+ * The arithmetic is `computeCategoryStats` (shared/src/stats.js) and every word
+ * about what it means is there. This route's whole job is the three things a
+ * pure function cannot do for itself, and each of them is a way the figures go
+ * quietly wrong rather than loudly:
+ *
+ *   1. Hand it EVERY habit, archived included — hence a SELECT with no
+ *      `archived` predicate rather than the two `/habits` takes a parameter
+ *      for. `archivedExcluded` is derived from the members handed over, so a
+ *      route that filtered here reports 0 forever and the comparison view has
+ *      nothing to say about what it left out.
+ *   2. Supply each member's LIFETIME `firstEntry`. The entry read below is
+ *      bounded, so a habit last logged before that window comes back with an
+ *      empty slice — indistinguishable, from the slice alone, from one that has
+ *      never been logged. An abandoned habit has a real strength near zero and
+ *      belongs in its category's mean; a never-logged one has no strength to
+ *      average in at all. One grouped `MIN(date)` answers the question the
+ *      slice cannot, off the `(habit_id, date)` primary key.
+ *   3. Read the entries in ONE pass. `WHERE habit_id = $1` inside the loop is
+ *      the shape that took 13.5 seconds in the importer (`shared/CLAUDE.md`),
+ *      and this route runs it against however many habits the account has.
+ *
+ * Every query is inside one `withUser`, so RLS scopes all five to the session's
+ * user and a forgotten predicate returns nothing rather than somebody else's
+ * account — which is exactly what the `SELECT * FROM habits` with no `WHERE` of
+ * its own is relying on. That is also why the categories and the habits are
+ * read in the same transaction as the entries: a category deleted between two
+ * of them would leave its habits pointing at an id no section carries, and
+ * `computeCategoryStats` folds those into Uncategorised rather than dropping
+ * them.
+ *
+ * Registered ABOVE the `/categories/:id` routes, and a `GET /categories/:id`
+ * added later must go below this line: `parseCategoryId('stats')` is null, so a
+ * pattern route reaching this path first answers 400 for a URL that is not an
+ * id at all.
+ *
+ * Identical to the personal edition's, deliberately and to the day — the two
+ * bounds it enforces are imported from `shared/src/stats.js` for exactly that
+ * reason.
+ */
+api.get('/categories/stats', route(async (req, res) => {
+  // The three bounds `/habits/:id/stats` states, in the same order and for the
+  // same reason: never compute past the CALLER's today, never backwards, and
+  // never more than a ceiling, because every pass below allocates one element
+  // per day. The ceiling itself is NOT that route's — see `MAX_COMPARE_DAYS`.
+  // That route walks one habit; this one walks every habit the account has, so
+  // the same span costs the habit count times as much.
+  const now = callerToday(req);
+  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const end = requestedEnd > now ? now : requestedEnd;
+
+  const requestedStart = DATE_RE.test(req.query.start ?? '') ? req.query.start : undefined;
+  if (requestedStart) {
+    if (requestedStart > end) throw httpError(400, 'start must not be after end');
+    if (daysBetween(requestedStart, end) > MAX_COMPARE_DAYS) {
+      throw httpError(400, `range must not exceed ${MAX_COMPARE_DAYS} days`);
+    }
+  }
+
+  // A caller that named no start gets a YEAR, not the ceiling: the simplest
+  // possible request must not be the most expensive one this route can answer,
+  // and five years is available to anyone who asks for it. Derived from `end`
+  // rather than read back from the earliest stored entry — a date out of the
+  // database is attacker-controlled (root CLAUDE.md), and it is the wrong
+  // question here anyway, since a comparison has as many first entries as it
+  // has members.
+  const start = requestedStart ?? addDays(end, -COMPARE_WINDOW_DAYS);
+
+  const granularity = req.query.granularity ?? 'day';
+
+  const payload = await withUser(uid(req), async (db) => {
+    const { rows: categories } = await db.query(
+      `SELECT * FROM categories ORDER BY position, id`
+    );
+    // No `archived` predicate — see (1) above.
+    const { rows: habits } = await db.query(
+      `SELECT * FROM habits ORDER BY position, id`
+    );
+
+    // One answer for the account, read once for the whole payload rather than
+    // per habit, exactly as `/overview` reads `unlogged`: the map below runs
+    // once per habit and neither of these is a per-habit question.
+    const { rows: [prefs] } = await db.query(
+      `SELECT settings ->> 'weekStart'      AS week_start,
+              settings ->> 'atMostUnlogged' AS unlogged
+         FROM users WHERE id = $1`,
+      [uid(req)]
+    );
+    const weekStart = /** @type {'monday'|'sunday'} */ (
+      prefs?.week_start === 'sunday' ? 'sunday' : 'monday');
+    const unlogged = unloggedFrom(prefs);
+
+    const ids = habits.map((h) => h.id);
+
+    // One SELECT over the window and one grouped MIN over the lifetime — see
+    // (2) and (3) above. The warm-up start is DERIVED from the window, never
+    // read back from a stored date, and the span it opens is the clamp above
+    // plus the fixed 400 days.
+    const { rows: entryRows } = ids.length ? await db.query(
+      `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+       FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
+       ORDER BY date`,
+      [ids, addDays(start, -SCORE_WARMUP_DAYS), end]
+    ) : { rows: [] };
+    const { rows: firstRows } = ids.length ? await db.query(
+      `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
+       FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
+      [ids]
+    ) : { rows: [] };
+
+    const byHabit = new Map(ids.map((id) => [id, []]));
+    for (const r of entryRows) byHabit.get(r.habit_id).push(r);
+    const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
+
+    return computeCategoryStats(
+      categories,
+      habits.map((h) => ({
+        habit: h,
+        entries: byHabit.get(h.id) ?? [],
+        // `?? null`, and never left absent: an omitted key tells
+        // `computeCategoryStats` to derive the answer from the entries it was
+        // given, which is the truncated slice this route deliberately fetched.
+        firstEntry: firstEntry.get(h.id) ?? null,
+      })),
+      { start, end, granularity, weekStart, unlogged }
+    );
+  });
+
+  res.json(payload);
 }));
 
 /**

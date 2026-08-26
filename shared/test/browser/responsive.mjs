@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9303);
@@ -408,6 +409,110 @@ try {
     await fetch('/api/settings', { method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groupByCategory: false }) });
+    const cats = await (await fetch('/api/categories')).json();
+    for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
+  })()`);
+
+  /* ---------- the category comparison (#65), at every width ---------- */
+  //
+  // A grid of cards, each holding a chart sized from the card it sits in — a
+  // shape no other view in the app has, and the one place `svg.chart {
+  // max-width: 100% }` can silently scale a whole drawing down rather than
+  // clipping it. Nothing above ever opens `#/categories`, so this is the only
+  // pass that could catch either failure on a phone.
+  console.log('\n--- category comparison ---');
+  await seedCategorySpread({ base: APP });
+
+  for (const vp of VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
+    // Back to the dashboard and in through the button, rather than navigating
+    // straight to `#/categories` at each width. A second `Page.navigate` to a
+    // URL that differs only in its FRAGMENT is a same-document navigation and
+    // does not re-render anything — so every width after the first measured
+    // the previous one's charts, and the SVGs drawn for a 768px tablet then
+    // read as scaled down inside a 1440px desktop's narrower two-column card.
+    // A spurious failure that looked exactly like the real defect the
+    // `downscaled` check below is for.
+    await send('Page.navigate', { url: APP }, sessionId);
+    for (let i = 0; i < 100; i++) {
+      const ready = await ev(`!!document.querySelector('#grid .habit-row')
+        && document.getElementById('btn-compare').hidden === false`).catch(() => 0);
+      if (ready) break;
+      await sleep(200);
+    }
+    await ev(`document.getElementById('btn-compare').click()`);
+
+    // **The view unhidden AND the first card laid out**, not a card count.
+    // `render()` unhides the container before `replaceChildren()` empties it,
+    // so a previous render's cards are still in it — a poll that counts
+    // `.compare-card` matches those and returns before this render has laid
+    // anything out, which is how a zero-width page comes to be measured.
+    for (let i = 0; i < 100; i++) {
+      const ready = await ev(`(() => {
+        const view = document.getElementById('view-categories');
+        const first = view && !view.hidden && view.querySelector('.compare-card');
+        return !!first && first.getBoundingClientRect().width > 0;
+      })()`).catch(() => 0);
+      if (ready) break;
+      await sleep(200);
+    }
+    await sleep(300);
+
+    const probe = await ev(LAYOUT_PROBE);
+    ck(`${vp.label}: the comparison does not scroll sideways`,
+      probe.pageScrollsSideways === false, JSON.stringify(probe.overflowing));
+    ck(`${vp.label}: nothing overflows the viewport on the comparison`,
+      probe.overflowing.length === 0, JSON.stringify(probe.overflowing));
+
+    const compare = await ev(`(() => {
+      const de = document.documentElement;
+      const cards = [...document.querySelectorAll('#view-categories .compare-card')];
+      const svgs = [...document.querySelectorAll('#view-categories svg')];
+      return {
+        cards: cards.length,
+        narrowest: Math.min(...cards.map(c => Math.round(c.getBoundingClientRect().width))),
+        outside: cards.filter(c => {
+          const b = c.getBoundingClientRect();
+          return b.left < -1 || b.right > de.clientWidth + 1;
+        }).length,
+        charts: svgs.length,
+        // The silent downscale innerWidthOf exists to prevent: an SVG asked
+        // for more width than its card has is SCALED, not clipped, so the whole
+        // drawing shrinks with nothing overflowing to say so. A chart rendered
+        // narrower than the width it asked for is that, and nothing else.
+        downscaled: svgs.filter(s => {
+          const asked = Number(s.getAttribute('width'));
+          return asked - s.getBoundingClientRect().width > 1;
+        }).length,
+        // A member name is free text and one long enough to widen its track
+        // would push the grid past the viewport; .compare-member-name
+        // ellipsises for that reason, so it must not be the widest thing here.
+        namesClipped: [...document.querySelectorAll('.compare-member-name')]
+          .filter(n => n.getBoundingClientRect().right > de.clientWidth + 1).length,
+      };
+    })()`);
+
+    ck(`${vp.label}: every category is drawn as a card`,
+      compare.cards === 5, `${compare.cards} cards`);
+    ck(`${vp.label}: no card sits outside the viewport`,
+      compare.outside === 0, `${compare.outside} of ${compare.cards}`);
+    ck(`${vp.label}: the cards have real width`,
+      compare.narrowest > 200, `narrowest ${compare.narrowest}px`);
+    ck(`${vp.label}: every category with a strength drew its chart`,
+      compare.charts === 3, `${compare.charts} charts`);
+    ck(`${vp.label}: no chart was silently scaled down inside its card`,
+      compare.downscaled === 0, `${compare.downscaled} of ${compare.charts}`);
+    ck(`${vp.label}: no member name spills off the screen`,
+      compare.namesClipped === 0, String(compare.namesClipped));
+  }
+
+  // Cleaned up for the reason the grouped block above cleans up its own: the
+  // top-bar Compare button exists only for an account that HAS a category, so
+  // leaving these behind puts a fifth control in the top bar for the next
+  // standalone run — including this suite's own dashboard checks, which are
+  // the ones measuring whether that bar fits a 360px phone.
+  await ev(`(async()=>{
     const cats = await (await fetch('/api/categories')).json();
     for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
   })()`);

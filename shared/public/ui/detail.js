@@ -12,6 +12,7 @@ import {
 } from '/shared/charts.js';
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
+import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 import {
   card, cardInnerWidth, focusKeyOf, habitIcon, restoreFocus, segmented,
   subheading, windowedChart,
@@ -366,6 +367,13 @@ function render(stats, entries) {
   // pointing at a habit the server refused would survive a reload as a link
   // that goes nowhere.
   routes.go({ view: 'habit', id: habit.id });
+  // The top bar's Compare button goes away while a habit is open, and it is
+  // `syncEntry` that decides — `openHabitId` above is one of its two inputs,
+  // so this only has to say that the input moved. The rule is not cosmetic:
+  // it is what makes `dashboard → habit → categories` unreachable, which is
+  // what keeps `routes.js`'s single `ourEntry` boolean honest. See the note on
+  // `syncEntry` in `ui/categories.js` before changing either half.
+  syncCompareEntry();
   const host = views.showDetail();
 
   // Captured before the rebuild below destroys whatever had it. The day strip

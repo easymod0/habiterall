@@ -404,6 +404,61 @@ grid fills sequentially from there. What it does need is the labels, and
 Home/End, which jumped to `getDay() === 0` and so walked off the top of a
 Monday-start grid.
 
+**A CATEGORY has no score of its own, and `computeCategoryStats` aggregates
+HABITS rather than entries.** The decay above carries a `sqrt(frequency)` term,
+and that term is the whole reason a 3×/week habit's number is comparable with a
+daily one's — a category has as many frequencies as it has members, plus a mix
+of boolean/numerical and at_least/at_most, so there is no single frequency
+`onPaceSeries` could be handed for one. What is reported is the mean of the
+members' own strengths, **equal weight per habit**: never per entry, which lets
+a daily member drown a weekly one, and never re-derived from raw entries, which
+would be a second answer to a question `computeStats` already answers. The mean
+never travels alone either — `members` is the n and `best`/`worst` are the
+spread, on the same payload, because a mean over an unstated number of habits
+is a figure its reader cannot check.
+
+**Each member is scored over `[start - SCORE_WARMUP_DAYS, end]` and sliced back
+to `[start, end]`.** `computeScores` starts its EWMA at 0 on the first day of
+the range it is handed, and `ui/detail.js` sends **no `start`** to
+`/habits/:id/stats` — so a habit's own page is always converged from its first
+entry, while a comparison starting cold at `start` reports that same habit
+weaker. Two surfaces disagreeing about one habit is indistinguishable from one
+of them being broken. `SCORE_WARMUP_DAYS` is 400, the number both editions'
+`/overview` already spends on the same problem, and it is exported from
+`stats.js` and imported by both routes rather than spelled once per edition.
+What makes it easy to lose again: a year of window swamps the warm-up, so
+dropping it moves nothing on the DEFAULT request and only an explicitly short
+`start` can falsify it — measured in `docs/decisions/categories.md`, and the
+reason the suite's window is 20 days rather than the route's own year.
+
+**A member that has never been logged has no strength, which is not a strength
+of zero** — the same claim `recovery.rate === null` already makes, and the same
+refusal to average it into a number. It is counted in `members` and in
+`unloggedExcluded` and left out of `mean`, `best`, `worst` and every bucket of
+`series` until its first entry lands, so adding a habit to a category raises two
+counts and moves no figure downward; a bare mean would report that your health
+got worse on the day you decided to do more about it. That landing rule is asked
+once and used by all four, which is what makes `series.at(-1).value === mean`
+hold unconditionally — the same members, the same day, the same arithmetic —
+because a chart whose last point disagrees with the number printed over it reads
+as a bug whichever of the two is right. "Never logged" is not "nothing in the
+entry slice": a route fetches a bounded window, so the LIFETIME first-entry date
+is supplied per member, and an abandoned habit keeps its genuine near-zero
+strength in the mean instead of being excused from it.
+
+**`MAX_COMPARE_DAYS` is 1830 and is deliberately not `MAX_RANGE_DAYS`.** That
+ceiling bounds a route walking ONE habit; a comparison walks every habit the
+account has, so the same span costs the habit count times as much — at 50
+habits, `MAX_RANGE_DAYS` is ~385,000 synchronous day-steps before the warm-up is
+added, the order of the year-0100 entry the root `CLAUDE.md` records blocking
+the event loop for 32 seconds. `COMPARE_WINDOW_DAYS` is what an absent `start`
+opens, 365 and never the ceiling, because the ORDINARY request must not be the
+worst case the route can be asked for — the shape `/overview` already has, where
+`days` defaults to 30 against a cap of 365. Both live here beside
+`SCORE_WARMUP_DAYS` and are imported by both editions: a ceiling that drifted
+would have one edition refuse a URL the other served, and a default that drifted
+would have them answer one `start`-less URL with different bucket counts.
+
 ## Awards
 
 **An award is a READING of the stats response, computed on the SERVER because the

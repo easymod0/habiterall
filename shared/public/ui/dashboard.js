@@ -32,6 +32,7 @@ import { SKIP } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
 import { GRID_DAYS, gridColumns } from '/shared/ui/window.js';
 import { open as openHabit } from '/shared/ui/detail.js';
+import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -209,6 +210,14 @@ function visibleHabits() {
 
 export function paint() {
   state.openHabitId = null;
+  // ...and neither is the comparison, which this paint is about to cover. Set
+  // beside `openHabitId` because the two answer one question between them —
+  // see the note on the field in `ui/store.js`.
+  state.openCategories = false;
+  // The top-bar entry point to that comparison, which `ui/categories.js`
+  // owns: this is the one place that runs after `state.categories` has been
+  // refreshed, and every category mutation ends in a 'reload' that reaches it.
+  syncCompareEntry(state.categories.length > 0);
   // The URL follows the view. Cheap to call on every repaint — and this is
   // called on every check-off — because `go` does nothing when the address bar
   // already says this.
@@ -705,6 +714,10 @@ export function init() {
 
   // The dashboard repaints from what it already has; only a 'reload' goes back
   // to the server. Both are ignored while the detail view is the one showing.
-  on('change', () => { if (state.openHabitId == null) paint(); });
+  // "The dashboard is what is showing" is two questions now, not one: the
+  // comparison view also runs with no habit open, and painting over it would
+  // navigate away from a page nobody had left — the same reasoning the
+  // `openHabitId` half already carries.
+  on('change', () => { if (state.openHabitId == null && !state.openCategories) paint(); });
   on('reload', () => { load().catch((e) => toast(e.message)); });
 }

@@ -149,6 +149,62 @@
  */
 
 /**
+ * A category's strongest or weakest member, named rather than linked: the
+ * comparison view links to no habit, because `ui/routes.js` tracks `ourEntry`
+ * as a single boolean and `go(LIST)` unwinds by `history.back()`, which assumes
+ * the entry underneath a habit is the dashboard.
+ * @typedef {object} CategoryMember
+ * @property {number} id
+ * @property {string} name
+ * @property {number} score            that member's strength at `end`, 0..1
+ */
+
+/**
+ * One bucket of a category's aggregate strength, on the axis shared by every
+ * category in the same response.
+ * @typedef {object} CategorySeriesPoint
+ * @property {string} bucket           as `HistoryBucket.bucket` spells it
+ * @property {number|null} value       mean strength of the members that had
+ *   landed by this bucket; null when none had
+ * @property {number} members          how many members that mean is over — an
+ *   absent member is never counted as 0
+ */
+
+/**
+ * One row of a category comparison. `id: null` is Uncategorised, which is
+ * always present and always last and carries no name or colour of its own —
+ * naming it belongs to the view, as it already does on the grouped dashboard.
+ * @typedef {object} CategorySection
+ * @property {number|null} id
+ * @property {string|null} name
+ * @property {string|null} color
+ * @property {number} members          habits in this category, archived aside
+ * @property {number} unloggedExcluded members that have NEVER been logged,
+ *   which have no strength rather than a strength of zero: counted here instead
+ *   of averaged in, so adding a habit never moves a figure downward. Not
+ *   "nothing in the fetched slice" — an abandoned habit has a real strength
+ *   near zero and is in the mean. See `computeCategoryStats`
+ * @property {number|null} mean        equal weight per habit, at `end`, over
+ *   the members that have landed; null when none have, never 0
+ * @property {CategoryMember|null} best
+ * @property {CategoryMember|null} worst
+ * @property {CategorySeriesPoint[]} series always ends at `mean`
+ * @property {number|null} recoveryRate mean of the members whose rate is a
+ *   number; null when no member has one
+ * @property {number} recoveryExcluded members whose rate was null — no CLOSED
+ *   lapse in the window, whether because nothing was ever missed, nothing was
+ *   ever logged, or the only lapse is still open. Not the same claim as 100%
+ */
+
+/**
+ * Which of an account's categories is holding up, over one window.
+ * @typedef {object} CategoryStats
+ * @property {string[]} buckets        the axis every `series` is drawn on
+ * @property {number} archivedExcluded archived habits left out of every figure
+ * @property {CategorySection[]} categories
+ */
+
+/**
  * One month the stats window entirely contains, and how much of it was
  * ANSWERED — a row of any kind, including a skip and a stated lapse. `days` is
  * always the length of the month; see `computeCoverage` for why only contained

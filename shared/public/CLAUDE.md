@@ -485,6 +485,31 @@ The Android WebView and a browser then disagree on purpose; see
 `android-native/CLAUDE.md`, whose back-stack rules depend on exactly what
 `app.js` writes to history during boot.
 
+**`#/categories` is the second fragment route, and the app is exactly one
+fragment entry deep at all times.** `ui/routes.js` keeps `ourEntry` as a single
+boolean and `go(LIST)` unwinds with one `history.back()`, so neither can
+describe a stack two of ours deep. Nothing in `routes.js` enforces that; two
+rules in `ui/categories.js` do, and they are why the single boolean is still
+honest. **The comparison links to no habit** — `best` and `worst` are named as
+text and neither is an `<a>`, because dashboard → categories → habit would be
+two entries of ours and Back from that habit lands on `#/categories` with the
+dashboard painted underneath it. And **its top-bar button is hidden whenever a
+habit is open** (`syncEntry`, which reads `state.openHabitId`), which closes the
+same hole from the other side: no habit can sit UNDER the comparison either. One
+invariant, two constraints — weakening either means teaching `routes.js` a real
+stack first, and neither is a tidiness rule.
+
+**And `go()` must not be made to REPLACE for this route.** It looks like the
+one-line answer to the same problem and it is not: on Android a same-document
+open counts an entry in `WebBackStack.floorAfterShow`, so replacing leaves
+`currentIndex` AT the floor and the next system Back closes the screen out from
+under the user rather than reaching the dashboard.
+`android-native/CLAUDE.md` requires all three back-stack rules re-read together
+and checked on an emulator whenever `go()` changes, and records that every wrong
+version still passes `WebBackStackTest`. `routecheck.mjs` pins the push at
+exactly one entry and Back returning to the dashboard, which is the browser half
+of it only.
+
 ## Boot and auth
 
 **Boot has to be able to fail visibly.** Everything `start()` does before the

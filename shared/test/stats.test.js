@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 const {
   computeStreaks, currentStreak, bestStreak, computeHistory,
   computeWeekdays, computeFrequency, computeScores, computeStats, summaryStats,
+  computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, MAX_RANGE_DAYS,
 } = await import('../src/stats.js');
 
@@ -1184,4 +1185,404 @@ test('an explicit start after end collapses the window to [end, end], not an emp
   const entries = [{ date: '2026-08-18', value: YES }];
   const stats = computeStats(boolHabit, entries, { start: '2026-08-20', end: '2026-08-18' });
   assert.equal(stats.totalCompleted, 1);
+});
+
+/* ---------- comparing categories ---------- */
+
+const CAT_START = '2026-06-01';
+const CAT_END = '2026-06-30';
+const CAT_WINDOW = { start: CAT_START, end: CAT_END };
+// Where every fixture's history begins: comfortably inside the 400-day warm-up
+// and five months before the window, so a comparison that starts its EWMA cold
+// at CAT_START reports a different number from the habit's own page.
+const CAT_HISTORY = '2026-01-01';
+
+const dowOf = (iso) => new Date(iso + 'T12:00:00').getDay();
+const rowsOn = (from, to, value, pred = () => true) =>
+  dateRange(from, to).filter(pred).map((d) => ({ date: d, value, status: '' }));
+const entryMapOf = (entries) =>
+  new Map(entries.map((e) => [e.date, { value: e.value, status: e.status ?? '' }]));
+
+// The three shapes whose scores are arrived at differently, each set off its
+// defaults on purpose: a daily boolean, a 3x/week numerical, and a limit.
+const readHabit = { ...boolHabit, id: 11, name: 'Read', category_id: 1 };
+const gymHabit = {
+  ...numHabit, id: 12, name: 'Gym', unit: 'sets', target_value: 5,
+  freq_numerator: 3, freq_denominator: 7, category_id: 1,
+};
+const smokeHabit = { ...atMostHabit, id: 13, name: 'Smoke', category_id: 1 };
+
+const readRows = rowsOn(CAT_HISTORY, CAT_END, YES);
+const gymRows = rowsOn(CAT_HISTORY, CAT_END, 5, (d) => [1, 3, 5].includes(dowOf(d)));
+const smokeRows = rowsOn(CAT_HISTORY, CAT_END, 2);
+
+const CATS = [
+  { id: 1, name: 'Health', color: '#2e7d32', position: 0 },
+  { id: 2, name: 'Admin', color: '#6a1b9a', position: 1 },
+];
+
+test('SCORE_WARMUP_DAYS is 400, the number /overview already spends', () => {
+  // The literal, not the imported name: both editions' SUMMARY_WINDOW_DAYS is
+  // 400 for the same reason, and a warm-up that quietly widened here would
+  // change every figure on the comparison and nothing else in the suite.
+  assert.equal(SCORE_WARMUP_DAYS, 400);
+});
+
+test('a category\'s mean is the mean of its members\' own strengths, warmed up the way their own pages are', () => {
+  // Decision 2 of the brief, and the whole reason the warm-up exists.
+  // `ui/detail.js` sends no `start` to /habits/:id/stats, so a habit's own page
+  // shows a score converged from its first entry. A comparison starting cold at
+  // CAT_START reports every one of these habits weaker than its own page does,
+  // and two surfaces disagreeing about the same habit is indistinguishable
+  // from one of them being broken.
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: gymHabit, entries: gymRows },
+    { habit: smokeHabit, entries: smokeRows },
+  ];
+  const own = members.map((m) => computeStats(m.habit, m.entries, { end: CAT_END }).score);
+  const expected = own.reduce((a, b) => a + b, 0) / own.length;
+
+  // The fixture separates only if the habits are actually converged: a cold
+  // start would put the daily members at ~0.80 and the 3x/week one at ~0.65.
+  assert.ok(own.every((s) => s > 0.99), `members are not converged: ${own.join(', ')}`);
+
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+
+  // Not zero tolerance, and the reason is a real property rather than
+  // floating-point slack: `onPaceSeries`/`computeScores` pro-rate the
+  // requirement over the first `den - 1` days, so starting the 3x/week member
+  // 400 days earlier re-judges those days against a full week's requirement
+  // (shared/CLAUDE.md says so). That residue decays by alpha^n and is ~2e-3
+  // here; the cold-start mutation this test exists for moves the mean by ~0.25.
+  assert.ok(Math.abs(health.mean - expected) < 5e-3,
+    `mean ${health.mean} should track the members' own pages (${expected})`);
+  assert.ok(health.mean > 0.99, `a category of three converged habits read ${health.mean}`);
+
+  // And exactly, for a category whose only member is daily — `num >= den`, so
+  // there is no leniency window for the warm-up to re-judge and the two windows
+  // must agree to the last bit.
+  const solo = computeCategoryStats(CATS, [{ habit: readHabit, entries: readRows }],
+    CAT_WINDOW).categories[0];
+  assert.ok(Math.abs(solo.mean - own[0]) < 1e-12,
+    `a daily member's category mean ${solo.mean} must equal its own page's ${own[0]}`);
+});
+
+test('the mean is equal weight per HABIT, never per entry', () => {
+  // A daily habit logged every day carries seven times the rows of a 3x/week
+  // one, so weighting by entries lets it drown its category-mate — the daily
+  // member here is near 1.0 and the weekly one is held at a third of its
+  // target, and an entry-weighted mean reads 0.92 where an equal-weighted one
+  // reads 0.67.
+  const mondaysOnly = rowsOn(CAT_HISTORY, CAT_END, 5, (d) => dowOf(d) === 1);
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: gymHabit, entries: mondaysOnly },
+  ];
+  assert.ok(readRows.length > 6 * mondaysOnly.length,
+    `the fixture must be lopsided in ENTRIES: ${readRows.length} vs ${mondaysOnly.length}`);
+
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+
+  // best/worst are these two members' own scores, so this states the rule
+  // without restating the arithmetic: the mean of a two-member category is the
+  // midpoint of its spread, whatever the two habits' entry counts are.
+  assert.ok(health.best.score - health.worst.score > 0.5,
+    `the fixture must be lopsided in STRENGTH: ${health.best.score} vs ${health.worst.score}`);
+  assert.ok(Math.abs(health.mean - (health.best.score + health.worst.score) / 2) < 1e-12,
+    `mean ${health.mean} is not the midpoint of ${health.worst.score}..${health.best.score}`);
+  assert.ok(health.mean < 0.7,
+    `an entry-weighted mean reads ~0.92 here; this read ${health.mean}`);
+});
+
+test('a member joins the series when its first entry lands, and is never counted as 0 before', () => {
+  // A habit added mid-window must read as a line STARTING, not as a category
+  // that was doing half as well for every bucket before it existed.
+  const joinerRows = rowsOn('2026-06-16', CAT_END, YES);
+  const joiner = { ...boolHabit, id: 14, name: 'Stretch', category_id: 1 };
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: joiner, entries: joinerRows },
+  ];
+  // The incumbent's own daily series, derived independently of the aggregation.
+  const ownScores = new Map(
+    computeStats(readHabit, readRows, { end: CAT_END }).scores.map((p) => [p.date, p.score])
+  );
+
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+  const at = (bucket) => health.series.find((s) => s.bucket === bucket);
+
+  assert.equal(health.series.length, 30);
+  assert.equal(at('2026-06-01').members, 1, 'only one habit existed on the 1st');
+  assert.ok(Math.abs(at('2026-06-01').value - ownScores.get('2026-06-01')) < 1e-12,
+    `the 1st read ${at('2026-06-01').value}, not the one member's own ${ownScores.get('2026-06-01')}`);
+  assert.equal(at('2026-06-15').members, 1, 'the day before the joiner\'s first entry');
+  assert.equal(at('2026-06-16').members, 2, 'the day it lands');
+  assert.equal(at(CAT_END).members, 2);
+
+  // The last bucket reads the last day the window holds, which is what keeps
+  // the chart's final point and the headline `mean` from disagreeing.
+  assert.ok(Math.abs(at(CAT_END).value - health.mean) < 1e-12,
+    `the final bucket ${at(CAT_END).value} disagrees with the mean ${health.mean}`);
+});
+
+test('a member that has never missed is excluded from recoveryRate, and counted', () => {
+  // `rate === null` means nothing has ever been missed, which is a different
+  // claim from 100%: averaging it in as either number invents a reading.
+  const lapsed = ['2026-06-05', '2026-06-10', '2026-06-15', '2026-06-16', '2026-06-17'];
+  const lapsedRows = rowsOn(CAT_HISTORY, CAT_END, YES, (d) => !lapsed.includes(d));
+  const lapser = { ...boolHabit, id: 15, name: 'Floss', category_id: 1 };
+  const spotless = { ...boolHabit, id: 16, name: 'Vitamins', category_id: 2 };
+
+  // The fixture, pinned through the same pair the aggregation uses: three
+  // CLOSED lapses of which two lasted a single day.
+  const own = computeRecovery(
+    computeMissRuns(lapser, entryMapOf(lapsedRows), CAT_START, CAT_END), CAT_END
+  );
+  assert.equal(own.lapses, 3);
+  assert.equal(own.rate, 2 / 3);
+
+  const result = computeCategoryStats(CATS, [
+    { habit: lapser, entries: lapsedRows },
+    { habit: { ...spotless, category_id: 1 }, entries: readRows },
+    { habit: spotless, entries: readRows },
+  ], CAT_WINDOW);
+
+  // One member with a rate, one without: the answer is the first member's own
+  // rate. Averaging the null as 0 reads 1/3 here.
+  assert.equal(result.categories[0].members, 2);
+  assert.equal(result.categories[0].recoveryRate, 2 / 3);
+  assert.equal(result.categories[0].recoveryExcluded, 1);
+
+  // And where every member has never missed, the category says so rather than
+  // reporting a recovery rate of 0.
+  assert.equal(result.categories[1].members, 1);
+  assert.equal(result.categories[1].recoveryRate, null);
+  assert.equal(result.categories[1].recoveryExcluded, 1);
+});
+
+test('a category of one is its own best and worst member', () => {
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: { ...gymHabit, category_id: 2 }, entries: gymRows },
+    { habit: { ...smokeHabit, category_id: 2 }, entries: rowsOn('2026-06-20', CAT_END, 9) },
+  ], CAT_WINDOW);
+
+  const [health, admin] = result.categories;
+  assert.equal(health.members, 1);
+  assert.deepEqual(health.best, health.worst,
+    'a category of one has the same habit at both ends of its spread');
+  assert.equal(health.best.id, 11);
+  assert.equal(health.best.name, 'Read');
+  assert.equal(health.best.score, health.mean);
+
+  // And with two, the ends are the two ends — a reducer that answers the first
+  // member for both, or skips one, fails here as well as above.
+  assert.equal(admin.members, 2);
+  assert.equal(admin.best.id, 12, 'the kept 3x/week habit is the stronger');
+  assert.equal(admin.worst.id, 13, 'the limit blown for ten days is the weaker');
+  assert.ok(admin.best.score > admin.worst.score);
+});
+
+test('Uncategorised is present and last even with no members, and so is an empty category', () => {
+  // Uncategorised is a state a habit is in, never a category — the same
+  // discipline the four day states get — so it is drawn whether or not anything
+  // is in it, exactly as the grouped dashboard draws its trailing section.
+  // An empty NAMED category is present for the neighbouring reason: sections
+  // are not collapsed away.
+  const result = computeCategoryStats(CATS,
+    [{ habit: readHabit, entries: readRows }], CAT_WINDOW);
+
+  assert.equal(result.categories.length, 3);
+  assert.deepEqual(result.categories.map((c) => c.id), [1, 2, null]);
+
+  const empty = result.categories[1];
+  assert.equal(empty.name, 'Admin');
+  assert.equal(empty.members, 0);
+  assert.equal(empty.mean, null, 'an empty category has measured nothing, and is not 0');
+  assert.equal(empty.best, null);
+  assert.equal(empty.worst, null);
+  assert.equal(empty.recoveryRate, null);
+  assert.equal(empty.recoveryExcluded, 0);
+  assert.equal(empty.unloggedExcluded, 0);
+
+  const none = result.categories[2];
+  assert.equal(none.name, null, 'naming Uncategorised is the view\'s job, as on the dashboard');
+  assert.equal(none.color, null);
+  assert.equal(none.members, 0);
+  assert.equal(none.mean, null);
+  // The axis is still shared, so the view can draw an empty small multiple
+  // against the same buckets as its neighbours.
+  assert.deepEqual(none.series.map((s) => s.bucket), result.buckets);
+  assert.ok(none.series.every((s) => s.members === 0 && s.value === null));
+});
+
+test('a habit whose category was deleted since the fetch falls into Uncategorised', () => {
+  // The grouped dashboard makes the same fallback for the same reason: every
+  // habit is drawn exactly once, and a dangling id must not drop one.
+  const orphan = { ...readHabit, id: 17, name: 'Orphan', category_id: 99 };
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: orphan, entries: readRows },
+    { habit: { ...readHabit, id: 18, name: 'Nulled', category_id: null }, entries: readRows },
+  ], CAT_WINDOW);
+
+  assert.equal(result.categories[0].members, 1);
+  assert.equal(result.categories[2].id, null);
+  assert.equal(result.categories[2].members, 2);
+});
+
+test('archived members are excluded from every figure, and counted', () => {
+  const shelved = { ...readHabit, id: 19, name: 'Shelved', archived: 1 };
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: shelved, entries: readRows },
+  ], CAT_WINDOW);
+
+  assert.equal(result.archivedExcluded, 1);
+  assert.equal(result.categories[0].members, 1);
+  assert.equal(result.categories[0].best.id, 11);
+});
+
+test('the bucket axis is the one computeHistory draws, at the same granularity', () => {
+  // Shared so the comparison's small multiples line up with the history chart
+  // a habit's own page draws — including `weekStart`, which is why this asks
+  // for Sunday weeks rather than the default.
+  const opts = { ...CAT_WINDOW, granularity: 'week', weekStart: 'sunday' };
+  const result = computeCategoryStats(CATS, [{ habit: readHabit, entries: readRows }], opts);
+  const history = computeHistory(readHabit, entryMapOf(readRows),
+    CAT_START, CAT_END, 'week', 'sunday');
+
+  assert.deepEqual(result.buckets, history.map((b) => b.bucket));
+  assert.equal(result.buckets[0], '2026-05-31', 'the Sunday the window opens inside');
+  assert.deepEqual(result.categories[0].series.map((s) => s.bucket), result.buckets);
+});
+
+test('an inherited property is not a granularity here either', () => {
+  // `granularity` reaches this straight off a query string, and
+  // `BUCKETERS['valueOf']` is truthy — the same shape computeHistory pays for.
+  for (const key of ['valueOf', 'toString', 'hasOwnProperty', '__proto__', 'constructor']) {
+    const result = computeCategoryStats(CATS, [{ habit: readHabit, entries: readRows }],
+      { start: '2026-06-01', end: '2026-06-02', granularity: key });
+    assert.deepEqual(result.buckets, ['2026-06-01', '2026-06-02'],
+      `${key} should fall back to daily buckets`);
+  }
+});
+
+test('a habit with no entries yet is counted in `members` and excluded from the mean', () => {
+  // A habit added to a category has no strength yet, which is not a strength of
+  // zero — the same claim `recovery.rate === null` makes, and this file already
+  // refuses to average that one into a number. Averaging it in would report
+  // that the category got worse on the day you decided to do more about it.
+  const fresh = { ...boolHabit, id: 20, name: 'Fresh start', category_id: 1 };
+  const health = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: fresh, entries: [] },
+  ], CAT_WINDOW).categories[0];
+
+  // n still describes the category: the new habit IS in it.
+  assert.equal(health.members, 2);
+  // And the reason it is not in the mean is stated rather than hidden.
+  assert.equal(health.unloggedExcluded, 1);
+
+  const own = computeStats(readHabit, readRows, { end: CAT_END }).score;
+  assert.ok(Math.abs(health.mean - own) < 1e-12,
+    `mean ${health.mean} should be the one logged member's ${own}, not half of it`);
+  assert.equal(health.best.id, 11, 'the unlogged member is not the spread either');
+  assert.deepEqual(health.best, health.worst);
+});
+
+test('the final bucket and the headline mean are the same number, unconditionally', () => {
+  // The property the last-day bucket rule and the landing rule exist to hold
+  // together: a chart whose final point disagrees with the number printed over
+  // it reads as a bug whichever of the two is right. Asserted over a category
+  // holding a never-logged member, which is the shape that breaks it if `mean`
+  // is taken over all members while the series is not.
+  const fresh = { ...boolHabit, id: 20, name: 'Fresh start', category_id: 1 };
+  const opts = { ...CAT_WINDOW, granularity: 'week', weekStart: 'sunday' };
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: fresh, entries: [] },
+    { habit: { ...gymHabit, category_id: 2 }, entries: gymRows },
+  ], opts);
+
+  for (const cat of result.categories) {
+    const last = cat.series.at(-1);
+    assert.equal(last.value, cat.mean,
+      `category ${cat.id}: the last bucket says ${last.value} and the mean says ${cat.mean}`);
+    assert.equal(last.members, cat.members - cat.unloggedExcluded,
+      `category ${cat.id}: the last bucket is over a different set from the mean`);
+  }
+  // ...and the fixture is not passing by having nothing to compare: two of the
+  // three categories carry a real number, and one of them holds the unlogged
+  // member the property is at risk from.
+  assert.equal(result.categories[0].unloggedExcluded, 1);
+  assert.ok(result.categories[0].mean > 0.99);
+  assert.ok(result.categories[1].mean > 0.99);
+  assert.equal(result.categories[2].mean, null);
+});
+
+test('an ABANDONED habit is in the mean at its decayed score, not mistaken for a new one', () => {
+  // A route fetches entries from `start - SCORE_WARMUP_DAYS`, so a habit last
+  // logged two years ago — still active, never archived — has NOTHING in that
+  // slice. Deriving `firstEntry` from the slice calls it never logged, which
+  // excludes it from the mean (the category then reads healthier than it is)
+  // and describes it with a sentence that is false about a habit with years
+  // behind it. The caller supplies the lifetime date instead.
+  const abandoned = { ...boolHabit, id: 21, name: 'Guitar', category_id: 1 };
+  const health = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows, firstEntry: CAT_HISTORY },
+    { habit: abandoned, entries: [], firstEntry: '2023-01-01' },
+  ], CAT_WINDOW).categories[0];
+
+  assert.equal(health.members, 2);
+  assert.equal(health.unloggedExcluded, 0,
+    'a habit logged for years and then dropped has been logged');
+
+  // It lands in every bucket, at the strength it has actually decayed to.
+  assert.equal(health.series[0].members, 2);
+  assert.equal(health.series.at(-1).members, 2);
+  assert.equal(health.worst.id, 21);
+  assert.equal(health.worst.score, 0, 'two years untouched IS a strength of zero');
+
+  // And it drags the category down, because it really is dragging it down.
+  const own = computeStats(readHabit, readRows, { end: CAT_END }).score;
+  assert.ok(Math.abs(health.mean - own / 2) < 1e-12,
+    `mean ${health.mean} should be halved by the abandoned member, from ${own}`);
+  assert.equal(health.series.at(-1).value, health.mean);
+
+  // `recoveryExcluded` is a different count from `unloggedExcluded`, and this
+  // fixture separates them: 0 against 2. Both members have a null rate for the
+  // two reasons the JSDoc now names beside "never logged" — the kept habit has
+  // never missed, and the abandoned one's single lapse never closes, so neither
+  // has a CLOSED lapse to judge. Neither is excluded from the mean.
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(health.recoveryExcluded, 2);
+  assert.equal(health.recoveryRate, null);
+});
+
+test('firstEntry falls back to the entries when the caller omits it', () => {
+  // The function stays usable standalone — every other test in this section
+  // relies on it — and a caller holding a whole history need not restate it.
+  const joinerRows = rowsOn('2026-06-16', CAT_END, YES);
+  const joiner = { ...boolHabit, id: 22, name: 'Stretch', category_id: 1 };
+  const health = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: joiner, entries: joinerRows },
+  ], CAT_WINDOW).categories[0];
+
+  const at = (bucket) => health.series.find((s) => s.bucket === bucket);
+  assert.equal(at('2026-06-15').members, 1, 'derived from the earliest entry, not from nothing');
+  assert.equal(at('2026-06-16').members, 2);
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(health.members, 2);
+
+  // An explicit `null` is a caller saying there is no entry at all, which is
+  // NOT the same as omitting the key — so it must not fall back to the rows.
+  const stated = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: joiner, entries: joinerRows, firstEntry: null },
+  ], CAT_WINDOW).categories[0];
+  assert.equal(stated.unloggedExcluded, 1);
+  assert.equal(stated.series.at(-1).members, 1);
 });
