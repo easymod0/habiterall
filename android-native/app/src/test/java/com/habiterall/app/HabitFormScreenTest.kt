@@ -163,11 +163,33 @@ class HabitFormScreenTest {
         )
     }
 
+    /**
+     * Named for what it pins, which is NOT "the account has none": an empty
+     * list is equally a fetch that has not landed, and this screen cannot tell
+     * the two apart. What it can say is that there is nothing here to pick,
+     * and where picking anything would have to come from.
+     */
     @Test
-    fun `an account with no categories yet says where one comes from`() {
+    fun `with nothing to pick and no category set, the picker says where one comes from`() {
         show(categories = emptyList())
 
         compose.onNodeWithText("Categories are made in the web app.").assertExists()
+    }
+
+    /**
+     * The hint stands down for a habit that already carries a category, and
+     * the reason is the contradiction it would otherwise produce: an empty
+     * list plus a category id draws "Categories haven't loaded yet (#7)", and
+     * a line implying there are none to load directly beneath it says the
+     * opposite about the same state. The chip is the accurate one of the two,
+     * so it is the one that stays.
+     */
+    @Test
+    fun `the where-they-come-from hint does not sit under a not-loaded-yet chip`() {
+        show(existing = Habit(id = 9, name = "Water", categoryId = 7), categories = emptyList())
+
+        compose.onNodeWithText("Categories haven't loaded yet (#7)").assertExists()
+        compose.onAllNodesWithText("Categories are made in the web app.").assertCountEquals(0)
     }
 
     @Test

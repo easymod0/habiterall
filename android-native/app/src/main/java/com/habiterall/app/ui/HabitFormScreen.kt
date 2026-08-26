@@ -744,12 +744,19 @@ private fun CategoryPicker(categories: List<Category>, selectedId: Long?, onPick
             }
         }
         // Nothing else on this screen says where a category comes from — the
-        // picker is pick-only, on purpose (see the KDoc above) — so an account
-        // with none yet gets a line saying so, the same way the reminder
+        // picker is pick-only, on purpose (see the KDoc above) — so when there
+        // is nothing to pick from, a line says so, the same way the reminder
         // message field's supportingText explains an otherwise-silent control.
-        // Only drawn when there is nothing to pick from; a full list needs no
-        // such hint.
-        if (categories.isEmpty()) {
+        //
+        // `selectedId == null` is the second half and it is not decoration.
+        // An empty list does NOT prove the account has no categories — it is
+        // equally "the fetch has not landed", which is the whole distinction
+        // the chip above just went to the trouble of drawing. Without this
+        // clause the two are rendered together, and "Categories haven't loaded
+        // yet (#7)" sits directly above a line implying there are none to
+        // load. A habit already carrying a category is exactly the case where
+        // this hint has nothing useful to add, so it stands down for it.
+        if (categories.isEmpty() && selectedId == null) {
             Text(
                 "Categories are made in the web app.",
                 style = MaterialTheme.typography.bodySmall,

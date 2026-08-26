@@ -465,10 +465,11 @@ data class Overview(
     val habits: List<Habit>,
     // Defaults to empty rather than being required: `/habits` and an older
     // server do not carry it, and a missing list must still parse the rest
-    // of the response. `HabitSections.rows` draws that as one Uncategorised
-    // section holding every habit, categorised ones included — not an
-    // ungrouped list — the same answer `dashboard.js` gives an empty
-    // `state.categories`.
+    // of the response. What that then DRAWS depends on `groupByCategory`,
+    // which is off by default: ungrouped it is the ordinary flat list, and
+    // grouped it is one Uncategorised section holding every habit,
+    // categorised ones included — not an ungrouped list — which is the same
+    // answer `dashboard.js` gives an empty `state.categories`.
     val categories: List<Category> = emptyList(),
 )
 
