@@ -212,7 +212,7 @@ function render(data) {
   for (const { el, section } of cards) appendChart(el, section, chartWidth);
 }
 
-/** English plurals, for the three counts this view says out loud. */
+/** English plurals, for the counts this view says out loud. */
 const plural = (n, word) => (n === 1 ? word : `${word}s`);
 
 /** A whole-number percentage, the way every other strength in the app reads. */
@@ -265,11 +265,23 @@ function sectionCard(section) {
     // that says so is `unloggedExcluded`, so it is what the second sentence
     // reports in place of a figure nobody can be given.
     value.textContent = '—';
-    note.textContent = section.members === 0
-      ? 'No habits in this category yet.'
-      : `${section.members} ${plural(section.members, 'habit')}, `
+    if (section.members === 0) {
+      // ...and an EMPTY category is two situations as well. Archived habits are
+      // left out of every figure, so a category the user filled and later
+      // shelved arrives here with `members: 0` and is otherwise
+      // indistinguishable from one nobody has put anything in — and the card
+      // then states something false about it. The account-wide
+      // `data.archivedExcluded` in the header cannot answer for one section,
+      // which is why `CategorySection` carries its own count.
+      note.textContent = section.archivedExcluded
+        ? `${section.archivedExcluded} archived `
+          + `${plural(section.archivedExcluded, 'habit')}, nothing active to average.`
+        : 'No habits in this category yet.';
+    } else {
+      note.textContent = `${section.members} ${plural(section.members, 'habit')}, `
         + `${section.unloggedExcluded === 1 ? 'never logged' : 'none logged yet'}`
         + ' — no strength to average.';
+    }
   } else {
     value.textContent = pct(section.mean);
     note.textContent = [

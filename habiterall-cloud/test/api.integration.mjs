@@ -701,6 +701,71 @@ ck('...and the chart\'s last point is that same number, not a near-miss',
   warm?.series.at(-1)?.value === warm?.mean,
   JSON.stringify({ last: warm?.series.at(-1)?.value, mean: warm?.mean }));
 
+/* -- ...and it agrees about an AVOID habit, which is the shape it can FLATTER --
+ *
+ * The block above covers the at-least shape, and that shape cannot see half of
+ * this. The warm-up reaches back before the member existed, and on an at-least
+ * habit those phantom days credit 0 — so the two surfaces agree whether or not
+ * the range is clamped to the member's own first entry. On an at-most habit
+ * whose unlogged days count as KEPT (`at_most_unlogged: 'success'`, or the
+ * account's `atMostUnlogged`, which is every `show_as: 'avoid'` habit under that
+ * setting) an unlogged day is FULL credit, so an unclamped warm-up converges a
+ * limit created last week to ~1.0 while its own page reads under half that.
+ * That is every limit habit's opening state, which makes it the reading a user
+ * is most likely to meet first.
+ *
+ * Over the ordinary 30-day request rather than the short window above, and
+ * deliberately: the disagreement is about days before the habit existed, so it
+ * does not need a narrow window to show, and pinning it here says the DEFAULT
+ * question this route is asked answers honestly for this shape.
+ */
+
+const avoidCategory = await postCategory({ name: 'Compare Avoid', color: '#b45309' });
+const avoidHabit = await postHabit({
+  name: 'Compare Avoid habit', type: 'numerical', unit: 'cans',
+  target_type: 'at_most', target_value: 0,
+  at_most_unlogged: 'success', show_as: 'avoid',
+  category_id: avoidCategory.id,
+});
+// One slip, ten days back — `target + 1`, which is what `valueForState` writes
+// for a slip on an avoided habit. Every other day of its life is unlogged,
+// which is the state the setting counts as kept.
+await fetch(`${overviewBase}/api/habits/${avoidHabit.id}/entries/${addDays(STATS_END, -10)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 1 }),
+});
+
+const avoidOwnPage = await fetch(
+  `${overviewBase}/api/habits/${avoidHabit.id}/stats?end=${STATS_END}`
+).then((r) => r.json());
+const avoidOwnScore = avoidOwnPage.scores?.at(-1)?.score;
+
+ck('sanity: this habit\'s unlogged days really do count as kept',
+  avoidOwnPage.habit?.unlogged_is_success === true,
+  JSON.stringify(avoidOwnPage.habit?.unlogged_is_success));
+// The control that makes the assertion able to fail: a member already near 1.0
+// on its own page would agree with a converged comparison by accident.
+ck('sanity: and its own page has it well short of converged',
+  typeof avoidOwnScore === 'number' && avoidOwnScore > 0.1 && avoidOwnScore < 0.75,
+  JSON.stringify(avoidOwnScore));
+
+const withAvoid = await categoryStats();
+const avoidSection = withAvoid.categories.find((c) => c.id === avoidCategory.id);
+
+ck('sanity: the avoid habit is the one member of its category',
+  avoidSection?.members === 1 && avoidSection?.unloggedExcluded === 0,
+  JSON.stringify({ members: avoidSection?.members,
+                   unlogged: avoidSection?.unloggedExcluded }));
+ck('THE assertion: a limit created inside the window reads the same here as on ' +
+  'its own page — a warm-up not clamped to the member\'s first entry credits ' +
+  '400 days before it existed as kept and converges it to ~1.0',
+  avoidSection?.mean === avoidOwnScore && typeof avoidOwnScore === 'number',
+  JSON.stringify({ mean: avoidSection?.mean, ownScore: avoidOwnScore }));
+ck('...and the chart\'s last point is that same number here too',
+  avoidSection?.series.at(-1)?.value === avoidSection?.mean,
+  JSON.stringify({ last: avoidSection?.series.at(-1)?.value, mean: avoidSection?.mean }));
+
 /* -- the range bounds --
  *
  * The ceiling is this route's OWN, and it is 1830 days — five years — not the
@@ -771,7 +836,8 @@ ck('an absent start opens the window a year before end, not at the ceiling',
 // entry she has. Clear only what this block wrote.
 await withUser(alice, (db) => db.query(
   `DELETE FROM entries WHERE habit_id = ANY($1)`,
-  [[keptHabit.id, archivedHabit.id, abandonedHabit.id, neverHabit.id, warmupHabit.id]]
+  [[keptHabit.id, archivedHabit.id, abandonedHabit.id, neverHabit.id, warmupHabit.id,
+    avoidHabit.id]]
 ));
 
 /* ---------- and which day that device is ON ---------- */

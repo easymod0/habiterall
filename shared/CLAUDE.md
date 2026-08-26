@@ -417,19 +417,34 @@ never travels alone either — `members` is the n and `best`/`worst` are the
 spread, on the same payload, because a mean over an unstated number of habits
 is a figure its reader cannot check.
 
-**Each member is scored over `[start - SCORE_WARMUP_DAYS, end]` and sliced back
-to `[start, end]`.** `computeScores` starts its EWMA at 0 on the first day of
-the range it is handed, and `ui/detail.js` sends **no `start`** to
-`/habits/:id/stats` — so a habit's own page is always converged from its first
-entry, while a comparison starting cold at `start` reports that same habit
-weaker. Two surfaces disagreeing about one habit is indistinguishable from one
-of them being broken. `SCORE_WARMUP_DAYS` is 400, the number both editions'
-`/overview` already spends on the same problem, and it is exported from
-`stats.js` and imported by both routes rather than spelled once per edition.
-What makes it easy to lose again: a year of window swamps the warm-up, so
-dropping it moves nothing on the DEFAULT request and only an explicitly short
-`start` can falsify it — measured in `docs/decisions/categories.md`, and the
-reason the suite's window is 20 days rather than the route's own year.
+**Each member is scored over `[start - SCORE_WARMUP_DAYS, end]` — clamped
+forward to that member's own first entry — and sliced back to `[start, end]`.**
+`computeScores` starts its EWMA at 0 on the first day of the range it is handed,
+and `ui/detail.js` sends **no `start`** to `/habits/:id/stats` — so a habit's own
+page is always converged from its first entry, while a comparison starting cold
+at `start` reports that same habit weaker. Two surfaces disagreeing about one
+habit is indistinguishable from one of them being broken. `SCORE_WARMUP_DAYS` is
+400, the number both editions' `/overview` already spends on the same problem,
+and it is exported from `stats.js` and imported by both routes rather than
+spelled once per edition. What makes it easy to lose again: a year of window
+swamps the warm-up, so dropping it moves nothing on the DEFAULT request and only
+an explicitly short `start` can falsify it — measured in
+`docs/decisions/categories.md`, and the reason the suite's window is 20 days
+rather than the route's own year.
+
+**The CLAMP is the other half and is not a detail**, because a habit's own page
+opens at `start ?? firstEntry` and a warm-up reaching further back is scoring a
+member over a window it never had. On an at-least member those phantom days
+credit 0 and the two surfaces agree anyway, which is what made this survive a
+suite of them; under `at_most_unlogged: 'success'` — every `show_as: 'avoid'`
+habit when the account says so — an unlogged day is FULL credit, so 400 days
+before the habit existed converged a limit to **0.97** against an own page of
+**0.41**, for the first ~430 days of its life. The clamped date is normalised
+**after** the clamp for the reason `resolveWindow` gives at length, and
+`landedAt` reads that same normalised date rather than the raw `firstEntry`:
+`computeScores` normalises the start it is handed while the landing rule
+compares strings, so a member dated `2026-02-30` was admitted on `2026-03-01`
+with no score point behind it and put one NaN bucket through the series.
 
 **A member that has never been logged has no strength, which is not a strength
 of zero** — the same claim `recovery.rate === null` already makes, and the same

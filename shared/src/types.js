@@ -179,6 +179,10 @@
  * @property {string|null} name
  * @property {string|null} color
  * @property {number} members          habits in this category, archived aside
+ * @property {number} archivedExcluded archived habits in THIS category, left out
+ *   of `members` and every figure below it. Its own count rather than a share of
+ *   the payload's total, because a section whose habits are all archived and one
+ *   nobody has filled both arrive with `members: 0` and are different sentences
  * @property {number} unloggedExcluded members that have NEVER been logged,
  *   which have no strength rather than a strength of zero: counted here instead
  *   of averaged in, so adding a habit never moves a figure downward. Not
@@ -200,7 +204,8 @@
  * Which of an account's categories is holding up, over one window.
  * @typedef {object} CategoryStats
  * @property {string[]} buckets        the axis every `series` is drawn on
- * @property {number} archivedExcluded archived habits left out of every figure
+ * @property {number} archivedExcluded archived habits left out of every figure,
+ *   account-wide; each section carries its own count as well
  * @property {CategorySection[]} categories
  */
 

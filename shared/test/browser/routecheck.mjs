@@ -242,6 +242,58 @@ try {
     buttonBack.hidden === false && buttonBack.visible === true,
     JSON.stringify(buttonBack));
 
+  /* ---------- a habit reached from OUTSIDE the app closes the comparison ---------- */
+
+  // The two constraints above close every route the app itself offers into
+  // `dashboard -> categories -> habit`, and they cannot close a same-document
+  // FRAGMENT navigation made from outside it. The app ships one: `appLink` in
+  // `shared/src/notify.js` builds `#/habit/42` for the ntfy `click` and the
+  // Discord `embed.url`, and the address bar reaches it too. `location.hash` is
+  // that navigation exactly — no reload, so `routes.init`'s listener is what
+  // opens the habit, which is the path a notification tap takes.
+  //
+  // With `state.openCategories` left true by `detail.js`, Back from that habit
+  // fires `onRoute({view: 'categories'})`, `app.js`'s `!state.openCategories`
+  // guard is false, `categories.open()` is skipped — and the app sits with
+  // `#/categories` in the address bar and the habit still rendered.
+  await cmpEv(`document.getElementById('btn-compare').click()`);
+  await waitUntil(cmpEv, `(() => {
+    const view = document.getElementById('view-categories');
+    const first = view && !view.hidden && view.querySelector('.compare-card');
+    return !!first && first.getBoundingClientRect().width > 0;
+  })()`, { what: 'the comparison to render again' });
+
+  await cmpEv(`location.hash = '#/habit/${habit.id}'`);
+  await waitUntil(cmpEv,
+    `!document.getElementById('view-detail').hidden
+       && document.getElementById('view-categories').hidden
+       && !!document.querySelector('#view-detail h2')`,
+    { what: 'the habit the fragment names' });
+
+  // A settle rather than a poll, for the reason the two Back checks above use
+  // one: the wrong answer is "nothing moved at all", which has no predicate to
+  // wait on — a poll on the comparison could only ever time out.
+  await cmpEv(`history.back()`);
+  await sleep(1200);
+  const backToCompare = await cmpEv(`(() => ({
+    compare: !document.getElementById('view-categories').hidden,
+    detail: !document.getElementById('view-detail').hidden,
+    hash: location.hash,
+    cards: document.querySelectorAll('#view-categories .compare-card').length,
+  }))()`);
+  ck('Back from a habit opened by its fragment returns to the comparison, not to '
+     + 'the comparison\'s URL over the habit',
+    backToCompare.compare && !backToCompare.detail
+    && backToCompare.hash === '#/categories' && backToCompare.cards > 0,
+    JSON.stringify(backToCompare));
+
+  // ...and leave the tab on the dashboard, where the deep-link blocks below
+  // would otherwise inherit a comparison nobody asked them about.
+  await cmpEv(`history.back()`);
+  await waitUntil(cmpEv,
+    `!document.getElementById('view-list').hidden && location.hash === ''`,
+    { what: 'the dashboard after leaving the comparison' });
+
   /* ---------- a cold load of the fragment lands on the habit ---------- */
 
   // A tab of its own, with no history of its own. Reusing the one above would

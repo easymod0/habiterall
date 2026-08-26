@@ -1121,8 +1121,10 @@ export function summaryStats(habit, entries, { start, end, unlogged = UNLOGGED_D
  * to `/habits/:id/stats`, so a habit's strength there is always converged from
  * its first entry. Two surfaces disagreeing about the same habit is
  * indistinguishable from one of them being broken, so each member's series is
- * computed over `[start - SCORE_WARMUP_DAYS, end]` and sliced back to
- * `[start, end]` for the response.
+ * computed over `[start - SCORE_WARMUP_DAYS, end]` — clamped forward to that
+ * member's own first entry, because that is where its own page opens too — and
+ * sliced back to `[start, end]` for the response. The clamp is not a detail: see
+ * `memberWarm` in `computeCategoryStats` for the habit shape it exists for.
  *
  * 400 days, which is the number both editions' `/overview` already spends on
  * the same problem (`SUMMARY_WINDOW_DAYS` in each `api.js`). Declared here and
@@ -1249,7 +1251,11 @@ function extremeMember(rows, better) {
  * `archivedExcluded`, so the view can say what it left out. That is derived
  * from the members handed in, which is the only way a pure function can answer
  * it — a caller that filters them out in SQL will see 0 and have nothing to
- * report.
+ * report. It is reported TWICE, and the two answer different questions: the
+ * account-wide total on the payload, which the header reads, and a per-section
+ * count beside `members`, because one number cannot tell a category nobody has
+ * filled from one whose habits have all been shelved — both arrive with
+ * `members: 0`, and the view said the first about the second.
  *
  * @param {import('./types.js').Category[]} categories in the order to report
  *   them; Uncategorised is appended and is not one of these
@@ -1288,9 +1294,9 @@ export function computeCategoryStats(categories, members,
   }
 
   const active = [];
-  let archivedExcluded = 0;
+  const shelved = [];
   for (const member of members) {
-    if (member.habit.archived) archivedExcluded++;
+    if (member.habit.archived) shelved.push(member.habit);
     else active.push(member);
   }
 
@@ -1331,10 +1337,59 @@ export function computeCategoryStats(categories, members,
         ? entries.reduce((min, e) => (e.date < min ? e.date : min), entries[0].date)
         : null);
 
+    // **And the warm-up is clamped to that same date**, which is exactly what
+    // `resolveWindow` already does for a habit's own page: it opens at
+    // `start ?? firstEntry`, so scoring a member from 400 days before it existed
+    // compares it against a window it never had. For an at-least member those
+    // phantom days credit 0 and the two surfaces agree anyway; for an at-most
+    // member whose unlogged days count as kept — `at_most_unlogged: 'success'`,
+    // or the account's `atMostUnlogged`, which is every `show_as: 'avoid'` habit
+    // under that setting — an unlogged day is FULL credit, so the warm-up
+    // converged a new limit to ~0.97 where its own page read 0.41, for the first
+    // ~430 days of every avoid habit's life.
+    //
+    // The clamp leaves `scoreAt` without a point for any day before
+    // `memberWarm`, and the only thing that keeps `scoreAt.get(day)` from
+    // answering `undefined` — and putting NaN through every mean below — is that
+    // `landedAt` already refuses to read a member on a day before it landed. The
+    // two dates are now the same one, so that coupling is load bearing:
+    // weakening the landing rule means widening this range back.
+    let memberWarm = firstEntry && firstEntry > warmStart ? firstEntry : warmStart;
+
+    // **Normalised AFTER the clamp, never before**, which is `resolveWindow`'s
+    // own shape and is here for the same reason: `firstEntry` comes out of
+    // STORAGE and does not have to be a real day. `assertDate` refuses one on
+    // the way in, but a row predating that guard does not, and `computeScores`
+    // normalises the start it is handed (a walk from 2026-02-30 begins on
+    // 2026-03-02) while `landedAt` below selects by STRING comparison. The two
+    // then disagreed about the days in between: 2026-03-01 read as landed, with
+    // no score point behind it, which is `undefined` through `meanScoreAt` and
+    // one NaN bucket — serialised as `null` and dropped by `ui/categories.js`'s
+    // own filter, so the drawn line quietly lost a vertex. Measured: `mean`
+    // itself survived, because the last bucket is `end`, long past the gap.
+    //
+    // A phantom day never happened, so the member lands on the real day the walk
+    // reaches instead. `unloggedExcluded` is unmoved either way — the member has
+    // an entry, whatever that entry is dated.
+    //
+    // The ORDERING is the whole safety of it, exactly as it is in
+    // `resolveWindow`: `toISO` pads the month and the day and NOT the year, so
+    // normalising '0999-12-31' yields '999-12-31', which sorts ABOVE '2026-...'
+    // and walks straight past every bound in this function. Clamped first, the
+    // value being reformatted is at or after `warmStart` — itself derived from
+    // `end` — so it is already inside the window. A `firstEntry` OLDER than
+    // `warmStart` is never reformatted at all and does not need to be:
+    // `memberWarm` is then `warmStart`, a real day, and the member is admitted
+    // on every day of the window under either spelling.
+    if (memberWarm) {
+      const asDate = fromISO(memberWarm);
+      if (!Number.isNaN(asDate.getTime())) memberWarm = toISO(asDate);
+    }
+
     const scoreAt = new Map();
     let rate = null;
     if (dates.length) {
-      for (const point of computeScores(habit, entryMap, warmStart, end, unlogged)) {
+      for (const point of computeScores(habit, entryMap, memberWarm, end, unlogged)) {
         scoreAt.set(point.date, point.score);
       }
       rate = computeRecovery(
@@ -1346,7 +1401,13 @@ export function computeCategoryStats(categories, members,
       id: habit.id,
       name: habit.name,
       categoryId: habit.category_id,
-      firstEntry,
+      // The day this member LANDS on, which is `memberWarm` and not the raw
+      // `firstEntry`: it names the day `computeScores` above actually began its
+      // walk at, so the landing rule and `scoreAt` cannot disagree about which
+      // days have a point. `null` when the habit has never been logged at all —
+      // that is what keeps it out of every figure, and `memberWarm` is
+      // `warmStart` for such a member rather than anything about it.
+      landsOn: firstEntry === null ? null : memberWarm,
       scoreAt,
       score: dates.length ? scoreAt.get(dates[dates.length - 1]) : 0,
       rate,
@@ -1363,19 +1424,41 @@ export function computeCategoryStats(categories, members,
     (bucket || uncategorised).push(reading);
   }
 
+  // The archived members are partitioned the same way, by the same authority —
+  // `byCategory.has`, so a dangling `category_id` lands in Uncategorised here
+  // exactly as it does above rather than by a second rule that could disagree.
+  // The account-wide total is one number and cannot answer for a SECTION: a
+  // category whose members are all archived arrives with `members: 0` and is
+  // otherwise indistinguishable from one nobody has filled, so the card said
+  // "No habits in this category yet." about a category the user filled and
+  // later shelved.
+  const archivedIn = new Map();
+  let archivedUncategorised = 0;
+  for (const habit of shelved) {
+    const id = habit.category_id;
+    if (id != null && byCategory.has(id)) archivedIn.set(id, (archivedIn.get(id) ?? 0) + 1);
+    else archivedUncategorised++;
+  }
+
   // The landing rule, asked once and used by every figure that reads a
   // strength: the headline mean, the spread, and each bucket of the series.
   // `mean` and `series.at(-1).value` are therefore the same arithmetic over the
   // same members on the same day, which is what makes them equal rather than
   // nearly equal — see the note above about a chart's last point disagreeing
   // with the number printed over it.
+  //
+  // It reads `landsOn` rather than the raw `firstEntry`, and `meanScoreAt`
+  // beneath it is why: every member this admits must have a point in `scoreAt`,
+  // or an `undefined` goes through that sum as NaN. The two are the same date
+  // by construction now — see `memberWarm` above, which is where both come
+  // from.
   const lastDay = dates.length ? dates[dates.length - 1] : null;
   const landedAt = (rows, day) =>
-    day === null ? [] : rows.filter((r) => r.firstEntry !== null && r.firstEntry <= day);
+    day === null ? [] : rows.filter((r) => r.landsOn !== null && r.landsOn <= day);
   const meanScoreAt = (rows, day) =>
     rows.length ? rows.reduce((sum, r) => sum + r.scoreAt.get(day), 0) / rows.length : null;
 
-  const section = (id, name, color, rows) => {
+  const section = (id, name, color, rows, archived) => {
     const rates = rows.map((r) => r.rate).filter((r) => r !== null);
     const landed = landedAt(rows, lastDay);
     return {
@@ -1383,6 +1466,7 @@ export function computeCategoryStats(categories, members,
       name,
       color,
       members: rows.length,
+      archivedExcluded: archived,
       unloggedExcluded: rows.length - landed.length,
       mean: meanScoreAt(landed, lastDay),
       best: extremeMember(landed, (a, b) => a > b),
@@ -1401,10 +1485,11 @@ export function computeCategoryStats(categories, members,
 
   return {
     buckets,
-    archivedExcluded,
+    archivedExcluded: shelved.length,
     categories: [
-      ...categories.map((c) => section(c.id, c.name, c.color, byCategory.get(c.id))),
-      section(null, null, null, uncategorised),
+      ...categories.map((c) => section(c.id, c.name, c.color, byCategory.get(c.id),
+        archivedIn.get(c.id) ?? 0)),
+      section(null, null, null, uncategorised, archivedUncategorised),
     ],
   };
 }

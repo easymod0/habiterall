@@ -1268,6 +1268,106 @@ test('a category\'s mean is the mean of its members\' own strengths, warmed up t
     `a daily member's category mean ${solo.mean} must equal its own page's ${own[0]}`);
 });
 
+test('a member is warmed up from ITS first entry, so an at-most habit whose unlogged days count as kept is not converged by days before it existed', () => {
+  // The clamp on `memberWarm`, and the shape the warm-up is most dangerous for.
+  // Every other fixture in this section is at-least, or is `smokeHabit` with a
+  // row on every day of the window and `at_most_unlogged` left at its 'miss'
+  // default — none of which can see this, and all of them pass either way.
+  //
+  // A habit's own page opens at `start ?? firstEntry` (`resolveWindow`), so
+  // scoring a member from 400 days before it was created compares it against a
+  // window it never had. For an at-least member those phantom days credit 0 and
+  // the two surfaces agree anyway; under `at_most_unlogged: 'success'` an
+  // unlogged day is FULL credit, so they converge it upward. Measured against
+  // the unclamped code: 0.969536 here, against an own page of 0.41327 — which
+  // is every avoid/limit habit's opening state, for its first ~430 days.
+  const avoid = {
+    ...atMostHabit, id: 23, name: 'No soda', target_value: 0,
+    at_most_unlogged: 'success', show_as: 'avoid', category_id: 1,
+  };
+  // Created INSIDE the window — one slip, ten days before it closes — so there
+  // is nothing earlier for a warm-up to legitimately reach back for.
+  const slip = [{ date: addDays(CAT_END, -10), value: 1, status: '' }];
+
+  const own = computeStats(avoid, slip, { end: CAT_END }).score;
+  // The fixture separates only while the habit is a long way from converged: a
+  // member handed 400 days of full credit reads ~0.97 here, so a check that
+  // merely compared the two numbers could pass on a fixture that had climbed
+  // there honestly.
+  assert.ok(own > 0.2 && own < 0.6, `the fixture must sit mid-scale: ${own}`);
+
+  const health = computeCategoryStats(CATS, [{ habit: avoid, entries: slip }],
+    CAT_WINDOW).categories[0];
+
+  assert.ok(Math.abs(health.mean - own) < 1e-12,
+    `the comparison says ${health.mean} where the habit's own page says ${own}`);
+  assert.ok(health.mean < 0.6,
+    `an unclamped warm-up reads ~0.97 for this habit; this read ${health.mean}`);
+  // And the series is the same members on the same day, as it is everywhere
+  // else — a clamp that moved only the headline would leave the chart saying
+  // the other number.
+  assert.equal(health.series.at(-1).value, health.mean);
+
+  // The control, and it is what says this is about the SHAPE rather than about
+  // the fixture: the identical rows on an at-least habit agree with their own
+  // page whether or not the clamp is there, which is exactly why nothing in
+  // this suite caught it.
+  const atLeast = {
+    ...avoid, id: 24, name: 'Push-ups', target_type: 'at_least',
+    at_most_unlogged: 'default', show_as: 'amount',
+  };
+  const control = computeCategoryStats(CATS, [{ habit: atLeast, entries: slip }],
+    CAT_WINDOW).categories[0];
+  assert.ok(Math.abs(control.mean - computeStats(atLeast, slip, { end: CAT_END }).score) < 1e-12,
+    `the at-least control disagrees too, so the fixture is not isolating the shape: ${control.mean}`);
+});
+
+test('a member whose first entry is not a real calendar day lands on the day the walk actually reaches', () => {
+  // The clamp above is what put these two in contact, so this is its own
+  // defect. `firstEntry` comes out of STORAGE and does not have to be a real
+  // day — `assertDate` refuses one on the way in, but a row predating that
+  // guard, a direct insert or an import around it does not. `computeScores`
+  // normalises the start it is handed and begins its walk on 2026-03-02;
+  // `landedAt` selects by STRING comparison and admits 2026-03-01. That bucket
+  // then had a member and no score point behind it — an `undefined` summed into
+  // NaN, which serialises as `null` and is dropped by `ui/categories.js`'s
+  // `p.value !== null` filter, so the drawn line silently loses a vertex.
+  //
+  // `mean` itself survives, which is why this is small and why nothing else
+  // here can see it: the last bucket's day is `end`, long past the two-day gap.
+  const PHANTOM = '2026-02-30';
+  const opts = { start: '2026-02-25', end: '2026-03-31' };
+  const entries = [
+    { date: PHANTOM, value: YES, status: '' },
+    ...rowsOn('2026-03-02', opts.end, YES),
+  ];
+  const health = computeCategoryStats(CATS,
+    [{ habit: readHabit, entries, firstEntry: PHANTOM }], opts).categories[0];
+  const at = (bucket) => health.series.find((p) => p.bucket === bucket);
+
+  // The fixture is only about this while the window holds the gap.
+  assert.ok(at('2026-03-01'),
+    'the window must contain the day the phantom date normalises past');
+
+  const nan = health.series.filter((p) => Number.isNaN(p.value));
+  assert.equal(nan.length, 0,
+    `NaN buckets: ${nan.map((p) => `${p.bucket} over ${p.members}`).join(', ')}`);
+
+  // ...and it does not pass by excluding the member everywhere instead: it
+  // lands on the real day, and every bucket from there carries it.
+  assert.equal(at('2026-03-01').members, 0, 'a phantom day never happened');
+  assert.equal(at('2026-03-01').value, null);
+  assert.equal(at('2026-03-02').members, 1);
+  assert.equal(typeof at('2026-03-02').value, 'number');
+
+  // `unloggedExcluded` is unmoved — the member has an entry, whatever it is
+  // dated — and the headline figure is still a number over it.
+  assert.equal(health.members, 1);
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(typeof health.mean, 'number');
+  assert.equal(health.series.at(-1).value, health.mean);
+});
+
 test('the mean is equal weight per HABIT, never per entry', () => {
   // A daily habit logged every day carries seven times the rows of a 3x/week
   // one, so weighting by entries lets it drown its category-mate — the daily
@@ -1432,16 +1532,49 @@ test('a habit whose category was deleted since the fetch falls into Uncategorise
   assert.equal(result.categories[2].members, 2);
 });
 
-test('archived members are excluded from every figure, and counted', () => {
+test('archived members are excluded from every figure, and counted — per SECTION as well as account-wide', () => {
   const shelved = { ...readHabit, id: 19, name: 'Shelved', archived: 1 };
+  // A category whose ONLY member is archived. It arrives with `members: 0`,
+  // exactly as an empty one does, and one account-wide number cannot tell the
+  // view which of the two it is looking at — so the card said "No habits in
+  // this category yet." about a category the user filled and later shelved.
+  const allShelved = {
+    ...readHabit, id: 25, name: 'Old routine', category_id: 2, archived: 1,
+  };
+  // And a dangling `category_id` falls into Uncategorised here for the same
+  // reason a live member's does: one partition rule, asked twice, not two.
+  const orphanShelved = {
+    ...readHabit, id: 26, name: 'Loose end', category_id: 99, archived: 1,
+  };
   const result = computeCategoryStats(CATS, [
     { habit: readHabit, entries: readRows },
     { habit: shelved, entries: readRows },
+    { habit: allShelved, entries: readRows },
+    { habit: orphanShelved, entries: readRows },
   ], CAT_WINDOW);
 
-  assert.equal(result.archivedExcluded, 1);
+  assert.equal(result.archivedExcluded, 3, 'the account-wide total is still every one of them');
   assert.equal(result.categories[0].members, 1);
   assert.equal(result.categories[0].best.id, 11);
+
+  assert.equal(result.categories[0].archivedExcluded, 1);
+  assert.equal(result.categories[1].members, 0);
+  assert.equal(result.categories[1].archivedExcluded, 1,
+    'a category whose habits are all archived is not an empty category');
+  assert.equal(result.categories[2].id, null);
+  assert.equal(result.categories[2].archivedExcluded, 1);
+
+  // ...and a genuinely empty category still says 0, rather than inheriting the
+  // total — which is the reading that would make the two indistinguishable
+  // again from the other side.
+  const noneShelvedHere = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: shelved, entries: readRows },
+  ], CAT_WINDOW);
+  assert.equal(noneShelvedHere.archivedExcluded, 1);
+  assert.equal(noneShelvedHere.categories[1].members, 0);
+  assert.equal(noneShelvedHere.categories[1].archivedExcluded, 0);
+  assert.equal(noneShelvedHere.categories[2].archivedExcluded, 0);
 });
 
 test('the bucket axis is the one computeHistory draws, at the same granularity', () => {

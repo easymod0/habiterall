@@ -318,6 +318,38 @@ is the user who has to decide which. So each member's series is computed over
 spends on the same problem as `SUMMARY_WINDOW_DAYS`, declared once in
 `stats.js` and imported by both routes rather than spelled twice.
 
+**And it is clamped forward to the member's own first entry, which the first
+version was not.** The same sentence that justifies the warm-up justifies the
+bound on it: a habit's own page opens at `start ?? firstEntry`, so a comparison
+reaching back further is scoring the member over a window it never had. That
+costs nothing on an at-least habit — the phantom days before it existed credit
+0, so both surfaces agree either way, and every category fixture in
+`shared/test/stats.test.js` was one of those, which is why 91 tests passed with
+the clamp and without it. Under `at_most_unlogged: 'success'` an unlogged day is
+**full** credit, and that setting covers every `show_as: 'avoid'` habit when the
+account chooses it. Measured on this branch: an avoid habit with target 0 and a
+single slip logged ten days ago reads **0.41327** on its own page and
+**0.969536** on an unclamped comparison, while an at-least habit of the identical
+shape reads **0.030464** on both. Not an edge case — that is every limit habit's
+opening state, for its first ~430 days, on the screen that exists to compare it
+with others.
+
+The clamped date is normalised **after** the clamp, never before, for exactly
+the reason `resolveWindow` writes out at length: `toISO` pads the month and the
+day and not the year, so normalising `0999-12-31` yields `999-12-31`, which
+sorts above `2026-…` and walks past every bound. Clamped first, the value is
+already inside the window before anything reformats it. `landedAt` then reads
+that normalised date rather than the raw `firstEntry`, because the clamp is what
+put the two in contact and they did not agree: `computeScores` normalises the
+start it is handed (a walk from `2026-02-30` begins on `2026-03-02`) while the
+landing rule compares strings and admitted `2026-03-01`, a bucket with a member
+and no score point behind it. That summed an `undefined` into NaN, serialised as
+`null`, and `ui/categories.js`'s `p.value !== null` filter dropped the vertex —
+so the line lost a point and said nothing about it. `mean` survived, because the
+last bucket's day is `end`, long past the gap. A phantom day never happened, so
+the member lands on the real day the walk reaches instead; `unloggedExcluded` is
+unmoved, since the member has an entry whatever it is dated.
+
 What makes this worth writing down at length is how easy it is to remove
 without noticing. Measured on this branch, by setting `SCORE_WARMUP_DAYS` to 0
 and back: a daily habit logged on 82% of its days for three years scores
@@ -328,7 +360,7 @@ habit, on two screens a tap apart. Compared over a **365-day** window it reads
 whatever it began at. 365 days is what `COMPARE_WINDOW_DAYS` opens for a caller
 that names no `start`, which is to say the ordinary request cannot see this at
 all: only an explicitly short `start` falsifies it. That is why the suite's
-window is 30 days rather than the route's own year, and why a test written
+window is 20 days rather than the route's own year, and why a test written
 against the default would have passed against code with the warm-up deleted.
 
 **The comparison links to no habit, and that is two constraints rather than

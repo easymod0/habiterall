@@ -359,6 +359,82 @@ try {
   ck('the Compare button is hidden while a habit is open', whileOpen === true,
     `hidden=${whileOpen}`);
 
+  /* ---------- an all-archived category is not an empty one ---------- */
+
+  // `archivedExcluded` used to be one account-wide number, so a category whose
+  // only members are archived arrived with `members: 0` and was
+  // indistinguishable from 'Dormant' above — and the card then said "No habits
+  // in this category yet." about a category the user filled and later shelved.
+  // Made here rather than seeded: 'Reading' is a one-member category the checks
+  // above have already finished with, and archiving its member turns it into
+  // exactly that shape without moving any card's position or the section count
+  // every other assertion in this file (and `responsive.mjs`) indexes by.
+  // Navigated rather than `history.back()`: the habit above was opened from the
+  // COMPARISON's grid, so one Back lands on `#/categories` and the depth to
+  // unwind is a thing this block would have to know. Aiming at the app with no
+  // fragment reaches the dashboard whether the browser treats it as a reload or
+  // as a same-document hash change.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `location.hash === ''
+       && !document.getElementById('view-list').hidden
+       && document.getElementById('btn-compare').hidden === false
+       && [...document.querySelectorAll('#grid .habit-row .habit-name')]
+            .some(n => n.textContent.trim() === 'Meditate')`,
+    { what: 'the dashboard, with its Compare button' });
+
+  await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    const read = habits.find(h => h.name === 'Read');
+    // PUT REPLACES, so the whole fetched row goes back with the one field
+    // changed — see shared/CLAUDE.md.
+    await fetch('/api/habits/' + read.id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...read, archived: true }),
+    });
+  })()`);
+
+  await ev(`document.getElementById('btn-compare').click()`);
+  // The Reading card showing a DASH, not merely a card called Reading: the
+  // previous render's nodes survive in the container until `replaceChildren()`
+  // runs, and that card was showing a percentage — so this predicate is about
+  // THIS render and cannot be satisfied by what is already on screen.
+  await waitUntil(ev, `(() => {
+    const c = [...document.querySelectorAll('#view-categories .compare-card')]
+      .find(x => x.querySelector('.card-title').textContent.trim() === 'Reading');
+    return !!c && c.querySelector('.compare-mean').textContent === '—';
+  })()`, { what: 'the comparison, with Reading now empty of active habits' });
+
+  const shelvedCard = await ev(`(() => {
+    const cards = [...document.querySelectorAll('#view-categories .compare-card')];
+    const c = cards.find(x =>
+      x.querySelector('.card-title').textContent.trim() === 'Reading');
+    return {
+      mean: c.querySelector('.compare-mean').textContent,
+      notes: [...c.querySelectorAll('.compare-note')].map(n => n.textContent),
+      sub: document.querySelector('#view-categories .habit-sub').textContent,
+    };
+  })()`);
+  const shelvedSection = await ev(
+    `fetch('/api/categories/stats?granularity=week').then(r => r.json())`
+  ).then((d) => d.categories.find((c) => c.name === 'Reading'));
+
+  ck('a category whose habits are all archived reports its own archived count',
+    shelvedSection?.members === 0 && shelvedSection?.archivedExcluded === 1,
+    JSON.stringify({ members: shelvedSection?.members,
+                     archivedExcluded: shelvedSection?.archivedExcluded }));
+  ck('...and the card says THAT rather than claiming nobody has filled it',
+    shelvedCard.mean === '—'
+    && shelvedCard.notes.includes('1 archived habit, nothing active to average.')
+    && !shelvedCard.notes.includes('No habits in this category yet.'),
+    JSON.stringify(shelvedCard.notes));
+  // The account-wide total is still the header's, and it moved by one — so the
+  // per-section count is an addition rather than a rename of the same number.
+  ck('and the header still reports the account-wide total, now two',
+    shelvedCard.sub.includes('2 archived habits left out.'),
+    JSON.stringify(shelvedCard.sub));
+
   console.log(fails === 0 ? '\nALL COMPARISON CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;
