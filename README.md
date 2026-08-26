@@ -108,10 +108,10 @@ renaming, recolouring and deleting a category stay web actions), and draws the
 same sections. Deleting a category never deletes its habits: they fall back to
 uncategorised with every entry and note untouched. Each section header also
 carries its own mean strength and the spread between its weakest and strongest
-habit — the same figures, and the same rule for which habits count, as the
-comparison view below — and it steps aside while you are searching or showing
-archived habits, exactly as reordering does, rather than draw a mean over a
-different set of habits than the count sitting right beside it.
+habit — the same rule for which habits count as the comparison view below — and
+it steps aside while you are searching or showing archived habits, exactly as
+reordering does, rather than draw a mean over a different set of habits than
+the count sitting right beside it.
 
 **Compare your categories** — once you have one category, a **▤** button
 (*Compare categories*) appears in the header and opens a card per category: the

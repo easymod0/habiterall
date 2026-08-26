@@ -372,12 +372,29 @@ const pct = (v) => `${Math.round(v * 100)}%`;
  * `shared/src/stats.js`) — or `null`, when there is nothing to draw: while
  * filtering, while showing archived, or when the payload carried no matching
  * row at all. `null` draws exactly what this header always drew, count and
- * all.
+ * all — and so does `summary.members === 0`: `/overview` only fetches
+ * active habits, so a category every member of which is archived arrives
+ * with `members: 0` too, and is not told apart from an empty one.
  */
 function sectionHeader(name, color, count, categoryId, summary) {
   const header = document.createElement('div');
   header.className = 'category-section-header' + (categoryId == null ? ' uncategorised' : '');
   header.dataset.categoryId = categoryId == null ? '' : String(categoryId);
+  // A bare `<div>` maps to role="generic", which ARIA specifies as
+  // name-prohibited — confirmed against this app's own accessibility tree
+  // (CDP `Accessibility.getPartialAXTree`, see `categorycheck.mjs`): a
+  // generic element here is never reachable by a screen reader's "next
+  // heading" navigation and never reports a `level`, whatever its
+  // `aria-label` says. `role="heading"` is the honest fix: this element IS
+  // the heading of a section of the list, and it is set unconditionally —
+  // for every header, summarised or not — so the markup does not change
+  // shape depending on whether a summary happens to be present. Level 2:
+  // `#view-list` carries no page-title heading of its own (unlike
+  // `#view-categories`'s own `<h2>`), so this is the first heading reached
+  // inside it, directly under the app's own `<h1>` in index.html's topbar —
+  // level 3 would skip a level.
+  header.setAttribute('role', 'heading');
+  header.setAttribute('aria-level', '2');
   // Same custom property the category chips set (habit-dialog.js) — a border
   // has to stay legible whatever the category's own colour is, so it is
   // never a filled background.
@@ -400,25 +417,34 @@ function sectionHeader(name, color, count, categoryId, summary) {
   countEl.textContent = String(count);
   header.append(countEl);
 
-  if (summary) {
+  // `summary.members === 0` draws NO figure at all — not a different
+  // sentence. `/overview` without `?archived=true` fetches only active
+  // habits while `categories` is fetched whole, so a category the user
+  // filled and later archived every member of arrives here with
+  // `members: 0` too, indistinguishable from one nobody has put anything in
+  // — exactly the shape `ui/categories.js` (`sectionCard`, ~line 268-279)
+  // already refuses to say "No habits in this category yet." about. The
+  // visible `0` beside the name already says everything `/overview` knows;
+  // `#/categories` is the surface with the count to explain the rest.
+  if (summary && summary.members > 0) {
     const figure = document.createElement('span');
     figure.className = 'category-section-figure';
 
     const meanEl = document.createElement('span');
     meanEl.className = 'category-section-mean';
 
-    // `title` and the sentence below both use the two never-logged sentences
+    // `title` and the sentence below both use the never-logged sentence
     // `ui/categories.js` already settled on (`sectionCard`, ~line 259-283) —
-    // an empty category has nobody to average, a category with members has
-    // members with no strength YET, which is not a strength of zero.
+    // a category with members has members with no strength YET, which is
+    // not a strength of zero. `summary.members === 1` reads more obviously
+    // than `summary.unloggedExcluded === 1` and is equivalent on this
+    // branch: `mean === null` implies `unloggedExcluded === members` here.
     let sentence;
     if (summary.mean === null) {
       meanEl.textContent = '—';
-      const reason = summary.members === 0
-        ? 'No habits in this category yet.'
-        : `${summary.members} ${plural(summary.members, 'habit')}, `
-          + `${summary.unloggedExcluded === 1 ? 'never logged' : 'none logged yet'}`
-          + ' — no strength to average.';
+      const reason = `${summary.members} ${plural(summary.members, 'habit')}, `
+        + `${summary.members === 1 ? 'never logged' : 'none logged yet'}`
+        + ' — no strength to average.';
       figure.title = reason;
       figure.append(meanEl);
       sentence = reason;
