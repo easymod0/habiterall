@@ -3,6 +3,7 @@ package com.habiterall.app
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.isSelected
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -253,6 +254,30 @@ class SettingsScreenTest {
         compose.onNodeWithContentDescription("Back").performClick()
         compose.waitForIdle()
         assertEquals(true, closedWith)
+    }
+
+    /**
+     * Toggling "Group by category" patches exactly that key.
+     *
+     * The switch is reached by `SwitchRow`'s own `contentDescription`, which
+     * is what names one of five otherwise identical switches — neither the
+     * `Row` nor the `Column` around it carries a semantics node, so the title
+     * `Text` is a sibling leaf rather than an ancestor and cannot label it.
+     *
+     * The KEY sent is the point of the test. `AppSettings.groupByCategory`
+     * being right does not make this call site right: a typo here —
+     * `groupByCategories`, say — draws the same switch, flips it under the
+     * thumb, and stores nothing, because `PUT /settings` drops an unknown key
+     * in silence with a 200 so an older server tolerates a newer client.
+     */
+    @Test
+    fun `toggling group by category patches exactly that key`() {
+        show()
+
+        compose.onNodeWithContentDescription("Group by category").assertIsOff().performClick()
+        compose.waitUntil { sent.isNotEmpty() }
+
+        assertEquals(listOf("groupByCategory=true"), sent)
     }
 
     /**

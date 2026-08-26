@@ -102,8 +102,11 @@ you on a fresh account. Turn on **Group by category** (⚙ → Dashboard, off by
 default) to draw one section per category, in the order you made them, with an
 always-present **Uncategorised** section last for every habit with no label —
 uncategorised is something the dashboard shows you, never a category you
-create or manage yourself. Deleting a category never deletes its habits: they
-fall back to uncategorised with every entry and note untouched.
+create or manage yourself. The setting governs the native list too: the
+Android app offers a picker on its own habit form (options only — creating,
+renaming, recolouring and deleting a category stay web actions), and draws the
+same sections. Deleting a category never deletes its habits: they fall back to
+uncategorised with every entry and note untouched.
 
 **Compare your categories** — once you have one category, a **▤** button
 (*Compare categories*) appears in the header and opens a card per category: the
@@ -1517,10 +1520,14 @@ reminder *times* live on the server and follow your account to a new phone.
 
 The list is native too — a row of days per habit, its streak beside the name,
 tappable squares back through a year, running whichever way your `dayOrder`
-setting says. It carries the same search described under
-[Features](#features), behind an icon in the top bar. Everything a web page does
-well — charts, the calendar, history editing — opens the server's own UI inside
-the app, so there is one implementation of the statistics rather than two.
+setting says. With **Group by category** on, it draws the same sections the
+dashboard does, one per category plus a trailing Uncategorised, and the habit
+form offers a category picker of its own — picking only, since creating,
+renaming, recolouring and deleting a category stay web actions. It carries the
+same search described under [Features](#features), behind an icon in the top
+bar. Everything a web page does well — charts, the calendar, history editing —
+opens the server's own UI inside the app, so there is one implementation of
+the statistics rather than two.
 
 Its light and dark are the **phone's**, not the account's: the native screens
 follow the system setting, so they change with whatever the device is doing at

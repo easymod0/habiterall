@@ -277,6 +277,78 @@ filtered one at a time. It is deliberately NOT the rule `parseHabit` applies to
 JSON body where a number is the only honest spelling, and here it arrives as
 text by construction.
 
+## Phase 2's Android half
+
+Issue #65 also asked for the native client to draw the grouped list and offer
+a category picker, landing after phase 3 and covering only the Android app —
+no route, schema or migration changed on either edition, and `shared/public`
+was untouched (the web grouping already shipped above). `android-native/CLAUDE.md`
+carries the operative rules; this is the reasoning behind the two calls that
+were made rather than the ones the issue text originally asked for.
+
+**Options come from `/overview`'s `categories`, not a new `GET /categories`
+call.** The issue text asked for the latter. Both editions' `/overview`
+already return the account's categories — `habiterall-personal/src/api.js`'s
+`categories: q.allCategories.all()`, and cloud's own `/overview` on both its
+early and its main return path — and the list screen (`MainActivity.kt`'s
+`HabitListScreen`) already makes that call to draw the grid. A second fetch
+just for the form would be free to disagree with what the list just drew from,
+for no benefit: the form only needs the same list, not a fresher one, and
+`Api.kt` gained no `categories()` method.
+
+**The picker picks only.** It offers the account's existing categories, read
+off `/overview`, plus an explicit "None" — never a way to create, rename,
+recolour or delete one. Those stay web actions, the same stance this client
+already takes toward habit icons: a rendering gap, not a data gap. Nothing
+here ports `foldCategoryName`, `LIMITS.categories`, the suggestion chips or the
+409 duplicate-name answer to Kotlin.
+
+**The picker inherits, and does not fix, the silent-clear hazard #251's web
+habit dialog shipped.** A habit whose `categoryId` names a category not in the
+list the form was handed — deleted since the last fetch, or the form opened
+before any fetch succeeded — must not draw "None" as selected, because saving
+without touching the row would then clear a category nobody chose to clear
+through `PUT /habits/:id`'s replace semantics. `CategoryPicker`
+(`ui/HabitFormScreen.kt`) draws that id as its own extra, disabled, selected
+chip instead, so losing a category takes an explicit tap on "None" or another
+chip. `selectedId == null` is the only condition that selects "None".
+
+**Grouping the `LazyColumn` turns a habit's index into something a habit count
+can no longer answer.** `HabitSections.rows` (new,
+`ui/HabitSections.kt`) is a pure partition — ungrouped it is
+`habits.map(ListRow::Entry)` and nothing else; grouped it interleaves a
+`ListRow.Header` per category, in the order `/overview` sent them, plus an
+always-present trailing Uncategorised header, with a habit whose category was
+deleted since the fetch falling into Uncategorised rather than being dropped.
+It mirrors `shared/public/ui/dashboard.js`'s grouped branch (`:315-330`) so the
+two clients draw the same sections from the same input, but it is explicitly
+not a sixth mirror: `HabitFilter`'s own KDoc gives the reason it reuses — a
+mirror exists so two clients agree about a value that reaches storage, and a
+partition that only decides where a habit is drawn reaches none. Once headers
+are items, though, `ScrollRestore` and the notification-focus effect in
+`ui/HabitList.kt` had to stop reading `visible`'s size and index and start
+reading `listRows`'s — the item count is no longer the habit count, and a
+habit's position in `visible` is no longer its position in what the
+`LazyColumn` holds. `android-native/CLAUDE.md` now carries this as the
+specific shape of the "four bugs lived one line below a correct pure function"
+lesson it names elsewhere.
+
+**Reorder does not disable while grouped, unlike the web.** `dashboard.js`
+disables dragging under `grouped` because its drag writes a flat id list that
+would then be read back as the grouped order. Android's reorder is a separate
+full-screen `ReorderScreen` handed the unfiltered, ungrouped `habits` in the
+server's own position order, so that hazard cannot reach it — `HabitList.kt`'s
+`enabled = habits.size > 1` on the reorder hand-off was left exactly as it
+was.
+
+Two small things landed alongside the above, neither planned but both
+small enough to fold in rather than defer: the section header's count reads
+"1 habit" / "N habits" rather than always pluralising, and `SwitchRow`'s
+`Switch` (`ui/SettingsScreen.kt`) now carries `contentDescription = title` —
+without it, a `Switch` beside a sibling `Text` is not labelled by that text,
+and TalkBack announced every one of the settings screen's five switches,
+`groupByCategory`'s new one included, as a bare "off, switch".
+
 ## Phase 3 — comparing categories
 
 `computeCategoryStats` in `shared/src/stats.js`, one

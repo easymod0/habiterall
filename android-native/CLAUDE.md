@@ -45,7 +45,9 @@ below a correct pure function.
 unfiltered one** — the reorder hand-off and its `enabled`, the full-screen error
 branch, and the search icon's own `habits.isNotEmpty() || filtering` gate —
 **while two must read the rendered one**: `ScrollRestore`'s item count and the
-`focusHabit` index. A reorder against a subset writes a wrong `position` for
+`focusHabit` index. Since grouping, "the rendered one" for those two is
+`listRows` and not `visible` — see the section-header paragraph below, which is
+where that distinction now lives. A reorder against a subset writes a wrong `position` for
 habits that were never on screen, and it is the only one of the five that
 reaches storage; the rest only look wrong — the error screen replacing a working
 list, the search icon itself disappearing (were it gated on `visible` instead)
@@ -99,16 +101,50 @@ reaches storage, so there is no shared truth for the two to have drifted out
 of — only two different "is this control worth its space" answers to two
 budgets that are not comparable.
 
-**`category_id` is carried, not mirrored, and that is the whole of this
-client's part in categories.** A category never runs from an alarm — the
-notification path never asks which one a habit is in — so there is nothing here
-to work offline and no sixth mirror to justify. What there IS is the replace
-hazard: `PUT /habits/:id` runs the body through `parseHabit`, which defaults
-every absent field, so a write that omits `category_id` CLEARS a category set
-on the web. `Habit`, `HabitInput`, `Draft`, `Habit.toInput()`,
-`Habit.toDraft()` and `Draft.toInput()` therefore all carry it untouched, for
-exactly the reason `icon` and `at_most_unlogged` do. There is no picker: setting
-a category is a web action, which is a rendering gap and not a data one.
+**The client now HAS a picker and a grouped list, and `groupByCategory` is
+still not a sixth mirror.** Issue #65's Android half added `CategoryPicker`
+(`ui/HabitFormScreen.kt`) and the grouped `LazyColumn` (`ui/HabitList.kt`,
+`ui/HabitSections.kt`), so "there is no picker: setting a category is a web
+action" is no longer true — picking one is now a native action, same as
+setting a habit's colour. What stays true, and is why `groupByCategory` joins
+`AppSettings` without joining `Settings.kt`'s three cached mirrors: a category
+never runs from an alarm — the notification path never asks which one a habit
+is in — so there is nothing here that has to work with no network. The setting
+is read from the settings fetch (`AppSettings.groupByCategoryEnabled`) and used
+to draw, and no more. The replace hazard is also unchanged and is still why
+`Habit`, `HabitInput`, `Draft`, `Habit.toInput()`, `Habit.toDraft()` and
+`Draft.toInput()` all carry `category_id` untouched: `PUT /habits/:id` runs the
+body through `parseHabit`, which defaults every absent field, so a write that
+omits it CLEARS a category set on the web. The picker inherits that hazard
+rather than removing it — see `Draft.categoryId`'s KDoc for the shape it takes
+when `existing`'s category is not in the account's current list, the same
+silent-clear bug #251's web habit dialog actually shipped.
+
+**Grouping makes `HabitList`'s item count stop being its habit count, and two
+places had to stop reading `visible` because of it.** `HabitSections.rows`
+(`ui/HabitSections.kt`) interleaves a `ListRow.Header` per category into
+`listRows`, so once grouping is on, `visible.size` items become `listRows.size`
+items and a habit's position in `visible` is not its position in what the
+`LazyColumn` actually holds. `ScrollRestore.needsSnapToTop` and the
+notification-focus effect (`ui/HabitList.kt`) both read `listRows`, keyed and
+indexed into by `ListRow.Entry`, for exactly that reason. A future change that
+puts `visible.indexOfFirst { it.id == focusHabit }` back is the same defect
+shape this file names repeatedly — a correct pure function (`HabitSections`)
+with a caller one line away that stopped reading its output — and its
+observable symptom is a notification tap scrolling to whatever row is that
+many slots down, a different habit's row once a section boundary sits between
+them.
+
+**Reorder does not disable while grouped, unlike the web, and does not need
+to.** `dashboard.js:300` sets `reorderable = … && !grouped` because the web's
+drag writes a flat id list back, which would then be read as the *grouped*
+order. Android's reorder is a separate full-screen `ReorderScreen` handed
+`habits` — unfiltered, in the server's own `position, id` order, never passed
+through `HabitSections.rows` — so a grouped view cannot leak into what a drag
+writes. `HabitList.kt`'s `enabled = habits.size > 1` on the reorder hand-off is
+therefore unchanged by this work and should stay that way; adding `&& !grouped`
+to it would be porting a fix for a hazard this client's reorder screen was
+never exposed to.
 
 `HabitFieldCoverageTest` reads `JSON_HABIT_FIELDS` out of
 `shared/test/roundtrip-fixture.mjs` and would demand a field called `category`,

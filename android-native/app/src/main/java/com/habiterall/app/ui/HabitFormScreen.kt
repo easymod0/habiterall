@@ -6,6 +6,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -43,6 +45,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import com.habiterall.app.data.Category
 import com.habiterall.app.data.DEFAULT_HABIT_COLOR
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.HabitInput
@@ -92,11 +95,14 @@ internal data class Draft(
     val showAs: String = "amount",
     val icon: String = "",
     /**
-     * No form control here — a picker is issue #65 phase 2's Android half
-     * and out of scope for this screen, same as [icon] above. Carried through
-     * untouched for the same PUT-replaces reason: this is the bridge the
-     * file's own KDoc on [Draft] warns about, and `icon` was missed here the
-     * first time.
+     * The category chip row sets this — "None" for `null`, or a category's
+     * own id, offered from the account's current list. A value naming no
+     * category in that list — one deleted since the list was last fetched,
+     * or the form opened before any fetch succeeded — is kept exactly as it
+     * arrived rather than folded into `null`: [HabitFormScreen] draws it as
+     * its own disabled, selected chip instead of letting "None" appear
+     * selected, because a habit PUT REPLACES and an untouched save would
+     * otherwise clear a category nobody chose to leave.
      */
     val categoryId: Long? = null,
     val archived: Boolean = false,
@@ -232,7 +238,8 @@ internal fun Draft.toInput() = HabitInput(
     // out of scope for this screen. Carried through untouched for the same
     // PUT-replaces reason as atMostUnlogged and showAs above.
     icon = icon,
-    // No form control here either — see the KDoc on Draft.categoryId above.
+    // Whatever the chip row set it to, including an id naming no category the
+    // account currently has — kept rather than reset. See Draft.categoryId.
     categoryId = categoryId,
     archived = archived,
 )
@@ -253,6 +260,12 @@ internal fun Draft.toInput() = HabitInput(
 fun HabitFormScreen(
     existing: Habit?,
     confirmDelete: Boolean,
+    /**
+     * The account's categories, offered as the picker's options — this
+     * screen never fetches its own copy. See [Draft.categoryId] for what
+     * happens when [existing]'s category is not in this list.
+     */
+    categories: List<Category>,
     onSave: suspend (HabitInput) -> Unit,
     onDelete: (suspend () -> Unit)? = null,
     /**
@@ -524,6 +537,15 @@ fun HabitFormScreen(
                 onPick = { draft = draft.copy(color = it) },
             )
 
+            /* -------------------------------------------------------- category */
+
+            SectionLabel("Category")
+            CategoryPicker(
+                categories = categories,
+                selectedId = draft.categoryId,
+                onPick = { draft = draft.copy(categoryId = it) },
+            )
+
             /* ------------------------------------------------------- reminder */
 
             SectionLabel("Reminder")
@@ -658,6 +680,54 @@ private fun SectionLabel(text: String) {
         fontWeight = FontWeight.SemiBold,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+/**
+ * The category chips: "None" first, then one per account category in the
+ * order [categories] arrived in (`/api/overview`'s own `position, id` — this
+ * does not re-sort). `FlowRow`, not a `Row` — the same reason
+ * [ReminderTimeField]'s quick picks use one — because the category list is
+ * whatever size the account has grown to and a plain `Row` clips silently
+ * past a phone's width.
+ *
+ * Pick-only: there is no affordance here to create, rename, recolour or
+ * delete a category, matching the stance this client already takes toward
+ * habit icons.
+ *
+ * **[selectedId] naming no category in [categories] is drawn as its own
+ * extra, disabled, selected chip — never as "None".** This is the hazard
+ * #251's web habit dialog actually shipped: a category deleted since the
+ * list was fetched, or a form opened before any fetch succeeded, would
+ * otherwise show "None" selected, and saving without touching this row would
+ * clear the habit's category through `PUT /habits/:id`'s replace semantics —
+ * a loss the user never asked for. Losing a category now takes an explicit
+ * tap on "None" or another chip.
+ */
+@OptIn(ExperimentalLayoutApi::class)   // FlowRow, for the same reason ReminderTimeField uses one
+@Composable
+private fun CategoryPicker(categories: List<Category>, selectedId: Long?, onPick: (Long?) -> Unit) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = selectedId == null,
+            onClick = { onPick(null) },
+            label = { Text("None") },
+        )
+        categories.forEach { category ->
+            FilterChip(
+                selected = selectedId == category.id,
+                onClick = { onPick(category.id) },
+                label = { Text(category.name) },
+            )
+        }
+        if (selectedId != null && categories.none { it.id == selectedId }) {
+            FilterChip(
+                selected = true,
+                enabled = false,
+                onClick = {},
+                label = { Text("Not in your list (#$selectedId)") },
+            )
+        }
+    }
 }
 
 /**

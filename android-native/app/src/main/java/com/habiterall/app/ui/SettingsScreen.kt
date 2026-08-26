@@ -33,6 +33,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.habiterall.app.data.AppSettings
@@ -287,6 +289,13 @@ fun SettingsScreen(
                 enabled = !busy,
                 onChange = { put("confirmDelete", "the delete confirmation", JsonPrimitive(it)) },
             )
+            SwitchRow(
+                title = "Group by category",
+                subtitle = "Draw one section per category, with an Uncategorised section last.",
+                checked = settings.groupByCategoryEnabled,
+                enabled = !busy,
+                onChange = { put("groupByCategory", "grouping by category", JsonPrimitive(it)) },
+            )
 
             HorizontalDivider()
 
@@ -372,7 +381,18 @@ private fun SwitchRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+        // Named, because a `Switch` beside a `Text` is not labelled by it:
+        // neither the `Row` nor the `Column` carries a semantics node, so the
+        // title is a sibling leaf rather than an ancestor, and TalkBack
+        // announced every one of these as a bare "off, switch" with nothing
+        // saying which setting it governed. It is also what lets a test name
+        // one of five switches without resorting to its position on screen.
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            enabled = enabled,
+            modifier = Modifier.semantics { contentDescription = title },
+        )
     }
 }
 
