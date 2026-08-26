@@ -105,6 +105,8 @@ private fun ManageScreen(
     api: Api,
     account: AppSettings,
     onAccount: (AppSettings) -> Unit,
+    /** The account's categories, for the habit form's picker. See [HabitFormScreen]. */
+    categories: List<Category>,
     onEditArchived: (habit: Habit, changed: Boolean) -> Unit,
     onDone: (changed: Boolean) -> Unit,
 ) {
@@ -114,6 +116,7 @@ private fun ManageScreen(
         Manage.NewHabit -> HabitFormScreen(
             existing = null,
             confirmDelete = account.confirmDeleteEnabled,
+            categories = categories,
             onSave = { input -> api.createHabit(input) },
             onClose = onDone,
         )
@@ -121,6 +124,7 @@ private fun ManageScreen(
         is Manage.EditHabit -> HabitFormScreen(
             existing = screen.habit,
             confirmDelete = account.confirmDeleteEnabled,
+            categories = categories,
             onSave = { input -> api.updateHabit(screen.habit.id, input) },
             onDelete = { api.deleteHabit(screen.habit.id) },
             onClose = onDone,
@@ -427,6 +431,15 @@ class MainActivity : ComponentActivity() {
                  * ask depending on which screen you reached it from.
                  */
                 var account by remember { mutableStateOf(AppSettings()) }
+                /**
+                 * This account's categories, reported up by the list after each
+                 * of its fetches — one copy for the whole activity, for the
+                 * identical reason [account] is one: the habit form's category
+                 * picker needs the same list the list screen just drew from, or
+                 * the two screens could disagree about what a habit's category
+                 * names.
+                 */
+                var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
 
                 // A reminder tap lands on the list, whatever was on screen when
                 // the app was last left. Coming back to a chart from three days
@@ -544,6 +557,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenSettings = { manage = Manage.Settings },
                                 onOpenArchive = { manage = Manage.Archive },
                                 onAccount = { account = it },
+                                onCategories = { categories = it },
                             )
                         }
 
@@ -567,6 +581,7 @@ class MainActivity : ComponentActivity() {
                                     api = manageApi,
                                     account = account,
                                     onAccount = { account = it },
+                                    categories = categories,
                                     // Straight from the archive into the form,
                                     // replacing this screen rather than stacking
                                     // on it: the form's own Archived switch is
@@ -760,8 +775,17 @@ class MainActivity : ComponentActivity() {
          * which is the kind of difference nobody tracks down.
          */
         onAccount: (AppSettings) -> Unit,
+        /**
+         * Reports this account's categories upward after every fetch, the same
+         * shape as [onAccount] and for the same reason: this screen already asks
+         * `/api/overview` for them, and the habit form needs the same list to
+         * offer as the picker's options — a second fetch there would be free to
+         * disagree with what this screen just drew.
+         */
+        onCategories: (List<Category>) -> Unit,
     ) {
         var habits by remember { mutableStateOf<List<Habit>>(emptyList()) }
+        var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
         var error by remember { mutableStateOf<String?>(null) }
         var loading by remember { mutableStateOf(true) }
         /** True once a fetch has finished, however it went. See the spinner rule below. */
@@ -828,6 +852,11 @@ class MainActivity : ComponentActivity() {
         // state the account has switched off.
         var skipDays by remember { mutableStateOf(false) }
         var questionMarks by remember { mutableStateOf(false) }
+        // No local mirror for this one, unlike the two above: nothing about a
+        // category runs from an alarm or a receiver with no network, so there
+        // is nothing here that has to work offline. Read from the fetch and
+        // used to draw, and no more.
+        var grouped by remember { mutableStateOf(false) }
         // Seeded from the mirror the notification already reads, so the grid and
         // the shade agree during the first paint — before any fetch lands, and for
         // as long as one cannot (the mirror is what works offline).
@@ -908,6 +937,7 @@ class MainActivity : ComponentActivity() {
                 newestLeft = fetched.newestLeft
                 skipDays = fetched.skipDaysEnabled
                 questionMarks = fetched.questionMarksEnabled
+                grouped = fetched.groupByCategoryEnabled
                 // The same fetch answers whether this phone is still a
                 // destination, and the alarms read that from the local mirror —
                 // so this is where a choice made in a browser reaches them.
@@ -932,6 +962,11 @@ class MainActivity : ComponentActivity() {
             try {
                 val data = api.overview(days = windowDays)
                 habits = data.habits.filter { h -> !h.archived }
+                categories = data.categories
+                // Reported upward the same way `onAccount(fetched)` is above: the
+                // activity holds one copy for the whole of it, which is what the
+                // habit form's category picker reads from.
+                onCategories(data.categories)
                 loadedDays = windowDays
                 error = null
                 // Re-arm from what just arrived. A reminder time set in a
@@ -1176,6 +1211,8 @@ class MainActivity : ComponentActivity() {
         HabitList(
             habits = habits,
             rows = shown,
+            categories = categories,
+            grouped = grouped,
             loading = loading,
             loaded = loaded,
             error = error,

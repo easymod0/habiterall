@@ -65,9 +65,9 @@ data class Habit(
     val icon: String = "",
     /**
      * The user-created category this habit belongs to, or `null` for
-     * uncategorised. See [HabitInput.categoryId]: this client carries the id
-     * only — no picker, no grouped list, issue #65 phase 2's Android half is
-     * out of scope for this PR.
+     * uncategorised. See [HabitInput.categoryId] for why this client carries
+     * the id untouched — creating, renaming, recolouring and deleting a
+     * category stay web actions, but the id is picked and shown here.
      */
     @SerialName("category_id") val categoryId: Long? = null,
     val position: Int = 0,
@@ -238,13 +238,11 @@ data class HabitInput(
     /**
      * A positive id naming a category, or `null` for uncategorised. Carried
      * here for the usual reason — a habit PUT REPLACES, so leaving this out
-     * clears a category set on another client — and for no other: this
-     * client has no picker and no grouped list (issue #65 phase 2's Android
-     * half), so the only two writers that touch it are the ones that flip one
-     * thing about a habit they already fetched, and both must carry the value
-     * forward untouched. `null` here and an absent key are the same thing to
-     * `parseHabit` (`shared/src/validate.js`) — both resolve to "no category"
-     * — so this client's `explicitNulls = false` on write costs nothing.
+     * clears a category set on another client — and it is now also a value
+     * this client's own form can set, through the picker's `FilterChip` row.
+     * `null` here and an absent key are the same thing to `parseHabit`
+     * (`shared/src/validate.js`) — both resolve to "no category" — so this
+     * client's `explicitNulls = false` on write costs nothing.
      */
     @SerialName("category_id") val categoryId: Long? = null,
     val archived: Boolean = false,
@@ -318,6 +316,15 @@ data class AppSettings(
     @SerialName("historyGranularity") val historyGranularity: String? = null,
     @SerialName("historyMode") val historyMode: String? = null,
     @SerialName("scoreGranularity") val scoreGranularity: String? = null,
+    /**
+     * Whether the list draws one section per category, with an Uncategorised
+     * section last. Null means untouched — matches
+     * `SETTINGS.groupByCategory.default` in shared/public/ui/settings.js, and
+     * the two must not drift. Read from the settings fetch and used to draw;
+     * nothing about a category runs from an alarm, so this is not cached to
+     * `Settings.kt` alongside the reminder mirrors.
+     */
+    @SerialName("groupByCategory") val groupByCategory: Boolean? = null,
 ) {
     val androidRemindersEnabled: Boolean
         get() = notifyChannels?.contains(CHANNEL_ANDROID) ?: true
@@ -377,6 +384,9 @@ data class AppSettings(
     val atMostUnloggedOrDefault: String
         get() = atMostUnlogged ?: DEFAULT_AT_MOST_UNLOGGED
 
+    val groupByCategoryEnabled: Boolean
+        get() = groupByCategory ?: DEFAULT_GROUP_BY_CATEGORY
+
     companion object {
         const val CHANNEL_ANDROID = "android"
 
@@ -410,6 +420,9 @@ data class AppSettings(
          * streaks on the list were computed with the other.
          */
         const val DEFAULT_AT_MOST_UNLOGGED = "miss"
+
+        /** `SETTINGS.groupByCategory.default` in shared/public/ui/settings.js. */
+        const val DEFAULT_GROUP_BY_CATEGORY = false
     }
 }
 
@@ -429,11 +442,35 @@ data class SettingsPatchResult(
     val ignored: List<String> = emptyList(),
 )
 
+/**
+ * A category as `/api/overview` carries it — the picker's options, and the
+ * grouped list's sections. The server also sends `created_at` and, in cloud,
+ * `user_id`; this client's `Json` is `ignoreUnknownKeys`, so neither is here.
+ *
+ * Pick-only: creating, renaming, recolouring and deleting a category stay web
+ * actions, the same stance this client already takes toward habit icons.
+ */
+@Serializable
+data class Category(
+    val id: Long,
+    val name: String,
+    val color: String = "",
+    val position: Int = 0,
+)
+
 @Serializable
 data class Overview(
     val start: String,
     val end: String,
     val habits: List<Habit>,
+    // Defaults to empty rather than being required: `/habits` and an older
+    // server do not carry it, and a missing list must still parse the rest
+    // of the response. What that then DRAWS depends on `groupByCategory`,
+    // which is off by default: ungrouped it is the ordinary flat list, and
+    // grouped it is one Uncategorised section holding every habit,
+    // categorised ones included — not an ungrouped list — which is the same
+    // answer `dashboard.js` gives an empty `state.categories`.
+    val categories: List<Category> = emptyList(),
 )
 
 @Serializable

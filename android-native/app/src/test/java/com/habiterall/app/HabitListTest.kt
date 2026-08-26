@@ -34,6 +34,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.requestFocus
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.habiterall.app.data.Category
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Sentinels
 import com.habiterall.app.ui.HabitList
@@ -103,6 +104,10 @@ class HabitListTest {
     private fun show(
         habits: List<Habit> = listOf(water, reading),
         rows: List<Habit> = habits,
+        categories: List<Category> = emptyList(),
+        // Defaulted off, so every test above this step's own leaves the
+        // ungrouped path untouched.
+        grouped: Boolean = false,
         loading: Boolean = false,
         loaded: Boolean = true,
         error: String? = null,
@@ -131,6 +136,8 @@ class HabitListTest {
             HabitList(
                 habits = habits,
                 rows = rows,
+                categories = categories,
+                grouped = grouped,
                 loading = loading,
                 loaded = loaded,
                 error = error,
@@ -471,6 +478,145 @@ class HabitListTest {
         compose.onNode(hasSetTextAction()).performTextInput("Wat")
 
         compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertDoesNotExist()
+    }
+
+    // --- Grouping by category, and the two index hazards it opens ---
+
+    /**
+     * The end-to-end shape `HabitSectionsTest` cannot see on its own: every
+     * category draws its header, the trailing Uncategorised header draws too,
+     * and every habit passed in still appears exactly once.
+     */
+    @Test
+    fun `grouped, the list renders a header per category plus Uncategorised, and every habit exactly once`() {
+        val fitness = Category(id = 10, name = "Fitness", color = "#ff0000", position = 0)
+        val mind = Category(id = 20, name = "Mind", color = "", position = 1)
+        val categorised = listOf(
+            water.copy(categoryId = fitness.id),
+            reading.copy(categoryId = mind.id),
+            cycling, // no categoryId: falls into Uncategorised
+        )
+        show(
+            habits = categorised,
+            rows = categorised,
+            categories = listOf(fitness, mind),
+            grouped = true,
+        )
+
+        // The header's own content is announced as one description
+        // (`clearAndSetSemantics`), not as separate name/count text nodes.
+        compose.onNodeWithContentDescription("Fitness section, 1 habit").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Mind section, 1 habit").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Uncategorised section, 1 habit").assertIsDisplayed()
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertIsDisplayed()
+        compose.onNodeWithText("Cycling").assertIsDisplayed()
+    }
+
+    /**
+     * Ungrouped is still exactly what it always was: no header at all, whatever
+     * categories are handed in. The control for every grouped test above and
+     * below it.
+     */
+    @Test
+    fun `grouped = false renders no header at all`() {
+        val fitness = Category(id = 10, name = "Fitness")
+        val categorised = listOf(water.copy(categoryId = fitness.id), reading)
+        show(habits = categorised, rows = categorised, categories = listOf(fitness), grouped = false)
+
+        compose.onNodeWithContentDescription("Fitness section, 1 habit").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Uncategorised section, 1 habit").assertDoesNotExist()
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Reading").assertIsDisplayed()
+    }
+
+    /**
+     * The hazard `android-native/CLAUDE.md` names: once a header is an item,
+     * a habit's index in `visible` is not its index in what the `LazyColumn`
+     * holds. Fifteen solo categories (one header, one entry each) sit ahead of
+     * the target, which is otherwise an ordinary uncategorised habit: its
+     * position in `visible` is 15 (right after them), and its position in
+     * `listRows` is 31 — past those fifteen header/entry pairs and the
+     * trailing Uncategorised header — a gap wide enough that no viewport at
+     * this screen size shows both at once. Nineteen more uncategorised habits
+     * follow it, so there is plenty of list left below the target for Compose
+     * to scroll to without pulling the position back to keep the screen full
+     * (the trap a version of this test hit before it had that tail: too
+     * little content past the target and Compose settled short of it
+     * regardless of which index was asked for). `visible.indexOfFirst` — the
+     * hazard reverted — lands sixteen short, on a row nowhere near the
+     * target's, so the target's own row never scrolls into view.
+     */
+    @Test
+    fun `grouped, a focusHabit naming a habit below at least one header scrolls the list to that habit`() {
+        val padding = (1..15).map { i -> Category(id = i.toLong(), name = "Cat $i") }
+        val paddingHabits = padding.map { cat ->
+            Habit(id = cat.id + 100, name = "Padding ${cat.id}", categoryId = cat.id)
+        }
+        val target = Habit(id = 900, name = "Target habit")
+        val trailing = (1..19).map { i -> Habit(id = i.toLong() + 500, name = "Trailing $i") }
+        val categorised = paddingHabits + target + trailing
+
+        show(
+            habits = categorised,
+            rows = categorised,
+            categories = padding,
+            grouped = true,
+            focusHabit = target.id,
+        )
+
+        assertTrue(focused)
+        compose.onNodeWithText("Target habit").assertIsDisplayed()
+    }
+
+    /**
+     * `ScrollRestore` has to be asked about `listRows`, not `visible`. Twenty
+     * uncategorised habits make `listRows` 21 items (the trailing
+     * Uncategorised header plus the twenty rows) where `visible` is twenty. A
+     * restored index of 20 is the last row of 21 — in range, nothing to
+     * correct — and out of range against twenty, which is exactly what tells
+     * the two counts apart: `needsSnapToTop(20, 0, 21)` is false and
+     * `needsSnapToTop(20, 0, 20)` is true. `visible.size` reverted into the
+     * effect therefore snaps this back to the top; a genuine restore leaves it
+     * scrolled, which is what the existing (ungrouped) tests above already
+     * establish twenty habits is enough to observe at this screen size.
+     */
+    @Test
+    fun `grouped, a restored position past the habit count but inside the item count is kept`() {
+        val twenty = manyHabits(20)
+        show(habits = twenty, rows = twenty, grouped = true, initialScrollIndex = 20)
+
+        assertTrue(listState.firstVisibleItemIndex > 0)
+    }
+
+    /**
+     * `HabitSections.rows` has to be handed `visible`, the search-narrowed
+     * list, not `rows`, the unfiltered one — or a grouped list stops honouring
+     * the search box at all. Yoga is in Fitness alongside Water but does not
+     * match the query, so a correct build drops it from both the grid and
+     * Fitness's own count; handed `rows` instead, Fitness would still read 2
+     * and Yoga would still be on screen.
+     */
+    @Test
+    fun `grouped and a live query, only matching habits appear and the headers' counts follow the filter`() {
+        val fitness = Category(id = 1, name = "Fitness")
+        val mind = Category(id = 2, name = "Mind")
+        val yoga = Habit(id = 4, name = "Yoga", categoryId = fitness.id)
+        val categorised = listOf(water.copy(categoryId = fitness.id), yoga, reading.copy(categoryId = mind.id))
+        show(
+            habits = categorised,
+            rows = categorised,
+            categories = listOf(fitness, mind),
+            grouped = true,
+            query = "Water",
+        )
+
+        compose.onNodeWithContentDescription("Fitness section, 1 habit").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Mind section, 0 habits").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Uncategorised section, 0 habits").assertIsDisplayed()
+        compose.onNodeWithText("Water").assertIsDisplayed()
+        compose.onNodeWithText("Yoga").assertDoesNotExist()
         compose.onNodeWithText("Reading").assertDoesNotExist()
     }
 
