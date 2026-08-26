@@ -9,7 +9,7 @@
 import { api } from '/shared/ui/api.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, staysOnList, state } from '/shared/ui/store.js';
+import { dashboardShowing, emit, staysOnList, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -38,6 +38,30 @@ const CATEGORY_SUGGESTIONS = [
 
 /** Which category's manage row is showing its rename/recolour controls. */
 let editingCategoryId = null;
+
+/**
+ * Tell whatever is behind this modal that something it draws has moved.
+ *
+ * **A dialog does not know which view it was opened over, and it must not
+ * navigate away from one.** `'reload'` means "go to the dashboard and fetch
+ * it", which is right when the dashboard is already what is showing — a
+ * repaint alone would draw the old list without the habit that was just made —
+ * and is a navigation the user did not ask for from anywhere else. `'change'`
+ * means "the visible view's data moved", which every other view answers by
+ * refetching itself in place.
+ *
+ * Five call sites: `saveHabit`, and the four category mutations this dialog
+ * makes in place (rename, delete, a suggestion chip, the New category box).
+ * The last four used to emit `'reload'` unconditionally, which is how **adding
+ * a category while editing a habit dropped the user back on the dashboard** —
+ * `#btn-new` and this dialog's category manager are reachable from a habit's
+ * own page and from `#/categories`, and neither is the list.
+ *
+ * The three that stay unconditional are the ones where going home is the
+ * answer: a habit deleted, a habit restored, and a create whose request was
+ * abandoned. The page you were on is gone, or nobody knows what it holds.
+ */
+const announce = () => emit(dashboardShowing() ? 'reload' : 'change');
 
 function categoryHint(message, isError = false) {
   const hint = $('#category-hint');
@@ -215,7 +239,7 @@ function renderCategoryManage() {
           // category's NAME, never which one this form has chosen, so there
           // is nothing to force here and forcing it is what goes wrong.
           await refreshCategoryPicker();
-          emit('reload');
+          announce();
         } catch (err) {
           // A queued write is the outbox doing its job, not a failure — the
           // same reading the two add handlers below already give it. `PUT
@@ -309,7 +333,7 @@ function renderCategoryManage() {
           // right about the outcome and wrong about the timing — see
           // `refreshCategoryPicker`.
           await refreshCategoryPicker();
-          emit('reload');
+          announce();
         } catch (err) {
           // Queued is not failed — see the rename handler above. But saying so
           // is not enough here, because a queued DELETE is DURABLE and will
@@ -539,12 +563,12 @@ async function saveHabit(e) {
       toast('Habit created');
     }
     dialog.close();
-    // Land back where the edit was started. Editing a habit from its own page
-    // and being returned to the dashboard loses your place for no reason —
-    // 'change' reloads whichever view is showing, and `openHabitId` is still
-    // set because a modal dialog repaints nothing behind it. Creating from the
-    // dashboard still needs 'reload': a repaint alone would draw the old list
-    // without the habit that was just made.
+    // Land back where the edit was started — `announce`, whose note has the
+    // whole rule. Editing a habit from its own page and being returned to the
+    // dashboard loses your place for no reason, and the flags it reads are
+    // still whatever they were, because a modal dialog repaints nothing behind
+    // it. Creating from the dashboard still needs 'reload': a repaint alone
+    // would draw the old list without the habit that was just made.
     // The dashboard's search filter goes only when what was just saved would be
     // OFF the list: a habit the user is told about and cannot see is the thing
     // #74 protects against, and clearing on anything else is the opposite
@@ -574,7 +598,7 @@ async function saveHabit(e) {
     // from a habit and on a background reconnect, mid-word. `dashboard.js`'s
     // archive toggle already works this way.
     if (!staysOnList(saved)) state.query = '';
-    emit(state.openHabitId != null ? 'change' : 'reload');
+    announce();
   } catch (err) {
     toast(err.message);
     // A create that timed out is the one failure nobody here can classify: the
@@ -698,7 +722,7 @@ export function init() {
         // it back at render time is the only reading that is still true when
         // the refetch lands.
         await refreshCategoryPicker();
-        emit('reload');
+        announce();
         categoryHint(`Added "${cat.name}" — pick it above to use it.`);
       } catch (err) {
         // The account already holds this name in some casing, which is not a
@@ -755,7 +779,7 @@ export function init() {
       nameField.value = '';
       // No argument — see `refreshCategoryPicker`, and the chip handler above.
       await refreshCategoryPicker();
-      emit('reload');
+      announce();
       categoryHint(`Added "${cat.name}" — pick it above to use it.`);
     } catch (err) {
       // A queued write is the outbox doing its job, not an error: `api()`

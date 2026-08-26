@@ -16,7 +16,7 @@
 
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, set, state } from '/shared/ui/store.js';
+import { dashboardShowing, emit, set, state } from '/shared/ui/store.js';
 import { currentTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
 
@@ -652,8 +652,9 @@ async function applyDraft() {
     //
     // The comparison view is the third answer to "what is showing": it has no
     // habit open either, and it has already refetched on the 'change' above.
-    if (SERVER_COMPUTED.some((key) => key in changed)
-        && state.openHabitId == null && !state.openCategories) {
+    // `dashboardShowing()` is that whole question, asked once — see its note in
+    // `ui/store.js`.
+    if (SERVER_COMPUTED.some((key) => key in changed) && dashboardShowing()) {
       emit('reload');
     }
     return true;

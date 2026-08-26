@@ -32,6 +32,13 @@ const ck = (label, cond, extra = '') => {
   if (!cond) fails++;
 };
 
+/**
+ * A post-action settle, for the one shape `waitUntil` cannot express: asserting
+ * that something did NOT happen has no predicate to poll. One caller, and every
+ * other wait in this file is a `waitUntil`.
+ */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 let ws, nid = 1;
 const pend = new Map();
 const send = (m, p = {}, s) => new Promise((res, rej) => {
@@ -96,14 +103,17 @@ try {
   const byText = (sel, text) => `[...document.querySelectorAll(${JSON.stringify(sel)})]
     .find(el => el.textContent.trim() === ${JSON.stringify(text)})`;
 
-  // Works from either view. A category mutation's `emit('reload')` runs
-  // `dashboard.load()` in the background, which ends in `paint()` and so in
-  // `views.showList()` — even while this suite is still on the habit's own
-  // page behind an open dialog. `.habit-meta`'s row is a real DOM node
-  // either way, and `.click()` fires its listener whether or not `#grid` is
-  // currently the visible view, so re-navigating through it is what settles
-  // that race rather than waiting on a view that may or may not still be the
-  // one left standing.
+  // Works from either view, and it has to: this suite calls it from the
+  // dashboard and from a habit's own page, and a `'reload'` reaching the
+  // dashboard from anywhere ends in `paint()` and so in `views.showList()`.
+  // `.habit-meta`'s row is a real DOM node either way, and `.click()` fires
+  // its listener whether or not `#grid` is currently the visible view, so
+  // re-navigating through it is what settles that rather than waiting on a
+  // view that may or may not still be the one left standing.
+  //
+  // A category mutation used to be one of those emitters and is no longer —
+  // see the "adding a category while editing a habit stays on that habit"
+  // block below, which is what that costs and what it is worth.
   const openHabitByName = async (name) => {
     await ev(`(()=>{
       const row = [...document.querySelectorAll('#grid .habit-row')]
@@ -1022,6 +1032,150 @@ try {
   await ev(`document.getElementById('dialog-cancel').click()`);
   await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
     { what: 'the create dialog to close after the Enter checks' });
+
+  /* ---------- adding a category while editing a habit stays on that habit ----
+   *
+   * Reported from use: open a habit, press Edit, add a category, and the app is
+   * back on the dashboard with the habit's page gone.
+   *
+   * The four category mutations this dialog makes in place — rename, delete, a
+   * suggestion chip and the New category box — all ended in an unconditional
+   * `emit('reload')`, which means "go to the dashboard and load it from the
+   * server" (`ui/store.js`). That is right when the dashboard is what is
+   * showing and is a navigation nobody asked for from anywhere else, and it is
+   * exactly the rule `saveHabit` already had one line of its own for. It is
+   * `announce()` in `ui/habit-dialog.js` now, over `dashboardShowing()`.
+   *
+   * The dialog is MODAL and repaints nothing behind it, so the view that gets
+   * pulled out from under it is only visible once the dialog closes — which is
+   * why this survived a suite that opens and closes it a dozen times: every
+   * earlier block re-navigates before it looks at anything.
+   *
+   * This drives the "New category" BOX, which is one of the four; the other
+   * three go through the same `announce()`, so the mutation to make is that
+   * function or this call site — reverting the CHIP handler alone would not
+   * fail here, and the block above already drives the chip for its own reason.
+   *
+   * Mutation target: `announce()` back to `emit('reload')` at
+   * `#category-new-add` in `ui/habit-dialog.js`. Measured: the app landed on
+   * `#/habit/9` — ANOTHER habit's page — because `paint()`'s `go(LIST)` is a
+   * `history.back()` from here and the entry underneath was whatever this suite
+   * pushed last. So `#view-detail` was still showing, and the URL is what says
+   * a navigation happened. Both are asserted.
+   */
+
+  const STAY_CATEGORY = 'Zzz Stay Put';
+  // Opens the habit's own page and presses its Edit — so the dialog below is
+  // modal over `#view-detail`, which is the state the report is about.
+  await openHabitByName('Meditate');
+  const stayingOn = await ev(`(() => ({
+    heading: document.querySelector('#view-detail h2')?.textContent.trim() ?? null,
+    detail: !document.getElementById('view-detail').hidden,
+    hash: location.hash,
+  }))()`);
+  ck('sanity: the dialog is open over the habit\'s own page, not over the list',
+    stayingOn.heading === 'Meditate' && stayingOn.detail === true
+    && /^#\/habit\/\d+$/.test(stayingOn.hash),
+    JSON.stringify(stayingOn));
+
+  await ev(`document.getElementById('category-new-name').value = ${JSON.stringify(STAY_CATEGORY)}`);
+  await ev(`document.getElementById('category-new-add').click()`);
+  // The category landing, which is what makes the emit below have happened —
+  // and it is read off the DIALOG's own picker rather than the network, so this
+  // waits for the whole handler rather than for its POST.
+  await waitUntil(ev, `[...document.querySelectorAll(
+    '#habit-form [name=category_id] option')].some(o => o.textContent === ${JSON.stringify(STAY_CATEGORY)})`,
+  { what: 'the new category to reach the picker' });
+  // `emit('reload')` is `dashboard.load()`, which is a round trip before it
+  // paints — so the wrong answer arrives LATER than the right one and a read
+  // taken here would pass against the unfixed code. A settle is the only shape
+  // available: what is asserted is that a navigation did not happen.
+  await sleep(1200);
+
+  const stayed = await ev(`(() => ({
+    dialog: document.getElementById('habit-dialog').open,
+    detail: !document.getElementById('view-detail').hidden,
+    list: !document.getElementById('view-list').hidden,
+    hash: location.hash,
+    heading: document.querySelector('#view-detail h2')?.textContent.trim() ?? null,
+  }))()`);
+  ck('THE assertion: adding a category from the edit dialog leaves the habit\'s ' +
+     'own page showing, not the dashboard',
+    stayed.detail === true && stayed.list === false && stayed.heading === 'Meditate',
+    JSON.stringify(stayed));
+  // The SAME fragment, not merely a habit-shaped one. `'reload'` ends in
+  // `paint()`, which calls `go(LIST)` — and with `ourEntry` set that is a
+  // `history.back()`, which lands on whatever this suite pushed before rather
+  // than reliably on the dashboard. Measured against the unfixed code: it
+  // arrived on ANOTHER habit's page, so `#view-detail` was still showing and a
+  // check that only asked "is the detail view up" would have passed a
+  // navigation that plainly happened.
+  ck('…and the URL still names THAT habit, so Back has not been walked either',
+    stayed.hash === stayingOn.hash,
+    `${stayingOn.hash} -> ${stayed.hash}`);
+  ck('…and the dialog it was added from is still open, mid-edit',
+    stayed.dialog === true, `open=${stayed.dialog}`);
+
+  // The habit is saved from the dialog that is still open, with the new
+  // category picked — which is what the user was doing when they hit this, and
+  // it proves the edit was not abandoned by whatever ran behind the modal.
+  await ev(`(() => {
+    const select = document.querySelector('#habit-form [name=category_id]');
+    const opt = [...select.options].find(o => o.textContent === ${JSON.stringify(STAY_CATEGORY)});
+    select.value = opt.value;
+    document.getElementById('habit-form').requestSubmit();
+  })()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the edit to save' });
+
+  const stayedSaved = await fetchHabit('Meditate');
+  const stayCat = await ev(`(async()=>{
+    const cats = await (await fetch('/api/categories')).json();
+    return cats.find(c => c.name === ${JSON.stringify(STAY_CATEGORY)}) ?? null;
+  })()`);
+  ck('…and the category added mid-edit is the one the habit is saved into',
+    !!stayCat && stayedSaved?.category_id === stayCat.id,
+    JSON.stringify({ saved: stayedSaved?.category_id, added: stayCat?.id }));
+
+  // Put the account back the way the blocks below expect to find it: they
+  // enumerate categories by name and count them.
+  await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    const m = habits.find(h => h.name === 'Meditate');
+    if (m) await fetch('/api/habits/' + m.id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...m, category_id: null }),
+    });
+    const cats = await (await fetch('/api/categories')).json();
+    const c = cats.find(x => x.name === ${JSON.stringify(STAY_CATEGORY)});
+    if (c) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
+  })()`);
+  // **And this block does NOT return to the dashboard**, which is worth the
+  // paragraph because two ways of doing so were tried and both were wrong.
+  //
+  // `Page.navigate` to the same origin is a full document RELOAD, and the
+  // block below opens a dialog whose `openDialog` fires a `GET /categories` it
+  // does not await. Against a cold boot's own requests that GET lands late —
+  // after the queued delete there has optimistically removed a row — and puts
+  // the row back. Measured: 1 failure in 20 runs of this suite with a navigate
+  // here, 0 in 20 without, and the failure was on THAT block's assertion, never
+  // on any of this one's. The race is its own weak wait (it polls the hint
+  // text, which the handler writes AFTER the repaint, so a later-landing
+  // refresh is invisible to it); this block simply has no business widening it.
+  //
+  // The app's own '← Back' is worse and fails 20 times in 20: it emits
+  // 'reload', whose `paint()` calls `go(LIST)`, which with `ourEntry` set is a
+  // `history.back()` — and by here this suite's history holds several habit
+  // entries, so it lands on ANOTHER habit's page rather than the list. That is
+  // the same one-entry-deep assumption `ui/routes.js` documents, met from the
+  // test side.
+  //
+  // Nothing needs the dashboard: `openHabitByName` works from either view, by
+  // design, and the round-3 block above already calls it from a detail page.
+  // `state.categories` is left holding the category deleted just above, which
+  // the next `openDialog`'s own refetch corrects, and no assertion below reads
+  // it before then.
 
   /* ---------- review round 5: a QUEUED category write is DURABLE, so the two
      controls have to move with it ----------

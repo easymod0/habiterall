@@ -30,10 +30,12 @@ export const state = {
   openHabitId: null,   // habit shown in the detail view, null on the dashboard
   // The category comparison is showing. It is a THIRD answer to the question
   // `openHabitId == null` used to settle on its own — "is the dashboard what
-  // the user is looking at?" — which two guards ask before repainting or
+  // the user is looking at?" — which several guards ask before repainting or
   // reloading the list. Left out, opening Settings from the comparison and
   // pressing Done emits a 'change' the dashboard answers by painting itself
-  // over a view nobody had left.
+  // over a view nobody had left. **Read it through `dashboardShowing()` below,
+  // never as a second hand-written conjunction** — that is the whole reason the
+  // predicate exists.
   openCategories: false,
   // null means "use the saved setting". The per-habit toggles set these for
   // the session, so trying a different view does not rewrite your default —
@@ -69,6 +71,32 @@ export const state = {
   offline: false,      // showing cached data / writes are being queued
   pending: 0,          // writes waiting in the outbox
 };
+
+/**
+ * Whether the DASHBOARD is the view the user is looking at.
+ *
+ * **One question, one predicate, and it is here because it has already been
+ * copied wrong.** Six places need it — `app.js` twice (which view a traversal
+ * lands on, and whether the browser reminder may reload the list),
+ * `dashboard.js` twice (the `'change'` listener and the breakpoint reflow),
+ * `settings-dialog.js` once and `habit-dialog.js` five times — and until
+ * `#/categories` existed they could all spell it `state.openHabitId == null`
+ * and be right. Adding a second full-page view made that spelling wrong at
+ * every one of them at once, and the two that were missed on the first pass
+ * failed in exactly the way this file's comment on `openCategories` predicts:
+ * the breakpoint reflow painted the dashboard over the comparison on a phone
+ * ROTATION, and the habit dialog's `'reload'` did the same on Save. Neither is
+ * a `routes.js` question — the URL is already right — it is only ever "is the
+ * list what is on screen".
+ *
+ * A function rather than a getter on `state`, so it cannot be spread, cached
+ * into a local at render time, or serialised into a payload by accident.
+ *
+ * A THIRD view means editing this and nothing else. That is the point.
+ */
+export function dashboardShowing() {
+  return state.openHabitId == null && !state.openCategories;
+}
 
 /** Fold case and strip the accents, so "cafe" finds "Café". */
 const fold = (s) => String(s ?? '')

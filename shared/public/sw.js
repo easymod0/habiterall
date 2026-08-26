@@ -230,10 +230,15 @@ const sw = self;
 // installs; naming the new shell separately is what makes the swap atomic at
 // the cache level. It costs every installed client its data cache.
 //
-// `ui/routes.js`, `ui/store.js`, `ui/dashboard.js` and `ui/settings-dialog.js`
-// moved with it and add no export — `dashboard.js` imports `syncEntry` from
-// the new module, which is v16's case exactly and covered by the same bump.
-// `style.css` is a shell asset too and gained this view's rules.
+// `ui/routes.js`, `ui/dashboard.js`, `ui/settings-dialog.js`, `ui/detail.js`,
+// `ui/habit-dialog.js` and `auth-session.js` moved with it — `dashboard.js`
+// imports `syncEntry` from the new module, which is v16's case exactly and
+// covered by the same bump. `ui/store.js` adds an EXPORT of its own,
+// `dashboardShowing`, which four of those files import: that is v9's case
+// again in miniature, and the reason it is named here rather than left to the
+// list above is that an export is the half a reader checking "did anything new
+// appear?" would otherwise miss. `style.css` is a shell asset too and gained
+// this view's rules.
 const CACHE_VERSION = 'v25';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;

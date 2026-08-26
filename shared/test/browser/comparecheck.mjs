@@ -33,6 +33,13 @@ const ck = (label, cond, extra = '') => {
   if (!cond) fails++;
 };
 
+/**
+ * A post-action settle, for the one shape `waitUntil` cannot express: asserting
+ * that something did NOT happen has no predicate to poll. Every other wait in
+ * this file is a `waitUntil`.
+ */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 let ws, nid = 1;
 const pend = new Map();
 const send = (m, p = {}, s) => new Promise((res, rej) => {
@@ -434,6 +441,134 @@ try {
   ck('and the header still reports the account-wide total, now two',
     shelvedCard.sub.includes('2 archived habits left out.'),
     JSON.stringify(shelvedCard.sub));
+
+  /* ---------- nothing paints the dashboard over a view nobody left ---------- */
+  //
+  // `state.openCategories` exists because "is the dashboard what is showing?"
+  // stopped being answerable by `openHabitId == null` — and the answer is now
+  // `dashboardShowing()` in `ui/store.js`, asked at six sites. Two of them were
+  // left spelling it the old way, and both failed here rather than anywhere a
+  // payload could see. Each check below drives a real gesture and asserts the
+  // comparison SURVIVED it; each fails against the pre-fix code.
+  //
+  // The comparison is what is showing at this point, from the block above.
+
+  console.log('\n--- the comparison survives what is not a navigation ---');
+
+  // The second half of the reflow guard is `state.habits.length`, so a suite
+  // with an empty grid would pass the rotation check against the unfixed code
+  // for the wrong reason. The dashboard has been painted twice by now; assert
+  // its rows exist before relying on the guard's first half being what decides.
+  const gridRows = await ev(
+    `document.querySelectorAll('#grid .habit-row').length`);
+  ck('control: the dashboard behind the comparison holds rows, so the reflow ' +
+    'guard turns on which VIEW is showing rather than on there being nothing to paint',
+    gridRows > 0, `${gridRows} rows`);
+
+  /* -- a phone turned sideways is not a navigation -- */
+
+  // `dashboard.js`'s `matchMedia('(max-width: 640px)')` listener calls
+  // `paint()`, which does not merely reflow the grid: it SHOWS the list and
+  // calls `routes.go(LIST)`, which unwinds `ourEntry` with `history.back()`.
+  // Nine lines above the `'change'` listener that got `dashboardShowing()`
+  // first time round, and reachable by rotating a phone.
+  //
+  // 900 then 360, so the crossing is the second call: headless Chrome's own
+  // window is already wide, so overriding to another wide width fires no
+  // 'change' at all and the narrow one is unambiguously what did it.
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: 900, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId);
+  await sleep(200);
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: 360, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId);
+  // A settle, not a poll: what is asserted is that something did NOT happen,
+  // which has no predicate to wait on — the exception the root CLAUDE.md's
+  // "wait for the app, never for a duration" rule carves out.
+  await sleep(700);
+
+  const afterRotate = await ev(`(() => ({
+    matched: window.matchMedia('(max-width: 640px)').matches,
+    compare: !document.getElementById('view-categories').hidden,
+    list: !document.getElementById('view-list').hidden,
+    hash: location.hash,
+  }))()`);
+  ck('control: the viewport really did cross the 640px breakpoint',
+    afterRotate.matched === true, JSON.stringify(afterRotate));
+  ck('THE assertion: crossing it does not paint the dashboard over the comparison',
+    afterRotate.compare === true && afterRotate.list === false,
+    JSON.stringify(afterRotate));
+  ck('...and does not unwind the fragment either — `paint()` ends in `go(LIST)`, ' +
+    'which is a `history.back()` from here',
+    afterRotate.hash === '#/categories', afterRotate.hash);
+
+  await send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+  await sleep(300);
+
+  /* -- creating a habit from here redraws this view, it does not leave it -- */
+
+  // `#btn-new` is in `auth-session.js`'s SIGNED_IN_ONLY and nothing hides it
+  // per view, so the habit dialog opens over the comparison. `saveHabit` used
+  // to emit `'reload'` for any state with no habit open, which means "go to the
+  // dashboard and fetch it" — so saving here dropped the user on the list, and
+  // the member count that had just changed was never drawn. `announce()` in
+  // `ui/habit-dialog.js` is the one rule now.
+  const NEW_HABIT = 'Zzz Compare Created';
+  const uncatBefore = await ev(`(() => {
+    const c = [...document.querySelectorAll('#view-categories .compare-card')].at(-1);
+    return c.querySelector('.compare-note').textContent;
+  })()`);
+
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the habit dialog over the comparison' });
+  await ev(`document.querySelector('#habit-form [name=name]').value = ${JSON.stringify(NEW_HABIT)}`);
+  await ev(`document.getElementById('habit-form').requestSubmit()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the habit dialog to close' });
+
+  // The redraw is a refetch, so the predicate is the FIGURE moving rather than
+  // the view merely still being there: a guard that skipped the emit entirely
+  // would leave the comparison up and stale, which is a different bug wearing
+  // the same face.
+  await waitUntil(ev, `(() => {
+    const view = document.getElementById('view-categories');
+    if (view.hidden) return false;
+    const c = [...view.querySelectorAll('.compare-card')].at(-1);
+    return !!c && c.querySelector('.compare-note').textContent !== ${JSON.stringify(uncatBefore)};
+  })()`, { what: "Uncategorised's count to move" }).catch(() => {});
+
+  const afterCreate = await ev(`(() => {
+    const view = document.getElementById('view-categories');
+    const last = [...view.querySelectorAll('.compare-card')].at(-1);
+    return {
+      compare: !view.hidden,
+      list: !document.getElementById('view-list').hidden,
+      hash: location.hash,
+      uncategorised: last?.querySelector('.compare-note').textContent ?? null,
+    };
+  })()`);
+  const uncatSection = await ev(
+    `fetch('/api/categories/stats?granularity=week').then(r => r.json())`
+  ).then((d) => d.categories.at(-1));
+
+  ck('THE assertion: saving a habit from the comparison stays on the comparison',
+    afterCreate.compare === true && afterCreate.list === false
+    && afterCreate.hash === '#/categories', JSON.stringify(afterCreate));
+  // Against the SERVER's count, not against a literal: what is being pinned is
+  // that the card was redrawn from a fresh answer, and a literal would pin this
+  // fixture's habit count instead. `before` is asserted too, or a view that
+  // never redrew at all would satisfy the first clause by coincidence.
+  ck('...and the view refetched, so the member it just gained is on the card',
+    uncatBefore === 'over 1 habit'
+    && afterCreate.uncategorised.startsWith(`over ${uncatSection.members} habits`),
+    JSON.stringify({ before: uncatBefore, after: afterCreate.uncategorised,
+                     server: uncatSection?.members }));
+
+  await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    const made = habits.find(h => h.name === ${JSON.stringify(NEW_HABIT)});
+    if (made) await fetch('/api/habits/' + made.id, { method: 'DELETE' });
+  })()`);
 
   console.log(fails === 0 ? '\nALL COMPARISON CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {

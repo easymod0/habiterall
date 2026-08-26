@@ -92,3 +92,46 @@ test('a live query narrows the list the same way for both', () => {
   assert.equal(matchesQuery({ name: 'Gym' }, q), true);
   assert.equal(matchesQuery({ name: 'Read' }, q), false);
 });
+
+/* ---------- which view is showing ---------- */
+
+// `dashboardShowing()` is here for the same reason `matchesQuery` is: more than
+// one module asks it and `store.js` is the file all of them can import. Until
+// `#/categories` existed, every one of them could spell it
+// `state.openHabitId == null` and be right — and when a second full-page view
+// arrived, two of the six hand-written copies were missed. What this file can
+// pin is the DECISION only; that a caller actually reads it is the browser
+// suites' half (`comparecheck.mjs`, `categorycheck.mjs`), because a predicate
+// being right does not make its caller use it.
+
+test('dashboardShowing is true only when neither other view is up', async () => {
+  const { dashboardShowing } = await import('../public/ui/store.js');
+  const before = { habit: state.openHabitId, cats: state.openCategories };
+  try {
+    state.openHabitId = null; state.openCategories = false;
+    assert.equal(dashboardShowing(), true, 'nothing open is the dashboard');
+
+    state.openHabitId = 7; state.openCategories = false;
+    assert.equal(dashboardShowing(), false, 'a habit is open over it');
+
+    // The half that was the whole bug: no habit open, and still not the
+    // dashboard. A predicate written as `openHabitId == null` answers true here.
+    state.openHabitId = null; state.openCategories = true;
+    assert.equal(dashboardShowing(), false,
+      'the comparison is open, and it has no habit id to give it away');
+
+    state.openHabitId = 7; state.openCategories = true;
+    assert.equal(dashboardShowing(), false);
+  } finally {
+    state.openHabitId = before.habit;
+    state.openCategories = before.cats;
+  }
+});
+
+test('dashboardShowing reads the live state rather than a snapshot', () => {
+  // It is a function and not a boolean on `state` on purpose: a value would be
+  // spread into a payload, cached into a local at render time, or read once at
+  // module load — and every guard that asks this runs long after import.
+  assert.equal(typeof state.dashboardShowing, 'undefined',
+    'it must not also exist as a field, or the two can disagree');
+});

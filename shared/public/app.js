@@ -23,7 +23,7 @@ import * as nudge from '/shared/ui/nudge.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settingsDialog from '/shared/ui/settings-dialog.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, state } from '/shared/ui/store.js';
+import { dashboardShowing, emit, state } from '/shared/ui/store.js';
 import { initTheme, toggleTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
 import { showError } from '/shared/ui/views.js';
@@ -86,7 +86,7 @@ function initRouting() {
       // this view: a traversal that lands on the fragment already showing must
       // not refetch it.
       if (!state.openCategories) categories.open();
-    } else if (state.openHabitId != null || state.openCategories) {
+    } else if (!dashboardShowing()) {
       // 'reload' rather than a repaint: the dashboard is coming back after a
       // detour, and the entries behind it may have moved since.
       emit('reload');
@@ -175,7 +175,7 @@ export async function start(adapter) {
     // `gridLoaded` of null and `covers` refuses every date against it, which
     // is precisely the state that asks for one refresh.
     refresh: async () => {
-      if (state.gridEnd || state.openHabitId != null || state.openCategories) return;
+      if (state.gridEnd || !dashboardShowing()) return;
       await dashboard.load();
     },
     enabled: () => settings.get('notifyChannels') ?? [],

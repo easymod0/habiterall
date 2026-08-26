@@ -26,7 +26,7 @@ import {
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
-import { isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
+import { dashboardShowing, isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 import { SKIP } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
@@ -708,16 +708,21 @@ export function init() {
 
   // Reflow the day grid when crossing the narrow/wide breakpoint (rotation,
   // window resize) so the column count always matches the available width.
+  //
+  // `dashboardShowing()` and not `openHabitId == null`: `paint()` does not
+  // merely reflow, it SHOWS the list and unwinds the fragment. Turning a phone
+  // sideways crosses 640px, so with the comparison on screen this used to
+  // replace it with the dashboard and fire `history.back()` — a navigation
+  // nobody asked for, from a gesture that is not a navigation at all. The
+  // reflow is for the grid, and the grid is only on screen when the dashboard
+  // is.
   window.matchMedia('(max-width: 640px)').addEventListener('change', () => {
-    if (state.openHabitId == null && state.habits.length) paint();
+    if (dashboardShowing() && state.habits.length) paint();
   });
 
   // The dashboard repaints from what it already has; only a 'reload' goes back
-  // to the server. Both are ignored while the detail view is the one showing.
-  // "The dashboard is what is showing" is two questions now, not one: the
-  // comparison view also runs with no habit open, and painting over it would
-  // navigate away from a page nobody had left — the same reasoning the
-  // `openHabitId` half already carries.
-  on('change', () => { if (state.openHabitId == null && !state.openCategories) paint(); });
+  // to the server. Both are ignored while another view is the one showing —
+  // painting over it would navigate away from a page nobody had left.
+  on('change', () => { if (dashboardShowing()) paint(); });
   on('reload', () => { load().catch((e) => toast(e.message)); });
 }

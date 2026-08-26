@@ -510,6 +510,39 @@ version still passes `WebBackStackTest`. `routecheck.mjs` pins the push at
 exactly one entry and Back returning to the dashboard, which is the browser half
 of it only.
 
+**"Is the dashboard what is showing?" is `dashboardShowing()` in
+`ui/store.js`, and it is never spelled out a second time.** Six guards ask it
+— `app.js` twice (which view a traversal lands on; whether the browser reminder
+may reload the list), `dashboard.js` twice (the `'change'` listener and the
+`matchMedia` reflow), `settings-dialog.js` once and `habit-dialog.js` through
+its own `announce()` — and until `#/categories` existed every one of them could
+write `state.openHabitId == null` and be right. A second full-page view made
+that spelling wrong at all six AT ONCE, and the two that were missed on the
+first pass are why this paragraph exists: the breakpoint reflow painted the
+dashboard over the comparison **on a phone rotation**, and the habit dialog's
+`'reload'` did the same on Save. Neither is a `routes.js` question — the URL is
+already correct in both — so do not go looking there. A THIRD view means
+editing that one function and nothing else.
+
+**A dialog does not know which view it was opened over, so it announces rather
+than navigates.** `'reload'` means "go to the dashboard and fetch it"
+(`ui/store.js`), which is right only when the dashboard is what is showing;
+`'change'` is what every other view answers by refetching itself in place.
+`#btn-new` is in `auth-session.js`'s `SIGNED_IN_ONLY` and nothing hides it per
+view, so the habit dialog — and with it the in-place category manager — opens
+over a habit's own page and over the comparison as readily as over the list.
+Its four category mutations emitted `'reload'` unconditionally, which is how
+**adding a category while editing a habit dropped the user on the dashboard**;
+`announce()` is the one rule now. The three emitters that stay unconditional
+are the ones where going home IS the answer: a habit deleted, a habit restored,
+and a create whose request was abandoned. Note what the modal hides: nothing
+repaints behind it, so the view that was pulled out from under it only becomes
+visible when the dialog closes — which is why a suite that opens and closes
+this dialog a dozen times never saw it, and why `categorycheck.mjs` now asserts
+the URL as well as the visible view (measured against the unfixed code, the
+`history.back()` inside `paint()` landed on ANOTHER habit's page, so
+`#view-detail` was still showing and only the fragment gave it away).
+
 ## Boot and auth
 
 **Boot has to be able to fail visibly.** Everything `start()` does before the
@@ -929,13 +962,15 @@ for every key Done actually changed — otherwise the dialog appears to do
 nothing once a toggle has been touched. Read through the accessor, never
 `state.X` directly.
 
-**Saving a habit returns you to where the edit started.** `habit-dialog` emits
-`'change'` when `openHabitId` is set and `'reload'` otherwise, so editing from
-a habit's own page reloads that page and creating from the dashboard reloads
-the list. It cannot simply call the detail view — that is the import cycle the
-store exists to break — and it cannot always emit `'change'`, because on the
-dashboard that is a repaint from stale state and a newly created habit would
-not appear. Deleting still goes home: the page you were on is gone.
+**Saving a habit returns you to where the edit started**, and so does adding a
+category from the same dialog. `habit-dialog`'s `announce()` emits `'reload'`
+only when `dashboardShowing()`, `'change'` otherwise — see "A dialog does not
+know which view it was opened over" under Routing for the whole rule. So
+editing from a habit's own page reloads that page and creating from the
+dashboard reloads the list. It cannot simply call the detail view — that is the
+import cycle the store exists to break — and it cannot always emit `'change'`,
+because on the dashboard that is a repaint from stale state and a newly created
+habit would not appear. Deleting still goes home: the page you were on is gone.
 
 **The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
 `android-native/.../ReminderTime.kt` accept the same inputs and produce the same
