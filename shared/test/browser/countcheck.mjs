@@ -107,6 +107,29 @@ try {
     const row = es.find(e => e.date === ${JSON.stringify(target.end)});
     return row ? { value: row.value, status: row.status } : null;})()`);
 
+  /**
+   * Wait for today's stored amount to BECOME `value`, rather than reading it
+   * once and hoping the write has landed.
+   *
+   * `typeAndSave`'s settle is a duration, and a duration is a guess in both
+   * directions — the rule the root CLAUDE.md states. It was long enough here
+   * and not on a loaded CI runner: the fixture seeds today at `10 + (i % 21)`,
+   * so a read that arrived before the write reported **10** and the failure
+   * read `"8,5" is stored as 8.5 :: {"value":10}` — a number the test never
+   * typed and which looks like an amount parser dropping a comma rather than
+   * like a race. That is the worst shape a flake can take: a wrong answer that
+   * implicates the code under test.
+   *
+   * Only the call sites that expect a CHANGE use this. The refusal cases below
+   * assert that the stored row did NOT move, which has no predicate to poll and
+   * so keeps its settle — the exception the same rule carves out.
+   */
+  const storedBecomes = (value) => waitUntil(ev, `(async()=>{
+    const es = await (await fetch('/api/habits/${target.id}/entries')).json();
+    const row = es.find(e => e.date === ${JSON.stringify(target.end)});
+    return !!row && row.value === ${value};})()`,
+  { what: `today's stored amount to become ${value}` });
+
   /** Put text in the box as a person would, then press Save. */
   const typeAndSave = async (text) => {
     await ev(`(()=>{
@@ -138,6 +161,7 @@ try {
 
   console.log('\n--- a decimal comma is the amount, not ten times it ---');
   await typeAndSave('8,5');
+  await storedBecomes(8.5);
   let row = await stored();
   check('"8,5" is stored as 8.5', row?.value === 8.5, JSON.stringify(row));
 
@@ -291,6 +315,7 @@ try {
   // second half is what stops the box telling its owner they typed it wrong:
   // it accepted 8,5 and would have redrawn it as 8.5.
   await typeAndSave('8,5');
+  await storedBecomes(8.5);
   row = await stored();
   check('"8,5" is stored as 8.5 on a comma account', row?.value === 8.5, JSON.stringify(row));
   check('reopened', await openToday());

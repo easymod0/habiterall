@@ -105,6 +105,21 @@ uncategorised is something the dashboard shows you, never a category you
 create or manage yourself. Deleting a category never deletes its habits: they
 fall back to uncategorised with every entry and note untouched.
 
+**Compare your categories** — once you have one category, a **▤** button
+(*Compare categories*) appears in the header and opens a card per category: the
+mean strength of its habits over the last year, how many habits that is over,
+the strongest and the weakest of them by name, how often its lapses are
+recovered from, and a chart of the whole thing. Uncategorised gets a card of
+the same kind. There is no category-level *score*, deliberately — the strength
+curve is what makes a daily habit and a 3×/week one comparable in the first
+place, and a category holds habits at whatever frequencies you gave them — so
+what is shown is the average of the members' own strengths, one vote each, the
+same numbers their own pages show. A habit you have never logged has no
+strength *yet* rather than a strength of zero: it is counted and left out of
+the average, so adding a habit to a category never drags that category down on
+the day you decide to do more about it. Archived habits are left out too, and
+the page says how many.
+
 **Undo** — deleting a habit offers an Undo that restores every entry and note.
 
 **Reminders, where you want them** — set a time on a habit, choose what it
@@ -1961,7 +1976,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 
 ## API
 
-25 endpoints, identical in both editions. Dates are local calendar dates
+26 endpoints, identical in both editions. Dates are local calendar dates
 (`YYYY-MM-DD`).
 
 <details>
@@ -1976,6 +1991,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 | `GET` `POST` | `/categories` | List, create a habit's group (name + colour) |
 | `PUT` `DELETE` | `/categories/:id` | Rename/recolour, or delete (habits survive, uncategorised) |
 | `POST` | `/categories/reorder` | Reorder — `{ "order": [id, …] }` |
+| `GET` | `/categories/stats` | Compare categories: mean strength of each one's habits (`?start&end&granularity`, a year by default and five years at most) |
 | `GET` | `/habits/:id/entries` | Every entry for a habit |
 | `PUT` | `/habits/:id/entries/:date` | Record a value, a skip, or a note |
 | `DELETE` | `/habits/:id/entries/:date` | Clear a day |

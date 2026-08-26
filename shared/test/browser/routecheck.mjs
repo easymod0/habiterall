@@ -1,20 +1,30 @@
 /**
  * The URL names the view, and the view can be reached from the URL.
  *
- * Four things, and only a real browser can check any of them: opening a habit
- * writes `#/habit/<id>`; loading that fragment cold lands on the habit rather
- * than the dashboard; Back leaves it; and the detail view's own controls —
- * which all re-enter `open()` — do not each leave a history entry behind.
+ * Four things about a habit, and only a real browser can check any of them:
+ * opening one writes `#/habit/<id>`; loading that fragment cold lands on the
+ * habit rather than the dashboard; Back leaves it; and the detail view's own
+ * controls — which all re-enter `open()` — do not each leave a history entry
+ * behind.
  *
  * The last one is the reason this suite exists. `detail.open()` is called
  * again for every zoom, page and granularity press, so a naive "write the URL
  * when the view renders" turns one habit into a dozen history entries and
  * Back walks through all of them before it goes anywhere.
+ *
+ * Two more about the category comparison (#65), which is the second fragment
+ * route and the reason the first four are not enough on their own: `ourEntry`
+ * in `ui/routes.js` is a single BOOLEAN and `go(LIST)` unwinds with one
+ * `history.back()`, so the app is only ever one of our entries deep. That
+ * holds because the comparison pushes exactly one entry AND cannot be opened
+ * over a habit — the two checks below — not because anything in `go()`
+ * enforces it. What the figures on that view SAY is `comparecheck.mjs`.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import { seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9312);
@@ -32,6 +42,13 @@ const send = (m, p = {}, s) => new Promise((res, rej) => {
 });
 
 try {
+  // The category comparison is a second fragment route, and its top-bar entry
+  // point is shown only for an account that HAS a category — so the fixtures
+  // it needs are laid down before the browser is pointed at anything. The
+  // habits it adds go on the end of the list, so the "click the first row"
+  // checks below still open the same habit they always did.
+  await seedCategorySpread({ base: APP });
+
   const url = await devtoolsUrl(PORT, chrome);
   ws = new globalThis.WebSocket(url);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
@@ -116,6 +133,166 @@ try {
   ck('Back returns to the dashboard', backed.list && !backed.detail,
     JSON.stringify(backed));
   ck('and clears the fragment', backed.hash === '', `hash=${backed.hash}`);
+
+  /* ---------- the comparison is one entry, and Back unwinds it ---------- */
+
+  // `ui/routes.js` keeps `ourEntry` as a single BOOLEAN and `go(LIST)` reaches
+  // the dashboard with one `history.back()`, so the whole app is exactly one
+  // fragment entry deep at all times. A second pushing route is the change
+  // that could break that, and both halves are asserted: the push is one entry
+  // and not none — a `replaceState` here leaves the entry underneath it as
+  // whatever preceded the app, so the next Back walks out of it.
+  //
+  // A tab of its own, for the reason the deep-link cases below need theirs:
+  // the tab above has a FORWARD entry (the habit it went Back from), and a
+  // `pushState` prunes it, so `history.length` there is 3 before the push and 3
+  // after — a count that reads identical to no push at all. Starting from a tab
+  // created straight at the app is the only way this number means anything.
+  const cmpTab = await send('Target.createTarget', { url: APP });
+  const cmpSession = (await send('Target.attachToTarget',
+    { targetId: cmpTab.targetId, flatten: true })).sessionId;
+  const cmpEv = async (e) => {
+    const r = await send('Runtime.evaluate',
+      { expression: e, awaitPromise: true, returnByValue: true }, cmpSession);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
+    return r.result.value;
+  };
+  // The Compare button visible, not merely the grid populated: it is shown
+  // only for an account that HAS a category and `dashboard.paint()` is what
+  // decides that, so this is the weakest predicate the click below depends on.
+  await waitUntil(cmpEv,
+    `!!document.querySelector('#grid .habit-row')
+       && document.getElementById('btn-compare').hidden === false`,
+    { what: 'the dashboard, with its Compare button' });
+
+  const beforeCompare = await cmpEv(`history.length`);
+  await cmpEv(`document.getElementById('btn-compare').click()`);
+  // The view unhidden AND a card with a real box in it. Counting
+  // `.compare-card` alone is satisfied by a previous render's nodes, which
+  // survive in the container until `replaceChildren()` runs — see the same
+  // wait in `comparecheck.mjs`.
+  await waitUntil(cmpEv, `(() => {
+    const view = document.getElementById('view-categories');
+    const first = view && !view.hidden && view.querySelector('.compare-card');
+    return !!first && first.getBoundingClientRect().width > 0;
+  })()`, { what: 'the comparison to render' });
+
+  const compared = await cmpEv(`(() => ({
+    compare: !document.getElementById('view-categories').hidden,
+    list: !document.getElementById('view-list').hidden,
+    hash: location.hash,
+    length: history.length,
+  }))()`);
+  ck('the comparison replaces the dashboard and names itself in the URL',
+    compared.compare && !compared.list && compared.hash === '#/categories',
+    JSON.stringify(compared));
+  ck('and it pushes exactly one history entry',
+    compared.length === beforeCompare + 1, `${beforeCompare} -> ${compared.length}`);
+
+  // A settle rather than a `waitUntil`, matching the Back check above it: the
+  // thing being asserted is WHERE Back landed, and one wrong answer is "it did
+  // not move at all" — which a poll on the dashboard cannot observe, it can
+  // only time out somewhere else and report a page that never loaded.
+  await cmpEv(`history.back()`);
+  await sleep(1200);
+  const backFromCompare = await cmpEv(`(() => ({
+    compare: !document.getElementById('view-categories').hidden,
+    list: !document.getElementById('view-list').hidden,
+    hash: location.hash,
+  }))()`);
+  ck('Back from the comparison returns to the dashboard',
+    backFromCompare.list && !backFromCompare.compare && backFromCompare.hash === '',
+    JSON.stringify(backFromCompare));
+
+  /* ---------- and it cannot be entered from a habit ---------- */
+
+  // The other half of the same invariant, and it is not a tidiness rule: with
+  // the button reachable from a habit's own page, `dashboard -> habit ->
+  // categories` is two of our entries, and one `history.back()` from a habit
+  // that a link out of the comparison had opened would land on `#/categories`
+  // with the dashboard painted underneath it. `android-native/CLAUDE.md`'s
+  // back-stack section states the assumption that breaks.
+  await cmpEv(`document.querySelector('#grid .habit-row .habit-meta, #grid .habit-row .habit-name')
+    ?.click()`);
+  await waitUntil(cmpEv,
+    `!document.getElementById('view-detail').hidden
+       && !!document.querySelector('#view-detail h2')`,
+    { what: 'the habit to open again' });
+  const buttonOverHabit = await cmpEv(`(() => {
+    const b = document.getElementById('btn-compare');
+    return { hidden: b.hidden, visible: !!b.offsetParent };
+  })()`);
+  ck('the Compare button is absent while a habit is open',
+    buttonOverHabit.hidden === true && buttonOverHabit.visible === false,
+    JSON.stringify(buttonOverHabit));
+
+  // `dashboard.paint()` calls `syncEntry` before it shows the list, so the
+  // list being visible is downstream of the decision being asserted — the wait
+  // is on the view and the check is on the button, rather than the wait
+  // quietly being the check.
+  await cmpEv(`history.back()`);
+  await waitUntil(cmpEv,
+    `!document.getElementById('view-list').hidden && location.hash === ''`,
+    { what: 'the dashboard after leaving the habit' });
+  const buttonBack = await cmpEv(`(() => {
+    const b = document.getElementById('btn-compare');
+    return { hidden: b.hidden, visible: !!b.offsetParent };
+  })()`);
+  ck('and it comes back once the habit is closed',
+    buttonBack.hidden === false && buttonBack.visible === true,
+    JSON.stringify(buttonBack));
+
+  /* ---------- a habit reached from OUTSIDE the app closes the comparison ---------- */
+
+  // The two constraints above close every route the app itself offers into
+  // `dashboard -> categories -> habit`, and they cannot close a same-document
+  // FRAGMENT navigation made from outside it. The app ships one: `appLink` in
+  // `shared/src/notify.js` builds `#/habit/42` for the ntfy `click` and the
+  // Discord `embed.url`, and the address bar reaches it too. `location.hash` is
+  // that navigation exactly — no reload, so `routes.init`'s listener is what
+  // opens the habit, which is the path a notification tap takes.
+  //
+  // With `state.openCategories` left true by `detail.js`, Back from that habit
+  // fires `onRoute({view: 'categories'})`, `app.js`'s `!state.openCategories`
+  // guard is false, `categories.open()` is skipped — and the app sits with
+  // `#/categories` in the address bar and the habit still rendered.
+  await cmpEv(`document.getElementById('btn-compare').click()`);
+  await waitUntil(cmpEv, `(() => {
+    const view = document.getElementById('view-categories');
+    const first = view && !view.hidden && view.querySelector('.compare-card');
+    return !!first && first.getBoundingClientRect().width > 0;
+  })()`, { what: 'the comparison to render again' });
+
+  await cmpEv(`location.hash = '#/habit/${habit.id}'`);
+  await waitUntil(cmpEv,
+    `!document.getElementById('view-detail').hidden
+       && document.getElementById('view-categories').hidden
+       && !!document.querySelector('#view-detail h2')`,
+    { what: 'the habit the fragment names' });
+
+  // A settle rather than a poll, for the reason the two Back checks above use
+  // one: the wrong answer is "nothing moved at all", which has no predicate to
+  // wait on — a poll on the comparison could only ever time out.
+  await cmpEv(`history.back()`);
+  await sleep(1200);
+  const backToCompare = await cmpEv(`(() => ({
+    compare: !document.getElementById('view-categories').hidden,
+    detail: !document.getElementById('view-detail').hidden,
+    hash: location.hash,
+    cards: document.querySelectorAll('#view-categories .compare-card').length,
+  }))()`);
+  ck('Back from a habit opened by its fragment returns to the comparison, not to '
+     + 'the comparison\'s URL over the habit',
+    backToCompare.compare && !backToCompare.detail
+    && backToCompare.hash === '#/categories' && backToCompare.cards > 0,
+    JSON.stringify(backToCompare));
+
+  // ...and leave the tab on the dashboard, where the deep-link blocks below
+  // would otherwise inherit a comparison nobody asked them about.
+  await cmpEv(`history.back()`);
+  await waitUntil(cmpEv,
+    `!document.getElementById('view-list').hidden && location.hash === ''`,
+    { what: 'the dashboard after leaving the comparison' });
 
   /* ---------- a cold load of the fragment lands on the habit ---------- */
 

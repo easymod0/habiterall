@@ -20,11 +20,15 @@
  */
 
 /**
- * @typedef {{view: 'list'} | {view: 'habit', id: number}} Route
+ * @typedef {{view: 'list'} | {view: 'habit', id: number}
+ *           | {view: 'categories'}} Route
  */
 
 /** The dashboard: the route with no fragment. @type {Route} */
 export const LIST = { view: 'list' };
+
+/** The category comparison. @type {Route} */
+export const CATEGORIES = { view: 'categories' };
 
 /**
  * `#/habit/<id>`, and nothing else.
@@ -36,6 +40,14 @@ export const LIST = { view: 'list' };
 const HABIT_RE = /^#?\/habit\/(\d+)$/;
 
 /**
+ * `#/categories`, and nothing else.
+ *
+ * Anchored for the reason `HABIT_RE` is, and it carries no id because the
+ * comparison is one page over the whole account rather than one per category.
+ */
+const CATEGORIES_RE = /^#?\/categories$/;
+
+/**
  * The route a fragment names.
  *
  * Never throws and never returns null: anything unrecognised is the list,
@@ -45,7 +57,10 @@ const HABIT_RE = /^#?\/habit\/(\d+)$/;
  * @returns {Route}
  */
 export function parseRoute(hash = '') {
-  const match = HABIT_RE.exec(String(hash).trim());
+  const text = String(hash).trim();
+  if (CATEGORIES_RE.test(text)) return CATEGORIES;
+
+  const match = HABIT_RE.exec(text);
   if (!match) return LIST;
 
   const id = Number(match[1]);
@@ -64,7 +79,9 @@ export function parseRoute(hash = '') {
  * @returns {string}
  */
 export function hashFor(route) {
-  return route?.view === 'habit' ? `#/habit/${route.id}` : '';
+  if (route?.view === 'habit') return `#/habit/${route.id}`;
+  if (route?.view === 'categories') return '#/categories';
+  return '';
 }
 
 /** The route the address bar currently names. @returns {Route} */
@@ -106,13 +123,28 @@ let ourEntry = false;
  * pushed; `replaceState` remains for every other case, including the first
  * paint of a cold deep link, where there is nothing of ours to unwind.
  *
+ * **The comparison is pushed the same way, and NOTHING here keeps the stack
+ * one deep — the views do.** `ourEntry` is a single boolean and the unwind is
+ * a single `history.back()`, so both depend on there never being two entries
+ * of ours at once. Two rules elsewhere are what make that unreachable rather
+ * than merely unlikely: the comparison links to no habit (see
+ * `ui/categories.js`), and its top-bar button is absent while a habit is open
+ * (`syncEntry`, same file). Do not weaken either without reading this, and do
+ * not "fix" a third route by making this function replace instead: a
+ * same-document open counts an entry in `WebBackStack.floorAfterShow` on
+ * Android, so replacing leaves `currentIndex` AT the floor and the next system
+ * Back closes the screen rather than reaching the dashboard.
+ * `android-native/CLAUDE.md` requires all three back-stack rules to be re-read
+ * together and checked on an emulator whenever this function changes, and
+ * records that every wrong version still passes `WebBackStackTest`.
+ *
  * @param {Route} route
  */
 export function go(route) {
   const hash = hashFor(route);
   if (location.hash === hash) return;
 
-  if (route?.view === 'habit') {
+  if (hash) {
     history.pushState(null, '', hash);
     handled = hash;
     ourEntry = true;
@@ -160,9 +192,12 @@ export function init(onRoute) {
   const fire = () => {
     if (location.hash === handled) return;
     handled = location.hash;
-    // Landing on a habit means that entry is one we pushed — nothing else
-    // creates one — so it stays unwindable after a Forward as well as a Back.
-    ourEntry = parseRoute(location.hash).view === 'habit';
+    // Landing on a habit or the comparison means that entry is one we wrote —
+    // nothing else creates one — so it stays unwindable after a Forward as
+    // well as a Back. Asked as "does this route have a fragment" rather than
+    // by naming the two views, which is the same question `go` above asks and
+    // keeps the two from drifting as a third fragment route is added.
+    ourEntry = hashFor(parseRoute(location.hash)) !== '';
     onRoute(current());
   };
   window.addEventListener('hashchange', fire);

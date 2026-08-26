@@ -26,12 +26,13 @@ import {
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
-import { isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
+import { dashboardShowing, isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 import { SKIP } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
 import { GRID_DAYS, gridColumns } from '/shared/ui/window.js';
 import { open as openHabit } from '/shared/ui/detail.js';
+import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -209,6 +210,14 @@ function visibleHabits() {
 
 export function paint() {
   state.openHabitId = null;
+  // ...and neither is the comparison, which this paint is about to cover. Set
+  // beside `openHabitId` because the two answer one question between them —
+  // see the note on the field in `ui/store.js`.
+  state.openCategories = false;
+  // The top-bar entry point to that comparison, which `ui/categories.js`
+  // owns: this is the one place that runs after `state.categories` has been
+  // refreshed, and every category mutation ends in a 'reload' that reaches it.
+  syncCompareEntry(state.categories.length > 0);
   // The URL follows the view. Cheap to call on every repaint — and this is
   // called on every check-off — because `go` does nothing when the address bar
   // already says this.
@@ -699,12 +708,21 @@ export function init() {
 
   // Reflow the day grid when crossing the narrow/wide breakpoint (rotation,
   // window resize) so the column count always matches the available width.
+  //
+  // `dashboardShowing()` and not `openHabitId == null`: `paint()` does not
+  // merely reflow, it SHOWS the list and unwinds the fragment. Turning a phone
+  // sideways crosses 640px, so with the comparison on screen this used to
+  // replace it with the dashboard and fire `history.back()` — a navigation
+  // nobody asked for, from a gesture that is not a navigation at all. The
+  // reflow is for the grid, and the grid is only on screen when the dashboard
+  // is.
   window.matchMedia('(max-width: 640px)').addEventListener('change', () => {
-    if (state.openHabitId == null && state.habits.length) paint();
+    if (dashboardShowing() && state.habits.length) paint();
   });
 
   // The dashboard repaints from what it already has; only a 'reload' goes back
-  // to the server. Both are ignored while the detail view is the one showing.
-  on('change', () => { if (state.openHabitId == null) paint(); });
+  // to the server. Both are ignored while another view is the one showing —
+  // painting over it would navigate away from a page nobody had left.
+  on('change', () => { if (dashboardShowing()) paint(); });
   on('reload', () => { load().catch((e) => toast(e.message)); });
 }

@@ -206,7 +206,40 @@ const sw = self;
 // `index.html` with the select, held against an old `habit-dialog.js` that
 // never populates or reads it — which is exactly why this is a version bump
 // and not a "the new file will just 404 and get refetched" shrug.
-const CACHE_VERSION = 'v24';
+// v25: the category comparison (#65 phase 3). This is BOTH shapes of bump at
+// once, which is why it is one version and not an argument about whether it
+// needs to be.
+//
+// It is v9's and v17's: `ui/categories.js` is a brand-new shell asset that
+// `app.js` imports STATICALLY, so an installed PWA would otherwise first fetch
+// it at the moment somebody presses the button — and offline that is a module
+// link error before `start()`, outside `#view-error`, which is a blank page
+// rather than a view that says something.
+//
+// And it is v13's and v24's: `index.html` is in `SHELL` and now carries
+// `#btn-compare` and `#view-categories`. `ui/categories.js` looks the button
+// up at module scope and dereferences it in `syncEntry`, and `ui/views.js`
+// puts `#view-categories` in `all` and sets `.hidden` on it — so a stale v24
+// `index.html` served alongside the new scripts throws on the first paint of
+// the dashboard, which is the one path every boot takes.
+//
+// The reverse pairing is the silent one, as it was at v24: a new
+// `index.html` with a top-bar button that no cached script ever wires or
+// reveals. `shellFirst` is stale-while-revalidate and writes into the RUNNING
+// worker's cache, so both pairings are reachable in the window between
+// installs; naming the new shell separately is what makes the swap atomic at
+// the cache level. It costs every installed client its data cache.
+//
+// `ui/routes.js`, `ui/dashboard.js`, `ui/settings-dialog.js`, `ui/detail.js`,
+// `ui/habit-dialog.js` and `auth-session.js` moved with it — `dashboard.js`
+// imports `syncEntry` from the new module, which is v16's case exactly and
+// covered by the same bump. `ui/store.js` adds an EXPORT of its own,
+// `dashboardShowing`, which four of those files import: that is v9's case
+// again in miniature, and the reason it is named here rather than left to the
+// list above is that an export is the half a reader checking "did anything new
+// appear?" would otherwise miss. `style.css` is a shell asset too and gained
+// this view's rules.
+const CACHE_VERSION = 'v25';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -234,6 +267,7 @@ const SHELL = [
   '/shared/ui/amount.js',
   '/shared/ui/api.js',
   '/shared/ui/calendar.js',
+  '/shared/ui/categories.js',
   '/shared/ui/components.js',
   '/shared/ui/connectivity.js',
   '/shared/ui/count-field.js',

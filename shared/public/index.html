@@ -38,6 +38,19 @@
     <div class="topbar-actions">
       <button id="btn-new" class="btn btn-primary" hidden>New habit</button>
       <!--
+        Compare categories. An ICON button rather than a labelled one, and not
+        because the label would not read well: the note below records that four
+        buttons plus the brand already did not fit a 360px phone, so a fifth
+        control has to cost what the gear and the theme toggle cost. It is
+        hidden here and stays hidden for an account with no categories — see
+        `syncEntry` in ui/categories.js, which owns it. Deliberately NOT in
+        `auth-session.js`'s SIGNED_IN_ONLY: that list turns its buttons ON for
+        every signed-in account, which is precisely the thing this one must not
+        do.
+      -->
+      <button id="btn-compare" class="btn btn-icon" title="Compare categories"
+              aria-label="Compare categories" hidden>▤</button>
+      <!--
         Backup lives at the foot of the settings dialog, not here. Four
         buttons plus the brand did not fit a 360px phone, and of the four this
         is the one nobody presses daily — the gear is already where everything
@@ -181,6 +194,12 @@
   </main>
 
   <main id="view-detail" class="view" hidden></main>
+
+  <!--
+    The category comparison, filled by ui/categories.js. Empty markup for the
+    same reason `#view-detail` is: everything in it is built from a response.
+  -->
+  <main id="view-categories" class="view" hidden></main>
 
   <dialog id="habit-dialog">
     <form id="habit-form" method="dialog">

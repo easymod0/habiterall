@@ -16,9 +16,10 @@ const $ = (sel) => document.querySelector(sel);
 
 const list = $('#view-list');
 const detail = $('#view-detail');
+const categories = $('#view-categories');
 const error = $('#view-error');
 
-const all = [list, detail, error];
+const all = [list, detail, categories, error];
 
 /** Hide every view, then show one. @returns the one shown */
 function only(view) {
@@ -34,6 +35,11 @@ export function showList() {
 /** Show the single-habit view. @returns its container */
 export function showDetail() {
   return only(detail);
+}
+
+/** Show the category comparison. @returns its container, for the view to fill */
+export function showCategories() {
+  return only(categories);
 }
 
 /** Show the boot-error view. @returns its container, for the caller to fill */

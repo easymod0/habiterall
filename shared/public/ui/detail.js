@@ -12,6 +12,7 @@ import {
 } from '/shared/charts.js';
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
+import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 import {
   card, cardInnerWidth, focusKeyOf, habitIcon, restoreFocus, segmented,
   subheading, windowedChart,
@@ -361,11 +362,31 @@ function render(stats, entries) {
   const habit = stats.habit;
   const color = habit.color;
   state.openHabitId = habit.id;
+  // ...and the comparison is not what is showing any more, however this habit
+  // was reached. The two in-app rules — the comparison links to no habit, its
+  // button is hidden while a habit is open — close every route the app itself
+  // offers, and they cannot close a same-document fragment navigation made from
+  // OUTSIDE it. The app ships one: `appLink` in `shared/src/notify.js` builds
+  // `#/habit/42` for the ntfy `click` and the Discord `embed.url`, and typing
+  // the fragment reaches it too. Arriving that way over `#/categories` left the
+  // flag true, so Back fired `onRoute({view: 'categories'})`, `app.js`'s
+  // `!state.openCategories` guard was false, `categories.open()` was skipped —
+  // and the app sat with `#/categories` in the address bar and the habit still
+  // rendered. This does not make `ourEntry` a real stack and does not claim to;
+  // it removes the user-visible half.
+  state.openCategories = false;
   // Set here rather than in `open()`, so the URL only names a habit that
   // actually rendered: `open()` is also the failure path, and a fragment
   // pointing at a habit the server refused would survive a reload as a link
   // that goes nowhere.
   routes.go({ view: 'habit', id: habit.id });
+  // The top bar's Compare button goes away while a habit is open, and it is
+  // `syncEntry` that decides — `openHabitId` above is one of its two inputs,
+  // so this only has to say that the input moved. The rule is not cosmetic:
+  // it is what makes `dashboard → habit → categories` unreachable, which is
+  // what keeps `routes.js`'s single `ourEntry` boolean honest. See the note on
+  // `syncEntry` in `ui/categories.js` before changing either half.
+  syncCompareEntry();
   const host = views.showDetail();
 
   // Captured before the rebuild below destroys whatever had it. The day strip

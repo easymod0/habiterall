@@ -16,7 +16,7 @@
 
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, set, state } from '/shared/ui/store.js';
+import { dashboardShowing, emit, set, state } from '/shared/ui/store.js';
 import { currentTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
 
@@ -649,7 +649,12 @@ async function applyDraft() {
     // `habit-dialog` uses for the same reason: 'reload' goes to the dashboard,
     // so emitting it over an open habit would navigate away from the page the
     // user is on — and that page has already refetched on the 'change' above.
-    if (SERVER_COMPUTED.some((key) => key in changed) && state.openHabitId == null) {
+    //
+    // The comparison view is the third answer to "what is showing": it has no
+    // habit open either, and it has already refetched on the 'change' above.
+    // `dashboardShowing()` is that whole question, asked once — see its note in
+    // `ui/store.js`.
+    if (SERVER_COMPUTED.some((key) => key in changed) && dashboardShowing()) {
       emit('reload');
     }
     return true;

@@ -20,6 +20,11 @@ import { join } from 'node:path';
 // The clamp this suite fills to has to be the one the API enforces, not a
 // restated 30 that could drift from it.
 import { LIMITS } from '@habiterall/shared/validate.js';
+// Dates only. `/categories/stats`'s own ceiling is asserted as the LITERAL
+// 1830 below and deliberately not imported: a test that imports the constant it
+// checks pins the name and nothing else — the `fresh` window passed with 7
+// widened to 30 while its own comment claimed the boundary was covered.
+import { today, addDays } from '@habiterall/shared/stats.js';
 
 const workdir = mkdtempSync(join(tmpdir(), 'habiterall-shape-'));
 // These suites exercise the API, not sign-in or rate limiting, and auth now
@@ -465,6 +470,337 @@ const keptByCarrying = await (await putJson(`/api/habits/${habitToKeep.id}`,
   { name: 'Keep me', type: 'boolean', category_id: secondCategory.id })).json();
 ck('a PUT that carries category_id keeps it',
   keptByCarrying.category_id === secondCategory.id, JSON.stringify(keptByCarrying.category_id));
+
+/* ---- GET /categories/stats — the three things only the ROUTE can get wrong ----
+ *
+ * `computeCategoryStats` has its own unit tests and they pin the arithmetic.
+ * These pin the WIRING, which is what a route gets wrong without touching the
+ * rule at all: what it hands the function, and what it refuses to compute.
+ */
+
+const STATS_END = today();
+const STATS_START = addDays(STATS_END, -29);
+
+const statsUrl = (params) =>
+  `${base}/api/categories/stats?${new URLSearchParams(params)}`;
+
+const categoryStats = async (params = {}) => (await (await fetch(statsUrl({
+  start: STATS_START, end: STATS_END, granularity: 'day', ...params,
+}))).json());
+
+const logDay = (id, date) => fetch(`${base}/api/habits/${id}/entries/${date}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 2 }),
+});
+
+/* -- archived members: excluded from the category, and COUNTED -- */
+
+const keptCategory = await (await postJson('/api/categories',
+  { name: 'Compare Kept', color: '#123456' })).json();
+
+const keptHabit = await makeHabit(
+  { name: 'Compare Kept habit', type: 'boolean', category_id: keptCategory.id }
+);
+const archivedHabit = await makeHabit(
+  { name: 'Compare Archived habit', type: 'boolean', category_id: keptCategory.id }
+);
+// Both logged, so the archived one has a real strength to be left out OF —
+// a member sitting at no score would drop out of the mean either way.
+for (let i = 0; i < 10; i++) {
+  await logDay(keptHabit.id, addDays(STATS_END, -i));
+  await logDay(archivedHabit.id, addDays(STATS_END, -i));
+}
+
+const beforeArchive = await categoryStats();
+const keptBefore = beforeArchive.categories.find((c) => c.id === keptCategory.id);
+ck('both members are counted while both are active',
+  keptBefore?.members === 2, `members: ${keptBefore?.members}`);
+ck('sanity: the window ends on the day that was asked for',
+  beforeArchive.buckets.at(-1) === STATS_END,
+  JSON.stringify({ last: beforeArchive.buckets.at(-1), STATS_END }));
+
+const archivedCountBefore = beforeArchive.archivedExcluded;
+
+await putJson(`/api/habits/${archivedHabit.id}`, {
+  name: 'Compare Archived habit', type: 'boolean',
+  category_id: keptCategory.id, archived: true,
+});
+
+const afterArchive = await categoryStats();
+const keptAfter = afterArchive.categories.find((c) => c.id === keptCategory.id);
+ck('an archived member leaves its category\'s member count',
+  keptAfter?.members === 1, `members: ${keptAfter?.members}`);
+ck('THE assertion: and it is COUNTED in archivedExcluded — a route that ' +
+  'filtered on `archived` in SQL reports 0 here forever, and the view has ' +
+  'nothing to say about what it left out',
+  afterArchive.archivedExcluded === archivedCountBefore + 1,
+  JSON.stringify({ archivedCountBefore, after: afterArchive.archivedExcluded }));
+ck('...and the one active member is both the best and the worst named',
+  keptAfter?.best?.id === keptHabit.id && keptAfter?.worst?.id === keptHabit.id,
+  JSON.stringify({ best: keptAfter?.best, worst: keptAfter?.worst }));
+
+/* -- an ABANDONED habit is in the mean; only a NEVER-LOGGED one is excluded --
+ *
+ * The route fetches entries from `start - 400`, so a habit last logged before
+ * that comes back with an empty slice — indistinguishable, from the slice
+ * alone, from one that has never been logged at all. They are different facts
+ * and only one of them should keep a habit out of its category's mean: an
+ * abandoned habit has a real strength near zero and really is dragging the
+ * category down. The lifetime `MIN(date)` is what tells them apart, and this is
+ * the only assertion in the suite that can see whether the route supplies it.
+ */
+
+const abandonedCategory = await (await postJson('/api/categories',
+  { name: 'Compare Abandoned', color: '#654321' })).json();
+const abandonedHabit = await makeHabit(
+  { name: 'Compare Abandoned habit', type: 'boolean',
+    category_id: abandonedCategory.id }
+);
+// 900 days back: well outside the fetched window (29 + 400 = 429 days), and
+// well inside the lifetime the grouped MIN(date) reads.
+for (let i = 0; i < 3; i++) {
+  await logDay(abandonedHabit.id, addDays(STATS_END, -(900 + i)));
+}
+
+const neverCategory = await (await postJson('/api/categories',
+  { name: 'Compare Never', color: '#abcdef' })).json();
+await makeHabit(
+  { name: 'Compare Never habit', type: 'boolean', category_id: neverCategory.id }
+);
+
+const landing = await categoryStats();
+const abandoned = landing.categories.find((c) => c.id === abandonedCategory.id);
+const never = landing.categories.find((c) => c.id === neverCategory.id);
+
+ck('the abandoned habit is a member of its category',
+  abandoned?.members === 1, `members: ${abandoned?.members}`);
+ck('THE assertion: it is NOT reported as never logged — its entries are older ' +
+  'than the fetched slice, so only a lifetime MIN(date) can say so',
+  abandoned?.unloggedExcluded === 0,
+  JSON.stringify({ unloggedExcluded: abandoned?.unloggedExcluded,
+                   mean: abandoned?.mean }));
+ck('...so it is averaged into the mean rather than left out of it',
+  typeof abandoned?.mean === 'number', JSON.stringify(abandoned?.mean));
+
+ck('a habit that has never been logged is counted, and counted as unlogged',
+  never?.members === 1 && never?.unloggedExcluded === 1,
+  JSON.stringify({ members: never?.members,
+                   unloggedExcluded: never?.unloggedExcluded }));
+ck('...and a category with nothing landed has no mean at all, never 0',
+  Object.is(never?.mean, null), JSON.stringify(never?.mean));
+
+ck('Uncategorised is the last section, and carries id null',
+  Object.is(landing.categories.at(-1).id, null),
+  JSON.stringify(landing.categories.at(-1)?.id));
+
+/* -- the warm-up: this route agrees with the habit's OWN page --
+ *
+ * `computeScores` starts its EWMA at 0 on the first day of the range it is
+ * handed, so a comparison computed cold at the requested `start` reports every
+ * habit weaker than `/habits/:id/stats` does — `ui/detail.js` sends that route
+ * no `start`, so a habit's own page is always converged from its first entry.
+ * Two surfaces disagreeing about the same habit is indistinguishable from one
+ * of them being broken, which is why each member is scored over
+ * `[start - SCORE_WARMUP_DAYS, end]` and sliced back.
+ *
+ * `stats.test.js` pins that DECISION and cannot pin the WIRING: the pure
+ * function scores whatever entries it is handed, so a route fetching from
+ * `start` rather than from `start - SCORE_WARMUP_DAYS` satisfies every unit
+ * test in this repo — the member simply arrives with a shorter history and
+ * `computeCategoryStats` has no way to know it was short-changed. This is the
+ * route-layer half, and the assertion is deliberately CROSS-SURFACE: the claim
+ * the warm-up makes is not "400 days are fetched", it is "the comparison says
+ * what the habit's own page says".
+ *
+ * It needs a SHORT window to be falsifiable at all. The default window is 365
+ * days — some 28 half-lives of this decay — so a series starting cold at that
+ * edge has re-converged long before `end` and the two figures agree whether or
+ * not the warm-up is there. Twenty days is inside its reach.
+ */
+
+// Three times the window compared below, so the warm-up has real history to
+// reach back for rather than a few days of it.
+const WARMUP_HISTORY_DAYS = 60;
+// Inclusive, so this is a 20-day window and not a 21-day one.
+const WARMUP_START = addDays(STATS_END, -19);
+
+const warmupCategory = await (await postJson('/api/categories',
+  { name: 'Compare Warmup', color: '#0f766e' })).json();
+const warmupHabit = await makeHabit(
+  { name: 'Compare Warmup habit', type: 'boolean', category_id: warmupCategory.id }
+);
+for (let i = 0; i < WARMUP_HISTORY_DAYS; i++) {
+  await logDay(warmupHabit.id, addDays(STATS_END, -i));
+}
+
+// The habit's own page, asked exactly as the detail view asks it: an `end`,
+// and no `start` at all.
+const ownPage = await (await fetch(
+  `${base}/api/habits/${warmupHabit.id}/stats?end=${STATS_END}`)).json();
+const ownScore = ownPage.scores?.at(-1)?.score;
+
+// The control, and it is what makes the assertion below able to fail: the
+// member's history must start well BEFORE the compared window opens. Against a
+// habit first logged inside that window, a route with no warm-up produces the
+// very same agreement, because there would be nothing earlier to miss.
+ck('sanity: the member has history reaching far back beyond the compared window',
+  ownPage.scores?.length === WARMUP_HISTORY_DAYS
+    && WARMUP_HISTORY_DAYS > 20,
+  JSON.stringify({ points: ownPage.scores?.length, WARMUP_HISTORY_DAYS }));
+
+const shortWindow = await categoryStats({ start: WARMUP_START });
+const warm = shortWindow.categories.find((c) => c.id === warmupCategory.id);
+
+ck('sanity: that window really is the short one, 20 days of buckets',
+  shortWindow.buckets.length === 20,
+  JSON.stringify({ buckets: shortWindow.buckets.length, WARMUP_START }));
+ck('sanity: and the category has exactly the one member being compared',
+  warm?.members === 1 && warm?.unloggedExcluded === 0,
+  JSON.stringify({ members: warm?.members, unlogged: warm?.unloggedExcluded }));
+
+// Compared against the habit's own figure, never a literal: the number is a
+// property of this fixture, and writing it out would pin the fixture rather
+// than the agreement between the two surfaces.
+ck('THE assertion: over a 20-day window the category mean IS the member\'s own ' +
+  'strength — a route fetching entries from `start` instead of ' +
+  '`start - SCORE_WARMUP_DAYS` reports it weaker here than its own page does',
+  warm?.mean === ownScore && typeof ownScore === 'number',
+  JSON.stringify({ mean: warm?.mean, ownScore }));
+ck('...and the chart\'s last point is that same number, not a near-miss',
+  warm?.series.at(-1)?.value === warm?.mean,
+  JSON.stringify({ last: warm?.series.at(-1)?.value, mean: warm?.mean }));
+
+/* -- ...and it agrees about an AVOID habit, which is the shape it can FLATTER --
+ *
+ * The block above covers the at-least shape, and that shape cannot see half of
+ * this. The warm-up reaches back before the member existed, and on an at-least
+ * habit those phantom days credit 0 — so the two surfaces agree whether or not
+ * the range is clamped to the member's own first entry. On an at-most habit
+ * whose unlogged days count as KEPT (`at_most_unlogged: 'success'`, or the
+ * account's `atMostUnlogged`, which is every `show_as: 'avoid'` habit under that
+ * setting) an unlogged day is FULL credit, so an unclamped warm-up converges a
+ * limit created last week to ~1.0 while its own page reads under half that.
+ * That is every limit habit's opening state, which makes it the reading a user
+ * is most likely to meet first.
+ *
+ * Over the ordinary 30-day request rather than the short window above, and
+ * deliberately: the disagreement is about days before the habit existed, so it
+ * does not need a narrow window to show, and pinning it here says the DEFAULT
+ * question this route is asked answers honestly for this shape.
+ */
+
+const avoidCategory = await (await postJson('/api/categories',
+  { name: 'Compare Avoid', color: '#b45309' })).json();
+const avoidHabit = await makeHabit({
+  name: 'Compare Avoid habit', type: 'numerical', unit: 'cans',
+  target_type: 'at_most', target_value: 0,
+  at_most_unlogged: 'success', show_as: 'avoid',
+  category_id: avoidCategory.id,
+});
+// One slip, ten days back — `target + 1`, which is what `valueForState` writes
+// for a slip on an avoided habit. Every other day of its life is unlogged,
+// which is the state the setting counts as kept.
+await fetch(`${base}/api/habits/${avoidHabit.id}/entries/${addDays(STATS_END, -10)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 1 }),
+});
+
+const avoidOwnPage = await (await fetch(
+  `${base}/api/habits/${avoidHabit.id}/stats?end=${STATS_END}`)).json();
+const avoidOwnScore = avoidOwnPage.scores?.at(-1)?.score;
+
+ck('sanity: this habit\'s unlogged days really do count as kept',
+  avoidOwnPage.habit?.unlogged_is_success === true,
+  JSON.stringify(avoidOwnPage.habit?.unlogged_is_success));
+// The control that makes the assertion able to fail: a member already near 1.0
+// on its own page would agree with a converged comparison by accident.
+ck('sanity: and its own page has it well short of converged',
+  typeof avoidOwnScore === 'number' && avoidOwnScore > 0.1 && avoidOwnScore < 0.75,
+  JSON.stringify(avoidOwnScore));
+
+const withAvoid = await categoryStats();
+const avoidSection = withAvoid.categories.find((c) => c.id === avoidCategory.id);
+
+ck('sanity: the avoid habit is the one member of its category',
+  avoidSection?.members === 1 && avoidSection?.unloggedExcluded === 0,
+  JSON.stringify({ members: avoidSection?.members,
+                   unlogged: avoidSection?.unloggedExcluded }));
+ck('THE assertion: a limit created inside the window reads the same here as on ' +
+  'its own page — a warm-up not clamped to the member\'s first entry credits ' +
+  '400 days before it existed as kept and converges it to ~1.0',
+  avoidSection?.mean === avoidOwnScore && typeof avoidOwnScore === 'number',
+  JSON.stringify({ mean: avoidSection?.mean, ownScore: avoidOwnScore }));
+ck('...and the chart\'s last point is that same number here too',
+  avoidSection?.series.at(-1)?.value === avoidSection?.mean,
+  JSON.stringify({ last: avoidSection?.series.at(-1)?.value, mean: avoidSection?.mean }));
+
+/* -- the range bounds --
+ *
+ * The ceiling is this route's OWN, and it is 1830 days — five years — not the
+ * 3660 of `/habits/:id/stats`. That route walks one habit; this one walks
+ * every habit in the account, so `MAX_RANGE_DAYS` here buys a cost multiplied
+ * by the habit count.
+ *
+ * 1830 and 1831 are written out rather than imported, on purpose. A test that
+ * imports the constant it checks pins the NAME and nothing else and goes on
+ * passing while the boundary moves underneath it — the exact way the `fresh`
+ * window survived widening from 7 to 30.
+ */
+
+const tooWide = await fetch(statsUrl({
+  start: addDays(STATS_END, -1831), end: STATS_END, granularity: 'month',
+}));
+ck('a window of 1831 days — one past this route\'s ceiling — gives 400',
+  tooWide.status === 400, String(tooWide.status));
+
+const atCeiling = await fetch(statsUrl({
+  start: addDays(STATS_END, -1830), end: STATS_END, granularity: 'month',
+}));
+ck('...and exactly 1830 is still answered, so the bound is the documented one ' +
+  'and not one day tighter',
+  atCeiling.status === 200, String(atCeiling.status));
+
+// The bound is this route's own and NOT the one /habits/:id/stats enforces:
+// a span that route serves happily is refused here.
+const atOtherCeiling = await fetch(statsUrl({
+  start: addDays(STATS_END, -3660), end: STATS_END, granularity: 'month',
+}));
+ck('a 3660-day window — fine for one habit on /habits/:id/stats — is refused ' +
+  'here, because this route walks every habit in the account',
+  atOtherCeiling.status === 400, String(atOtherCeiling.status));
+
+const backwards = await fetch(statsUrl({
+  start: STATS_END, end: addDays(STATS_END, -1),
+}));
+ck('a start after end gives 400', backwards.status === 400, String(backwards.status));
+
+const futureEnd = await categoryStats({ end: addDays(STATS_END, 10) });
+ck("an end in the future is clamped to the caller's today",
+  futureEnd.buckets.at(-1) === STATS_END,
+  JSON.stringify({ last: futureEnd.buckets.at(-1), STATS_END }));
+
+/* -- ...and a caller that names no start gets a YEAR, not the ceiling --
+ *
+ * The simplest request the route takes must not be the most expensive one it
+ * can answer. At the ceiling this would be 1831 daily buckets PER CATEGORY for
+ * asking the plainest possible question; a caller who wants five years says so.
+ *
+ * `COMPARE_WINDOW_DAYS` lives in `shared/src/stats.js` so the two editions
+ * cannot answer a start-less URL with different bucket counts — and, like the
+ * ceiling above, it is written out here rather than imported. Importing it
+ * would pin the name and let the window move underneath this check; the 366 is
+ * the inclusive day count `addDays(end, -365)` actually produces.
+ */
+
+const defaulted = await (await fetch(
+  statsUrl({ end: STATS_END, granularity: 'day' })
+)).json();
+ck('an absent start opens the window a year before end, not at the ceiling',
+  defaulted.buckets.length === 366 && defaulted.buckets[0] === addDays(STATS_END, -365),
+  JSON.stringify({ buckets: defaulted.buckets.length, first: defaulted.buckets[0],
+                   wanted: addDays(STATS_END, -365) }));
 
 /* ---- LIMITS.categories is a ceiling, not a suggestion ----
  * Last, deliberately: it fills the account to the ceiling, and every test

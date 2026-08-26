@@ -10,6 +10,7 @@
  */
 
 import { setAuth } from '/shared/ui/api.js';
+import * as categories from '/shared/ui/categories.js';
 import * as connectivity from '/shared/ui/connectivity.js';
 import * as dashboard from '/shared/ui/dashboard.js';
 import * as dataDialog from '/shared/ui/data-dialog.js';
@@ -22,7 +23,7 @@ import * as nudge from '/shared/ui/nudge.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settingsDialog from '/shared/ui/settings-dialog.js';
 import * as settings from '/shared/ui/settings.js';
-import { emit, state } from '/shared/ui/store.js';
+import { dashboardShowing, emit, state } from '/shared/ui/store.js';
 import { initTheme, toggleTheme } from '/shared/ui/theme.js';
 import { toast } from '/shared/ui/toast.js';
 import { showError } from '/shared/ui/views.js';
@@ -80,7 +81,12 @@ function initRouting() {
   routes.init((route) => {
     if (route.view === 'habit') {
       if (route.id !== state.openHabitId) detail.open(route.id);
-    } else if (state.openHabitId != null) {
+    } else if (route.view === 'categories') {
+      // The same guard, asked of the flag that answers the same question for
+      // this view: a traversal that lands on the fragment already showing must
+      // not refetch it.
+      if (!state.openCategories) categories.open();
+    } else if (!dashboardShowing()) {
       // 'reload' rather than a repaint: the dashboard is coming back after a
       // detour, and the entries behind it may have moved since.
       emit('reload');
@@ -129,6 +135,7 @@ export async function start(adapter) {
   settingsDialog.init();
   dashboard.init();
   detail.init();
+  categories.init();
   initRouting();
   registerServiceWorker();
 
@@ -160,8 +167,15 @@ export async function start(adapter) {
     // midnight, holding a window that ends yesterday because nothing in the app
     // refreshes on `visibilitychange` — `syncNow` returns early on an empty
     // queue, and `'reload'` fires only on an offline→online transition.
+    // ...and the comparison view is the same refusal as the habit, by the same
+    // mechanism: `dashboard.load()` ends in a `paint()`, which shows the list.
+    // Measured on a cold deep link to `#/categories` with the browser reminder
+    // switched on — the comparison rendered and was replaced by the dashboard
+    // a moment later, because a boot that never loaded the list has a
+    // `gridLoaded` of null and `covers` refuses every date against it, which
+    // is precisely the state that asks for one refresh.
     refresh: async () => {
-      if (state.gridEnd || state.openHabitId != null) return;
+      if (state.gridEnd || !dashboardShowing()) return;
       await dashboard.load();
     },
     enabled: () => settings.get('notifyChannels') ?? [],
@@ -225,6 +239,13 @@ export async function start(adapter) {
       // Falling back to the list when the habit will not open, or a deleted
       // habit's link leaves the app showing nothing at all.
       if (!await detail.open(opening.id)) await dashboard.load();
+    } else if (opening.view === 'categories') {
+      // Everything the branch above says, for the same reasons: no list is
+      // painted on the way, the URL still moves through it because that is
+      // the entry Back returns to, and a request that will not answer falls
+      // back to the dashboard rather than leaving a blank page.
+      routes.go(routes.LIST);
+      if (!await categories.open()) await dashboard.load();
     } else {
       await dashboard.load();
     }

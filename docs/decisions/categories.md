@@ -1,4 +1,4 @@
-# Categories (issue #65, phases 1 and 2)
+# Categories (issue #65, phases 1 to 3)
 
 Long-form reasoning moved out of `CLAUDE.md` to keep that file under the size
 that is loaded into every session. Nothing here is loaded automatically; the
@@ -276,3 +276,156 @@ filtered one at a time. It is deliberately NOT the rule `parseHabit` applies to
 `body.category_id`, which refuses a numeric STRING: there the id arrives in a
 JSON body where a number is the only honest spelling, and here it arrives as
 text by construction.
+
+## Phase 3 — comparing categories
+
+`computeCategoryStats` in `shared/src/stats.js`, one
+`GET /api/categories/stats` per edition, and a comparison view at
+`#/categories`. Three decisions carried the whole design; the operative form of
+each is in `shared/CLAUDE.md` and `shared/public/CLAUDE.md`.
+
+**The paragraph above stands: there is still no category-level score formula,
+and what shipped is not one.** Phases 1–2 recorded two objections to defining
+one, and only the first is fatal. The first is that `0.5^(sqrt(frequency)/13)`
+is what makes a daily habit and a 2×/week habit comparable at all, and a
+category has as many frequencies as it has members — so there is no argument to
+hand `computeScores` for a category, and nothing to build a formula out of. The
+second objection was that averaging the members answers a different question
+("how are these habits doing on average") than a category score would, and
+inherits a cardinality bias from some categories holding two habits and others
+twelve. That is true, and it is the reason the average is shipped **as an
+average** rather than corrected into a score: `mean` never travels without
+`members` beside it, and `best`/`worst` name the two ends of the spread, so a
+reader of a two-habit category can see that it is a two-habit category. A
+weighting chosen to cancel the cardinality bias would be a category score
+arriving by the back door, picked to make one number look right, and it is
+exactly the thing that is hard to walk back once a chart has been drawn from
+it. Equal weight per habit is the claim the view makes out loud; per-entry
+weighting was refused in the same breath, because it lets one daily member
+drown a weekly one while looking like a fairness improvement.
+
+**The score window needs a 400-day warm-up, and that is a fact about
+`ui/detail.js` rather than about the arithmetic.** `computeScores` starts its
+EWMA at `score = 0` on the first day of the range it is handed. A habit's own
+page sends **no `start`** to `/habits/:id/stats`, so the number there is always
+converged from the habit's first entry; a comparison starting cold at the
+requested `start` therefore reports every habit weaker than its own page does,
+by an amount nobody can explain from either screen. Two surfaces disagreeing
+about the same habit is indistinguishable from one of them being broken, and it
+is the user who has to decide which. So each member's series is computed over
+`[start - SCORE_WARMUP_DAYS, end]` and sliced back to `[start, end]`, with
+`SCORE_WARMUP_DAYS = 400` — the number both editions' `/overview` already
+spends on the same problem as `SUMMARY_WINDOW_DAYS`, declared once in
+`stats.js` and imported by both routes rather than spelled twice.
+
+**And it is clamped forward to the member's own first entry, which the first
+version was not.** The same sentence that justifies the warm-up justifies the
+bound on it: a habit's own page opens at `start ?? firstEntry`, so a comparison
+reaching back further is scoring the member over a window it never had. That
+costs nothing on an at-least habit — the phantom days before it existed credit
+0, so both surfaces agree either way, and every category fixture in
+`shared/test/stats.test.js` was one of those, which is why 91 tests passed with
+the clamp and without it. Under `at_most_unlogged: 'success'` an unlogged day is
+**full** credit, and that setting covers every `show_as: 'avoid'` habit when the
+account chooses it. Measured on this branch: an avoid habit with target 0 and a
+single slip logged ten days ago reads **0.41327** on its own page and
+**0.969536** on an unclamped comparison, while an at-least habit of the identical
+shape reads **0.030464** on both. Not an edge case — that is every limit habit's
+opening state, for its first ~430 days, on the screen that exists to compare it
+with others.
+
+The clamped date is normalised **after** the clamp, never before, for exactly
+the reason `resolveWindow` writes out at length: `toISO` pads the month and the
+day and not the year, so normalising `0999-12-31` yields `999-12-31`, which
+sorts above `2026-…` and walks past every bound. Clamped first, the value is
+already inside the window before anything reformats it. `landedAt` then reads
+that normalised date rather than the raw `firstEntry`, because the clamp is what
+put the two in contact and they did not agree: `computeScores` normalises the
+start it is handed (a walk from `2026-02-30` begins on `2026-03-02`) while the
+landing rule compares strings and admitted `2026-03-01`, a bucket with a member
+and no score point behind it. That summed an `undefined` into NaN, serialised as
+`null`, and `ui/categories.js`'s `p.value !== null` filter dropped the vertex —
+so the line lost a point and said nothing about it. `mean` survived, because the
+last bucket's day is `end`, long past the gap. A phantom day never happened, so
+the member lands on the real day the walk reaches instead; `unloggedExcluded` is
+unmoved, since the member has an entry whatever it is dated.
+
+What makes this worth writing down at length is how easy it is to remove
+without noticing. Measured on this branch, by setting `SCORE_WARMUP_DAYS` to 0
+and back: a daily habit logged on 82% of its days for three years scores
+**0.79** on its own page. Compared over a **20-day** window it reads **0.79**
+with the warm-up and **0.52** without it — a quarter of the scale, on the same
+habit, on two screens a tap apart. Compared over a **365-day** window it reads
+**0.79 either way**, because a year of real history swamps a cold start
+whatever it began at. 365 days is what `COMPARE_WINDOW_DAYS` opens for a caller
+that names no `start`, which is to say the ordinary request cannot see this at
+all: only an explicitly short `start` falsifies it. That is why the suite's
+window is 20 days rather than the route's own year, and why a test written
+against the default would have passed against code with the warm-up deleted.
+
+**The comparison links to no habit, and that is two constraints rather than
+one.** `ui/routes.js` tracks `ourEntry` as a single boolean and `go(LIST)`
+reaches the dashboard with one `history.back()`, so the app is exactly one
+fragment entry deep at all times; `android-native/CLAUDE.md`'s back-stack
+section states the assumption that rests on it — *"that unwind assumes the
+entry underneath a habit is the dashboard"*. dashboard → categories → habit
+would be two entries of ours, and Back from that habit would land on
+`#/categories` with the dashboard painted underneath it, which in the WebView is
+the system back gesture. So `best` and `worst` are named as text and linked to
+nothing, **and** the top-bar button is hidden whenever a habit is open — the
+second is what stops a habit sitting under the comparison by the other route.
+Either alone leaves the invariant reachable; together they make the state
+`ourEntry` cannot describe unreachable rather than merely unlikely. The honest
+statement of the cost is that a name in the spread is a name you then have to
+find on the dashboard, and that is accepted until `routes.js` has a real stack.
+
+**Making `go()` REPLACE for this route is the fix that looks like it works.**
+It removes the second entry, which is the stated problem, and it is wrong on
+the client that matters: a same-document open still counts an entry in
+`WebBackStack.floorAfterShow`, so replacing leaves `currentIndex` at the floor
+and the next system Back closes the screen out from under a user who opened a
+habit from a notification. `android-native/CLAUDE.md` requires all three
+back-stack rules to be re-read together and verified on an emulator whenever
+`go()` changes, and records that **every wrong version still passes
+`WebBackStackTest`** — so the browser suite going green here is not evidence
+about that path. `go()` was left alone.
+
+### What phase 3 refused
+
+- **`MAX_RANGE_DAYS` as the ceiling.** It bounds a route that walks one habit;
+  this one walks every habit in the account, so the same span costs the habit
+  count times as much — at 50 habits, ~385,000 synchronous day-steps before the
+  warm-up is added, the order of the year-0100 entry the root `CLAUDE.md`
+  records blocking the event loop for 32 seconds. `MAX_COMPARE_DAYS` is 1830,
+  which is what `STREAK_HISTORY_DAYS` already is.
+- **Defaulting the window to that ceiling.** It would make the plainest
+  possible request the most expensive one the route can answer.
+  `COMPARE_WINDOW_DAYS` is 365 and a caller who wants five years asks for it —
+  the shape `/overview` already has, where `days` defaults to 30 against a cap
+  of 365. Both constants are shared for the same reason the warm-up is: a
+  ceiling that drifted would have one edition refuse a URL the other served,
+  and a default that drifted would have them answer one `start`-less URL with
+  different bucket counts.
+- **Filtering archived habits in SQL.** `archivedExcluded` is what lets the
+  view say what it left out, and a pure function can only report it from the
+  members it was handed — filtering in the query would make that figure
+  permanently 0 while looking like an optimisation.
+- **Deriving each member's first entry from the fetched slice.** The route
+  fetches from `start - 400 days`, so a habit last logged before that comes
+  back with no rows — and "has never been logged" and "has nothing in the
+  window I happened to fetch" are different facts that the landing rule treats
+  oppositely. An abandoned habit has a genuine strength near zero and belongs
+  in the mean; a never-logged one has no strength to average. The lifetime
+  `MIN(date)` is one grouped query, and it is supplied per member.
+- **Counting an unlogged member as 0** — in the mean, in the spread, or in a
+  bucket of the series. A habit with no strength yet is undefined, not zero,
+  the same claim `recovery.rate === null` already makes; averaged in as zero, a
+  new habit reports that your health got worse on the day you decided to do
+  more about it, and a habit added in March draws the category as having been
+  half as good all January. It is counted into `unloggedExcluded` instead, and
+  a null recovery rate into `recoveryExcluded` — two counts that overlap on a
+  never-logged member and agree about nothing else.
+- **A query per habit.** `shared/CLAUDE.md` records what that shape cost the
+  importer (13.5 seconds on one file), and this route would run it against
+  however many habits an account has. Entries are one `SELECT` bucketed into a
+  Map, exactly as `/overview` reads them.
