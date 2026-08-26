@@ -69,6 +69,62 @@ try {
     return r.result.value;
   };
 
+  // `Accessibility.getPartialAXTree` needs the DOM domain enabled first (per
+  // CDP's own docs on `Accessibility.enable`), so both are turned on once,
+  // here, for the block below that reads the computed accessible name AND
+  // ROLE rather than the `aria-label` attribute and the source markup.
+  await send('DOM.enable', {}, sessionId);
+  await send('Accessibility.enable', {}, sessionId);
+
+  /**
+   * The COMPUTED role and accessible name of the one element `selector`
+   * matches, read from the browser's own accessibility tree over CDP rather
+   * than off the `aria-label` attribute or the markup's `role=` — `getAttribute`
+   * cannot see what a real assistive technology is actually handed.
+   *
+   * Measured directly against this Chrome build (`/tmp/debug-ax.mjs`, kept out
+   * of the repo): a bare `<div>` with an `aria-label` still reports a computed
+   * NAME equal to that label — this Chromium does not enforce "generic" role's
+   * ARIA-specified name prohibition for an author-supplied `aria-label` the way
+   * it does for a name read off child content (a header with no `aria-label` at
+   * all reports an EMPTY computed name while generic, confirmed below). So the
+   * name alone does not discriminate `role="heading"` from no role at all for a
+   * header that carries a summary — the ROLE does: `generic` vs `heading`, with
+   * `aria-level` only reported as a property at all once the role is `heading`.
+   * Both are asserted below for that reason, and it is the ROLE assertion that
+   * is load-bearing for the mutation this fix's test exists to catch.
+   */
+  const axInfo = async (selector) => {
+    const { root } = await send('DOM.getDocument', { depth: -1, pierce: true }, sessionId);
+    const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector }, sessionId);
+    if (!nodeId) return null;
+    const { nodes } = await send('Accessibility.getPartialAXTree',
+      { nodeId, fetchRelatives: false }, sessionId);
+    const node = nodes[0];
+    if (!node) return null;
+    return {
+      role: node.role?.value ?? null,
+      level: node.properties?.find((p) => p.name === 'level')?.value?.value ?? null,
+      name: node.name?.value ?? '',
+    };
+  };
+
+  // `DOM.querySelector` takes a CSS selector, which cannot match on text
+  // content — so this reads a header's own `data-category-id` (set by
+  // `sectionHeader`) via `Runtime.evaluate` first, and builds an attribute
+  // selector CDP's DOM domain can actually resolve.
+  const headerSelectorByName = async (name) => {
+    const found = await ev(`(()=>{
+      const headers = [...document.querySelectorAll('#grid .category-section-header')];
+      const h = headers.find(x => x.querySelector('.category-section-name')?.textContent === ${JSON.stringify(name)});
+      return h ? { categoryId: h.dataset.categoryId, uncategorised: h.classList.contains('uncategorised') } : null;
+    })()`);
+    if (!found) return null;
+    return found.uncategorised
+      ? '.category-section-header.uncategorised'
+      : `.category-section-header[data-category-id="${found.categoryId}"]`;
+  };
+
   await send('Page.navigate', { url: APP }, sessionId);
   // `!!document.querySelector('#grid .habit-row')` returns the instant the
   // grid holds ANY row — including one left behind by whatever loaded before
@@ -651,6 +707,231 @@ try {
   // by category permanently, from an action that never said it would.
   ck('no drag handle while grouped',
     grouping.dragHandles === 0, String(grouping.dragHandles));
+
+  /* ---------- summarising each section (issue #65 step 4) ----------
+
+     Still the same load: `Work` holds only `HABIT_NAME`, created moments ago
+     and never logged; `Fitness` holds only `Meditate`, which the fixture
+     seed logs on every day but every ninth. That gives one category whose
+     mean is null (`—`) and one with a real percentage, from a single real
+     `/overview` response rather than anything staged. */
+
+  const figures = await ev(`(()=>{
+    const byName = Object.fromEntries(
+      [...document.querySelectorAll('#grid .category-section-header')]
+        .map(h => [h.querySelector('.category-section-name').textContent, h]));
+    const read = (name) => {
+      const header = byName[name];
+      const figure = header?.querySelector('.category-section-figure');
+      return {
+        ariaLabel: header ? header.getAttribute('aria-label') : null,
+        mean: figure ? figure.querySelector('.category-section-mean').textContent : null,
+        spread: figure?.querySelector('.category-section-spread')
+          ? figure.querySelector('.category-section-spread').textContent : null,
+        title: figure ? figure.title : null,
+      };
+    };
+    return { work: read('Work'), fitness: read('Fitness') };
+  })()`);
+  ck('a never-logged category draws an em dash for its mean, not a percentage',
+    figures.work.mean === '—', JSON.stringify(figures.work));
+  ck('its title reuses the never-logged wording ui/categories.js already settled on',
+    figures.work.title != null && figures.work.title.includes('never logged'),
+    JSON.stringify(figures.work));
+  // THE assertion for fix round 1, item 2: `header.getAttribute('aria-label')`
+  // is true of a string no assistive technology is guaranteed to read — a bare
+  // `<div>` maps to `role="generic"`, which ARIA marks name-prohibited. This
+  // reads the COMPUTED role and name instead, out of the browser's own
+  // accessibility tree over CDP (`Accessibility.getPartialAXTree`).
+  // Mutation target: remove the `role="heading"` `sectionHeader` sets, leaving
+  // the `aria-label` in place. The ROLE assertion is the one that is load
+  // bearing here: measured directly against this Chrome build, the computed
+  // NAME still comes back as the `aria-label` text even with no role at all —
+  // this Chromium does not withhold an author-supplied name from a generic
+  // element the way it withholds a CONTENT-derived one (see the no-summary
+  // case below, where the mutation does empty the name) — so asserting the
+  // name alone would pass against the unfixed markup. The computed ROLE does
+  // not: it reports `generic`, not `heading`, with no `level` property at all,
+  // until `role="heading"` is restored.
+  const workHeaderSelector = await headerSelectorByName('Work');
+  const workAx = await axInfo(workHeaderSelector);
+  ck('THE assertion: the header is exposed to the accessibility tree as a HEADING, level 2 — not a generic div',
+    workAx?.role === 'heading' && workAx?.level === 2,
+    JSON.stringify({ workAx }));
+  ck('and its computed accessible name (not just the aria-label attribute) carries the same reason',
+    workAx?.name != null && workAx.name.includes('Work') && workAx.name.includes('never logged'),
+    JSON.stringify({ workAx, ariaLabelAttribute: figures.work.ariaLabel }));
+  ck('a category with a logged member draws a real mean percentage',
+    figures.fitness.mean != null && /^\d+%$/.test(figures.fitness.mean),
+    JSON.stringify(figures.fitness));
+  // Fitness holds exactly one member (Meditate), so `best === worst`
+  // (`summariseMembers`'s tie rule) and the spread must be that ONE number,
+  // never `NN–NN%`.
+  ck('a one-member category draws one spread number, not a range',
+    figures.fitness.spread === figures.fitness.mean, JSON.stringify(figures.fitness));
+
+  // The Uncategorised section has three members (Gym, Read, "No late-night
+  // snacks") with different scores, so it is the one that can actually catch
+  // `best` and `worst` swapped in the spread. The expected string is built
+  // from a fresh, independent `/overview` fetch — not from anything
+  // `dashboard.js` itself computed — so a swap in the RENDERER still shows up
+  // even though the arithmetic behind `mean`/`best`/`worst` is out of scope
+  // for this suite (that is `stats.test.js`'s job).
+  // Mutation target: swap `best` and `worst` in `sectionHeader`'s spread.
+  const overview = await ev(`(async()=>(await (await fetch('/api/overview?days=7')).json()))()`);
+  const uncategorised = overview.categorySummaries.find((s) => s.id === null);
+  const pctOf = (v) => `${Math.round(v * 100)}%`;
+  const expectedSpread = uncategorised.best.score === uncategorised.worst.score
+    ? pctOf(uncategorised.best.score)
+    : `${pctOf(uncategorised.worst.score)}–${pctOf(uncategorised.best.score)}`;
+  const uncategorisedFigure = await ev(`(()=>{
+    const headers = [...document.querySelectorAll('#grid .category-section-header')];
+    const header = headers.find(h => h.classList.contains('uncategorised'));
+    const figure = header?.querySelector('.category-section-figure');
+    return {
+      mean: figure ? figure.querySelector('.category-section-mean').textContent : null,
+      spread: figure ? figure.querySelector('.category-section-spread').textContent : null,
+    };
+  })()`);
+  ck('the Uncategorised spread reads worst–best, matching a fresh /overview fetch',
+    uncategorisedFigure.spread === expectedSpread,
+    JSON.stringify({ uncategorisedFigure, expectedSpread, uncategorised }));
+  ck('and its mean matches the same fetch',
+    uncategorisedFigure.mean === pctOf(uncategorised.mean),
+    JSON.stringify({ uncategorisedFigure, uncategorised }));
+
+  /* ---------- fix round 1, item 1: a category whose members are all
+     archived is not "empty" ----------
+
+     `Work` holds exactly one habit, `HABIT_NAME` — never logged, from the
+     block above. `/overview` without `?archived=true` fetches only ACTIVE
+     habits while `categories` is fetched whole, so archiving that one habit
+     makes `Work` arrive with `members: 0`, indistinguishable on the payload
+     from a category nobody has ever put anything in — the shape
+     `ui/categories.js` already refuses to say "No habits in this category
+     yet." about (its own `archivedExcluded` count, ~line 268-279).
+
+     Mutation target: restore the `summary.members === 0` branch in
+     `sectionHeader` that draws the em dash and that sentence again — this
+     block's assertions must FAIL, naming the string. */
+
+  const workHabit = await fetchHabit(HABIT_NAME);
+  await ev(`fetch('/api/habits/${workHabit.id}', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(${JSON.stringify({ ...workHabit, archived: true })}),
+  })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 4`,
+    { what: 'the dashboard to reload with the archived habit dropped from the active list' });
+
+  const archivedOut = await ev(`(()=>{
+    const headers = [...document.querySelectorAll('#grid .category-section-header')];
+    const work = headers.find(h => h.querySelector('.category-section-name')?.textContent === 'Work');
+    return {
+      workPresent: !!work,
+      workCount: work ? work.querySelector('.category-section-count').textContent : null,
+      workHasFigure: work ? !!work.querySelector('.category-section-figure') : null,
+      workAriaLabel: work ? work.getAttribute('aria-label') : undefined,
+      // The false sentence, anywhere on the page — a title on ANY figure or
+      // an aria-label on ANY header, not only Work's, since a members-0
+      // category could in principle draw it from either place.
+      falseSentenceAnywhere: document.getElementById('grid').innerHTML
+        .includes('No habits in this category yet'),
+    };
+  })()`);
+  ck('a category whose only member is now archived still draws its header',
+    archivedOut.workPresent === true, JSON.stringify(archivedOut));
+  ck('its count still reads 0, the true figure `/overview` has for it',
+    archivedOut.workCount === '0', JSON.stringify(archivedOut));
+  ck('THE assertion: it draws NO figure at all — not a different sentence',
+    archivedOut.workHasFigure === false, JSON.stringify(archivedOut));
+  ck('THE assertion: and so no aria-label either, on this or any header',
+    archivedOut.workAriaLabel === undefined || archivedOut.workAriaLabel === null,
+    JSON.stringify(archivedOut));
+  ck('THE assertion: the false "No habits in this category yet." sentence ' +
+     'appears nowhere on the page, in a title or an aria-label',
+    archivedOut.falseSentenceAnywhere === false, JSON.stringify(archivedOut));
+
+  // Restored before the rest of the suite, which assumes `HABIT_NAME` is on
+  // the active list under `Work` with a real (never-logged) summary.
+  await ev(`fetch('/api/habits/${workHabit.id}', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(${JSON.stringify({ ...workHabit, archived: false })}),
+  })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the dashboard to reload with the habit un-archived again' });
+
+  // A query that matches only Meditate — Fitness still draws a header with a
+  // real count (1), so this is unlike the no-match case below: the headers
+  // stay, and it is the FIGURES that must vanish, because a mean drawn over
+  // the unfiltered category would disagree with the count sitting right
+  // beside it. Mutation target: drop `!filtering` from `summarised`.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.query = 'Meditate';
+    dash.paint();
+    return true;
+  })()`);
+  const whileFiltering = await ev(`(()=>({
+    headers: document.querySelectorAll('#grid .category-section-header').length,
+    figures: document.querySelectorAll('#grid .category-section-figure').length,
+  }))()`);
+  ck('section headers stay while filtering, but every figure disappears',
+    whileFiltering.headers > 0 && whileFiltering.figures === 0,
+    JSON.stringify(whileFiltering));
+
+  // Fitness draws no figure here (no `aria-label` at all — `summarised` is
+  // false while filtering), which is the other half of the fix: `role` and
+  // `aria-level` are set UNCONDITIONALLY, so a header with nothing to
+  // summarise is still exposed as a heading with a usable name, read off its
+  // own child text (name + count) rather than left silent for want of an
+  // `aria-label`. THE mutation-catching half for this case, confirmed
+  // directly against this Chrome build: with no `role="heading"`, a generic
+  // element's computed name from CONTENT (as opposed to an `aria-label`) comes
+  // back genuinely EMPTY, so this one assertion alone would already fail the
+  // mutation — the role check is added anyway, for the same reason as above.
+  const fitnessAx = await axInfo(await headerSelectorByName('Fitness'));
+  ck('THE assertion: a header with no summary is still exposed as a HEADING, level 2',
+    fitnessAx?.role === 'heading' && fitnessAx?.level === 2,
+    JSON.stringify({ fitnessAx }));
+  ck('and it still has a usable accessible name, from its own text',
+    fitnessAx?.name != null && fitnessAx.name.length > 0 && fitnessAx.name.includes('Fitness'),
+    JSON.stringify({ fitnessAx }));
+
+  // Same figures, same real `categorySummaries` still sitting in `state` —
+  // only the client-side archived flag changes, exactly as `reorderable`
+  // reads `state.showArchived` for its own guard. No refetch: `paint()`
+  // alone is enough to prove the guard, and cheaper than restaging an
+  // archived habit through the API.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.query = '';
+    state.showArchived = true;
+    dash.paint();
+    return true;
+  })()`);
+  const whileArchivedShown = await ev(`(()=>({
+    headers: document.querySelectorAll('#grid .category-section-header').length,
+    figures: document.querySelectorAll('#grid .category-section-figure').length,
+  }))()`);
+  ck('and every figure disappears while archived habits are shown, too',
+    whileArchivedShown.headers > 0 && whileArchivedShown.figures === 0,
+    JSON.stringify(whileArchivedShown));
+
+  // Restored before the next block, which makes its own assumptions about
+  // `state.query` and `state.showArchived` starting clean.
+  await ev(`(async()=>{
+    const { state } = await import('/shared/ui/store.js');
+    const dash = await import('/shared/ui/dashboard.js');
+    state.showArchived = false;
+    dash.paint();
+    return true;
+  })()`);
 
   /* ---------- no section headers over the empty state or a no-match search
      (fix round item 5) — grouping is still on from the block above ---------- */

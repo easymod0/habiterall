@@ -34,6 +34,7 @@ import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
+  summariseByCategory,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
@@ -765,7 +766,15 @@ api.get('/overview', route(async (req, res) => {
     const { rows: categories } = await db.query(
       `SELECT * FROM categories ORDER BY position, id`
     );
-    if (!habits.length) return { start, end, categories, habits: [] };
+    if (!habits.length) {
+      // Same key shape as the full path below: `categorySummaries` is absent
+      // only in archived mode, never merely because there is nothing to
+      // summarise yet — an empty category still draws its header.
+      return {
+        start, end, categories, habits: [],
+        ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
+      };
+    }
 
     const ids = habits.map((h) => h.id);
 
@@ -776,6 +785,20 @@ api.get('/overview', route(async (req, res) => {
       [uid(req)]
     );
     const unlogged = unloggedFrom(prefs);
+
+    // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
+    // (same shape, line 453 there), reused here so a section header can tell
+    // "never logged" from "scored zero" — the bounded windows below cannot
+    // answer that, and `first_date` is used for a null check only, never
+    // `addDays` or `dateRange` (root CLAUDE.md). Skipped entirely in archived
+    // mode: that fetch has nothing active to average, so `categorySummaries`
+    // is omitted below rather than computed and discarded.
+    const { rows: firstRows } = archived ? { rows: [] } : await db.query(
+      `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
+       FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
+      [ids]
+    );
+    const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
 
     // One query for the grid window, one for the lifetime figures, rather
     // than two per habit.
@@ -837,47 +860,54 @@ api.get('/overview', route(async (req, res) => {
 
     const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
 
+    const habitPayloads = habits.map((h) => {
+      const all = byHabit.get(h.id) ?? [];
+      const recent = all.filter((e) => e.date >= cutoff);
+      // Two numbers are read below — `score` and `currentStreak` — so this
+      // calls `summaryStats` rather than `computeStats`: the same window and
+      // the same two passes (`computeScores`, `computeStreaks`), with the
+      // five passes `computeStats` also runs — `computeHistory`,
+      // `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
+      // `computeResilience` — never started, once per habit, on the
+      // dashboard's hot path. Awards are out of this route for the same
+      // reason, stated at the `/stats` call site above.
+      const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
+
+      const totalCompleted = totals.get(h.id) ?? 0;
+
+      const streaks = computeStreaks(
+        h,
+        new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
+        all.length ? all[0].date : summaryEnd,
+        summaryEnd,
+        unlogged
+      );
+
+      return {
+        ...h,
+        entries: grid.get(h.id) ?? {},
+        skips: skips.get(h.id) ?? [],
+        score: stats.score,
+        currentStreak: stats.currentStreak,
+        bestStreak: bestStreak(streaks),
+        totalCompleted,
+        // Same field, same reason as the `/stats` call site above: resolved
+        // server-side because no renderer can import `unansweredCounts`, and
+        // derived rather than stored.
+        unlogged_is_success: unansweredCounts(h, unlogged),
+      };
+    });
+
+    // The mean is over `habitPayloads`' own `score` — the same number drawn
+    // on the row beneath each header — never a second scoring pass. See
+    // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
+    // rule.
     return {
       start,
       end,
       categories,
-      habits: habits.map((h) => {
-        const all = byHabit.get(h.id) ?? [];
-        const recent = all.filter((e) => e.date >= cutoff);
-        // Two numbers are read below — `score` and `currentStreak` — so this
-        // calls `summaryStats` rather than `computeStats`: the same window and
-        // the same two passes (`computeScores`, `computeStreaks`), with the
-        // five passes `computeStats` also runs — `computeHistory`,
-        // `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
-        // `computeResilience` — never started, once per habit, on the
-        // dashboard's hot path. Awards are out of this route for the same
-        // reason, stated at the `/stats` call site above.
-        const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
-
-        const totalCompleted = totals.get(h.id) ?? 0;
-
-        const streaks = computeStreaks(
-          h,
-          new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
-          all.length ? all[0].date : summaryEnd,
-          summaryEnd,
-          unlogged
-        );
-
-        return {
-          ...h,
-          entries: grid.get(h.id) ?? {},
-          skips: skips.get(h.id) ?? [],
-          score: stats.score,
-          currentStreak: stats.currentStreak,
-          bestStreak: bestStreak(streaks),
-          totalCompleted,
-          // Same field, same reason as the `/stats` call site above: resolved
-          // server-side because no renderer can import `unansweredCounts`, and
-          // derived rather than stored.
-          unlogged_is_success: unansweredCounts(h, unlogged),
-        };
-      }),
+      habits: habitPayloads,
+      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
     };
   });
 

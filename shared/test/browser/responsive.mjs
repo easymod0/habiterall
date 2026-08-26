@@ -358,7 +358,11 @@ try {
   // A section header is a row shape `#grid` never drew before this feature —
   // its own padding, its coloured left border and its count text — and none
   // of the checks above ever turn `groupByCategory` on, so this is the only
-  // pass that could catch it overflowing a narrow phone.
+  // pass that could catch it overflowing a narrow phone. Both habits
+  // assigned into a category below are real fixture habits the seed logs
+  // over 60 days, so `categorySummaries` carries a real mean and a real
+  // `.category-section-figure` is on the row this probes — an empty (`—`)
+  // header would tell nothing about the figures' own width.
   console.log('\n--- grouped dashboard ---');
   await ev(`(async()=>{
     const cats = await (await fetch('/api/categories')).json();
@@ -403,6 +407,14 @@ try {
       `document.querySelectorAll('#grid .category-section-header').length`);
     ck(`${vp.label}: both categories plus the trailing Uncategorised section are drawn`,
       headers === 3, String(headers));
+
+    // The probe above is only meaningful for this feature if a real figure
+    // was actually on the row it measured — logged habits, not filtered, not
+    // archived, so `summarised` is true and `categorySummaries` was fetched.
+    const figures = await ev(
+      `document.querySelectorAll('#grid .category-section-figure').length`);
+    ck(`${vp.label}: at least one section drew a summary figure to be measured`,
+      figures > 0, String(figures));
   }
 
   await ev(`(async()=>{

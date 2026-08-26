@@ -362,6 +362,21 @@ body {
 .category-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .category-section-count { flex: none; color: var(--text-dim); }
 
+/* The mean + spread `dashboard.js` draws when `summarised` is true. `flex:
+   none` on both, like `.category-section-count` above — the row is already
+   `flex` with an ellipsising NAME, so at 360px it is the name that gives up
+   width, never these figures. */
+.category-section-figure {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.category-section-mean { font-weight: 700; color: var(--text); }
+.category-section-spread { color: var(--text-dim); }
+
 /* Flex rather than a fixed grid: the drag handle is absent in the archived
    view and when there is only one habit, and the row must still line up. */
 .habit-row {
