@@ -788,6 +788,17 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   width: 36px;
   height: 32px;
 }
+/* Four buttons now share this row with the swatch and the name — `flex: none`
+   keeps them at their own intrinsic size so `.category-manage-name`'s
+   `flex: 1; min-width: 0` is what absorbs a narrow screen, not them. Tighter
+   padding than the ordinary `.btn-icon` (declared for every icon button in
+   this row, not only the two new ones, so ✎ and ✕ shrink by the same amount
+   rather than sitting wider than their new neighbours) is what keeps the row
+   fitting at 360px with four of them in play. */
+.category-manage-row .btn-icon {
+  flex: none;
+  padding: 5px 7px;
+}
 #category-hint.error { color: var(--danger); }
 
 /* ---------- category comparison (#/categories) ---------- */

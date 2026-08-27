@@ -7,6 +7,7 @@
  */
 
 import { api } from '/shared/ui/api.js';
+import { focusKeyOf, restoreFocus } from '/shared/ui/components.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { dashboardShowing, emit, staysOnList, state } from '/shared/ui/store.js';
@@ -200,12 +201,17 @@ function renderCategorySelect(wanted) {
   select.value = (known || pinned) ? want : '';
 }
 
-/** The manage list: one row per category, ✎ for rename+recolour, ✕ to delete. */
+/** The manage list: one row per category, ↑/↓ to reorder, ✎ for rename+recolour, ✕ to delete. */
 function renderCategoryManage() {
   const list = $('#category-manage');
   list.replaceChildren();
 
-  for (const c of state.categories) {
+  // Same gate `reorderable` uses for the dashboard's own drag handle
+  // (dashboard.js:307) — moving a row only means something once there is a
+  // second row to move it past.
+  const canReorder = state.categories.length > 1;
+
+  state.categories.forEach((c, i) => {
     const li = document.createElement('li');
     li.className = 'category-manage-row';
     li.dataset.categoryId = String(c.id);
@@ -301,6 +307,41 @@ function renderCategoryManage() {
       name.className = 'category-manage-name';
       name.textContent = c.name;
 
+      // Absent entirely below two categories — see `canReorder` above —
+      // rather than merely disabled, so an account with one category shows
+      // no arrows to press in the first place.
+      let up = null;
+      let down = null;
+      if (canReorder) {
+        up = document.createElement('button');
+        up.type = 'button';
+        up.className = 'btn btn-icon category-move-up';
+        up.title = `Move ${c.name} up`;
+        up.setAttribute('aria-label', `Move ${c.name} up`);
+        up.textContent = '↑';
+        up.dataset.focusKey = `catmove:up:${c.id}`;
+        // Disabled at the first row (nowhere to move to) and — because
+        // `repaintCategories` refuses to rebuild this list while a rename
+        // box is open — disabled on EVERY row whenever one is mid-rename.
+        // Left enabled there, a press would send a write and repaint
+        // nothing: the row stays exactly where it was with no sign the
+        // click did anything, which is the silent-failure class this repo
+        // names most often.
+        up.disabled = i === 0 || editingCategoryId != null;
+        up.addEventListener('click', () => moveCategory(c.id, -1));
+
+        down = document.createElement('button');
+        down.type = 'button';
+        down.className = 'btn btn-icon category-move-down';
+        down.title = `Move ${c.name} down`;
+        down.setAttribute('aria-label', `Move ${c.name} down`);
+        down.textContent = '↓';
+        down.dataset.focusKey = `catmove:down:${c.id}`;
+        // Same two reasons as ↑ above, mirrored at the last row.
+        down.disabled = i === state.categories.length - 1 || editingCategoryId != null;
+        down.addEventListener('click', () => moveCategory(c.id, 1));
+      }
+
       const edit = document.createElement('button');
       edit.type = 'button';
       edit.className = 'btn btn-icon category-edit';
@@ -360,10 +401,12 @@ function renderCategoryManage() {
         }
       });
 
-      li.append(swatch, name, edit, remove);
+      li.append(swatch, name);
+      if (canReorder) li.append(up, down);
+      li.append(edit, remove);
     }
     list.append(li);
-  }
+  });
 }
 
 /**
@@ -427,6 +470,79 @@ async function refreshCategoryPicker() {
 function repaintCategories() {
   renderCategorySelect();
   if (editingCategoryId == null) renderCategoryManage();
+}
+
+/**
+ * Shift a category one slot up or down and write the new order.
+ *
+ * Follows `nudgeHabit` / `persistOrder` (dashboard.js) — optimistic splice,
+ * repaint, then the write — with one deliberate difference in the catch
+ * below. Module-local and not exported: this is a one-off helper for the two
+ * buttons above, not a rule anything else needs, and an export here is a
+ * `CACHE_VERSION` bump for nothing (root `CLAUDE.md`).
+ *
+ * The payload names only the ids THIS client currently holds, so a category
+ * created on another device since this dialog's own fetch keeps whatever
+ * position it already has — the reorder route's existing semantics, not
+ * anything decided here. And rapid presses put several of these writes in
+ * flight at once, each carrying the full order at the time it fired;
+ * `persistOrder` has the very same exposure, so this does not invent a new
+ * mechanism the habit list does not already live with.
+ */
+async function moveCategory(id, delta) {
+  const order = state.categories.map((c) => c.id);
+  const from = order.indexOf(id);
+  const to = from + delta;
+  if (from === -1 || to < 0 || to >= order.length) return;
+
+  const focused = focusKeyOf(document.activeElement);
+  const byId = new Map(state.categories.map((c) => [c.id, c]));
+  const previous = state.categories;
+  order.splice(to, 0, ...order.splice(from, 1));
+  state.categories = order.map((catId) => byId.get(catId));
+  // Not `renderCategoryManage()` alone — the select's option order has to
+  // follow too, and this is the one function that redraws both controls from
+  // `state.categories` as it stands.
+  repaintCategories();
+  // So holding ↑ walks a category up instead of dropping focus on the first
+  // press — `repaintCategories()` just tore out the button that was focused
+  // and built a new one under the same `data-focus-key`.
+  restoreFocus($('#category-manage'), focused);
+
+  try {
+    await api('/categories/reorder', { method: 'POST', body: JSON.stringify({ order }) });
+    // No argument — see `refreshCategoryPicker`. A reorder never changes
+    // which category this form has chosen.
+    await refreshCategoryPicker();
+    // `refreshCategoryPicker`'s own `repaintCategories()` just did a SECOND
+    // `list.replaceChildren()` — this time from the server's answer — which
+    // drops focus to `<body>` exactly like the optimistic one above did, and
+    // nothing restores it after that one. Left alone, a keyboard user only
+    // keeps focus while presses outrun the fetch; at a human pace every press
+    // loses it, which is the very defect the optimistic restore above claims
+    // to have fixed. Restore again here — but ONLY when `<body>` (or nothing)
+    // holds focus, i.e. it was this repaint that dropped it. By the time the
+    // GET lands the user may have deliberately moved focus elsewhere, and an
+    // unconditional restore would steal it back.
+    if (document.activeElement == null || document.activeElement === document.body) {
+      restoreFocus($('#category-manage'), focused);
+    }
+    announce(); // never a bare emit('reload') — see `announce`'s own comment
+  } catch (err) {
+    // `/categories/reorder` is `replayable()` (ui/api.js: everything but
+    // `POST /habits`), so offline the write is already staged before this
+    // throw and WILL land on reconnect. Reverting the optimistic order here
+    // would snap the list back from an order that is about to be applied —
+    // the mistake `persistOrder` (dashboard.js) makes for the habit list,
+    // which reverts unconditionally, `err.queued` included. That is a real,
+    // pre-existing defect there; this is deliberately not a second copy of
+    // it.
+    if (!err.queued) {
+      state.categories = previous;
+      repaintCategories();
+    }
+    categoryHint(err.message, !err.queued);
+  }
 }
 
 /** @param habit  null opens the create form */

@@ -491,6 +491,26 @@ try {
   await waitUntil(ev, `document.getElementById('category-hint').textContent.includes('Added "Health"')`,
     { what: 'the chip to create "Health"' });
 
+  /* ---------- e: a single category draws no move arrows (issue #65 step 1) ----------
+   *
+   * The one moment in this whole suite with EXACTLY one category on the
+   * account — Health, just created, nothing else yet — so this is the
+   * natural place to ask the question, rather than staging a throwaway
+   * account state later on. `renderCategoryManage`'s `canReorder` gate is
+   * `state.categories.length > 1`.
+   *
+   * Mutation target: render the arrows unconditionally, ignoring
+   * `state.categories.length < 2` — this must FAIL.
+   */
+  const singleCategoryManage = await ev(`(()=>({
+    rows: document.querySelectorAll('#category-manage .category-manage-row').length,
+    arrows: document.querySelectorAll(
+      '#category-manage .category-move-up, #category-manage .category-move-down').length,
+  }))()`);
+  ck('e: with a single category, no move arrows are rendered at all',
+    singleCategoryManage.rows === 1 && singleCategoryManage.arrows === 0,
+    JSON.stringify(singleCategoryManage));
+
   ck('the chip did not assign it on its own — that is a separate, deliberate step',
     (await selectedCategoryOption()).value === '');
 
@@ -1458,6 +1478,283 @@ try {
   // the next `openDialog`'s own refetch corrects, and no assertion below reads
   // it before then.
 
+  /* ---------- reordering categories, a/b/c/d/f (issue #65 step 1) ----------
+   *
+   * Run over the account as everything above it left it — Work (on
+   * `HABIT_NAME`), Fitness, Mind and "Zzz Enter Renamed" all survive to here
+   * — rather than a staged fixture, so this is a real account with more than
+   * one category to move. `readManage` is used again for `g`, at the very
+   * end of the suite.
+   */
+  console.log('--- reordering categories, a/b/c/d/f (issue #65 step 1) ---');
+
+  const readManage = () => ev(`(()=>({
+    names: [...document.querySelectorAll('#category-manage .category-manage-name')]
+      .map(n => n.textContent.trim()),
+    upDisabled: [...document.querySelectorAll('#category-manage .category-move-up')]
+      .map(b => b.disabled),
+    downDisabled: [...document.querySelectorAll('#category-manage .category-move-down')]
+      .map(b => b.disabled),
+  }))()`);
+
+  await openHabitByName(HABIT_NAME);
+  // The comment just above this block's own opening says so: `state.categories`
+  // still holds "Zzz Stay Put", deleted through the API rather than the UI, and
+  // this dialog's synchronous first render draws from whatever it already had.
+  // Wait for its own refetch to land before reading the manage list, or this
+  // reads the stale five rather than the real four.
+  await waitUntil(ev,
+    `![...document.querySelectorAll('#category-manage .category-manage-name')]
+       .some(n => n.textContent.trim() === ${JSON.stringify(STAY_CATEGORY)})`,
+    { what: "the dialog's own refetch to land, dropping the category deleted just above" });
+  const beforeMove = await readManage();
+  ck('sanity: more than one category, so there is something to move',
+    beforeMove.names.length > 1, JSON.stringify(beforeMove));
+
+  // d: the boundary rows are the ones that cannot move any further, and only
+  // those — a blanket disable would also pass an unguarded middle row.
+  // Mutation target: drop `disabled` from the boundary arrows in
+  // `renderCategoryManage` — this must FAIL.
+  ck('d: the first row’s ↑ and the last row’s ↓ are disabled, and no other arrow is',
+    beforeMove.upDisabled[0] === true
+      && beforeMove.downDisabled.at(-1) === true
+      && beforeMove.upDisabled.slice(1).every((d) => d === false)
+      && beforeMove.downDisabled.slice(0, -1).every((d) => d === false),
+    JSON.stringify(beforeMove));
+
+  // a: pressing the first row's own ↓ moves it down one.
+  const [firstName, secondName] = beforeMove.names;
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click()`);
+  await waitUntil(ev,
+    `document.querySelectorAll(
+      '#category-manage .category-manage-name')[0]?.textContent.trim() === ${JSON.stringify(secondName)}`,
+    { what: 'the first row to move down one' });
+
+  const afterMove = await readManage();
+  ck('a: pressing ↓ on the first category moves it down one in the manage list',
+    afterMove.names[0] === secondName && afterMove.names[1] === firstName,
+    JSON.stringify({ before: beforeMove.names, after: afterMove.names }));
+
+  // b: it reached the server — reload the page, reopen the dialog, the order
+  // holds. Mutation target: delete the `await api('/categories/reorder', …)`
+  // line in `moveCategory`, keeping only the optimistic splice — this must
+  // FAIL, because a reload reads nothing but the server's own answer.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
+    { what: 'the dashboard to reload after the reorder' });
+  await openHabitByName(HABIT_NAME);
+
+  const afterReloadManage = await readManage();
+  ck('b: the new order reached the server and survives a reload',
+    afterReloadManage.names[0] === secondName && afterReloadManage.names[1] === firstName,
+    JSON.stringify(afterReloadManage.names));
+
+  const orderOnServer = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('…confirmed straight off the API, not only what the dialog happens to show',
+    orderOnServer[0] === secondName && orderOnServer[1] === firstName,
+    JSON.stringify(orderOnServer));
+
+  // c: with `groupByCategory` on, the dashboard's own section order follows.
+  // Both editions already read `ORDER BY position, id` for every list — this
+  // confirms the premise the brief states rather than protecting anything new
+  // in `dashboard.js`.
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close before checking the grouped dashboard' });
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: true }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the grouped dashboard to reload after the reorder' });
+
+  const sectionOrder = await ev(`[...document.querySelectorAll(
+    '#grid .category-section-header:not(.uncategorised) .category-section-name')]
+    .map(n => n.textContent)`);
+  ck('c: the dashboard’s own section order follows the new position',
+    sectionOrder[0] === secondName && sectionOrder[1] === firstName,
+    JSON.stringify({ sectionOrder, expected: [secondName, firstName] }));
+
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: false }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the flat dashboard to load again after the section-order check' });
+
+  // f: every arrow on every row is disabled while a row is mid-rename —
+  // `repaintCategories` refuses to rebuild this list while
+  // `editingCategoryId != null`, so a press then would send a write and
+  // repaint nothing. Mutation target: drop the `editingCategoryId != null`
+  // disable in `renderCategoryManage` — this must FAIL.
+  await openHabitByName(HABIT_NAME);
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('#category-manage .category-manage-row')][0];
+    row.querySelector('.category-edit').click();
+  })()`);
+  await waitUntil(ev, `!!document.querySelector('#category-manage .category-edit-name')`,
+    { what: 'the rename controls to open' });
+
+  const whileEditing = await ev(`(()=>({
+    arrows: document.querySelectorAll(
+      '#category-manage .category-move-up, #category-manage .category-move-down').length,
+    allDisabled: [...document.querySelectorAll(
+      '#category-manage .category-move-up, #category-manage .category-move-down')]
+      .every(b => b.disabled),
+  }))()`);
+  ck('f: every arrow on every row is disabled while a row is mid-rename',
+    whileEditing.arrows > 0 && whileEditing.allDisabled === true,
+    JSON.stringify(whileEditing));
+
+  await ev(`${byText('#category-manage button', 'Cancel')}.click()`);
+  await waitUntil(ev, `!document.querySelector('#category-manage .category-edit-name')`,
+    { what: 'the rename to cancel' });
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after the reorder checks' });
+
+  /* ---------- 2a: focus survives the SECOND repaint too, not only the
+     optimistic one (issue #65 step 2) ----------
+   *
+   * `moveCategory` restores focus after its own optimistic `repaintCategories()`
+   * — that is `d`/`a` above, implicitly — but `refreshCategoryPicker`'s GET runs
+   * a SECOND `repaintCategories()` from the server's answer, whose
+   * `renderCategoryManage` does `list.replaceChildren()` and drops focus to
+   * `<body>` with nothing to restore it. At a human pace (press, wait, look,
+   * press again) a keyboard user loses focus on every single press, which is
+   * the exact defect the optimistic restore claims to have fixed.
+   *
+   * Waiting only for the OPTIMISTIC repaint (a `waitUntil` on the manage list's
+   * order, as `a` above does) would pass against the unfixed code, because that
+   * repaint's own restore is the one thing step 1 already got right. The
+   * button's `data-focus-key` is identical before and after the refetch, so the
+   * only way to tell the two repaints apart from outside is NODE IDENTITY: stash
+   * a reference to the button focus landed on right after the click (the
+   * optimistic generation) and poll for a DIFFERENT node under the same key
+   * (the refetch's generation) before reading `document.activeElement`.
+   *
+   * Mutation target: delete the post-refetch `restoreFocus` call in
+   * `moveCategory` — this must FAIL, because a fresh node exists but nothing
+   * ever calls `.focus()` on it, so focus stays on the stale, now-detached
+   * optimistic node (or wherever the detach sends it).
+   */
+  console.log('--- 2a: focus survives the post-refetch repaint too (issue #65 step 2) ---');
+
+  // `openDialog`'s own fire-and-forget `refreshCategoryPicker()` call (see its
+  // docstring above `refreshCategoryPicker`) can land at any point after the
+  // dialog opens and rebuilds `#category-manage` on its own — tearing out
+  // whatever this block focuses next if it races it, exactly the hazard `a`–`f`
+  // above already wait out before touching the list. Watching for the SETTLED
+  // CONTENT (as `a`–`f` do) is not enough here specifically, because nothing
+  // else in this account has changed since `f` left it — the dialog's own
+  // SYNCHRONOUS first render already shows the settled order before that
+  // fetch has even landed, so a content check passes vacuously and the fetch
+  // can still land later, mid-interaction. Count in-flight fetches instead —
+  // installed fresh right before opening the dialog, so it catches exactly
+  // the one this open triggers — and wait for the count to reach zero, with a
+  // settle afterwards for the synchronous repaint that follows the fetch by a
+  // tick.
+  await ev(`(()=>{
+    window.__catPending = 0;
+    window.__catRealFetch = window.__catRealFetch || window.fetch;
+    const real = window.__catRealFetch;
+    window.fetch = (...args) => {
+      window.__catPending++;
+      return real(...args).finally(() => { window.__catPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__catPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving" });
+  await sleep(300);
+
+  // Focus, click and the generation-one capture all happen inside ONE
+  // `Runtime.evaluate` — a separate `ev()` call between `.focus()` and
+  // `.click()` gave the dialog's own settling (or anything else) a whole CDP
+  // round trip to steal focus back to `<body>` before the click ever landed,
+  // which read at `moveCategory`'s own entry as `focused: null` and made the
+  // rest of this block meaningless. `.click()` is synchronous and does not
+  // itself move focus, so this also still captures the OPTIMISTIC node:
+  // moveCategory's synchronous prefix (splice, optimistic repaint, its own
+  // `restoreFocus`) has already completed by the time `.click()` returns, and
+  // nothing async can run until this whole script yields.
+  const downTarget = await ev(`(()=>{
+    const btn = [...document.querySelectorAll('#category-manage .category-move-down')]
+      .find(b => !b.disabled);
+    const key = btn.dataset.focusKey;
+    btn.focus();
+    btn.click();
+    window.__catmoveGen1 = document.querySelector('[data-focus-key=' + JSON.stringify(key) + ']');
+    return key;
+  })()`);
+
+  // Poll for the REFETCH's own repaint — a THIRD `list.replaceChildren()`
+  // since the click, distinguishable from the optimistic one only by node
+  // identity, since every attribute including `data-focus-key` is the same.
+  await waitUntil(ev,
+    `(()=>{
+      const btn = document.querySelector('[data-focus-key=${JSON.stringify(downTarget)}]');
+      return !!btn && btn !== window.__catmoveGen1;
+    })()`,
+    { what: "refreshCategoryPicker's own repaint (a fresh node under the same focus key)" });
+
+  const focusAfterRefetch = await ev(`(()=>{
+    const el = document.activeElement;
+    return el && el.dataset ? el.dataset.focusKey ?? null : null;
+  })()`);
+  ck('2a: focus is restored again after the post-move refetch, not only the optimistic repaint',
+    focusAfterRefetch === downTarget,
+    JSON.stringify({ expected: downTarget, focusAfterRefetch }));
+
+  // …and the guard on that second restore actually guards: by the time the GET
+  // lands the user may have deliberately moved focus elsewhere, and the restore
+  // above must not steal it back. Same shape as above — click, capture the
+  // optimistic generation's node — except focus is moved to Cancel immediately
+  // after the click returns, which is still before the network round trip the
+  // refetch needs, and held there until a fresh (refetch) node is confirmed to
+  // exist under the moved arrow's own key.
+  //
+  // Mutation target: make the post-refetch restore in `moveCategory`
+  // unconditional (drop the `activeElement == null || … === document.body`
+  // guard) — this must FAIL, because an unconditional restore pulls focus back
+  // from Cancel onto the arrow the moment the refetch's repaint runs.
+  // Focus, click and the deliberate focus-steal to Cancel all happen inside
+  // ONE `Runtime.evaluate`, for the same reason `downTarget` above does: a
+  // separate call between `.focus()` and `.click()` gives anything else —
+  // including the app itself — a whole CDP round trip to move focus first,
+  // and moveCategory's synchronous prefix (splice, optimistic repaint, its
+  // own `restoreFocus`) completes before `.click()` returns, so this is also
+  // guaranteed to land before the network round trip the refetch needs.
+  const upTarget = await ev(`(()=>{
+    const btn = [...document.querySelectorAll('#category-manage .category-move-up')]
+      .find(b => !b.disabled);
+    const key = btn.dataset.focusKey;
+    btn.focus();
+    btn.click();
+    window.__catmoveGen1b = document.querySelector('[data-focus-key=' + JSON.stringify(key) + ']');
+    document.getElementById('dialog-cancel').focus();
+    return key;
+  })()`);
+  await waitUntil(ev,
+    `(()=>{
+      const btn = document.querySelector('[data-focus-key=${JSON.stringify(upTarget)}]');
+      return !!btn && btn !== window.__catmoveGen1b;
+    })()`,
+    { what: "the refetch's own repaint to land, with focus deliberately parked on Cancel" });
+
+  const focusAfterDeliberateMove = await ev(
+    `document.activeElement === document.getElementById('dialog-cancel')`);
+  ck('…and does not steal focus back once the user has deliberately moved it elsewhere',
+    focusAfterDeliberateMove === true, JSON.stringify({ focusAfterDeliberateMove }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after the focus-restore checks' });
+
   /* ---------- review round 5: a QUEUED category write is DURABLE, so the two
      controls have to move with it ----------
 
@@ -1658,6 +1955,66 @@ try {
   ck('…and both queued category writes actually landed',
     renamedOnServer.names.includes('Wellness') && renamedOnServer.work === false,
     JSON.stringify(renamedOnServer));
+
+  /* ---------- g: an offline reorder keeps its order (issue #65 step 1) ----------
+   *
+   * The very end of the suite, reusing round 5's already-installed
+   * `window.__offline` fetch stub rather than a second one, over the dialog
+   * round 5 left open (`RENAMED_HABIT`'s own, mid-edit) and the account round
+   * 5 left it — Work deleted, Fitness renamed to Wellness — which is a known
+   * state with more than one category still on it.
+   *
+   * Mutation target: change `moveCategory`'s catch to
+   * `state.categories = previous; repaintCategories();` unconditionally —
+   * the same mistake `persistOrder` (dashboard.js) makes for the habit list —
+   * this must FAIL.
+   */
+  console.log('--- g: an offline reorder keeps its order (issue #65 step 1) ---');
+
+  await ev(`(async()=>{
+    const { clearAll } = await import('/shared/offline.js');
+    await clearAll();
+    return true;
+  })()`);
+
+  const beforeOffline = await readManage();
+  ck('sanity: more than one category is left to move, in the dialog round 5 left open',
+    beforeOffline.names.length > 1, JSON.stringify(beforeOffline));
+
+  await ev(`window.__offline = true; true`);
+  const [offlineFirst, offlineSecond] = beforeOffline.names;
+  // Blanked in the SAME evaluate as the click, for the reason the queued-rename
+  // block above is: round 5's queued delete/rename left `#category-hint`
+  // reading "Saved offline" and nothing between there and here clears it, so
+  // the wait below would otherwise be a predicate that was ALREADY TRUE — it
+  // could resolve on its first poll, before `moveCategory`'s catch has run,
+  // and `readManage()` would then read the optimistic splice from BEFORE the
+  // `try` rather than the outcome of the catch. `categoryHint` is the LAST
+  // statement in `moveCategory`'s catch, after the conditional revert, so the
+  // sentence appearing again means that decision has already been made.
+  await ev(`(()=>{
+    document.getElementById('category-hint').textContent = '';
+    document.querySelector(
+      '#category-manage .category-manage-row .category-move-down').click();
+    return true;
+  })()`);
+  await waitUntil(ev,
+    `document.getElementById('category-hint').textContent.includes('Saved offline')`,
+    { what: 'the offline reorder to be staged and reported as queued' });
+
+  const afterOffline = await readManage();
+  const offlineHint = await ev(`(()=>({
+    text: document.getElementById('category-hint').textContent,
+    error: document.getElementById('category-hint').classList.contains('error'),
+  }))()`);
+  ck('g: THE assertion: an offline press keeps the new order rather than reverting it',
+    afterOffline.names[0] === offlineSecond && afterOffline.names[1] === offlineFirst,
+    JSON.stringify({ before: beforeOffline.names, after: afterOffline.names }));
+  ck('…and reports it as saved offline, not as an error',
+    offlineHint.text.includes('Saved offline') && offlineHint.error === false,
+    JSON.stringify(offlineHint));
+
+  await ev(`window.__offline = false; true`);
 
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {

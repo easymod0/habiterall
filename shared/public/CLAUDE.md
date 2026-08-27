@@ -80,6 +80,21 @@ category. `summarised` can still be true while there is nothing to draw:
 treats a missing summary exactly like `summarised` being false, by drawing the
 header it always drew and nothing more.
 
+**A grouped section's ORDER is `position`, and the habit dialog's category
+manage list is the one surface that writes it.** Both editions already read
+every category list `ORDER BY position, id` and a create already lands a new
+one at `MAX(position) + 1`, so `POST /categories/reorder` (`moveCategory`,
+`ui/habit-dialog.js`) is a caller for existing storage semantics rather than
+new ones — nothing on the read side, including the grouped dashboard's own
+section order, had to learn anything. The ↑/↓ pair on each manage row are
+disabled while `editingCategoryId != null`, because `repaintCategories` will
+not rebuild that list while a rename box is open (a live `<input>` a rebuild
+would tear out from under whoever is typing in it); a press there would send a
+write and repaint nothing, which reads as the click having done nothing at
+all. See `docs/decisions/categories.md`'s phase 5 for the disable rules in
+full and for why `moveCategory` keeps the optimistic order on `err.queued`
+where `persistOrder` (the habit list's own reorder) does not.
+
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears

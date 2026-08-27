@@ -417,6 +417,69 @@ try {
       figures > 0, String(figures));
   }
 
+  /* ---------- the habit dialog's category manage row (issue #65 step 2), at
+     every width ---------- */
+  //
+  // Buttons, not drag: the ↑/↓ pair this issue adds share the row with the
+  // swatch, the name and the existing ✎/✕, and `.category-manage-name`'s own
+  // `flex: 1; min-width: 0` is the one thing meant to absorb a narrow
+  // screen — everything else in the row is `flex: none`. The two categories
+  // (Health, Work) created for the grouped-dashboard block just above are
+  // still on the account, which is what `canReorder` needs before either
+  // arrow is drawn at all.
+  console.log('\n--- habit dialog: category manage row ---');
+
+  for (const vp of VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
+    await send('Page.navigate', { url: APP }, sessionId);
+    for (let i = 0; i < 80; i++) {
+      if (await ev(`!!document.getElementById('btn-new') && !document.getElementById('btn-new').hidden`)
+        .catch(() => false)) break;
+      await sleep(200);
+    }
+    await ev(`document.getElementById('btn-new').click()`);
+    for (let i = 0; i < 80; i++) {
+      if (await ev(`document.querySelectorAll('#category-manage .category-manage-row').length >= 2`)
+        .catch(() => false)) break;
+      await sleep(200);
+    }
+    await sleep(200);
+
+    // FIT, not touch size — see the comment on the assertion below. Every
+    // focusable control in a row (swatch excluded; it is not a button) has
+    // its right edge measured against `.category-manage`'s own client width,
+    // which is the row's actual container (the `<ul>`), not the dialog.
+    const rows = await ev(`(() => {
+      const manage = document.querySelector('.category-manage');
+      const manageRight = manage.getBoundingClientRect().right;
+      return [...manage.querySelectorAll('.category-manage-row')].map((r) => {
+        const controls = [...r.querySelectorAll('button, input')];
+        const rightmost = controls.reduce(
+          (max, el) => Math.max(max, el.getBoundingClientRect().right), 0);
+        const name = r.querySelector('.category-manage-name');
+        return {
+          overflowsBy: Math.round(rightmost - manageRight),
+          nameWidth: name ? Math.round(name.getBoundingClientRect().width) : 0,
+        };
+      });
+    })()`);
+
+    ck(`${vp.label}: every manage row's controls fit inside .category-manage`,
+      rows.length > 0 && rows.every((r) => r.overflowsBy <= 1), JSON.stringify(rows));
+    // `MIN_TOUCH` (44px) is deliberately not asked here: `.btn-icon`'s
+    // existing `padding: 7px 10px` for ✎ and ✕ is already smaller than that,
+    // so a touch-size assertion would fail on controls this change did not
+    // add. This is a FIT check — nothing pushed past the row's own edge —
+    // and a non-zero name width, so the row did not "fit" by squeezing the
+    // name away to nothing.
+    ck(`${vp.label}: the category name still has real width, not squeezed away`,
+      rows.length > 0 && rows.every((r) => r.nameWidth > 0), JSON.stringify(rows));
+
+    await ev(`document.getElementById('dialog-cancel').click()`);
+    await sleep(150);
+  }
+
   await ev(`(async()=>{
     await fetch('/api/settings', { method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

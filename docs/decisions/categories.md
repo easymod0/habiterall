@@ -565,3 +565,87 @@ mode fetched only archived habits and has nothing active to say anything about.
 `dashboard.js` tolerates the key's absence for a second reason besides: an
 older cached payload, served by `shellFirst`'s stale-while-revalidate before
 the client's next fetch lands, may carry no such key either.
+
+## Phase 5 — giving `POST /categories/reorder` a caller (#65)
+
+**The route existed and was fully tested before anything called it.** Both
+editions validated every id through `parseCategoryId`, capped at
+`LIMITS.categories`, wrote inside a transaction and returned the full list —
+and `grep -rn "categories/reorder" shared/public/ android-native/` returned
+nothing. `position` was already honoured everywhere it is read (`ORDER BY
+position, id`, and a create's `COALESCE(MAX(position) + 1, 0)`); this phase
+gives it a writer, not a new rule.
+
+**Buttons, not drag-and-drop.** `attachDragHandlers`'s own comment on the
+habit list already states the reason: HTML5 drag events are unreachable by
+keyboard and unreliable on touch. The manage list is a `<dialog>` inside a
+`<form>`, capped at 30 rows with `max-height: 160px; overflow-y: auto`, which
+is a worse surface for a drag gesture than the dashboard's own uncapped grid
+— so the argument that already ruled drag in for the habit list rules it out
+here twice over.
+
+**Three disable rules, and the third is the one worth explaining.** The first
+two are ordinary boundary conditions: no arrows at all under two categories
+(the same gate `reorderable` uses for the dashboard's own drag handle), and
+the first row's ↑ / the last row's ↓ disabled because there is nowhere left to
+move to. The third — every arrow on every row disabled while a row is
+mid-rename — exists because `repaintCategories` *deliberately* refuses to
+rebuild the manage list while `editingCategoryId != null` (a rename box is a
+live `<input>` a rebuild would tear out from under whoever is typing in it,
+the same failure mode `shared/public/CLAUDE.md` documents for the settings
+dialog). An arrow left enabled there would send a write and repaint
+**nothing**: the row stays exactly where it was, with no sign on screen that
+the click did anything — silent, which is the failure class this repo names
+most often. Disabling it is not a UX nicety layered on top of the rebuild
+guard; it is what keeps a press from being a write with no visible effect.
+
+**`moveCategory`'s `catch` keeps the optimistic order on `err.queued`, and
+`persistOrder` (the habit list's own reorder, `dashboard.js`) does not.**
+`/categories/reorder` is `replayable()` — everything but `POST /habits` — so
+offline the write is already staged before the throw and **will** land on
+reconnect; reverting the optimistic order would snap the list back from an
+order that is about to be applied anyway. `persistOrder` reverts
+unconditionally, `err.queued` included, which is a real, pre-existing defect
+in the habit list's own reorder (tracked separately, not fixed here — this
+phase's own version is deliberately not a second copy of it).
+
+**The post-move focus restore had to run twice, not once, and the second one
+needs a guard the first does not.** `moveCategory` does an OPTIMISTIC
+`repaintCategories()` before the write, and `restoreFocus` after it walks
+fine — until `refreshCategoryPicker`'s own GET lands and runs a **second**
+`repaintCategories()` from the server's answer, whose `renderCategoryManage`
+does `list.replaceChildren()` and drops focus to `<body>` with nothing to
+restore it. Left alone, holding ↑ only "walks a category up" for as long as
+presses outrun the fetch; at an ordinary human pace every press lost focus,
+which is exactly the defect the first restore was written to fix and reads as
+fixed until it is tested against the SECOND repaint rather than the first.
+The second restore is conditional — `document.activeElement == null ||
+document.activeElement === document.body` — because by the time the GET
+lands the user may have deliberately moved focus elsewhere (to Cancel, to a
+different row's own control), and stealing it back would be a new bug rather
+than a fix for the old one. `shared/test/browser/categorycheck.mjs` asserts
+both halves: that focus survives the refetch's own repaint (polled by node
+identity, since the button's `data-focus-key` is identical across both
+repaints and only the DOM node itself changes), and that the guard actually
+holds when focus is moved away before the refetch lands.
+
+**The manage row had to be checked at 360px, not assumed to fit.** Four
+controls (swatch, name, ↑, ↓) plus the pre-existing ✎ and ✕ share one row whose
+only flexible member is `.category-manage-name` (`flex: 1; min-width: 0`,
+already ellipsising); everything else is `flex: none`, and `.btn-icon`'s
+padding inside this row is tighter than the ordinary icon button's so six
+controls fit at 360px. `shared/test/browser/responsive.mjs` asserts FIT —
+nothing pushed past `.category-manage`'s own right edge, and the name kept
+non-zero width — rather than the 44px `MIN_TOUCH` the rest of that suite
+checks elsewhere: `.btn-icon`'s existing `padding: 7px 10px` for ✎ and ✕ is
+already smaller than 44px, so a touch-size assertion here would fail on
+controls this phase did not add.
+
+**Left alone, on purpose, and named rather than fixed:** the reorder payload
+names only the category ids the client currently holds, so a category created
+on another device since this dialog's own fetch keeps whatever position it
+already has — the route's existing semantics, not a new limitation. And rapid
+presses put several writes in flight at once, each carrying the full order at
+the moment it fired; `persistOrder` has the identical exposure for the habit
+list, so this does not invent a new mechanism the app was not already living
+with.
