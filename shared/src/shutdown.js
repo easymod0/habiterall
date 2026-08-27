@@ -78,8 +78,9 @@ export function installShutdown(server, options = {}) {
       const startedAt = Date.now();
       if (draining) {
         // Also the idempotency guard, not only an impatient operator's escape
-        // hatch: without it a second signal re-runs the whole sequence, and
-        // `closePool()` a second time is an unhandled rejection.
+        // hatch: without it a second signal re-runs the whole sequence — a
+        // spurious `shutdown` line, two exits racing, and `closePool()` called
+        // a second time to report its own teardown as failed.
         log.warn('shutdown.forced', { signal });
         exit(1);
         return;

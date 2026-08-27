@@ -1062,7 +1062,10 @@ constant (8s) and not an environment variable, because it has to hold for an
 operator who never sets `stop_grace_period` and so gets Docker's default 10s; and
 the deadline path deliberately runs **no** `cleanup`, since something is already
 stuck and a `closePool()` that hangs too would lose the exit the deadline just
-bought. A cleanup that REJECTS is the third exit — `shutdown.cleanup_failed` and
+bought. A cleanup that REJECTS **or throws synchronously** — cloud's
+`closePool()` is the first, personal's `db.close()` the second, and
+`.then(() => cleanup())` rather than `Promise.resolve(cleanup())` is the one line
+that covers both — is the third exit: `shutdown.cleanup_failed` and
 `exit(1)`, caught rather than left to become an unhandled rejection — because
 there the drain SUCCEEDED and only the storage teardown failed, and an unhandled
 rejection would have reported that as a crash: no line, a raw stack, and nothing

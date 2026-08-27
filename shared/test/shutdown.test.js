@@ -21,6 +21,15 @@ async function waitFor(predicate, ms) {
   return predicate();
 }
 
+// `cleanupFails` is `false`, `'async'` or `'sync'`, because the two editions
+// fail in two different SHAPES and one line of `shutdown.js` is what covers
+// both. Cloud passes `cleanup: () => closePool()` — a promise that rejects when
+// a client errors during `pool.end()`. Personal passes `cleanup: () =>
+// db.close()`, with no `async` and no `await`, so `ERR_INVALID_STATE` on an
+// already-closed handle is a SYNCHRONOUS throw out of the call. `.then(() =>
+// cleanup())` catches that one; `Promise.resolve(cleanup())` would let it
+// escape into `server.close()`'s callback as an uncaught exception, which is
+// the crash-shaped exit this module exists to avoid.
 async function harness({ deadlineMs = 5000, cleanupFails = false } = {}) {
   const order = [];
   /** @type {{level: string, event: string, fields: any, err: any}[]} */
@@ -55,17 +64,26 @@ async function harness({ deadlineMs = 5000, cleanupFails = false } = {}) {
     order.push(event);
   };
 
+  // Neither failing shape pushes anything: it never gets that far.
+  const cleanup = cleanupFails === 'sync'
+    // Personal's: thrown on the first line, before any await, so the call
+    // itself throws rather than returning a promise at all.
+    ? () => { throw new Error('db.close blew up'); }
+    // Cloud's: a rejection AFTER an await, so the call returns a promise and
+    // the failure arrives on a later turn.
+    : async () => {
+      await null;
+      // Any truthy value that is not `'sync'`, so a caller writing `true`
+      // gets a failing cleanup rather than a silently passing one. An option
+      // whose typo means "do not fail" is how a test stops being able to fail.
+      if (cleanupFails) throw new Error('closePool blew up');
+      order.push('cleanup');
+    };
+
   installShutdown(server, {
     log: { info: record('info'), warn: record('warn'), error: record('error') },
     beforeClose: () => order.push('beforeClose'),
-    cleanup: async () => {
-      await null;
-      // Rejecting AFTER an await, which is the shape both editions can
-      // produce: `pool.end()` rejecting mid-teardown, `db.close()` throwing
-      // `ERR_INVALID_STATE`. It pushes nothing, because it never gets that far.
-      if (cleanupFails) throw new Error('closePool blew up');
-      order.push('cleanup');
-    },
+    cleanup,
     deadlineMs,
     exit: (code) => {
       order.push(`exit:${code}`);
@@ -224,7 +242,7 @@ test('cleanup runs before exit(0) on the clean path, and not at all on the deadl
 });
 
 test('a cleanup that REJECTS is named and exits 1, and claims no completed drain', async () => {
-  const h = await harness({ cleanupFails: true });
+  const h = await harness({ cleanupFails: 'async' });
   try {
     h.fire('SIGTERM');
     assert.ok(
@@ -257,6 +275,49 @@ test('a cleanup that REJECTS is named and exits 1, and claims no completed drain
     assert.equal(failed.err?.message, 'closePool blew up');
 
     // Nothing arrives late: no second exit, and no drained line behind it.
+    await sleep(100);
+    assert.deepEqual(
+      h.order,
+      ['shutdown', 'beforeClose', 'shutdown.cleanup_failed', 'exit:1'],
+      'something arrived after the failed cleanup had already chosen the exit',
+    );
+  } finally {
+    await h.stop();
+  }
+});
+
+test('a cleanup that throws SYNCHRONOUSLY is named and exits 1 too, which is personal\'s shape', async () => {
+  // The test above cannot see this one. `cleanup: () => db.close()` has no
+  // `async` and no `await`, so `ERR_INVALID_STATE` on an already-closed handle
+  // never becomes a rejected promise — it throws out of the call. Under
+  // `Promise.resolve(cleanup())` the throw escapes into `server.close()`'s
+  // callback as an uncaught exception: exit 1 with a raw stack and no
+  // `shutdown.cleanup_failed` at all, on the edition that line names.
+  const h = await harness({ cleanupFails: 'sync' });
+  try {
+    h.fire('SIGTERM');
+    assert.ok(
+      await h.waitFor(() => h.exits.length > 0, 1000),
+      'nothing exited: the synchronous throw escaped the chain instead of being caught',
+    );
+
+    assert.deepEqual(h.order, ['shutdown', 'beforeClose', 'shutdown.cleanup_failed', 'exit:1']);
+    assert.equal(
+      h.order.filter((e) => e === 'shutdown.drained').length,
+      0,
+      `a failed teardown claimed a completed drain (order: ${JSON.stringify(h.order)})`,
+    );
+
+    const failed = h.logs.find((l) => l.event === 'shutdown.cleanup_failed');
+    assert.ok(failed, 'the failure was not logged at all');
+    assert.equal(failed.level, 'error');
+    assert.equal(failed.fields.signal, 'SIGTERM');
+    assert.ok(
+      Number.isFinite(failed.fields.ms),
+      `no usable duration on the failure line: ${JSON.stringify(failed.fields)}`,
+    );
+    assert.equal(failed.err?.message, 'db.close blew up');
+
     await sleep(100);
     assert.deepEqual(
       h.order,

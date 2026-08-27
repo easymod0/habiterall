@@ -125,4 +125,16 @@ choose the exit and its code and there is a log line saying the drain ran out; a
 10 s SIGKILL chooses, with no line, no cleanup, and a status that says only that
 something killed it.
 
+There are **three** exits, and an operator reads them apart by the event beside
+the status. `exit(0)` with `shutdown.drained` is the whole thing working: every
+accepted response finished and the storage teardown ran. `exit(1)` with
+`shutdown.deadline` is the 8 s running out — no cleanup was attempted, because
+something was still stuck and a `closePool()` that hung too would lose the exit
+the deadline just bought. `exit(1)` with `shutdown.cleanup_failed` is the third
+and the least obvious: the drain SUCCEEDED, every accepted response *was*
+finished, and only `db.close()` / `closePool()` failed. That is why the rejection
+is caught rather than left alone — an unhandled rejection is also a status of 1,
+but with a raw stack and no line, which destroys the distinction between a
+teardown that failed and a process that never left.
+
 
