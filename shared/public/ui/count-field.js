@@ -45,8 +45,16 @@ const $ = (sel) => document.querySelector(sel);
  * a value captured at import time would answer with whichever was true first
  * and go on answering that after the dialog changed it. Two instances of this
  * control exist for the life of the page, which is the same span.
+ *
+ * Exported for a THIRD caller that is not a count field: the habit dialog's
+ * target box (#156), which is a plain text input over the same `ui/amount.js`
+ * rules — `stepFor(goal)` and a preset offering the goal are both meaningless
+ * in the box where the goal is being typed. It asks this rather than composing
+ * `resolveNumberFormat(get('numberFormat'), deviceDecimalSeparator())` a second
+ * time, so there is one declaration of the question and the rule above about
+ * when it is asked reaches every surface that asks it.
  */
-const convention = () =>
+export const convention = () =>
   resolveNumberFormat(get('numberFormat'), deviceDecimalSeparator());
 
 /**

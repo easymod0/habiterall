@@ -429,16 +429,51 @@ is the one that matters, because `inputmode="decimal"` is what shows it and most
 of Europe's keyboards offer it; `HabitFormScreen.parseAmount` on the phone has a
 comment about the same input.
 
-So the box is `type="text"`, both surfaces are `ui/count-field.js` over the rules
-in `ui/amount.js`, and that module owns the reading — with the same three-answer
-convention `parseTimeInput` uses and the same trap in it: `''` (empty — a
-delete), `null` (unreadable — say so, write nothing) and a number, of which `0`
-is a real answer. Two of the three are falsy, so callers compare with `===`.
-`parseAmount` is also stricter than `Number()`, which `shared/CLAUDE.md` records
-as too generous about form — `1e3` is not a thing anyone types into a box asking
-how many glasses of water they drank. The dashboard keeps its own write path —
-`recordValue`, which paints before awaiting, because offline `api()` queues the
-write and THEN throws.
+So the box is `type="text"`, the day editor and the dashboard grid are both
+`ui/count-field.js` over the rules in `ui/amount.js`, and that module owns the
+reading — with the same three-answer convention `parseTimeInput` uses and the
+same trap in it: `''` (empty — a delete), `null` (unreadable — say so, write
+nothing) and a number, of which `0` is a real answer. Two of the three are
+falsy, so callers compare with `===`. `parseAmount` is also stricter than
+`Number()`, which `shared/CLAUDE.md` records as too generous about form —
+`1e3` is not a thing anyone types into a box asking how many glasses of water
+they drank. The dashboard keeps its own write path — `recordValue`, which
+paints before awaiting, because offline `api()` queues the write and THEN
+throws.
+
+**A third typed-amount surface is deliberately not a `count-field`.** The habit
+dialog's Target box is a GOAL, not a day's amount, and `stepFor(goal)` plus a
+preset offering the goal back are both meaningless in the box where the goal
+itself is being typed — so it is a plain `type="text"` box straight over
+`ui/amount.js`, asking `count-field.js`'s exported `convention()` so there is
+still one answer to the decimal-point question rather than a second guess at
+it. `readTarget` (`ui/habit-dialog.js`) is the reader, and two decisions about
+it are not obvious from the code alone.
+
+**The target box submits what was typed; an untouched box submits what was
+stored.** Typing runs through `parseAmount`, bounded to `[1e-6, 1e12]` and
+quantised to six places exactly as a day's amount is; leaving the box alone
+submits the stored `target_value` verbatim, whatever it is. A target has never
+been bounded server-side — not in `parseHabit`, not on the phone, not on any
+import path — and `PUT /habits/:id` REPLACES, so inheriting the day amount's
+domain whole would let a colour-only edit quantise a stored `3.14159265`, and
+would make a habit whose target sits outside that domain unsavable over a
+field nobody touched, with no in-domain spelling to retype it as. This changes
+what no stored row means, which is why it needed no further approval than the
+one it already has.
+
+**A refusal is gated on the target box being ON SCREEN, not on the parse.**
+Mistype the target, decide the habit is Yes/No after all, and press Save: the
+box lives inside `.numerical-only`, which `syncTypeFields` hides the moment
+Type stops being Measurable, and hidden, a complaint would land in a hidden
+span while `focus()` landed on a hidden input — the dialog would just stop
+saving with nothing visible saying why. A refusal nobody can see is not a
+refusal, so hidden and unreadable, the stored target stands instead.
+
+**An empty Target box still means a habit with no target — 0 — not a
+delete.** That is what `Number(f.target_value.value) || 0` meant before this
+and what `parseHabit` stores for one; it is deliberately not the day editor's
+empty box, which is a DELETE, because there is no row here to delete.
 
 **A refusal has to be actionable, and what it QUOTES has to be true of what it
 quoted.** `parseAmount` refuses `10,000` as ambiguous; `amountComplaint` names

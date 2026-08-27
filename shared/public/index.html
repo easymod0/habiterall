@@ -274,7 +274,17 @@
 
       <div class="numerical-only" hidden>
         <label>Target
-          <input name="target_value" type="number" min="0" step="any" value="1">
+          <!-- `type="text"`, for the reason the day editor's amount box is:
+               a number input does not report what it cannot read, it filters
+               the keystrokes it dislikes and hands back what survived, so
+               "8,5" typed here arrived as 85 — a goal ten times the one that
+               was typed — and "abc" as "", which `Number(...) || 0` stored as
+               a habit with no target at all. `inputmode="decimal"` is what
+               offers the comma key this is about. Read through `parseAmount`;
+               see ui/amount.js. -->
+          <input name="target_value" type="text" inputmode="decimal"
+                 autocomplete="off" value="1">
+          <span class="field-hint" id="target-hint"></span>
         </label>
         <label>Goal
           <select name="target_type">

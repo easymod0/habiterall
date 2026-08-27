@@ -19,22 +19,32 @@
  * is what most of Europe's keyboards invite, `inputmode="decimal"` shows it,
  * and dropping it multiplies the answer by ten. `HabitFormScreen.parseAmount`
  * on the phone has a comment about the same input — and note it is NOT a mirror
- * of this and does not try to be: it reads a habit's TARGET where this reads a
- * DAY's amount. Be exact about where they part, because "not a mirror" is easy
- * to say too strongly. They agree about the FORM: the same digits-and-at-most-
- * one-separator shape, the same refusal of a sign, an exponent or hex, and —
- * on a `point` account, which is every account until somebody says otherwise —
- * the same thousands refusal since #111. They part in two places. The DOMAIN:
- * this one bounds and quantises to what `formatAmount` can show back, so
- * `3.14159265` is 3.141593 here and itself there. And the CONVENTION: `10.000`
- * is ten thousand here on a `comma` account and ten on the phone, always, which
- * is #108's remaining half and is written down as such rather than fixed by
- * copying this file a sixth time.
+ * of this and does not try to be, even now that both read a habit's TARGET
+ * (`readTarget` in `ui/habit-dialog.js` reads one through this module — the
+ * next paragraph): the phone is not an offline mirror of a target, because a
+ * target is server-authoritative, the way creating a habit and the settings
+ * screen already are. Be exact about
+ * where they part, because "not a mirror" is easy to say too strongly. They
+ * agree about the FORM: the same digits-and-at-most-one-separator shape, the
+ * same refusal of a sign, an exponent or hex, and — on a `point` account,
+ * which is every account until somebody says otherwise — the same thousands
+ * refusal since #111. They part in two places. The DOMAIN: this one bounds
+ * and quantises to what `formatAmount` can show back, so `3.14159265` is
+ * 3.141593 here and itself there. And the CONVENTION: `10.000` is ten
+ * thousand here on a `comma` account and ten on the phone, always, which is
+ * #108's remaining half — tracked as #157 — and is written down as such
+ * rather than fixed by copying this file a sixth time.
  *
- * The web's own target box is the gap that leaves. `index.html`'s
- * `target_value` is still an `<input type="number">` — the very control this
- * comment opens by measuring — so `8,5` typed into a habit's goal is still 85.
- * That is issue #156 and not this module's to fix from here.
+ * The web's own target box was the gap that left, and is one no longer (#156).
+ * `index.html`'s `target_value` was an `<input type="number">` — the very
+ * control this comment opens by measuring — so `8,5` typed into a habit's goal
+ * reached storage as 85. It is a plain `type="text"` box over this module now,
+ * read by `readTarget` (`ui/habit-dialog.js`) rather than by a `count-field`,
+ * since a goal has no goal to step by. What that reader does NOT hand this
+ * module is a target it was merely SHOWN: an untouched box submits the stored
+ * value verbatim, because nothing bounds a target server-side and
+ * `PUT /habits/:id` replaces, so the domain above may judge what was typed and
+ * not what was already there. `shared/public/CLAUDE.md` has the rule.
  *
  * **The server imports this**, which is the one thing here with a cost. A
  * Discord modal is a box somebody types an amount into, arriving over a socket
