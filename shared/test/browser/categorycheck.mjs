@@ -2986,6 +2986,298 @@ try {
 
   await ev(`window.__offline = false; true`);
 
+  /* ---------- 2c: a boundary press keeps the row it moved IN VIEW
+     (review round 3, finding 2) ----------
+   *
+   * `2b` fixed where the keyboard goes at a boundary and, in doing so, took
+   * away the thing that had been carrying the VIEW. `.focus()` scrolls its
+   * target into view as a side effect, so while focus followed the row up the
+   * list the scroll came along for free; a boundary parks focus on the list
+   * itself with `preventScroll`, and the last press of a walk — the one that
+   * reaches row 0 — was then the only press that did not follow its row.
+   * `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
+   * rows, about four visible, and `moveCategory` puts `scrollTop` back to its
+   * press-time offset across BOTH repaints. So from a list scrolled a single
+   * row down, the category arrives above the fold and the press that was
+   * supposed to land it at the top reads as having made it vanish.
+   *
+   * Both repaints are asserted, because the fix is two calls and each fails on
+   * its own. The second is the one a reader would think already covered: after
+   * the refetch, `restoreArrowFocus` is guarded on focus having been dropped to
+   * `<body>`, which at a boundary it has NOT been — focus is parked on the list
+   * — so the forced `scrollTop` there had nothing to correct it either.
+   *
+   * Two mutation targets, one per call. Drop `revealCategoryRow(list, id)` from
+   * after the optimistic `list.scrollTop = scrollTop` in `moveCategory`: the
+   * first assertion must FAIL. Drop the one inside the post-refetch
+   * `if (editingCategoryId == null)` block instead: the second must FAIL, and
+   * only it.
+   */
+  console.log('--- 2c: a boundary press keeps the row it moved in view (review round 3, finding 2) ---');
+
+  // Enough rows for the list to actually scroll. Through the API rather than
+  // the form because what this block is about only begins once it overflows,
+  // and `scrollable` below is asserted rather than assumed — with a list that
+  // fits, every check here passes against the unfixed code.
+  await ev(`(async()=>{
+    for (let i = 0; i < 6; i++) {
+      await fetch('/api/categories', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Zzz Scroll ' + i, color: '#4f46e5' }) });
+    }
+    return true;
+  })()`);
+
+  // A fresh page rather than round 5's dialog and stubbed `fetch`: this block
+  // and `n` below want an ordinary app, and `g` left the store believing it is
+  // offline. `#btn-new` because the manage list is the same in either mode and
+  // that one depends on no habit's name surviving the renames above.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].length > 0`,
+    { what: 'the dashboard to come back for 2c' });
+  await ev(`(async()=>{
+    const { clearAll } = await import('/shared/offline.js');
+    await clearAll();
+    return true;
+  })()`);
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open for 2c' });
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#category-manage .category-manage-name')]
+       .filter(n => n.textContent.trim().startsWith('Zzz Scroll')).length === 6`,
+    { what: "2c's own categories to reach the manage list" });
+
+  // Count the refetch, so the second half below waits on the app rather than on
+  // a duration.
+  await ev(`(()=>{
+    window.__cGets = 0;
+    window.__cPrevFetch = window.fetch;
+    const prev = window.__cPrevFetch;
+    window.fetch = (url, opts) => {
+      const p = prev(url, opts);
+      return (String(url).endsWith('/api/categories')
+        && (opts?.method ?? 'GET').toUpperCase() === 'GET')
+        ? p.then((res) => { window.__cGets++; return res; })
+        : p;
+    };
+    return true;
+  })()`);
+
+  // Scrolled by exactly one row pitch: the first row is off the top and the
+  // second sits at the fold, which is the state a user pressing ↑ on that
+  // second row is in.
+  const scrolledC = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const rows = [...list.children];
+    list.scrollTop = rows[1].offsetTop - rows[0].offsetTop;
+    return {
+      rows: rows.length,
+      scrollTop: list.scrollTop,
+      scrollable: list.scrollHeight > list.clientHeight,
+    };
+  })()`);
+  ck('2c sanity: the manage list overflows and is scrolled off its first row',
+    scrolledC.scrollable === true && scrolledC.scrollTop > 0,
+    JSON.stringify(scrolledC));
+
+  // Focus, click and both reads inside ONE `Runtime.evaluate`, for the reason
+  // `2a` and `2b` give. `moveCategory`'s synchronous prefix — splice, repaint,
+  // scroll restore, reveal, focus restore — has completed by the time
+  // `.click()` returns, so this reads the FIRST repaint's outcome.
+  const pressedC = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const row = list.children[1];
+    const id = row.dataset.categoryId;
+    const name = row.querySelector('.category-manage-name').textContent.trim();
+    const before = list.scrollTop;
+    const up = row.querySelector('.category-move-up');
+    up.focus();
+    up.click();
+    const moved = [...list.children].find(li => li.dataset.categoryId === id);
+    const lb = list.getBoundingClientRect();
+    const rb = moved.getBoundingClientRect();
+    return {
+      id, name, before,
+      index: [...list.children].indexOf(moved),
+      scrollTop: list.scrollTop,
+      visible: rb.top >= lb.top - 1 && rb.bottom <= lb.bottom + 1,
+    };
+  })()`);
+  ck('2c sanity: the press moved the row to the top boundary, from a scrolled list',
+    pressedC.index === 0 && pressedC.before > 0, JSON.stringify(pressedC));
+  ck('2c: THE assertion: the press that reaches the boundary leaves the row it moved in view',
+    pressedC.visible === true, JSON.stringify(pressedC));
+
+  await waitUntil(ev, `window.__cGets >= 1`,
+    { what: "the boundary press's own refetch to land and rebuild the list" });
+  await sleep(300);
+
+  const afterRefetchC = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const moved = [...list.children]
+      .find(li => li.dataset.categoryId === ${JSON.stringify(pressedC.id)});
+    const lb = list.getBoundingClientRect();
+    const rb = moved.getBoundingClientRect();
+    return {
+      index: [...list.children].indexOf(moved),
+      scrollTop: list.scrollTop,
+      visible: rb.top >= lb.top - 1 && rb.bottom <= lb.bottom + 1,
+    };
+  })()`);
+  ck("…and the refetch's own repaint does not scroll it back out",
+    afterRefetchC.visible === true, JSON.stringify(afterRefetchC));
+
+  await ev(`window.fetch = window.__cPrevFetch; true`);
+
+  /* ---------- n: the queued DELETE's optimistic removal is a writer of
+     `state.categories` too (review round 3, finding 1) ----------
+   *
+   * `j`, `k`, `l` and `m` pin four of the five halves of `categoryReadSeq`.
+   * This is the fifth, and it is the one a reader working on the reorder
+   * feature would not think to look at: it is not in `moveCategory` at all.
+   *
+   * The delete's `err.queued` branch removes the row from `state.categories`
+   * and repaints — an optimistic write with no read of its own, which is
+   * `moveCategory`'s splice in every structural respect, and it took no ticket.
+   * So `openDialog`'s fire-and-forget refetch, fired before the press existed
+   * and landing after it with the PRE-delete list, had nothing newer to
+   * supersede it and installed the category the branch had just removed
+   * straight back into the store, the manage list and the picker.
+   *
+   * The harm is not a display one, and the round-5 block above is where it is
+   * spelled out in full: that removal is what stops `saveHabit` submitting an
+   * id the replay is about to destroy, and on replay `resolveCategoryId`
+   * answers 400 while `PUT /habits/:id` REPLACES — so the WHOLE habit edit is
+   * dropped as permanently inapplicable, behind a toast naming neither the
+   * habit nor the field. Putting the category back in the picker re-arms
+   * exactly that.
+   *
+   * It needs no prior outage either: `api()` queues a `replayable()` write on
+   * any network error, the 10s `AbortSignal.timeout` included, while a GET is
+   * never pre-empted and can still be answered. The GET here is fired for real
+   * at the moment `openDialog` asks for it — so its body is genuinely the
+   * pre-delete list — and only its RESPONSE is held, which keeps this a test
+   * about what the client does with an answer rather than about a stub.
+   *
+   * Mutation target: drop the `++state.categoryReadSeq` from the `err.queued`
+   * branch in `habit-dialog.js` — THE assertion below must FAIL, while the
+   * sanity check before it (round 5's own property, at the moment of the
+   * delete) still passes. That split is the whole point: the removal was never
+   * broken, only undone a round trip later.
+   */
+  console.log('--- n: a read already on the wire does not resurrect a queued-deleted category (review round 3, finding 1) ---');
+
+  await ev(`(async()=>{
+    const { clearAll } = await import('/shared/offline.js');
+    await clearAll();
+    return true;
+  })()`);
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close before n opens its own' });
+
+  // Holds the FIRST `GET /api/categories` only; every other request goes to the
+  // network unless `__nOffline` is set, which is what makes the DELETE queue.
+  // Offline as a rejecting `fetch` rather than CDP throttling, for the reason
+  // round 5 gives: it is what `api()` actually sees, and the first refusal
+  // flips `state.offline` through `reportUnreachable()`.
+  await ev(`(()=>{
+    const real = window.fetch;
+    window.__nRealFetch = real;
+    window.__nOffline = false;
+    window.__nHeld = false;
+    window.__nDelivered = false;
+    let captured = false;
+    const held = new Promise((res) => { window.__nRelease = res; });
+    window.fetch = (url, opts) => {
+      const path = String(url);
+      const method = (opts?.method ?? 'GET').toUpperCase();
+      if (!captured && method === 'GET' && path.endsWith('/api/categories')) {
+        captured = true;
+        const inFlight = real(url, opts);
+        window.__nHeld = true;
+        return held.then(() => inFlight).then((res) => {
+          window.__nDelivered = true;
+          return res;
+        });
+      }
+      return window.__nOffline
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : real(url, opts);
+    };
+    return true;
+  })()`);
+
+  // `#btn-new` rather than a habit's own page: either fires `openDialog`'s
+  // fire-and-forget refetch, which is the read being held, and this one leaves
+  // the dashboard showing.
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open for n' });
+  await waitUntil(ev, `window.__nHeld === true`,
+    { what: "openDialog's own fire-and-forget refetch to be captured and held" });
+
+  // Drawn synchronously from the store `openDialog` already had, so the rows
+  // are live while its refetch is parked.
+  const beforeN = (await readManage()).names;
+  const victimN = beforeN[0];
+  ck('sanity: a category to delete while a read of the list is parked',
+    beforeN.length >= 2 && !!victimN, JSON.stringify(beforeN));
+
+  // `openDialog` runs `categoryHint('')`, so the wait below is not a predicate
+  // that was already true — the sentence appearing is this delete's own.
+  await ev(`window.__nOffline = true; true`);
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('.category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name').textContent.trim()
+        === ${JSON.stringify(victimN)});
+    row.querySelector('.category-delete').click();
+    return true;
+  })()`);
+  await waitUntil(ev,
+    `document.getElementById('category-hint').textContent.includes('Saved offline')`,
+    { what: 'the delete to be staged in the outbox and reported as queued' });
+
+  const readControlsN = `(()=>({
+    managed: [...document.querySelectorAll('#category-manage .category-manage-name')]
+      .map(n => n.textContent.trim()),
+    offered: [...document.querySelectorAll('#habit-form [name=category_id] option')]
+      .map(o => o.textContent.trim()),
+  }))()`;
+
+  const atDeleteN = await ev(readControlsN);
+  ck('n sanity: the queued delete takes the category out of both controls (round 5, still holding)',
+    !atDeleteN.managed.includes(victimN) && !atDeleteN.offered.includes(victimN),
+    JSON.stringify({ victimN, ...atDeleteN }));
+
+  // Deliver the pre-delete answer now — the exact moment the unticketed code
+  // paints the category back over the removal.
+  await ev(`window.__nRelease(); true`);
+  await waitUntil(ev, `window.__nDelivered === true`,
+    { what: 'the held GET /categories to be delivered to refreshCategoryPicker' });
+  await sleep(500);
+
+  const afterReadN = await ev(readControlsN);
+  ck('n: THE assertion: a read issued before the queued delete does not put the category back',
+    !afterReadN.managed.includes(victimN) && !afterReadN.offered.includes(victimN),
+    JSON.stringify({ victimN, ...afterReadN, wouldBeResurrected: beforeN }));
+
+  // And the write it was hiding was real: replay it, so what the assertion
+  // above protects is shown to have been a durable delete rather than a hint.
+  await ev(`window.fetch = window.__nRealFetch; window.__nOffline = false; true`);
+  const flushedN = await ev(`(async()=>{
+    const { flush } = await import('/shared/offline.js');
+    const r = await flush();
+    return { sent: r.sent, failed: r.failed.map(f => f.status), remaining: r.remaining };
+  })()`);
+  ck('…and the delete behind it was durable, replaying cleanly on reconnect',
+    flushedN.failed.length === 0 && flushedN.remaining === 0, JSON.stringify(flushedN));
+  const serverN = await categoryNames();
+  ck('…leaving the category deleted on the server, which is what the picker was right about',
+    !serverN.includes(victimN), JSON.stringify(serverN));
+
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {
   console.log('ERROR:', e.message);

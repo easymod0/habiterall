@@ -432,7 +432,24 @@ function renderCategoryManage() {
           // dialog is reconciled by the reconnect flush's own `emit('reload')`
           // (`ui/connectivity.js`), which is also what takes this back if the
           // replay is refused.
+          //
+          // This removal is an OPTIMISTIC write of `state.categories` with no
+          // read of its own, which is `moveCategory`'s splice exactly — so it
+          // takes a ticket for the same reason and retires every category read
+          // already on the wire (`categoryReadSeq`, ui/store.js). The one that
+          // bites is `openDialog`'s fire-and-forget refetch, fired before this
+          // press existed and landing after it with the PRE-delete list; with
+          // nothing newer to supersede it, it installed the category this
+          // branch had just removed straight back into the store, the manage
+          // list and the picker — undoing the whole paragraph above with no
+          // surface, and leaving `saveHabit` free to submit the id again. A
+          // queued DELETE does not need the app to have been offline first:
+          // `api()` queues a `replayable()` write on any network error, the
+          // 10s `AbortSignal.timeout` included, while a GET is never
+          // pre-empted and can still be answered from the network or from the
+          // service worker's cache.
           if (err.queued) {
+            ++state.categoryReadSeq;
             state.categories = state.categories.filter((x) => x.id !== c.id);
             repaintCategories();
           }
@@ -520,6 +537,44 @@ function repaintCategories() {
 }
 
 /**
+ * Keep the row a press just moved in view.
+ *
+ * `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
+ * rows — about four visible — and every press puts `scrollTop` back to its
+ * press-time offset across both repaints, so something has to carry the view
+ * the one row the press moved. Until this existed the thing carrying it was
+ * `.focus()`, which scrolls its target into view as a SIDE EFFECT: exactly the
+ * "`.focus()` is not a scroll mechanism" `moveCategory`'s own scroll save and
+ * restore records having been bitten by once, met a second time one call
+ * further out. It failed in two ways here rather than one, and both are at a
+ * BOUNDARY, where `restoreArrowFocus` parks focus on the list itself with
+ * `preventScroll`: the last press of a walk — the one that reaches row 0 — was
+ * the only press that did not follow its row, so from a list scrolled a single
+ * row down the category arrived above the fold and the press read as having
+ * made it vanish; and the second restore, after the refetch, is guarded on
+ * focus having been dropped to `<body>`, which at a boundary it has not been,
+ * so the forced `scrollTop` there had nothing to correct it either.
+ *
+ * Keyed on the ROW's `data-category-id` and not on the pressed arrow's
+ * `data-focus-key`, which is what a first draft used. The two differ exactly
+ * when nothing was focused: Chrome focuses a `<button>` on mousedown, so a real
+ * mouse press carries a key — but a synthesised `.click()` does not, and
+ * neither answer should decide whether the list scrolls. Visibility is about
+ * the row, and asking it that way also means the boundary and the ordinary
+ * press are one path rather than two.
+ *
+ * Compared rather than selected, the idiom `restoreFocus` gives its reason for.
+ * `block: 'nearest'` is the same minimal scroll `.focus()` was doing: nothing
+ * at all when the row is already in view, and nothing to the dialog or the page
+ * behind it, which are.
+ */
+function revealCategoryRow(list, id) {
+  [...list.children]
+    .find((li) => /** @type {HTMLElement} */ (li).dataset.categoryId === String(id))
+    ?.scrollIntoView({ block: 'nearest' });
+}
+
+/**
  * Put the keyboard back on the arrow that was just pressed — or park it on the
  * list itself when that very press is what disabled that arrow.
  *
@@ -542,14 +597,19 @@ function repaintCategories() {
  * — and the list survives `repaintCategories()`'s `replaceChildren()`, so the
  * post-refetch restore's `activeElement === document.body` guard correctly
  * reads it as focus nobody dropped.
+ *
+ * **It moves focus and never the scroll.** Both `.focus()` calls below pass
+ * `preventScroll`, and keeping the moved row in view is `revealCategoryRow`'s
+ * job instead — see there for why that separation is the fix rather than a
+ * tidy-up.
  */
 function restoreArrowFocus(list, key) {
   if (!key) return;
   // Compared rather than selected, for the reason `restoreFocus` gives.
   const arrow = [...list.querySelectorAll('[data-focus-key]')]
-    .find((el) => el.dataset.focusKey === key);
+    .find((el) => /** @type {HTMLElement} */ (el).dataset.focusKey === key);
   if (arrow && !(/** @type {HTMLButtonElement} */ (arrow).disabled)) {
-    /** @type {HTMLElement} */ (arrow).focus();
+    /** @type {HTMLElement} */ (arrow).focus({ preventScroll: true });
     return;
   }
   list.tabIndex = -1;
@@ -611,6 +671,10 @@ async function moveCategory(id, delta) {
   // `state.categories` as it stands.
   repaintCategories();
   list.scrollTop = scrollTop;
+  // The offset above is the one from BEFORE the splice, so the row this press
+  // moved is one slot away from where the view was left — see
+  // `revealCategoryRow`.
+  revealCategoryRow(list, id);
   // So holding ↑ walks a category up instead of dropping focus on the first
   // press — `repaintCategories()` just tore out the button that was focused
   // and built a new one under the same `data-focus-key`.
@@ -680,6 +744,12 @@ async function moveCategory(id, delta) {
   // should not, not from ever restoring a stale offset.)
   if (editingCategoryId == null) {
     list.scrollTop = scrollTop;
+    // Beside the restore rather than beside the focus guard below, because a
+    // boundary press fails that guard — focus is parked on the list, not on
+    // `<body>` — and the forced offset above would then be the last word on
+    // where the view sits. `revealCategoryRow` makes the row visible on BOTH
+    // repaints regardless of where the keyboard ended up.
+    revealCategoryRow(list, id);
   }
   // `refreshCategoryPicker`'s own `repaintCategories()` just did a SECOND
   // `list.replaceChildren()` — this time from the server's answer — which

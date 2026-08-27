@@ -718,13 +718,20 @@ from `state.categories` as it stands, so a stale list is POSTed straight back
 and **the server's own order ends up wrong too**. There is no error, no hint
 and no repaint anybody would read as a failure.
 
-`state.categoryReadSeq` (`ui/store.js`) is a monotonic counter, and it is four
+`state.categoryReadSeq` (`ui/store.js`) is a monotonic counter, and it is five
 halves that fail differently. It shipped as two, module-local to
-`ui/habit-dialog.js`, and the next review round found both of the others —
-which is the whole argument for where it lives now. **A ticket protects a
-FIELD, so it belongs beside the field**: `state.categories` is written from
-two modules, and the counter parked next to one of its readers could not see
-the other one at all.
+`ui/habit-dialog.js`; the next review round found two more and the one after
+that found the fifth — which is the whole argument for where it lives now.
+**A ticket protects a FIELD, so it belongs beside the field**:
+`state.categories` is written from two modules, and the counter parked next to
+one of its readers could not see the other one at all.
+
+Three review rounds each found a writer the round before had not enumerated,
+which says something about enumeration as a method. **The durable form of the
+rule is the SHAPE, not the list: a writer of `state.categories` that is not
+itself the newest read must take a ticket** — an optimistic write bumps, a read
+installs only while it holds one. Ask that of anything added next rather than
+checking it against the five below.
 
 - **`refreshCategoryPicker` takes a ticket and may only INSTALL its answer if
   that ticket is still the current one.** A superseded read still repaints —
@@ -769,19 +776,49 @@ the other one at all.
   answer rather than merely the safer one: a later press's payload was
   computed after this splice, so it carries this move whether or not this
   write ever landed.
+- **The queued DELETE's optimistic removal bumps too**, and it is the half
+  nobody working on the reorder feature would think to look at, because it is
+  not in `moveCategory` at all. `remove`'s `err.queued` branch takes the row
+  out of `state.categories` and repaints — an optimistic write of the field
+  with no read of its own, which is the splice above in every structural
+  respect — and it took no ticket, so `openDialog`'s fire-and-forget refetch
+  landed behind it and put the category straight back into the store, the
+  manage list and the picker.
 
-Blocks `j`, `k`, `l` and `m` in `shared/test/browser/categorycheck.mjs` pin
-one half each, and the split is forced rather than tidy: each one passes with
-any of the other three deleted, measured. All four drive the failure
+  What makes it the most expensive of the five is that the harm is not a
+  display one. That removal exists precisely so `saveHabit` cannot read the
+  deleted id through `currentCategoryId()` and stage a habit `PUT` behind the
+  DELETE; on replay the DELETE lands first, `resolveCategoryId` answers 400,
+  and `offline.js` drops every 4xx as permanently inapplicable — and because
+  `PUT /habits/:id` REPLACES, what is dropped is the WHOLE habit edit rather
+  than merely its category, behind a "1 change could not be synced" toast that
+  names neither the habit nor the field. A stale answer landing behind the
+  removal re-arms exactly that, and the window closes only when the reconnect
+  flush's own `'reload'` arrives — which is after the user has had the picker
+  offering it for as long as they were still editing.
+
+  It also needs no prior outage, which is what makes it reachable rather than
+  theoretical: `api()` queues a `replayable()` write on ANY network error, the
+  10s `AbortSignal.timeout` included, while a GET is never pre-empted and can
+  still be answered from the network or from the service worker's data cache.
+  One timed-out DELETE on an otherwise working connection is the whole setup.
+
+Blocks `j`, `k`, `l`, `m` and `n` in `shared/test/browser/categorycheck.mjs`
+pin one half each, and the split is forced rather than tidy: each one passes
+with any of the other four deleted, measured. All five drive the failure
 deterministically — the interceptor fires each request against the real server
 at the moment the app asks for it, so the body captured is genuinely the stale
 one and the server genuinely commits, and only the RESPONSE is held until the
 script releases it. (`m` is the exception that proves the shape: its held
 answer is a synthetic 500 that never reaches the server at all, because the
-thing under test is a write that FAILED.) Each block asserts the DOM or the
-dashboard's own section order and then the server's order after a follow-up
-press, because the visible half self-heals a round trip later while the write
-does not.
+thing under test is a write that FAILED.) The four reorder blocks each assert
+the DOM or the dashboard's own section order and then the server's order after
+a follow-up press, because the visible half self-heals a round trip later while
+the write does not. `n` ends differently, on the outbox: it asserts both
+controls at the moment of the delete and again once the held answer has landed,
+then flushes and reads the server — the second pair is what fails without the
+ticket, and the first still passing is what says the removal was never broken,
+only undone a round trip later.
 
 **A reorder arrow may not be restored with `restoreFocus`, and the reason is
 that ↑ and ↓ are each other's undo.** `restoreFocus` (`ui/components.js`)
@@ -816,6 +853,43 @@ it needs a second mechanism for the rename-mode disable, which must genuinely
 refuse the click, and it rewrites two passing mutation-tested assertions to
 buy it. Restoring to the row's ✎ instead is no better than ↓: Enter on it
 opens a rename box, which is a smaller wrong action rather than none.
+
+**Fixing where the keyboard goes took away what had been moving the VIEW, and
+that is worth its own note because it is the same mistake one call further
+out.** `moveCategory` already records having been bitten by `.focus()`'s
+scroll-into-view being relied on as a scroll mechanism: it looked like it kept
+`.category-manage` (`max-height: 160px; overflow-y: auto`, about four of up to
+30 rows visible) in place across `replaceChildren()`'s `scrollTop` clamp, and
+in Safari — which does not focus a `<button>` on mousedown — it did nothing at
+all, so a press below the fold scrolled the moving row out of sight. That was
+answered by saving and restoring `scrollTop` explicitly across both repaints.
+
+The second bite is the same side effect carrying something else: while focus
+followed a row up the list, `.focus()`'s scroll is what let the VIEW follow it
+past the restored offset. `restoreArrowFocus` parks focus on the list with
+`preventScroll` at a boundary, so the last press of a walk — the one that
+reaches row 0 — became the only press that did not follow its row: from a list
+scrolled a single row down, the category arrived above the fold and the press
+that was meant to land it at the top read as having made it vanish. Both
+repaints were affected, and the second is the one a reader assumes is already
+covered — after the refetch, the focus restore is guarded on focus having been
+dropped to `<body>`, which at a boundary it has NOT been, so the forced
+`scrollTop` there had nothing to correct it either.
+
+`revealCategoryRow` (`ui/habit-dialog.js`) owns visibility now and
+`restoreArrowFocus` owns only the keyboard — both its `.focus()` calls pass
+`preventScroll`, so nothing is getting its scroll for free from an unrelated
+call any more. It is keyed on the ROW's `data-category-id` rather than on the
+pressed arrow's `data-focus-key`, which a first draft used: the two differ
+exactly when nothing was focused, and while Chrome focuses a `<button>` on
+mousedown, neither that nor a synthesised `.click()` should be what decides
+whether the list scrolls. Asking it of the row also collapses the boundary and
+the ordinary press into one path. Block `2c` pins both calls — it scrolls the
+list by exactly one row pitch, presses ↑ on the row now at the fold, and
+asserts the moved row's rect against the list's on each repaint; each call
+fails its own assertion and only its own, measured. The block asserts
+`scrollHeight > clientHeight` first, because against a list that fits every
+check in it passes without the fix.
 
 What is still shared with `persistOrder`, unchanged: several writes in flight,
 each carrying the full order as of when it fired, so the order the server ends
