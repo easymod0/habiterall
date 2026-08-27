@@ -25,6 +25,7 @@ Postgres one.
 | `src/password.js` | hashing, verification, and the one answer to "is auth on?". Personal's half of the shared sign-in flow; cloud uses none of it |
 | `src/log.js` | structured logging: one event per line, one stream, and the redaction that keeps personal data out |
 | `src/observe.js` | `logStartup`, `requestLog` and `watchRuntime` — an Express-shaped middleware that never imports Express |
+| `src/shutdown.js` | the drain between the signal and the exit, and the deadline that bounds it — handed a server, importing no HTTP framework |
 | `src/types.js` | JSDoc typedefs, exporting nothing at runtime. The contract between three packages |
 | `public/app.js` | boot, the top bar, the PWA; `start(authAdapter)` is the entry |
 | `public/ui/store.js` | view state, and the `'change'` / `'reload'` channel views listen on |
@@ -1040,6 +1041,28 @@ so that decision is written once, and `normalizeEntry` answers
 was the exception and did not know it — six passes wrote `?? UNSET`, harmless
 for an at-least habit, and a limit with no entries at all reported a 30-day
 streak.
+
+**`server.close()` is not a drain.** On Node 26 it does sweep the connections
+that are idle at the instant it is called, which is what makes the obvious fix
+look like it works; it says nothing about a connection that was IN FLIGHT when
+the signal landed and goes idle a moment later. Nothing closes that one — it sits
+until `keepAliveTimeout`, and a pooling reverse proxy never leaves it idle long
+enough to expire at all, so the process runs until Docker's SIGKILL takes it with
+its in-flight requests. Measured on the real personal server: 5ms when the socket
+was already idle, **6158ms** when it went idle after the signal, and **20188ms
+having served 70 further requests** when the peer kept using the pool.
+`docs/decisions/connectivity.md` has the numbers and the mutations behind them.
+
+The mechanism is therefore the sweep hooked to **every response's `close` while
+draining**, and it is attached at INSTALL time rather than by the signal handler.
+A request already in flight had its `request` event long ago, so a hook installed
+by the handler could never see it — and that is the only case that hangs. Two
+consequences worth knowing before touching `installShutdown`: the deadline is a
+constant (8s) and not an environment variable, because it has to hold for an
+operator who never sets `stop_grace_period` and so gets Docker's default 10s; and
+the deadline path deliberately runs **no** `cleanup`, since something is already
+stuck and a `closePool()` that hangs too would lose the exit the deadline just
+bought.
 
 **`shared/src` is not served to the browser.** Only `shared/public` is mounted,
 so `ui/settings.js` cannot import `notify.js` — the channel list is declared in

@@ -333,6 +333,12 @@ services:
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                        # 60000
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                      # 200
     restart: unless-stopped
+    # Docker's own default, written down because the app now has a deadline
+    # sitting under it: on SIGTERM it finishes the requests already accepted
+    # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
+    # shared/src/shutdown.js). Lower this below ~9s and SIGKILL chooses the
+    # exit instead, which is what taking in-flight requests down looks like.
+    stop_grace_period: 10s
 
 volumes:
   habiterall-data:
@@ -723,6 +729,12 @@ services:
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
+    # Docker's own default, written down because the app now has a deadline
+    # sitting under it: on SIGTERM it finishes the requests already accepted
+    # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
+    # shared/src/shutdown.js). Lower this below ~9s and SIGKILL chooses the
+    # exit instead, which is what taking in-flight requests down looks like.
+    stop_grace_period: 10s
 
 volumes:
   db-data:
@@ -1126,6 +1138,12 @@ services:
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
+    # Docker's own default, written down because the app now has a deadline
+    # sitting under it: on SIGTERM it finishes the requests already accepted
+    # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
+    # shared/src/shutdown.js). Lower this below ~9s and SIGKILL chooses the
+    # exit instead, which is what taking in-flight requests down looks like.
+    stop_grace_period: 10s
 
 volumes:
   db-data:

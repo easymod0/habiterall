@@ -13,6 +13,7 @@ import {
 import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
+import { installShutdown } from '@habiterall/shared/shutdown.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, STATIC_CACHE, RATE_LIMITS,
   trustProxy, sameOriginOnly, warnOnUntrustedProxy,
@@ -296,15 +297,14 @@ if (isEntryPoint) {
   // webhook the developer's own database happens to hold.
   const notifier = startNotifier();
 
-  for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => {
-      log.info('shutdown', { signal });
+  // The drain between the signal and the exit, including the deadline that
+  // bounds it: `shared/src/shutdown.js`, which both editions call.
+  installShutdown(server, {
+    log,
+    beforeClose: () => {
       runtime.stop();
       notifier?.stop();
-      server.close(() => {
-        db.close();
-        process.exit(0);
-      });
-    });
-  }
+    },
+    cleanup: () => db.close(),
+  });
 }

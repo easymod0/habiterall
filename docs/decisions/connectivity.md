@@ -69,4 +69,60 @@ unbounded. Closing it means enqueueing FIRST, which changes the outbox from
 "writes that failed" to "every write" and needs an idempotency key before it can
 be done — `flush()` would otherwise replay a create that had already landed.
 
+## SIGTERM, keep-alive, and what `server.close()` does not do
+
+The bug in #237 was reported as "SIGTERM kills in-flight requests". It is not
+that. Measured against the real `habiterall-personal/src/server.js` on Node
+v26.7.0 with `HABITERALL_AUTH=off` — a raw socket, half a `POST /api/habits` body
+sent, then `SIGTERM`, then the body finished:
+
+| case | master's shutdown block | with `installShutdown` |
+|---|---|---|
+| pooled keep-alive socket **idle** at the signal | exits in **5 ms** | 4 ms |
+| **in flight** at the signal, then goes idle and is left alone | exits in **6158 ms** | **156 ms** |
+| in flight, and the peer keeps using the pooled socket | **20188 ms**, having served **70** requests after the signal — Docker SIGKILLs at 10000 ms | **155 ms**, 0 requests served |
+
+In every case the held request itself came back `HTTP/1.1 201 Created` with a real
+habit id, on master and after the fix alike. So a drain that kills in-flight work
+was never the defect; the defect is the process not leaving, and then leaving by
+SIGKILL — which loses whatever the 10th second happened to be carrying, and loses
+the cleanup and the log line with it.
+
+Two consequences, and the first one invalidates the issue's own proposed fix.
+
+**`server.close()` on Node 26 already sweeps the connections that are idle at the
+instant it is called**, so a one-shot `server.closeIdleConnections()` — literally
+what #237 asks for — is a no-op. Mutation-measured both ways: removing the
+one-shot call while keeping the repeated sweep changed nothing (`idle` 5 ms,
+`inflight` 156 ms, `pooling` 156 ms); removing the **repeated** sweep while
+keeping the one-shot call put `inflight` back to **6157 ms** and `pooling` to an
+8005 ms forced `exit(1)`. The issue's proposed mutation ("remove
+`closeIdleConnections()` and the held-connection case must hang") would therefore
+not have bitten, and a suite built on it would have passed against a fix that
+does nothing. The one-shot call is kept anyway: it is the same call as the sweep
+two lines above it, and `shutdown.js` says so at the line, because deleting the
+redundant one invites deleting both.
+
+**The load-bearing mechanism is the sweep hooked to every response's `close`
+event while draining, attached at INSTALL time.** A request already in flight when
+the signal lands had its `request` event long ago, so a hook installed by the
+signal handler could never see it — and that request is the only case that hangs.
+`close` rather than `finish`, so an aborted response counts too: either way the
+connection has just gone idle, and idle is what `close` sweeps.
+
+Rejected alternative: **setting `Connection: close` on every response while
+draining.** It works, and it is what a lot of guides recommend, but only once the
+peer sends another request on that socket — the case above where the process sat
+for 6158 ms with a silent pooled socket is exactly the one it does not reach. It
+also needs a change in each edition's request path (a header written per
+response, in two files, under a flag both have to read) to buy a subset of what
+one `closeIdleConnections()` on the response's `close` already buys.
+
+The ceiling is `DRAIN_DEADLINE_MS`, 8000 ms, a constant rather than an
+environment variable: Docker's default `stop_grace_period` is 10 s, and the
+number's whole job is to hold for an operator who sets nothing. At 8 s *we*
+choose the exit and its code and there is a log line saying the drain ran out; at
+10 s SIGKILL chooses, with no line, no cleanup, and a status that says only that
+something killed it.
+
 
