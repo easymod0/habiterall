@@ -36,7 +36,8 @@
 -- drop first, `pg_locks` still showed AccessExclusiveLock on `entries` after
 -- the CREATE INDEX; with the create first and no prior drop, ShareLock and
 -- nothing else. Building first therefore means the expensive statement holds
--- only SHARE (reads continue; writes to that table wait for the build), and
+-- only SHARE (reads continue; writes to that table wait until this migration
+-- COMMITS, not merely until the build finishes — same reason), and
 -- the ACCESS EXCLUSIVE the drops need is taken at the tail and held for the
 -- remainder of the transaction, which is short. What that ordering costs is
 -- disk: the old index and the new one both exist until the commit, so the
@@ -146,10 +147,12 @@ CREATE INDEX IF NOT EXISTS idx_notify_log_owner_date
 -- 4. The two superseded indexes, dropped LAST
 -- ---------------------------------------------------------------------------
 --
--- Both of these supersede something built above, and both are here rather than
--- beside it because of the lock held for the rest of the transaction — see the
--- header. Nothing below is expensive; the ACCESS EXCLUSIVE each one takes is
--- held only from here to the COMMIT.
+-- Both of these are SUPERSEDED, not superseding — `idx_entries_habit` by
+-- `entries_pkey`, which migration 001 already declared on the same two columns,
+-- and `idx_notify_log_date` by the index built in section 3. Neither is dropped
+-- beside the thing that replaces it, because of the lock held for the rest of
+-- the transaction — see the header. Nothing below is expensive; the ACCESS
+-- EXCLUSIVE each one takes is held only from here to the COMMIT.
 
 -- `idx_entries_habit` was `btree (habit_id, date)`. So is `entries_pkey`,
 -- which migration 001 declared on the same two columns in the same order. The

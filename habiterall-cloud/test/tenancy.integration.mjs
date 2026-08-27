@@ -111,10 +111,18 @@ const parallel = await withUser(alice.id, async (db) => {
 // the EXPLAIN above is an ANALYZE — it is the one number that says the process
 // boundary was actually crossed, and everything below this asserts about a
 // worker rather than about the leader.
+//
+// Asserted POSITIVELY, and that is the whole of the difference. `not
+// "Workers Launched: 0"` is also satisfied when the line is absent entirely —
+// which is exactly the no-Gather case, i.e. the regression this block exists to
+// catch — so the negative form contributed nothing in the one direction that
+// matters. `Single Copy: true` means one worker or none, so 1 is the only
+// number a launched worker can report here; that is not the GUC's artefact but
+// its consequence, and it fails in both directions.
 check('a plan over entries inside withUser can be parallelised at all',
   parallel.plan.includes('Gather'), parallel.plan);
 check('and a worker was actually launched, so the reads below ran in one',
-  !parallel.plan.includes('Workers Launched: 0'), parallel.plan);
+  parallel.plan.includes('Workers Launched: 1'), parallel.plan);
 // The counts are the baseline block's, unchanged, and both directions of being
 // wrong are visible: bob owns a habit and an entry too, so a worker reading
 // without the setting propagated would report 2, and one reading with the
