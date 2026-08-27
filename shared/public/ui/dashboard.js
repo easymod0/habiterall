@@ -166,11 +166,27 @@ export async function load() {
   const params = new URLSearchParams({ days: String(GRID_DAYS) });
   if (state.gridEnd) params.set('end', state.gridEnd);
   if (state.showArchived) params.set('archived', 'true');
+  // This request is also a read of `state.categories`, so it takes a ticket
+  // before it goes out — see `categoryReadSeq` in `ui/store.js`.
+  const categoryRead = ++state.categoryReadSeq;
   const data = await api(`/overview?${params}`);
   state.habits = data.habits;
   // The habit dialog's category picker reads this rather than fetching its
-  // own copy — every load already carries it.
-  state.categories = data.categories;
+  // own copy — every load already carries it. Installed only while this is
+  // still the newest read: `announce()` (ui/habit-dialog.js) sends every OTHER
+  // category mutation through `emit('reload')`, which lands here, and a
+  // category is created at `MAX(position) + 1` — so "add one, then press ↑ to
+  // move it up" puts an arrow press inside this request's own round trip as a
+  // matter of course. `/overview` computes every habit's window plus
+  // `categorySummaries` against a reorder's few `UPDATE`s, so it is the one
+  // likely to lose that race, and its answer knows nothing of the move.
+  //
+  // `habits` and `categorySummaries` are NOT guarded with it. Neither has a
+  // second writer that can be newer than this reply: a reorder moves no
+  // figure, and `categorySummaries` is read by id rather than by position
+  // (`sectionHeader` below), so an order this answer is stale about cannot
+  // reach either of them.
+  if (categoryRead === state.categoryReadSeq) state.categories = data.categories;
   // Each grouped section's mean/spread, one row per category plus a trailing
   // `id: null` for Uncategorised. `?archived=true` sends no such key at all —
   // that mode has nothing active to average — and an older cached payload

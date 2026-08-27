@@ -41,21 +41,30 @@ const CATEGORY_SUGGESTIONS = [
 let editingCategoryId = null;
 
 /**
- * Which category read is the CURRENT one — bumped by every
- * `refreshCategoryPicker` and by `moveCategory`'s optimistic splice.
+ * Which category read is the CURRENT one — `state.categoryReadSeq`, bumped by
+ * every `refreshCategoryPicker` and by `moveCategory`'s optimistic splice.
  *
  * `state.categories` has more than one writer that can be in flight at once,
  * and until this existed the LAST answer to arrive won regardless of which
- * one was freshest. Two of those writers ship in this file: `openDialog`'s
- * fire-and-forget refetch, which by its own docstring can land at any point
- * after the dialog opened, and `moveCategory`'s per-press one — and the
- * arrows are deliberately not disabled while a write is in flight, so two
- * presses overlapping is the ordinary gesture for moving a category more than
- * one slot rather than an edge case. A GET answered before a later press's
- * POST committed, but delivered after that press's own GET, then installed an
- * order the server had already moved past; the next press computed its
- * payload from that stale list and wrote the regression back, so the SERVER's
- * order ended up wrong too and not merely the display.
+ * one was freshest. Three of those writers exist. Two ship in this file:
+ * `openDialog`'s fire-and-forget refetch, which by its own docstring can land
+ * at any point after the dialog opened, and `moveCategory`'s per-press one —
+ * and the arrows are deliberately not disabled while a write is in flight, so
+ * two presses overlapping is the ordinary gesture for moving a category more
+ * than one slot rather than an edge case. A GET answered before a later
+ * press's POST committed, but delivered after that press's own GET, then
+ * installed an order the server had already moved past; the next press
+ * computed its payload from that stale list and wrote the regression back, so
+ * the SERVER's order ended up wrong too and not merely the display.
+ *
+ * The THIRD is `load()` in `dashboard.js`, which is why the counter itself
+ * lives in `store.js` rather than here: `announce()` sends every other
+ * category mutation in this file through `'reload'`, and `/overview`'s answer
+ * carries the whole category list too. Add a category and press ↑ on it —
+ * which is the ordinary gesture, since a create lands at `MAX(position) + 1`
+ * and so puts the new row at the BOTTOM — and that `/overview`, issued before
+ * the move existed, lands after it. It is a read like any other and now takes
+ * a ticket like any other.
  *
  * A monotonic counter is what `persistOrder` (dashboard.js) does not need and
  * this does: that one never refetches after its own write, so it cannot race
@@ -63,7 +72,6 @@ let editingCategoryId = null;
  * no counterpart for, which is why the PR that added it could not inherit an
  * answer here.
  */
-let categoryReadSeq = 0;
 
 /**
  * Tell whatever is behind this modal that something it draws has moved.
@@ -474,7 +482,7 @@ function renderCategoryManage() {
  * to belong to the dialog being drawn, because no `await` separates them.
  */
 async function refreshCategoryPicker() {
-  const mine = ++categoryReadSeq;
+  const mine = ++state.categoryReadSeq;
   const fetched = await api('/categories');
   // Only the newest read may INSTALL its answer — see `categoryReadSeq`. An
   // older one still repaints, from whatever the store holds now: the
@@ -482,7 +490,7 @@ async function refreshCategoryPicker() {
   // would mean an awaiting caller (the rename's `editingCategoryId = null`,
   // say) could be left with controls that do not match the state behind them.
   // A repaint from current state can only ever re-confirm what is there.
-  if (mine === categoryReadSeq) state.categories = fetched;
+  if (mine === state.categoryReadSeq) state.categories = fetched;
   repaintCategories();
 }
 
@@ -540,10 +548,13 @@ async function moveCategory(id, delta) {
   order.splice(to, 0, ...order.splice(from, 1));
   // This press is newer than anything already out on the wire, so retire every
   // category read in flight before installing the optimistic order — see
-  // `categoryReadSeq`. Without it, `openDialog`'s own fire-and-forget refetch
-  // (fired before this press existed) or a previous press's refetch could land
-  // afterwards and paint the pre-move order back over this one.
-  categoryReadSeq++;
+  // `categoryReadSeq` (ui/store.js). Without it, `openDialog`'s own
+  // fire-and-forget refetch (fired before this press existed), a previous
+  // press's refetch, or the `/overview` a sibling handler's `announce()` set
+  // going could land afterwards and paint the pre-move order back over this
+  // one. The number is kept, because the revert below is a writer of
+  // `state.categories` too and has to ask the same question.
+  const mine = ++state.categoryReadSeq;
   state.categories = order.map((catId) => byId.get(catId));
   const list = $('#category-manage');
   // `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
@@ -579,7 +590,19 @@ async function moveCategory(id, delta) {
     // which reverts unconditionally, `err.queued` included. That is a real,
     // pre-existing defect there; this is deliberately not a second copy of
     // it.
-    if (!err.queued) {
+    //
+    // `mine === state.categoryReadSeq` for the same reason the refetch asks
+    // it: `previous` was captured before this press's own splice, so it is a
+    // stale writer of `state.categories` the moment anything newer has
+    // installed an order. Two presses overlapping and the EARLIER one failing
+    // last — a 5xx, a dropped connection, or the write limiter's 429, which
+    // is what a held arrow key reaches — put an order two presses old back in
+    // the store with nothing left in flight to correct it, and the next press
+    // wrote that regression to the server. Where something newer HAS run, not
+    // reverting is also the more accurate answer: a later press's payload was
+    // computed after this splice, so it carries this move whether or not this
+    // write landed.
+    if (!err.queued && mine === state.categoryReadSeq) {
       state.categories = previous;
       repaintCategories();
     }

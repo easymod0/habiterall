@@ -689,6 +689,13 @@ other four mutations already fall back to `'change'` whenever the dashboard
 is not what is showing, and a reorder can only be initiated from the manage
 list this dialog itself draws, which needs no event at all to see its own
 write.
+
+What this does **not** do is retire `/overview` as a writer of
+`state.categories`. `announce()` still sends the dialog's four other category
+mutations through `'reload'`, so a `load()` can still be in flight when an
+arrow is pressed — see the fourth bullet under "Two presses race each other's
+reads" below, which is the review round that found it. Changing the event was
+right and was never the whole answer.
 **Two presses race each other's reads, and the last answer to arrive used to
 win regardless of which was freshest.** The arrows are deliberately not
 disabled while a write is in flight — that is what lets a category be walked
@@ -711,8 +718,13 @@ from `state.categories` as it stands, so a stale list is POSTed straight back
 and **the server's own order ends up wrong too**. There is no error, no hint
 and no repaint anybody would read as a failure.
 
-`categoryReadSeq` (`ui/habit-dialog.js`) is a monotonic counter, and it is two
-halves that fail differently:
+`state.categoryReadSeq` (`ui/store.js`) is a monotonic counter, and it is four
+halves that fail differently. It shipped as two, module-local to
+`ui/habit-dialog.js`, and the next review round found both of the others —
+which is the whole argument for where it lives now. **A ticket protects a
+FIELD, so it belongs beside the field**: `state.categories` is written from
+two modules, and the counter parked next to one of its readers could not see
+the other one at all.
 
 - **`refreshCategoryPicker` takes a ticket and may only INSTALL its answer if
   that ticket is still the current one.** A superseded read still repaints —
@@ -729,16 +741,47 @@ halves that fail differently:
   without the bump that pre-move answer paints the optimistic move away. It
   needs no response reordering at all, only the dialog's own GET being slower
   than the first press on it, which is an ordinary open-and-press.
+- **`load()` (`ui/dashboard.js`) takes a ticket before `/overview` goes out**,
+  and installs `data.categories` only while it holds it. This is the writer
+  the first two could not see, and the section above names it without closing
+  it: `'reload'` is the wrong event for `moveCategory` — but `announce()`
+  still sends the dialog's four OTHER category mutations through it, and each
+  of those puts an `/overview` on the wire that carries the whole category
+  list. The gesture that reaches it is not a race anybody has to try for. A
+  category is created at `MAX(position) + 1`, so a fresh one lands at the
+  BOTTOM of the manage list, which is exactly where you then press ↑ — and
+  that press falls inside the round trip the Add's own `announce()` started.
+  `/overview` computes every habit's window plus `categorySummaries` against a
+  reorder's few `UPDATE`s, so it is the one likely to lose. `load()`'s own
+  `paint()` redraws the dashboard and never the manage list, so nothing on
+  screen contradicts the move: the list goes on showing it while the store no
+  longer does, and the next press writes the regression to the server.
+  `habits` and `categorySummaries` from the same reply are deliberately NOT
+  ticketed — neither has a second writer that can be newer than that reply,
+  and summaries are read by id rather than by position.
+- **`moveCategory`'s catch keeps its ticket and reverts only while it holds
+  it.** `previous` is captured before the splice, so the revert is a writer of
+  `state.categories` exactly as stale as any reply. Two presses overlapping
+  with the EARLIER one failing last — a 5xx, a dropped connection, or the
+  write limiter's 429, which is what a held arrow key reaches — put an order
+  two presses old back in the store with nothing left in flight to correct it.
+  Where something newer HAS run, not reverting is also the more accurate
+  answer rather than merely the safer one: a later press's payload was
+  computed after this splice, so it carries this move whether or not this
+  write ever landed.
 
-Blocks `j` and `k` in `shared/test/browser/categorycheck.mjs` pin one half
-each, and the split is forced rather than tidy: with the bump deleted `j`
-still passes and only `k` fails. Both drive the failure deterministically —
-the interceptor fires each request against the real server at the moment the
-app asks for it, so the body captured is genuinely the stale one and the
-server genuinely commits, and only the RESPONSE is held until the script
-releases it. Each block asserts the DOM and then the server's own order after
-a follow-up press, because the DOM half self-heals a round trip later while
-the write does not.
+Blocks `j`, `k`, `l` and `m` in `shared/test/browser/categorycheck.mjs` pin
+one half each, and the split is forced rather than tidy: each one passes with
+any of the other three deleted, measured. All four drive the failure
+deterministically — the interceptor fires each request against the real server
+at the moment the app asks for it, so the body captured is genuinely the stale
+one and the server genuinely commits, and only the RESPONSE is held until the
+script releases it. (`m` is the exception that proves the shape: its held
+answer is a synthetic 500 that never reaches the server at all, because the
+thing under test is a write that FAILED.) Each block asserts the DOM or the
+dashboard's own section order and then the server's order after a follow-up
+press, because the visible half self-heals a round trip later while the write
+does not.
 
 What is still shared with `persistOrder`, unchanged: several writes in flight,
 each carrying the full order as of when it fired, so the order the server ends

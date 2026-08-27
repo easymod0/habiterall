@@ -239,7 +239,23 @@ const sw = self;
 // list above is that an export is the half a reader checking "did anything new
 // appear?" would otherwise miss. `style.css` is a shell asset too and gained
 // this view's rules.
-const CACHE_VERSION = 'v25';
+// v26 adds no file and no export, and is a bump for the OTHER half of the rule
+// in `shared/public/CLAUDE.md`: the shape of a value read by more than one
+// shell module. `state` (`ui/store.js`) gains `categoryReadSeq`, the ticket
+// that decides which answer may install `state.categories`, and BOTH
+// `ui/habit-dialog.js` and `ui/dashboard.js` now take one.
+//
+// The dangerous pairing is a new `ui/dashboard.js` over a cached v25
+// `ui/store.js`, which is exactly what `shellFirst`'s stale-while-revalidate
+// can serve in the window between installs. There is no such field, so
+// `++state.categoryReadSeq` is **NaN**, `NaN === NaN` is false, and every
+// guarded assignment is skipped forever: `state.categories` stays `[]` through
+// every `/overview` and every `GET /categories`, so the grouped dashboard
+// draws no sections and the habit dialog's picker offers no category. Not a
+// throw, not a link error — a working-looking app with the account's
+// categories silently gone. This is #163's case (`detailCards`) again, and the
+// reason that clause is in the rule at all.
+const CACHE_VERSION = 'v26';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

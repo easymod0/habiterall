@@ -97,20 +97,40 @@ where `persistOrder` (the habit list's own reorder) does not.
 
 **`state.categories` has several writers that can be in flight at once, so a
 read may only INSTALL its answer if it is still the newest one.**
-`categoryReadSeq` (`ui/habit-dialog.js`) is that counter, and it has two
-halves that fail differently: `refreshCategoryPicker` takes a ticket and
-assigns only while it holds the current one, and `moveCategory` bumps the
-counter at its optimistic splice so a press retires every read already out.
-The second is not implied by the first — the read in flight is often
-`openDialog`'s fire-and-forget refetch, fired before the press existed and
-landing while the press's own read has not started, so nothing newer has taken
-a ticket to supersede it. A superseded read still repaints (from current
-state, which can only re-confirm what is there); the ASSIGNMENT is the half
-that can be stale. `persistOrder` needs none of this because it never
-refetches after its own write and so cannot race a second call's read — do
-not read its shape as the precedent here. Blocks `j` and `k` in
-`categorycheck.mjs` pin one half each, and with the bump deleted `j` still
-passes.
+`state.categoryReadSeq` (`ui/store.js`) is that counter. It lives beside the
+field it protects rather than beside any one reader, because **the writers are
+in two modules and the one that is easiest to forget is in the other one**:
+`load()` (`ui/dashboard.js`) assigns `data.categories` from `/overview`, and
+`announce()` sends every category mutation in the habit dialog EXCEPT
+`moveCategory` through `'reload'`, which is what calls it. Four halves, and
+each fails differently — a version with any three of them still ships the bug:
+
+- `refreshCategoryPicker` takes a ticket and assigns only while it holds the
+  current one.
+- `moveCategory` bumps at its optimistic splice, so a press retires every read
+  already out. **Not implied by the first** — the read in flight is often
+  `openDialog`'s fire-and-forget refetch, fired before the press existed and
+  landing while the press's own read has not started, so nothing newer has
+  taken a ticket to supersede it.
+- `load()` takes a ticket before `/overview` goes out and installs
+  `data.categories` only while it holds it. Its own `paint()` does not rebuild
+  the manage list, so under the unfixed code the dialog goes on showing a move
+  the store no longer has. Add a category and press ↑ on it — the ordinary
+  gesture, since a create lands at `MAX(position) + 1` and so at the BOTTOM —
+  and the Add's own `'reload'` is in flight for exactly that press. `habits`
+  and `categorySummaries` are deliberately NOT ticketed: neither has a writer
+  that can be newer, and summaries are read by id rather than by position.
+- `moveCategory`'s catch keeps its ticket and reverts only while it holds it.
+  `previous` is captured before the splice, so the revert is as stale a writer
+  as any reply — two presses overlapping with the EARLIER one failing last put
+  an order two presses old back in the store.
+
+A superseded read still repaints (from current state, which can only
+re-confirm what is there); the ASSIGNMENT is the half that can be stale.
+`persistOrder` needs none of this because it never refetches after its own
+write and so cannot race a second call's read — do not read its shape as the
+precedent here. Blocks `j`, `k`, `l` and `m` in `categorycheck.mjs` pin one
+half each, and each one passes with any of the other three deleted.
 
 ## The detail view
 
