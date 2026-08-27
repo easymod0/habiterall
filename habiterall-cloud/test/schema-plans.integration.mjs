@@ -145,6 +145,12 @@ check('no duplicate index anywhere in the public schema',
 
 console.log('--- every foreign key has an index to cascade through ---');
 
+// `indpred IS NULL AND indisvalid` is what makes the index counted here one a
+// cascade could actually use: a PARTIAL index covers only the rows its
+// predicate admits, and an INVALID one — what a failed `CREATE INDEX
+// CONCURRENTLY` leaves in the catalog — is not used by any plan at all.
+// Without those two the check is satisfied by an index that does nothing for a
+// `DELETE FROM users`, which is the whole of what it is here to notice.
 const { rows: unindexedFks } = await admin.query(`
   SELECT con.conname, c.relname
     FROM pg_constraint con
@@ -153,7 +159,8 @@ const { rows: unindexedFks } = await admin.query(`
    WHERE con.contype = 'f' AND n.nspname = 'public'
      AND NOT EXISTS (SELECT 1 FROM pg_index x
                       WHERE x.indrelid = con.conrelid
-                        AND x.indkey[0] = ANY(con.conkey))
+                        AND x.indkey[0] = ANY(con.conkey)
+                        AND x.indpred IS NULL AND x.indisvalid)
 `);
 check('no foreign key would cascade through a sequential scan',
   unindexedFks.length === 0,

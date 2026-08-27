@@ -77,9 +77,21 @@ console.log('--- attack: does isolation survive a PARALLEL plan? ---');
 // so before 016 there is no Gather here whatever the fixture size. It is
 // `context = user`, so `habiterall_app` may set it, and `SET LOCAL` is what
 // keeps it from following this connection back into the pool.
+//
+// ANALYZE, not a bare EXPLAIN, and that is the difference between this block
+// testing something and testing nothing. A plan is a statement about SHAPE:
+// with `max_parallel_workers = 0` at the server the planner still emits
+// `Gather / Single Copy: true`, then at execution launches no worker at all
+// and runs the whole thing in the LEADER — so the Gather check and both
+// isolation checks below would pass having exercised none of what 016 changed,
+// and this block would decay in silence into a copy of the baseline four lines
+// above. A CI runner that has its parallel workers spoken for gets there
+// intermittently. Only ANALYZE reports `Workers Launched`, and `EXPLAIN
+// ANALYZE` over a `SELECT count(*)` executes the query and writes nothing.
 const parallel = await withUser(alice.id, async (db) => {
   await db.query('SET LOCAL debug_parallel_query = on');
-  const plan = (await db.query('EXPLAIN (COSTS OFF) SELECT count(*) FROM entries'))
+  const plan = (await db.query(
+    'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM entries'))
     .rows.map((r) => r['QUERY PLAN']).join('\n');
   // Still the same transaction, so still forced parallel: these two reads are
   // themselves answered under a Gather. That is the point — what is under test
@@ -91,12 +103,18 @@ const parallel = await withUser(alice.id, async (db) => {
     .rows.map((r) => r.name);
   return { plan, entries, habits };
 });
-// `Gather` and nothing more. `Workers Planned` and `Single Copy` are
-// debug_parallel_query's own forcing artefacts and say nothing about the
-// schema, so asserting on them would pin the GUC's behaviour rather than the
-// functions'.
+// `Gather` says the plan is parallel-SAFE, which is the half 016's ALTER
+// FUNCTIONs buy. `Workers Planned` and `Single Copy` are not asserted on:
+// they are debug_parallel_query's own forcing artefacts and say nothing about
+// the schema, so pinning them would pin the GUC's behaviour rather than the
+// functions'. `Workers Launched` is a different kind of line and is the reason
+// the EXPLAIN above is an ANALYZE — it is the one number that says the process
+// boundary was actually crossed, and everything below this asserts about a
+// worker rather than about the leader.
 check('a plan over entries inside withUser can be parallelised at all',
   parallel.plan.includes('Gather'), parallel.plan);
+check('and a worker was actually launched, so the reads below ran in one',
+  !parallel.plan.includes('Workers Launched: 0'), parallel.plan);
 // The counts are the baseline block's, unchanged, and both directions of being
 // wrong are visible: bob owns a habit and an entry too, so a worker reading
 // without the setting propagated would report 2, and one reading with the
