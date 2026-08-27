@@ -82,11 +82,15 @@ object Reminders {
      * [Notifications.EXTRA_SNOOZED] tells the receiver not to arm tomorrow's
      * from this firing, and [Notifications.EXTRA_DATE] carries **the day the
      * reminder was about**, because the rule this feature exists for cannot be
-     * enforced at arm time alone: the alarm may be inexact — which is the
-     * ordinary case on Android 14+, where `SCHEDULE_EXACT_ALARM` is not granted
-     * by default — and an inexact alarm set for 23:52 can be delivered at 00:03,
-     * after which `LocalDate.now()` names a day the reminder was never about.
-     * The worker checks it against its own today; see [stillAboutToday].
+     * enforced at arm time alone: the alarm may be inexact — on API 31-32 for a
+     * user who has revoked "Alarms & reminders", since `USE_EXACT_ALARM` covers
+     * 33+ unconditionally and nothing below 31 needs a permission — and an
+     * inexact alarm set for 23:52 can be delivered at 00:03, after which
+     * `LocalDate.now()` names a day the reminder was never about. The worker
+     * checks it against its own today; see [stillAboutToday]. Above 32 that
+     * check is belt and braces and stays anyway: it costs one string in an
+     * extra, and an exact alarm is a promise about when the system WAKES, not
+     * about how long the work behind it then takes.
      *
      * @param date null when CANCELLING, where the extras are irrelevant:
      *   `filterEquals` ignores them, so the uri alone finds the live one.
@@ -213,9 +217,16 @@ object Reminders {
      */
     fun setAlarm(context: Context, at: Long, intent: PendingIntent) {
         val manager = alarmManager(context)
-        // Exact alarms can be revoked by the user on API 31+. Falling back to
-        // an inexact alarm keeps reminders working, just less punctually —
-        // better than silently dropping them.
+        // Which permission answers this depends on the version, and the
+        // manifest declares both. From 33 up it is `USE_EXACT_ALARM`, which is
+        // protection level `normal` — granted at install and not revocable —
+        // so this is true there with nobody asked. On 31-32 it is
+        // `SCHEDULE_EXACT_ALARM`, granted by default but revocable under
+        // "Alarms & reminders", and that is the one range where the fallback
+        // below is reachable. Under 31 no permission exists to revoke. Falling
+        // back to an inexact alarm keeps reminders working, just less
+        // punctually — better than silently dropping them. The read happens on
+        // every arm, so a grant or a revocation needs no migration.
         val canBeExact = Build.VERSION.SDK_INT < 31 || manager.canScheduleExactAlarms()
         if (canBeExact) {
             manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
@@ -260,12 +271,14 @@ object Reminders {
      *
      * The second half of the rule above, and it exists because arming is not
      * the last chance to be wrong. `setAlarm` falls back to
-     * `setAndAllowWhileIdle` when exact alarms are not permitted — which on
-     * Android 14+ is the ordinary case, since `SCHEDULE_EXACT_ALARM` is not
-     * granted by default — and an inexact alarm is loose by minutes: armed at
+     * `setAndAllowWhileIdle` when exact alarms are not permitted — API 31-32
+     * with "Alarms & reminders" revoked, `USE_EXACT_ALARM` covering 33+
+     * unconditionally — and an inexact alarm is loose by minutes: armed at
      * 22:52 for 23:52, delivered at 00:03. The press was legal and the delivery
      * is late, so the check has to happen where `today` is known, at the point
-     * of posting.
+     * of posting. On 33+ it is belt and braces rather than dead, and cheap
+     * enough to keep: an exact alarm bounds the WAKE, not the fetch and the
+     * notification build that follow it.
      *
      * [about] is null for the DAILY alarm, which names no day and means
      * whichever day it arrives on. Only a snooze carries one.

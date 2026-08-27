@@ -202,13 +202,29 @@ records nothing. Two rules in it:
   unanswered. Yes / No / Skip on that same stale notification write to the date
   it names; refusing costs nothing.
 
+**The manifest declares BOTH exact-alarm permissions, and that reverses a
+decision this file used to state the other way.** `USE_EXACT_ALARM` uncapped
+plus `SCHEDULE_EXACT_ALARM` with `android:maxSdkVersion="32"`. The first is
+protection level `normal` — granted at install, not revocable — so from 33 up
+`canScheduleExactAlarms()` is true with nobody asked and every reminder takes
+the exact branch. The old shape declared `SCHEDULE_EXACT_ALARM` alone, which for
+an app targeting 33+ is denied by default from Android 14 on, and nothing in
+this client ever called `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` — so the exact
+branch was unreachable on any phone on 14 or later, and every test still passed,
+because no test asked what the APK requests. `ExactAlarmPermissionTest` is that
+assertion now, read from the MERGED manifest through `PackageManager`. The Play
+restriction the old comment cited does not reach a sideloaded APK;
+`docs/decisions/android.md` has the argument in full.
+
 **Arming is not the last chance to be wrong, which is why the day rides on the
 alarm.** `setAlarm` falls back to `setAndAllowWhileIdle` when exact alarms are
-not permitted, and on Android 14+ that is the ORDINARY path — `SCHEDULE_EXACT_ALARM`
-is not granted by default. So one armed at 22:52 for 23:52 can arrive at 00:03.
-The snooze intent carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`.
-The daily alarm carries no date deliberately: it names no day and means whichever
-one it arrives on, so refusing a null would silence every reminder there is.
+not permitted, which since the manifest change means API 31-32 for a user who
+revoked "Alarms & reminders" — not the ordinary path any more, but not dead
+either. So one armed at 22:52 for 23:52 can arrive at 00:03. The snooze intent
+carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`, load-bearing on
+31-32 and belt-and-braces above. The daily alarm carries no date deliberately:
+it names no day and means whichever one it arrives on, so refusing a null would
+silence every reminder there is.
 
 **Two alarms are two PendingIntents** (`habiterall://snooze/<id>` against
 `habiterall://remind/<id>`), because `filterEquals` ignores extras and one intent

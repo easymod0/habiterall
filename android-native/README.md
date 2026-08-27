@@ -205,9 +205,9 @@ real time, not of wall clock, and always inside **the day the reminder is
 about**: late in the evening, or on a notification left over from yesterday,
 there is no snooze to give, so the button is absent (and a press is refused, in
 case it was drawn hours earlier). The day rides on the alarm and is checked
-again at the moment of posting, because an inexact alarm — the ordinary case on
-Android 14+ — can be delivered minutes into the next day. The re-post asks
-`needsReminder` again, so a day answered in between stays quiet.
+again at the moment of posting, because a delivery can land minutes into the
+next day — an alarm the app is not allowed to set exactly is loose by that much.
+The re-post asks `needsReminder` again, so a day answered in between stays quiet.
 
 The collapsed shade shows three action buttons and drops the tail, which is why
 snooze is added last. A yes/no habit and an avoided one spend two buttons on Yes

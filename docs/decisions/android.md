@@ -49,12 +49,55 @@ was the one action that silently changed the subject. Refusing costs nothing —
 the daily alarm is untouched, and the notification stays in the shade with its
 three answers still correct about the day it names.
 
+**A permission that is DECLARED and never REQUESTED is a permission the app does
+not have, and this client shipped that from its first commit.** The manifest
+carried `SCHEDULE_EXACT_ALARM` alone from `5cb7860` (2026-08-12), deliberately
+and with the reasoning written beside it. That permission is user-grantable, and for an app targeting 33+ it is denied
+by default from Android 14 on; `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` appears
+nowhere in this client, so nothing ever asked. `canScheduleExactAlarms()` in
+`Reminders.setAlarm` was therefore false forever on any phone running 14 or
+later — which is every current one — and every reminder rode
+`setAndAllowWhileIdle`, which is inexact by contract.
+
+It did not read as a missing permission, which is the reason it lasted. App
+standby widens the window the longer the app goes unopened, so a reminder set in
+the app and watched for was punctual, and the same reminder set from a browser
+and left overnight looked like it had never fired — flakiness, not a setting.
+Nothing in the Kotlin could be made to fail by it either: the answer comes from
+the manifest, so `ExactAlarmPermissionTest` had to be written to ask
+`PackageManager` what the MERGED manifest requests. That is the same lesson this
+file already carries twice — pinning the decision is not pinning the wiring.
+
+**So the manifest now declares BOTH, split at 33: `USE_EXACT_ALARM` uncapped and
+`SCHEDULE_EXACT_ALARM` with `android:maxSdkVersion="32"`.** This REVERSES the
+earlier decision, and the earlier decision's two arguments are what it has to
+answer. The first was Google Play's restriction of `USE_EXACT_ALARM` to alarm
+clocks and calendars: that is a review policy, this APK is sideloaded from a
+GitHub release (`release.yml`), there is no listing to reject — and Loop, a
+habit tracker, ships the permission on Play anyway. The second was that
+`USE_EXACT_ALARM` would turn the inexact fallback into dead code. It does not.
+`minSdk` is 26, so 26-30 need no permission at all and take the `SDK_INT < 31`
+arm; 33+ hold `USE_EXACT_ALARM`, which is protection level `normal` — granted at
+install, not revocable — and so answer true unconditionally; and 31-32 hold
+`SCHEDULE_EXACT_ALARM`, granted by default but revocable under "Alarms &
+reminders". That range is where the fallback stays reachable, and it is the
+range the cap keeps the permission for, since `USE_EXACT_ALARM` does not exist
+below 33.
+
+No migration goes with it. `setAlarm` re-reads the permission on every arm and
+alarms are re-armed on every fetch, on boot and six-hourly, so the first arm
+after an install is exact and a revocation on 31-32 is honoured at the next one
+without anything being told. `BootReceiver` still handles
+`SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` for that range and stays.
+Telling the user their reminders are inexact when they are is a separate
+question and a separate issue — nothing here surfaces it.
+
 **Arming is not the last chance to be wrong, which is why the day rides on the
 alarm.** `setAlarm` falls back to `setAndAllowWhileIdle` when exact alarms are
-not permitted, and on Android 14+ that is the ORDINARY path rather than the
-exception: `SCHEDULE_EXACT_ALARM` is not granted by default. An inexact alarm is
-loose by minutes, so one armed at 22:52 for 23:52 can arrive at 00:03 with
-nobody having pressed anything late. The snooze intent therefore carries
+not permitted — since the manifest change that is API 31-32 with "Alarms &
+reminders" revoked, no longer the ordinary path but not the empty set either. An
+inexact alarm is loose by minutes, so one armed at 22:52 for 23:52 can arrive at
+00:03 with nobody having pressed anything late. The snooze intent therefore carries
 `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday` before posting; a
 delivery that has outlived its day is dropped and logged, exactly as the other
 six silences there are. The daily alarm carries no date, deliberately — it names
