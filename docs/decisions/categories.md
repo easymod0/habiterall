@@ -649,3 +649,39 @@ presses put several writes in flight at once, each carrying the full order at
 the moment it fired; `persistOrder` has the identical exposure for the habit
 list, so this does not invent a new mechanism the app was not already living
 with.
+
+**`moveCategory` does not call `announce()`, and that was found in review
+rather than designed in up front.** It shipped emitting `announce()`'s
+`'reload'` like the dialog's other four category mutations, which is the
+event `ui/store.js` defines as "go to the dashboard and fetch it" —
+`dashboard.js` answers it with `load()`, which re-fetches `/overview` and
+overwrites `state.categories` from that reply (`dashboard.js:173`) before
+ending in its own `paint()`. That is a SECOND writer of the same field
+`refreshCategoryPicker`'s `GET /categories` had just set, carrying whatever
+order was current when the `/overview` request went out — and nothing
+repaints the manage list itself from either answer. The failure needs no
+exotic timing: press ↓, the reorder's write and its own refetch land,
+`'reload'` fires `/overview`; press ↓ again before THAT lands, which is the
+ordinary gesture for moving a category more than one slot, and the older
+`/overview` order lands on top of the newer one the manage list is already
+showing. For about a round trip every arrow is then wrong, because
+`moveCategory` computes its next move from the store while the user is
+pressing a row in the DOM they can see: one press hits the bounds check and
+silently does nothing, another vaults a category two rows and persists an
+order that discards the previous press.
+
+`'reload'` was simply the wrong event for this mutation, not a mutation this
+event needed to learn to tolerate. A reorder creates no habit, destroys none
+and moves no figure — the dashboard already draws its section order straight
+from `state.categories`, and `categorySummaries` (phase 4, above) is looked
+up by category id, so order does not reach it either. There is nothing here
+for a fetch to be FOR. `'change'` is sufficient because every listener that
+matters already redraws from `state.categories` as it stands: `paint()`
+(`dashboard.js`) does, with no request of its own, and the manage list and
+picker are repainted directly inside `moveCategory` regardless of which event
+it ends in. Emitting `'change'` unconditionally — not routed through
+`announce()`'s dashboard-showing check — costs nothing extra either: the
+other four mutations already fall back to `'change'` whenever the dashboard
+is not what is showing, and a reorder can only be initiated from the manage
+list this dialog itself draws, which needs no event at all to see its own
+write.

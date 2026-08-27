@@ -531,35 +531,6 @@ async function moveCategory(id, delta) {
 
   try {
     await api('/categories/reorder', { method: 'POST', body: JSON.stringify({ order }) });
-    // No argument — see `refreshCategoryPicker`. A reorder never changes
-    // which category this form has chosen.
-    await refreshCategoryPicker();
-    list.scrollTop = scrollTop;
-    // `refreshCategoryPicker`'s own `repaintCategories()` just did a SECOND
-    // `list.replaceChildren()` — this time from the server's answer — which
-    // drops focus to `<body>` exactly like the optimistic one above did, and
-    // nothing restores it after that one. Left alone, a keyboard user only
-    // keeps focus while presses outrun the fetch; at a human pace every press
-    // loses it, which is the very defect the optimistic restore above claims
-    // to have fixed. Restore again here — but ONLY when `<body>` (or nothing)
-    // holds focus, i.e. it was this repaint that dropped it. By the time the
-    // GET lands the user may have deliberately moved focus elsewhere, and an
-    // unconditional restore would steal it back.
-    if (document.activeElement == null || document.activeElement === document.body) {
-      restoreFocus($('#category-manage'), focused);
-    }
-    // `emit('change')` directly — the one mutation in this file that
-    // deliberately does NOT go through `announce()`. There is nothing to
-    // fetch: `refreshCategoryPicker` just set `state.categories` from
-    // `GET /categories`, which is the authoritative order, so every listener
-    // can simply redraw from what the store already holds. `announce()`
-    // would fire `'reload'` here whenever the dashboard is showing, and that
-    // is active harm rather than a slower way to the same place —
-    // `dashboard.js`'s `load()` overwrites `state.categories` with
-    // `/overview`'s answer, a SECOND writer of the same field that can land
-    // after a later press has already moved the order again, installing a
-    // stale order over the manage list's own newer one.
-    emit('change');
   } catch (err) {
     // `/categories/reorder` is `replayable()` (ui/api.js: everything but
     // `POST /habits`), so offline the write is already staged before this
@@ -574,7 +545,68 @@ async function moveCategory(id, delta) {
       repaintCategories();
     }
     categoryHint(err.message, !err.queued);
+    // Only THIS request's own rejection may reach the branch above. Nothing
+    // below here may run on this path — see the refetch's own comment for
+    // why a failure past this point is a different animal entirely.
+    return;
   }
+
+  // The POST has already committed by the time we reach here, so only ITS
+  // OWN rejection (the catch above) may revert or paint an error. A refetch
+  // that fails on a connection drop, a restart, the service worker's
+  // synthetic 503 or the read limiter's own 429 (a separate bucket from the
+  // write limiter, `shared/src/security.js`) is not the reorder failing —
+  // the server already has the move. Reverting here would snap the list back
+  // from an order the next reload would show anyway, and telling the user it
+  // failed would be false. `.catch(() => {})` is the same swallow the "add a
+  // suggested category" chip handler already uses on its own 409 path, below
+  // in this file, for the same shape of problem — a write that is already
+  // settled followed by a refetch whose own failure answers nothing about it:
+  // the optimistic order already IS the server's own order by then, so there
+  // is nothing left to paint and nothing to revert.
+  //
+  // No argument — see `refreshCategoryPicker`. A reorder never changes
+  // which category this form has chosen.
+  await refreshCategoryPicker().catch(() => {});
+  // `repaintCategories()` (just run, inside `refreshCategoryPicker`) rebuilds
+  // the manage list — and clamps `scrollTop` back to 0 — only when
+  // `editingCategoryId == null`, the same condition it gates
+  // `renderCategoryManage()` on. With a rename box open there was no rebuild
+  // and nothing here to correct: forcing the press-time offset regardless
+  // used to jump the list under the open rename box the moment this GET
+  // landed. (A manual scroll made during the wait, with no rename involved,
+  // is not something this line — or `restoreFocus`'s own guard below, which
+  // reads the same `<body>` either way — can tell apart from an untouched
+  // wait; this guard only stops the write from firing where it plainly
+  // should not, not from ever restoring a stale offset.)
+  if (editingCategoryId == null) {
+    list.scrollTop = scrollTop;
+  }
+  // `refreshCategoryPicker`'s own `repaintCategories()` just did a SECOND
+  // `list.replaceChildren()` — this time from the server's answer — which
+  // drops focus to `<body>` exactly like the optimistic one above did, and
+  // nothing restores it after that one. Left alone, a keyboard user only
+  // keeps focus while presses outrun the fetch; at a human pace every press
+  // loses it, which is the very defect the optimistic restore above claims
+  // to have fixed. Restore again here — but ONLY when `<body>` (or nothing)
+  // holds focus, i.e. it was this repaint that dropped it. By the time the
+  // GET lands the user may have deliberately moved focus elsewhere, and an
+  // unconditional restore would steal it back.
+  if (document.activeElement == null || document.activeElement === document.body) {
+    restoreFocus($('#category-manage'), focused);
+  }
+  // `emit('change')` directly — the one mutation in this file that
+  // deliberately does NOT go through `announce()`. There is nothing to
+  // fetch: `refreshCategoryPicker` just set `state.categories` from
+  // `GET /categories`, which is the authoritative order, so every listener
+  // can simply redraw from what the store already holds. `announce()`
+  // would fire `'reload'` here whenever the dashboard is showing, and that
+  // is active harm rather than a slower way to the same place —
+  // `dashboard.js`'s `load()` overwrites `state.categories` with
+  // `/overview`'s answer, a SECOND writer of the same field that can land
+  // after a later press has already moved the order again, installing a
+  // stale order over the manage list's own newer one.
+  emit('change');
 }
 
 /** @param habit  null opens the create form */

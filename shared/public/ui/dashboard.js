@@ -223,7 +223,20 @@ export function paint() {
   state.openCategories = false;
   // The top-bar entry point to that comparison, which `ui/categories.js`
   // owns: this is the one place that runs after `state.categories` has been
-  // refreshed, and every category mutation ends in a 'reload' that reaches it.
+  // refreshed. Not every category mutation ends in a 'reload' any more —
+  // `moveCategory` (habit-dialog.js) deliberately emits 'change' instead of
+  // going through `announce()`, see its own comment — but this still runs
+  // after every one of them, because `paint()` is where both events end up.
+  // 'reload' reaches it through `load()`, which always ends in a `paint()`
+  // (below); 'change' reaches it straight through this file's own listener
+  // (`on('change', () => { if (dashboardShowing()) paint(); })`), which is
+  // conditional — but that condition is exactly "is this the render this line
+  // needs to run for right now", so a 'change' that arrives while some other
+  // view is showing costs nothing: `state.categories` is already updated by
+  // the time this file's view is next entered, and every path back to it
+  // (Back from a habit, from the comparison, on boot) goes through `load()`,
+  // which paints from the fresh value regardless of which event got there
+  // first.
   syncCompareEntry(state.categories.length > 0);
   // The URL follows the view. Cheap to call on every repaint — and this is
   // called on every check-off — because `go` does nothing when the address bar

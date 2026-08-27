@@ -1729,6 +1729,128 @@ try {
   await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
     { what: 'the flat dashboard to load again after h' });
 
+  /* ---------- i: a refetch that fails AFTER a committed reorder must not
+     revert it, and must not paint the hint as an error (review round 2,
+     finding 1) ----------
+   *
+   * `moveCategory`'s `try` used to wrap both `POST /categories/reorder` and
+   * the `await refreshCategoryPicker()` right after it — a plain
+   * `GET /categories` — so a POST the server had already accepted, followed
+   * by a GET that failed for any of several ordinary reasons (a dropped
+   * connection, a restart, the service worker's own synthetic 503, the read
+   * limiter's 429 — a separate bucket from the write limiter,
+   * `shared/src/security.js`), took the SAME catch as a failed WRITE: the
+   * optimistic order snapped back and `#category-hint` painted the failure in
+   * the error class, while the server had already committed the move — reload
+   * and the order just reported as failed is there.
+   *
+   * Reproduced by letting the POST reach the real server and failing only the
+   * ONE `GET /api/categories` that follows it, once — every other request,
+   * including the reorder POST itself and this block's own final read, goes
+   * straight to the real network, so this is testing the second request's own
+   * failure and nothing about the first.
+   *
+   * There is no predicate to poll for "the revert did not happen" — this is
+   * the shape `sleep` exists for in this file (see its own comment at the
+   * top) — so the wait below is a settle long enough for the POST, the failed
+   * GET and `moveCategory`'s own continuation to have all run, the same
+   * margin `h` above gives its own "no /overview request" check.
+   *
+   * Mutation target: put the refetch back inside the `try` (equivalently,
+   * delete the early `return` from the catch above it) — all three
+   * assertions below must FAIL.
+   */
+  console.log("--- i: a refetch failure after a committed reorder does not revert it (review round 2, finding 1) ---");
+
+  // `openDialog`'s own fire-and-forget `refreshCategoryPicker()` (see its
+  // docstring) can land at any point after the dialog opens — the same
+  // hazard `2a` below documents at length. Armed too early, THIS block's own
+  // interceptor could catch and reject that GET instead of the one it is
+  // actually testing (the reorder's own refetch). Count in-flight fetches and
+  // wait for that opening refetch to finish arriving first, exactly as `2a`
+  // does, before touching `window.fetch` again below.
+  await ev(`(()=>{
+    window.__iPending = 0;
+    window.__iRealFetch = window.__iRealFetch || window.fetch;
+    const real = window.__iRealFetch;
+    window.fetch = (...args) => {
+      window.__iPending++;
+      return real(...args).finally(() => { window.__iPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__iPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving" });
+  await sleep(300);
+
+  const beforeI = await readManage();
+  ck('sanity: more than one category is left to move for i',
+    beforeI.names.length > 1, JSON.stringify(beforeI));
+  const [iFirst, iSecond] = beforeI.names;
+
+  // Swap the counting wrapper above for one that also rejects the NEXT
+  // categories GET while a flag is up — the reorder's own POST, and every
+  // other request, still goes to the real network underneath it.
+  await ev(`(()=>{
+    const real = window.__iRealFetch;
+    window.__iRejectNextGet = false;
+    window.fetch = (url, opts) => {
+      const isCategoriesGet = String(url).endsWith('/api/categories') &&
+        (!opts || (opts.method ?? 'GET').toUpperCase() === 'GET');
+      // Only the ONE GET fired while the flag is up — moveCategory's own
+      // refetch, right after its POST resolves. The POST itself, and every
+      // other request (including this block's own later read), goes straight
+      // to the real network.
+      if (isCategoriesGet && window.__iRejectNextGet) {
+        window.__iRejectNextGet = false;
+        return Promise.reject(new TypeError('Failed to fetch'));
+      }
+      return real(url, opts);
+    };
+    return true;
+  })()`);
+
+  // Blanked in the same evaluate as the click, for the reason the offline
+  // block below (`g`) already gives: an earlier block's own hint text could
+  // otherwise still be sitting there, making the "not in the error class"
+  // check below pass on a sentence this press never wrote.
+  await ev(`window.__iRejectNextGet = true;
+    document.getElementById('category-hint').textContent = '';
+    document.getElementById('category-hint').classList.remove('error');
+    document.querySelector('#category-manage .category-manage-row .category-move-down').click();
+    true`);
+  await waitUntil(ev, `window.__iRejectNextGet === false`,
+    { what: "the interceptor to see the refetch's own GET and fail it" });
+  await sleep(500);
+
+  await ev(`window.fetch = window.__iRealFetch; true`);
+
+  const afterI = await readManage();
+  ck('i: the manage list still shows the MOVED order, not a reverted one',
+    afterI.names[0] === iSecond && afterI.names[1] === iFirst,
+    JSON.stringify({ before: beforeI.names, after: afterI.names }));
+
+  const iHint = await ev(`(()=>({
+    text: document.getElementById('category-hint').textContent,
+    error: document.getElementById('category-hint').classList.contains('error'),
+  }))()`);
+  ck('i: #category-hint is not painted as an error over a write the server accepted',
+    iHint.error === false, JSON.stringify(iHint));
+
+  // THE assertion this block exists for: the server's own answer, read with
+  // the real `fetch` restored above — not merely what the dialog happens to
+  // show, which the two checks above already cover.
+  const iServerOrder = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('i: THE assertion: the server really did keep the move, not only the DOM',
+    iServerOrder[0] === iSecond && iServerOrder[1] === iFirst,
+    JSON.stringify({ iServerOrder, expected: [iSecond, iFirst] }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after i' });
+
   /* ---------- 2a: focus survives the SECOND repaint too, not only the
      optimistic one (issue #65 step 2) ----------
    *
