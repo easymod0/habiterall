@@ -80,6 +80,102 @@ category. `summarised` can still be true while there is nothing to draw:
 treats a missing summary exactly like `summarised` being false, by drawing the
 header it always drew and nothing more.
 
+**A grouped section's ORDER is `position`, and the habit dialog's category
+manage list is the one surface that writes it.** Both editions already read
+every category list `ORDER BY position, id` and a create already lands a new
+one at `MAX(position) + 1`, so `POST /categories/reorder` (`moveCategory`,
+`ui/habit-dialog.js`) is a caller for existing storage semantics rather than
+new ones — nothing on the read side, including the grouped dashboard's own
+section order, had to learn anything. The ↑/↓ pair on each manage row are
+disabled while `editingCategoryId != null`, because `repaintCategories` will
+not rebuild that list while a rename box is open (a live `<input>` a rebuild
+would tear out from under whoever is typing in it); a press there would send a
+write and repaint nothing, which reads as the click having done nothing at
+all. See `docs/decisions/categories.md`'s phase 5 for the disable rules in
+full and for why `moveCategory` keeps the optimistic order on `err.queued`
+where `persistOrder` (the habit list's own reorder) does not.
+
+**`state.categories` has several writers that can be in flight at once, so a
+read may only INSTALL its answer if it is still the newest one.**
+`state.categoryReadSeq` (`ui/store.js`) is that counter. It lives beside the
+field it protects rather than beside any one reader, because **the writers are
+in two modules and the one that is easiest to forget is in the other one**:
+`load()` (`ui/dashboard.js`) assigns `data.categories` from `/overview`, and
+`announce()` sends every category mutation in the habit dialog EXCEPT
+`moveCategory` through `'reload'`, which is what calls it. Five halves, and
+each fails differently — a version with any four of them still ships the bug:
+
+- `refreshCategoryPicker` takes a ticket and assigns only while it holds the
+  current one.
+- `moveCategory` bumps at its optimistic splice, so a press retires every read
+  already out. **Not implied by the first** — the read in flight is often
+  `openDialog`'s fire-and-forget refetch, fired before the press existed and
+  landing while the press's own read has not started, so nothing newer has
+  taken a ticket to supersede it.
+- `load()` takes a ticket before `/overview` goes out and installs
+  `data.categories` only while it holds it. Its own `paint()` does not rebuild
+  the manage list, so under the unfixed code the dialog goes on showing a move
+  the store no longer has. Add a category and press ↑ on it — the ordinary
+  gesture, since a create lands at `MAX(position) + 1` and so at the BOTTOM —
+  and the Add's own `'reload'` is in flight for exactly that press. `habits`
+  and `categorySummaries` are deliberately NOT ticketed: neither has a writer
+  that can be newer, and summaries are read by id rather than by position.
+- `moveCategory`'s catch keeps its ticket and reverts only while it holds it.
+  `previous` is captured before the splice, so the revert is as stale a writer
+  as any reply — two presses overlapping with the EARLIER one failing last put
+  an order two presses old back in the store.
+- **The queued DELETE's optimistic removal bumps too**, and it is the half a
+  reader looking only at the reorder feature would not think to check. It is
+  `moveCategory`'s splice in every structural respect — an optimistic write of
+  the field with no read of its own — and the read it loses to is the same
+  `openDialog` refetch. What is different is the harm, which is not a display
+  one: the removal exists precisely so `saveHabit` cannot submit an id the
+  replay is about to destroy (`resolveCategoryId` answers 400 on replay, and
+  `PUT /habits/:id` REPLACES, so the WHOLE habit edit is dropped as
+  permanently inapplicable behind a toast naming neither the habit nor the
+  field). A stale answer landing behind it puts the category back in the
+  picker and re-arms exactly that. It needs no prior outage: `api()` queues a
+  `replayable()` write on any network error, the 10s timeout included, while a
+  GET is never pre-empted.
+
+A superseded read still repaints (from current state, which can only
+re-confirm what is there); the ASSIGNMENT is the half that can be stale.
+`persistOrder` needs none of this because it never refetches after its own
+write and so cannot race a second call's read — do not read its shape as the
+precedent here. Blocks `j`, `k`, `l`, `m` and `n` in `categorycheck.mjs` pin
+one half each, and each one passes with any of the other four deleted.
+
+The rule for anything added next is the shape rather than the list: **a writer
+of `state.categories` that is not itself the newest read must take a ticket** —
+an optimistic write bumps, a read installs only while it holds one. Two of the
+five were found by review after the counter shipped, both by asking that
+question of a writer nobody had enumerated.
+
+**And a reorder arrow may not be restored with `restoreFocus`.** Its fallback
+for a control that has stopped being operable is the first still-operable
+`[data-focus-key]` in the same parent, which is right for `Today` and wrong in
+a manage row, where ↑ and ↓ are the only two focus keys and each is the
+other's undo: the press that lands a category at row 0 disables its ↑ and
+handed the keyboard its ↓, so the next Enter walked it back down and a held
+Enter ping-ponged it between the ends with a write per step.
+`restoreArrowFocus` (`ui/habit-dialog.js`) parks focus on the list itself at a
+boundary instead — the gesture stops where the boundary says it stops, and
+focus stays inside the dialog rather than dropping to `<body>`, which is the
+whole reason a restore runs there. Block `2b` pins both halves.
+
+**And that made the scroll a separate question, which it always should have
+been.** `.focus()` scrolls its target into view as a side effect, so while the
+keyboard followed the row up the list the VIEW came along for free — a boundary
+parks focus on the list with `preventScroll`, and the last press of a walk was
+then the only one that did not follow, dropping the row above the fold from a
+list scrolled a single row down. `revealArrow` (`ui/habit-dialog.js`) owns
+visibility now and `restoreArrowFocus` owns only the keyboard: both `.focus()`
+calls pass `preventScroll`, and each of `moveCategory`'s two repaints reveals
+the moved row after putting `scrollTop` back, whether or not focus moved. This
+is the same "`.focus()` is not a scroll mechanism" that `moveCategory`'s own
+scroll save/restore records having been bitten by in Safari, met a second time
+one call further out.
+
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears

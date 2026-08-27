@@ -26,6 +26,25 @@ export const state = {
   // the dashboard's (future, behind `groupByCategory`) sections, and the habit
   // dialog's picker needs the same list rather than a fetch of its own.
   categories: [],
+  // Which read of `categories` is the CURRENT one. Bumped by everything that
+  // starts a read of the list (`refreshCategoryPicker` in `ui/habit-dialog.js`,
+  // `load()` in `ui/dashboard.js`) and by the one thing that changes its order
+  // without one (`moveCategory`'s optimistic splice); an answer may only be
+  // INSTALLED while it still holds the number it took.
+  //
+  // It lives here rather than beside either reader because the field it
+  // protects has readers in two modules and no single owner. `/overview` and
+  // `GET /categories` both answer with the whole list, so the last reply to
+  // arrive used to win regardless of which was freshest — and once a section
+  // can be REORDERED that is not merely a repaint of the same thing: a reply
+  // issued before a move, delivered after it, puts the pre-move order back in
+  // the store, the next press computes its payload from that, and the SERVER
+  // takes the regression. The manage list is not repainted by `load()`, so
+  // nothing on screen says it happened.
+  //
+  // A counter and not a timestamp: `Date.now()` has no ordering guarantee
+  // finer than a millisecond, and two of these can start in the same one.
+  categoryReadSeq: 0,
   editingId: null,
   openHabitId: null,   // habit shown in the detail view, null on the dashboard
   // The category comparison is showing. It is a THIRD answer to the question

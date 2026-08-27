@@ -34,8 +34,9 @@ const ck = (label, cond, extra = '') => {
 
 /**
  * A post-action settle, for the one shape `waitUntil` cannot express: asserting
- * that something did NOT happen has no predicate to poll. One caller, and every
- * other wait in this file is a `waitUntil`.
+ * that something did NOT happen has no predicate to poll — plus the settles
+ * that follow one of those, where the poll has already told us the answer is
+ * in flight. Every other wait in this file is a `waitUntil`.
  */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -490,6 +491,26 @@ try {
   await ev(`${byText('#category-chips button', 'Health')}.click()`);
   await waitUntil(ev, `document.getElementById('category-hint').textContent.includes('Added "Health"')`,
     { what: 'the chip to create "Health"' });
+
+  /* ---------- e: a single category draws no move arrows (issue #65 step 1) ----------
+   *
+   * The one moment in this whole suite with EXACTLY one category on the
+   * account — Health, just created, nothing else yet — so this is the
+   * natural place to ask the question, rather than staging a throwaway
+   * account state later on. `renderCategoryManage`'s `canReorder` gate is
+   * `state.categories.length > 1`.
+   *
+   * Mutation target: render the arrows unconditionally, ignoring
+   * `state.categories.length < 2` — this must FAIL.
+   */
+  const singleCategoryManage = await ev(`(()=>({
+    rows: document.querySelectorAll('#category-manage .category-manage-row').length,
+    arrows: document.querySelectorAll(
+      '#category-manage .category-move-up, #category-manage .category-move-down').length,
+  }))()`);
+  ck('e: with a single category, no move arrows are rendered at all',
+    singleCategoryManage.rows === 1 && singleCategoryManage.arrows === 0,
+    JSON.stringify(singleCategoryManage));
 
   ck('the chip did not assign it on its own — that is a separate, deliberate step',
     (await selectedCategoryOption()).value === '');
@@ -1458,6 +1479,1252 @@ try {
   // the next `openDialog`'s own refetch corrects, and no assertion below reads
   // it before then.
 
+  /* ---------- reordering categories, a/b/c/d/f (issue #65 step 1) ----------
+   *
+   * Run over the account as everything above it left it — Work (on
+   * `HABIT_NAME`), Fitness, Mind and "Zzz Enter Renamed" all survive to here
+   * — rather than a staged fixture, so this is a real account with more than
+   * one category to move. `readManage` is used again for `g`, at the very
+   * end of the suite.
+   */
+  console.log('--- reordering categories, a/b/c/d/f (issue #65 step 1) ---');
+
+  const readManage = () => ev(`(()=>({
+    names: [...document.querySelectorAll('#category-manage .category-manage-name')]
+      .map(n => n.textContent.trim()),
+    upDisabled: [...document.querySelectorAll('#category-manage .category-move-up')]
+      .map(b => b.disabled),
+    downDisabled: [...document.querySelectorAll('#category-manage .category-move-down')]
+      .map(b => b.disabled),
+  }))()`);
+
+  await openHabitByName(HABIT_NAME);
+  // The comment just above this block's own opening says so: `state.categories`
+  // still holds "Zzz Stay Put", deleted through the API rather than the UI, and
+  // this dialog's synchronous first render draws from whatever it already had.
+  // Wait for its own refetch to land before reading the manage list, or this
+  // reads the stale five rather than the real four.
+  await waitUntil(ev,
+    `![...document.querySelectorAll('#category-manage .category-manage-name')]
+       .some(n => n.textContent.trim() === ${JSON.stringify(STAY_CATEGORY)})`,
+    { what: "the dialog's own refetch to land, dropping the category deleted just above" });
+  const beforeMove = await readManage();
+  ck('sanity: more than one category, so there is something to move',
+    beforeMove.names.length > 1, JSON.stringify(beforeMove));
+
+  // d: the boundary rows are the ones that cannot move any further, and only
+  // those — a blanket disable would also pass an unguarded middle row.
+  // Mutation target: drop `disabled` from the boundary arrows in
+  // `renderCategoryManage` — this must FAIL.
+  ck('d: the first row’s ↑ and the last row’s ↓ are disabled, and no other arrow is',
+    beforeMove.upDisabled[0] === true
+      && beforeMove.downDisabled.at(-1) === true
+      && beforeMove.upDisabled.slice(1).every((d) => d === false)
+      && beforeMove.downDisabled.slice(0, -1).every((d) => d === false),
+    JSON.stringify(beforeMove));
+
+  // a: pressing the first row's own ↓ moves it down one.
+  const [firstName, secondName] = beforeMove.names;
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click()`);
+  await waitUntil(ev,
+    `document.querySelectorAll(
+      '#category-manage .category-manage-name')[0]?.textContent.trim() === ${JSON.stringify(secondName)}`,
+    { what: 'the first row to move down one' });
+
+  const afterMove = await readManage();
+  ck('a: pressing ↓ on the first category moves it down one in the manage list',
+    afterMove.names[0] === secondName && afterMove.names[1] === firstName,
+    JSON.stringify({ before: beforeMove.names, after: afterMove.names }));
+
+  // b: it reached the server — reload the page, reopen the dialog, the order
+  // holds. Mutation target: delete the `await api('/categories/reorder', …)`
+  // line in `moveCategory`, keeping only the optimistic splice — this must
+  // FAIL, because a reload reads nothing but the server's own answer.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
+    { what: 'the dashboard to reload after the reorder' });
+  await openHabitByName(HABIT_NAME);
+
+  const afterReloadManage = await readManage();
+  ck('b: the new order reached the server and survives a reload',
+    afterReloadManage.names[0] === secondName && afterReloadManage.names[1] === firstName,
+    JSON.stringify(afterReloadManage.names));
+
+  const orderOnServer = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('…confirmed straight off the API, not only what the dialog happens to show',
+    orderOnServer[0] === secondName && orderOnServer[1] === firstName,
+    JSON.stringify(orderOnServer));
+
+  // c: with `groupByCategory` on, the dashboard's own section order follows.
+  // Both editions already read `ORDER BY position, id` for every list — this
+  // confirms the premise the brief states rather than protecting anything new
+  // in `dashboard.js`.
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close before checking the grouped dashboard' });
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: true }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the grouped dashboard to reload after the reorder' });
+
+  const sectionOrder = await ev(`[...document.querySelectorAll(
+    '#grid .category-section-header:not(.uncategorised) .category-section-name')]
+    .map(n => n.textContent)`);
+  ck('c: the dashboard’s own section order follows the new position',
+    sectionOrder[0] === secondName && sectionOrder[1] === firstName,
+    JSON.stringify({ sectionOrder, expected: [secondName, firstName] }));
+
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: false }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the flat dashboard to load again after the section-order check' });
+
+  // f: every arrow on every row is disabled while a row is mid-rename —
+  // `repaintCategories` refuses to rebuild this list while
+  // `editingCategoryId != null`, so a press then would send a write and
+  // repaint nothing. Mutation target: drop the `editingCategoryId != null`
+  // disable in `renderCategoryManage` — this must FAIL.
+  await openHabitByName(HABIT_NAME);
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('#category-manage .category-manage-row')][0];
+    row.querySelector('.category-edit').click();
+  })()`);
+  await waitUntil(ev, `!!document.querySelector('#category-manage .category-edit-name')`,
+    { what: 'the rename controls to open' });
+
+  const whileEditing = await ev(`(()=>({
+    arrows: document.querySelectorAll(
+      '#category-manage .category-move-up, #category-manage .category-move-down').length,
+    allDisabled: [...document.querySelectorAll(
+      '#category-manage .category-move-up, #category-manage .category-move-down')]
+      .every(b => b.disabled),
+  }))()`);
+  ck('f: every arrow on every row is disabled while a row is mid-rename',
+    whileEditing.arrows > 0 && whileEditing.allDisabled === true,
+    JSON.stringify(whileEditing));
+
+  await ev(`${byText('#category-manage button', 'Cancel')}.click()`);
+  await waitUntil(ev, `!document.querySelector('#category-manage .category-edit-name')`,
+    { what: 'the rename to cancel' });
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after the reorder checks' });
+
+  /* ---------- h: a reorder emits 'change', not 'reload' (issue #65 step 2,
+     review finding 1) ----------
+   *
+   * `openHabitByName`, which every case above uses, always opens the dialog
+   * over the HABIT'S OWN PAGE — `dashboardShowing()` answers false there, so
+   * `announce()` was already taking the `'change'` branch and none of a–f
+   * above ever exercised the dashboard one. This block opens the dialog with
+   * `#btn-new` instead, reachable straight from the (grouped) dashboard, and
+   * uses two fresh, habit-less categories so it owns its own order rather
+   * than depending on where the cases above left the account's others.
+   *
+   * Two things follow from `moveCategory` ending in a bare `emit('change')`:
+   * no `/overview` request at all, and the dashboard's own section order
+   * moving with no page reload. Mutation target for the first: put
+   * `announce()` back in place of `emit('change')` — this must FAIL, because
+   * `dashboardShowing()` is true here and `'reload'` fires `dashboard.js`'s
+   * `load()`, which fetches `/overview`. Mutation target for the second:
+   * delete the `emit('change')` call entirely — this must FAIL, because
+   * nothing then tells the dashboard to redraw and the section order this
+   * block reads after closing the dialog is the one from BEFORE the press.
+   */
+  console.log("--- h: a reorder emits 'change', not 'reload' (issue #65 step 2, review finding 1) ---");
+
+  await ev(`(async()=>{
+    await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Reorder A', color: '#0ea5e9' }) });
+    await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Reorder B', color: '#f97316' }) });
+    await fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupByCategory: true }) });
+  })()`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
+    { what: 'the grouped dashboard to load for h' });
+
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open from the dashboard for h' });
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#category-manage .category-manage-name')]
+      .some(n => n.textContent.trim() === 'Zzz Reorder B')`,
+    { what: "the New-habit dialog's own category-manage refetch to include the two fresh categories" });
+
+  const beforeH = (await readManage()).names;
+  const aStart = beforeH.indexOf('Zzz Reorder A');
+  ck('h sanity: the two fresh categories are adjacent, A directly before B',
+    aStart >= 0 && beforeH[aStart + 1] === 'Zzz Reorder B', JSON.stringify(beforeH));
+
+  const sectionsBeforeH = await ev(`[...document.querySelectorAll(
+    '#grid .category-section-header:not(.uncategorised) .category-section-name')]
+    .map(n => n.textContent)`);
+
+  // Record every request from here on — attached to `window` because each
+  // `ev()` call is its own `Runtime.evaluate` and shares nothing but the page.
+  await ev(`(()=>{
+    window.__hOrigFetch = window.fetch;
+    window.__hRequests = [];
+    window.fetch = (input, init) => {
+      window.__hRequests.push(typeof input === 'string' ? input : input.url);
+      return window.__hOrigFetch(input, init);
+    };
+    return true;
+  })()`);
+
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('#category-manage .category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name').textContent.trim() === 'Zzz Reorder A');
+    row.querySelector('.category-move-down').click();
+  })()`);
+  await waitUntil(ev,
+    `(() => {
+      const names = [...document.querySelectorAll('#category-manage .category-manage-name')]
+        .map(n => n.textContent.trim());
+      return names.indexOf('Zzz Reorder B') === names.indexOf('Zzz Reorder A') - 1;
+    })()`,
+    { what: 'A to move below B in the manage list' });
+  // A post-action settle, not a poll: the assertion below is about what did
+  // NOT happen, which is exactly the shape `sleep` exists for in this file —
+  // long enough for the reorder POST, `refreshCategoryPicker`'s own GET, and
+  // (under the mutation) a `'reload'`-triggered `/overview` to all have had
+  // time to fire.
+  await sleep(500);
+
+  const requestsH = await ev('window.__hRequests');
+  await ev(`window.fetch = window.__hOrigFetch; true`);
+  ck('h: a reorder makes no /overview request',
+    Array.isArray(requestsH) && !requestsH.some((u) => u.includes('/api/overview')),
+    JSON.stringify(requestsH));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after h' });
+
+  const sectionsAfterH = await ev(`[...document.querySelectorAll(
+    '#grid .category-section-header:not(.uncategorised) .category-section-name')]
+    .map(n => n.textContent)`);
+  const bAfterH = sectionsAfterH.indexOf('Zzz Reorder B');
+  const aAfterH = sectionsAfterH.indexOf('Zzz Reorder A');
+  ck('h: the dashboard’s own section order follows the press with no page reload',
+    bAfterH >= 0 && aAfterH >= 0 && bAfterH === aAfterH - 1,
+    JSON.stringify({ before: sectionsBeforeH, after: sectionsAfterH }));
+
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: false }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the flat dashboard to load again after h' });
+
+  /* ---------- i: a refetch that fails AFTER a committed reorder must not
+     revert it, and must not paint the hint as an error (review round 2,
+     finding 1) ----------
+   *
+   * `moveCategory`'s `try` used to wrap both `POST /categories/reorder` and
+   * the `await refreshCategoryPicker()` right after it — a plain
+   * `GET /categories` — so a POST the server had already accepted, followed
+   * by a GET that failed for any of several ordinary reasons (a dropped
+   * connection, a restart, the service worker's own synthetic 503, the read
+   * limiter's 429 — a separate bucket from the write limiter,
+   * `shared/src/security.js`), took the SAME catch as a failed WRITE: the
+   * optimistic order snapped back and `#category-hint` painted the failure in
+   * the error class, while the server had already committed the move — reload
+   * and the order just reported as failed is there.
+   *
+   * Reproduced by letting the POST reach the real server and failing only the
+   * ONE `GET /api/categories` that follows it, once — every other request,
+   * including the reorder POST itself and this block's own final read, goes
+   * straight to the real network, so this is testing the second request's own
+   * failure and nothing about the first.
+   *
+   * There is no predicate to poll for "the revert did not happen" — this is
+   * the shape `sleep` exists for in this file (see its own comment at the
+   * top) — so the wait below is a settle long enough for the POST, the failed
+   * GET and `moveCategory`'s own continuation to have all run, the same
+   * margin `h` above gives its own "no /overview request" check.
+   *
+   * Mutation target: put the refetch back inside the `try` (equivalently,
+   * delete the early `return` from the catch above it) — all three
+   * assertions below must FAIL.
+   */
+  console.log("--- i: a refetch failure after a committed reorder does not revert it (review round 2, finding 1) ---");
+
+  // `openDialog`'s own fire-and-forget `refreshCategoryPicker()` (see its
+  // docstring) can land at any point after the dialog opens — the same
+  // hazard `2a` below documents at length. Armed too early, THIS block's own
+  // interceptor could catch and reject that GET instead of the one it is
+  // actually testing (the reorder's own refetch). Count in-flight fetches and
+  // wait for that opening refetch to finish arriving first, exactly as `2a`
+  // does, before touching `window.fetch` again below.
+  await ev(`(()=>{
+    window.__iPending = 0;
+    window.__iRealFetch = window.__iRealFetch || window.fetch;
+    const real = window.__iRealFetch;
+    window.fetch = (...args) => {
+      window.__iPending++;
+      return real(...args).finally(() => { window.__iPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__iPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving" });
+  await sleep(300);
+
+  const beforeI = await readManage();
+  ck('sanity: more than one category is left to move for i',
+    beforeI.names.length > 1, JSON.stringify(beforeI));
+  const [iFirst, iSecond] = beforeI.names;
+
+  // Swap the counting wrapper above for one that also rejects the NEXT
+  // categories GET while a flag is up — the reorder's own POST, and every
+  // other request, still goes to the real network underneath it.
+  await ev(`(()=>{
+    const real = window.__iRealFetch;
+    window.__iRejectNextGet = false;
+    window.fetch = (url, opts) => {
+      const isCategoriesGet = String(url).endsWith('/api/categories') &&
+        (!opts || (opts.method ?? 'GET').toUpperCase() === 'GET');
+      // Only the ONE GET fired while the flag is up — moveCategory's own
+      // refetch, right after its POST resolves. The POST itself, and every
+      // other request (including this block's own later read), goes straight
+      // to the real network.
+      if (isCategoriesGet && window.__iRejectNextGet) {
+        window.__iRejectNextGet = false;
+        return Promise.reject(new TypeError('Failed to fetch'));
+      }
+      return real(url, opts);
+    };
+    return true;
+  })()`);
+
+  // Blanked in the same evaluate as the click, for the reason the offline
+  // block below (`g`) already gives: an earlier block's own hint text could
+  // otherwise still be sitting there, making the "not in the error class"
+  // check below pass on a sentence this press never wrote.
+  await ev(`window.__iRejectNextGet = true;
+    document.getElementById('category-hint').textContent = '';
+    document.getElementById('category-hint').classList.remove('error');
+    document.querySelector('#category-manage .category-manage-row .category-move-down').click();
+    true`);
+  await waitUntil(ev, `window.__iRejectNextGet === false`,
+    { what: "the interceptor to see the refetch's own GET and fail it" });
+  await sleep(500);
+
+  await ev(`window.fetch = window.__iRealFetch; true`);
+
+  const afterI = await readManage();
+  ck('i: the manage list still shows the MOVED order, not a reverted one',
+    afterI.names[0] === iSecond && afterI.names[1] === iFirst,
+    JSON.stringify({ before: beforeI.names, after: afterI.names }));
+
+  const iHint = await ev(`(()=>({
+    text: document.getElementById('category-hint').textContent,
+    error: document.getElementById('category-hint').classList.contains('error'),
+  }))()`);
+  ck('i: #category-hint is not painted as an error over a write the server accepted',
+    iHint.error === false, JSON.stringify(iHint));
+
+  // THE assertion this block exists for: the server's own answer, read with
+  // the real `fetch` restored above — not merely what the dialog happens to
+  // show, which the two checks above already cover.
+  const iServerOrder = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('i: THE assertion: the server really did keep the move, not only the DOM',
+    iServerOrder[0] === iSecond && iServerOrder[1] === iFirst,
+    JSON.stringify({ iServerOrder, expected: [iSecond, iFirst] }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after i' });
+
+  /* ---------- j: a category read that is answered before a LATER press's
+     write must not install its answer over the newer one (review round 3,
+     finding 1) ----------
+   *
+   * The arrows are deliberately not disabled while a write is in flight, so
+   * two `moveCategory` calls overlapping is the ordinary gesture for moving a
+   * category more than one slot. Each press was independent end to end: its
+   * own POST, then its OWN `GET /categories`, whose reply was assigned to
+   * `state.categories` unconditionally. Nothing sequenced the two, so a GET
+   * the server answered BEFORE a later press's POST committed — but which was
+   * delivered to the client after that later press's own GET — silently
+   * installed an order the server had already moved past, with no error, no
+   * hint and no repaint anybody would read as a failure.
+   *
+   * It compounds, which is the half that reaches storage: the next press
+   * computes its whole payload from `state.categories` as it stands, so it
+   * POSTs the regressed order back and the SERVER's order is wrong too, not
+   * merely the display. The second assertion below is that half, read off
+   * `GET /api/categories` rather than off the DOM.
+   *
+   * `persistOrder` (dashboard.js) does NOT have this: it never refetches after
+   * its own write, so it cannot race a second call's READ. The per-press GET
+   * is a mechanism the habit list has no counterpart for.
+   *
+   * Reproduced deterministically rather than by racing the network. The
+   * interceptor fires press A's refetch against the real server AT THE MOMENT
+   * `moveCategory` asks for it — so the captured body is the order as of A's
+   * own POST, which is exactly the stale reading — and then holds the
+   * RESPONSE until this script releases it, after press B has been made and
+   * B's own refetch has landed. Every other request, B's included, goes
+   * straight to the real network.
+   *
+   * Mutation target: drop the `mine === categoryReadSeq` guard in
+   * `refreshCategoryPicker` (equivalently, the `categoryReadSeq++` in
+   * `moveCategory`) — BOTH assertions below must FAIL.
+   */
+  console.log('--- j: a superseded category read does not install its stale order (review round 3, finding 1) ---');
+
+  // `openDialog`'s own fire-and-forget refetch has to be out of the way before
+  // the holding wrapper is armed, or it — rather than press A's — is the GET
+  // that gets held. Same count-in-flight wait `i` and `2a` use.
+  await ev(`(()=>{
+    window.__jPending = 0;
+    window.__jRealFetch = window.__jRealFetch || window.fetch;
+    const real = window.__jRealFetch;
+    window.fetch = (...args) => {
+      window.__jPending++;
+      return real(...args).finally(() => { window.__jPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__jPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving" });
+  await sleep(300);
+
+  const beforeJ = await readManage();
+  ck('sanity: three or more categories, so two presses reach three distinct orders',
+    beforeJ.names.length >= 3, JSON.stringify(beforeJ));
+  const [j0, j1, j2] = beforeJ.names;
+
+  await ev(`(()=>{
+    const real = window.__jRealFetch;
+    window.__jHeld = false;
+    window.__jDelivered = false;
+    window.__jLanded = 0;
+    let captured = false;
+    const held = new Promise((res) => { window.__jRelease = res; });
+    window.fetch = (url, opts) => {
+      const isCategoriesGet = String(url).endsWith('/api/categories') &&
+        (!opts || (opts.method ?? 'GET').toUpperCase() === 'GET');
+      if (isCategoriesGet && !captured) {
+        captured = true;
+        // Fired NOW against the real server — the body is the order as of
+        // press A's own POST, which is the stale reading this block is about
+        // — and delivered only once this script releases it. The response
+        // body is not consumed here, so \`api()\`'s own \`res.json()\` still
+        // reads the snapshot taken at this moment.
+        const inFlight = real(url, opts);
+        window.__jHeld = true;
+        return held.then(() => inFlight).then((res) => {
+          window.__jDelivered = true;
+          return res;
+        });
+      }
+      if (isCategoriesGet) {
+        return real(url, opts).then((res) => { window.__jLanded++; return res; });
+      }
+      return real(url, opts);
+    };
+    return true;
+  })()`);
+
+  // Press A: the first row's ↓. Its POST goes to the real server; its refetch
+  // is the one held above.
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__jHeld === true`,
+    { what: "press A's own refetch to be captured and held" });
+  await waitUntil(ev,
+    `document.querySelectorAll(
+      '#category-manage .category-manage-name')[0]?.textContent.trim() === ${JSON.stringify(j1)}`,
+    { what: "press A's optimistic move to paint" });
+
+  // Press B, while A's read is still out: the SECOND row's ↓, which moves the
+  // category A just displaced further down again. B's own POST and refetch go
+  // to the real network, so when its reply lands the list — and the server —
+  // both read [j1, j2, j0, …].
+  await ev(`[...document.querySelectorAll(
+    '#category-manage .category-manage-row')][1]
+    .querySelector('.category-move-down').click(); true`);
+  await waitUntil(ev, `window.__jLanded >= 1`,
+    { what: "press B's own refetch to land unheld" });
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#category-manage .category-manage-name')]
+       .slice(0, 3).map(n => n.textContent.trim()).join('|') ===
+       ${JSON.stringify([j1, j2, j0].join('|'))}`,
+    { what: "press B's own answer to install the newer order" });
+
+  // Release A's stale reply now — the exact moment the unguarded code paints
+  // it over B's. There is no predicate for "the stale order did not install",
+  // so the settle after delivery is the shape `sleep` exists for here.
+  await ev(`window.__jRelease(); true`);
+  await waitUntil(ev, `window.__jDelivered === true`,
+    { what: "press A's held reply to be delivered to api()" });
+  await sleep(500);
+
+  const afterJ = await readManage();
+  ck('j: the stale reply from the earlier press did not install its order over the newer one',
+    afterJ.names.slice(0, 3).join('|') === [j1, j2, j0].join('|'),
+    JSON.stringify({ before: beforeJ.names, after: afterJ.names,
+      expected: [j1, j2, j0] }));
+
+  // THE assertion: the compounding half. A third press computes its payload
+  // from `state.categories` as it stands, so if the stale reply had installed
+  // itself the order this writes is a regression the SERVER then holds.
+  //
+  // The wait is on the press's own refetch LANDING — counted by the wrapper,
+  // which is still installed and now passes everything through — rather than
+  // on the order it paints. A wait on the order would be a `waitUntil` that
+  // THROWS under the mutation this block exists to catch, aborting the suite
+  // where the two `ck`s below are what should report it.
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__jLanded >= 2`,
+    { what: "the third press's own refetch to land" });
+  await sleep(300);
+  await ev(`window.fetch = window.__jRealFetch; true`);
+
+  const jServerOrder = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('j: THE assertion: the next press wrote the newer order to the server, not a regressed one',
+    jServerOrder.slice(0, 3).join('|') === [j2, j1, j0].join('|'),
+    JSON.stringify({ jServerOrder, expected: [j2, j1, j0] }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after j' });
+
+  /* ---------- k: a press RETIRES the reads already in flight, including the
+     one `openDialog` fired before the press existed (review round 3,
+     finding 1, second half) ----------
+   *
+   * `j` above covers two presses racing each other's reads, where the newer
+   * press's own refetch is what supersedes the older one. This is the case
+   * that guard alone does NOT answer: the read in flight is `openDialog`'s
+   * fire-and-forget `refreshCategoryPicker()`, fired before any press existed,
+   * and the press's own read has not STARTED yet because its POST is still
+   * out. Nothing newer has taken a ticket, so an unbumped counter lets that
+   * read install the PRE-move order straight over the optimistic splice.
+   *
+   * Needs no response reordering at all — only the dialog's own GET being
+   * slower than the first press on it, which is an ordinary open-and-press.
+   * It self-heals a round trip later when the press's own refetch lands, so
+   * the DOM check below is only half of it; the assertion that lasts is what a
+   * press made INSIDE that window writes, since it computes its payload from
+   * the reverted list and the server then holds the regression.
+   *
+   * Both requests are fired against the real server at the moment the app asks
+   * for them and only their RESPONSES are held, so the server genuinely
+   * commits press A's reorder and this stays a test about what the client does
+   * with the answers rather than about the network.
+   *
+   * Mutation target: delete the `categoryReadSeq++` in `moveCategory` — both
+   * assertions below must FAIL. (The `mine === categoryReadSeq` guard in
+   * `refreshCategoryPicker` is the other half and is `j`'s.)
+   */
+  console.log("--- k: a press retires openDialog's own in-flight read (review round 3, finding 1, second half) ---");
+
+  await ev(`(()=>{
+    const real = window.__jRealFetch;
+    window.__kRealFetch = real;
+    window.__kHeldGet = false;
+    window.__kHeldPost = false;
+    window.__kGetDelivered = false;
+    let capturedGet = false;
+    let capturedPost = false;
+    const heldGet = new Promise((res) => { window.__kReleaseGet = res; });
+    const heldPost = new Promise((res) => { window.__kReleasePost = res; });
+    window.fetch = (url, opts) => {
+      const path = String(url);
+      const method = (opts?.method ?? 'GET').toUpperCase();
+      // openDialog's own fire-and-forget refetch: fired for real NOW, so its
+      // body is the order BEFORE the press below, and delivered only once
+      // this script releases it.
+      if (!capturedGet && path.endsWith('/api/categories') && method === 'GET') {
+        capturedGet = true;
+        const inFlight = real(url, opts);
+        window.__kHeldGet = true;
+        return heldGet.then(() => inFlight).then((res) => {
+          window.__kGetDelivered = true;
+          return res;
+        });
+      }
+      // Press A's own write: it really reaches the server, but its ANSWER is
+      // held, so moveCategory is parked before its own refetch can start —
+      // which is the whole point. Nothing newer has taken a read ticket while
+      // the stale one lands.
+      if (!capturedPost && path.endsWith('/api/categories/reorder') && method === 'POST') {
+        capturedPost = true;
+        const inFlight = real(url, opts);
+        window.__kHeldPost = true;
+        return heldPost.then(() => inFlight);
+      }
+      // Every later reorder write goes straight through, counted so the block
+      // below can wait for the second press's own POST to settle without
+      // polling the ORDER it paints — a predicate on the order would be a
+      // waitUntil that THROWS under the mutation this block exists to
+      // catch, aborting the suite before its checks can report it.
+      if (path.endsWith('/api/categories/reorder') && method === 'POST') {
+        return real(url, opts).then((res) => { window.__kPosts++; return res; });
+      }
+      return real(url, opts);
+    };
+    window.__kPosts = 0;
+    return true;
+  })()`);
+
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__kHeldGet === true`,
+    { what: "openDialog's own refetch to be captured and held" });
+
+  // The manage list is drawn synchronously by `openDialog` from
+  // `state.categories` as the dashboard left it, so there is a real order here
+  // to move even with the dialog's own read still out.
+  const beforeK = await readManage();
+  ck('sanity: three or more categories with the dialog’s own read still in flight',
+    beforeK.names.length >= 3, JSON.stringify(beforeK));
+  const [k0, k1, k2] = beforeK.names;
+
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__kHeldPost === true`,
+    { what: "press A's write to reach the server and have its answer held" });
+  await waitUntil(ev,
+    `document.querySelectorAll(
+      '#category-manage .category-manage-name')[0]?.textContent.trim() === ${JSON.stringify(k1)}`,
+    { what: "press A's optimistic move to paint" });
+
+  // Deliver the dialog's own pre-move answer, now — with press A parked on its
+  // held POST, so no newer read exists to supersede this one.
+  await ev(`window.__kReleaseGet(); true`);
+  await waitUntil(ev, `window.__kGetDelivered === true`,
+    { what: "openDialog's held reply to be delivered to api()" });
+  await sleep(500);
+
+  const afterK = await readManage();
+  ck("k: the dialog's own pre-move read did not paint the optimistic move away",
+    afterK.names.slice(0, 3).join('|') === [k1, k0, k2].join('|'),
+    JSON.stringify({ before: beforeK.names, after: afterK.names,
+      expected: [k1, k0, k2] }));
+
+  // THE assertion: a press made inside that window computes its payload from
+  // whatever the list now holds, so a reverted list is written back to the
+  // server and outlives the self-heal. The SECOND row's ↓, which reaches a
+  // different order from each of the two candidate lists.
+  await ev(`[...document.querySelectorAll(
+    '#category-manage .category-manage-row')][1]
+    .querySelector('.category-move-down').click(); true`);
+  await waitUntil(ev, `window.__kPosts >= 1`,
+    { what: "the second press's own write to reach the server" });
+  await ev(`window.__kReleasePost(); true`);
+  await sleep(800);
+  await ev(`window.fetch = window.__kRealFetch; true`);
+
+  const kServerOrder = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('k: THE assertion: the press made in that window wrote the moved order, not the reverted one',
+    kServerOrder.slice(0, 3).join('|') === [k1, k2, k0].join('|'),
+    JSON.stringify({ kServerOrder, expected: [k1, k2, k0] }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after k' });
+
+  /* Move a name one slot in a list of names, the way `moveCategory` does.
+     Shared by l and m below, which each have to say what THREE different
+     candidate orders would be — the fixed one, the one the mutation installs,
+     and what a further press writes from each. */
+  const moveBy = (names, name, delta) => {
+    const out = names.slice();
+    const i = out.indexOf(name);
+    out.splice(i + delta, 0, ...out.splice(i, 1));
+    return out;
+  };
+
+  /* ---------- l: `/overview` is a category READ too, and a press retires it
+     (review round 4, finding 1) ----------
+   *
+   * `j` and `k` cover the two reads this file starts itself. The third writer
+   * of `state.categories` lives in another module and had no ticket at all:
+   * `load()` (ui/dashboard.js) assigns `data.categories` from `/overview`, and
+   * `announce()` sends every category mutation in this dialog EXCEPT
+   * `moveCategory` through `'reload'`, which is exactly what calls `load()`.
+   *
+   * The gesture is ordinary rather than contrived, and that is the point of
+   * building the block this way round. A category is created at
+   * `MAX(position) + 1`, so a fresh one lands at the BOTTOM of the manage list
+   * — which is precisely where you then press ↑. That press falls inside the
+   * round trip the Add's own `announce()` started, and `/overview` computes
+   * every habit's window plus `categorySummaries` against a reorder's few
+   * `UPDATE`s, so it is the one likely to lose the race.
+   *
+   * `load()` repaints the DASHBOARD and not the manage list, so under the
+   * unfixed code nothing on screen contradicts the move — the manage list goes
+   * on showing it while the store no longer does. Both halves are asserted:
+   * the dashboard's own section order, which is drawn straight from
+   * `state.categories` (hence `groupByCategory`, switched on for this block
+   * and back off after it, as `h` does), and then what the NEXT press writes
+   * to the server, which is the half that outlives the self-heal.
+   *
+   * Mutation target: drop the `categoryRead === state.categoryReadSeq` guard
+   * on `state.categories = data.categories` in `dashboard.js`'s `load()` —
+   * both assertions below must FAIL.
+   */
+  console.log("--- l: /overview is a category read too, and a press retires it (review round 4, finding 1) ---");
+
+  const L_NEW = 'Zzz Reorder L';
+
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: true }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .category-section-header')].length > 0`,
+    { what: 'the grouped dashboard to load for l' });
+
+  // Count in flight before opening, so the wait below catches `openDialog`'s
+  // own fire-and-forget refetch rather than a page that merely has content —
+  // same reason `j` and `2a` install theirs first.
+  await ev(`(()=>{
+    window.__lPending = 0;
+    window.__lRealFetch = window.fetch;
+    const real = window.__lRealFetch;
+    window.fetch = (...args) => {
+      window.__lPending++;
+      return real(...args).finally(() => { window.__lPending--; });
+    };
+    return true;
+  })()`);
+  // `#btn-new` and not `openHabitByName`: `announce()` only reaches `'reload'`
+  // — and so `load()` — while `dashboardShowing()` is true, which it is not
+  // over a habit's own page.
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open from the dashboard for l' });
+  await waitUntil(ev, `window.__lPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving for l" });
+  await sleep(300);
+
+  const beforeL = (await readManage()).names;
+  ck('sanity: two or more categories before l adds its own',
+    beforeL.length >= 2, JSON.stringify(beforeL));
+
+  // The hold, armed on the FIRST `/overview` only: fired for real at the
+  // moment `load()` asks for it, so its body is the order as of the Add and
+  // knows nothing of the press below, and delivered only once this script
+  // releases it. Reorder writes and category reads are counted so the waits
+  // below can be on request settlement rather than on a painted order — a
+  // `waitUntil` on the EXPECTED order THROWS under the mutation this block
+  // exists to catch, aborting the suite before its own `ck`s can report it.
+  await ev(`(()=>{
+    const real = window.__lRealFetch;
+    window.__lHeld = false;
+    window.__lDelivered = false;
+    window.__lPosts = 0;
+    window.__lGets = 0;
+    let captured = false;
+    const held = new Promise((res) => { window.__lRelease = res; });
+    window.fetch = (url, opts) => {
+      const path = String(url);
+      const method = (opts?.method ?? 'GET').toUpperCase();
+      if (!captured && path.includes('/api/overview')) {
+        captured = true;
+        const inFlight = real(url, opts);
+        window.__lHeld = true;
+        return held.then(() => inFlight).then((res) => {
+          window.__lDelivered = true;
+          return res;
+        });
+      }
+      if (path.endsWith('/api/categories/reorder') && method === 'POST') {
+        return real(url, opts).then((res) => { window.__lPosts++; return res; });
+      }
+      if (path.endsWith('/api/categories') && method === 'GET') {
+        return real(url, opts).then((res) => { window.__lGets++; return res; });
+      }
+      return real(url, opts);
+    };
+    return true;
+  })()`);
+
+  // Add a category. Its handler awaits its own `refreshCategoryPicker()` and
+  // THEN calls `announce()`, so by the time the `/overview` is captured the
+  // new row is already in the list and the arrows are live.
+  await ev(`(()=>{
+    document.getElementById('category-new-name').value = ${JSON.stringify(L_NEW)};
+    document.getElementById('category-new-add').click();
+    return true;
+  })()`);
+  await waitUntil(ev, `window.__lHeld === true`,
+    { what: "the Add's own announce() to put /overview on the wire, and that request to be held" });
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#category-manage .category-manage-name')]
+       .map(n => n.textContent.trim()).at(-1) === ${JSON.stringify(L_NEW)}`,
+    { what: 'the new category to arrive at the bottom of the manage list' });
+
+  const addedL = [...beforeL, L_NEW];
+  const movedL = moveBy(addedL, L_NEW, -1);
+
+  await ev(`window.__lGets = 0; true`);
+  // ↑ on the last row — the new one. The ordinary next thing to do with a
+  // category that was just created at the bottom.
+  await ev(`(()=>{
+    const rows = [...document.querySelectorAll('#category-manage .category-manage-row')];
+    rows[rows.length - 1].querySelector('.category-move-up').click();
+    return true;
+  })()`);
+  await waitUntil(ev, `window.__lPosts >= 1`,
+    { what: "the press's own write to reach the server" });
+  await waitUntil(ev, `window.__lGets >= 1`,
+    { what: "the press's own refetch to land" });
+
+  // Deliver the pre-move `/overview` now — the exact moment the unguarded code
+  // paints its categories over the press's.
+  await ev(`window.__lRelease(); true`);
+  await waitUntil(ev, `window.__lDelivered === true`,
+    { what: 'the held /overview reply to be delivered to load()' });
+  await sleep(600);
+
+  const sectionsAfterL = await ev(`[...document.querySelectorAll(
+    '#grid .category-section-header:not(.uncategorised) .category-section-name')]
+    .map(n => n.textContent.trim())`);
+  ck('l: the stale /overview did not install its pre-move order over the press',
+    sectionsAfterL.join('|') === movedL.join('|'),
+    JSON.stringify({ sectionsAfterL, expected: movedL, wouldBeStale: addedL }));
+
+  // THE assertion: the compounding half, and the one that outlives the
+  // self-heal. A further press computes its payload from `state.categories` as
+  // it stands, so a stale store is written straight back to the server. The
+  // row is found by NAME rather than by index, because the manage list — which
+  // `load()` never rebuilt — shows the moved order under either outcome, and
+  // the whole question is what the STORE behind it holds.
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('#category-manage .category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name').textContent.trim() === ${JSON.stringify(L_NEW)});
+    row.querySelector('.category-move-up').click();
+    return true;
+  })()`);
+  await waitUntil(ev, `window.__lPosts >= 2`,
+    { what: "the second press's own write to reach the server" });
+  await sleep(400);
+  await ev(`window.fetch = window.__lRealFetch; true`);
+
+  const expectedServerL = moveBy(movedL, L_NEW, -1);
+  const lServerOrder = await categoryNames();
+  ck('l: THE assertion: the next press wrote the newer order to the server, not a regressed one',
+    lServerOrder.join('|') === expectedServerL.join('|'),
+    JSON.stringify({ lServerOrder, expected: expectedServerL, wouldBeStale: movedL }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after l' });
+  // Back to where `h` left the account, so nothing below inherits l's grouping.
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: false }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].length > 0
+      && document.querySelectorAll('#grid .category-section-header').length === 0`,
+    { what: 'the ungrouped dashboard to come back after l' });
+
+  /* ---------- 2b: a boundary press must not hand the keyboard the arrow that
+     UNDOES it (review round 4, finding 2) ----------
+   *
+   * The arrows exist because drag is "unreachable by keyboard"
+   * (`attachDragHandlers`), so the keyboard is this control's headline path,
+   * and `restoreFocus`'s generic fallback is the wrong answer on exactly this
+   * row. It hands focus to the first still-operable `[data-focus-key]` in the
+   * same parent — right for `Today`, whose neighbour does something unrelated,
+   * and wrong here, where ↑ and ↓ are the row's ONLY two focus keys and each
+   * is the other's undo. The press that lands a category at row 0 disables its
+   * ↑ and moved focus one button right onto its ↓; the next Enter sent it back
+   * down, and a held Enter ping-ponged the row between the two ends with a
+   * `POST /categories/reorder` per step.
+   *
+   * Both halves are asserted, because the second is the one that reaches
+   * storage: where focus went, and then what a further Enter actually does.
+   * The Enter is a REAL key event for the reason the implicit-submission block
+   * above gives — a script-made `KeyboardEvent` does not activate a button,
+   * so a test built on one passes against the unfixed code.
+   *
+   * Two mutation targets, because the two halves fail differently. Put
+   * `restoreFocus($('#category-manage'), focused)` back in place of
+   * `restoreArrowFocus(list, focused)` in `moveCategory`: the "not the ↓" check
+   * and BOTH of the Enter checks must fail, while "focus stays inside the list"
+   * still passes — that one is not about this bug and says so. Then instead
+   * drop the `list.focus(...)` fallback from `restoreArrowFocus`, leaving a
+   * boundary with nothing to restore to: that one check, and only it, must
+   * fail.
+   */
+  console.log('--- 2b: a boundary press does not hand the keyboard the arrow that undoes it (review round 4, finding 2) ---');
+
+  await ev(`(()=>{
+    window.__bPending = 0;
+    window.__bRealFetch = window.fetch;
+    const real = window.__bRealFetch;
+    window.fetch = (...args) => {
+      window.__bPending++;
+      return real(...args).finally(() => { window.__bPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__bPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving for 2b" });
+  await sleep(300);
+
+  const beforeB = (await readManage()).names;
+  ck('sanity: two or more categories, so a row can be walked to the top boundary',
+    beforeB.length >= 2, JSON.stringify(beforeB));
+
+  // The row at index 1: one press of its ↑ lands it at index 0, where that very
+  // ↑ disables itself. Focus, click and the read of where focus ended up all
+  // inside ONE `Runtime.evaluate`, for the reason `2a` gives — a separate call
+  // between them hands anything else a whole CDP round trip to move focus
+  // first. `moveCategory`'s synchronous prefix (splice, repaint, its own focus
+  // restore) has completed by the time `.click()` returns.
+  const pressedB = await ev(`(()=>{
+    const rows = [...document.querySelectorAll('#category-manage .category-manage-row')];
+    const row = rows[1];
+    const name = row.querySelector('.category-manage-name').textContent.trim();
+    const upKey = row.querySelector('.category-move-up').dataset.focusKey;
+    const downKey = row.querySelector('.category-move-down').dataset.focusKey;
+    row.querySelector('.category-move-up').focus();
+    row.querySelector('.category-move-up').click();
+    const el = document.activeElement;
+    const list = document.getElementById('category-manage');
+    return {
+      name, upKey, downKey,
+      focusKey: el && el.dataset ? el.dataset.focusKey ?? null : null,
+      onBody: el == null || el === document.body,
+      inList: !!el && list.contains(el),
+    };
+  })()`);
+
+  ck('2b: the press that disables ↑ does not move focus onto the ↓ that would undo it',
+    pressedB.focusKey !== pressedB.downKey, JSON.stringify(pressedB));
+  ck('…and focus stays inside the manage list rather than dropping to <body>',
+    pressedB.onBody === false && pressedB.inList === true, JSON.stringify(pressedB));
+
+  // Let the press's own POST and refetch settle first, so the SECOND focus
+  // restore has had its chance too: under the unfixed code its
+  // `activeElement === document.body` guard sees focus sitting on the ↓ and
+  // leaves it there, which is the state a held Enter then acts on.
+  await waitUntil(ev, `window.__bPending === 0`,
+    { what: "the boundary press's own write and refetch to settle" });
+  await sleep(300);
+
+  const afterPressB = (await readManage()).names;
+  ck('2b sanity: the press did move the row to the top',
+    afterPressB[0] === pressedB.name,
+    JSON.stringify({ beforeB, afterPressB, moved: pressedB.name }));
+
+  await pressEnter();
+  await sleep(700);
+
+  ck('2b sanity: Enter did not submit the habit form out from under the list',
+    (await ev(`document.getElementById('habit-dialog').open`)) === true);
+
+  const afterEnterB = (await readManage()).names;
+  ck('2b: THE assertion: one more Enter does not walk the category straight back down',
+    afterEnterB.join('|') === afterPressB.join('|'),
+    JSON.stringify({ afterPressB, afterEnterB, wouldBeReversed: beforeB }));
+
+  await ev(`window.fetch = window.__bRealFetch; true`);
+  const bServerOrder = await categoryNames();
+  ck('…and no reversal was written to the server either',
+    bServerOrder.join('|') === afterPressB.join('|'),
+    JSON.stringify({ bServerOrder, expected: afterPressB }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after 2b' });
+
+  /* ---------- m: a press whose write FAILED must not revert over a newer one
+     (review round 4, finding 3) ----------
+   *
+   * `moveCategory` captures `previous` before its own splice, so the revert in
+   * its catch is a writer of `state.categories` exactly as stale as the
+   * refetch `j` covers — and until this it asked none of the same questions.
+   * Two presses overlap, the EARLIER one fails and resolves LAST (a 5xx, a
+   * dropped connection, or the write limiter's 429, which is what a held arrow
+   * key reaches), and an order two presses old goes back into the store with
+   * nothing left in flight to correct it.
+   *
+   * Press A's write is answered with a 500 that never reaches the server, so
+   * the only order the server holds is press B's — which, its payload having
+   * been computed after A's splice, already carries A's move. That is what
+   * makes NOT reverting the accurate answer here as well as the safe one.
+   *
+   * Mutation target: drop the `mine === state.categoryReadSeq` half of the
+   * revert guard in `moveCategory`'s catch — both assertions below must FAIL.
+   */
+  console.log('--- m: a failed press does not revert over a newer one (review round 4, finding 3) ---');
+
+  await ev(`(()=>{
+    window.__mPending = 0;
+    window.__mRealFetch = window.fetch;
+    const real = window.__mRealFetch;
+    window.fetch = (...args) => {
+      window.__mPending++;
+      return real(...args).finally(() => { window.__mPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__mPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving for m" });
+  await sleep(300);
+
+  await ev(`(()=>{
+    const real = window.__mRealFetch;
+    window.__mHeld = false;
+    window.__mDelivered = false;
+    window.__mPosts = 0;
+    window.__mGets = 0;
+    let captured = false;
+    const held = new Promise((res) => { window.__mRelease = res; });
+    window.fetch = (url, opts) => {
+      const path = String(url);
+      const method = (opts?.method ?? 'GET').toUpperCase();
+      // Press A's write: refused, never sent, and the refusal held until B has
+      // finished. A real status rather than a rejection, so \`api()\` throws a
+      // plain Error with no \`queued\` on it — the branch under test.
+      if (!captured && path.endsWith('/api/categories/reorder') && method === 'POST') {
+        captured = true;
+        window.__mHeld = true;
+        return held.then(() => {
+          window.__mDelivered = true;
+          return new Response(JSON.stringify({ error: 'reorder refused' }),
+            { status: 500, headers: { 'Content-Type': 'application/json' } });
+        });
+      }
+      if (path.endsWith('/api/categories/reorder') && method === 'POST') {
+        return real(url, opts).then((res) => { window.__mPosts++; return res; });
+      }
+      if (path.endsWith('/api/categories') && method === 'GET') {
+        return real(url, opts).then((res) => { window.__mGets++; return res; });
+      }
+      return real(url, opts);
+    };
+    return true;
+  })()`);
+
+  const beforeM = (await readManage()).names;
+  ck('sanity: three or more categories, so two presses reach three distinct orders for m',
+    beforeM.length >= 3, JSON.stringify(beforeM));
+  const afterAM = moveBy(beforeM, beforeM[0], 1);
+  const afterBM = moveBy(afterAM, beforeM[0], 1);
+
+  // Press A: the first row's ↓.
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__mHeld === true`,
+    { what: "press A's write to be captured and refused" });
+  await waitUntil(ev,
+    `document.querySelectorAll(
+      '#category-manage .category-manage-name')[0]?.textContent.trim() === ${JSON.stringify(beforeM[1])}`,
+    { what: "press A's optimistic move to paint" });
+
+  // Press B, while A is still parked: the SECOND row's ↓, which is the
+  // category A just displaced. Its payload therefore carries A's move, and it
+  // commits for real.
+  await ev(`[...document.querySelectorAll(
+    '#category-manage .category-manage-row')][1]
+    .querySelector('.category-move-down').click(); true`);
+  await waitUntil(ev, `window.__mPosts >= 1`,
+    { what: "press B's own write to reach the server" });
+  await waitUntil(ev, `window.__mGets >= 1`,
+    { what: "press B's own refetch to install the server's order" });
+
+  await ev(`window.__mRelease(); true`);
+  await waitUntil(ev, `window.__mDelivered === true`,
+    { what: "press A's held refusal to be delivered to api()" });
+  await sleep(500);
+
+  const afterM = (await readManage()).names;
+  ck('m: a press whose write failed does not revert over the order a newer press installed',
+    afterM.join('|') === afterBM.join('|'),
+    JSON.stringify({ beforeM, afterM, expected: afterBM, wouldBeReverted: beforeM }));
+
+  // THE assertion, the same compounding half `j` and `l` end on: a further
+  // press computes its payload from the store, so a reverted store is written
+  // back and the SERVER holds the regression.
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__mPosts >= 2`,
+    { what: "the third press's own write to reach the server" });
+  await sleep(400);
+  await ev(`window.fetch = window.__mRealFetch; true`);
+
+  const expectedServerM = moveBy(afterBM, afterBM[0], 1);
+  const mServerOrder = await categoryNames();
+  ck('m: THE assertion: the next press wrote the newer order to the server, not the reverted one',
+    mServerOrder.join('|') === expectedServerM.join('|'),
+    JSON.stringify({ mServerOrder, expected: expectedServerM,
+      wouldBeStale: moveBy(beforeM, beforeM[0], 1) }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after m' });
+
+  /* ---------- 2a: focus survives the SECOND repaint too, not only the
+     optimistic one (issue #65 step 2) ----------
+   *
+   * `moveCategory` restores focus after its own optimistic `repaintCategories()`
+   * — that is `d`/`a` above, implicitly — but `refreshCategoryPicker`'s GET runs
+   * a SECOND `repaintCategories()` from the server's answer, whose
+   * `renderCategoryManage` does `list.replaceChildren()` and drops focus to
+   * `<body>` with nothing to restore it. At a human pace (press, wait, look,
+   * press again) a keyboard user loses focus on every single press, which is
+   * the exact defect the optimistic restore claims to have fixed.
+   *
+   * Waiting only for the OPTIMISTIC repaint (a `waitUntil` on the manage list's
+   * order, as `a` above does) would pass against the unfixed code, because that
+   * repaint's own restore is the one thing step 1 already got right. The
+   * button's `data-focus-key` is identical before and after the refetch, so the
+   * only way to tell the two repaints apart from outside is NODE IDENTITY: stash
+   * a reference to the button focus landed on right after the click (the
+   * optimistic generation) and poll for a DIFFERENT node under the same key
+   * (the refetch's generation) before reading `document.activeElement`.
+   *
+   * Mutation target: delete the post-refetch `restoreFocus` call in
+   * `moveCategory` — this must FAIL, because a fresh node exists but nothing
+   * ever calls `.focus()` on it, so focus stays on the stale, now-detached
+   * optimistic node (or wherever the detach sends it).
+   */
+  console.log('--- 2a: focus survives the post-refetch repaint too (issue #65 step 2) ---');
+
+  // `openDialog`'s own fire-and-forget `refreshCategoryPicker()` call (see its
+  // docstring above `refreshCategoryPicker`) can land at any point after the
+  // dialog opens and rebuilds `#category-manage` on its own — tearing out
+  // whatever this block focuses next if it races it, exactly the hazard `a`–`f`
+  // above already wait out before touching the list. Watching for the SETTLED
+  // CONTENT (as `a`–`f` do) is not enough here specifically, because nothing
+  // else in this account has changed since `f` left it — the dialog's own
+  // SYNCHRONOUS first render already shows the settled order before that
+  // fetch has even landed, so a content check passes vacuously and the fetch
+  // can still land later, mid-interaction. Count in-flight fetches instead —
+  // installed fresh right before opening the dialog, so it catches exactly
+  // the one this open triggers — and wait for the count to reach zero, with a
+  // settle afterwards for the synchronous repaint that follows the fetch by a
+  // tick.
+  await ev(`(()=>{
+    window.__catPending = 0;
+    window.__catRealFetch = window.__catRealFetch || window.fetch;
+    const real = window.__catRealFetch;
+    window.fetch = (...args) => {
+      window.__catPending++;
+      return real(...args).finally(() => { window.__catPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__catPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving" });
+  await sleep(300);
+
+  // Focus, click and the generation-one capture all happen inside ONE
+  // `Runtime.evaluate` — a separate `ev()` call between `.focus()` and
+  // `.click()` gave the dialog's own settling (or anything else) a whole CDP
+  // round trip to steal focus back to `<body>` before the click ever landed,
+  // which read at `moveCategory`'s own entry as `focused: null` and made the
+  // rest of this block meaningless. `.click()` is synchronous and does not
+  // itself move focus, so this also still captures the OPTIMISTIC node:
+  // moveCategory's synchronous prefix (splice, optimistic repaint, its own
+  // `restoreFocus`) has already completed by the time `.click()` returns, and
+  // nothing async can run until this whole script yields.
+  const downTarget = await ev(`(()=>{
+    const btn = [...document.querySelectorAll('#category-manage .category-move-down')]
+      .find(b => !b.disabled);
+    const key = btn.dataset.focusKey;
+    btn.focus();
+    btn.click();
+    window.__catmoveGen1 = document.querySelector('[data-focus-key=' + JSON.stringify(key) + ']');
+    return key;
+  })()`);
+
+  // Poll for the REFETCH's own repaint — a THIRD `list.replaceChildren()`
+  // since the click, distinguishable from the optimistic one only by node
+  // identity, since every attribute including `data-focus-key` is the same.
+  await waitUntil(ev,
+    `(()=>{
+      const btn = document.querySelector('[data-focus-key=${JSON.stringify(downTarget)}]');
+      return !!btn && btn !== window.__catmoveGen1;
+    })()`,
+    { what: "refreshCategoryPicker's own repaint (a fresh node under the same focus key)" });
+
+  const focusAfterRefetch = await ev(`(()=>{
+    const el = document.activeElement;
+    return el && el.dataset ? el.dataset.focusKey ?? null : null;
+  })()`);
+  ck('2a: focus is restored again after the post-move refetch, not only the optimistic repaint',
+    focusAfterRefetch === downTarget,
+    JSON.stringify({ expected: downTarget, focusAfterRefetch }));
+
+  // …and the guard on that second restore actually guards: by the time the GET
+  // lands the user may have deliberately moved focus elsewhere, and the restore
+  // above must not steal it back. Same shape as above — click, capture the
+  // optimistic generation's node — except focus is moved to Cancel immediately
+  // after the click returns, which is still before the network round trip the
+  // refetch needs, and held there until a fresh (refetch) node is confirmed to
+  // exist under the moved arrow's own key.
+  //
+  // Mutation target: make the post-refetch restore in `moveCategory`
+  // unconditional (drop the `activeElement == null || … === document.body`
+  // guard) — this must FAIL, because an unconditional restore pulls focus back
+  // from Cancel onto the arrow the moment the refetch's repaint runs.
+  // Focus, click and the deliberate focus-steal to Cancel all happen inside
+  // ONE `Runtime.evaluate`, for the same reason `downTarget` above does: a
+  // separate call between `.focus()` and `.click()` gives anything else —
+  // including the app itself — a whole CDP round trip to move focus first,
+  // and moveCategory's synchronous prefix (splice, optimistic repaint, its
+  // own `restoreFocus`) completes before `.click()` returns, so this is also
+  // guaranteed to land before the network round trip the refetch needs.
+  const upTarget = await ev(`(()=>{
+    const btn = [...document.querySelectorAll('#category-manage .category-move-up')]
+      .find(b => !b.disabled);
+    const key = btn.dataset.focusKey;
+    btn.focus();
+    btn.click();
+    window.__catmoveGen1b = document.querySelector('[data-focus-key=' + JSON.stringify(key) + ']');
+    document.getElementById('dialog-cancel').focus();
+    return key;
+  })()`);
+  await waitUntil(ev,
+    `(()=>{
+      const btn = document.querySelector('[data-focus-key=${JSON.stringify(upTarget)}]');
+      return !!btn && btn !== window.__catmoveGen1b;
+    })()`,
+    { what: "the refetch's own repaint to land, with focus deliberately parked on Cancel" });
+
+  const focusAfterDeliberateMove = await ev(
+    `document.activeElement === document.getElementById('dialog-cancel')`);
+  ck('…and does not steal focus back once the user has deliberately moved it elsewhere',
+    focusAfterDeliberateMove === true, JSON.stringify({ focusAfterDeliberateMove }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after the focus-restore checks' });
+
   /* ---------- review round 5: a QUEUED category write is DURABLE, so the two
      controls have to move with it ----------
 
@@ -1658,6 +2925,358 @@ try {
   ck('…and both queued category writes actually landed',
     renamedOnServer.names.includes('Wellness') && renamedOnServer.work === false,
     JSON.stringify(renamedOnServer));
+
+  /* ---------- g: an offline reorder keeps its order (issue #65 step 1) ----------
+   *
+   * The very end of the suite, reusing round 5's already-installed
+   * `window.__offline` fetch stub rather than a second one, over the dialog
+   * round 5 left open (`RENAMED_HABIT`'s own, mid-edit) and the account round
+   * 5 left it — Work deleted, Fitness renamed to Wellness — which is a known
+   * state with more than one category still on it.
+   *
+   * Mutation target: change `moveCategory`'s catch to
+   * `state.categories = previous; repaintCategories();` unconditionally —
+   * the same mistake `persistOrder` (dashboard.js) makes for the habit list —
+   * this must FAIL.
+   */
+  console.log('--- g: an offline reorder keeps its order (issue #65 step 1) ---');
+
+  await ev(`(async()=>{
+    const { clearAll } = await import('/shared/offline.js');
+    await clearAll();
+    return true;
+  })()`);
+
+  const beforeOffline = await readManage();
+  ck('sanity: more than one category is left to move, in the dialog round 5 left open',
+    beforeOffline.names.length > 1, JSON.stringify(beforeOffline));
+
+  await ev(`window.__offline = true; true`);
+  const [offlineFirst, offlineSecond] = beforeOffline.names;
+  // Blanked in the SAME evaluate as the click, for the reason the queued-rename
+  // block above is: round 5's queued delete/rename left `#category-hint`
+  // reading "Saved offline" and nothing between there and here clears it, so
+  // the wait below would otherwise be a predicate that was ALREADY TRUE — it
+  // could resolve on its first poll, before `moveCategory`'s catch has run,
+  // and `readManage()` would then read the optimistic splice from BEFORE the
+  // `try` rather than the outcome of the catch. `categoryHint` is the LAST
+  // statement in `moveCategory`'s catch, after the conditional revert, so the
+  // sentence appearing again means that decision has already been made.
+  await ev(`(()=>{
+    document.getElementById('category-hint').textContent = '';
+    document.querySelector(
+      '#category-manage .category-manage-row .category-move-down').click();
+    return true;
+  })()`);
+  await waitUntil(ev,
+    `document.getElementById('category-hint').textContent.includes('Saved offline')`,
+    { what: 'the offline reorder to be staged and reported as queued' });
+
+  const afterOffline = await readManage();
+  const offlineHint = await ev(`(()=>({
+    text: document.getElementById('category-hint').textContent,
+    error: document.getElementById('category-hint').classList.contains('error'),
+  }))()`);
+  ck('g: THE assertion: an offline press keeps the new order rather than reverting it',
+    afterOffline.names[0] === offlineSecond && afterOffline.names[1] === offlineFirst,
+    JSON.stringify({ before: beforeOffline.names, after: afterOffline.names }));
+  ck('…and reports it as saved offline, not as an error',
+    offlineHint.text.includes('Saved offline') && offlineHint.error === false,
+    JSON.stringify(offlineHint));
+
+  await ev(`window.__offline = false; true`);
+
+  /* ---------- 2c: a boundary press keeps the row it moved IN VIEW
+     (review round 3, finding 2) ----------
+   *
+   * `2b` fixed where the keyboard goes at a boundary and, in doing so, took
+   * away the thing that had been carrying the VIEW. `.focus()` scrolls its
+   * target into view as a side effect, so while focus followed the row up the
+   * list the scroll came along for free; a boundary parks focus on the list
+   * itself with `preventScroll`, and the last press of a walk — the one that
+   * reaches row 0 — was then the only press that did not follow its row.
+   * `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
+   * rows, about four visible, and `moveCategory` puts `scrollTop` back to its
+   * press-time offset across BOTH repaints. So from a list scrolled a single
+   * row down, the category arrives above the fold and the press that was
+   * supposed to land it at the top reads as having made it vanish.
+   *
+   * Both repaints are asserted, because the fix is two calls and each fails on
+   * its own. The second is the one a reader would think already covered: after
+   * the refetch, `restoreArrowFocus` is guarded on focus having been dropped to
+   * `<body>`, which at a boundary it has NOT been — focus is parked on the list
+   * — so the forced `scrollTop` there had nothing to correct it either.
+   *
+   * Two mutation targets, one per call. Drop `revealCategoryRow(list, id)` from
+   * after the optimistic `list.scrollTop = scrollTop` in `moveCategory`: the
+   * first assertion must FAIL. Drop the one inside the post-refetch
+   * `if (editingCategoryId == null)` block instead: the second must FAIL, and
+   * only it.
+   */
+  console.log('--- 2c: a boundary press keeps the row it moved in view (review round 3, finding 2) ---');
+
+  // Enough rows for the list to actually scroll. Through the API rather than
+  // the form because what this block is about only begins once it overflows,
+  // and `scrollable` below is asserted rather than assumed — with a list that
+  // fits, every check here passes against the unfixed code.
+  await ev(`(async()=>{
+    for (let i = 0; i < 6; i++) {
+      await fetch('/api/categories', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Zzz Scroll ' + i, color: '#4f46e5' }) });
+    }
+    return true;
+  })()`);
+
+  // A fresh page rather than round 5's dialog and stubbed `fetch`: this block
+  // and `n` below want an ordinary app, and `g` left the store believing it is
+  // offline. `#btn-new` because the manage list is the same in either mode and
+  // that one depends on no habit's name surviving the renames above.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].length > 0`,
+    { what: 'the dashboard to come back for 2c' });
+  await ev(`(async()=>{
+    const { clearAll } = await import('/shared/offline.js');
+    await clearAll();
+    return true;
+  })()`);
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open for 2c' });
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#category-manage .category-manage-name')]
+       .filter(n => n.textContent.trim().startsWith('Zzz Scroll')).length === 6`,
+    { what: "2c's own categories to reach the manage list" });
+
+  // Count the refetch, so the second half below waits on the app rather than on
+  // a duration.
+  await ev(`(()=>{
+    window.__cGets = 0;
+    window.__cPrevFetch = window.fetch;
+    const prev = window.__cPrevFetch;
+    window.fetch = (url, opts) => {
+      const p = prev(url, opts);
+      return (String(url).endsWith('/api/categories')
+        && (opts?.method ?? 'GET').toUpperCase() === 'GET')
+        ? p.then((res) => { window.__cGets++; return res; })
+        : p;
+    };
+    return true;
+  })()`);
+
+  // Scrolled by exactly one row pitch: the first row is off the top and the
+  // second sits at the fold, which is the state a user pressing ↑ on that
+  // second row is in.
+  const scrolledC = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const rows = [...list.children];
+    list.scrollTop = rows[1].offsetTop - rows[0].offsetTop;
+    return {
+      rows: rows.length,
+      scrollTop: list.scrollTop,
+      scrollable: list.scrollHeight > list.clientHeight,
+    };
+  })()`);
+  ck('2c sanity: the manage list overflows and is scrolled off its first row',
+    scrolledC.scrollable === true && scrolledC.scrollTop > 0,
+    JSON.stringify(scrolledC));
+
+  // Focus, click and both reads inside ONE `Runtime.evaluate`, for the reason
+  // `2a` and `2b` give. `moveCategory`'s synchronous prefix — splice, repaint,
+  // scroll restore, reveal, focus restore — has completed by the time
+  // `.click()` returns, so this reads the FIRST repaint's outcome.
+  const pressedC = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const row = list.children[1];
+    const id = row.dataset.categoryId;
+    const name = row.querySelector('.category-manage-name').textContent.trim();
+    const before = list.scrollTop;
+    const up = row.querySelector('.category-move-up');
+    up.focus();
+    up.click();
+    const moved = [...list.children].find(li => li.dataset.categoryId === id);
+    const lb = list.getBoundingClientRect();
+    const rb = moved.getBoundingClientRect();
+    return {
+      id, name, before,
+      index: [...list.children].indexOf(moved),
+      scrollTop: list.scrollTop,
+      visible: rb.top >= lb.top - 1 && rb.bottom <= lb.bottom + 1,
+    };
+  })()`);
+  ck('2c sanity: the press moved the row to the top boundary, from a scrolled list',
+    pressedC.index === 0 && pressedC.before > 0, JSON.stringify(pressedC));
+  ck('2c: THE assertion: the press that reaches the boundary leaves the row it moved in view',
+    pressedC.visible === true, JSON.stringify(pressedC));
+
+  await waitUntil(ev, `window.__cGets >= 1`,
+    { what: "the boundary press's own refetch to land and rebuild the list" });
+  await sleep(300);
+
+  const afterRefetchC = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const moved = [...list.children]
+      .find(li => li.dataset.categoryId === ${JSON.stringify(pressedC.id)});
+    const lb = list.getBoundingClientRect();
+    const rb = moved.getBoundingClientRect();
+    return {
+      index: [...list.children].indexOf(moved),
+      scrollTop: list.scrollTop,
+      visible: rb.top >= lb.top - 1 && rb.bottom <= lb.bottom + 1,
+    };
+  })()`);
+  ck("…and the refetch's own repaint does not scroll it back out",
+    afterRefetchC.visible === true, JSON.stringify(afterRefetchC));
+
+  await ev(`window.fetch = window.__cPrevFetch; true`);
+
+  /* ---------- n: the queued DELETE's optimistic removal is a writer of
+     `state.categories` too (review round 3, finding 1) ----------
+   *
+   * `j`, `k`, `l` and `m` pin four of the five halves of `categoryReadSeq`.
+   * This is the fifth, and it is the one a reader working on the reorder
+   * feature would not think to look at: it is not in `moveCategory` at all.
+   *
+   * The delete's `err.queued` branch removes the row from `state.categories`
+   * and repaints — an optimistic write with no read of its own, which is
+   * `moveCategory`'s splice in every structural respect, and it took no ticket.
+   * So `openDialog`'s fire-and-forget refetch, fired before the press existed
+   * and landing after it with the PRE-delete list, had nothing newer to
+   * supersede it and installed the category the branch had just removed
+   * straight back into the store, the manage list and the picker.
+   *
+   * The harm is not a display one, and the round-5 block above is where it is
+   * spelled out in full: that removal is what stops `saveHabit` submitting an
+   * id the replay is about to destroy, and on replay `resolveCategoryId`
+   * answers 400 while `PUT /habits/:id` REPLACES — so the WHOLE habit edit is
+   * dropped as permanently inapplicable, behind a toast naming neither the
+   * habit nor the field. Putting the category back in the picker re-arms
+   * exactly that.
+   *
+   * It needs no prior outage either: `api()` queues a `replayable()` write on
+   * any network error, the 10s `AbortSignal.timeout` included, while a GET is
+   * never pre-empted and can still be answered. The GET here is fired for real
+   * at the moment `openDialog` asks for it — so its body is genuinely the
+   * pre-delete list — and only its RESPONSE is held, which keeps this a test
+   * about what the client does with an answer rather than about a stub.
+   *
+   * Mutation target: drop the `++state.categoryReadSeq` from the `err.queued`
+   * branch in `habit-dialog.js` — THE assertion below must FAIL, while the
+   * sanity check before it (round 5's own property, at the moment of the
+   * delete) still passes. That split is the whole point: the removal was never
+   * broken, only undone a round trip later.
+   */
+  console.log('--- n: a read already on the wire does not resurrect a queued-deleted category (review round 3, finding 1) ---');
+
+  await ev(`(async()=>{
+    const { clearAll } = await import('/shared/offline.js');
+    await clearAll();
+    return true;
+  })()`);
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close before n opens its own' });
+
+  // Holds the FIRST `GET /api/categories` only; every other request goes to the
+  // network unless `__nOffline` is set, which is what makes the DELETE queue.
+  // Offline as a rejecting `fetch` rather than CDP throttling, for the reason
+  // round 5 gives: it is what `api()` actually sees, and the first refusal
+  // flips `state.offline` through `reportUnreachable()`.
+  await ev(`(()=>{
+    const real = window.fetch;
+    window.__nRealFetch = real;
+    window.__nOffline = false;
+    window.__nHeld = false;
+    window.__nDelivered = false;
+    let captured = false;
+    const held = new Promise((res) => { window.__nRelease = res; });
+    window.fetch = (url, opts) => {
+      const path = String(url);
+      const method = (opts?.method ?? 'GET').toUpperCase();
+      if (!captured && method === 'GET' && path.endsWith('/api/categories')) {
+        captured = true;
+        const inFlight = real(url, opts);
+        window.__nHeld = true;
+        return held.then(() => inFlight).then((res) => {
+          window.__nDelivered = true;
+          return res;
+        });
+      }
+      return window.__nOffline
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : real(url, opts);
+    };
+    return true;
+  })()`);
+
+  // `#btn-new` rather than a habit's own page: either fires `openDialog`'s
+  // fire-and-forget refetch, which is the read being held, and this one leaves
+  // the dashboard showing.
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open for n' });
+  await waitUntil(ev, `window.__nHeld === true`,
+    { what: "openDialog's own fire-and-forget refetch to be captured and held" });
+
+  // Drawn synchronously from the store `openDialog` already had, so the rows
+  // are live while its refetch is parked.
+  const beforeN = (await readManage()).names;
+  const victimN = beforeN[0];
+  ck('sanity: a category to delete while a read of the list is parked',
+    beforeN.length >= 2 && !!victimN, JSON.stringify(beforeN));
+
+  // `openDialog` runs `categoryHint('')`, so the wait below is not a predicate
+  // that was already true — the sentence appearing is this delete's own.
+  await ev(`window.__nOffline = true; true`);
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('.category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name').textContent.trim()
+        === ${JSON.stringify(victimN)});
+    row.querySelector('.category-delete').click();
+    return true;
+  })()`);
+  await waitUntil(ev,
+    `document.getElementById('category-hint').textContent.includes('Saved offline')`,
+    { what: 'the delete to be staged in the outbox and reported as queued' });
+
+  const readControlsN = `(()=>({
+    managed: [...document.querySelectorAll('#category-manage .category-manage-name')]
+      .map(n => n.textContent.trim()),
+    offered: [...document.querySelectorAll('#habit-form [name=category_id] option')]
+      .map(o => o.textContent.trim()),
+  }))()`;
+
+  const atDeleteN = await ev(readControlsN);
+  ck('n sanity: the queued delete takes the category out of both controls (round 5, still holding)',
+    !atDeleteN.managed.includes(victimN) && !atDeleteN.offered.includes(victimN),
+    JSON.stringify({ victimN, ...atDeleteN }));
+
+  // Deliver the pre-delete answer now — the exact moment the unticketed code
+  // paints the category back over the removal.
+  await ev(`window.__nRelease(); true`);
+  await waitUntil(ev, `window.__nDelivered === true`,
+    { what: 'the held GET /categories to be delivered to refreshCategoryPicker' });
+  await sleep(500);
+
+  const afterReadN = await ev(readControlsN);
+  ck('n: THE assertion: a read issued before the queued delete does not put the category back',
+    !afterReadN.managed.includes(victimN) && !afterReadN.offered.includes(victimN),
+    JSON.stringify({ victimN, ...afterReadN, wouldBeResurrected: beforeN }));
+
+  // And the write it was hiding was real: replay it, so what the assertion
+  // above protects is shown to have been a durable delete rather than a hint.
+  await ev(`window.fetch = window.__nRealFetch; window.__nOffline = false; true`);
+  const flushedN = await ev(`(async()=>{
+    const { flush } = await import('/shared/offline.js');
+    const r = await flush();
+    return { sent: r.sent, failed: r.failed.map(f => f.status), remaining: r.remaining };
+  })()`);
+  ck('…and the delete behind it was durable, replaying cleanly on reconnect',
+    flushedN.failed.length === 0 && flushedN.remaining === 0, JSON.stringify(flushedN));
+  const serverN = await categoryNames();
+  ck('…leaving the category deleted on the server, which is what the picker was right about',
+    !serverN.includes(victimN), JSON.stringify(serverN));
 
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {

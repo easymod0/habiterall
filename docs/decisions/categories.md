@@ -565,3 +565,334 @@ mode fetched only archived habits and has nothing active to say anything about.
 `dashboard.js` tolerates the key's absence for a second reason besides: an
 older cached payload, served by `shellFirst`'s stale-while-revalidate before
 the client's next fetch lands, may carry no such key either.
+
+## Phase 5 — giving `POST /categories/reorder` a caller (#65)
+
+**The route existed and was fully tested before anything called it.** Both
+editions validated every id through `parseCategoryId`, capped at
+`LIMITS.categories`, wrote inside a transaction and returned the full list —
+and `grep -rn "categories/reorder" shared/public/ android-native/` returned
+nothing. `position` was already honoured everywhere it is read (`ORDER BY
+position, id`, and a create's `COALESCE(MAX(position) + 1, 0)`); this phase
+gives it a writer, not a new rule.
+
+**Buttons, not drag-and-drop.** `attachDragHandlers`'s own comment on the
+habit list already states the reason: HTML5 drag events are unreachable by
+keyboard and unreliable on touch. The manage list is a `<dialog>` inside a
+`<form>`, capped at 30 rows with `max-height: 160px; overflow-y: auto`, which
+is a worse surface for a drag gesture than the dashboard's own uncapped grid
+— so the argument that already ruled drag in for the habit list rules it out
+here twice over.
+
+**Three disable rules, and the third is the one worth explaining.** The first
+two are ordinary boundary conditions: no arrows at all under two categories
+(the same gate `reorderable` uses for the dashboard's own drag handle), and
+the first row's ↑ / the last row's ↓ disabled because there is nowhere left to
+move to. The third — every arrow on every row disabled while a row is
+mid-rename — exists because `repaintCategories` *deliberately* refuses to
+rebuild the manage list while `editingCategoryId != null` (a rename box is a
+live `<input>` a rebuild would tear out from under whoever is typing in it,
+the same failure mode `shared/public/CLAUDE.md` documents for the settings
+dialog). An arrow left enabled there would send a write and repaint
+**nothing**: the row stays exactly where it was, with no sign on screen that
+the click did anything — silent, which is the failure class this repo names
+most often. Disabling it is not a UX nicety layered on top of the rebuild
+guard; it is what keeps a press from being a write with no visible effect.
+
+**`moveCategory`'s `catch` keeps the optimistic order on `err.queued`, and
+`persistOrder` (the habit list's own reorder, `dashboard.js`) does not.**
+`/categories/reorder` is `replayable()` — everything but `POST /habits` — so
+offline the write is already staged before the throw and **will** land on
+reconnect; reverting the optimistic order would snap the list back from an
+order that is about to be applied anyway. `persistOrder` reverts
+unconditionally, `err.queued` included, which is a real, pre-existing defect
+in the habit list's own reorder (tracked separately, not fixed here — this
+phase's own version is deliberately not a second copy of it).
+
+**The post-move focus restore had to run twice, not once, and the second one
+needs a guard the first does not.** `moveCategory` does an OPTIMISTIC
+`repaintCategories()` before the write, and `restoreFocus` after it walks
+fine — until `refreshCategoryPicker`'s own GET lands and runs a **second**
+`repaintCategories()` from the server's answer, whose `renderCategoryManage`
+does `list.replaceChildren()` and drops focus to `<body>` with nothing to
+restore it. Left alone, holding ↑ only "walks a category up" for as long as
+presses outrun the fetch; at an ordinary human pace every press lost focus,
+which is exactly the defect the first restore was written to fix and reads as
+fixed until it is tested against the SECOND repaint rather than the first.
+The second restore is conditional — `document.activeElement == null ||
+document.activeElement === document.body` — because by the time the GET
+lands the user may have deliberately moved focus elsewhere (to Cancel, to a
+different row's own control), and stealing it back would be a new bug rather
+than a fix for the old one. `shared/test/browser/categorycheck.mjs` asserts
+both halves: that focus survives the refetch's own repaint (polled by node
+identity, since the button's `data-focus-key` is identical across both
+repaints and only the DOM node itself changes), and that the guard actually
+holds when focus is moved away before the refetch lands.
+
+**The manage row had to be checked at 360px, not assumed to fit.** Four
+controls (swatch, name, ↑, ↓) plus the pre-existing ✎ and ✕ share one row whose
+only flexible member is `.category-manage-name` (`flex: 1; min-width: 0`,
+already ellipsising); everything else is `flex: none`, and `.btn-icon`'s
+padding inside this row is tighter than the ordinary icon button's so six
+controls fit at 360px. `shared/test/browser/responsive.mjs` asserts FIT —
+nothing pushed past `.category-manage`'s own right edge, and the name kept
+non-zero width — rather than the 44px `MIN_TOUCH` the rest of that suite
+checks elsewhere: `.btn-icon`'s existing `padding: 7px 10px` for ✎ and ✕ is
+already smaller than 44px, so a touch-size assertion here would fail on
+controls this phase did not add.
+
+**Left alone, on purpose, and named rather than fixed:** the reorder payload
+names only the category ids the client currently holds, so a category created
+on another device since this dialog's own fetch keeps whatever position it
+already has — the route's existing semantics, not a new limitation. And rapid
+presses put several WRITES in flight at once, each carrying the full order at
+the moment it fired; `persistOrder` has the identical exposure for the habit
+list, so this does not invent a new mechanism the app was not already living
+with.
+
+The concurrent READS are a different matter, and that inheritance argument does
+not cover them — see "Two presses race each other's reads" below, which is the
+finding that took the claim apart.
+
+**`moveCategory` does not call `announce()`, and that was found in review
+rather than designed in up front.** It shipped emitting `announce()`'s
+`'reload'` like the dialog's other four category mutations, which is the
+event `ui/store.js` defines as "go to the dashboard and fetch it" —
+`dashboard.js` answers it with `load()`, which re-fetches `/overview` and
+overwrites `state.categories` from that reply (`dashboard.js:173`) before
+ending in its own `paint()`. That is a SECOND writer of the same field
+`refreshCategoryPicker`'s `GET /categories` had just set, carrying whatever
+order was current when the `/overview` request went out — and nothing
+repaints the manage list itself from either answer. The failure needs no
+exotic timing: press ↓, the reorder's write and its own refetch land,
+`'reload'` fires `/overview`; press ↓ again before THAT lands, which is the
+ordinary gesture for moving a category more than one slot, and the older
+`/overview` order lands on top of the newer one the manage list is already
+showing. For about a round trip every arrow is then wrong, because
+`moveCategory` computes its next move from the store while the user is
+pressing a row in the DOM they can see: one press hits the bounds check and
+silently does nothing, another vaults a category two rows and persists an
+order that discards the previous press.
+
+`'reload'` was simply the wrong event for this mutation, not a mutation this
+event needed to learn to tolerate. A reorder creates no habit, destroys none
+and moves no figure — the dashboard already draws its section order straight
+from `state.categories`, and `categorySummaries` (phase 4, above) is looked
+up by category id, so order does not reach it either. There is nothing here
+for a fetch to be FOR. `'change'` is sufficient because every listener that
+matters already redraws from `state.categories` as it stands: `paint()`
+(`dashboard.js`) does, with no request of its own, and the manage list and
+picker are repainted directly inside `moveCategory` regardless of which event
+it ends in. Emitting `'change'` unconditionally — not routed through
+`announce()`'s dashboard-showing check — costs nothing extra either: the
+other four mutations already fall back to `'change'` whenever the dashboard
+is not what is showing, and a reorder can only be initiated from the manage
+list this dialog itself draws, which needs no event at all to see its own
+write.
+
+What this does **not** do is retire `/overview` as a writer of
+`state.categories`. `announce()` still sends the dialog's four other category
+mutations through `'reload'`, so a `load()` can still be in flight when an
+arrow is pressed — see the fourth bullet under "Two presses race each other's
+reads" below, which is the review round that found it. Changing the event was
+right and was never the whole answer.
+**Two presses race each other's reads, and the last answer to arrive used to
+win regardless of which was freshest.** The arrows are deliberately not
+disabled while a write is in flight — that is what lets a category be walked
+several rows without waiting on a round trip between presses — so two
+`moveCategory` calls overlapping is the ordinary gesture rather than an edge
+case. Each was independent end to end: its own POST, then its OWN
+`GET /categories`, whose reply was assigned to `state.categories`
+unconditionally. Nothing sequenced the two and no reply carried anything a
+later one could be checked against.
+
+The reasoning that let this ship was the paragraph above — "`persistOrder` has
+the identical exposure" — and it is true of the WRITES and false of the READS.
+`persistOrder` never refetches after its own write: it trusts the optimistic
+order or reverts to the pre-write snapshot, so it structurally cannot race a
+second call's read. The per-press GET is a mechanism the habit list has no
+counterpart for, which is why there was no answer here to inherit.
+
+What it costs is not merely a display: press three computes its whole payload
+from `state.categories` as it stands, so a stale list is POSTed straight back
+and **the server's own order ends up wrong too**. There is no error, no hint
+and no repaint anybody would read as a failure.
+
+`state.categoryReadSeq` (`ui/store.js`) is a monotonic counter, and it is five
+halves that fail differently. It shipped as two, module-local to
+`ui/habit-dialog.js`; the next review round found two more and the one after
+that found the fifth — which is the whole argument for where it lives now.
+**A ticket protects a FIELD, so it belongs beside the field**:
+`state.categories` is written from two modules, and the counter parked next to
+one of its readers could not see the other one at all.
+
+Three review rounds each found a writer the round before had not enumerated,
+which says something about enumeration as a method. **The durable form of the
+rule is the SHAPE, not the list: a writer of `state.categories` that is not
+itself the newest read must take a ticket** — an optimistic write bumps, a read
+installs only while it holds one. Ask that of anything added next rather than
+checking it against the five below.
+
+- **`refreshCategoryPicker` takes a ticket and may only INSTALL its answer if
+  that ticket is still the current one.** A superseded read still repaints —
+  from whatever the store holds now, which can only re-confirm what is there —
+  because an awaiting caller (the rename handler's `editingCategoryId = null`,
+  say) would otherwise be left with controls that do not match the state
+  behind them. The assignment is the half that can be stale.
+- **`moveCategory` bumps the counter at its optimistic splice**, which retires
+  every read already out on the wire. This is *not* covered by the first half,
+  and that is the part worth remembering: the read in flight is often
+  `openDialog`'s fire-and-forget `refreshCategoryPicker()`, fired before any
+  press existed, and at the moment it lands the press's own read has not
+  STARTED — its POST is still out. Nothing newer has taken a ticket, so
+  without the bump that pre-move answer paints the optimistic move away. It
+  needs no response reordering at all, only the dialog's own GET being slower
+  than the first press on it, which is an ordinary open-and-press.
+- **`load()` (`ui/dashboard.js`) takes a ticket before `/overview` goes out**,
+  and installs `data.categories` only while it holds it. This is the writer
+  the first two could not see, and the section above names it without closing
+  it: `'reload'` is the wrong event for `moveCategory` — but `announce()`
+  still sends the dialog's four OTHER category mutations through it, and each
+  of those puts an `/overview` on the wire that carries the whole category
+  list. The gesture that reaches it is not a race anybody has to try for. A
+  category is created at `MAX(position) + 1`, so a fresh one lands at the
+  BOTTOM of the manage list, which is exactly where you then press ↑ — and
+  that press falls inside the round trip the Add's own `announce()` started.
+  `/overview` computes every habit's window plus `categorySummaries` against a
+  reorder's few `UPDATE`s, so it is the one likely to lose. `load()`'s own
+  `paint()` redraws the dashboard and never the manage list, so nothing on
+  screen contradicts the move: the list goes on showing it while the store no
+  longer does, and the next press writes the regression to the server.
+  `habits` and `categorySummaries` from the same reply are deliberately NOT
+  ticketed — neither has a second writer that can be newer than that reply,
+  and summaries are read by id rather than by position.
+- **`moveCategory`'s catch keeps its ticket and reverts only while it holds
+  it.** `previous` is captured before the splice, so the revert is a writer of
+  `state.categories` exactly as stale as any reply. Two presses overlapping
+  with the EARLIER one failing last — a 5xx, a dropped connection, or the
+  write limiter's 429, which is what a held arrow key reaches — put an order
+  two presses old back in the store with nothing left in flight to correct it.
+  Where something newer HAS run, not reverting is also the more accurate
+  answer rather than merely the safer one: a later press's payload was
+  computed after this splice, so it carries this move whether or not this
+  write ever landed.
+- **The queued DELETE's optimistic removal bumps too**, and it is the half
+  nobody working on the reorder feature would think to look at, because it is
+  not in `moveCategory` at all. `remove`'s `err.queued` branch takes the row
+  out of `state.categories` and repaints — an optimistic write of the field
+  with no read of its own, which is the splice above in every structural
+  respect — and it took no ticket, so `openDialog`'s fire-and-forget refetch
+  landed behind it and put the category straight back into the store, the
+  manage list and the picker.
+
+  What makes it the most expensive of the five is that the harm is not a
+  display one. That removal exists precisely so `saveHabit` cannot read the
+  deleted id through `currentCategoryId()` and stage a habit `PUT` behind the
+  DELETE; on replay the DELETE lands first, `resolveCategoryId` answers 400,
+  and `offline.js` drops every 4xx as permanently inapplicable — and because
+  `PUT /habits/:id` REPLACES, what is dropped is the WHOLE habit edit rather
+  than merely its category, behind a "1 change could not be synced" toast that
+  names neither the habit nor the field. A stale answer landing behind the
+  removal re-arms exactly that, and the window closes only when the reconnect
+  flush's own `'reload'` arrives — which is after the user has had the picker
+  offering it for as long as they were still editing.
+
+  It also needs no prior outage, which is what makes it reachable rather than
+  theoretical: `api()` queues a `replayable()` write on ANY network error, the
+  10s `AbortSignal.timeout` included, while a GET is never pre-empted and can
+  still be answered from the network or from the service worker's data cache.
+  One timed-out DELETE on an otherwise working connection is the whole setup.
+
+Blocks `j`, `k`, `l`, `m` and `n` in `shared/test/browser/categorycheck.mjs`
+pin one half each, and the split is forced rather than tidy: each one passes
+with any of the other four deleted, measured. All five drive the failure
+deterministically — the interceptor fires each request against the real server
+at the moment the app asks for it, so the body captured is genuinely the stale
+one and the server genuinely commits, and only the RESPONSE is held until the
+script releases it. (`m` is the exception that proves the shape: its held
+answer is a synthetic 500 that never reaches the server at all, because the
+thing under test is a write that FAILED.) The four reorder blocks each assert
+the DOM or the dashboard's own section order and then the server's order after
+a follow-up press, because the visible half self-heals a round trip later while
+the write does not. `n` ends differently, on the outbox: it asserts both
+controls at the moment of the delete and again once the held answer has landed,
+then flushes and reads the server — the second pair is what fails without the
+ticket, and the first still passing is what says the removal was never broken,
+only undone a round trip later.
+
+**A reorder arrow may not be restored with `restoreFocus`, and the reason is
+that ↑ and ↓ are each other's undo.** `restoreFocus` (`ui/components.js`)
+answers a control that has survived a rebuild but stopped being operable by
+handing focus to the first still-operable `[data-focus-key]` in the same
+parent. That is right where it was written — pressing Today disables Today,
+and its neighbour does something unrelated — and wrong in a manage row, where
+those two arrows are the row's ONLY focus keys. The press that lands a
+category at row 0 disables its ↑ and moved focus one button right onto its ↓;
+the next Enter sent the category back down, and since ↓ stays enabled at every
+row but the last, continued presses walked it to the bottom and then back up
+again, one `POST /categories/reorder` per step. The only thing saying so was a
+focus ring shifting about 30px inside a row that was moving anyway.
+
+This is the keyboard path, not a corner of it: the arrows exist *because*
+`attachDragHandlers` records HTML5 drag as "unreachable by keyboard", and
+`moveCategory`'s own comment says the restore is there so holding ↑ walks a
+category up. `restoreArrowFocus` (`ui/habit-dialog.js`) parks focus on
+`#category-manage` itself at a boundary instead — the gesture stops where the
+boundary says it stops, focus stays inside the dialog rather than dropping to
+`<body>`, and the list survives `replaceChildren()` so the post-refetch
+restore's `activeElement === document.body` guard correctly reads it as focus
+nobody dropped. Block `2b` pins both halves, and the second one with a REAL
+`Input.dispatchKeyEvent`: a script-made `KeyboardEvent` does not activate a
+button, so a test built on one passes against the unfixed code.
+
+Two alternatives were weighed and lost. Keeping the button enabled with
+`aria-disabled` is the WAI-ARIA answer to "a control that disables itself
+under the user's finger" and would be better still — `moveCategory` already
+returns early at a boundary, so an enabled arrow there is a safe no-op — but
+it needs a second mechanism for the rename-mode disable, which must genuinely
+refuse the click, and it rewrites two passing mutation-tested assertions to
+buy it. Restoring to the row's ✎ instead is no better than ↓: Enter on it
+opens a rename box, which is a smaller wrong action rather than none.
+
+**Fixing where the keyboard goes took away what had been moving the VIEW, and
+that is worth its own note because it is the same mistake one call further
+out.** `moveCategory` already records having been bitten by `.focus()`'s
+scroll-into-view being relied on as a scroll mechanism: it looked like it kept
+`.category-manage` (`max-height: 160px; overflow-y: auto`, about four of up to
+30 rows visible) in place across `replaceChildren()`'s `scrollTop` clamp, and
+in Safari — which does not focus a `<button>` on mousedown — it did nothing at
+all, so a press below the fold scrolled the moving row out of sight. That was
+answered by saving and restoring `scrollTop` explicitly across both repaints.
+
+The second bite is the same side effect carrying something else: while focus
+followed a row up the list, `.focus()`'s scroll is what let the VIEW follow it
+past the restored offset. `restoreArrowFocus` parks focus on the list with
+`preventScroll` at a boundary, so the last press of a walk — the one that
+reaches row 0 — became the only press that did not follow its row: from a list
+scrolled a single row down, the category arrived above the fold and the press
+that was meant to land it at the top read as having made it vanish. Both
+repaints were affected, and the second is the one a reader assumes is already
+covered — after the refetch, the focus restore is guarded on focus having been
+dropped to `<body>`, which at a boundary it has NOT been, so the forced
+`scrollTop` there had nothing to correct it either.
+
+`revealCategoryRow` (`ui/habit-dialog.js`) owns visibility now and
+`restoreArrowFocus` owns only the keyboard — both its `.focus()` calls pass
+`preventScroll`, so nothing is getting its scroll for free from an unrelated
+call any more. It is keyed on the ROW's `data-category-id` rather than on the
+pressed arrow's `data-focus-key`, which a first draft used: the two differ
+exactly when nothing was focused, and while Chrome focuses a `<button>` on
+mousedown, neither that nor a synthesised `.click()` should be what decides
+whether the list scrolls. Asking it of the row also collapses the boundary and
+the ordinary press into one path. Block `2c` pins both calls — it scrolls the
+list by exactly one row pitch, presses ↑ on the row now at the fold, and
+asserts the moved row's rect against the list's on each repaint; each call
+fails its own assertion and only its own, measured. The block asserts
+`scrollHeight > clientHeight` first, because against a list that fits every
+check in it passes without the fix.
+
+What is still shared with `persistOrder`, unchanged: several writes in flight,
+each carrying the full order as of when it fired, so the order the server ends
+up with is whichever POST commits last rather than whichever press was made
+last. That is a write-ordering question, it predates this work in the habit
+list, and closing it means sequencing the writes rather than the reads.

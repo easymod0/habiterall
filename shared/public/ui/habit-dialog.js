@@ -7,6 +7,7 @@
  */
 
 import { api } from '/shared/ui/api.js';
+import { focusKeyOf } from '/shared/ui/components.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { dashboardShowing, emit, staysOnList, state } from '/shared/ui/store.js';
@@ -40,6 +41,39 @@ const CATEGORY_SUGGESTIONS = [
 let editingCategoryId = null;
 
 /**
+ * Which category read is the CURRENT one — `state.categoryReadSeq`, bumped by
+ * every `refreshCategoryPicker` and by `moveCategory`'s optimistic splice.
+ *
+ * `state.categories` has more than one writer that can be in flight at once,
+ * and until this existed the LAST answer to arrive won regardless of which
+ * one was freshest. Three of those writers exist. Two ship in this file:
+ * `openDialog`'s fire-and-forget refetch, which by its own docstring can land
+ * at any point after the dialog opened, and `moveCategory`'s per-press one —
+ * and the arrows are deliberately not disabled while a write is in flight, so
+ * two presses overlapping is the ordinary gesture for moving a category more
+ * than one slot rather than an edge case. A GET answered before a later
+ * press's POST committed, but delivered after that press's own GET, then
+ * installed an order the server had already moved past; the next press
+ * computed its payload from that stale list and wrote the regression back, so
+ * the SERVER's order ended up wrong too and not merely the display.
+ *
+ * The THIRD is `load()` in `dashboard.js`, which is why the counter itself
+ * lives in `store.js` rather than here: `announce()` sends every other
+ * category mutation in this file through `'reload'`, and `/overview`'s answer
+ * carries the whole category list too. Add a category and press ↑ on it —
+ * which is the ordinary gesture, since a create lands at `MAX(position) + 1`
+ * and so puts the new row at the BOTTOM — and that `/overview`, issued before
+ * the move existed, lands after it. It is a read like any other and now takes
+ * a ticket like any other.
+ *
+ * A monotonic counter is what `persistOrder` (dashboard.js) does not need and
+ * this does: that one never refetches after its own write, so it cannot race
+ * a second call's READ. The per-press GET is a mechanism the habit list has
+ * no counterpart for, which is why the PR that added it could not inherit an
+ * answer here.
+ */
+
+/**
  * Tell whatever is behind this modal that something it draws has moved.
  *
  * **A dialog does not know which view it was opened over, and it must not
@@ -60,6 +94,12 @@ let editingCategoryId = null;
  * The three that stay unconditional are the ones where going home is the
  * answer: a habit deleted, a habit restored, and a create whose request was
  * abandoned. The page you were on is gone, or nobody knows what it holds.
+ *
+ * `moveCategory` is a fifth category mutation, and it deliberately does NOT
+ * call this function at all — see its own `emit('change')` and the comment
+ * there. A reorder changes no figure `announce()`'s `'reload'` exists to
+ * fetch, and `/overview` is a second writer of `state.categories` that can
+ * land after this list has already moved again.
  */
 const announce = () => emit(dashboardShowing() ? 'reload' : 'change');
 
@@ -200,12 +240,17 @@ function renderCategorySelect(wanted) {
   select.value = (known || pinned) ? want : '';
 }
 
-/** The manage list: one row per category, ✎ for rename+recolour, ✕ to delete. */
+/** The manage list: one row per category, ↑/↓ to reorder, ✎ for rename+recolour, ✕ to delete. */
 function renderCategoryManage() {
   const list = $('#category-manage');
   list.replaceChildren();
 
-  for (const c of state.categories) {
+  // Same gate `reorderable` uses for the dashboard's own drag handle
+  // (dashboard.js:307) — moving a row only means something once there is a
+  // second row to move it past.
+  const canReorder = state.categories.length > 1;
+
+  state.categories.forEach((c, i) => {
     const li = document.createElement('li');
     li.className = 'category-manage-row';
     li.dataset.categoryId = String(c.id);
@@ -301,6 +346,41 @@ function renderCategoryManage() {
       name.className = 'category-manage-name';
       name.textContent = c.name;
 
+      // Absent entirely below two categories — see `canReorder` above —
+      // rather than merely disabled, so an account with one category shows
+      // no arrows to press in the first place.
+      let up = null;
+      let down = null;
+      if (canReorder) {
+        up = document.createElement('button');
+        up.type = 'button';
+        up.className = 'btn btn-icon category-move-up';
+        up.title = `Move ${c.name} up`;
+        up.setAttribute('aria-label', `Move ${c.name} up`);
+        up.textContent = '↑';
+        up.dataset.focusKey = `catmove:up:${c.id}`;
+        // Disabled at the first row (nowhere to move to) and — because
+        // `repaintCategories` refuses to rebuild this list while a rename
+        // box is open — disabled on EVERY row whenever one is mid-rename.
+        // Left enabled there, a press would send a write and repaint
+        // nothing: the row stays exactly where it was with no sign the
+        // click did anything, which is the silent-failure class this repo
+        // names most often.
+        up.disabled = i === 0 || editingCategoryId != null;
+        up.addEventListener('click', () => moveCategory(c.id, -1));
+
+        down = document.createElement('button');
+        down.type = 'button';
+        down.className = 'btn btn-icon category-move-down';
+        down.title = `Move ${c.name} down`;
+        down.setAttribute('aria-label', `Move ${c.name} down`);
+        down.textContent = '↓';
+        down.dataset.focusKey = `catmove:down:${c.id}`;
+        // Same two reasons as ↑ above, mirrored at the last row.
+        down.disabled = i === state.categories.length - 1 || editingCategoryId != null;
+        down.addEventListener('click', () => moveCategory(c.id, 1));
+      }
+
       const edit = document.createElement('button');
       edit.type = 'button';
       edit.className = 'btn btn-icon category-edit';
@@ -352,7 +432,24 @@ function renderCategoryManage() {
           // dialog is reconciled by the reconnect flush's own `emit('reload')`
           // (`ui/connectivity.js`), which is also what takes this back if the
           // replay is refused.
+          //
+          // This removal is an OPTIMISTIC write of `state.categories` with no
+          // read of its own, which is `moveCategory`'s splice exactly — so it
+          // takes a ticket for the same reason and retires every category read
+          // already on the wire (`categoryReadSeq`, ui/store.js). The one that
+          // bites is `openDialog`'s fire-and-forget refetch, fired before this
+          // press existed and landing after it with the PRE-delete list; with
+          // nothing newer to supersede it, it installed the category this
+          // branch had just removed straight back into the store, the manage
+          // list and the picker — undoing the whole paragraph above with no
+          // surface, and leaving `saveHabit` free to submit the id again. A
+          // queued DELETE does not need the app to have been offline first:
+          // `api()` queues a `replayable()` write on any network error, the
+          // 10s `AbortSignal.timeout` included, while a GET is never
+          // pre-empted and can still be answered from the network or from the
+          // service worker's cache.
           if (err.queued) {
+            ++state.categoryReadSeq;
             state.categories = state.categories.filter((x) => x.id !== c.id);
             repaintCategories();
           }
@@ -360,10 +457,12 @@ function renderCategoryManage() {
         }
       });
 
-      li.append(swatch, name, edit, remove);
+      li.append(swatch, name);
+      if (canReorder) li.append(up, down);
+      li.append(edit, remove);
     }
     list.append(li);
-  }
+  });
 }
 
 /**
@@ -400,7 +499,15 @@ function renderCategoryManage() {
  * to belong to the dialog being drawn, because no `await` separates them.
  */
 async function refreshCategoryPicker() {
-  state.categories = await api('/categories');
+  const mine = ++state.categoryReadSeq;
+  const fetched = await api('/categories');
+  // Only the newest read may INSTALL its answer — see `categoryReadSeq`. An
+  // older one still repaints, from whatever the store holds now: the
+  // assignment is the half that can be stale, and skipping the repaint too
+  // would mean an awaiting caller (the rename's `editingCategoryId = null`,
+  // say) could be left with controls that do not match the state behind them.
+  // A repaint from current state can only ever re-confirm what is there.
+  if (mine === state.categoryReadSeq) state.categories = fetched;
   repaintCategories();
 }
 
@@ -427,6 +534,248 @@ async function refreshCategoryPicker() {
 function repaintCategories() {
   renderCategorySelect();
   if (editingCategoryId == null) renderCategoryManage();
+}
+
+/**
+ * Keep the row a press just moved in view.
+ *
+ * `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
+ * rows — about four visible — and every press puts `scrollTop` back to its
+ * press-time offset across both repaints, so something has to carry the view
+ * the one row the press moved. Until this existed the thing carrying it was
+ * `.focus()`, which scrolls its target into view as a SIDE EFFECT: exactly the
+ * "`.focus()` is not a scroll mechanism" `moveCategory`'s own scroll save and
+ * restore records having been bitten by once, met a second time one call
+ * further out. It failed in two ways here rather than one, and both are at a
+ * BOUNDARY, where `restoreArrowFocus` parks focus on the list itself with
+ * `preventScroll`: the last press of a walk — the one that reaches row 0 — was
+ * the only press that did not follow its row, so from a list scrolled a single
+ * row down the category arrived above the fold and the press read as having
+ * made it vanish; and the second restore, after the refetch, is guarded on
+ * focus having been dropped to `<body>`, which at a boundary it has not been,
+ * so the forced `scrollTop` there had nothing to correct it either.
+ *
+ * Keyed on the ROW's `data-category-id` and not on the pressed arrow's
+ * `data-focus-key`, which is what a first draft used. The two differ exactly
+ * when nothing was focused: Chrome focuses a `<button>` on mousedown, so a real
+ * mouse press carries a key — but a synthesised `.click()` does not, and
+ * neither answer should decide whether the list scrolls. Visibility is about
+ * the row, and asking it that way also means the boundary and the ordinary
+ * press are one path rather than two.
+ *
+ * Compared rather than selected, the idiom `restoreFocus` gives its reason for.
+ * `block: 'nearest'` is the same minimal scroll `.focus()` was doing: nothing
+ * at all when the row is already in view, and nothing to the dialog or the page
+ * behind it, which are.
+ */
+function revealCategoryRow(list, id) {
+  [...list.children]
+    .find((li) => /** @type {HTMLElement} */ (li).dataset.categoryId === String(id))
+    ?.scrollIntoView({ block: 'nearest' });
+}
+
+/**
+ * Put the keyboard back on the arrow that was just pressed — or park it on the
+ * list itself when that very press is what disabled that arrow.
+ *
+ * Deliberately not `restoreFocus` (ui/components.js), and this is the one
+ * place in the app where its fallback is the wrong answer. That fallback hands
+ * focus to the first still-operable `[data-focus-key]` in the same PARENT,
+ * which is right for its other caller — pressing Today disables Today, and the
+ * paging button beside it does something unrelated — and actively wrong in a
+ * manage row, where ↑ and ↓ are the only two focus keys and each is the
+ * other's undo. Walk a category to the top with repeated Enter presses (the
+ * gesture `moveCategory`'s own restore exists for) and the press that lands it
+ * at row 0 disables ↑ and moves focus one button right to ↓; the next press
+ * sends it back down, and a held Enter ping-pongs the row between the two ends
+ * with a `POST /categories/reorder` per step. The only thing saying so is a
+ * focus ring shifting about 30px inside a row that was moving anyway.
+ *
+ * So a boundary parks the keyboard on `#category-manage`. The gesture stops
+ * where the boundary says it stops, focus stays inside the dialog rather than
+ * dropping to `<body>` — which is the whole reason a restore runs here at all
+ * — and the list survives `repaintCategories()`'s `replaceChildren()`, so the
+ * post-refetch restore's `activeElement === document.body` guard correctly
+ * reads it as focus nobody dropped.
+ *
+ * **It moves focus and never the scroll.** Both `.focus()` calls below pass
+ * `preventScroll`, and keeping the moved row in view is `revealCategoryRow`'s
+ * job instead — see there for why that separation is the fix rather than a
+ * tidy-up.
+ */
+function restoreArrowFocus(list, key) {
+  if (!key) return;
+  // Compared rather than selected, for the reason `restoreFocus` gives.
+  const arrow = [...list.querySelectorAll('[data-focus-key]')]
+    .find((el) => /** @type {HTMLElement} */ (el).dataset.focusKey === key);
+  if (arrow && !(/** @type {HTMLButtonElement} */ (arrow).disabled)) {
+    /** @type {HTMLElement} */ (arrow).focus({ preventScroll: true });
+    return;
+  }
+  list.tabIndex = -1;
+  list.focus({ preventScroll: true });
+}
+
+/**
+ * Shift a category one slot up or down and write the new order.
+ *
+ * Follows `nudgeHabit` / `persistOrder` (dashboard.js) — optimistic splice,
+ * repaint, then the write — with one deliberate difference in the catch
+ * below. Module-local and not exported: this is a one-off helper for the two
+ * buttons above, not a rule anything else needs, and an export here is a
+ * `CACHE_VERSION` bump for nothing (root `CLAUDE.md`).
+ *
+ * The payload names only the ids THIS client currently holds, so a category
+ * created on another device since this dialog's own fetch keeps whatever
+ * position it already has — the reorder route's existing semantics, not
+ * anything decided here. And rapid presses put several of these writes in
+ * flight at once, each carrying the full order at the time it fired;
+ * `persistOrder` has the very same exposure, so this does not invent a new
+ * mechanism the habit list does not already live with.
+ */
+async function moveCategory(id, delta) {
+  const order = state.categories.map((c) => c.id);
+  const from = order.indexOf(id);
+  const to = from + delta;
+  if (from === -1 || to < 0 || to >= order.length) return;
+
+  const focused = focusKeyOf(document.activeElement);
+  const byId = new Map(state.categories.map((c) => [c.id, c]));
+  const previous = state.categories;
+  order.splice(to, 0, ...order.splice(from, 1));
+  // This press is newer than anything already out on the wire, so retire every
+  // category read in flight before installing the optimistic order — see
+  // `categoryReadSeq` (ui/store.js). Without it, `openDialog`'s own
+  // fire-and-forget refetch (fired before this press existed), a previous
+  // press's refetch, or the `/overview` a sibling handler's `announce()` set
+  // going could land afterwards and paint the pre-move order back over this
+  // one. The number is kept, because the revert below is a writer of
+  // `state.categories` too and has to ask the same question.
+  const mine = ++state.categoryReadSeq;
+  state.categories = order.map((catId) => byId.get(catId));
+  const list = $('#category-manage');
+  // `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
+  // rows, and `list.replaceChildren()` inside `repaintCategories()` clamps
+  // `scrollTop` back to 0 on every rebuild — twice here, once per repaint
+  // below. What put it back before was `restoreFocus`'s `.focus()` scrolling
+  // the focused element into view, which is not a scroll mechanism: it only
+  // worked because a press had already left the arrow focused, true in
+  // Chrome (which focuses a `<button>` on mousedown) and not in Safari on
+  // macOS or iOS, where both restores below no-op and a press on a row below
+  // the fold scrolled the moving row out of view. The browser suites are
+  // Chrome-only, so nothing there could see this. Save and restore the
+  // scroll position explicitly instead, across both repaints.
+  const scrollTop = list.scrollTop;
+  // Not `renderCategoryManage()` alone — the select's option order has to
+  // follow too, and this is the one function that redraws both controls from
+  // `state.categories` as it stands.
+  repaintCategories();
+  list.scrollTop = scrollTop;
+  // The offset above is the one from BEFORE the splice, so the row this press
+  // moved is one slot away from where the view was left — see
+  // `revealCategoryRow`.
+  revealCategoryRow(list, id);
+  // So holding ↑ walks a category up instead of dropping focus on the first
+  // press — `repaintCategories()` just tore out the button that was focused
+  // and built a new one under the same `data-focus-key`.
+  restoreArrowFocus(list, focused);
+
+  try {
+    await api('/categories/reorder', { method: 'POST', body: JSON.stringify({ order }) });
+  } catch (err) {
+    // `/categories/reorder` is `replayable()` (ui/api.js: everything but
+    // `POST /habits`), so offline the write is already staged before this
+    // throw and WILL land on reconnect. Reverting the optimistic order here
+    // would snap the list back from an order that is about to be applied —
+    // the mistake `persistOrder` (dashboard.js) makes for the habit list,
+    // which reverts unconditionally, `err.queued` included. That is a real,
+    // pre-existing defect there; this is deliberately not a second copy of
+    // it.
+    //
+    // `mine === state.categoryReadSeq` for the same reason the refetch asks
+    // it: `previous` was captured before this press's own splice, so it is a
+    // stale writer of `state.categories` the moment anything newer has
+    // installed an order. Two presses overlapping and the EARLIER one failing
+    // last — a 5xx, a dropped connection, or the write limiter's 429, which
+    // is what a held arrow key reaches — put an order two presses old back in
+    // the store with nothing left in flight to correct it, and the next press
+    // wrote that regression to the server. Where something newer HAS run, not
+    // reverting is also the more accurate answer: a later press's payload was
+    // computed after this splice, so it carries this move whether or not this
+    // write landed.
+    if (!err.queued && mine === state.categoryReadSeq) {
+      state.categories = previous;
+      repaintCategories();
+    }
+    categoryHint(err.message, !err.queued);
+    // Only THIS request's own rejection may reach the branch above. Nothing
+    // below here may run on this path — see the refetch's own comment for
+    // why a failure past this point is a different animal entirely.
+    return;
+  }
+
+  // The POST has already committed by the time we reach here, so only ITS
+  // OWN rejection (the catch above) may revert or paint an error. A refetch
+  // that fails on a connection drop, a restart, the service worker's
+  // synthetic 503 or the read limiter's own 429 (a separate bucket from the
+  // write limiter, `shared/src/security.js`) is not the reorder failing —
+  // the server already has the move. Reverting here would snap the list back
+  // from an order the next reload would show anyway, and telling the user it
+  // failed would be false. `.catch(() => {})` is the same swallow the "add a
+  // suggested category" chip handler already uses on its own 409 path, below
+  // in this file, for the same shape of problem — a write that is already
+  // settled followed by a refetch whose own failure answers nothing about it:
+  // the optimistic order already IS the server's own order by then, so there
+  // is nothing left to paint and nothing to revert.
+  //
+  // No argument — see `refreshCategoryPicker`. A reorder never changes
+  // which category this form has chosen.
+  await refreshCategoryPicker().catch(() => {});
+  // `repaintCategories()` (just run, inside `refreshCategoryPicker`) rebuilds
+  // the manage list — and clamps `scrollTop` back to 0 — only when
+  // `editingCategoryId == null`, the same condition it gates
+  // `renderCategoryManage()` on. With a rename box open there was no rebuild
+  // and nothing here to correct: forcing the press-time offset regardless
+  // used to jump the list under the open rename box the moment this GET
+  // landed. (A manual scroll made during the wait, with no rename involved,
+  // is not something this line — or the focus guard below, which reads the
+  // same `<body>` either way — can tell apart from an untouched
+  // wait; this guard only stops the write from firing where it plainly
+  // should not, not from ever restoring a stale offset.)
+  if (editingCategoryId == null) {
+    list.scrollTop = scrollTop;
+    // Beside the restore rather than beside the focus guard below, because a
+    // boundary press fails that guard — focus is parked on the list, not on
+    // `<body>` — and the forced offset above would then be the last word on
+    // where the view sits. `revealCategoryRow` makes the row visible on BOTH
+    // repaints regardless of where the keyboard ended up.
+    revealCategoryRow(list, id);
+  }
+  // `refreshCategoryPicker`'s own `repaintCategories()` just did a SECOND
+  // `list.replaceChildren()` — this time from the server's answer — which
+  // drops focus to `<body>` exactly like the optimistic one above did, and
+  // nothing restores it after that one. Left alone, a keyboard user only
+  // keeps focus while presses outrun the fetch; at a human pace every press
+  // loses it, which is the very defect the optimistic restore above claims
+  // to have fixed. Restore again here — but ONLY when `<body>` (or nothing)
+  // holds focus, i.e. it was this repaint that dropped it. By the time the
+  // GET lands the user may have deliberately moved focus elsewhere, and an
+  // unconditional restore would steal it back.
+  if (document.activeElement == null || document.activeElement === document.body) {
+    restoreArrowFocus(list, focused);
+  }
+  // `emit('change')` directly — the one mutation in this file that
+  // deliberately does NOT go through `announce()`. There is nothing to
+  // fetch: `refreshCategoryPicker` just set `state.categories` from
+  // `GET /categories`, which is the authoritative order, so every listener
+  // can simply redraw from what the store already holds. `announce()`
+  // would fire `'reload'` here whenever the dashboard is showing, and that
+  // is active harm rather than a slower way to the same place —
+  // `dashboard.js`'s `load()` overwrites `state.categories` with
+  // `/overview`'s answer, a SECOND writer of the same field that can land
+  // after a later press has already moved the order again, installing a
+  // stale order over the manage list's own newer one.
+  emit('change');
 }
 
 /** @param habit  null opens the create form */

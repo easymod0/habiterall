@@ -99,17 +99,21 @@ each with a name and a colour. Set it from the habit's own edit screen: six
 starter suggestions (Health, Work, Fitness, Mind, Social, Home) show as chips
 and create the category the first time you tap one, but nothing is created for
 you on a fresh account. Turn on **Group by category** (⚙ → Dashboard, off by
-default) to draw one section per category, in the order you made them, with an
-always-present **Uncategorised** section last for every habit with no label —
-uncategorised is something the dashboard shows you, never a category you
-create or manage yourself. The setting governs the native list too: the
-Android app offers a picker on its own habit form (options only — creating,
-renaming, recolouring and deleting a category stay web actions), and draws the
-same sections. Deleting a category never deletes its habits: they fall back to
-uncategorised with every entry and note untouched. Each section header also
-carries its own mean strength and the spread between its weakest and strongest
-habit — the same rule for which habits count as the comparison view below — and
-it steps aside while you are searching or showing archived habits, exactly as
+default) to draw one section per category, with an always-present
+**Uncategorised** section last for every habit with no label — uncategorised
+is something the dashboard shows you, never a category you create or manage
+yourself. Sections start in the order you made their categories in, and stay
+there until you change it: the same habit dialog's category list carries a ↑
+and a ↓ on each row (once there are two or more categories to move), which
+write the new order straight through — no separate save. The setting governs
+the native list too: the Android app offers a picker on its own habit form
+(options only — creating, renaming, recolouring, deleting and reordering a
+category stay web actions), and draws the same sections in the same order.
+Deleting a category never deletes its habits: they fall back to uncategorised
+with every entry and note untouched. Each section header also carries its own
+mean strength and the spread between its weakest and strongest habit — the
+same rule for which habits count as the comparison view below — and it steps
+aside while you are searching or showing archived habits, exactly as
 reordering does, rather than draw a mean over a different set of habits than
 the count sitting right beside it.
 

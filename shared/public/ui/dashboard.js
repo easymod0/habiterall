@@ -166,11 +166,27 @@ export async function load() {
   const params = new URLSearchParams({ days: String(GRID_DAYS) });
   if (state.gridEnd) params.set('end', state.gridEnd);
   if (state.showArchived) params.set('archived', 'true');
+  // This request is also a read of `state.categories`, so it takes a ticket
+  // before it goes out — see `categoryReadSeq` in `ui/store.js`.
+  const categoryRead = ++state.categoryReadSeq;
   const data = await api(`/overview?${params}`);
   state.habits = data.habits;
   // The habit dialog's category picker reads this rather than fetching its
-  // own copy — every load already carries it.
-  state.categories = data.categories;
+  // own copy — every load already carries it. Installed only while this is
+  // still the newest read: `announce()` (ui/habit-dialog.js) sends every OTHER
+  // category mutation through `emit('reload')`, which lands here, and a
+  // category is created at `MAX(position) + 1` — so "add one, then press ↑ to
+  // move it up" puts an arrow press inside this request's own round trip as a
+  // matter of course. `/overview` computes every habit's window plus
+  // `categorySummaries` against a reorder's few `UPDATE`s, so it is the one
+  // likely to lose that race, and its answer knows nothing of the move.
+  //
+  // `habits` and `categorySummaries` are NOT guarded with it. Neither has a
+  // second writer that can be newer than this reply: a reorder moves no
+  // figure, and `categorySummaries` is read by id rather than by position
+  // (`sectionHeader` below), so an order this answer is stale about cannot
+  // reach either of them.
+  if (categoryRead === state.categoryReadSeq) state.categories = data.categories;
   // Each grouped section's mean/spread, one row per category plus a trailing
   // `id: null` for Uncategorised. `?archived=true` sends no such key at all —
   // that mode has nothing active to average — and an older cached payload
@@ -223,7 +239,20 @@ export function paint() {
   state.openCategories = false;
   // The top-bar entry point to that comparison, which `ui/categories.js`
   // owns: this is the one place that runs after `state.categories` has been
-  // refreshed, and every category mutation ends in a 'reload' that reaches it.
+  // refreshed. Not every category mutation ends in a 'reload' any more —
+  // `moveCategory` (habit-dialog.js) deliberately emits 'change' instead of
+  // going through `announce()`, see its own comment — but this still runs
+  // after every one of them, because `paint()` is where both events end up.
+  // 'reload' reaches it through `load()`, which always ends in a `paint()`
+  // (below); 'change' reaches it straight through this file's own listener
+  // (`on('change', () => { if (dashboardShowing()) paint(); })`), which is
+  // conditional — but that condition is exactly "is this the render this line
+  // needs to run for right now", so a 'change' that arrives while some other
+  // view is showing costs nothing: `state.categories` is already updated by
+  // the time this file's view is next entered, and every path back to it
+  // (Back from a habit, from the comparison, on boot) goes through `load()`,
+  // which paints from the fresh value regardless of which event got there
+  // first.
   syncCompareEntry(state.categories.length > 0);
   // The URL follows the view. Cheap to call on every repaint — and this is
   // called on every check-off — because `go` does nothing when the address bar
