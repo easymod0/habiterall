@@ -87,15 +87,34 @@ export function installShutdown(server, options = {}) {
       draining = true;
       log.info('shutdown', { signal });
       beforeClose();
-      server.close(async () => {
-        await cleanup();
-        // After `cleanup`, never before it, and for two readers. An operator
-        // gets one line saying the drain completed and how long it took; and a
-        // suite that spawns the real server has no other observable for
-        // "cleanup ran" — `db.close()` / `closePool()` are closures a child
-        // process cannot be watched calling.
-        log.info('shutdown.drained', { signal, ms: Date.now() - startedAt });
-        exit(0);
+      server.close(() => {
+        // An explicit chain rather than an `async` callback, because nothing
+        // would be there to catch that one's rejection.
+        Promise.resolve()
+          .then(() => cleanup())
+          .then(() => {
+            // After `cleanup`, never before it, and for two readers. An
+            // operator gets one line saying the drain completed and how long it
+            // took; and a suite that spawns the real server has no other
+            // observable for "cleanup ran" — `db.close()` / `closePool()` are
+            // closures a child process cannot be watched calling.
+            log.info('shutdown.drained', { signal, ms: Date.now() - startedAt });
+            exit(0);
+          })
+          .catch((err) => {
+            // A third exit, and its own event on purpose. The drain SUCCEEDED
+            // here — every accepted response was finished — and only the
+            // storage teardown failed, which is a different thing from
+            // `shutdown.deadline`, where something was still stuck. Reachable:
+            // `pool.end()` rejects when a client errors during end and throws
+            // if anything else already ended it, and `db.close()` throws
+            // `ERR_INVALID_STATE` on an already-closed handle. Left
+            // uncaught it would be an unhandled rejection, which under Node's
+            // default kills the process with a raw stack and no line at all —
+            // reporting a completed drain as a crash.
+            log.error('shutdown.cleanup_failed', { signal, ms: Date.now() - startedAt }, err);
+            exit(1);
+          });
       });
       // The connections that are idle at this instant. `close` does this too on
       // Node 26; it is stated here because the sweep above is the same call and

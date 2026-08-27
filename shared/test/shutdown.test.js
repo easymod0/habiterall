@@ -21,9 +21,9 @@ async function waitFor(predicate, ms) {
   return predicate();
 }
 
-async function harness({ deadlineMs = 5000 } = {}) {
+async function harness({ deadlineMs = 5000, cleanupFails = false } = {}) {
   const order = [];
-  /** @type {{level: string, event: string, fields: any}[]} */
+  /** @type {{level: string, event: string, fields: any, err: any}[]} */
   const logs = [];
   /** @type {number[]} */
   const exits = [];
@@ -50,8 +50,8 @@ async function harness({ deadlineMs = 5000 } = {}) {
   // The log lands in `order` alongside the callbacks, not in a list of its own:
   // `shutdown.drained` claims the drain FINISHED, so where it sits relative to
   // `cleanup` and `exit` is the only interesting thing about it.
-  const record = (level) => (event, fields) => {
-    logs.push({ level, event, fields });
+  const record = (level) => (event, fields, err) => {
+    logs.push({ level, event, fields, err });
     order.push(event);
   };
 
@@ -60,6 +60,10 @@ async function harness({ deadlineMs = 5000 } = {}) {
     beforeClose: () => order.push('beforeClose'),
     cleanup: async () => {
       await null;
+      // Rejecting AFTER an await, which is the shape both editions can
+      // produce: `pool.end()` rejecting mid-teardown, `db.close()` throwing
+      // `ERR_INVALID_STATE`. It pushes nothing, because it never gets that far.
+      if (cleanupFails) throw new Error('closePool blew up');
       order.push('cleanup');
     },
     deadlineMs,
@@ -216,6 +220,51 @@ test('cleanup runs before exit(0) on the clean path, and not at all on the deadl
     );
   } finally {
     await stuck.stop();
+  }
+});
+
+test('a cleanup that REJECTS is named and exits 1, and claims no completed drain', async () => {
+  const h = await harness({ cleanupFails: true });
+  try {
+    h.fire('SIGTERM');
+    assert.ok(
+      await h.waitFor(() => h.exits.length > 0, 1000),
+      'nothing exited: the rejected cleanup was left to become an unhandled rejection',
+    );
+
+    // The drain itself succeeded — every accepted response was finished — and
+    // only the teardown failed, so this is its own event rather than the
+    // deadline's. Left uncaught it would have been an unhandled rejection,
+    // which Node reports as a crash: status 1, a raw stack, and no line here at
+    // all saying which of the two happened.
+    assert.deepEqual(h.order, ['shutdown', 'beforeClose', 'shutdown.cleanup_failed', 'exit:1']);
+    assert.equal(
+      h.order.filter((e) => e === 'shutdown.drained').length,
+      0,
+      `a failed teardown claimed a completed drain (order: ${JSON.stringify(h.order)})`,
+    );
+
+    const failed = h.logs.find((l) => l.event === 'shutdown.cleanup_failed');
+    assert.ok(failed, 'the failure was not logged at all');
+    assert.equal(failed.level, 'error');
+    assert.equal(failed.fields.signal, 'SIGTERM');
+    assert.ok(
+      Number.isFinite(failed.fields.ms),
+      `no usable duration on the failure line: ${JSON.stringify(failed.fields)}`,
+    );
+    // Third argument, this repo's logger shape. Without it the operator gets an
+    // event name and nothing about what threw.
+    assert.equal(failed.err?.message, 'closePool blew up');
+
+    // Nothing arrives late: no second exit, and no drained line behind it.
+    await sleep(100);
+    assert.deepEqual(
+      h.order,
+      ['shutdown', 'beforeClose', 'shutdown.cleanup_failed', 'exit:1'],
+      'something arrived after the failed cleanup had already chosen the exit',
+    );
+  } finally {
+    await h.stop();
   }
 });
 

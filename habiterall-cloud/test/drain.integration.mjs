@@ -8,10 +8,10 @@
  * cleanup is a synchronous `db.close()` while this edition's is
  * `async () => closePool()`. Exit code **0** is reachable only through
  * `await cleanup()` resolving inside `server.close()`'s callback — the deadline
- * path exits 1 and runs no cleanup at all, a rejected `closePool()` would be an
- * unhandled rejection, and a SIGKILL shows as a signal rather than a code. So
- * the exit code is the assertion that carries the async path, and it is the
- * primary evidence here.
+ * path exits 1 and runs no cleanup at all, a rejected `closePool()` is a named
+ * `shutdown.cleanup_failed` and an `exit(1)`, and a SIGKILL shows as a signal
+ * rather than a code. So the exit code is the assertion that carries the async
+ * path, and it is the primary evidence here.
  *
  * Deliberately shorter than personal's suite. The pooling peer and the 8s
  * deadline are properties of `shared/src/shutdown.js`, already pinned against a

@@ -231,6 +231,8 @@ services:
     # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
     # shared/src/shutdown.js). Lower this below ~9s and SIGKILL chooses the
     # exit instead, which is what taking in-flight requests down looks like.
+    # Raising it does not lengthen the drain: the 8s is fixed in the app, so a
+    # longer grace only means the process leaves earlier than the grace allows.
     stop_grace_period: 10s
 
 volumes:
