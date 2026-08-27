@@ -61,6 +61,12 @@ let editingCategoryId = null;
  * The three that stay unconditional are the ones where going home is the
  * answer: a habit deleted, a habit restored, and a create whose request was
  * abandoned. The page you were on is gone, or nobody knows what it holds.
+ *
+ * `moveCategory` is a fifth category mutation, and it deliberately does NOT
+ * call this function at all — see its own `emit('change')` and the comment
+ * there. A reorder changes no figure `announce()`'s `'reload'` exists to
+ * fetch, and `/overview` is a second writer of `state.categories` that can
+ * land after this list has already moved again.
  */
 const announce = () => emit(dashboardShowing() ? 'reload' : 'change');
 
@@ -500,10 +506,24 @@ async function moveCategory(id, delta) {
   const previous = state.categories;
   order.splice(to, 0, ...order.splice(from, 1));
   state.categories = order.map((catId) => byId.get(catId));
+  const list = $('#category-manage');
+  // `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
+  // rows, and `list.replaceChildren()` inside `repaintCategories()` clamps
+  // `scrollTop` back to 0 on every rebuild — twice here, once per repaint
+  // below. What put it back before was `restoreFocus`'s `.focus()` scrolling
+  // the focused element into view, which is not a scroll mechanism: it only
+  // worked because a press had already left the arrow focused, true in
+  // Chrome (which focuses a `<button>` on mousedown) and not in Safari on
+  // macOS or iOS, where both restores below no-op and a press on a row below
+  // the fold scrolled the moving row out of view. The browser suites are
+  // Chrome-only, so nothing there could see this. Save and restore the
+  // scroll position explicitly instead, across both repaints.
+  const scrollTop = list.scrollTop;
   // Not `renderCategoryManage()` alone — the select's option order has to
   // follow too, and this is the one function that redraws both controls from
   // `state.categories` as it stands.
   repaintCategories();
+  list.scrollTop = scrollTop;
   // So holding ↑ walks a category up instead of dropping focus on the first
   // press — `repaintCategories()` just tore out the button that was focused
   // and built a new one under the same `data-focus-key`.
@@ -514,6 +534,7 @@ async function moveCategory(id, delta) {
     // No argument — see `refreshCategoryPicker`. A reorder never changes
     // which category this form has chosen.
     await refreshCategoryPicker();
+    list.scrollTop = scrollTop;
     // `refreshCategoryPicker`'s own `repaintCategories()` just did a SECOND
     // `list.replaceChildren()` — this time from the server's answer — which
     // drops focus to `<body>` exactly like the optimistic one above did, and
@@ -527,7 +548,18 @@ async function moveCategory(id, delta) {
     if (document.activeElement == null || document.activeElement === document.body) {
       restoreFocus($('#category-manage'), focused);
     }
-    announce(); // never a bare emit('reload') — see `announce`'s own comment
+    // `emit('change')` directly — the one mutation in this file that
+    // deliberately does NOT go through `announce()`. There is nothing to
+    // fetch: `refreshCategoryPicker` just set `state.categories` from
+    // `GET /categories`, which is the authoritative order, so every listener
+    // can simply redraw from what the store already holds. `announce()`
+    // would fire `'reload'` here whenever the dashboard is showing, and that
+    // is active harm rather than a slower way to the same place —
+    // `dashboard.js`'s `load()` overwrites `state.categories` with
+    // `/overview`'s answer, a SECOND writer of the same field that can land
+    // after a later press has already moved the order again, installing a
+    // stale order over the manage list's own newer one.
+    emit('change');
   } catch (err) {
     // `/categories/reorder` is `replayable()` (ui/api.js: everything but
     // `POST /habits`), so offline the write is already staged before this

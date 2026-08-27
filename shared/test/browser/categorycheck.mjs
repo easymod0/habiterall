@@ -1616,6 +1616,119 @@ try {
   await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
     { what: 'the dialog to close after the reorder checks' });
 
+  /* ---------- h: a reorder emits 'change', not 'reload' (issue #65 step 2,
+     review finding 1) ----------
+   *
+   * `openHabitByName`, which every case above uses, always opens the dialog
+   * over the HABIT'S OWN PAGE — `dashboardShowing()` answers false there, so
+   * `announce()` was already taking the `'change'` branch and none of a–f
+   * above ever exercised the dashboard one. This block opens the dialog with
+   * `#btn-new` instead, reachable straight from the (grouped) dashboard, and
+   * uses two fresh, habit-less categories so it owns its own order rather
+   * than depending on where the cases above left the account's others.
+   *
+   * Two things follow from `moveCategory` ending in a bare `emit('change')`:
+   * no `/overview` request at all, and the dashboard's own section order
+   * moving with no page reload. Mutation target for the first: put
+   * `announce()` back in place of `emit('change')` — this must FAIL, because
+   * `dashboardShowing()` is true here and `'reload'` fires `dashboard.js`'s
+   * `load()`, which fetches `/overview`. Mutation target for the second:
+   * delete the `emit('change')` call entirely — this must FAIL, because
+   * nothing then tells the dashboard to redraw and the section order this
+   * block reads after closing the dialog is the one from BEFORE the press.
+   */
+  console.log("--- h: a reorder emits 'change', not 'reload' (issue #65 step 2, review finding 1) ---");
+
+  await ev(`(async()=>{
+    await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Reorder A', color: '#0ea5e9' }) });
+    await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz Reorder B', color: '#f97316' }) });
+    await fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupByCategory: true }) });
+  })()`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
+    { what: 'the grouped dashboard to load for h' });
+
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open from the dashboard for h' });
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#category-manage .category-manage-name')]
+      .some(n => n.textContent.trim() === 'Zzz Reorder B')`,
+    { what: "the New-habit dialog's own category-manage refetch to include the two fresh categories" });
+
+  const beforeH = (await readManage()).names;
+  const aStart = beforeH.indexOf('Zzz Reorder A');
+  ck('h sanity: the two fresh categories are adjacent, A directly before B',
+    aStart >= 0 && beforeH[aStart + 1] === 'Zzz Reorder B', JSON.stringify(beforeH));
+
+  const sectionsBeforeH = await ev(`[...document.querySelectorAll(
+    '#grid .category-section-header:not(.uncategorised) .category-section-name')]
+    .map(n => n.textContent)`);
+
+  // Record every request from here on — attached to `window` because each
+  // `ev()` call is its own `Runtime.evaluate` and shares nothing but the page.
+  await ev(`(()=>{
+    window.__hOrigFetch = window.fetch;
+    window.__hRequests = [];
+    window.fetch = (input, init) => {
+      window.__hRequests.push(typeof input === 'string' ? input : input.url);
+      return window.__hOrigFetch(input, init);
+    };
+    return true;
+  })()`);
+
+  await ev(`(()=>{
+    const row = [...document.querySelectorAll('#category-manage .category-manage-row')]
+      .find(r => r.querySelector('.category-manage-name').textContent.trim() === 'Zzz Reorder A');
+    row.querySelector('.category-move-down').click();
+  })()`);
+  await waitUntil(ev,
+    `(() => {
+      const names = [...document.querySelectorAll('#category-manage .category-manage-name')]
+        .map(n => n.textContent.trim());
+      return names.indexOf('Zzz Reorder B') === names.indexOf('Zzz Reorder A') - 1;
+    })()`,
+    { what: 'A to move below B in the manage list' });
+  // A post-action settle, not a poll: the assertion below is about what did
+  // NOT happen, which is exactly the shape `sleep` exists for in this file —
+  // long enough for the reorder POST, `refreshCategoryPicker`'s own GET, and
+  // (under the mutation) a `'reload'`-triggered `/overview` to all have had
+  // time to fire.
+  await sleep(500);
+
+  const requestsH = await ev('window.__hRequests');
+  await ev(`window.fetch = window.__hOrigFetch; true`);
+  ck('h: a reorder makes no /overview request',
+    Array.isArray(requestsH) && !requestsH.some((u) => u.includes('/api/overview')),
+    JSON.stringify(requestsH));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after h' });
+
+  const sectionsAfterH = await ev(`[...document.querySelectorAll(
+    '#grid .category-section-header:not(.uncategorised) .category-section-name')]
+    .map(n => n.textContent)`);
+  const bAfterH = sectionsAfterH.indexOf('Zzz Reorder B');
+  const aAfterH = sectionsAfterH.indexOf('Zzz Reorder A');
+  ck('h: the dashboard’s own section order follows the press with no page reload',
+    bAfterH >= 0 && aAfterH >= 0 && bAfterH === aAfterH - 1,
+    JSON.stringify({ before: sectionsBeforeH, after: sectionsAfterH }));
+
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: false }) })`);
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the flat dashboard to load again after h' });
+
   /* ---------- 2a: focus survives the SECOND repaint too, not only the
      optimistic one (issue #65 step 2) ----------
    *

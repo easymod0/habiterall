@@ -461,6 +461,7 @@ try {
         return {
           overflowsBy: Math.round(rightmost - manageRight),
           nameWidth: name ? Math.round(name.getBoundingClientRect().width) : 0,
+          buttonCount: r.querySelectorAll('button').length,
         };
       });
     })()`);
@@ -475,6 +476,14 @@ try {
     // name away to nothing.
     ck(`${vp.label}: the category name still has real width, not squeezed away`,
       rows.length > 0 && rows.every((r) => r.nameWidth > 0), JSON.stringify(rows));
+    // The two checks above measure whatever `button, input` happens to find,
+    // so they pass just as well over a row with its ↑/↓ pair deleted — two
+    // fewer controls to overflow is not a fit, it is a smaller row. Pin the
+    // count too: a non-editing row (none of these is mid-rename — the dialog
+    // was only just opened) holds exactly four buttons, ↑ ↓ ✎ ✕, `canReorder`
+    // having two categories to move between.
+    ck(`${vp.label}: every manage row holds all four buttons (↑ ↓ ✎ ✕)`,
+      rows.length > 0 && rows.every((r) => r.buttonCount === 4), JSON.stringify(rows));
 
     await ev(`document.getElementById('dialog-cancel').click()`);
     await sleep(150);
