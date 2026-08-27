@@ -106,6 +106,59 @@ canonicalised; `/api/notify/test` re-reads it from the database rather than
 taking one from the request body, and carries its own tight rate limit because
 it causes outbound traffic.
 
+## Both policy functions are `PARALLEL SAFE`, and that flag goes away in silence
+
+`app_current_user_id()` and `app_is_notifier()` were marked `PARALLEL SAFE` by
+migration 016 and must stay that way. `CREATE FUNCTION` defaults to UNSAFE and
+a later `CREATE OR REPLACE FUNCTION` that omits the clause resets it without
+saying so — and because both sit in the `USING` clause of a policy on every
+table, one unsafe function takes parallelism away from the whole application at
+once. That is what the before measurement showed: with `debug_parallel_query =
+on`, a `count(*)` over `entries` inside `withUser` produced an identical plan
+with no `Gather` node in it at all.
+
+`test/schema-plans.integration.mjs` is what notices. It walks `pg_depend` from
+the policies rather than naming these two functions, so a policy added later
+brings its function into the check with it, and the index invariants beside it
+are read out of `pg_index` / `pg_attribute` for the same reason — a table added
+next year is already covered. `test/tenancy.integration.mjs` holds the other
+half: forced parallel, inside `withUser`, an account still sees only its own
+rows. Parallel safety says the body may run in a worker; it does not widen what
+that worker can see, and that is asserted rather than argued.
+
+`LEAKPROOF` is deliberately not applied to either and must not be: it is the
+opposite lever — permission to push a user-supplied qual *below* a security
+barrier — and these functions **are** the barrier.
+
+None of this re-keys anything. `entries_pkey (habit_id, date)` and
+`notify_log_pkey (habit_id, channel, date)` not leading with `user_id` is a
+security decision with migrations 007 and 008 behind it — the composite foreign
+key to `habits (id, user_id)` is what stops an invisible-row squat — and 016's
+indexes are additions *beside* those keys. Read "the key does not lead with
+`user_id`" as a thing that was paid for, not as an oversight to correct.
+
+## An RLS table cannot be indexed on a non-leakproof operator
+
+`jsonb_exists_any` (`?|`), `jsonb_exists` (`?`) and `jsonb_contains` (`@>`) all
+have `proleakproof = false`. With a policy on the table, Postgres will not
+evaluate a non-leakproof qual of the caller's ahead of the security qual — a
+leaky operator could reveal a row the policy was about to hide — and an index
+condition is by definition evaluated first. So on a table under RLS such a qual
+can **never** become an `Index Cond`, whatever index exists. No jsonb index on
+`users` can serve `candidates()` in `src/notifier.js`, and that scan is
+knowingly a sequential one.
+
+The trap is that nothing complains. The index builds, `ANALYZE` is happy, the
+catalog says it is there, and the plan is byte for byte what it was. It only
+looks otherwise if the `EXPLAIN` is taken on the admin connection, which is the
+owner and bypasses RLS: no policy, no security qual, and the qual is free to
+become an index condition in a plan of a query this application never issues.
+That is exactly how #185 came to propose a GIN index on `users.settings` that
+the app role could not have used; the measurements are in that issue's comment
+thread. **Every plan taken in this edition must therefore be taken as
+`habiterall_app` through `withUser` / `withNotifierScope`**, which is what
+`test/schema-plans.integration.mjs` does and what anything added to it must do.
+
 ## `/healthz` has four callers, not the two it looks like
 
 It is the only unauthenticated route here that touches Postgres. The container

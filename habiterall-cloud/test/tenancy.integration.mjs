@@ -64,6 +64,51 @@ const allEntries = await withUser(alice.id, (db) =>
   db.query('SELECT * FROM entries').then(r => r.rows.length));
 check('entries with no WHERE returns only alice rows', allEntries === 1, `rows=${allEntries}`);
 
+console.log('--- attack: does isolation survive a PARALLEL plan? ---');
+// Migration 016 marks both policy functions PARALLEL SAFE, and that is the one
+// change in it that can move a boundary. A policy qual may now be evaluated in
+// a worker PROCESS rather than only in the leader, so the question this block
+// asks is whether `app.user_id` — set with `set_config(..., true)` by
+// `withUser` — reaches that worker. If it did not, the scan running there would
+// see either nothing or everything, and only one of those two is loud.
+//
+// `debug_parallel_query` is both the lever and the probe: it forces a Gather
+// over a plan that is parallel SAFE and adds nothing at all to one that is not,
+// so before 016 there is no Gather here whatever the fixture size. It is
+// `context = user`, so `habiterall_app` may set it, and `SET LOCAL` is what
+// keeps it from following this connection back into the pool.
+const parallel = await withUser(alice.id, async (db) => {
+  await db.query('SET LOCAL debug_parallel_query = on');
+  const plan = (await db.query('EXPLAIN (COSTS OFF) SELECT count(*) FROM entries'))
+    .rows.map((r) => r['QUERY PLAN']).join('\n');
+  // Still the same transaction, so still forced parallel: these two reads are
+  // themselves answered under a Gather. That is the point — what is under test
+  // is what a worker returns, not what an EXPLAIN says it would.
+  const entries = (await db.query(
+    `SELECT COUNT(*)::int AS n, COUNT(DISTINCT user_id)::int AS owners,
+            COALESCE(MIN(user_id), 0)::int AS owner FROM entries`)).rows[0];
+  const habits = (await db.query('SELECT name FROM habits ORDER BY name'))
+    .rows.map((r) => r.name);
+  return { plan, entries, habits };
+});
+// `Gather` and nothing more. `Workers Planned` and `Single Copy` are
+// debug_parallel_query's own forcing artefacts and say nothing about the
+// schema, so asserting on them would pin the GUC's behaviour rather than the
+// functions'.
+check('a plan over entries inside withUser can be parallelised at all',
+  parallel.plan.includes('Gather'), parallel.plan);
+// The counts are the baseline block's, unchanged, and both directions of being
+// wrong are visible: bob owns a habit and an entry too, so a worker reading
+// without the setting propagated would report 2, and one reading with the
+// setting empty would fail closed and report 0.
+check('the worker sees alice\'s one entry, and it is hers',
+  parallel.entries.n === 1 && parallel.entries.owners === 1
+    && parallel.entries.owner === alice.id,
+  `${JSON.stringify(parallel.entries)} alice=${alice.id}`);
+check('and alice\'s one habit, and it is hers',
+  parallel.habits.length === 1 && parallel.habits[0] === 'Alice Secret Habit',
+  JSON.stringify(parallel.habits));
+
 console.log('--- attack: address another user by id directly ---');
 const stolen = await withUser(alice.id, (db) =>
   db.query('SELECT * FROM habits WHERE id = $1', [bobHabit]).then(r => r.rows.length));

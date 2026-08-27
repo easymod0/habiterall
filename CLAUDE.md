@@ -288,6 +288,7 @@ Several layers, and they catch different things:
 | The probe reaches no session store | `npm run test:healthz -w habiterall-cloud` | Postgres |
 | Which claim names the account | `npm run test:claims -w habiterall-cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
+| Query plans and schema invariants | `npm run test:plans -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
 | Compose files | `npm run docs:compose -- --check`, and the CI `compose` job | Docker, for the job |
 | The website, and every link in it | `npm run site:build -- --offline` | nothing |
