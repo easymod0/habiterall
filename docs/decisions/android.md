@@ -52,11 +52,15 @@ three answers still correct about the day it names.
 **A permission that is DECLARED and never REQUESTED is a permission the app does
 not have, and this client shipped that from its first commit.** The manifest
 carried `SCHEDULE_EXACT_ALARM` alone from `5cb7860` (2026-08-12), deliberately
-and with the reasoning written beside it. That permission is user-grantable, and for an app targeting 33+ it is denied
-by default from Android 14 on; `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` appears
-nowhere in this client, so nothing ever asked. `canScheduleExactAlarms()` in
-`Reminders.setAlarm` was therefore false forever on any phone running 14 or
-later — which is every current one — and every reminder rode
+and with the reasoning written beside it. That permission is user-grantable, and
+for an app targeting 33+ it is denied by default from Android 14 on **for a
+newly installed app** — a phone already running this APK when it took the OTA
+to 14 keeps the grant it held under 13, and since the APK is sideloaded and
+updated in place rather than reinstalled, that grant survives every later
+version. `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` appears nowhere in this client
+either way, so nothing ever asked or re-asked. So `canScheduleExactAlarms()` in
+`Reminders.setAlarm` was false forever for anyone who first installed it on a
+phone already at 14 or later, and every reminder that user got rode
 `setAndAllowWhileIdle`, which is inexact by contract.
 
 It did not read as a missing permission, which is the reason it lasted. App
@@ -226,7 +230,12 @@ was the hole: a reboot clears every alarm, and the system's own
 so a reboot at 23:50 left yesterday on the home screen until the phone was
 used. Inexact was the first attempt and `dumpsys alarm` refused
 it: an alarm set 23 hours out is given a window of an HOUR, on the one alarm
-whose whole purpose is a date boundary. `updatePeriodMillis` is 30 minutes
+whose whole purpose is a date boundary. That refusal was not fixed at the time
+it was written down here — `armMidnight` arms through the same
+`Reminders.setAlarm` a reminder does, so on a fresh install on 14 or later it
+had been taking the very inexact branch this paragraph describes, since the
+widget landed, and only became exact once the manifest carried
+`USE_EXACT_ALARM`. `updatePeriodMillis` is 30 minutes
 underneath all of it and is NOT the midnight answer either — those updates ride
 an inexact alarm that Doze defers, so overnight the redraw lands on wake.
 

@@ -232,12 +232,15 @@ class HabitWidget : AppWidgetProvider() {
          *
          * So it is an alarm, through the same `Reminders.setAlarm` a reminder
          * uses: exact where the user has allowed exact alarms, inexact where
-         * they have not. Measured, because the inexact form looked good enough
-         * and is not — an alarm set 23 hours out gets a window of an HOUR, on
-         * the one alarm whose entire purpose is a date boundary, so the widget
-         * would go on showing yesterday until 01:00. Where exact alarms are
-         * refused that is still the behaviour, and the other triggers below are
-         * what bound it.
+         * they have not. Above 32 the app holds `USE_EXACT_ALARM`, granted at
+         * install with nothing to have allowed, so there is no toggle to check —
+         * the refused case is narrowed to 31-32, where `SCHEDULE_EXACT_ALARM`
+         * is still the user-revocable permission this arms against. Measured,
+         * because the inexact form looked good enough and is not — an alarm set
+         * 23 hours out gets a window of an HOUR, on the one alarm whose entire
+         * purpose is a date boundary, so the widget would go on showing
+         * yesterday until 01:00. Where exact alarms are refused that is still
+         * the behaviour, and the other triggers below are what bound it.
          *
          * `updatePeriodMillis` in the provider XML is underneath it and is NOT
          * a substitute: those updates ride an inexact alarm too and Doze defers

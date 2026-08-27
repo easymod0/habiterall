@@ -91,4 +91,21 @@ class ExactAlarmPermissionTest {
             scheduleExactAlarm in requested,
         )
     }
+
+    @Test
+    @Config(sdk = [33])
+    fun `on API 33 the app asks for USE_EXACT_ALARM and no longer for SCHEDULE_EXACT_ALARM`() {
+        // 33 rather than 34: it is the first level the cap actually excludes,
+        // so it is the only level that distinguishes `maxSdkVersion="32"` from
+        // `maxSdkVersion="33"` — the sdk=34 case above would pass either way.
+        val requested = requestedPermissions()
+        assertTrue(
+            "the APK must request USE_EXACT_ALARM, or every reminder on 33+ is inexact; got $requested",
+            useExactAlarm in requested,
+        )
+        assertFalse(
+            "SCHEDULE_EXACT_ALARM must be capped at 32, so 33 must not see it; got $requested",
+            scheduleExactAlarm in requested,
+        )
+    }
 }
