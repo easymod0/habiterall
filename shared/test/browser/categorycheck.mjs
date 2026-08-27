@@ -34,8 +34,9 @@ const ck = (label, cond, extra = '') => {
 
 /**
  * A post-action settle, for the one shape `waitUntil` cannot express: asserting
- * that something did NOT happen has no predicate to poll. One caller, and every
- * other wait in this file is a `waitUntil`.
+ * that something did NOT happen has no predicate to poll — plus the settles
+ * that follow one of those, where the poll has already told us the answer is
+ * in flight. Every other wait in this file is a `waitUntil`.
  */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1850,6 +1851,301 @@ try {
   await ev(`document.getElementById('dialog-cancel').click()`);
   await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
     { what: 'the dialog to close after i' });
+
+  /* ---------- j: a category read that is answered before a LATER press's
+     write must not install its answer over the newer one (review round 3,
+     finding 1) ----------
+   *
+   * The arrows are deliberately not disabled while a write is in flight, so
+   * two `moveCategory` calls overlapping is the ordinary gesture for moving a
+   * category more than one slot. Each press was independent end to end: its
+   * own POST, then its OWN `GET /categories`, whose reply was assigned to
+   * `state.categories` unconditionally. Nothing sequenced the two, so a GET
+   * the server answered BEFORE a later press's POST committed — but which was
+   * delivered to the client after that later press's own GET — silently
+   * installed an order the server had already moved past, with no error, no
+   * hint and no repaint anybody would read as a failure.
+   *
+   * It compounds, which is the half that reaches storage: the next press
+   * computes its whole payload from `state.categories` as it stands, so it
+   * POSTs the regressed order back and the SERVER's order is wrong too, not
+   * merely the display. The second assertion below is that half, read off
+   * `GET /api/categories` rather than off the DOM.
+   *
+   * `persistOrder` (dashboard.js) does NOT have this: it never refetches after
+   * its own write, so it cannot race a second call's READ. The per-press GET
+   * is a mechanism the habit list has no counterpart for.
+   *
+   * Reproduced deterministically rather than by racing the network. The
+   * interceptor fires press A's refetch against the real server AT THE MOMENT
+   * `moveCategory` asks for it — so the captured body is the order as of A's
+   * own POST, which is exactly the stale reading — and then holds the
+   * RESPONSE until this script releases it, after press B has been made and
+   * B's own refetch has landed. Every other request, B's included, goes
+   * straight to the real network.
+   *
+   * Mutation target: drop the `mine === categoryReadSeq` guard in
+   * `refreshCategoryPicker` (equivalently, the `categoryReadSeq++` in
+   * `moveCategory`) — BOTH assertions below must FAIL.
+   */
+  console.log('--- j: a superseded category read does not install its stale order (review round 3, finding 1) ---');
+
+  // `openDialog`'s own fire-and-forget refetch has to be out of the way before
+  // the holding wrapper is armed, or it — rather than press A's — is the GET
+  // that gets held. Same count-in-flight wait `i` and `2a` use.
+  await ev(`(()=>{
+    window.__jPending = 0;
+    window.__jRealFetch = window.__jRealFetch || window.fetch;
+    const real = window.__jRealFetch;
+    window.fetch = (...args) => {
+      window.__jPending++;
+      return real(...args).finally(() => { window.__jPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__jPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving" });
+  await sleep(300);
+
+  const beforeJ = await readManage();
+  ck('sanity: three or more categories, so two presses reach three distinct orders',
+    beforeJ.names.length >= 3, JSON.stringify(beforeJ));
+  const [j0, j1, j2] = beforeJ.names;
+
+  await ev(`(()=>{
+    const real = window.__jRealFetch;
+    window.__jHeld = false;
+    window.__jDelivered = false;
+    window.__jLanded = 0;
+    let captured = false;
+    const held = new Promise((res) => { window.__jRelease = res; });
+    window.fetch = (url, opts) => {
+      const isCategoriesGet = String(url).endsWith('/api/categories') &&
+        (!opts || (opts.method ?? 'GET').toUpperCase() === 'GET');
+      if (isCategoriesGet && !captured) {
+        captured = true;
+        // Fired NOW against the real server — the body is the order as of
+        // press A's own POST, which is the stale reading this block is about
+        // — and delivered only once this script releases it. The response
+        // body is not consumed here, so \`api()\`'s own \`res.json()\` still
+        // reads the snapshot taken at this moment.
+        const inFlight = real(url, opts);
+        window.__jHeld = true;
+        return held.then(() => inFlight).then((res) => {
+          window.__jDelivered = true;
+          return res;
+        });
+      }
+      if (isCategoriesGet) {
+        return real(url, opts).then((res) => { window.__jLanded++; return res; });
+      }
+      return real(url, opts);
+    };
+    return true;
+  })()`);
+
+  // Press A: the first row's ↓. Its POST goes to the real server; its refetch
+  // is the one held above.
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__jHeld === true`,
+    { what: "press A's own refetch to be captured and held" });
+  await waitUntil(ev,
+    `document.querySelectorAll(
+      '#category-manage .category-manage-name')[0]?.textContent.trim() === ${JSON.stringify(j1)}`,
+    { what: "press A's optimistic move to paint" });
+
+  // Press B, while A's read is still out: the SECOND row's ↓, which moves the
+  // category A just displaced further down again. B's own POST and refetch go
+  // to the real network, so when its reply lands the list — and the server —
+  // both read [j1, j2, j0, …].
+  await ev(`[...document.querySelectorAll(
+    '#category-manage .category-manage-row')][1]
+    .querySelector('.category-move-down').click(); true`);
+  await waitUntil(ev, `window.__jLanded >= 1`,
+    { what: "press B's own refetch to land unheld" });
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#category-manage .category-manage-name')]
+       .slice(0, 3).map(n => n.textContent.trim()).join('|') ===
+       ${JSON.stringify([j1, j2, j0].join('|'))}`,
+    { what: "press B's own answer to install the newer order" });
+
+  // Release A's stale reply now — the exact moment the unguarded code paints
+  // it over B's. There is no predicate for "the stale order did not install",
+  // so the settle after delivery is the shape `sleep` exists for here.
+  await ev(`window.__jRelease(); true`);
+  await waitUntil(ev, `window.__jDelivered === true`,
+    { what: "press A's held reply to be delivered to api()" });
+  await sleep(500);
+
+  const afterJ = await readManage();
+  ck('j: the stale reply from the earlier press did not install its order over the newer one',
+    afterJ.names.slice(0, 3).join('|') === [j1, j2, j0].join('|'),
+    JSON.stringify({ before: beforeJ.names, after: afterJ.names,
+      expected: [j1, j2, j0] }));
+
+  // THE assertion: the compounding half. A third press computes its payload
+  // from `state.categories` as it stands, so if the stale reply had installed
+  // itself the order this writes is a regression the SERVER then holds.
+  //
+  // The wait is on the press's own refetch LANDING — counted by the wrapper,
+  // which is still installed and now passes everything through — rather than
+  // on the order it paints. A wait on the order would be a `waitUntil` that
+  // THROWS under the mutation this block exists to catch, aborting the suite
+  // where the two `ck`s below are what should report it.
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__jLanded >= 2`,
+    { what: "the third press's own refetch to land" });
+  await sleep(300);
+  await ev(`window.fetch = window.__jRealFetch; true`);
+
+  const jServerOrder = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('j: THE assertion: the next press wrote the newer order to the server, not a regressed one',
+    jServerOrder.slice(0, 3).join('|') === [j2, j1, j0].join('|'),
+    JSON.stringify({ jServerOrder, expected: [j2, j1, j0] }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after j' });
+
+  /* ---------- k: a press RETIRES the reads already in flight, including the
+     one `openDialog` fired before the press existed (review round 3,
+     finding 1, second half) ----------
+   *
+   * `j` above covers two presses racing each other's reads, where the newer
+   * press's own refetch is what supersedes the older one. This is the case
+   * that guard alone does NOT answer: the read in flight is `openDialog`'s
+   * fire-and-forget `refreshCategoryPicker()`, fired before any press existed,
+   * and the press's own read has not STARTED yet because its POST is still
+   * out. Nothing newer has taken a ticket, so an unbumped counter lets that
+   * read install the PRE-move order straight over the optimistic splice.
+   *
+   * Needs no response reordering at all — only the dialog's own GET being
+   * slower than the first press on it, which is an ordinary open-and-press.
+   * It self-heals a round trip later when the press's own refetch lands, so
+   * the DOM check below is only half of it; the assertion that lasts is what a
+   * press made INSIDE that window writes, since it computes its payload from
+   * the reverted list and the server then holds the regression.
+   *
+   * Both requests are fired against the real server at the moment the app asks
+   * for them and only their RESPONSES are held, so the server genuinely
+   * commits press A's reorder and this stays a test about what the client does
+   * with the answers rather than about the network.
+   *
+   * Mutation target: delete the `categoryReadSeq++` in `moveCategory` — both
+   * assertions below must FAIL. (The `mine === categoryReadSeq` guard in
+   * `refreshCategoryPicker` is the other half and is `j`'s.)
+   */
+  console.log("--- k: a press retires openDialog's own in-flight read (review round 3, finding 1, second half) ---");
+
+  await ev(`(()=>{
+    const real = window.__jRealFetch;
+    window.__kRealFetch = real;
+    window.__kHeldGet = false;
+    window.__kHeldPost = false;
+    window.__kGetDelivered = false;
+    let capturedGet = false;
+    let capturedPost = false;
+    const heldGet = new Promise((res) => { window.__kReleaseGet = res; });
+    const heldPost = new Promise((res) => { window.__kReleasePost = res; });
+    window.fetch = (url, opts) => {
+      const path = String(url);
+      const method = (opts?.method ?? 'GET').toUpperCase();
+      // openDialog's own fire-and-forget refetch: fired for real NOW, so its
+      // body is the order BEFORE the press below, and delivered only once
+      // this script releases it.
+      if (!capturedGet && path.endsWith('/api/categories') && method === 'GET') {
+        capturedGet = true;
+        const inFlight = real(url, opts);
+        window.__kHeldGet = true;
+        return heldGet.then(() => inFlight).then((res) => {
+          window.__kGetDelivered = true;
+          return res;
+        });
+      }
+      // Press A's own write: it really reaches the server, but its ANSWER is
+      // held, so moveCategory is parked before its own refetch can start —
+      // which is the whole point. Nothing newer has taken a read ticket while
+      // the stale one lands.
+      if (!capturedPost && path.endsWith('/api/categories/reorder') && method === 'POST') {
+        capturedPost = true;
+        const inFlight = real(url, opts);
+        window.__kHeldPost = true;
+        return heldPost.then(() => inFlight);
+      }
+      // Every later reorder write goes straight through, counted so the block
+      // below can wait for the second press's own POST to settle without
+      // polling the ORDER it paints — a predicate on the order would be a
+      // waitUntil that THROWS under the mutation this block exists to
+      // catch, aborting the suite before its checks can report it.
+      if (path.endsWith('/api/categories/reorder') && method === 'POST') {
+        return real(url, opts).then((res) => { window.__kPosts++; return res; });
+      }
+      return real(url, opts);
+    };
+    window.__kPosts = 0;
+    return true;
+  })()`);
+
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__kHeldGet === true`,
+    { what: "openDialog's own refetch to be captured and held" });
+
+  // The manage list is drawn synchronously by `openDialog` from
+  // `state.categories` as the dashboard left it, so there is a real order here
+  // to move even with the dialog's own read still out.
+  const beforeK = await readManage();
+  ck('sanity: three or more categories with the dialog’s own read still in flight',
+    beforeK.names.length >= 3, JSON.stringify(beforeK));
+  const [k0, k1, k2] = beforeK.names;
+
+  await ev(`document.querySelector(
+    '#category-manage .category-manage-row .category-move-down').click(); true`);
+  await waitUntil(ev, `window.__kHeldPost === true`,
+    { what: "press A's write to reach the server and have its answer held" });
+  await waitUntil(ev,
+    `document.querySelectorAll(
+      '#category-manage .category-manage-name')[0]?.textContent.trim() === ${JSON.stringify(k1)}`,
+    { what: "press A's optimistic move to paint" });
+
+  // Deliver the dialog's own pre-move answer, now — with press A parked on its
+  // held POST, so no newer read exists to supersede this one.
+  await ev(`window.__kReleaseGet(); true`);
+  await waitUntil(ev, `window.__kGetDelivered === true`,
+    { what: "openDialog's held reply to be delivered to api()" });
+  await sleep(500);
+
+  const afterK = await readManage();
+  ck("k: the dialog's own pre-move read did not paint the optimistic move away",
+    afterK.names.slice(0, 3).join('|') === [k1, k0, k2].join('|'),
+    JSON.stringify({ before: beforeK.names, after: afterK.names,
+      expected: [k1, k0, k2] }));
+
+  // THE assertion: a press made inside that window computes its payload from
+  // whatever the list now holds, so a reverted list is written back to the
+  // server and outlives the self-heal. The SECOND row's ↓, which reaches a
+  // different order from each of the two candidate lists.
+  await ev(`[...document.querySelectorAll(
+    '#category-manage .category-manage-row')][1]
+    .querySelector('.category-move-down').click(); true`);
+  await waitUntil(ev, `window.__kPosts >= 1`,
+    { what: "the second press's own write to reach the server" });
+  await ev(`window.__kReleasePost(); true`);
+  await sleep(800);
+  await ev(`window.fetch = window.__kRealFetch; true`);
+
+  const kServerOrder = await ev(
+    `(async()=>(await (await fetch('/api/categories')).json()).map(c => c.name))()`);
+  ck('k: THE assertion: the press made in that window wrote the moved order, not the reverted one',
+    kServerOrder.slice(0, 3).join('|') === [k1, k2, k0].join('|'),
+    JSON.stringify({ kServerOrder, expected: [k1, k2, k0] }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after k' });
 
   /* ---------- 2a: focus survives the SECOND repaint too, not only the
      optimistic one (issue #65 step 2) ----------

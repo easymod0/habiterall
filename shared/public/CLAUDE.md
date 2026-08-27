@@ -95,6 +95,23 @@ all. See `docs/decisions/categories.md`'s phase 5 for the disable rules in
 full and for why `moveCategory` keeps the optimistic order on `err.queued`
 where `persistOrder` (the habit list's own reorder) does not.
 
+**`state.categories` has several writers that can be in flight at once, so a
+read may only INSTALL its answer if it is still the newest one.**
+`categoryReadSeq` (`ui/habit-dialog.js`) is that counter, and it has two
+halves that fail differently: `refreshCategoryPicker` takes a ticket and
+assigns only while it holds the current one, and `moveCategory` bumps the
+counter at its optimistic splice so a press retires every read already out.
+The second is not implied by the first — the read in flight is often
+`openDialog`'s fire-and-forget refetch, fired before the press existed and
+landing while the press's own read has not started, so nothing newer has taken
+a ticket to supersede it. A superseded read still repaints (from current
+state, which can only re-confirm what is there); the ASSIGNMENT is the half
+that can be stale. `persistOrder` needs none of this because it never
+refetches after its own write and so cannot race a second call's read — do
+not read its shape as the precedent here. Blocks `j` and `k` in
+`categorycheck.mjs` pin one half each, and with the bump deleted `j` still
+passes.
+
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears

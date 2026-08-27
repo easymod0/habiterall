@@ -41,6 +41,31 @@ const CATEGORY_SUGGESTIONS = [
 let editingCategoryId = null;
 
 /**
+ * Which category read is the CURRENT one — bumped by every
+ * `refreshCategoryPicker` and by `moveCategory`'s optimistic splice.
+ *
+ * `state.categories` has more than one writer that can be in flight at once,
+ * and until this existed the LAST answer to arrive won regardless of which
+ * one was freshest. Two of those writers ship in this file: `openDialog`'s
+ * fire-and-forget refetch, which by its own docstring can land at any point
+ * after the dialog opened, and `moveCategory`'s per-press one — and the
+ * arrows are deliberately not disabled while a write is in flight, so two
+ * presses overlapping is the ordinary gesture for moving a category more than
+ * one slot rather than an edge case. A GET answered before a later press's
+ * POST committed, but delivered after that press's own GET, then installed an
+ * order the server had already moved past; the next press computed its
+ * payload from that stale list and wrote the regression back, so the SERVER's
+ * order ended up wrong too and not merely the display.
+ *
+ * A monotonic counter is what `persistOrder` (dashboard.js) does not need and
+ * this does: that one never refetches after its own write, so it cannot race
+ * a second call's READ. The per-press GET is a mechanism the habit list has
+ * no counterpart for, which is why the PR that added it could not inherit an
+ * answer here.
+ */
+let categoryReadSeq = 0;
+
+/**
  * Tell whatever is behind this modal that something it draws has moved.
  *
  * **A dialog does not know which view it was opened over, and it must not
@@ -449,7 +474,15 @@ function renderCategoryManage() {
  * to belong to the dialog being drawn, because no `await` separates them.
  */
 async function refreshCategoryPicker() {
-  state.categories = await api('/categories');
+  const mine = ++categoryReadSeq;
+  const fetched = await api('/categories');
+  // Only the newest read may INSTALL its answer — see `categoryReadSeq`. An
+  // older one still repaints, from whatever the store holds now: the
+  // assignment is the half that can be stale, and skipping the repaint too
+  // would mean an awaiting caller (the rename's `editingCategoryId = null`,
+  // say) could be left with controls that do not match the state behind them.
+  // A repaint from current state can only ever re-confirm what is there.
+  if (mine === categoryReadSeq) state.categories = fetched;
   repaintCategories();
 }
 
@@ -505,6 +538,12 @@ async function moveCategory(id, delta) {
   const byId = new Map(state.categories.map((c) => [c.id, c]));
   const previous = state.categories;
   order.splice(to, 0, ...order.splice(from, 1));
+  // This press is newer than anything already out on the wire, so retire every
+  // category read in flight before installing the optimistic order — see
+  // `categoryReadSeq`. Without it, `openDialog`'s own fire-and-forget refetch
+  // (fired before this press existed) or a previous press's refetch could land
+  // afterwards and paint the pre-move order back over this one.
+  categoryReadSeq++;
   state.categories = order.map((catId) => byId.get(catId));
   const list = $('#category-manage');
   // `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30

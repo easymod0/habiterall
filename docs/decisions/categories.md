@@ -645,10 +645,14 @@ controls this phase did not add.
 names only the category ids the client currently holds, so a category created
 on another device since this dialog's own fetch keeps whatever position it
 already has — the route's existing semantics, not a new limitation. And rapid
-presses put several writes in flight at once, each carrying the full order at
+presses put several WRITES in flight at once, each carrying the full order at
 the moment it fired; `persistOrder` has the identical exposure for the habit
 list, so this does not invent a new mechanism the app was not already living
 with.
+
+The concurrent READS are a different matter, and that inheritance argument does
+not cover them — see "Two presses race each other's reads" below, which is the
+finding that took the claim apart.
 
 **`moveCategory` does not call `announce()`, and that was found in review
 rather than designed in up front.** It shipped emitting `announce()`'s
@@ -685,3 +689,59 @@ other four mutations already fall back to `'change'` whenever the dashboard
 is not what is showing, and a reorder can only be initiated from the manage
 list this dialog itself draws, which needs no event at all to see its own
 write.
+**Two presses race each other's reads, and the last answer to arrive used to
+win regardless of which was freshest.** The arrows are deliberately not
+disabled while a write is in flight — that is what lets a category be walked
+several rows without waiting on a round trip between presses — so two
+`moveCategory` calls overlapping is the ordinary gesture rather than an edge
+case. Each was independent end to end: its own POST, then its OWN
+`GET /categories`, whose reply was assigned to `state.categories`
+unconditionally. Nothing sequenced the two and no reply carried anything a
+later one could be checked against.
+
+The reasoning that let this ship was the paragraph above — "`persistOrder` has
+the identical exposure" — and it is true of the WRITES and false of the READS.
+`persistOrder` never refetches after its own write: it trusts the optimistic
+order or reverts to the pre-write snapshot, so it structurally cannot race a
+second call's read. The per-press GET is a mechanism the habit list has no
+counterpart for, which is why there was no answer here to inherit.
+
+What it costs is not merely a display: press three computes its whole payload
+from `state.categories` as it stands, so a stale list is POSTed straight back
+and **the server's own order ends up wrong too**. There is no error, no hint
+and no repaint anybody would read as a failure.
+
+`categoryReadSeq` (`ui/habit-dialog.js`) is a monotonic counter, and it is two
+halves that fail differently:
+
+- **`refreshCategoryPicker` takes a ticket and may only INSTALL its answer if
+  that ticket is still the current one.** A superseded read still repaints —
+  from whatever the store holds now, which can only re-confirm what is there —
+  because an awaiting caller (the rename handler's `editingCategoryId = null`,
+  say) would otherwise be left with controls that do not match the state
+  behind them. The assignment is the half that can be stale.
+- **`moveCategory` bumps the counter at its optimistic splice**, which retires
+  every read already out on the wire. This is *not* covered by the first half,
+  and that is the part worth remembering: the read in flight is often
+  `openDialog`'s fire-and-forget `refreshCategoryPicker()`, fired before any
+  press existed, and at the moment it lands the press's own read has not
+  STARTED — its POST is still out. Nothing newer has taken a ticket, so
+  without the bump that pre-move answer paints the optimistic move away. It
+  needs no response reordering at all, only the dialog's own GET being slower
+  than the first press on it, which is an ordinary open-and-press.
+
+Blocks `j` and `k` in `shared/test/browser/categorycheck.mjs` pin one half
+each, and the split is forced rather than tidy: with the bump deleted `j`
+still passes and only `k` fails. Both drive the failure deterministically —
+the interceptor fires each request against the real server at the moment the
+app asks for it, so the body captured is genuinely the stale one and the
+server genuinely commits, and only the RESPONSE is held until the script
+releases it. Each block asserts the DOM and then the server's own order after
+a follow-up press, because the DOM half self-heals a round trip later while
+the write does not.
+
+What is still shared with `persistOrder`, unchanged: several writes in flight,
+each carrying the full order as of when it fired, so the order the server ends
+up with is whichever POST commits last rather than whichever press was made
+last. That is a write-ordering question, it predates this work in the habit
+list, and closing it means sequencing the writes rather than the reads.
