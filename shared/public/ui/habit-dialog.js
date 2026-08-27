@@ -7,7 +7,7 @@
  */
 
 import { api } from '/shared/ui/api.js';
-import { focusKeyOf, restoreFocus } from '/shared/ui/components.js';
+import { focusKeyOf } from '/shared/ui/components.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { dashboardShowing, emit, staysOnList, state } from '/shared/ui/store.js';
@@ -520,6 +520,43 @@ function repaintCategories() {
 }
 
 /**
+ * Put the keyboard back on the arrow that was just pressed — or park it on the
+ * list itself when that very press is what disabled that arrow.
+ *
+ * Deliberately not `restoreFocus` (ui/components.js), and this is the one
+ * place in the app where its fallback is the wrong answer. That fallback hands
+ * focus to the first still-operable `[data-focus-key]` in the same PARENT,
+ * which is right for its other caller — pressing Today disables Today, and the
+ * paging button beside it does something unrelated — and actively wrong in a
+ * manage row, where ↑ and ↓ are the only two focus keys and each is the
+ * other's undo. Walk a category to the top with repeated Enter presses (the
+ * gesture `moveCategory`'s own restore exists for) and the press that lands it
+ * at row 0 disables ↑ and moves focus one button right to ↓; the next press
+ * sends it back down, and a held Enter ping-pongs the row between the two ends
+ * with a `POST /categories/reorder` per step. The only thing saying so is a
+ * focus ring shifting about 30px inside a row that was moving anyway.
+ *
+ * So a boundary parks the keyboard on `#category-manage`. The gesture stops
+ * where the boundary says it stops, focus stays inside the dialog rather than
+ * dropping to `<body>` — which is the whole reason a restore runs here at all
+ * — and the list survives `repaintCategories()`'s `replaceChildren()`, so the
+ * post-refetch restore's `activeElement === document.body` guard correctly
+ * reads it as focus nobody dropped.
+ */
+function restoreArrowFocus(list, key) {
+  if (!key) return;
+  // Compared rather than selected, for the reason `restoreFocus` gives.
+  const arrow = [...list.querySelectorAll('[data-focus-key]')]
+    .find((el) => el.dataset.focusKey === key);
+  if (arrow && !(/** @type {HTMLButtonElement} */ (arrow).disabled)) {
+    /** @type {HTMLElement} */ (arrow).focus();
+    return;
+  }
+  list.tabIndex = -1;
+  list.focus({ preventScroll: true });
+}
+
+/**
  * Shift a category one slot up or down and write the new order.
  *
  * Follows `nudgeHabit` / `persistOrder` (dashboard.js) — optimistic splice,
@@ -577,7 +614,7 @@ async function moveCategory(id, delta) {
   // So holding ↑ walks a category up instead of dropping focus on the first
   // press — `repaintCategories()` just tore out the button that was focused
   // and built a new one under the same `data-focus-key`.
-  restoreFocus($('#category-manage'), focused);
+  restoreArrowFocus(list, focused);
 
   try {
     await api('/categories/reorder', { method: 'POST', body: JSON.stringify({ order }) });
@@ -637,8 +674,8 @@ async function moveCategory(id, delta) {
   // and nothing here to correct: forcing the press-time offset regardless
   // used to jump the list under the open rename box the moment this GET
   // landed. (A manual scroll made during the wait, with no rename involved,
-  // is not something this line — or `restoreFocus`'s own guard below, which
-  // reads the same `<body>` either way — can tell apart from an untouched
+  // is not something this line — or the focus guard below, which reads the
+  // same `<body>` either way — can tell apart from an untouched
   // wait; this guard only stops the write from firing where it plainly
   // should not, not from ever restoring a stale offset.)
   if (editingCategoryId == null) {
@@ -655,7 +692,7 @@ async function moveCategory(id, delta) {
   // GET lands the user may have deliberately moved focus elsewhere, and an
   // unconditional restore would steal it back.
   if (document.activeElement == null || document.activeElement === document.body) {
-    restoreFocus($('#category-manage'), focused);
+    restoreArrowFocus(list, focused);
   }
   // `emit('change')` directly — the one mutation in this file that
   // deliberately does NOT go through `announce()`. There is nothing to

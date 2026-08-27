@@ -2345,6 +2345,119 @@ try {
       && document.querySelectorAll('#grid .category-section-header').length === 0`,
     { what: 'the ungrouped dashboard to come back after l' });
 
+  /* ---------- 2b: a boundary press must not hand the keyboard the arrow that
+     UNDOES it (review round 4, finding 2) ----------
+   *
+   * The arrows exist because drag is "unreachable by keyboard"
+   * (`attachDragHandlers`), so the keyboard is this control's headline path,
+   * and `restoreFocus`'s generic fallback is the wrong answer on exactly this
+   * row. It hands focus to the first still-operable `[data-focus-key]` in the
+   * same parent — right for `Today`, whose neighbour does something unrelated,
+   * and wrong here, where ↑ and ↓ are the row's ONLY two focus keys and each
+   * is the other's undo. The press that lands a category at row 0 disables its
+   * ↑ and moved focus one button right onto its ↓; the next Enter sent it back
+   * down, and a held Enter ping-ponged the row between the two ends with a
+   * `POST /categories/reorder` per step.
+   *
+   * Both halves are asserted, because the second is the one that reaches
+   * storage: where focus went, and then what a further Enter actually does.
+   * The Enter is a REAL key event for the reason the implicit-submission block
+   * above gives — a script-made `KeyboardEvent` does not activate a button,
+   * so a test built on one passes against the unfixed code.
+   *
+   * Two mutation targets, because the two halves fail differently. Put
+   * `restoreFocus($('#category-manage'), focused)` back in place of
+   * `restoreArrowFocus(list, focused)` in `moveCategory`: the "not the ↓" check
+   * and BOTH of the Enter checks must fail, while "focus stays inside the list"
+   * still passes — that one is not about this bug and says so. Then instead
+   * drop the `list.focus(...)` fallback from `restoreArrowFocus`, leaving a
+   * boundary with nothing to restore to: that one check, and only it, must
+   * fail.
+   */
+  console.log('--- 2b: a boundary press does not hand the keyboard the arrow that undoes it (review round 4, finding 2) ---');
+
+  await ev(`(()=>{
+    window.__bPending = 0;
+    window.__bRealFetch = window.fetch;
+    const real = window.__bRealFetch;
+    window.fetch = (...args) => {
+      window.__bPending++;
+      return real(...args).finally(() => { window.__bPending--; });
+    };
+    return true;
+  })()`);
+  await openHabitByName(HABIT_NAME);
+  await waitUntil(ev, `window.__bPending === 0`,
+    { what: "openDialog's own fire-and-forget refetch to finish arriving for 2b" });
+  await sleep(300);
+
+  const beforeB = (await readManage()).names;
+  ck('sanity: two or more categories, so a row can be walked to the top boundary',
+    beforeB.length >= 2, JSON.stringify(beforeB));
+
+  // The row at index 1: one press of its ↑ lands it at index 0, where that very
+  // ↑ disables itself. Focus, click and the read of where focus ended up all
+  // inside ONE `Runtime.evaluate`, for the reason `2a` gives — a separate call
+  // between them hands anything else a whole CDP round trip to move focus
+  // first. `moveCategory`'s synchronous prefix (splice, repaint, its own focus
+  // restore) has completed by the time `.click()` returns.
+  const pressedB = await ev(`(()=>{
+    const rows = [...document.querySelectorAll('#category-manage .category-manage-row')];
+    const row = rows[1];
+    const name = row.querySelector('.category-manage-name').textContent.trim();
+    const upKey = row.querySelector('.category-move-up').dataset.focusKey;
+    const downKey = row.querySelector('.category-move-down').dataset.focusKey;
+    row.querySelector('.category-move-up').focus();
+    row.querySelector('.category-move-up').click();
+    const el = document.activeElement;
+    const list = document.getElementById('category-manage');
+    return {
+      name, upKey, downKey,
+      focusKey: el && el.dataset ? el.dataset.focusKey ?? null : null,
+      onBody: el == null || el === document.body,
+      inList: !!el && list.contains(el),
+    };
+  })()`);
+
+  ck('2b: the press that disables ↑ does not move focus onto the ↓ that would undo it',
+    pressedB.focusKey !== pressedB.downKey, JSON.stringify(pressedB));
+  ck('…and focus stays inside the manage list rather than dropping to <body>',
+    pressedB.onBody === false && pressedB.inList === true, JSON.stringify(pressedB));
+
+  // Let the press's own POST and refetch settle first, so the SECOND focus
+  // restore has had its chance too: under the unfixed code its
+  // `activeElement === document.body` guard sees focus sitting on the ↓ and
+  // leaves it there, which is the state a held Enter then acts on.
+  await waitUntil(ev, `window.__bPending === 0`,
+    { what: "the boundary press's own write and refetch to settle" });
+  await sleep(300);
+
+  const afterPressB = (await readManage()).names;
+  ck('2b sanity: the press did move the row to the top',
+    afterPressB[0] === pressedB.name,
+    JSON.stringify({ beforeB, afterPressB, moved: pressedB.name }));
+
+  await pressEnter();
+  await sleep(700);
+
+  ck('2b sanity: Enter did not submit the habit form out from under the list',
+    (await ev(`document.getElementById('habit-dialog').open`)) === true);
+
+  const afterEnterB = (await readManage()).names;
+  ck('2b: THE assertion: one more Enter does not walk the category straight back down',
+    afterEnterB.join('|') === afterPressB.join('|'),
+    JSON.stringify({ afterPressB, afterEnterB, wouldBeReversed: beforeB }));
+
+  await ev(`window.fetch = window.__bRealFetch; true`);
+  const bServerOrder = await categoryNames();
+  ck('…and no reversal was written to the server either',
+    bServerOrder.join('|') === afterPressB.join('|'),
+    JSON.stringify({ bServerOrder, expected: afterPressB }));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close after 2b' });
+
   /* ---------- m: a press whose write FAILED must not revert over a newer one
      (review round 4, finding 3) ----------
    *

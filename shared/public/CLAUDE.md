@@ -132,6 +132,18 @@ write and so cannot race a second call's read — do not read its shape as the
 precedent here. Blocks `j`, `k`, `l` and `m` in `categorycheck.mjs` pin one
 half each, and each one passes with any of the other three deleted.
 
+**And a reorder arrow may not be restored with `restoreFocus`.** Its fallback
+for a control that has stopped being operable is the first still-operable
+`[data-focus-key]` in the same parent, which is right for `Today` and wrong in
+a manage row, where ↑ and ↓ are the only two focus keys and each is the
+other's undo: the press that lands a category at row 0 disables its ↑ and
+handed the keyboard its ↓, so the next Enter walked it back down and a held
+Enter ping-ponged it between the ends with a write per step.
+`restoreArrowFocus` (`ui/habit-dialog.js`) parks focus on the list itself at a
+boundary instead — the gesture stops where the boundary says it stops, and
+focus stays inside the dialog rather than dropping to `<body>`, which is the
+whole reason a restore runs there. Block `2b` pins both halves.
+
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears

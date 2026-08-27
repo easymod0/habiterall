@@ -783,6 +783,40 @@ dashboard's own section order and then the server's order after a follow-up
 press, because the visible half self-heals a round trip later while the write
 does not.
 
+**A reorder arrow may not be restored with `restoreFocus`, and the reason is
+that ↑ and ↓ are each other's undo.** `restoreFocus` (`ui/components.js`)
+answers a control that has survived a rebuild but stopped being operable by
+handing focus to the first still-operable `[data-focus-key]` in the same
+parent. That is right where it was written — pressing Today disables Today,
+and its neighbour does something unrelated — and wrong in a manage row, where
+those two arrows are the row's ONLY focus keys. The press that lands a
+category at row 0 disables its ↑ and moved focus one button right onto its ↓;
+the next Enter sent the category back down, and since ↓ stays enabled at every
+row but the last, continued presses walked it to the bottom and then back up
+again, one `POST /categories/reorder` per step. The only thing saying so was a
+focus ring shifting about 30px inside a row that was moving anyway.
+
+This is the keyboard path, not a corner of it: the arrows exist *because*
+`attachDragHandlers` records HTML5 drag as "unreachable by keyboard", and
+`moveCategory`'s own comment says the restore is there so holding ↑ walks a
+category up. `restoreArrowFocus` (`ui/habit-dialog.js`) parks focus on
+`#category-manage` itself at a boundary instead — the gesture stops where the
+boundary says it stops, focus stays inside the dialog rather than dropping to
+`<body>`, and the list survives `replaceChildren()` so the post-refetch
+restore's `activeElement === document.body` guard correctly reads it as focus
+nobody dropped. Block `2b` pins both halves, and the second one with a REAL
+`Input.dispatchKeyEvent`: a script-made `KeyboardEvent` does not activate a
+button, so a test built on one passes against the unfixed code.
+
+Two alternatives were weighed and lost. Keeping the button enabled with
+`aria-disabled` is the WAI-ARIA answer to "a control that disables itself
+under the user's finger" and would be better still — `moveCategory` already
+returns early at a boundary, so an enabled arrow there is a safe no-op — but
+it needs a second mechanism for the rename-mode disable, which must genuinely
+refuse the click, and it rewrites two passing mutation-tested assertions to
+buy it. Restoring to the row's ✎ instead is no better than ↓: Enter on it
+opens a rename box, which is a smaller wrong action rather than none.
+
 What is still shared with `persistOrder`, unchanged: several writes in flight,
 each carrying the full order as of when it fired, so the order the server ends
 up with is whichever POST commits last rather than whichever press was made
