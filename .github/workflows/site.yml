@@ -78,9 +78,9 @@ jobs:
 
       # Fails with a 404 when Pages has never been enabled for the repository.
       # See the note at the top of this file — it is a settings change, once.
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist
 
@@ -93,7 +93,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       - name: Where it went
         run: |
