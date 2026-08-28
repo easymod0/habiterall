@@ -69,8 +69,19 @@ await admin.connect();
 // One unsafe function here is not one slow query: these functions sit in the
 // USING clause of a policy on every table, so an unsafe one takes parallelism
 // away from every query the application issues, all at once.
+//
+// The predicate is `<> 's'` and NOT `= 'u'`, which is the whole of what this
+// assertion is worth. `PARALLEL RESTRICTED` may only run in the parallel group
+// LEADER, so an expression containing it cannot appear in a partial path — and
+// an RLS qual is applied at the scan, so a restricted policy function is a scan
+// that cannot be parallelised. `debug_parallel_query` in force mode only wraps
+// a plan whose top node is `parallel_safe`, so what comes out is no `Gather` at
+// all: byte for byte the regression migration 016 exists to undo. Written
+// `= 'u'`, a third policy function marked `'r'` by an author being cautious
+// passes this and takes parallelism away from every query the app role issues.
+// The control below cannot see it either — it names the two functions by hand.
 
-console.log('--- no function any RLS policy depends on is PARALLEL UNSAFE ---');
+console.log('--- every function an RLS policy depends on is PARALLEL SAFE ---');
 
 const { rows: unsafe } = await admin.query(`
   SELECT DISTINCT p.proname, p.proparallel, pol.polname, cl.relname
@@ -78,11 +89,12 @@ const { rows: unsafe } = await admin.query(`
     JOIN pg_proc p ON p.oid = d.refobjid AND d.refclassid = 'pg_proc'::regclass
     JOIN pg_policy pol ON pol.oid = d.objid AND d.classid = 'pg_policy'::regclass
     JOIN pg_class cl ON cl.oid = pol.polrelid
-   WHERE p.proparallel = 'u'
+   WHERE p.proparallel <> 's'
 `);
-check('every function reached from a policy is parallel safe or restricted',
+check('every function reached from a policy is PARALLEL SAFE, not merely not unsafe',
   unsafe.length === 0,
-  JSON.stringify(unsafe.map((r) => `${r.proname} via ${r.polname} on ${r.relname}`)));
+  JSON.stringify(unsafe.map(
+    (r) => `${r.proname} is '${r.proparallel}' via ${r.polname} on ${r.relname}`)));
 
 // The control. If the join above matched nothing at all — a renamed catalog
 // column, a typo in a regclass literal — the assertion would pass against a

@@ -126,6 +126,34 @@ half: forced parallel, inside `withUser`, an account still sees only its own
 rows. Parallel safety says the body may run in a worker; it does not widen what
 that worker can see, and that is asserted rather than argued.
 
+**`SAFE` is the requirement, and `RESTRICTED` fails it exactly as `UNSAFE`
+does.** The catalog walk asks `proparallel <> 's'`, not `= 'u'`, and that is
+not pedantry: `PARALLEL RESTRICTED` means the function may run only in the
+parallel group LEADER, so an expression containing it cannot appear in a
+partial path — and an RLS qual is applied at the scan, so a restricted policy
+function is a scan that cannot be parallelised at all. There is no `Gather` in
+the plan, which is byte for byte the regression 016 exists to undo. The first
+version of this suite asked `= 'u'`, so a THIRD policy function marked `'r'` by
+an author being cautious would have passed it while taking parallelism away
+from every query the app role issues; the named control beside it covers only
+these two functions and would not have seen it either. Mutation-tested both
+ways round.
+
+**And the plan that carries a security claim must be the plan of the statement
+whose ANSWER is trusted.** Round one of that tenancy block asserted `Workers
+Launched: 1` on a stand-in — `SELECT count(*) FROM entries` — and then ran the
+two isolation reads as separate statements, on the reasoning that the same
+forced-parallel transaction makes them parallel too. It does not follow: a
+`COUNT(DISTINCT ...)` is the sort of aggregate whose parallel-safety is worth
+not assuming, and a single `random()` (which Postgres marks `PARALLEL
+RESTRICTED`) anywhere in the select list is enough to take the `Gather` off one
+read while the stand-in beside it keeps its worker — measured. Each isolation
+read is now `EXPLAIN ANALYZE`d for its own plan and then issued again for its
+rows, and the worker count is asserted per statement. Same lesson as the
+`ANALYZE`-not-`EXPLAIN` one above, one level further in: a plan is a statement
+about shape, and the shape asserted has to be the shape of the query being
+believed.
+
 `LEAKPROOF` is deliberately not applied to either and must not be: it is the
 opposite lever — permission to push a user-supplied qual *below* a security
 barrier — and these functions **are** the barrier.

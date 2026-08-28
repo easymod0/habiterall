@@ -88,20 +88,40 @@ console.log('--- attack: does isolation survive a PARALLEL plan? ---');
 // above. A CI runner that has its parallel workers spoken for gets there
 // intermittently. Only ANALYZE reports `Workers Launched`, and `EXPLAIN
 // ANALYZE` over a `SELECT count(*)` executes the query and writes nothing.
+//
+// And the plan is taken of the ISOLATION READS THEMSELVES, not of a stand-in
+// beside them. Round one asserted `Workers Launched: 1` on `SELECT count(*)
+// FROM entries` and then ran the two reads that carry the security claim as
+// separate statements, with the prose saying they are "themselves answered
+// under a Gather". That is narrower than it sounds — the `max_parallel_workers
+// = 0` decay above is still caught, because the stand-in's own assertion goes
+// red — but what is left open is the case where the stand-in gets a worker and
+// an isolation read does not. `COUNT(DISTINCT ...)` is exactly the sort of
+// aggregate whose parallel-safety is worth not assuming, and this block's own
+// lesson is that a plan is a statement about shape and only ANALYZE says what
+// ran. So each read is EXPLAIN ANALYZEd for its plan and then issued again for
+// its rows, inside the same forced-parallel transaction, and the worker count
+// is asserted on the plan of the statement whose ANSWER is being trusted.
+const ENTRY_READ = `SELECT COUNT(*)::int AS n, COUNT(DISTINCT user_id)::int AS owners,
+            COALESCE(MIN(user_id), 0)::int AS owner FROM entries`;
+const HABIT_READ = 'SELECT name FROM habits ORDER BY name';
+
 const parallel = await withUser(alice.id, async (db) => {
   await db.query('SET LOCAL debug_parallel_query = on');
-  const plan = (await db.query(
-    'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM entries'))
+  const explain = async (sql) => (await db.query(
+    `EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ${sql}`))
     .rows.map((r) => r['QUERY PLAN']).join('\n');
+
+  const plan = await explain('SELECT count(*) FROM entries');
+  const entryPlan = await explain(ENTRY_READ);
+  const habitPlan = await explain(HABIT_READ);
   // Still the same transaction, so still forced parallel: these two reads are
-  // themselves answered under a Gather. That is the point — what is under test
-  // is what a worker returns, not what an EXPLAIN says it would.
-  const entries = (await db.query(
-    `SELECT COUNT(*)::int AS n, COUNT(DISTINCT user_id)::int AS owners,
-            COALESCE(MIN(user_id), 0)::int AS owner FROM entries`)).rows[0];
-  const habits = (await db.query('SELECT name FROM habits ORDER BY name'))
-    .rows.map((r) => r.name);
-  return { plan, entries, habits };
+  // the ones the plans above were taken of, run again for their rows. That is
+  // the point — what is under test is what a worker returns, not what an
+  // EXPLAIN says it would.
+  const entries = (await db.query(ENTRY_READ)).rows[0];
+  const habits = (await db.query(HABIT_READ)).rows.map((r) => r.name);
+  return { plan, entryPlan, habitPlan, entries, habits };
 });
 // `Gather` says the plan is parallel-SAFE, which is the half 016's ALTER
 // FUNCTIONs buy. `Workers Planned` and `Single Copy` are not asserted on:
@@ -123,6 +143,17 @@ check('a plan over entries inside withUser can be parallelised at all',
   parallel.plan.includes('Gather'), parallel.plan);
 check('and a worker was actually launched, so the reads below ran in one',
   parallel.plan.includes('Workers Launched: 1'), parallel.plan);
+// Each isolation read carries its OWN worker count, so "the answer below came
+// from a worker" is a claim about the statement that produced the answer. A
+// read that quietly stopped being parallelisable — an aggregate the planner
+// will not push down, a policy function marked restricted — fails here by name
+// instead of leaving the assertion beneath it true of the leader.
+check("the entry read is itself answered under a launched worker",
+  parallel.entryPlan.includes('Gather')
+    && parallel.entryPlan.includes('Workers Launched: 1'), parallel.entryPlan);
+check('and so is the habit read',
+  parallel.habitPlan.includes('Gather')
+    && parallel.habitPlan.includes('Workers Launched: 1'), parallel.habitPlan);
 // The counts are the baseline block's, unchanged, and both directions of being
 // wrong are visible: bob owns a habit and an entry too, so a worker reading
 // without the setting propagated would report 2, and one reading with the
