@@ -6,8 +6,10 @@
  * which view is showing.
  */
 
+import { amountComplaint, formatAmount, parseAmount } from '/shared/ui/amount.js';
 import { api } from '/shared/ui/api.js';
 import { focusKeyOf } from '/shared/ui/components.js';
+import { convention } from '/shared/ui/count-field.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { dashboardShowing, emit, staysOnList, state } from '/shared/ui/store.js';
@@ -39,6 +41,27 @@ const CATEGORY_SUGGESTIONS = [
 
 /** Which category's manage row is showing its rename/recolour controls. */
 let editingCategoryId = null;
+
+/**
+ * The target this dialog was FILLED with, and the exact string that was
+ * written into the box to show it. Both reset by every `openDialog`.
+ *
+ * A habit's target has never been bounded server-side — `parseHabit` accepts
+ * any finite non-negative number, and the phone and every import path write
+ * one straight through — so the box submits what was TYPED, through
+ * `parseAmount`, and the STORED value verbatim when it was not touched. The
+ * second half is not a nicety: `PUT /habits/:id` REPLACES, so without it an
+ * edit that only changed the colour would quantise a target of `3.14159265`
+ * to `3.141593`, and one outside `parseAmount`'s `[1e-6, 1e12]` could not be
+ * saved at all — a dialog refusing a field nobody touched, with no in-domain
+ * spelling of the value to retype. See #156.
+ *
+ * "Untouched" is the string, not a flag: typing a character and taking it
+ * back leaves the box holding exactly what was filled, which is the same
+ * claim about what the user is asking to store.
+ */
+let filledTarget = 1;
+let filledTargetText = '';
 
 /**
  * Which category read is the CURRENT one — `state.categoryReadSeq`, bumped by
@@ -107,6 +130,60 @@ function categoryHint(message, isError = false) {
   const hint = $('#category-hint');
   hint.textContent = message;
   hint.classList.toggle('error', isError);
+}
+
+/** Why the target box was refused, in the shape `reminderField.hint` uses. */
+function targetHint(message, isError = false) {
+  const hint = $('#target-hint');
+  hint.textContent = message;
+  hint.classList.toggle('error', isError);
+}
+
+/**
+ * What to submit as the target: `null` means refuse and say so.
+ *
+ * Untouched, that is the stored value verbatim — see `filledTarget`. Typed,
+ * it is `parseAmount`'s reading of it, with `''` mapped to 0: an empty box
+ * here is "a habit with no target", which is what `Number(...) || 0` meant
+ * before this and what `parseHabit` stores for one. That is NOT the day
+ * editor's `''`, which means a DELETE; there is no row here to delete.
+ *
+ * **A refusal is gated on the box being ON SCREEN, not on the parse.** The
+ * target lives inside `.numerical-only`, which `syncTypeFields` hides the
+ * moment Type stops being Measurable, and `[hidden]` is
+ * `display: none !important` here — so mistyping the target and then deciding
+ * the habit is a Yes / No one leaves Save writing a complaint into a hidden
+ * span and calling `focus()` on a hidden input, which does nothing. The
+ * dialog stops saving with nothing on screen saying why and no control the
+ * user can even see to fix, where `Number(...) || 0` at least saved. Hidden
+ * and UNREADABLE, the stored target stands — the same claim the untouched-box
+ * rule above makes. Hidden and READABLE, the value is submitted exactly as it
+ * would have been visible — the same one `syncTypeFields` states for the
+ * at-most controls: hidden is not cleared. Do not simplify this back to
+ * refusing whenever `parseAmount` does; a refusal nobody can see is not a
+ * refusal.
+ *
+ * So the gate asks `.numerical-only.hidden` — the attribute `syncTypeFields`
+ * itself writes — and not `form.type.value !== 'numerical'`. Those two agree
+ * today, and only because `syncTypeFields:923` is the one line that sets that
+ * attribute and it sets it from that one expression. Written the second way
+ * this is a copy of a rule that lives 750 lines off, carrying the comment
+ * explaining why it matters while the line it has to track carries none: a
+ * third `HABIT_TYPES` entry, or `.numerical-only` hidden for any second
+ * reason, splits them silently and the failure is the one this gate exists to
+ * prevent. Ask the thing the rule is actually about; the DOM already knows.
+ *
+ * @returns {number|null}
+ */
+function readTarget() {
+  const raw = form.target_value.value;
+  if (raw === filledTargetText) return filledTarget;
+  const parsed = parseAmount(raw, convention());
+  if (parsed === '') return 0;
+  if (parsed === null && form.querySelector('.numerical-only').hidden) {
+    return filledTarget;
+  }
+  return parsed;
 }
 
 /**
@@ -794,7 +871,19 @@ export function openDialog(habit = null) {
   renderCategoryManage();
   f.type.value = habit?.type ?? 'boolean';
   f.unit.value = habit?.unit ?? '';
-  f.target_value.value = habit?.target_value ?? 1;
+  // Shown through `formatAmount`, so a `comma` account is offered its own
+  // spelling (8,5) rather than told it typed the last one wrong — and so the
+  // string recorded here is exactly what the box holds, which is what
+  // `readTarget` compares against. `formatAmount` is faithful at the extremes
+  // on purpose (see its own comment): a value too small for it to show is
+  // rendered as its raw self rather than as "0", which is what leaves the
+  // untouched-box rule something true to preserve.
+  const storedTarget = Number(habit?.target_value ?? 1);
+  filledTarget = storedTarget;
+  filledTargetText = formatAmount(storedTarget, convention());
+  f.target_value.value = filledTargetText;
+  // Or a refusal from the last habit's dialog survives into this one.
+  targetHint('');
   f.target_type.value = habit?.target_type ?? 'at_least';
   f.at_most_unlogged.value = habit?.at_most_unlogged ?? 'default';
   f.show_as.value = habit?.show_as ?? 'amount';
@@ -870,6 +959,18 @@ async function saveHabit(e) {
     return;
   }
 
+  // The second field that can hold something unsaveable, and it gets the
+  // same treatment as the first: refuse and return, never coerce.
+  // `Number(f.target_value.value) || 0` stored "abc" as a habit with no
+  // target — a goal quietly deleted — and, through the number input this
+  // replaced, "8,5" as 85. See `readTarget` and #156.
+  const targetValue = readTarget();
+  if (targetValue === null) {
+    targetHint(amountComplaint(f.target_value.value, convention()), true);
+    f.target_value.focus();
+    return;
+  }
+
   const payload = {
     name: f.name.value,
     icon: f.icon.value,
@@ -880,7 +981,7 @@ async function saveHabit(e) {
     category_id: currentCategoryId(),
     type: f.type.value,
     unit: f.unit.value,
-    target_value: Number(f.target_value.value) || 0,
+    target_value: targetValue,
     target_type: f.target_type.value,
     at_most_unlogged: f.at_most_unlogged.value,
     show_as: f.show_as.value,
@@ -1049,6 +1150,12 @@ export function init() {
   // have to re-ask. Without this, switching to "At most" left the question
   // hidden until the dialog was reopened.
   form.target_type.addEventListener('change', syncTypeFields);
+
+  // Say nothing about a half-typed target — "8." is on its way to "8.5" and
+  // is not a mistake yet. The complaint belongs to Save, which is the moment
+  // something is actually done with it. `count-field.js` does the same for
+  // the same reason.
+  form.target_value.addEventListener('input', () => targetHint(''));
 
   // Built once — the six suggestions are static — mirroring how
   // reminder-field.js builds its own preset row at load rather than per open.

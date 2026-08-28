@@ -101,6 +101,111 @@ absence: an account that has CHOSEN a convention is followed in the browser and
 not on the phone. Under `auto`, which is almost everybody, the phone would
 resolve its own locale and there is nothing to carry.
 
+**The habit dialog's Target box was still `<input type="number">`, and #156 is
+the same measurement landing a second time.** `index.html`'s `target_value` was
+the one box `ui/amount.js`'s own header had already named as the gap this file
+leaves — `8,5` typed as a goal was stored as 85, exactly as it was for a day's
+amount before this file's first entry. `readTarget` (`ui/habit-dialog.js`) is
+the reader now: untouched, the box submits the stored value verbatim; typed, it
+goes through `parseAmount` like everything else that reads a typed amount.
+
+**Whether a typed target should share the day amount's bounded, quantised
+domain was a real choice, not a formality — Option B, sharing that domain for
+what is typed and not for what was merely stored, is what shipped.**
+Option A was to run `parseAmount` over whatever the box holds, unconditionally
+— inheriting the day amount's bounded, quantised domain whole, no migration
+and no server change, three lines shorter than what shipped. Refused: a
+colour-only edit would quantise a stored `3.14159265`, and a shared domain
+would have made every one of those rows unsavable the moment somebody opened
+the dialog and pressed Save without touching Target — the colour, say — with
+no in-domain spelling to retype the goal as. Option C was a
+`bounded: false` parameter on `parseAmount` itself, so the target box could ask
+for the unbounded, unquantised form of the same parser. Refused for a sharper
+reason: `parseAmount` is the one function `shared/src/discord.js` imports across
+the `src`/`public` boundary, and the bounds are not an accident of the day
+editor — they exist so `parseAmount` and `formatAmount` agree about one domain,
+which the target box needs as much as any caller that both reads and re-shows
+what it read. Threading a flag through a shared function to switch its domain
+off for one caller is the shape of bug the bound was written to prevent
+elsewhere in this same file.
+
+So Option B: what is **typed** goes through `parseAmount` exactly as a day's
+amount does — bounded to `[1e-6, 1e12]`, quantised to six places — and a box
+left **untouched** submits the stored value verbatim, whatever it is. The
+round trip this settles:
+
+```
+typed "3.14159265"    -> stored 3.141593   quantised, same as a day's amount
+typed "1e-7"          -> refused           below MIN_AMOUNT, an exponent besides
+typed "2000000000000" -> refused           above MAX_AMOUNT
+untouched, stored 3.14159265 -> stored 3.14159265   unchanged; the box was never asked
+```
+
+A target outside `[1e-6, 1e12]` is reachable today without an import touching
+anything: the `type="number"` box this change removes was one way in; the
+phone's `HabitFormScreen.parseAmount` has no bounds at all; every import
+reader (`shared/src/import.js`, both editions' `apply-import.js`) passes the
+file's own number straight through, checking only that it is finite and
+non-negative; and `formatAmount` renders a value too small for it to show back
+as its raw self rather than as `0`, precisely so a value this narrow has
+something true left to preserve rather than being silently rewritten into a
+stated lapse on the next Save.
+
+**A refusal is gated on the box being ON SCREEN, not on the parse, and that is
+a second choice with its own failure mode if it is not made.** The gate is
+`if (parsed === null && form.querySelector('.numerical-only').hidden)` in
+`readTarget`:
+hidden and unreadable, the stored target stands; hidden and readable, the
+typed value is submitted as it would have been visible — `syncTypeFields`'s own
+"hidden is not cleared" for the at-most controls. Ungated, mistyping the
+target and then switching Type away from Measurable leaves Save writing a
+complaint into a `[hidden]` span and calling `focus()` on a `[hidden]` input —
+both do nothing, and the dialog simply stops saving with no visible reason and
+no visible control to fix. `Number(...) || 0`, the code this replaced, at
+least always saved something; a refusal nobody can see is worse than the bug
+it fixes.
+
+That gate shipped as `form.type.value !== 'numerical'` and review changed it,
+which is worth recording because the two are behaviourally identical today.
+What decides whether the box is on screen is `syncTypeFields`, one line:
+`form.querySelector('.numerical-only').hidden = !numerical`. Written the first
+way, `readTarget` holds a second copy of that expression 750 lines from the
+line it has to track — and carries the comment saying why it matters, while
+the line it mirrors carries none. A third `HABIT_TYPES` entry, or
+`.numerical-only` hidden for any second reason, splits them silently, and what
+comes out is exactly the failure the gate exists to prevent. The DOM already
+holds the answer; ask it. `countcheck.mjs` has a check that can tell the two
+apart — the container hidden by hand with Type still reading Measurable —
+because the pre-existing one hides it by switching Type, where the two
+readings are the same event and so it passes against either.
+
+**The Target box shows a quantised value, and the string it shows is the one
+string that cannot be committed.** `filledTargetText` is `formatAmount(stored)`,
+which rounds to 6 dp, and `readTarget`'s untouched shortcut returns the
+UNQUANTISED stored number whenever the box still holds that string. So a habit
+stored at `3.14159265` is shown `3.141593`; a user who selects the box and
+retypes exactly what it was showing gets `3.14159265` back, unchanged. Retyping
+it any other way — `3.1415930`, a trailing zero — does commit the shown value,
+which is why this is a curiosity rather than a defect: no target is
+unreachable, only one spelling of one is inert.
+
+This is the direct price of "untouched is the STRING" and it is not worth
+paying to avoid. The alternative is a dirty flag on the box, and a flag is
+wrong in the direction that costs something: `input` fires on a keystroke that
+leaves the value identical, on a paste of the same text, on an IME commit, and
+on an autofill — so a flag marks touched a box nobody meaningfully changed, and
+then `PUT /habits/:id`'s replace semantics turn that into a stored target
+quietly rewritten during an edit of a different field. A comparison against the
+string cannot be wrong that way: it is exactly true when the box holds what the
+habit holds. The next person to look at this will reach for the flag; this
+paragraph is why not.
+
+**An empty Target box is still a stated 0, not a delete.** That is what
+`Number(f.target_value.value) || 0` meant before this — a habit with no
+target — and it is what `readTarget` maps `''` to as well. It is deliberately
+not the day editor's empty box, which is a DELETE of that day's row: there is
+no row here to delete, only a field on the habit itself.
+
 **Adding an EXPORT to a shell module is a `CACHE_VERSION` bump**, for the same
 reason v14 was one. `shellFirst` serves scripts cache-first and revalidates per
 request, so the swap is not atomic: a shell holding the new `count-field.js`

@@ -735,6 +735,12 @@ dialog select {
 }
 dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 
+/* The habit dialog's target box says why it was refused (#156). `.field-hint`
+   is the quiet grey every field's explanatory line takes, and the `.error`
+   colour is scoped per hint — `.timefield`, `.countfield`, `#category-hint` —
+   so a refusal here reads as ordinary help text without this line. */
+#target-hint.error { color: var(--danger); }
+
 /* ---------- category field (habit dialog) ---------- */
 
 .category-field { margin-bottom: 11px; }

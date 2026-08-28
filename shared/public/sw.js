@@ -255,7 +255,26 @@ const sw = self;
 // throw, not a link error — a working-looking app with the account's
 // categories silently gone. This is #163's case (`detailCards`) again, and the
 // reason that clause is in the rule at all.
-const CACHE_VERSION = 'v26';
+// v27: the habit dialog's Target box became a text box read through
+// `parseAmount` (#156), and `ui/count-field.js` gained an EXPORT — `convention`,
+// the one declaration of which character a decimal point is — which
+// `ui/habit-dialog.js` now imports STATICALLY. That is v20's case: a shell
+// holding the new `habit-dialog.js` over a cached v26 `count-field.js` throws
+// "does not provide an export named 'convention'" at module LINK time, before
+// `start()` runs and so outside `#view-error`.
+//
+// And it is v24's, on `index.html`, which is in `SHELL`: the target input lost
+// `type="number"` and gained `#target-hint`, the element a refusal is written
+// into. A cached v26 `index.html` under the new `habit-dialog.js` is a number
+// input that still eats the comma this change is about, beside a
+// `targetHint()` dereferencing an element that is not there — so the refusal
+// throws instead of being shown. The reverse pairing is the quiet one: a new
+// `index.html` whose text box accepts "8,5" held against a cached
+// `habit-dialog.js` that still reads it with `Number(...) || 0`, which is 85.
+// No new FILE, so `SHELL` is unchanged — `/index.html`, `/shared/ui/amount.js`,
+// `/shared/ui/count-field.js` and `/shared/ui/habit-dialog.js` are all already
+// in it.
+const CACHE_VERSION = 'v27';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
