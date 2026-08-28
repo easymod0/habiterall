@@ -328,6 +328,21 @@ jobs:
           APP_DB_PASSWORD: apptestpw
         run: node src/db/migrate.js
 
+      # What the schema lets Postgres DO, which no API suite can see: every
+      # answer here is byte-identical whether or not the indexes exist and
+      # whether or not the policy functions are parallel safe. A later
+      # `CREATE OR REPLACE FUNCTION` that omits `PARALLEL SAFE` resets it in
+      # silence and takes parallelism away from every table at once, and that
+      # is the regression this catches. First after the migrations on purpose:
+      # it takes plans against a database nothing else has put rows in, and it
+      # deletes its own fixture and re-analyses before the suites below run.
+      - name: Query plans and schema invariants
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: npm run test:plans
+
       # The cloud API was previously only ever exercised by hand. These are
       # the paths where a regression is most expensive: per-user isolation,
       # settings, and the import writer.

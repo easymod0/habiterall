@@ -106,6 +106,102 @@ canonicalised; `/api/notify/test` re-reads it from the database rather than
 taking one from the request body, and carries its own tight rate limit because
 it causes outbound traffic.
 
+## Both policy functions are `PARALLEL SAFE`, and that flag goes away in silence
+
+`app_current_user_id()` and `app_is_notifier()` were marked `PARALLEL SAFE` by
+migration 016 and must stay that way. `CREATE FUNCTION` defaults to UNSAFE and
+a later `CREATE OR REPLACE FUNCTION` that omits the clause resets it without
+saying so — and because both sit in the `USING` clause of a policy on every
+table, one unsafe function takes parallelism away from the whole application at
+once. That is what the before measurement showed: with `debug_parallel_query =
+on`, a `count(*)` over `entries` inside `withUser` produced an identical plan
+with no `Gather` node in it at all.
+
+`test/schema-plans.integration.mjs` is what notices. It walks `pg_depend` from
+the policies rather than naming these two functions, so a policy added later
+brings its function into the check with it, and the index invariants beside it
+are read out of `pg_index` / `pg_attribute` for the same reason — a table added
+next year is already covered. `test/tenancy.integration.mjs` holds the other
+half: forced parallel, inside `withUser`, an account still sees only its own
+rows. Parallel safety says the body may run in a worker; it does not widen what
+that worker can see, and that is asserted rather than argued.
+
+**`SAFE` is the requirement, and `RESTRICTED` fails it exactly as `UNSAFE`
+does.** The catalog walk asks `proparallel <> 's'`, not `= 'u'`, and that is
+not pedantry: `PARALLEL RESTRICTED` means the function may run only in the
+parallel group LEADER, so an expression containing it cannot appear in a
+partial path — and an RLS qual is applied at the scan, so a restricted policy
+function is a scan that cannot be parallelised at all. There is no `Gather` in
+the plan, which is byte for byte the regression 016 exists to undo. The first
+version of this suite asked `= 'u'`, so a THIRD policy function marked `'r'` by
+an author being cautious would have passed it while taking parallelism away
+from every query the app role issues; the named control beside it covers only
+these two functions and would not have seen it either. Mutation-tested both
+ways round.
+
+**And the plan that carries a security claim must be the plan of the statement
+whose ANSWER is trusted.** Round one of that tenancy block asserted `Workers
+Launched: 1` on a stand-in — `SELECT count(*) FROM entries` — and then ran the
+two isolation reads as separate statements, on the reasoning that the same
+forced-parallel transaction makes them parallel too. It does not follow: a
+`COUNT(DISTINCT ...)` is the sort of aggregate whose parallel-safety is worth
+not assuming, and a single `random()` (which Postgres marks `PARALLEL
+RESTRICTED`) anywhere in the select list is enough to take the `Gather` off one
+read while the stand-in beside it keeps its worker — measured. Each isolation
+read is now `EXPLAIN ANALYZE`d for its own plan and then issued again for its
+rows, and the worker count is asserted per statement. Same lesson as the
+`ANALYZE`-not-`EXPLAIN` one above, one level further in: a plan is a statement
+about shape, and the shape asserted has to be the shape of the query being
+believed.
+
+`LEAKPROOF` is deliberately not applied to either and must not be: it is the
+opposite lever — permission to push a user-supplied qual *below* a security
+barrier — and these functions **are** the barrier.
+
+**`test:plans` pins CAPABILITY; `bench:queries` is what measured CHOICE, and it
+is not a suite.** `planFor` sets `enable_seqscan = off` (and, for the grid read,
+`enable_bitmapscan = off` as well), so what it asserts is that the index can
+serve the predicate and that the planner prefers it *among indexes* — which is
+the half a test can pin, because the alternative is a cost estimate that moves
+with table size. Whether the planner reaches for it UNFORCED is what
+`scripts/bench-queries.mjs` reports, and that is where #185's before/after
+numbers come from. It has an npm script (`npm run bench:queries -w
+habiterall-cloud`) so it is invocable by name rather than by path, and it is
+deliberately **not** in CI: it is DESTRUCTIVE — it empties `users`, `habits`,
+`entries` and `notify_log` and seeds its own 20,000-user fixture, like the
+tenancy suite — and it reports figures rather than passing or failing. Point it
+at a throwaway database. If an index here is ever changed again, that script is
+what re-establishes the numbers, and it is the file to update first.
+
+None of this re-keys anything. `entries_pkey (habit_id, date)` and
+`notify_log_pkey (habit_id, channel, date)` not leading with `user_id` is a
+security decision with migrations 007 and 008 behind it — the composite foreign
+key to `habits (id, user_id)` is what stops an invisible-row squat — and 016's
+indexes are additions *beside* those keys. Read "the key does not lead with
+`user_id`" as a thing that was paid for, not as an oversight to correct.
+
+## An RLS table cannot be indexed on a non-leakproof operator
+
+`jsonb_exists_any` (`?|`), `jsonb_exists` (`?`) and `jsonb_contains` (`@>`) all
+have `proleakproof = false`. With a policy on the table, Postgres will not
+evaluate a non-leakproof qual of the caller's ahead of the security qual — a
+leaky operator could reveal a row the policy was about to hide — and an index
+condition is by definition evaluated first. So on a table under RLS such a qual
+can **never** become an `Index Cond`, whatever index exists. No jsonb index on
+`users` can serve `candidates()` in `src/notifier.js`, and that scan is
+knowingly a sequential one.
+
+The trap is that nothing complains. The index builds, `ANALYZE` is happy, the
+catalog says it is there, and the plan is byte for byte what it was. It only
+looks otherwise if the `EXPLAIN` is taken on the admin connection, which is the
+owner and bypasses RLS: no policy, no security qual, and the qual is free to
+become an index condition in a plan of a query this application never issues.
+That is exactly how #185 came to propose a GIN index on `users.settings` that
+the app role could not have used; the measurements are in that issue's comment
+thread. **Every plan taken in this edition must therefore be taken as
+`habiterall_app` through `withUser` / `withNotifierScope`**, which is what
+`test/schema-plans.integration.mjs` does and what anything added to it must do.
+
 ## `/healthz` has four callers, not the two it looks like
 
 It is the only unauthenticated route here that touches Postgres. The container
