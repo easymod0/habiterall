@@ -163,6 +163,16 @@ function targetHint(message, isError = false) {
  * refusing whenever `parseAmount` does; a refusal nobody can see is not a
  * refusal.
  *
+ * So the gate asks `.numerical-only.hidden` — the attribute `syncTypeFields`
+ * itself writes — and not `form.type.value !== 'numerical'`. Those two agree
+ * today, and only because `syncTypeFields:923` is the one line that sets that
+ * attribute and it sets it from that one expression. Written the second way
+ * this is a copy of a rule that lives 750 lines off, carrying the comment
+ * explaining why it matters while the line it has to track carries none: a
+ * third `HABIT_TYPES` entry, or `.numerical-only` hidden for any second
+ * reason, splits them silently and the failure is the one this gate exists to
+ * prevent. Ask the thing the rule is actually about; the DOM already knows.
+ *
  * @returns {number|null}
  */
 function readTarget() {
@@ -170,7 +180,9 @@ function readTarget() {
   if (raw === filledTargetText) return filledTarget;
   const parsed = parseAmount(raw, convention());
   if (parsed === '') return 0;
-  if (parsed === null && form.type.value !== 'numerical') return filledTarget;
+  if (parsed === null && form.querySelector('.numerical-only').hidden) {
+    return filledTarget;
+  }
   return parsed;
 }
 

@@ -580,6 +580,53 @@ try {
   await send('Page.navigate', { url: BASE }, sessionId);
   await rowReady(target.name);
 
+  /* ---------- the gate is VISIBILITY, and this is the only check that can
+     tell the two readings apart ----------
+
+     The block above hides the box by switching Type, where "the box is
+     hidden" and "Type is not Measurable" are the same event — so it passes
+     against `readTarget` asking either one. `.numerical-only.hidden` is what
+     `syncTypeFields` actually writes and `form.type.value !== 'numerical'` is
+     a copy of the expression it writes it from, 750 lines away; they agree
+     only while `HABIT_TYPES` has two entries and nothing else touches that
+     attribute. This drives them apart by hand — the container hidden with
+     Type still reading Measurable, which is what a third habit type, or any
+     second reason to hide it, looks like from `readTarget` — and asserts the
+     rule the comment states rather than the proxy.
+
+     Mutation target: `readTarget`'s gate. Restore
+     `form.type.value !== 'numerical'` and this check goes red on its own,
+     while every other check in this suite stays green. */
+  await openHabitEdit(target.name, String(target.target));
+  await typeTarget('10,000');
+  await ev(`(()=>{
+    document.querySelector('#habit-form .numerical-only').hidden = true;
+    document.querySelector('#habit-form [name=color]').value = '#fedcba';
+    return true; })()`);
+  await submitDialog();
+  await settled();
+  const offScreen = await ev(`(()=>{
+    const box = document.querySelector('#habit-form [name=target_value]');
+    return {
+      dialogOpen: document.getElementById('habit-dialog').open,
+      type: document.querySelector('#habit-form [name=type]').value,
+      hint: document.getElementById('target-hint').textContent,
+      boxOnScreen: box.offsetParent !== null,
+    };})()`);
+  console.log(`    after Save: ${JSON.stringify(offScreen)}`);
+  check('a Target box hidden for a reason other than Type refuses nothing either',
+    offScreen.dialogOpen === false && offScreen.type === 'numerical'
+      && offScreen.boxOnScreen === false, JSON.stringify(offScreen));
+  habit = await habitNow();
+  check('...and that target is kept too, with the edit beside it landing',
+    habit?.color === '#fedcba' && habit?.target_value === target.target,
+    JSON.stringify(habit));
+
+  // A clean page for the section below — the dialog above hid a container by
+  // hand, and a reload is the cheapest way to put the DOM back.
+  await send('Page.navigate', { url: BASE }, sessionId);
+  await rowReady(target.name);
+
   console.log('\n--- a comma account reads and writes the other way round ---');
   // #108's remaining half, followed to the row for the reason the rest of this
   // suite exists: "10.000" is ten to this parser and ten thousand to the reader

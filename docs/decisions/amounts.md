@@ -153,7 +153,8 @@ stated lapse on the next Save.
 
 **A refusal is gated on the box being ON SCREEN, not on the parse, and that is
 a second choice with its own failure mode if it is not made.** The gate is
-`if (parsed === null && form.type.value !== 'numerical')` in `readTarget`:
+`if (parsed === null && form.querySelector('.numerical-only').hidden)` in
+`readTarget`:
 hidden and unreadable, the stored target stands; hidden and readable, the
 typed value is submitted as it would have been visible — `syncTypeFields`'s own
 "hidden is not cleared" for the at-most controls. Ungated, mistyping the
@@ -163,6 +164,41 @@ both do nothing, and the dialog simply stops saving with no visible reason and
 no visible control to fix. `Number(...) || 0`, the code this replaced, at
 least always saved something; a refusal nobody can see is worse than the bug
 it fixes.
+
+That gate shipped as `form.type.value !== 'numerical'` and review changed it,
+which is worth recording because the two are behaviourally identical today.
+What decides whether the box is on screen is `syncTypeFields`, one line:
+`form.querySelector('.numerical-only').hidden = !numerical`. Written the first
+way, `readTarget` holds a second copy of that expression 750 lines from the
+line it has to track — and carries the comment saying why it matters, while
+the line it mirrors carries none. A third `HABIT_TYPES` entry, or
+`.numerical-only` hidden for any second reason, splits them silently, and what
+comes out is exactly the failure the gate exists to prevent. The DOM already
+holds the answer; ask it. `countcheck.mjs` has a check that can tell the two
+apart — the container hidden by hand with Type still reading Measurable —
+because the pre-existing one hides it by switching Type, where the two
+readings are the same event and so it passes against either.
+
+**The Target box shows a quantised value, and the string it shows is the one
+string that cannot be committed.** `filledTargetText` is `formatAmount(stored)`,
+which rounds to 6 dp, and `readTarget`'s untouched shortcut returns the
+UNQUANTISED stored number whenever the box still holds that string. So a habit
+stored at `3.14159265` is shown `3.141593`; a user who selects the box and
+retypes exactly what it was showing gets `3.14159265` back, unchanged. Retyping
+it any other way — `3.1415930`, a trailing zero — does commit the shown value,
+which is why this is a curiosity rather than a defect: no target is
+unreachable, only one spelling of one is inert.
+
+This is the direct price of "untouched is the STRING" and it is not worth
+paying to avoid. The alternative is a dirty flag on the box, and a flag is
+wrong in the direction that costs something: `input` fires on a keystroke that
+leaves the value identical, on a paste of the same text, on an IME commit, and
+on an autofill — so a flag marks touched a box nobody meaningfully changed, and
+then `PUT /habits/:id`'s replace semantics turn that into a stored target
+quietly rewritten during an edit of a different field. A comparison against the
+string cannot be wrong that way: it is exactly true when the box holds what the
+habit holds. The next person to look at this will reach for the flag; this
+paragraph is why not.
 
 **An empty Target box is still a stated 0, not a delete.** That is what
 `Number(f.target_value.value) || 0` meant before this — a habit with no
