@@ -10,7 +10,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 import { seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
@@ -433,17 +433,28 @@ try {
     await send('Emulation.setDeviceMetricsOverride',
       { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
     await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`!!document.getElementById('btn-new') && !document.getElementById('btn-new').hidden`)
-        .catch(() => false)) break;
-      await sleep(200);
-    }
+    // The DASHBOARD having painted, not `#btn-new` merely being visible.
+    // `auth-session.js` unhides that button the moment `/api/me` answers,
+    // which is well before `dashboard.load()` has put anything in
+    // `state.categories` — so a click there opens the dialog over an empty
+    // list and leaves this block depending entirely on `openDialog`'s own
+    // fire-and-forget `refreshCategoryPicker()` landing in time. Nothing else
+    // repaints the manage list, and that call swallows its own failure
+    // (`.catch(() => {})`), so one slow or stale read left the list empty for
+    // the whole 16s this used to wait and then measured it anyway. A painted
+    // `.habit-row` is the same predicate every other block in this file waits
+    // on, and it is the one that implies the store is populated.
+    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
+      { what: 'the dashboard to paint before the habit dialog is opened' });
     await ev(`document.getElementById('btn-new').click()`);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`document.querySelectorAll('#category-manage .category-manage-row').length >= 2`)
-        .catch(() => false)) break;
-      await sleep(200);
-    }
+    // `waitUntil` THROWS naming what it wanted. The hand-rolled loop this
+    // replaces fell out of its `for` and measured regardless, so a timeout
+    // arrived as three assertions failing on an empty `rows` array — which
+    // says the row is misshapen, not that the dialog never filled. See the
+    // root CLAUDE.md: wait for the app, never for a duration.
+    await waitUntil(ev,
+      `document.querySelectorAll('#category-manage .category-manage-row').length >= 2`,
+      { what: "the habit dialog's category manage list to hold both categories" });
     await sleep(200);
 
     // FIT, not touch size — see the comment on the assertion below. Every
