@@ -225,9 +225,14 @@ fun SettingsScreen(
 
             // Also gated on this phone still being a reminder destination: with
             // the switch above off, `Reminders.schedule` calls `cancel()` and
-            // returns before `setAlarm` is ever reached, so nothing is armed —
-            // and the sentence below would be false directly under the control
-            // that made it so.
+            // returns before `setAlarm` is ever reached, so no REMINDER is
+            // armed — and the sentence below would be false directly under the
+            // control that made it so. "No reminder" rather than "nothing": the
+            // widget's midnight redraw (`HabitWidget.armMidnight`) goes through
+            // the same `setAlarm` and asks nothing about destinations, so on
+            // 31-32 revoked it is still armed, still inexact, and deliberately
+            // has no sentence here — this one is about reminders, and the
+            // widget's own staleness is written up in `android-native/CLAUDE.md`.
             if (exactAlarmsRevoked && settings.androidRemindersEnabled) {
                 Text(
                     "\"Alarms & reminders\" is switched off for this app in Android " +

@@ -264,15 +264,21 @@ object Reminders {
      *
      * Read at DRAW time, same as [setAlarm]'s own check, and nothing here
      * caches it: a grant or a revocation made in Android's own settings shows
-     * up on the next visit to this screen with no migration and nothing to
-     * invalidate.
+     * up with no migration and nothing to invalidate.
      *
-     * "Next visit" is the operative phrase: leaving this screen open, flipping
-     * the toggle in Android's own settings, and returning to a settings screen
-     * that never closed does NOT re-read this — nothing here recomposes for a
-     * change made while it was already showing. Only closing and reopening
-     * Settings does. `androidRemindersSupported` above has carried the same
-     * staleness all along.
+     * **Do not hoist this call into a `remember { }` or a `LaunchedEffect(Unit)`.**
+     * It is an argument expression at `ManageScreen`'s call site, so it is
+     * asked again on every recomposition — and `account` being `mutableStateOf`
+     * means a patch or the list's own fetch recomposes that screen, which is
+     * how a toggle flipped while Settings was open still corrects itself
+     * without being closed. Remembering it would freeze the one answer that
+     * has to be able to change underneath the screen.
+     *
+     * What is genuinely missing is an `ON_RESUME` re-read: come back from
+     * Android's own settings having flipped the toggle and touch nothing else,
+     * and the old answer stands until something recomposes or Settings is
+     * closed and reopened. `androidRemindersSupported` on the line above has
+     * carried exactly the same gap since it was written.
      */
     fun exactAlarmsRevoked(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 31) return false
