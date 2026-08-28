@@ -25,6 +25,7 @@ Postgres one.
 | `src/password.js` | hashing, verification, and the one answer to "is auth on?". Personal's half of the shared sign-in flow; cloud uses none of it |
 | `src/log.js` | structured logging: one event per line, one stream, and the redaction that keeps personal data out |
 | `src/observe.js` | `logStartup`, `requestLog` and `watchRuntime` — an Express-shaped middleware that never imports Express |
+| `src/shutdown.js` | the drain between the signal and the exit, and the deadline that bounds it — handed a server, importing no HTTP framework |
 | `src/types.js` | JSDoc typedefs, exporting nothing at runtime. The contract between three packages |
 | `public/app.js` | boot, the top bar, the PWA; `start(authAdapter)` is the entry |
 | `public/ui/store.js` | view state, and the `'change'` / `'reload'` channel views listen on |
@@ -1040,6 +1041,122 @@ so that decision is written once, and `normalizeEntry` answers
 was the exception and did not know it — six passes wrote `?? UNSET`, harmless
 for an at-least habit, and a limit with no entries at all reported a 30-day
 streak.
+
+**`server.close()` is not a drain.** On Node 26 it does sweep the connections
+that are idle at the instant it is called, which is what makes the obvious fix
+look like it works; it says nothing about a connection that was IN FLIGHT when
+the signal landed and goes idle a moment later. Nothing closes that one — it sits
+until `keepAliveTimeout`, and a pooling reverse proxy never leaves it idle long
+enough to expire at all, so the process runs until Docker's SIGKILL takes it with
+its in-flight requests. Measured on the real personal server: 5ms when the socket
+was already idle, **6158ms** when it went idle after the signal, and **20188ms
+having served 70 further requests** when the peer kept using the pool.
+`docs/decisions/connectivity.md` has the numbers and the mutations behind them.
+
+The mechanism is therefore the sweep hooked to **every response's `close` while
+draining**, and it is attached at INSTALL time rather than by the signal handler.
+A request already in flight had its `request` event long ago, so a hook installed
+by the handler could never see it — and that is the only case that hangs.
+
+**The sweep is a trade, and every measurement flatters it, so say the other half
+out loud.** Shutting a pooled socket the moment it goes idle DROPS a request the
+peer had already written onto it — those 70 requests master served are requests
+this branch does not — and a proxy will not retry that one, because bytes were
+already on the wire when the connection went. Caddy pools upstream connections
+and `examples/Caddyfile` is a bare `reverse_proxy` with no retry configured, so
+it surfaces as a 502. The trade is still right (one bounded loss against an
+unbounded wait that ends in a SIGKILL losing in-flight work anyway) and it is
+still not free, which is why check 2 of the personal drain suite bounds "further
+requests served" at `<= 1` rather than `=== 0`. It is also the argument for #208:
+a readiness signal is the only thing that stops the proxy handing us the request
+we are about to drop.
+
+Two more consequences worth knowing before touching `installShutdown`: the
+deadline is a
+constant (8s) and not an environment variable, because it has to hold for an
+operator who never sets `stop_grace_period` and so gets Docker's default 10s; and
+the deadline path deliberately runs **no** `cleanup`, since something is already
+stuck and a `closePool()` that hangs too would lose the exit the deadline just
+bought. A cleanup that REJECTS **or throws synchronously** — cloud's
+`closePool()` is the first, personal's `db.close()` the second, and
+`.then(() => cleanup())` rather than `Promise.resolve(cleanup())` is the one line
+that covers both — is the third exit: `shutdown.cleanup_failed` and
+`exit(1)`, caught rather than left to become an unhandled rejection — because
+there the drain SUCCEEDED and only the storage teardown failed, and an unhandled
+rejection would have reported that as a crash: no line, a raw stack, and nothing
+to tell it from the SIGKILL this whole module exists to get ahead of.
+
+**There is a second hole and it is earlier: the signal that arrives before
+anything is listening.** Node is PID 1 in both images (exec-form `CMD`, no init),
+and for PID 1 a signal with DEFAULT disposition is *discarded* rather than
+fatal — so between process start and `installShutdown` a `docker stop` did
+nothing whatever and the operator waited the full grace for the SIGKILL, which is
+the failure above arriving by a second route and before the server it drains
+exists. Both editions have the window and **neither is unbounded** — cloud's is
+merely the long one. `await initAuth()` there is OIDC discovery, and
+openid-client 6.8.5's `performDiscovery` is `const timeout = options?.timeout ??
+30`, which neither call site in `habiterall-cloud/src/auth.js` overrides, so an
+IdP that accepts the connection and never answers aborts the boot with a
+`TimeoutError` at ~30s. That is what makes the arm necessary rather than what
+would: 30s is **three times** the `stop_grace_period: 10s` all three shipped
+compose files set, so a `docker stop` landing anywhere in that window waits out
+the whole grace and is SIGKILLed regardless of the bound. Check the bound again
+after an openid-client bump. Personal's window is `await initAuth()` too, where
+`verifyPassword` runs scrypt with the cost parameters read out of the STORED
+hash — measured with a p=128 credential, `shutdown.armed` at 91-101 ms against a
+`startup` at 3292-3382 ms, and signalled inside that it left in 30-34 ms;
+cloud's in 12-19 ms. Spreads rather than single figures, over the runs this
+took: one number here is pinned to whichever run got written down.
+
+**What the arm covers is the entry module's BODY onward, and on personal that
+leaves the larger window outside it.** ES modules evaluate every import fully
+before the importing module's body runs, so the express/helmet/session import
+cost (~100–300 ms, fixed) is ahead of any arm placed in a module body — and so,
+on personal, is `habiterall-personal/src/db.js`, which at module scope opens the
+handle, runs the whole schema and runs the one-time `entries.status` migration:
+`ALTER TABLE entries ADD COLUMN status …` then an `UPDATE entries SET status =
+'skip' … WHERE value = 3 AND habit_id IN (…)`. That `UPDATE` is
+data-proportional and unbounded by anything this code controls, and it runs on
+the FIRST start after an upgrade from a pre-`status` build — the boot an operator
+is most likely to interrupt. What the arm does cover on personal is
+`await initAuth()`, which is one or two p=1 scrypts at 28 ms each on an instance
+with an environment credential and NO scrypt at all on one whose credential is
+in the database — `initAuth` hashes only inside `if (env)`, and the shipped
+compose file leaves all three credential variables empty. The suite has to seed
+a p=128 credential to make the window measurable at all, and that is the tell.
+So personal's covered window is small in production and cloud's
+is the one that matters. It is not closed here because closing it is a different
+change: a wrapper entry point that arms and then dynamically `import()`s the
+server touches a new entry file, both Dockerfiles' `CMD`, both `start` scripts and
+both drain suites' `serverPath`. Do not add one without deciding that separately.
+
+`armShutdown` is what closes it: a bare handler taken at the top of each entry
+point's module body ahead of every `await` — in cloud ahead of the `config_missing`
+env check too, so a process that exits on a missing `SESSION_SECRET` or
+`PUBLIC_URL` is still one that could have been stopped, and in personal gated on
+`isEntryPoint`, because importing the module for its routes must not install
+process signal handlers. **`DATABASE_URL` is not one of those two**, however that
+loop reads: `db/pool.js` calls `assertConnectionString(process.env.DATABASE_URL,
+…)` at MODULE scope and `server.js` imports it, and every import is evaluated
+before the importing module's body — so a missing or malformed `DATABASE_URL`
+kills the process on an uncaught throw at import time, before the arm and before
+the loop, whose `DATABASE_URL` branch is unreachable for the missing case. No arm
+in a module body could have covered it, and it exits in microseconds, so there is
+no window there worth having. It cannot drain
+anything, nothing having been accepted, so it closes whatever HAS been opened and
+exits **0**: nothing was dropped, and 1 stays reserved for the two failures
+above. It runs no `beforeClose`, because at arm time neither the notifier nor the
+runtime watcher exists. `installShutdown` then ADOPTS it and registers nothing of
+its own — a `process.off` + `process.on` pair has a gap between the two calls and
+this has none, and a second registration beside the arm is not a harmless
+redundancy but this fix's own defect re-created: one press runs both sequences,
+the early exit wins at ~5 ms, and the in-flight request goes with it. The two
+boot-window checks cannot see that (inside the window a doubled handler is
+indistinguishable from a single one) and the drain checks can, which is why the
+unit suite asserts `installShutdown` given an arm calls `onSignal` never.
+`shutdown.armed` is one info line per start, and it is also the predicate both
+drain suites wait on — what lets them signal INSIDE the window rather than after
+a sleep.
 
 **`shared/src` is not served to the browser.** Only `shared/public` is mounted,
 so `ui/settings.js` cannot import `notify.js` — the channel list is declared in

@@ -22,7 +22,8 @@
     "test:auth": "node test/auth.integration.mjs",
     "test:signin": "node test/signin.browser.mjs",
     "test:credchange": "node test/credential-change.integration.mjs",
-    "test:staticcache": "node test/static-cache.integration.mjs"
+    "test:staticcache": "node test/static-cache.integration.mjs",
+    "test:drain": "node test/drain.integration.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",

@@ -273,6 +273,7 @@ Several layers, and they catch different things:
 | Browser | `npm run test:browser` | Chrome (starts its own fleet) |
 | Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
 | Credential change | `npm run test:credchange -w habiterall-personal` | nothing |
+| SIGTERM drains and the deadline holds | `npm run test:drain -w habiterall-personal` | nothing |
 | Sign-in view | `npm run test:signin -w habiterall-personal` | Chrome (starts its own server) |
 | Habit JSON shape | `npm run test:apishape -w habiterall-personal` | nothing |
 | Reminders | `npm run test:notify` | nothing |
@@ -286,6 +287,7 @@ Several layers, and they catch different things:
 | Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | The probe reaches no session store | `npm run test:healthz -w habiterall-cloud` | Postgres |
+| Cloud SIGTERM drains, and the pool closes | `npm run test:drain -w habiterall-cloud` | Postgres |
 | Which claim names the account | `npm run test:claims -w habiterall-cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
