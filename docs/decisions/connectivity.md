@@ -150,6 +150,47 @@ is caught rather than left alone — an unhandled rejection is also a status of 
 but with a raw stack and no line, which destroys the distinction between a
 teardown that failed and a process that never left.
 
+### What the sweep COSTS, which is not nothing and points the other way
+
+The sweep is the fix and it is also a trade, and the trade was very nearly left
+unwritten because every measurement above flatters it.
+
+`closeIdleConnections()` fires on each response's `close` while draining, so it
+shuts a pooled socket the instant that socket goes idle. A peer that had already
+written its NEXT request onto that socket — Caddy pools upstream connections and
+`examples/Caddyfile` is a bare `reverse_proxy` — has that request dropped
+mid-connection rather than answered. Master answered it. That is literally the
+70 requests row 3 of the table counts: on master they were served, on this branch
+they are not.
+
+So the honest framing of the change is **not** "master returns errors and this
+does not". It is: master stays up for 6-20 s still serving, then is SIGKILLed
+with whatever is in flight; this leaves in ~155 ms and drops the one request per
+drain that the peer had already committed to the wire. That is the right trade —
+a bounded, single-request loss against an unbounded wait ending in a SIGKILL that
+loses in-flight work anyway — but it is a trade and not a free win.
+
+Two things follow that are worth being precise about, because the obvious
+mitigation does not apply:
+
+- **A dropped pooled request is worse in KIND than a refused connection.** The
+  readiness half (#208, `needs-decision`) is written up below as "requests now
+  arrive as connection-refused rather than being routed to a healthy replica",
+  and a proxy configured to retry will retry a connect that was refused before
+  any bytes were sent. It will not retry this one: bytes were already on the
+  wire, so the request is not idempotent from the proxy's point of view. Caddy's
+  default is no retry at all (`lb_try_duration` unset), so it surfaces as a 502.
+- **Check 2 of the personal drain suite measures exactly this**, and its bound is
+  `served <= 1` rather than `=== 0` for that reason as much as for the scheduler
+  race its comment describes. The one request the bound permits is the one the
+  peer got onto the socket before the door shut. `timings` prints the run's real
+  figure so a drift is visible rather than absorbed.
+
+None of which argues for removing the sweep — without it the process does not
+leave at all, which is #237. It argues for #208 being the other half rather than
+a nice-to-have: a readiness signal is what stops the proxy handing us the request
+we are about to drop, and it is the only thing that closes this.
+
 ## The window before that: a signal with nothing listening yet
 
 The drain above was written first and this was stated as a known limitation of

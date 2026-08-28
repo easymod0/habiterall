@@ -1056,8 +1056,23 @@ having served 70 further requests** when the peer kept using the pool.
 The mechanism is therefore the sweep hooked to **every response's `close` while
 draining**, and it is attached at INSTALL time rather than by the signal handler.
 A request already in flight had its `request` event long ago, so a hook installed
-by the handler could never see it — and that is the only case that hangs. Two
-consequences worth knowing before touching `installShutdown`: the deadline is a
+by the handler could never see it — and that is the only case that hangs.
+
+**The sweep is a trade, and every measurement flatters it, so say the other half
+out loud.** Shutting a pooled socket the moment it goes idle DROPS a request the
+peer had already written onto it — those 70 requests master served are requests
+this branch does not — and a proxy will not retry that one, because bytes were
+already on the wire when the connection went. Caddy pools upstream connections
+and `examples/Caddyfile` is a bare `reverse_proxy` with no retry configured, so
+it surfaces as a 502. The trade is still right (one bounded loss against an
+unbounded wait that ends in a SIGKILL losing in-flight work anyway) and it is
+still not free, which is why check 2 of the personal drain suite bounds "further
+requests served" at `<= 1` rather than `=== 0`. It is also the argument for #208:
+a readiness signal is the only thing that stops the proxy handing us the request
+we are about to drop.
+
+Two more consequences worth knowing before touching `installShutdown`: the
+deadline is a
 constant (8s) and not an environment variable, because it has to hold for an
 operator who never sets `stop_grace_period` and so gets Docker's default 10s; and
 the deadline path deliberately runs **no** `cleanup`, since something is already

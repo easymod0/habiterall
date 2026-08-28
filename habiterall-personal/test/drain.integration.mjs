@@ -356,6 +356,16 @@ try {
     // would pin timing rather than behaviour, and its failure would read as a
     // shutdown regression when it is a scheduler.
     //
+    // That permitted one is not only a scheduler artefact, and it is the whole
+    // of what the sweep COSTS: a peer that already wrote its next request onto
+    // the pooled socket has it dropped rather than answered, where master
+    // answered it — the 70 this case measures on master are requests this
+    // branch does not serve. A proxy will not retry it either, bytes having
+    // been on the wire, and `examples/Caddyfile` configures no retry. The trade
+    // is right and it is not free; `docs/decisions/connectivity.md` argues it,
+    // and it is why #208's readiness half is the other half rather than a
+    // nice-to-have.
+    //
     // The bound still bites where it has to: master serves 70 here, and the
     // no-sweep mutation served 9. `timings` carries the run's actual figure,
     // so a drift from 0 to 1 is visible in the output rather than hidden by
