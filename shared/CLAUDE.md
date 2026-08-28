@@ -1071,6 +1071,78 @@ there the drain SUCCEEDED and only the storage teardown failed, and an unhandled
 rejection would have reported that as a crash: no line, a raw stack, and nothing
 to tell it from the SIGKILL this whole module exists to get ahead of.
 
+**There is a second hole and it is earlier: the signal that arrives before
+anything is listening.** Node is PID 1 in both images (exec-form `CMD`, no init),
+and for PID 1 a signal with DEFAULT disposition is *discarded* rather than
+fatal — so between process start and `installShutdown` a `docker stop` did
+nothing whatever and the operator waited the full grace for the SIGKILL, which is
+the failure above arriving by a second route and before the server it drains
+exists. Both editions have the window and **neither is unbounded** — cloud's is
+merely the long one. `await initAuth()` there is OIDC discovery, and
+openid-client 6.8.5's `performDiscovery` is `const timeout = options?.timeout ??
+30`, which neither call site in `habiterall-cloud/src/auth.js` overrides, so an
+IdP that accepts the connection and never answers aborts the boot with a
+`TimeoutError` at ~30s. That is what makes the arm necessary rather than what
+would: 30s is **three times** the `stop_grace_period: 10s` all three shipped
+compose files set, so a `docker stop` landing anywhere in that window waits out
+the whole grace and is SIGKILLed regardless of the bound. Check the bound again
+after an openid-client bump. Personal's window is `await initAuth()` too, where
+`verifyPassword` runs scrypt with the cost parameters read out of the STORED
+hash — measured with a p=128 credential, `shutdown.armed` at 91-101 ms against a
+`startup` at 3292-3382 ms, and signalled inside that it left in 30-34 ms;
+cloud's in 12-19 ms. Spreads rather than single figures, over the runs this
+took: one number here is pinned to whichever run got written down.
+
+**What the arm covers is the entry module's BODY onward, and on personal that
+leaves the larger window outside it.** ES modules evaluate every import fully
+before the importing module's body runs, so the express/helmet/session import
+cost (~100–300 ms, fixed) is ahead of any arm placed in a module body — and so,
+on personal, is `habiterall-personal/src/db.js`, which at module scope opens the
+handle, runs the whole schema and runs the one-time `entries.status` migration:
+`ALTER TABLE entries ADD COLUMN status …` then an `UPDATE entries SET status =
+'skip' … WHERE value = 3 AND habit_id IN (…)`. That `UPDATE` is
+data-proportional and unbounded by anything this code controls, and it runs on
+the FIRST start after an upgrade from a pre-`status` build — the boot an operator
+is most likely to interrupt. What the arm does cover on personal is
+`await initAuth()`, which is one or two p=1 scrypts at 28 ms each on an instance
+with an environment credential and NO scrypt at all on one whose credential is
+in the database — `initAuth` hashes only inside `if (env)`, and the shipped
+compose file leaves all three credential variables empty. The suite has to seed
+a p=128 credential to make the window measurable at all, and that is the tell.
+So personal's covered window is small in production and cloud's
+is the one that matters. It is not closed here because closing it is a different
+change: a wrapper entry point that arms and then dynamically `import()`s the
+server touches a new entry file, both Dockerfiles' `CMD`, both `start` scripts and
+both drain suites' `serverPath`. Do not add one without deciding that separately.
+
+`armShutdown` is what closes it: a bare handler taken at the top of each entry
+point's module body ahead of every `await` — in cloud ahead of the `config_missing`
+env check too, so a process that exits on a missing `SESSION_SECRET` or
+`PUBLIC_URL` is still one that could have been stopped, and in personal gated on
+`isEntryPoint`, because importing the module for its routes must not install
+process signal handlers. **`DATABASE_URL` is not one of those two**, however that
+loop reads: `db/pool.js` calls `assertConnectionString(process.env.DATABASE_URL,
+…)` at MODULE scope and `server.js` imports it, and every import is evaluated
+before the importing module's body — so a missing or malformed `DATABASE_URL`
+kills the process on an uncaught throw at import time, before the arm and before
+the loop, whose `DATABASE_URL` branch is unreachable for the missing case. No arm
+in a module body could have covered it, and it exits in microseconds, so there is
+no window there worth having. It cannot drain
+anything, nothing having been accepted, so it closes whatever HAS been opened and
+exits **0**: nothing was dropped, and 1 stays reserved for the two failures
+above. It runs no `beforeClose`, because at arm time neither the notifier nor the
+runtime watcher exists. `installShutdown` then ADOPTS it and registers nothing of
+its own — a `process.off` + `process.on` pair has a gap between the two calls and
+this has none, and a second registration beside the arm is not a harmless
+redundancy but this fix's own defect re-created: one press runs both sequences,
+the early exit wins at ~5 ms, and the in-flight request goes with it. The two
+boot-window checks cannot see that (inside the window a doubled handler is
+indistinguishable from a single one) and the drain checks can, which is why the
+unit suite asserts `installShutdown` given an arm calls `onSignal` never.
+`shutdown.armed` is one info line per start, and it is also the predicate both
+drain suites wait on — what lets them signal INSIDE the window rather than after
+a sleep.
+
 **`shared/src` is not served to the browser.** Only `shared/public` is mounted,
 so `ui/settings.js` cannot import `notify.js` — the channel list is declared in
 both and pinned by `test/notify.test.js`, exactly as `SETTING_VALUES` is. Do not

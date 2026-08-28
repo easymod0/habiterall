@@ -14,7 +14,7 @@ import { api } from './api.js';
 import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
-import { installShutdown } from '@habiterall/shared/shutdown.js';
+import { armShutdown, installShutdown } from '@habiterall/shared/shutdown.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, STATIC_CACHE, RATE_LIMITS,
   trustProxy, sameOriginOnly, warnOnUntrustedProxy,
@@ -24,6 +24,32 @@ import { NTFY_ANSWER_PATH, handleNtfyAnswer } from '@habiterall/shared/ntfy-answ
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
+
+// Take the signals NOW, ahead of every await below and ahead of the
+// `config_missing` check, so a process that exits on a missing SESSION_SECRET
+// or PUBLIC_URL is still one that could have been stopped. Node is PID 1 in the
+// image (exec-form CMD, no init), and for PID 1 a signal with default
+// disposition is *discarded* rather than fatal — so until something installs a
+// handler a `docker stop` did nothing whatever and the operator waited the full
+// grace for a SIGKILL.
+//
+// Not DATABASE_URL, whatever that loop reads: `db/pool.js` asserts it at module
+// scope and every import is evaluated before this body, so a missing or
+// malformed one throws during import — above this line, and in microseconds, so
+// there is no window there for an arm to cover.
+//
+// This edition's window is the LONG one, not an unbounded one: `await start()`
+// below is `await initAuth()`, which is OIDC discovery, and openid-client 6.8.5
+// defaults `timeout` to 30 seconds (`performDiscovery`: `options?.timeout ?? 30`
+// — `auth.js` overrides it nowhere), so a stalled IdP aborts the boot with a
+// TimeoutError rather than holding it open. 30s is three times the shipped
+// `stop_grace_period: 10s`, which is why the bound rescues nobody and this line
+// is still the fix. The pool was built by its import above, so `closePool()` is
+// the "whatever has been opened" the early path closes — on a pool nothing has
+// borrowed from it resolves at once. `installShutdown` at the bottom ADOPTS this
+// once the server exists, so there is never an instant with no listener. No
+// `isEntryPoint` gate: this module always listens.
+const arm = armShutdown({ log, cleanup: () => closePool() });
 
 // A `Secure` cookie is discarded by the browser over plaintext HTTP, which
 // would silently break login. Derive it from the scheme actually in use
@@ -382,6 +408,7 @@ async function start() {
 // bounds it: `shared/src/shutdown.js`, which both editions call.
 installShutdown(server, {
   log,
+  arm,
   beforeClose: () => {
     runtime.stop();
     notifier?.stop();

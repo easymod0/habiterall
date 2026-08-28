@@ -21,12 +21,18 @@
  * above ~5 s would pass against a server with no drain in it at all.
  * `DRAIN_DEADLINE_MS` is not imported here either; check 3 asserts the seconds a
  * process actually took.
+ *
+ * Check 4 is the other hole and it is EARLIER than a drain: the signal that
+ * arrives while the process is still booting, before anything is listening. It
+ * is the same spawn-and-signal shape, aimed at the window rather than at the
+ * server.
  */
 
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -54,29 +60,27 @@ async function waitFor(predicate, until) {
 }
 
 /**
- * Boot the real server and wait for it to answer.
+ * Start the real server and return at once, waiting for nothing.
+ *
+ * Split out of `boot` for check 4, whose whole subject is the stretch of boot
+ * BEFORE anything is listening — a helper that waits for the port could not
+ * reach it.
  *
  * `log.js` writes every line to ONE stream — stdout — so that is where
- * `shutdown.drained` and `shutdown.deadline` appear; stderr is captured into the
- * same buffer anyway, so a child that dies before the logger exists is still
- * readable in the failure detail rather than being swallowed by `stdio: 'ignore'`.
+ * `shutdown.armed`, `shutdown.early`, `shutdown.drained` and `shutdown.deadline`
+ * appear; stderr is captured into the same buffer anyway, so a child that dies
+ * before the logger exists is still readable in the failure detail rather than
+ * being swallowed by `stdio: 'ignore'`.
  */
-async function boot(dbName) {
+function spawnServer(env) {
   const child = spawn(process.execPath, [serverPath], {
     env: {
       ...process.env,
       PORT: String(PORT),
-      HABITERALL_DB: join(workdir, dbName),
-      HABITERALL_AUTH: 'off',
       HABITERALL_RATE_LIMIT: 'off',
       HABITERALL_NOTIFY: 'off',
       LOG_LEVEL: 'info',
-      // Cleared explicitly: these are the documented way to configure this app,
-      // so an ambient value in the developer's shell would reconfigure the very
-      // thing under test — see `credential-change.integration.mjs`.
-      HABITERALL_USERNAME: '',
-      HABITERALL_PASSWORD: '',
-      HABITERALL_PASSWORD_HASH: '',
+      ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -94,6 +98,21 @@ async function boot(dbName) {
     state.exit = { code, signal };
   });
   child.on('close', () => { state.closed = true; });
+  return state;
+}
+
+/** Boot the real server, auth off, and wait for it to answer. */
+async function boot(dbName) {
+  const state = spawnServer({
+    HABITERALL_DB: join(workdir, dbName),
+    HABITERALL_AUTH: 'off',
+    // Cleared explicitly: these are the documented way to configure this app,
+    // so an ambient value in the developer's shell would reconfigure the very
+    // thing under test — see `credential-change.integration.mjs`.
+    HABITERALL_USERNAME: '',
+    HABITERALL_PASSWORD: '',
+    HABITERALL_PASSWORD_HASH: '',
+  });
 
   for (let i = 0; i < 80; i++) {
     if (state.exit) throw new Error(`server exited during boot :: ${state.logs}`);
@@ -148,6 +167,91 @@ async function warm(s, label) {
   s.seen = '';
   return warmed;
 }
+
+/**
+ * The `p` in the seeded hash below, and the whole of check 4's boot window.
+ *
+ * `verifyPassword` (shared/src/password.js) reads N, r and p OUT OF the stored
+ * hash and bounds them only by `Number.isInteger(v) && v > 0`. `p` multiplies
+ * the work linearly and costs no extra memory, so a stored hash with a high one
+ * is a deterministic, seconds-long boot window reached entirely through
+ * production code — no patched module and no sleep. Measured here, N=16384 r=8:
+ * p=1 28 ms, p=64 2178 ms, p=128 4761 ms, p=256 7923 ms. 128 is well clear of a
+ * second and well under the 8 s deadline; do not raise it past node's 32 MB
+ * `maxmem`, which `verifyPassword` catches and answers `false` to IMMEDIATELY —
+ * silently closing the very window this buys.
+ */
+const SLOW_P = 128;
+
+/**
+ * How long check 4 waits for `shutdown.armed` before signalling anyway.
+ *
+ * The predicate is the point — it is what lets the signal land INSIDE the boot
+ * window rather than after a sleep and a hope. The budget on it is the other
+ * half, and it is what makes this check honest against an entry point with no
+ * arm in it: such a process never logs the line, so a generous budget would
+ * wait until it had finished booting and then signal a perfectly ordinary
+ * running server, which drains and exits 0 and looks fine. Bounded here, the
+ * unarmed build is signalled while it is still booting, where an unhandled
+ * SIGTERM TERMINATES it — `code=null signal=SIGTERM`, which is the shape the
+ * assertions below are written against.
+ *
+ * So two literals, and the control run asserts the ordering between them:
+ * armed well inside this, and `startup` well outside it. A machine fast enough
+ * to close the window before this elapses fails the control by name rather than
+ * passing this check for the wrong reason — raise `SLOW_P` if that ever happens.
+ */
+const ARMED_BUDGET_MS = 1000;
+
+/**
+ * Seed throwaway databases whose stored credential is expensive to VERIFY.
+ *
+ * The key does not have to verify against anything: `initAuth` ->
+ * `adoptEnvCredential` runs the FULL derivation before it compares, and that
+ * derivation is the cost being bought.
+ *
+ * Written through the real `src/db.js` rather than a hand-rolled `CREATE TABLE`,
+ * so the row sits in the schema the server actually has. Two copies, because
+ * the control run below COMPLETES `adoptEnvCredential`, which overwrites the row
+ * with an ordinary p=1 hash — one shared file would leave the second run with no
+ * window at all.
+ */
+async function seedSlowCredential(...names) {
+  const [first, ...rest] = names.map((n) => join(workdir, n));
+  const previous = process.env.HABITERALL_DB;
+  process.env.HABITERALL_DB = first;
+  // `db.js` reads HABITERALL_DB once, at module load, so this has to be a
+  // dynamic import taken with the variable set.
+  const { db } = await import('../src/db.js');
+  if (previous === undefined) delete process.env.HABITERALL_DB;
+  else process.env.HABITERALL_DB = previous;
+
+  const hash = ['scrypt', 16384, 8, SLOW_P,
+    randomBytes(16).toString('base64'),
+    randomBytes(64).toString('base64')].join('$');
+  db.prepare(
+    `INSERT INTO auth_credentials (id, username, hash) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET username = excluded.username, hash = excluded.hash`
+  ).run('admin', hash);
+  // Closed before anything is copied: SQLite checkpoints and removes the WAL on
+  // the last connection's close, so the file on disk is the whole database only
+  // from this line.
+  db.close();
+  for (const path of rest) copyFileSync(first, path);
+}
+
+/** The environment that puts a slow `verifyPassword` on the boot path. */
+const slowBootEnv = (dbName) => ({
+  HABITERALL_DB: join(workdir, dbName),
+  // Auth ON, deliberately not cleared the way `boot()` clears it: only an
+  // environment credential reaches `adoptEnvCredential`, and that call is the
+  // window. The empty string is not `off`, and `off` is the one value that
+  // disables auth.
+  HABITERALL_AUTH: '',
+  HABITERALL_USERNAME: 'admin',
+  HABITERALL_PASSWORD: 'this need not match the stored hash',
+  HABITERALL_PASSWORD_HASH: '',
+});
 
 /** Reap a child by PID and wait for it, so the next check finds the port free. */
 async function reap(state) {
@@ -292,6 +396,83 @@ try {
   } catch (err) {
     check('3. the ceiling, in the real process', false, String(err?.message ?? err));
   } finally {
+    await reap(state);
+  }
+
+  /* ---------- 4. a signal that lands in the boot window ---------- */
+
+  // Earlier than every case above, and a different hole: nothing is listening
+  // yet, so there is nothing to drain. Node is PID 1 in the image and a signal
+  // with DEFAULT disposition is *discarded* for PID 1, so until `armShutdown`
+  // ran this was a stretch in which `docker stop` did nothing whatever and the
+  // operator waited the full grace for a SIGKILL.
+  state = null;
+  let control = null;
+  try {
+    await seedSlowCredential('bootwindow-control.db', 'bootwindow.db');
+
+    // The control, and it is what makes the block below a measurement rather
+    // than a race: the same environment, no signal at all, takes SECONDS to get
+    // from `shutdown.armed` to `startup`. Without it "no startup line" would
+    // also be true of a run that was simply signalled after it had finished.
+    control = spawnServer(slowBootEnv('bootwindow-control.db'));
+    const controlAt = Date.now();
+    const controlArmed = await waitFor(
+      () => control.logs.includes('shutdown.armed'), controlAt + 15000);
+    const armedMs = Date.now() - controlAt;
+    const started = await waitFor(
+      () => control.logs.includes('"startup"'), controlAt + 30000);
+    const startupMs = Date.now() - controlAt;
+    timings.push(`4. control, no signal: armed at ${armedMs} ms, startup at ${startupMs} ms`);
+    // Both literals, in the order ARMED_BUDGET_MS depends on: armed well inside
+    // it, `startup` well outside it, so the signal below lands in the window on
+    // an armed build and on an unarmed one alike.
+    check('4. control: an unsignalled boot is armed at once and still booting a budget later',
+      controlArmed && started && armedMs <= ARMED_BUDGET_MS && startupMs >= 2500,
+      `armed=${armedMs}ms startup=${startupMs}ms budget=${ARMED_BUDGET_MS}ms`);
+    await reap(control);
+    control = null;
+
+    state = spawnServer(slowBootEnv('bootwindow.db'));
+    // A predicate, not a sleep, and it names what it wanted: without this line
+    // the signal below lands wherever the machine happened to be. Bounded — see
+    // ARMED_BUDGET_MS for why a generous bound would let an unarmed build boot
+    // fully and then look fine.
+    const armed = await waitFor(
+      () => state.logs.includes('shutdown.armed'), Date.now() + ARMED_BUDGET_MS);
+    check('4. the process says it is armed before it is listening', armed,
+      JSON.stringify(state.logs.slice(-200)));
+
+    const signalAt = Date.now();
+    state.child.kill('SIGTERM');
+
+    await waitFor(() => state.exit !== null, signalAt + 1500);
+    const ms = state.exit ? state.exitAt - signalAt : -1;
+    timings.push(`4. boot window: exit ${ms} ms, code ${state.exit?.code}, signal ${state.exit?.signal}`);
+
+    // `signal === null` carries as much as the code does. Outside Docker an
+    // unhandled SIGTERM TERMINATES the process, so "it exited quickly" is
+    // exactly what the unfixed code also does — as `code=null signal=SIGTERM`.
+    // A signalled death and a chosen exit must not read alike.
+    check('4. the process CHOSE to exit 0 rather than being killed by the signal',
+      state.exit?.code === 0 && state.exit?.signal === null,
+      `code=${state.exit?.code} signal=${state.exit?.signal} ms=${ms}`);
+    // The half that says the signal was not merely deferred into a hang. A
+    // literal, nowhere near DRAIN_DEADLINE_MS, which is not imported here.
+    check('4. and it left within 1500 ms of the signal', ms >= 0 && ms <= 1500, `ms=${ms}`);
+    await waitFor(() => state.closed, Date.now() + 1000);
+    check('4. having said it went out down the early path',
+      state.logs.includes('shutdown.early'), JSON.stringify(state.logs.slice(-200)));
+    // Self-validating, and the reason a window that quietly closed fails here
+    // rather than passing for the wrong reason: `logStartup` had not run and no
+    // drain had either, so the signal landed inside the window and not after it.
+    check('4. and it landed INSIDE the window — nothing had started, nothing drained',
+      !state.logs.includes('"startup"') && !state.logs.includes('shutdown.drained'),
+      JSON.stringify(state.logs.slice(-200)));
+  } catch (err) {
+    check('4. a signal that lands in the boot window', false, String(err?.stack ?? err));
+  } finally {
+    await reap(control);
     await reap(state);
   }
 

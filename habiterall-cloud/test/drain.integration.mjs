@@ -30,6 +30,13 @@
  * the body parser buffers, waiting for the `Content-Length` promised here —
  * that is the hold — and `requireAuth` below it answers once the body lands.
  *
+ * The second check is the OTHER hole and it is earlier than any drain: a signal
+ * that arrives while the process is still booting, before anything is
+ * listening. This edition owns the LONG version of it — `await start()` is
+ * `await initAuth()`, which is OIDC discovery, bounded only by openid-client's
+ * 30-second default, three times the shipped `stop_grace_period: 10s` — so it is
+ * checked here, against a real spawned process, with an IdP that never answers.
+ *
  *   DATABASE_URL=... ADMIN_URL=... node test/drain.integration.mjs
  */
 
@@ -101,14 +108,35 @@ async function fakeIssuer() {
 }
 
 /**
- * Boot the real server and wait for it to answer.
+ * An IdP that accepts the connection, takes the request, and never answers.
+ *
+ * The exact unreachable-IdP shape the PR body describes, with no network in it.
+ * `client.discovery` passes no `timeout` option, so openid-client 6.8.5's own
+ * default applies (`performDiscovery`: `options?.timeout ?? 30`) and
+ * `await initAuth()` waits on this for ~30 seconds before aborting. That wait IS
+ * this edition's boot window: bounded, but at three times the shipped
+ * `stop_grace_period`, and two orders of magnitude past anything asserted below.
+ */
+async function stallingIssuer() {
+  const srv = createServer(() => { /* deliberately never answered */ });
+  srv.listen(0, '127.0.0.1');
+  await once(srv, 'listening');
+  return { srv, base: `http://127.0.0.1:${srv.address().port}` };
+}
+
+/**
+ * Start the real server and return at once, waiting for nothing.
+ *
+ * Split out of `boot` for the boot-window check, whose whole subject is the
+ * stretch BEFORE anything is listening — a helper that waits for the port could
+ * not reach it.
  *
  * `log.js` writes every line to ONE stream — stdout — so that is where
- * `shutdown.drained` appears; stderr is captured into the same buffer anyway,
- * so a child that dies before the logger exists is still readable in the
- * failure detail rather than being swallowed.
+ * `shutdown.armed`, `shutdown.early` and `shutdown.drained` appear; stderr is
+ * captured into the same buffer anyway, so a child that dies before the logger
+ * exists is still readable in the failure detail rather than being swallowed.
  */
-async function boot(issuer) {
+function spawnServer(env) {
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: {
@@ -117,12 +145,12 @@ async function boot(issuer) {
       DATABASE_URL: childDatabaseUrl(),
       SESSION_SECRET: 'drain-integration-secret',
       PUBLIC_URL: `http://localhost:${PORT}`,
-      OIDC_ISSUER: issuer,
       OIDC_CLIENT_ID: 'test-client',
       OIDC_CLIENT_SECRET: 'test-secret',
       ALLOW_INSECURE_OIDC: 'true',
       HABITERALL_NOTIFY: 'off',
       LOG_LEVEL: 'info',
+      ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -140,6 +168,12 @@ async function boot(issuer) {
     state.exit = { code, signal };
   });
   child.on('close', () => { state.closed = true; });
+  return state;
+}
+
+/** Boot the real server against a working issuer and wait for it to answer. */
+async function boot(issuer) {
+  const state = spawnServer({ OIDC_ISSUER: issuer });
 
   for (let i = 0; i < 100; i++) {
     if (state.exit) throw new Error(`server exited during boot :: ${state.logs}`);
@@ -147,6 +181,13 @@ async function boot(issuer) {
     await sleep(250);
   }
   throw new Error(`server did not start :: ${state.logs}`);
+}
+
+/** Reap a child by PID and wait for it, so the next check finds the port free. */
+async function reap(state) {
+  if (!state) return;
+  if (!state.exit) state.child.kill('SIGKILL');
+  await waitFor(() => state.exit !== null, Date.now() + 5000);
 }
 
 /** One throwaway connection, closed by the server, so nothing is left pooled. */
@@ -198,82 +239,153 @@ async function appBackends() {
 
 const timings = [];
 const { srv, base: issuer } = await fakeIssuer();
+const stalling = await stallingIssuer();
 let state = null;
 
 try {
-  await admin.connect();
-  state = await boot(issuer);
+  /* ---------- 1. a request in flight when the signal lands ---------- */
 
-  // Warm the socket, so what follows travels on a POOLED connection as a
-  // reverse proxy's would. An unwarmed connection is not the case under test.
-  const s = openSocket();
-  await new Promise((r) => s.sock.once('connect', r).once('error', r));
-  s.sock.write(healthzRequest);
-  const warmed = await waitFor(() => s.seen.includes('"ok":true'), Date.now() + 5000);
-  check('the socket is warm, so what follows is a pooled connection',
-    warmed, JSON.stringify(s.seen.slice(0, 120)));
-  s.seen = '';
+  try {
+    await admin.connect();
+    state = await boot(issuer);
 
-  // Headers and the first ten bytes of the body. `express.json()` now holds the
-  // request, waiting for the rest, and nothing below it has run.
-  s.sock.write(habitHead + habitBody.slice(0, 10));
-  await sleep(200);
-  // The control. Without it the signal lands on an idle socket and every
-  // assertion below is true of a server with no drain in it.
-  check('nothing has come back before the signal', s.seen === '',
-    JSON.stringify(s.seen.slice(0, 120)));
+    // Warm the socket, so what follows travels on a POOLED connection as a
+    // reverse proxy's would. An unwarmed connection is not the case under test.
+    const s = openSocket();
+    await new Promise((r) => s.sock.once('connect', r).once('error', r));
+    s.sock.write(healthzRequest);
+    const warmed = await waitFor(() => s.seen.includes('"ok":true'), Date.now() + 5000);
+    check('1. the socket is warm, so what follows is a pooled connection',
+      warmed, JSON.stringify(s.seen.slice(0, 120)));
+    s.seen = '';
 
-  // The other control, for the witness at the bottom: the warm `/healthz`
-  // above ran `SELECT 1` through the pool, so this child owns a backend to
-  // begin with and "no backend afterwards" is a change rather than a fact
-  // about a database nothing ever connected to.
-  const before = await appBackends();
-  check('control: the child holds a Postgres backend before the signal',
-    before >= 1, `${APP_NAME} -> ${before}`);
+    // Headers and the first ten bytes of the body. `express.json()` now holds
+    // the request, waiting for the rest, and nothing below it has run.
+    s.sock.write(habitHead + habitBody.slice(0, 10));
+    await sleep(200);
+    // The control. Without it the signal lands on an idle socket and every
+    // assertion below is true of a server with no drain in it.
+    check('1. nothing has come back before the signal', s.seen === '',
+      JSON.stringify(s.seen.slice(0, 120)));
 
-  const signalAt = Date.now();
-  state.child.kill('SIGTERM');
-  await sleep(150);
-  s.sock.write(habitBody.slice(10));
+    // The other control, for the witness at the bottom: the warm `/healthz`
+    // above ran `SELECT 1` through the pool, so this child owns a backend to
+    // begin with and "no backend afterwards" is a change rather than a fact
+    // about a database nothing ever connected to.
+    const before = await appBackends();
+    check('1. control: the child holds a Postgres backend before the signal',
+      before >= 1, `${APP_NAME} -> ${before}`);
 
-  await waitFor(() => state.exit !== null, signalAt + 1500);
-  const ms = state.exit ? state.exitAt - signalAt : -1;
-  timings.push(`in flight: exit ${ms} ms, code ${state.exit?.code}`);
+    const signalAt = Date.now();
+    state.child.kill('SIGTERM');
+    await sleep(150);
+    s.sock.write(habitBody.slice(10));
 
-  check('the held request is answered 401 after the signal',
-    /^HTTP\/1\.1 401 /.test(s.seen),
-    JSON.stringify(s.seen.split('\r\n')[0] ?? s.seen.slice(0, 120)));
-  // Exactly 0, and this is the assertion carrying the async cleanup: the only
-  // route to it is `await closePool()` resolving inside `server.close()`'s
-  // callback. The deadline exits 1, a rejection would exit non-zero, and a
-  // SIGKILL would report a signal instead of a code.
-  check('and the process exits 0 within 1500 ms of the signal',
-    state.exit?.code === 0 && ms >= 0 && ms <= 1500,
-    `code=${state.exit?.code} signal=${state.exit?.signal} ms=${ms}`);
-  await waitFor(() => state.closed, Date.now() + 1000);
-  check('having said the drain completed', state.logs.includes('shutdown.drained'),
-    JSON.stringify(state.logs.slice(-200)));
+    await waitFor(() => state.exit !== null, signalAt + 1500);
+    const ms = state.exit ? state.exitAt - signalAt : -1;
+    timings.push(`1. in flight: exit ${ms} ms, code ${state.exit?.code}`);
 
-  // The second, weaker witness. Weaker on purpose and worth being precise
-  // about: an exiting process closes its sockets whether or not it called
-  // `closePool`, so this cannot tell a graceful pool teardown from the kernel
-  // doing it. What it does see is the case this whole suite is about — a
-  // process that never leaves keeps its pool, and its backends stay in
-  // `pg_stat_activity` for the whole poll below.
-  const gone = await waitFor(async () => (await appBackends()) === 0, Date.now() + 3000);
-  check('and Postgres holds no backend for this server afterwards',
-    gone, `${APP_NAME} -> ${await appBackends()}`);
-  s.sock.destroy();
+    check('1. the held request is answered 401 after the signal',
+      /^HTTP\/1\.1 401 /.test(s.seen),
+      JSON.stringify(s.seen.split('\r\n')[0] ?? s.seen.slice(0, 120)));
+    // Exactly 0, and this is the assertion carrying the async cleanup: the only
+    // route to it is `await closePool()` resolving inside `server.close()`'s
+    // callback. The deadline exits 1, a rejection would exit non-zero, and a
+    // SIGKILL would report a signal instead of a code.
+    check('1. and the process exits 0 within 1500 ms of the signal',
+      state.exit?.code === 0 && ms >= 0 && ms <= 1500,
+      `code=${state.exit?.code} signal=${state.exit?.signal} ms=${ms}`);
+    await waitFor(() => state.closed, Date.now() + 1000);
+    check('1. having said the drain completed', state.logs.includes('shutdown.drained'),
+      JSON.stringify(state.logs.slice(-200)));
+
+    // The second, weaker witness. Weaker on purpose and worth being precise
+    // about: an exiting process closes its sockets whether or not it called
+    // `closePool`, so this cannot tell a graceful pool teardown from the kernel
+    // doing it. What it does see is the case this whole suite is about — a
+    // process that never leaves keeps its pool, and its backends stay in
+    // `pg_stat_activity` for the whole poll below.
+    const gone = await waitFor(async () => (await appBackends()) === 0, Date.now() + 3000);
+    check('1. and Postgres holds no backend for this server afterwards',
+      gone, `${APP_NAME} -> ${await appBackends()}`);
+    s.sock.destroy();
+  } catch (err) {
+    check('1. a request in flight when the signal lands', false, String(err?.stack ?? err));
+  } finally {
+    await reap(state);
+  }
+
+  /* ---------- 2. a signal that lands in the boot window ---------- */
+
+  // Earlier than the case above and a different hole: `await start()` is
+  // `await initAuth()`, so with the IdP stalled nothing is listening and there
+  // is nothing to drain. Node is PID 1 in the image and a signal with DEFAULT
+  // disposition is *discarded* for PID 1 — so until `armShutdown` ran, this
+  // window is one in which `docker stop` did nothing whatever and the operator
+  // waited the full grace for a SIGKILL. ~30 seconds wide here — openid-client's
+  // own discovery default, which `client.discovery` does not override — and so
+  // three times the grace it has to survive.
+  state = null;
+  try {
+    state = spawnServer({ OIDC_ISSUER: stalling.base });
+    // A predicate, not a sleep, and it names what it wanted: without this line
+    // the signal below lands wherever the machine happened to be. Bounded, and
+    // that bound is what makes this honest against an entry point with no arm
+    // in it: such a process never logs the line, and waiting on it without a
+    // bound would hang the suite rather than signalling. The window here is
+    // ~30 SECONDS — the issuer never answers, and that is openid-client's
+    // discovery timeout — so anything past node's own boot is inside it, and one
+    // second is a thirtyfold margin on that.
+    const armed = await waitFor(
+      () => state.logs.includes('shutdown.armed'), Date.now() + 1000);
+    check('2. the process says it is armed before it is listening', armed,
+      JSON.stringify(state.logs.slice(-200)));
+
+    const signalAt = Date.now();
+    state.child.kill('SIGTERM');
+
+    await waitFor(() => state.exit !== null, signalAt + 1500);
+    const ms = state.exit ? state.exitAt - signalAt : -1;
+    timings.push(`2. boot window: exit ${ms} ms, code ${state.exit?.code}, signal ${state.exit?.signal}`);
+
+    // `signal === null` carries as much as the code does. Outside Docker an
+    // unhandled SIGTERM TERMINATES the process, so "it exited quickly" is
+    // exactly what the unfixed code also does — as `code=null signal=SIGTERM`.
+    // A signalled death and a chosen exit must not read alike. And the 0 is
+    // this edition's own half again: the early cleanup here is the ASYNC one,
+    // so exit 0 is the assertion that carries `await closePool()` on the early
+    // path, exactly as it carries it on the drain path above.
+    check('2. the process CHOSE to exit 0 rather than being killed by the signal',
+      state.exit?.code === 0 && state.exit?.signal === null,
+      `code=${state.exit?.code} signal=${state.exit?.signal} ms=${ms}`);
+    // The half that says the signal was not merely deferred into a hang. A
+    // literal, nowhere near DRAIN_DEADLINE_MS, which is not imported here.
+    check('2. and it left within 1500 ms of the signal', ms >= 0 && ms <= 1500, `ms=${ms}`);
+    await waitFor(() => state.closed, Date.now() + 1000);
+    check('2. having said it went out down the early path',
+      state.logs.includes('shutdown.early'), JSON.stringify(state.logs.slice(-200)));
+    // Self-validating, and the reason a window that quietly closed fails here
+    // rather than passing for the wrong reason: `logStartup` had not run and no
+    // drain had either, so the signal landed inside the window and not after it.
+    check('2. and it landed INSIDE the window — nothing had started, nothing drained',
+      !state.logs.includes('"startup"') && !state.logs.includes('shutdown.drained'),
+      JSON.stringify(state.logs.slice(-200)));
+  } catch (err) {
+    check('2. a signal that lands in the boot window', false, String(err?.stack ?? err));
+  } finally {
+    await reap(state);
+  }
 
   for (const t of timings) console.log(`      ${t}`);
   console.log(failures ? `\n${failures} check(s) failed` : '\nall drain checks passed');
-} catch (err) {
-  check('a request in flight when the signal lands', false, String(err?.stack ?? err));
 } finally {
-  if (state && !state.exit) state.child.kill('SIGKILL');
-  if (state) await waitFor(() => state.exit !== null, Date.now() + 5000);
+  await reap(state);
   await admin.end().catch(() => {});
   srv.close();
+  // The held request keeps this server's socket open, so `close()` alone would
+  // never complete and the suite would not exit.
+  stalling.srv.closeAllConnections();
+  stalling.srv.close();
 }
 
 process.exit(failures ? 1 : 0);
