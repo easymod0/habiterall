@@ -158,6 +158,21 @@ believed.
 opposite lever — permission to push a user-supplied qual *below* a security
 barrier — and these functions **are** the barrier.
 
+**`test:plans` pins CAPABILITY; `bench:queries` is what measured CHOICE, and it
+is not a suite.** `planFor` sets `enable_seqscan = off` (and, for the grid read,
+`enable_bitmapscan = off` as well), so what it asserts is that the index can
+serve the predicate and that the planner prefers it *among indexes* — which is
+the half a test can pin, because the alternative is a cost estimate that moves
+with table size. Whether the planner reaches for it UNFORCED is what
+`scripts/bench-queries.mjs` reports, and that is where #185's before/after
+numbers come from. It has an npm script (`npm run bench:queries -w
+habiterall-cloud`) so it is invocable by name rather than by path, and it is
+deliberately **not** in CI: it is DESTRUCTIVE — it empties `users`, `habits`,
+`entries` and `notify_log` and seeds its own 20,000-user fixture, like the
+tenancy suite — and it reports figures rather than passing or failing. Point it
+at a throwaway database. If an index here is ever changed again, that script is
+what re-establishes the numbers, and it is the file to update first.
+
 None of this re-keys anything. `entries_pkey (habit_id, date)` and
 `notify_log_pkey (habit_id, channel, date)` not leading with `user_id` is a
 security decision with migrations 007 and 008 behind it — the composite foreign

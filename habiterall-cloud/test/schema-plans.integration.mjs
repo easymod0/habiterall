@@ -225,6 +225,27 @@ check('it INCLUDEs exactly (value, status)',
 // connection, which is a superuser and bypasses RLS, exactly as the tenancy
 // suite does; removed again at the end.
 
+/**
+ * Every account this file creates, gone — the `sub-plans` subject below and the
+ * ten `sub-plans-N` the grid fixture adds. Habits, entries and `notify_log` all
+ * cascade from `users`.
+ *
+ * By PREFIX rather than by the ids in hand, because the ids are exactly what a
+ * run that died does not leave behind — and it runs BEFORE the seed as well as
+ * after it, which is the half that matters. `users_idp_identity_key`
+ * (migration 004) is UNIQUE on `(idp_subject, idp_issuer)`, so one leaked row
+ * makes the very first insert below throw a duplicate-key error and the suite
+ * reports ZERO checks rather than one failure: a broken-looking suite whose
+ * real cause is a previous crash. CI cannot see it, because the Postgres
+ * service container is new every run; a developer running `npm run test:plans`
+ * against the local stack sees it once and then permanently. Self-healing is
+ * cheaper than remembering.
+ */
+const sweep = () =>
+  admin.query("DELETE FROM users WHERE idp_subject LIKE 'sub-plans%'");
+
+await sweep();
+
 const { rows: [subject] } = await admin.query(
   `INSERT INTO users (idp_subject, idp_issuer, email, display_name)
    VALUES ('sub-plans','https://idp','plans@example.com','Plans') RETURNING id`);
@@ -285,46 +306,62 @@ const planFor = (userId, sql, params, { bitmapscan = 'on' } = {}) =>
 
 console.log("--- planner choice: /overview's grid read, as an index-only scan ---");
 
-const { rows: fixtureUsers } = await admin.query(
-  `INSERT INTO users (idp_subject, idp_issuer, email, display_name)
-   SELECT 'sub-plans-' || g, 'https://idp', 'plans' || g || '@example.com', 'Plans ' || g
-     FROM generate_series(1, 10) AS g
-   RETURNING id`);
-const fixtureIds = fixtureUsers.map((r) => r.id);
-await admin.query(
-  `INSERT INTO habits (user_id, name, type)
-   SELECT u, 'Fixture ' || h, 'boolean'
-     FROM unnest($1::bigint[]) AS u, generate_series(1, 6) AS h`, [fixtureIds]);
-await admin.query(
-  `INSERT INTO entries (habit_id, user_id, date, value)
-   SELECT h.id, h.user_id, DATE '2026-01-01' + d, 2
-     FROM habits h, generate_series(0, 99) AS d
-    WHERE h.user_id = ANY($1::bigint[])`, [fixtureIds]);
-await admin.query('ANALYZE users, habits, entries');
+// `try`/`finally`, because this fixture's cleanup is owed to the suites that
+// run AFTER this one rather than to this one. A `check` never throws, but a
+// query error anywhere below — a renamed column, a migration half-applied —
+// would otherwise hand the rest of the CI `cloud` job 6,000 entries and the
+// planner statistics that describe them, and turn one suite's failure into
+// several. Declared outside so the `finally` can still name what to delete when
+// the throw happened after the insert.
+let fixtureIds = [];
+try {
+  const { rows: fixtureUsers } = await admin.query(
+    `INSERT INTO users (idp_subject, idp_issuer, email, display_name)
+     SELECT 'sub-plans-' || g, 'https://idp', 'plans' || g || '@example.com', 'Plans ' || g
+       FROM generate_series(1, 10) AS g
+     RETURNING id`);
+  fixtureIds = fixtureUsers.map((r) => r.id);
+  await admin.query(
+    `INSERT INTO habits (user_id, name, type)
+     SELECT u, 'Fixture ' || h, 'boolean'
+       FROM unnest($1::bigint[]) AS u, generate_series(1, 6) AS h`, [fixtureIds]);
+  await admin.query(
+    `INSERT INTO entries (habit_id, user_id, date, value)
+     SELECT h.id, h.user_id, DATE '2026-01-01' + d, 2
+       FROM habits h, generate_series(0, 99) AS d
+      WHERE h.user_id = ANY($1::bigint[])`, [fixtureIds]);
+  await admin.query('ANALYZE users, habits, entries');
 
-const { rows: fixtureHabits } = await admin.query(
-  'SELECT id FROM habits WHERE user_id = $1 ORDER BY id', [fixtureIds[0]]);
-const gridPlan = await planFor(fixtureIds[0],
-  `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
-       FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
-       ORDER BY date`,
-  [fixtureHabits.map((r) => r.id), '2026-01-01', '2026-01-31'],
-  { bitmapscan: 'off' });
-check('the grid window is served by idx_entries_owner_habit',
-  gridPlan.includes('idx_entries_owner_habit'), gridPlan);
-check('...as an Index Only Scan, so INCLUDE (value, status) covers the row',
-  gridPlan.includes('Index Only Scan'), gridPlan);
-
-// Straight back out. The CI `cloud` job runs several suites against one
-// database, and 6,000 entries belonging to ten users nobody signed in as is
-// not a state the next suite should have to reason about. Deleting the users
-// cascades to their habits and entries.
-await admin.query('DELETE FROM users WHERE id = ANY($1::bigint[])', [fixtureIds]);
-// And re-analyse, because deleting the rows does not delete the statistics
-// that describe them: this suite runs first in the CI `cloud` job, and leaving
-// them behind hands the next suite a planner that thinks `entries` holds 6,000
-// rows when it holds none.
-await admin.query('ANALYZE users, habits, entries');
+  const { rows: fixtureHabits } = await admin.query(
+    'SELECT id FROM habits WHERE user_id = $1 ORDER BY id', [fixtureIds[0]]);
+  const gridPlan = await planFor(fixtureIds[0],
+    `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+         FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
+         ORDER BY date`,
+    [fixtureHabits.map((r) => r.id), '2026-01-01', '2026-01-31'],
+    { bitmapscan: 'off' });
+  check('the grid window is served by idx_entries_owner_habit',
+    gridPlan.includes('idx_entries_owner_habit'), gridPlan);
+  check('...as an Index Only Scan, so INCLUDE (value, status) covers the row',
+    gridPlan.includes('Index Only Scan'), gridPlan);
+} finally {
+  // Straight back out. The CI `cloud` job runs several suites against one
+  // database, and 6,000 entries belonging to ten users nobody signed in as is
+  // not a state the next suite should have to reason about. Deleting the users
+  // cascades to their habits and entries.
+  //
+  // Scoped to these ten by id rather than going through `sweep()`, which would
+  // take the `subject` account section 5 below still needs with it.
+  if (fixtureIds.length) {
+    await admin.query('DELETE FROM users WHERE id = ANY($1::bigint[])', [fixtureIds]);
+  }
+  // And re-analyse, because deleting the rows does not delete the statistics
+  // that describe them: this suite runs first in the CI `cloud` job, and leaving
+  // them behind hands the next suite a planner that thinks `entries` holds 6,000
+  // rows when it holds none. Unconditional — the insert may have landed and the
+  // `RETURNING` still not reached us.
+  await admin.query('ANALYZE users, habits, entries');
+}
 
 /* ---------- 5. the watermark read leads with user_id ---------- */
 //
@@ -385,7 +422,7 @@ check('and it INCLUDEs nothing',
 // Only this file's own accounts: habits, entries and notify_log all cascade
 // from them. Nothing else in the database is this suite's to delete — unlike
 // the tenancy suite, which owns the whole instance while it runs.
-await admin.query('DELETE FROM users WHERE id = $1', [subject.id]);
+await sweep();
 
 await admin.end();
 await pool.end();
