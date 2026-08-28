@@ -96,10 +96,15 @@ services:
     # Docker's own default, written down because the app now has a deadline
     # sitting under it: on SIGTERM it finishes the requests already accepted
     # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
-    # shared/src/shutdown.js). Lower this below ~9s and SIGKILL chooses the
-    # exit instead, which is what taking in-flight requests down looks like.
-    # Raising it does not lengthen the drain: the 8s is fixed in the app, so a
-    # longer grace only means the process leaves earlier than the grace allows.
+    # shared/src/shutdown.js). An ordinary restart does not go near either
+    # number -- a drain with nothing slow in flight finishes in about 150ms,
+    # so a much shorter grace costs nothing on a normal day. What the 10s
+    # buys is the bad day: a request still running when the grace expires is
+    # cut off by SIGKILL rather than answered, so anything under ~9s starts
+    # trading the app's own deadline away for a request that was going to be
+    # slow anyway. Raising it does not lengthen the drain -- the 8s is fixed
+    # in the app, so a longer grace only means the process leaves earlier
+    # than the grace allows.
     stop_grace_period: 10s
 
 volumes:

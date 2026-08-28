@@ -125,6 +125,19 @@ choose the exit and its code and there is a log line saying the drain ran out; a
 10 s SIGKILL chooses, with no line, no cleanup, and a status that says only that
 something killed it.
 
+**Neither number describes an ordinary restart, and the compose comment used to
+read as though they did.** It said "lower this below ~9s and SIGKILL chooses the
+exit instead, which is what taking in-flight requests down looks like" — true of
+the ceiling case and false as a general claim, which is how an operator reads a
+sentence in a compose file. The measured normal drain is ~155 ms (check 1 of
+both suites), so a 5 s grace takes nothing down on any day where nothing is
+slow. What the 10 s buys is the bad day: a request still running when the grace
+expires is cut off rather than answered. The comment in all three examples says
+that now, and `npm run docs:compose` carries it into the README's three blocks.
+Worth generalising: a tuning knob's comment should say what the ORDINARY value
+of the thing is before it says what the ceiling costs, or the ceiling reads as a
+floor.
+
 There are **three** exits, and an operator reads them apart by the event beside
 the status. `exit(0)` with `shutdown.drained` is the whole thing working: every
 accepted response finished and the storage teardown ran. `exit(1)` with

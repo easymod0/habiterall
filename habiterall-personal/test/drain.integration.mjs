@@ -348,8 +348,18 @@ try {
     check('2. the process exits 0 within 2000 ms despite the peer',
       state.exit?.code === 0 && ms >= 0 && ms <= 2000,
       `code=${state.exit?.code} signal=${state.exit?.signal} ms=${ms}`);
-    // At most one, not zero: a GET written in the same tick as the last answer
-    // is already on the wire before anything can sweep the connection.
+    // The measured answer is 0, on every run of this so far, and the bound is
+    // deliberately one looser than that. The gap is a real race and not slack:
+    // the poll writes a GET every 200 ms, and one written into the socket in
+    // the same tick that the last answer is flushed is already on the wire
+    // before the `close` sweep can shut the door behind it. Asserting `=== 0`
+    // would pin timing rather than behaviour, and its failure would read as a
+    // shutdown regression when it is a scheduler.
+    //
+    // The bound still bites where it has to: master serves 70 here, and the
+    // no-sweep mutation served 9. `timings` carries the run's actual figure,
+    // so a drift from 0 to 1 is visible in the output rather than hidden by
+    // the tolerance that permits it.
     check('2. and at most one further request is served after the signal',
       served <= 1, `served=${served}`);
     s.sock.destroy();
