@@ -223,21 +223,32 @@ fun SettingsScreen(
                 },
             )
 
+            // The sentence asserts nothing about the current alarm set, and it
+            // must not be edited back into one. "Reminders are still armed but
+            // can arrive late" was the first version, and the app cannot know
+            // that: the gate answers what the PLATFORM permits, so a user with
+            // reminders on and no habit carrying a `reminder_time` — or every
+            // such habit archived — has nothing armed and would be told
+            // otherwise, with nothing on the screen to disprove it. What is
+            // true in every state this gate admits is the consequence, so that
+            // is the whole of what it says. `SettingsScreenTest` keys its five
+            // cases on "can arrive late" for the same reason.
+            //
             // Also gated on this phone still being a reminder destination: with
             // the switch above off, `Reminders.schedule` calls `cancel()` and
-            // returns before `setAlarm` is ever reached, so no REMINDER is
-            // armed — and the sentence below would be false directly under the
-            // control that made it so. "No reminder" rather than "nothing": the
-            // widget's midnight redraw (`HabitWidget.armMidnight`) goes through
-            // the same `setAlarm` and asks nothing about destinations, so on
-            // 31-32 revoked it is still armed, still inexact, and deliberately
-            // has no sentence here — this one is about reminders, and the
-            // widget's own staleness is written up in `android-native/CLAUDE.md`.
+            // returns before `setAlarm` is ever reached, so there is no REMINDER
+            // for lateness to be about — and the sentence would sit directly
+            // under the control that made it so. "No reminder" rather than
+            // "nothing": the widget's midnight redraw (`HabitWidget.armMidnight`)
+            // goes through the same `setAlarm` and asks nothing about
+            // destinations, so on 31-32 revoked it is still armed, still
+            // inexact, and deliberately has no sentence here — this one is about
+            // reminders, and the widget's own staleness is written up in
+            // `android-native/CLAUDE.md`.
             if (exactAlarmsRevoked && settings.androidRemindersEnabled) {
                 Text(
                     "\"Alarms & reminders\" is switched off for this app in Android " +
-                        "settings, so reminders are still armed but can arrive late — by " +
-                        "an hour or more.",
+                        "settings, so reminders can arrive late — by an hour or more.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

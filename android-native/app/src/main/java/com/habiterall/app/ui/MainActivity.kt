@@ -80,7 +80,7 @@ private data class PendingWrite(val value: Double?, val skip: Boolean)
  * out whether it wrote anything, because that is what decides if the grid behind
  * it has to be fetched again.
  */
-private sealed interface Manage {
+internal sealed interface Manage {
     data object NewHabit : Manage
     data class EditHabit(val habit: Habit) : Manage
     data class Reorder(val habits: List<Habit>) : Manage
@@ -98,9 +98,17 @@ private sealed interface Manage {
  * habit write returns the stored habit, a reorder returns the whole list in its
  * new order, and a settings patch is followed by a re-read. Nothing here decides
  * locally what the database now holds.
+ *
+ * **`internal` rather than `private` so a test can drive it**, for the reason
+ * [HabitList] is top-level: the two platform questions the settings branch below
+ * asks — `areNotificationsEnabled()` and [Reminders.exactAlarmsRevoked] — are
+ * answered HERE and nowhere else, so pinning the predicate and pinning the
+ * rendering still leaves the line that joins them free to be wrong.
+ * `ManageScreenWiringTest` renders this composable and asks the platform's own
+ * shadows, which is the only place both hops are under one assertion.
  */
 @Composable
-private fun ManageScreen(
+internal fun ManageScreen(
     screen: Manage,
     api: Api,
     account: AppSettings,

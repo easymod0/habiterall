@@ -233,11 +233,29 @@ says so — 31-32 with "Alarms & reminders" revoked, never 33+, where
 `USE_EXACT_ALARM` is held from install with nothing to have revoked, **and**
 only while `settings.androidRemindersEnabled` — the same switch the line sits
 under — is still true: with the switch off, `Reminders.schedule` cancels
-rather than arms, and the line would otherwise claim a reminder is armed
-directly under a control saying it is not. Two decisions a later change would
-otherwise re-open: it stays SOFT — the alarm still arms, refusing (Loop's
-`SchedulerResult.IGNORED`) is not this client's answer — and the SDK upper
-bound is what keeps the sentence from being false on every current phone.
+rather than arms, so there is no reminder for lateness to be about and the
+line would sit directly under the control that made it so. Three decisions a
+later change would otherwise re-open: it stays SOFT — the alarm still arms,
+refusing (Loop's `SchedulerResult.IGNORED`) is not this client's answer — the
+SDK upper bound is what keeps the sentence from being false on every current
+phone, and **the sentence asserts nothing about the current alarm set**. It
+says only that reminders "can arrive late". An earlier version said they "are
+still armed but can arrive late", which the gate cannot know: it answers what
+the PLATFORM permits, so a user with reminders on and no habit carrying a
+`reminder_time` was told something false with nothing on the screen able to
+disprove it. The consequence is the part that is true in every state the gate
+admits, so it is the whole of what the line says.
+
+**Both platform questions on that screen are asked in `ManageScreen`, which is
+`internal` for that reason.** `SettingsScreenTest` pins the rendering and
+`RemindersTest` pins the predicate; the line that joins them —
+`exactAlarmsRevoked = Reminders.exactAlarmsRevoked(context)`, and its sibling
+`areNotificationsEnabled()` — is reachable from neither, and a constant written
+at either leaves every other test green. `ManageScreenWiringTest` renders the
+real composable and moves the PLATFORM instead (the reported SDK,
+`ShadowAlarmManager`, `ShadowNotificationManager`); each of the four constants
+that could be written there fails exactly one of its cases. Same reason
+`HabitList` is top-level, and the same defect shape this file names twice.
 
 **Two alarms are two PendingIntents** (`habiterall://snooze/<id>` against
 `habiterall://remind/<id>`), because `filterEquals` ignores extras and one intent

@@ -120,6 +120,28 @@ calls `cancel()` and returns before `setAlarm` is ever reached, so nothing is
 armed at all; without the third term the line would claim a late-but-real
 reminder directly under a control reading Off.
 
+**The sentence went out asserting something it did not need to, and review
+caught it.** The first version read "…so reminders **are still armed** but can
+arrive late — by an hour or more." Everything in that sentence is conditional
+and true in every state the gate admits *except* those four words, which are a
+claim about the current alarm set — and the gate is not a question about the
+alarm set. It asks what the platform PERMITS. A user on 12L with reminders on,
+who has set no `reminder_time` on any habit (or archived every habit that had
+one), has nothing armed at all: `Reminders.armFrom` reaches `setAlarm` for no
+habit, and the screen would tell them otherwise with nothing on it able to
+disprove the claim. The third gate term handles the case where the SWITCH is
+off, which is a different state and was already covered; this one it could not
+see.
+
+Fixing it by asking is the wrong trade — that is a fetch behind a sentence, and
+the answer would be stale the moment a habit changed. Deleting the four words
+costs nothing: the consequence ("can arrive late") is the whole of the useful
+content and is the part that holds in every admitted state. It also leaves the
+tests' assertion key (`"can arrive late"`) correct, so the five rendered cases
+survived the edit unchanged. The general shape is worth keeping: **a diagnostic
+line should name the consequence, not the mechanism**, when only the
+consequence is something the gate actually knows.
+
 The line itself is a SEPARATE `Text` drawn under the Reminders `SwitchRow`,
 never a rewrite of that row's own `subtitle`. The subtitle keeps its one
 `else` ("Notifications are switched off for this app in Android settings"),
@@ -143,6 +165,36 @@ gate missing its upper bound would fail. Two `ReminderWiringTest` cases pin
 the other half, "soft, not loud": the alarm still lands
 (`alarms().size == 1`) and the `else` no longer runs unheard, a WARN reaching
 the tag.
+
+**And then the hop between them, which the first round left open.** All of the
+above pins the predicate and the rendering. It does not pin the one line where
+they meet — `exactAlarmsRevoked = Reminders.exactAlarmsRevoked(context)`, in
+`ManageScreen`'s settings branch — because `ManageScreen` was `private` inside
+`MainActivity.kt` and no test could render it. Both call-site arguments are
+required parameters, so neither can be *deleted* without a compile error; but
+either can be replaced by a constant, and all 299 tests stay green while the
+feature is simply gone. That is this file's own repeated lesson, and the review
+was right to name it rather than accept "the sibling has the same gap" as a
+defence — two unpinned hops is worse than one.
+
+`ManageScreen` is therefore `internal`, for the same reason `HabitList` is
+top-level, and `ManageScreenWiringTest` renders it. Nothing is passed in: the
+four cases move the platform — the SDK Robolectric reports, `ShadowAlarmManager`'s
+`canScheduleExactAlarms()`, `ShadowNotificationManager`'s
+`areNotificationsEnabled()` — and assert what reaches the screen. The mapping is
+one failure per mutation, which is what makes them value pins rather than a
+smoke test:
+
+| written at the call site | the case that fails |
+|---|---|
+| `exactAlarmsRevoked = false` | a revoked toggle reaches the screen (sdk 32) |
+| `exactAlarmsRevoked = true` | the SDK upper bound reaches the screen (sdk 33) |
+| `androidRemindersSupported = true` | notifications switched off reach the screen |
+| `androidRemindersSupported = false` | notifications left alone keep the ordinary subtitle |
+
+The last two are why the sibling gap closes with the same file rather than
+being left for later: a constant `false` passes every "the warning is shown"
+assertion there is, and only the positive case catches it.
 
 **Arming is not the last chance to be wrong, which is why the day rides on the
 alarm.** `setAlarm` falls back to `setAndAllowWhileIdle` when exact alarms are
