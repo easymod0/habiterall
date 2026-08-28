@@ -226,8 +226,18 @@ carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`, load-bearing on
 it names no day and means whichever one it arrives on, so refusing a null would
 silence every reminder there is.
 
-**The fallback stopped being silent about itself.** `setAlarm`'s `else` logs a
-WARN under the tag `habiterall.notify`, and the settings screen draws a
+**The fallback stopped being silent about itself, and is quiet about repeating
+itself.** `setAlarm`'s `else` logs a WARN under the tag `habiterall.notify`
+**once per CHANGE of state, not once per arm** — `schedule` runs per habit on
+every fetch and the widget's midnight alarm comes through the same function, so
+unconditional it was one line per habit per resume, describing a single
+persistent state hundreds of times a day. `lastArmWasExact` is the dedupe and it
+caches the LOGGING only: the permission is still read on every arm, so a grant or
+a revocation still takes effect on the next alarm and still gets exactly one line
+when it does, in either direction. It is `internal` because Robolectric caches a
+sandbox per SDK level across test classes, so an `object`'s field outlives the
+test that set it and `ReminderWiringTest` has to clear it in `@Before`. The
+settings screen draws a
 separate line under the Reminders switch when `Reminders.exactAlarmsRevoked`
 says so — 31-32 with "Alarms & reminders" revoked, never 33+, where
 `USE_EXACT_ALARM` is held from install with nothing to have revoked, **and**

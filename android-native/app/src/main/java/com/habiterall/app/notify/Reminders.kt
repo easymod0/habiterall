@@ -210,6 +210,34 @@ object Reminders {
     }
 
     /**
+     * What the last arm decided, so the fallback WARN in [setAlarm] is one line
+     * per CHANGE of state rather than one per arm.
+     *
+     * [schedule] runs once per habit on every fetch and
+     * `HabitWidget.armMidnight` goes through [setAlarm] too, so an
+     * unconditional line is one WARN per habit per app resume — on a phone with
+     * thirty reminder habits, hundreds of identical lines a day describing a
+     * single persistent state. That is the shape `shared/CLAUDE.md` names on the
+     * server side ("1,440 lines a day is how a log stops being read"), and the
+     * server's answer is the `once` dedupe in `shared/src/notify.js`. This is
+     * the same answer with a smaller key.
+     *
+     * It caches the LOGGING, never the permission: [setAlarm] still calls
+     * `canScheduleExactAlarms()` on every arm, so a grant or a revocation still
+     * takes effect on the very next alarm — it just also gets exactly one line
+     * when it does, in either direction. `null` is "nothing armed yet in this
+     * process", so the first inexact arm after a cold start always speaks.
+     *
+     * `internal` rather than `private` for `ManageScreen`'s reason, one file
+     * over: Robolectric caches a sandbox per SDK level ACROSS test classes, so
+     * an `object`'s field outlives the test that set it and a suite asserting
+     * "the fallback logs" would depend on which test ran first. `ReminderWiringTest`
+     * resets it in `@Before`. Nothing in production writes it but [setAlarm].
+     */
+    @Volatile
+    internal var lastArmWasExact: Boolean? = null
+
+    /**
      * Set one alarm, as punctually as this install is allowed to.
      *
      * Public because the home-screen widget's midnight redraw wants the same
@@ -240,10 +268,24 @@ object Reminders {
         // into silence. So the `else` below still arms, and now only stops
         // being quiet about it.
         val canBeExact = Build.VERSION.SDK_INT < 31 || manager.canScheduleExactAlarms()
+        // Read and cleared around the branch, not inside it, so a return to the
+        // exact path re-arms the warning for the next revocation — see
+        // `lastArmWasExact`. The `at` is deliberately gone from the message: it
+        // was the one part that differed between otherwise identical lines, so
+        // it made a repeat look like news while saying nothing about the state
+        // being reported. The alarm's own time is not what is wrong here.
+        val stateChanged = lastArmWasExact != canBeExact
+        lastArmWasExact = canBeExact
         if (canBeExact) {
             manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         } else {
-            Log.w(TAG, "exact alarms not permitted; arming inexactly for $at")
+            if (stateChanged) {
+                Log.w(
+                    TAG,
+                    "exact alarms not permitted; arming inexactly until this changes " +
+                        "(\"Alarms & reminders\" is off for this app)",
+                )
+            }
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         }
     }
