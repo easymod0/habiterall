@@ -202,13 +202,70 @@ records nothing. Two rules in it:
   unanswered. Yes / No / Skip on that same stale notification write to the date
   it names; refusing costs nothing.
 
+**The manifest declares BOTH exact-alarm permissions, and that reverses a
+decision this file used to state the other way.** `USE_EXACT_ALARM` uncapped
+plus `SCHEDULE_EXACT_ALARM` with `android:maxSdkVersion="32"`. The first is
+protection level `normal` — granted at install, not revocable — so from 33 up
+`canScheduleExactAlarms()` is true with nobody asked and every reminder takes
+the exact branch. The old shape declared `SCHEDULE_EXACT_ALARM` alone, which for
+an app targeting 33+ is denied by default from Android 14 on, and nothing in
+this client ever called `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` — so the exact
+branch was unreachable on any phone on 14 or later, and every test still passed,
+because no test asked what the APK requests. `ExactAlarmPermissionTest` is that
+assertion now, read from the MERGED manifest through `PackageManager`. The Play
+restriction the old comment cited does not reach a sideloaded APK;
+`docs/decisions/android.md` has the argument in full.
+
 **Arming is not the last chance to be wrong, which is why the day rides on the
 alarm.** `setAlarm` falls back to `setAndAllowWhileIdle` when exact alarms are
-not permitted, and on Android 14+ that is the ORDINARY path — `SCHEDULE_EXACT_ALARM`
-is not granted by default. So one armed at 22:52 for 23:52 can arrive at 00:03.
-The snooze intent carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`.
-The daily alarm carries no date deliberately: it names no day and means whichever
-one it arrives on, so refusing a null would silence every reminder there is.
+not permitted, which since the manifest change means API 31-32 for a user who
+revoked "Alarms & reminders" — not the ordinary path any more, but not dead
+either. So one armed at 22:52 for 23:52 can arrive at 00:03. The snooze intent
+carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`, load-bearing on
+31-32 and belt-and-braces above. The daily alarm carries no date deliberately:
+it names no day and means whichever one it arrives on, so refusing a null would
+silence every reminder there is.
+
+**The fallback stopped being silent about itself, and is quiet about repeating
+itself.** `setAlarm`'s `else` logs a WARN under the tag `habiterall.notify`
+**once per CHANGE of state, not once per arm** — `schedule` runs per habit on
+every fetch and the widget's midnight alarm comes through the same function, so
+unconditional it was one line per habit per resume, describing a single
+persistent state hundreds of times a day. `lastArmWasExact` is the dedupe and it
+caches the LOGGING only: the permission is still read on every arm, so a grant or
+a revocation still takes effect on the next alarm and still gets exactly one line
+when it does, in either direction. It is `internal` because Robolectric caches a
+sandbox per SDK level across test classes, so an `object`'s field outlives the
+test that set it and `ReminderWiringTest` has to clear it in `@Before`. The
+settings screen draws a
+separate line under the Reminders switch when `Reminders.exactAlarmsRevoked`
+says so — 31-32 with "Alarms & reminders" revoked, never 33+, where
+`USE_EXACT_ALARM` is held from install with nothing to have revoked, **and**
+only while `settings.androidRemindersEnabled` — the same switch the line sits
+under — is still true: with the switch off, `Reminders.schedule` cancels
+rather than arms, so there is no reminder for lateness to be about and the
+line would sit directly under the control that made it so. Three decisions a
+later change would otherwise re-open: it stays SOFT — the alarm still arms,
+refusing (Loop's `SchedulerResult.IGNORED`) is not this client's answer — the
+SDK upper bound is what keeps the sentence from being false on every current
+phone, and **the sentence asserts nothing about the current alarm set**. It
+says only that reminders "can arrive late". An earlier version said they "are
+still armed but can arrive late", which the gate cannot know: it answers what
+the PLATFORM permits, so a user with reminders on and no habit carrying a
+`reminder_time` was told something false with nothing on the screen able to
+disprove it. The consequence is the part that is true in every state the gate
+admits, so it is the whole of what the line says.
+
+**Both platform questions on that screen are asked in `ManageScreen`, which is
+`internal` for that reason.** `SettingsScreenTest` pins the rendering and
+`RemindersTest` pins the predicate; the line that joins them —
+`exactAlarmsRevoked = Reminders.exactAlarmsRevoked(context)`, and its sibling
+`areNotificationsEnabled()` — is reachable from neither, and a constant written
+at either leaves every other test green. `ManageScreenWiringTest` renders the
+real composable and moves the PLATFORM instead (the reported SDK,
+`ShadowAlarmManager`, `ShadowNotificationManager`); each of the four constants
+that could be written there fails exactly one of its cases. Same reason
+`HabitList` is top-level, and the same defect shape this file names twice.
 
 **Two alarms are two PendingIntents** (`habiterall://snooze/<id>` against
 `habiterall://remind/<id>`), because `filterEquals` ignores extras and one intent

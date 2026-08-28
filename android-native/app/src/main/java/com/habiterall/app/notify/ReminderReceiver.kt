@@ -117,14 +117,16 @@ class ReminderReceiver : BroadcastReceiver() {
             // A snoozed alarm names the day it was armed for, and by the time it
             // arrives that may no longer be today. Arming is not the last chance
             // to be wrong here: `setAlarm` falls back to `setAndAllowWhileIdle`
-            // when exact alarms are not permitted — the ordinary case on Android
-            // 14+, where `SCHEDULE_EXACT_ALARM` is not granted by default — and
-            // an inexact alarm armed at 22:52 for 23:52 can be delivered at
-            // 00:03. Posting then would ask about a day nobody has lived, under
-            // a date the press never meant. Dropped rather than re-dated, which
-            // is the same answer `dueReminders` gives a reminder whose window
-            // has straddled midnight; the habit's own alarm asks again at its
-            // own time.
+            // when exact alarms are not permitted — API 31-32 with "Alarms &
+            // reminders" revoked, since `USE_EXACT_ALARM` covers 33+ whatever
+            // the user does — and an inexact alarm armed at 22:52 for 23:52 can
+            // be delivered at 00:03. An exact one bounds the WAKE and not this
+            // worker, which fetches before it posts, so the check earns its
+            // keep above 32 as well. Posting late would ask about a day nobody
+            // has lived, under a date the press never meant. Dropped rather
+            // than re-dated, which is the same answer `dueReminders` gives a
+            // reminder whose window has straddled midnight; the habit's own
+            // alarm asks again at its own time.
             val about = inputData.getString(Notifications.EXTRA_DATE)
             if (!Reminders.stillAboutToday(about, today)) {
                 return drop(habitId, "a snoozed reminder arrived after the day it was for")
