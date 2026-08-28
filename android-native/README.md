@@ -209,6 +209,12 @@ again at the moment of posting, because a delivery can land minutes into the
 next day — an alarm the app is not allowed to set exactly is loose by that much.
 The re-post asks `needsReminder` again, so a day answered in between stays quiet.
 
+On Android 12 and 12L, if you have switched "Alarms & reminders" off for this
+app in Android's own settings, you still get your reminders — late rather than
+never — and the Settings screen says so, in a line under the Reminders switch.
+There is no button here for it: the toggle lives in Android's settings, not
+this app's.
+
 The collapsed shade shows three action buttons and drops the tail, which is why
 snooze is added last. A yes/no habit and an avoided one spend two buttons on Yes
 and No, so with skip days on they have four and lose the snooze; a measurable

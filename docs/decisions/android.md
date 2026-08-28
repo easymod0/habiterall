@@ -93,8 +93,50 @@ alarms are re-armed on every fetch, on boot and six-hourly, so the first arm
 after an install is exact and a revocation on 31-32 is honoured at the next one
 without anything being told. `BootReceiver` still handles
 `SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` for that range and stays.
-Telling the user their reminders are inexact when they are is a separate
-question and a separate issue — nothing here surfaces it.
+**Telling the user is a soft answer, drawn from the same choice as the fallback
+itself.** Loop's `IntentScheduler` answers the missing permission by refusing:
+it logs "No permission to schedule exact alarms", returns
+`SchedulerResult.IGNORED` and schedules nothing at all. That shape is rejected
+here — on 31-32 the user affected is already receiving late-but-real
+reminders, and refusing would turn a punctuality bug into a silence, taking
+away a reminder that still works. So `setAlarm`'s `else` keeps arming with
+`setAndAllowWhileIdle` and only stops being quiet about it: it logs a WARN
+under the tag `habiterall.notify`, the same tag `ReminderReceiver` already
+logs under, because these are one subsystem's logs.
+
+`Reminders.exactAlarmsRevoked` is the gate the settings screen reads, and its
+upper bound is the load-bearing half, not the lower one. The question is
+31-32 **and** `!canScheduleExactAlarms()`: from 33 the app holds
+`USE_EXACT_ALARM`, protection level `normal`, granted at install and never
+revocable, so there is no toggle left to have turned off. A gate written
+without that upper bound would show the line to every user on a current
+phone — false, and false in the direction nobody would ever report, since
+nothing on 33+ is ever late enough to disprove it. Below 31 there is equally
+nothing to have revoked, which is the lower bound.
+
+The line itself is a SEPARATE `Text` drawn under the Reminders `SwitchRow`,
+never a rewrite of that row's own `subtitle`. The subtitle keeps its one
+`else` ("Notifications are switched off for this app in Android settings"),
+so a user with notifications off **and** "Alarms & reminders" revoked sees
+both statements at once, on screen together, and neither has to win the
+other's slot.
+
+What stays out, deliberately: the row is not made tappable into
+`ACTION_REQUEST_SCHEDULE_EXACT_ALARM`, and there is no "Fix this" button. That
+is a further design call and not an oversight — the sentence names where the
+toggle lives ("Alarms & reminders", in Android's own settings) and stops
+there; asking the platform to jump there is a separate question for a
+separate day.
+
+It is proven at the screen, not at the predicate. Five `@Config(sdk = …)`
+cases in `SettingsScreenTest` assert the RENDERED line rather than
+`exactAlarmsRevoked` alone — 12 and 12L with the toggle revoked show it, 12L
+with it left alone does not, nor does anything below 31 or at 33 and up, the
+last of those against the shadow's own "revoked" default, which is the one a
+gate missing its upper bound would fail. Two `ReminderWiringTest` cases pin
+the other half, "soft, not loud": the alarm still lands
+(`alarms().size == 1`) and the `else` no longer runs unheard, a WARN reaching
+the tag.
 
 **Arming is not the last chance to be wrong, which is why the day rides on the
 alarm.** `setAlarm` falls back to `setAndAllowWhileIdle` when exact alarms are

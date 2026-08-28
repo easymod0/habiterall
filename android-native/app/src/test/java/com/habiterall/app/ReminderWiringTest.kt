@@ -20,6 +20,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowAlarmManager
+import org.robolectric.shadows.ShadowLog
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
@@ -153,6 +155,49 @@ class ReminderWiringTest {
         assertEquals(2, alarms().size)
         assertTrue(Reminders.alarmUri(43, snoozed = false) in uris())
         assertTrue(Reminders.alarmUri(43, snoozed = true) in uris())
+    }
+
+    /* ---------- soft, not loud: an inexact arm still arms, and says so ---------- */
+
+    /**
+     * On 31-32 with "Alarms & reminders" revoked, `setAlarm` still arms — that
+     * is decision 1, "soft, not loud", and it is written down HERE: refusing
+     * (Loop's `SchedulerResult.IGNORED`) was rejected, so a future change
+     * toward that shape has to fail this test. It also stops being silent: a
+     * WARN reaches the tag this subsystem's logs share.
+     */
+    @Config(sdk = [32])
+    @Test
+    fun `an inexact arm still arms, and logs that it did`() {
+        // The shadow's own default is "revoked" — no setup needed, and that is
+        // the point: this is the state a user who has not touched the toggle
+        // since upgrading is in in this range's default.
+        Reminders.schedule(app, habit(), androidEnabled = true)
+
+        assertEquals("refusing here is the rejected design", 1, alarms().size)
+
+        val warnings = ShadowLog.getLogsForTag("habiterall.notify")
+            .filter { it.type == android.util.Log.WARN }
+        assertTrue(
+            "expected a WARN naming the fallback",
+            warnings.any { it.msg.contains("inexactly") },
+        )
+    }
+
+    /**
+     * The control for the test above: with the permission held, the alarm is
+     * still scheduled — unsurprising — and nothing is logged for this tag.
+     * Without this, a `Log.w` fired unconditionally (not just in the `else`)
+     * would pass the test above for the wrong reason.
+     */
+    @Config(sdk = [34])
+    @Test
+    fun `a granted permission arms exactly and logs nothing`() {
+        ShadowAlarmManager.setCanScheduleExactAlarms(true)
+        Reminders.schedule(app, habit(), androidEnabled = true)
+
+        assertEquals(1, alarms().size)
+        assertTrue(ShadowLog.getLogsForTag("habiterall.notify").isEmpty())
     }
 
     /* ---------- what a delivery does when it arrives ---------- */

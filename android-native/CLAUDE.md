@@ -226,6 +226,16 @@ carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`, load-bearing on
 it names no day and means whichever one it arrives on, so refusing a null would
 silence every reminder there is.
 
+**The fallback stopped being silent about itself.** `setAlarm`'s `else` logs a
+WARN under the tag `habiterall.notify`, and the settings screen draws a
+separate line under the Reminders switch when `Reminders.exactAlarmsRevoked`
+says so — 31-32 with "Alarms & reminders" revoked, never 33+, where
+`USE_EXACT_ALARM` is held from install with nothing to have revoked. Two
+decisions a later change would otherwise re-open: it stays SOFT — the alarm
+still arms, refusing (Loop's `SchedulerResult.IGNORED`) is not this client's
+answer — and the SDK upper bound is what keeps the sentence from being false
+on every current phone.
+
 **Two alarms are two PendingIntents** (`habiterall://snooze/<id>` against
 `habiterall://remind/<id>`), because `filterEquals` ignores extras and one intent
 for both would make "in an hour" the habit's new daily time. That is also what

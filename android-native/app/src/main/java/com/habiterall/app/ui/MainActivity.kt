@@ -156,6 +156,9 @@ private fun ManageScreen(
             // answer will be ignored by the system regardless.
             androidRemindersSupported =
                 NotificationManagerCompat.from(context).areNotificationsEnabled(),
+            // The second, narrower question: not whether Android will post a
+            // notification at all, but whether the alarm behind it can be exact.
+            exactAlarmsRevoked = Reminders.exactAlarmsRevoked(context),
             onPatch = { patch ->
                 // What it would not take, kept: a key this server does not know
                 // comes back in `ignored` with a 200 rather than as an error, so

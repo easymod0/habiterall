@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.Data
@@ -29,6 +30,9 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.TimeUnit
+
+/** `adb logcat -s habiterall.notify` is the whole point of this being one tag. */
+private const val TAG = "habiterall.notify"
 
 /**
  * Turns each habit's `reminder_time` into an Android alarm.
@@ -227,12 +231,46 @@ object Reminders {
         // back to an inexact alarm keeps reminders working, just less
         // punctually — better than silently dropping them. The read happens on
         // every arm, so a grant or a revocation needs no migration.
+        //
+        // This is deliberately SOFT, not Loop's answer: `IntentScheduler` there
+        // logs "No permission to schedule exact alarms", answers
+        // `SchedulerResult.IGNORED` and schedules nothing at all. That is
+        // rejected here — on 31-32 the user affected is already receiving
+        // late-but-real reminders, and refusing would convert a punctuality bug
+        // into silence. So the `else` below still arms, and now only stops
+        // being quiet about it.
         val canBeExact = Build.VERSION.SDK_INT < 31 || manager.canScheduleExactAlarms()
         if (canBeExact) {
             manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         } else {
+            Log.w(TAG, "exact alarms not permitted; arming inexactly for $at")
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         }
+    }
+
+    /**
+     * Whether an alarm armed right now would be INEXACT for a reason the user
+     * can undo — a narrower question than `!canScheduleExactAlarms()`, which is
+     * also true below 31 (no permission exists to ask about) and would be true
+     * on every phone from 33 up with nothing anybody can do about it.
+     *
+     * The upper bound is the load-bearing half: from 33 the app holds
+     * `USE_EXACT_ALARM`, protection level `normal`, granted at install and never
+     * revocable, so there is no toggle to have turned off — a line saying
+     * otherwise would be false on every current phone, and false in the
+     * direction nobody notices, since nothing on 33+ is ever late to disprove
+     * it. Below 31 there is no permission to have revoked either, which is the
+     * lower bound.
+     *
+     * Read at DRAW time, same as [setAlarm]'s own check, and nothing here
+     * caches it: a grant or a revocation made in Android's own settings shows
+     * up on the next visit to this screen with no migration and nothing to
+     * invalidate.
+     */
+    fun exactAlarmsRevoked(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 31) return false
+        if (Build.VERSION.SDK_INT > 32) return false
+        return !alarmManager(context).canScheduleExactAlarms()
     }
 
     /**

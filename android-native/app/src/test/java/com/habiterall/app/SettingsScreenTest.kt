@@ -12,6 +12,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.assertIsDisplayed
 import com.habiterall.app.data.AppSettings
+import com.habiterall.app.notify.Reminders
 import com.habiterall.app.ui.PatchOutcome
 import com.habiterall.app.ui.SettingsScreen
 import kotlinx.serialization.json.JsonElement
@@ -22,7 +23,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowAlarmManager
 
 /**
  * What the settings screen DRAWS, and what a tap on it does.
@@ -78,11 +81,18 @@ class SettingsScreenTest {
     private fun show(
         initial: AppSettings = AppSettings(),
         ignored: List<String> = emptyList(),
+        // Defaulted to the REAL predicate so every existing test — none of
+        // which sets an `@Config(sdk = …)` — exercises it too, at the default
+        // sdk, where it answers false. The new tests below override the sdk
+        // per method and let this default stand, so each one is exercising the
+        // predicate AND the rendering in the same pass.
+        exactAlarmsRevoked: Boolean = Reminders.exactAlarmsRevoked(RuntimeEnvironment.getApplication()),
     ) {
         compose.setContent {
             SettingsScreen(
                 initial = initial,
                 androidRemindersSupported = true,
+                exactAlarmsRevoked = exactAlarmsRevoked,
                 onPatch = { patch ->
                     patch.forEach { (k, v) -> sent += "$k=${(v as JsonPrimitive).content}" }
                     // A server that stored it answers with the new settings; one
@@ -296,5 +306,89 @@ class SettingsScreenTest {
 
         assertEquals(false, closedWith)
         assertEquals(emptyList<String>(), sent)
+    }
+
+    /**
+     * The five cases for the separate "alarms can arrive late" line, which
+     * exercise `Reminders.exactAlarmsRevoked` AND the rendering together —
+     * `show()`'s default reads the real predicate, so a version that pins only
+     * the decision and not the wiring cannot pass these. Every assertion keys on
+     * "can arrive late", a substring that appears nowhere else on the screen:
+     * the existing subtitle's "in Android settings" is a false-positive trap for
+     * the same reason, and is why absence is checked with "Alarms & reminders"
+     * instead — the opening phrase of the new sentence alone.
+     */
+
+    /** 12 with the toggle revoked (the shadow's own default) shows the line. */
+    @Config(sdk = [31])
+    @Test
+    fun `the line appears on Android 12 with the toggle revoked`() {
+        show()
+
+        compose.onNodeWithText("can arrive late", substring = true).assertIsDisplayed()
+        // Decision 2, as a test: the ordinary subtitle is still there, unmoved.
+        compose.onNodeWithText(
+            "A local alarm, so it fires with no network. Off here also stops the " +
+                "other devices on this account from arming one.",
+        ).assertIsDisplayed()
+    }
+
+    /** 12L, same as 12: still inside the revocable range. */
+    @Config(sdk = [32])
+    @Test
+    fun `the line appears on Android 12L with the toggle revoked`() {
+        show()
+
+        compose.onNodeWithText("can arrive late", substring = true).assertIsDisplayed()
+        compose.onNodeWithText(
+            "A local alarm, so it fires with no network. Off here also stops the " +
+                "other devices on this account from arming one.",
+        ).assertIsDisplayed()
+    }
+
+    /** A user who left "Alarms & reminders" alone is told nothing. */
+    @Config(sdk = [32])
+    @Test
+    fun `a user who left Alarms and reminders alone is told nothing`() {
+        ShadowAlarmManager.setCanScheduleExactAlarms(true)
+        show()
+
+        compose.onAllNodes(
+            androidx.compose.ui.test.hasText("Alarms & reminders", substring = true)
+        ).assertCountEquals(0)
+    }
+
+    /**
+     * On 33+ the line never appears, whatever the alarm manager says.
+     *
+     * The hostile answer: the shadow's default is "revoked", which is exactly
+     * what a gate written without an upper bound would show a line for — false
+     * on every current phone, since 33+ holds `USE_EXACT_ALARM` at install and
+     * cannot revoke it. This is the case that catches that gate.
+     */
+    @Config(sdk = [33])
+    @Test
+    fun `on 33 plus the line never appears whatever the alarm manager says`() {
+        show()
+
+        compose.onAllNodes(
+            androidx.compose.ui.test.hasText("Alarms & reminders", substring = true)
+        ).assertCountEquals(0)
+    }
+
+    /**
+     * Below 31 there is no permission to have revoked.
+     *
+     * Also proves the guard runs BEFORE the call: `canScheduleExactAlarms` does
+     * not exist below API 31.
+     */
+    @Config(sdk = [30])
+    @Test
+    fun `below 31 there is no permission to have revoked`() {
+        show()
+
+        compose.onAllNodes(
+            androidx.compose.ui.test.hasText("Alarms & reminders", substring = true)
+        ).assertCountEquals(0)
     }
 }

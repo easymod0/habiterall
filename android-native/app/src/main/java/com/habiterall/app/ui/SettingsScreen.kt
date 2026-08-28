@@ -95,6 +95,17 @@ data class PatchOutcome(
 fun SettingsScreen(
     initial: AppSettings,
     androidRemindersSupported: Boolean,
+    /**
+     * [com.habiterall.app.notify.Reminders.exactAlarmsRevoked]'s answer.
+     *
+     * A DIFFERENT question from [androidRemindersSupported] — that one asks
+     * whether Android will post a notification at all, this one asks whether
+     * the alarm behind it will be on time — which is why each gets its own
+     * `Text` below rather than the two being folded into one contended
+     * `subtitle`: with notifications off AND exact alarms revoked, both
+     * statements are true at once and neither has to win.
+     */
+    exactAlarmsRevoked: Boolean,
     onPatch: suspend (Map<String, JsonElement>) -> PatchOutcome,
     /** Closes, saying whether any setting was actually stored. */
     onClose: (changed: Boolean) -> Unit,
@@ -211,6 +222,16 @@ fun SettingsScreen(
                         JsonArray(next.map { JsonPrimitive(it) }))
                 },
             )
+
+            if (exactAlarmsRevoked) {
+                Text(
+                    "\"Alarms & reminders\" is switched off for this app in Android " +
+                        "settings, so reminders are still armed but can arrive late — by " +
+                        "an hour or more.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             HorizontalDivider()
 
