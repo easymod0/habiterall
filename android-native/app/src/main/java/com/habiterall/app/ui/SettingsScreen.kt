@@ -223,7 +223,12 @@ fun SettingsScreen(
                 },
             )
 
-            if (exactAlarmsRevoked) {
+            // Also gated on this phone still being a reminder destination: with
+            // the switch above off, `Reminders.schedule` calls `cancel()` and
+            // returns before `setAlarm` is ever reached, so nothing is armed —
+            // and the sentence below would be false directly under the control
+            // that made it so.
+            if (exactAlarmsRevoked && settings.androidRemindersEnabled) {
                 Text(
                     "\"Alarms & reminders\" is switched off for this app in Android " +
                         "settings, so reminders are still armed but can arrive late — by " +

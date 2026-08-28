@@ -266,6 +266,13 @@ object Reminders {
      * caches it: a grant or a revocation made in Android's own settings shows
      * up on the next visit to this screen with no migration and nothing to
      * invalidate.
+     *
+     * "Next visit" is the operative phrase: leaving this screen open, flipping
+     * the toggle in Android's own settings, and returning to a settings screen
+     * that never closed does NOT re-read this — nothing here recomposes for a
+     * change made while it was already showing. Only closing and reopening
+     * Settings does. `androidRemindersSupported` above has carried the same
+     * staleness all along.
      */
     fun exactAlarmsRevoked(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 31) return false

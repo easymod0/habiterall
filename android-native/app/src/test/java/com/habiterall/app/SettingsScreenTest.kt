@@ -87,11 +87,12 @@ class SettingsScreenTest {
         // per method and let this default stand, so each one is exercising the
         // predicate AND the rendering in the same pass.
         exactAlarmsRevoked: Boolean = Reminders.exactAlarmsRevoked(RuntimeEnvironment.getApplication()),
+        androidRemindersSupported: Boolean = true,
     ) {
         compose.setContent {
             SettingsScreen(
                 initial = initial,
-                androidRemindersSupported = true,
+                androidRemindersSupported = androidRemindersSupported,
                 exactAlarmsRevoked = exactAlarmsRevoked,
                 onPatch = { patch ->
                     patch.forEach { (k, v) -> sent += "$k=${(v as JsonPrimitive).content}" }
@@ -390,5 +391,50 @@ class SettingsScreenTest {
         compose.onAllNodes(
             androidx.compose.ui.test.hasText("Alarms & reminders", substring = true)
         ).assertCountEquals(0)
+    }
+
+    /**
+     * A phone that is not a reminder destination is told nothing, even with
+     * "Alarms & reminders" revoked.
+     *
+     * With the switch above reading Off, `Reminders.schedule` cancels rather
+     * than arms, so the lateness sentence would be false directly under the
+     * control that made it so. sdk=32 keeps the SDK half of the gate satisfied
+     * — the shadow's own default is "revoked" — so only the new term is under
+     * test here.
+     */
+    @Config(sdk = [32])
+    @Test
+    fun `a phone that is not a reminder destination is told nothing`() {
+        val settings = AppSettings(notifyChannels = listOf("discord"))
+        // Assert the precondition before rendering: a mis-constructed fixture
+        // must not be able to make this pass by drawing a screen nobody checked.
+        assertEquals(false, settings.androidRemindersEnabled)
+
+        show(initial = settings)
+
+        compose.onAllNodes(
+            androidx.compose.ui.test.hasText("Alarms & reminders", substring = true)
+        ).assertCountEquals(0)
+    }
+
+    /**
+     * Both sentences at once — the state decision 2 exists for.
+     *
+     * Notifications are switched off for this app in Android settings AND
+     * "Alarms & reminders" is revoked: neither statement has to win the other's
+     * slot, which is why they are two separate `Text`s rather than one folded
+     * `subtitle`. This is the case that fails if somebody later folds the
+     * lateness message into the subtitle's `else`.
+     */
+    @Config(sdk = [32])
+    @Test
+    fun `both sentences show at once`() {
+        show(androidRemindersSupported = false)
+
+        compose.onNodeWithText(
+            "Notifications are switched off for this app in Android settings.",
+        ).assertIsDisplayed()
+        compose.onNodeWithText("can arrive late", substring = true).assertIsDisplayed()
     }
 }

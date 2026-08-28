@@ -114,6 +114,12 @@ phone — false, and false in the direction nobody would ever report, since
 nothing on 33+ is ever late enough to disprove it. Below 31 there is equally
 nothing to have revoked, which is the lower bound.
 
+The screen's own `if` adds a third term, `settings.androidRemindersEnabled` —
+the same switch the line sits under. With that switch off, `Reminders.schedule`
+calls `cancel()` and returns before `setAlarm` is ever reached, so nothing is
+armed at all; without the third term the line would claim a late-but-real
+reminder directly under a control reading Off.
+
 The line itself is a SEPARATE `Text` drawn under the Reminders `SwitchRow`,
 never a rewrite of that row's own `subtitle`. The subtitle keeps its one
 `else` ("Notifications are switched off for this app in Android settings"),

@@ -230,11 +230,14 @@ silence every reminder there is.
 WARN under the tag `habiterall.notify`, and the settings screen draws a
 separate line under the Reminders switch when `Reminders.exactAlarmsRevoked`
 says so — 31-32 with "Alarms & reminders" revoked, never 33+, where
-`USE_EXACT_ALARM` is held from install with nothing to have revoked. Two
-decisions a later change would otherwise re-open: it stays SOFT — the alarm
-still arms, refusing (Loop's `SchedulerResult.IGNORED`) is not this client's
-answer — and the SDK upper bound is what keeps the sentence from being false
-on every current phone.
+`USE_EXACT_ALARM` is held from install with nothing to have revoked, **and**
+only while `settings.androidRemindersEnabled` — the same switch the line sits
+under — is still true: with the switch off, `Reminders.schedule` cancels
+rather than arms, and the line would otherwise claim a reminder is armed
+directly under a control saying it is not. Two decisions a later change would
+otherwise re-open: it stays SOFT — the alarm still arms, refusing (Loop's
+`SchedulerResult.IGNORED`) is not this client's answer — and the SDK upper
+bound is what keeps the sentence from being false on every current phone.
 
 **Two alarms are two PendingIntents** (`habiterall://snooze/<id>` against
 `habiterall://remind/<id>`), because `filterEquals` ignores extras and one intent
