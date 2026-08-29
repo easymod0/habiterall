@@ -145,3 +145,15 @@ sends to `ev`, and in what order — so the test that actually exercises it is a
 unit test over a fake `ev` that models a window/document/location well enough
 to hold the doomed document open on purpose, which a real browser on this
 build will not (`shared/test/browser-runner.test.js`).
+
+Worth saying plainly, because a careful reader will notice it on their own:
+every suite poll IS a `Runtime.evaluate`, so "CDP cannot observe the window"
+and "a CDP poll cannot land in it" are the same sentence — which means the
+1.3s `avoidcheck` flake in CI is equally explicable by the WEAK predicate
+#153 already replaced ("any row" rather than "this habit's row"), and this
+build gives no way to tell the two apart. On this build, the fix's necessity
+rests on #130's six-trial observation and on the shape of the race rather
+than on a reproduction here. That is not resolved by asserting harder: the
+change is strictly stronger either way — it can only close a window, never
+open one — and it costs nothing to hold a predicate that cannot be answered
+by a document that is going away, whether or not this build ever lands in it.

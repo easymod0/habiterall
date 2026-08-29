@@ -75,7 +75,7 @@ try {
   console.log(`    habit ${made.id}, show_as=${made.show_as}`);
   check('the server stores the rendering choice', made.show_as === 'avoid', made.show_as);
 
-  await reloadAndWaitForRow(ev, 'Smoking');
+  await reloadAndWaitForRow(ev, 'Smoking', { what: 'the "Smoking" row after the habit was created' });
 
   const cell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Smoking'));
@@ -135,7 +135,7 @@ try {
   await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ skipDays: true }) }); })()`);
-  await reloadAndWaitForRow(ev, 'Smoking');
+  await reloadAndWaitForRow(ev, 'Smoking', { what: 'the "Smoking" row after the skips reload' });
   // The day is at `no` when these run, so this is slip -> clean -> skip. The
   // cycle itself is Loop's DONE -> SKIP -> NO, which the rendering does not
   // reorder — stated again at the limit-of-two section below.
@@ -154,7 +154,7 @@ try {
       body: JSON.stringify({ name:'Coffee', type:'numerical', unit:'cups',
         target_value: 2, target_type:'at_most', show_as:'avoid' }) });
     return (await r.json()).id;})()`);
-  await reloadAndWaitForRow(ev, 'Coffee');
+  await reloadAndWaitForRow(ev, 'Coffee', { what: 'the "Coffee" row on the limit-of-two habit' });
   const twoCell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Coffee'));
     // Named, for the reason the Smoking cell above is: a regression here
@@ -196,7 +196,7 @@ try {
     await fetch('/api/habits/${made.id}', { method:'PUT',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ ...h, show_as:'amount' }) });})()`);
-  await reloadAndWaitForRow(ev, 'Smoking');
+  await reloadAndWaitForRow(ev, 'Smoking', { what: 'the "Smoking" row after the switch to amount' });
   row = await stored();
   // Both non-null, or "unchanged" is two absences agreeing and the check says
   // nothing at all.

@@ -90,8 +90,16 @@ const run = new Function('window', 'document', 'location', 'src', 'return eval(s
 
 function fakeBrowser({ rows, commitAfterMs }) {
   const state = { win: {}, rows, reloads: 0, doomedAtReload: undefined };
+  // The selector is part of the contract `reloadAndWaitForRow` is pinned on —
+  // it evaluates `document.querySelectorAll('#grid .habit-row')` and nothing
+  // else — so this fake is the only thing that can hold that string to
+  // account: a `querySelectorAll` that answered every selector alike would
+  // leave the literal free to drift (or be misspelled) with every test here
+  // still green, while the real fleet timed out at 20s on all five call sites.
   const doc = () => ({
-    querySelectorAll: () => state.rows.map((t) => ({ textContent: t })),
+    querySelectorAll: (selector) => (
+      selector === '#grid .habit-row' ? state.rows.map((t) => ({ textContent: t })) : []
+    ),
   });
   const location = {
     reload() {
@@ -111,11 +119,16 @@ test('reloadAndWaitForRow: the wait cannot be satisfied by the document the relo
 
   await assert.rejects(
     reloadAndWaitForRow(ev, 'Meditate', { timeoutMs: 300, intervalMs: 10 }),
-    (err) => err.message.includes('Meditate'),
+    // `err.message.includes('Meditate')` alone is satisfied by `waitUntil`'s
+    // FALLBACK message too, since with no `what` it interpolates the
+    // expression, which already contains `"Meditate"` via `JSON.stringify`.
+    // Requiring the `what` wording as well pins that `reloadAndWaitForRow`
+    // actually passes one — dropping or renaming the option cannot pass here.
+    (err) => err.message.includes('Meditate') && err.message.includes('in the reloaded page'),
   );
 });
 
-test('reloadAndWaitForRow: the marker is set in the same evaluation as the reload', async () => {
+test('reloadAndWaitForRow: the marker is already set when the reload fires', async () => {
   const { reloadAndWaitForRow } = await import('./browser/chrome.mjs');
   // Same doomed-forever shape as the test above: what matters here is not
   // whether the call settles but what `location.reload()` observed at the
@@ -127,6 +140,9 @@ test('reloadAndWaitForRow: the marker is set in the same evaluation as the reloa
   assert.equal(state.reloads, 1);
   // Sampled INSIDE location.reload(), so this pins the ordering: the marker
   // was already set at the instant the reload fired, not sometime after.
+  // Splitting the marker and the reload into two separate `ev` calls would
+  // still pass this, since the fake hands both the same `state.win` — that
+  // same-EVALUATION half is the source guard's job, further down this file.
   assert.equal(state.doomedAtReload, 1);
 });
 
@@ -145,7 +161,12 @@ test("reloadAndWaitForRow: a document that commits without this habit's row is s
 
   await assert.rejects(
     reloadAndWaitForRow(ev, 'Meditate', { timeoutMs: 300, intervalMs: 10 }),
-    (err) => err.message.includes('Meditate'),
+    // `err.message.includes('Meditate')` alone is satisfied by `waitUntil`'s
+    // FALLBACK message too, since with no `what` it interpolates the
+    // expression, which already contains `"Meditate"` via `JSON.stringify`.
+    // Requiring the `what` wording as well pins that `reloadAndWaitForRow`
+    // actually passes one — dropping or renaming the option cannot pass here.
+    (err) => err.message.includes('Meditate') && err.message.includes('in the reloaded page'),
   );
 });
 
