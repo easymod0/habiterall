@@ -89,7 +89,7 @@ test('no two suites share a fallback DevTools port', () => {
 const run = new Function('window', 'document', 'location', 'src', 'return eval(src)');
 
 function fakeBrowser({ rows, commitAfterMs }) {
-  const state = { win: {}, rows, reloads: 0, doomedAtReload: undefined };
+  const state = { win: {}, rows, reloads: 0, doomedAtReload: undefined, sources: [] };
   // The selector is part of the contract `reloadAndWaitForRow` is pinned on —
   // it evaluates `document.querySelectorAll('#grid .habit-row')` and nothing
   // else — so this fake is the only thing that can hold that string to
@@ -101,16 +101,23 @@ function fakeBrowser({ rows, commitAfterMs }) {
       selector === '#grid .habit-row' ? state.rows.map((t) => ({ textContent: t })) : []
     ),
   });
-  const location = {
-    reload() {
-      state.reloads++;
-      state.doomedAtReload = state.win.__doomed;
-      if (commitAfterMs === null) return;                  // doomed window, held open
-      setTimeout(() => { state.win = {}; }, commitAfterMs); // a fresh document
-    },
+  // Both a `location.reload()` and an EXTERNAL reload (what a CDP reload is —
+  // triggered from outside the page) go through the same commit scheduling;
+  // `sources` records which door was used, because a single counter cannot
+  // tell "called the callback" apart from "evaluated `location.reload()`
+  // anyway", and that distinction is the whole point of `reloadAndWaitFor`'s
+  // `reload:` option.
+  const commit = (source) => {
+    state.reloads++;
+    state.sources.push(source);
+    state.doomedAtReload = state.win.__doomed;
+    if (commitAfterMs === null) return;                  // doomed window, held open
+    setTimeout(() => { state.win = {}; }, commitAfterMs); // a fresh document
   };
+  const location = { reload() { commit('page'); } };
+  const reload = async () => commit('external');
   const ev = async (src) => run(state.win, doc(), location, src);
-  return { state, ev };
+  return { state, ev, reload };
 }
 
 test('reloadAndWaitForRow: the wait cannot be satisfied by the document the reload is destroying', async () => {
@@ -171,35 +178,175 @@ test("reloadAndWaitForRow: a document that commits without this habit's row is s
 });
 
 /**
+ * `reloadAndWaitFor` is the join `reloadAndWaitForRow` above delegates to.
+ * Most of these go through the CDP door (a reload triggered from OUTSIDE the
+ * page, via the `reload:` option) specifically, since that is the new half —
+ * `reloadAndWaitForRow`'s own tests above already cover the in-page default.
+ * Two exceptions, each with its own reason at the test: "the default path
+ * still reloads in the page" is about the default itself, and the parens
+ * test is about the predicate join, which is shared by both doors and does
+ * not care which one is exercised. All pass the same row expression as the
+ * predicate, so the fake needs no second content model.
+ */
+const rowExpr = (name) =>
+  `[...document.querySelectorAll('#grid .habit-row')].some(r => r.textContent.includes(${JSON.stringify(name)}))`;
+
+test('reloadAndWaitFor: the wait cannot be satisfied by the document the reload is destroying', async () => {
+  const { reloadAndWaitFor } = await import('./browser/chrome.mjs');
+  // Through the `reload:` callback — this is the CDP door's own version of
+  // the doomed-document window, not a re-run of `reloadAndWaitForRow`'s test
+  // through a second entry point.
+  const { ev, reload } = fakeBrowser({ rows: ['Meditate'], commitAfterMs: null });
+
+  await assert.rejects(
+    reloadAndWaitFor(ev, rowExpr('Meditate'), {
+      reload, timeoutMs: 300, intervalMs: 10, what: 'a row containing "Meditate" (fake probe)',
+    }),
+    // A name-only filter is satisfied by `waitUntil`'s FALLBACK message too,
+    // since with no `what` it interpolates the expression, which already
+    // contains "Meditate" via `JSON.stringify` — the hole review of #271
+    // found. Requiring the `what` wording as well pins that this call
+    // actually passed one through.
+    (err) => err.message.includes('Meditate') && err.message.includes('fake probe'),
+  );
+});
+
+test('reloadAndWaitFor: the marker is set before the external reload fires', async () => {
+  const { reloadAndWaitFor } = await import('./browser/chrome.mjs');
+  // Same doomed-forever shape as above: what matters is what the reload
+  // callback observed at the instant it fired, sampled INSIDE it — `await
+  // reload()` before the marker evaluation would fail this.
+  const { state, ev, reload } = fakeBrowser({ rows: ['Meditate'], commitAfterMs: null });
+
+  await reloadAndWaitFor(ev, rowExpr('Meditate'), { reload, timeoutMs: 300, intervalMs: 10 }).catch(() => {});
+
+  assert.equal(state.doomedAtReload, 1);
+});
+
+test('reloadAndWaitFor: the callback replaces the in-page reload, it does not add to it', async () => {
+  const { reloadAndWaitFor } = await import('./browser/chrome.mjs');
+  const { state, ev, reload } = fakeBrowser({ rows: ['Meditate'], commitAfterMs: 40 });
+
+  await reloadAndWaitFor(ev, rowExpr('Meditate'), { reload, timeoutMs: 2000, intervalMs: 10 });
+
+  // Catches both "reloaded twice" (['external', 'page'] or the reverse) and
+  // "ignored the callback" (['page']).
+  assert.deepEqual(state.sources, ['external']);
+});
+
+test('reloadAndWaitFor: the default path still reloads in the page', async () => {
+  const { reloadAndWaitFor } = await import('./browser/chrome.mjs');
+  const { state, ev } = fakeBrowser({ rows: ['Meditate'], commitAfterMs: 40 });
+
+  await reloadAndWaitFor(ev, rowExpr('Meditate'), { timeoutMs: 2000, intervalMs: 10 });
+
+  assert.deepEqual(state.sources, ['page']);
+});
+
+test('reloadAndWaitFor: it returns once the new document has painted', async () => {
+  const { reloadAndWaitFor } = await import('./browser/chrome.mjs');
+  const { ev, reload } = fakeBrowser({ rows: ['Meditate'], commitAfterMs: 40 });
+
+  // Without this, a predicate that can NEVER be satisfied would pass the
+  // "cannot be satisfied" test above too.
+  await reloadAndWaitFor(ev, rowExpr('Meditate'), { reload, timeoutMs: 2000, intervalMs: 10 });
+});
+
+test('reloadAndWaitFor: a document that commits without the content is still a failure', async () => {
+  const { reloadAndWaitFor } = await import('./browser/chrome.mjs');
+  // Through the `reload:` callback, same reason as the test above.
+  const { ev, reload } = fakeBrowser({ rows: ['Gym'], commitAfterMs: 40 });
+
+  await assert.rejects(
+    reloadAndWaitFor(ev, rowExpr('Meditate'), {
+      reload, timeoutMs: 300, intervalMs: 10, what: 'a row containing "Meditate" (fake probe)',
+    }),
+    (err) => err.message.includes('Meditate') && err.message.includes('fake probe'),
+  );
+});
+
+test('reloadAndWaitFor: the parentheses around the expression are load-bearing against `||`', async () => {
+  const { reloadAndWaitFor } = await import('./browser/chrome.mjs');
+  // The doomed window held open forever: a sound predicate can never resolve
+  // here. `false || true` is unconditionally true, so if the joined predicate
+  // were `!window.__doomed && ${expression}` rather than
+  // `!window.__doomed && (${expression})`, it would parse as
+  // `(!window.__doomed && false) || true` — always true, and this call would
+  // resolve immediately in the very document it is supposed to refuse.
+  //
+  // Left on the default (in-page) path deliberately: the parens live in the
+  // join `waitUntil` is handed, which is shared by both doors, so which one
+  // fires the reload is irrelevant to what this test pins.
+  const { ev } = fakeBrowser({ rows: [], commitAfterMs: null });
+
+  await assert.rejects(
+    reloadAndWaitFor(ev, 'false || true', {
+      timeoutMs: 300, intervalMs: 10, what: 'a bare boolean expression containing ||',
+    }),
+    // `assert.rejects` with no filter passes on ANY rejection, including one
+    // from a typo in the expression rather than the timeout this is actually
+    // about. Requiring the timeout wording, and the `what` this test passed,
+    // pins that it rejected FOR THIS REASON — with the parens dropped the call
+    // resolves instead, so this filter is never reached at all.
+    (err) => err.message.includes('timed out') && err.message.includes('a bare boolean expression containing ||'),
+  );
+});
+
+/**
  * The guard below reads source text one line at a time, and that decision is
  * extracted here so the guard's own sanity checks can run a synthetic offender
  * and a synthetic comment through the SAME predicate the scan uses — not
  * through a second copy of it, which would pin a regex nobody reads and leave
  * the one that runs free to be broadened.
  */
-const isReloadCallSite = (line) => (
-  !/^\s*(\*|\/\/)/.test(line)     // a comment mentioning it is not a call site
-  && line.includes('location.reload(')
-);
+const isReloadCallSite = (line) => {
+  if (/^\s*(\*|\/\/)/.test(line)) return false;   // a comment mentioning it is not a call site
+  // Never sanctioned in a suite, in any position: the default path does the
+  // marker and the reload in ONE evaluation, so handing `location.reload()` in
+  // as a `reload:` callback would break the property this whole guard is for.
+  if (line.includes('location.reload(')) return true;
+  // A CDP reload is sanctioned ONLY as `reloadAndWaitFor`'s own argument.
+  return line.includes('Page.reload') && !/\breload:.*Page\.reload/.test(line);
+};
 
 /**
- * What this guard does NOT cover, said plainly so the next reader does not
- * mistake a green run for a swept directory: it matches the literal text
- * `location.reload(`, so a reload issued over CDP as `send('Page.reload', …)`
- * is invisible to it. `snackcheck.mjs` already does that twice, and the poll
- * after each one waits on a detail view that was open BEFORE the reload — the
- * same doomed-document shape, reached by a different door. That is #154's
- * audit being scoped to `location.reload()`, not this guard failing; it is
- * #269, filed rather than widened into here.
+ * What this guard covers, and what it deliberately still does not.
+ *
+ * It forbids `location.reload(` anywhere at all, including inside a `reload:`
+ * callback — the in-page reload only joins soundly with the marker as ONE
+ * evaluation, so handing it in as a callback would recreate the exact bug
+ * `reloadAndWaitFor` exists to close. It forbids a free-standing CDP reload
+ * (`send('Page.reload', …)`) too — the door #269 opened, since a reload issued
+ * over CDP cannot literally share an evaluation with the marker the way the
+ * in-page one does — and exempts `Page.reload` ONLY where it is
+ * `reloadAndWaitFor`'s own `reload:` argument, which is the join `chrome.mjs`
+ * now provides for that case.
+ *
+ * That exemption is a SINGLE-LINE match, because this is a line-based guard
+ * and stays one: it does not parse across a wrap. Splitting the callback —
+ * `reload: () =>` on one line and `send('Page.reload', …)` on the next — makes
+ * the guard misread it as a free-standing CDP reload, and drops the
+ * "exemption is exercised" floor below to zero at the same time. Keep
+ * `reload: () => send('Page.reload', …)` on one physical line.
+ *
+ * What it still does not see: a same-URL `Page.navigate`. It is the same race
+ * in principle — a navigation to a fragment-less URL is a cross-document load
+ * even from a fragment route, so the marker would work there too — and a
+ * FRAGMENT-only navigate would be same-document, where the marker would
+ * survive it and the wait would never return. Telling which of the 76
+ * `Page.navigate` sends across 29 suites are which is a per-site audit, not a
+ * text guard, and it is not this change — see `docs/decisions/testing.md`.
  */
-test('no suite calls location.reload() on its own — the reload and the wait after it are one call', () => {
+test('no suite issues a free-standing reload, in-page or CDP, outside reloadAndWaitFor', () => {
   const offenders = [];
   let scanned = 0;
+  let sanctioned = 0;
   for (const file of readdirSync(browserDir).filter((f) => f.endsWith('.mjs') && f !== 'chrome.mjs')) {
     scanned++;
     const src = readFileSync(join(browserDir, file), 'utf8');
     src.split('\n').forEach((line, i) => {
       if (isReloadCallSite(line)) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
+      if (line.includes('Page.reload') && /\breload:.*Page\.reload/.test(line)) sanctioned++;
     });
   }
   assert.deepEqual(offenders, []);
@@ -213,7 +360,15 @@ test('no suite calls location.reload() on its own — the reload and the wait af
   // wrong, or exclude more than `chrome.mjs`, and nothing is read at all.
   assert.ok(scanned > 25, `only scanned ${scanned} suite files; has the filter or the directory changed?`);
 
-  // The predicate: broadening the comment skip, or losing the literal, disarms
+  // A third way to go quiet: the `reload:` exemption could rot into a
+  // permanently dead branch — matched by nothing, permitted for nothing —
+  // while every assertion above stays green. This is the floor that the
+  // exemption is exercised by real source, not only by the synthetic cases
+  // below.
+  assert.ok(sanctioned > 0,
+    'no suite uses the sanctioned `reload: … Page.reload(...)` form; has snackcheck.mjs changed?');
+
+  // The predicate: broadening the comment skip, or losing a literal, disarms
   // the scan while every assertion above still passes. Each line below is run
   // through the SAME predicate the loop just used, in both directions — a table
   // that only listed offenders would be satisfied by a predicate that returned
@@ -230,6 +385,15 @@ test('no suite calls location.reload() on its own — the reload and the wait af
     ['  // location.reload() is what this guard forbids', false, 'a line comment'],
     ['   * `location.reload()` and the wait after it are one call', false, 'a JSDoc line'],
     ['  await reloadAndWaitForRow(ev, "Smoking");', false, 'the helper this guard points everyone at'],
+    ["  await send('Page.reload',{},sessionId);", true, 'a free-standing CDP reload'],
+    ["    reload: () => send('Page.reload', {}, sessionId),", false, "the helper's own argument"],
+    ['  // a note mentioning Page.reload', false, 'a comment naming Page.reload'],
+    // This one pins the guard's SCOPE: a same-URL `Page.navigate` is the
+    // widened half of #269 and is deliberately not claimed here.
+    ["  await send('Page.navigate', { url: BASE }, sessionId);", false, 'a same-URL Page.navigate — out of scope'],
+    // And this one pins the asymmetry above: `location.reload(` offends even
+    // inside a `reload:` callback, where `Page.reload` alone would not.
+    ["  reload: () => ev('location.reload()')", true, 'location.reload( inside a reload: callback'],
   ];
   for (const [line, offends, what] of cases) {
     assert.equal(

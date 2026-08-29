@@ -157,3 +157,55 @@ than on a reproduction here. That is not resolved by asserting harder: the
 change is strictly stronger either way — it can only close a window, never
 open one — and it costs nothing to hold a predicate that cannot be answered
 by a document that is going away, whether or not this build ever lands in it.
+
+**#269 is the same defect through a different door.** `snackcheck.mjs` reloads
+over CDP (`send('Page.reload', …, sessionId)`), and each reload was followed
+by its own hand-rolled poll on `detailReady`, checking three selectors — the
+calendar cell, the History bars, the strip cell — that the detail view had
+already drawn BEFORE the reload. Naming the content does not help here either,
+for the same reason #153 found: the page being reloaded already had all three,
+so the strengthened predicate is exactly as satisfiable in the doomed document
+as the weak one was.
+
+The join still has to be one call, but a CDP reload cannot literally be one
+evaluation with the marker the way `location.reload()` is — it is a separate
+round trip over the DevTools socket, not an expression the page can run.
+`reloadAndWaitFor` is the factored-out join: the marker is set in its own
+evaluation, and the caller's reload (in-page by default, or a `reload:`
+callback for CDP) runs immediately after it, with nothing else able to
+navigate the page in between. That keeps it sound despite the split.
+`reloadAndWaitForRow` becomes the row-shaped wrapper over it, unchanged in
+behaviour, and `snackcheck.mjs`'s own poll loops are gone in favour of one
+`reloadAndWaitFor` call per reload site.
+
+The guard (`browser-runner.test.js`) is widened to see a free-standing
+`Page.reload` and forbid it exactly as it already forbade a bare
+`location.reload(` — with one exemption, for `Page.reload` appearing as
+`reloadAndWaitFor`'s own `reload:` argument, which is the sanctioned form now
+that one exists. `location.reload(` gets no matching exemption: it offends
+even inside a `reload:` callback, because the whole reason the CDP door needs
+one is that the in-page reload's soundness depends on being one evaluation
+with the marker, which a callback would undo.
+
+**What this still does not cover, deliberately: a same-URL `Page.navigate`.**
+A comment on #269 widens it there, to `countcheck.mjs` and to every suite. It
+really is the same race in principle — a navigation to a fragment-less URL is
+a cross-document load even from a fragment route, so the marker would work at
+every cross-document site. `categorycheck.mjs:1459` documents that a
+same-origin `Page.navigate` IS a full document reload; what it goes on to
+measure there (1 failure in 20 runs) is a *different* race — a cold boot's
+un-awaited `GET /categories` landing after an optimistic delete, not a poll
+reading the pre-navigation document — so it supports the reload claim and not
+"exactly this".
+
+What makes the wider claim a separate change is volume and judgement, not a
+different bug: there are 76 `send('Page.navigate', …)` sites across 29 suites,
+and the marker is sound only where the navigation is cross-document. A
+*fragment-only* navigate would be same-document, where the marker would
+SURVIVE it and a helper applied there would never return — a hazard the audit
+has to rule out **per site**, not one this tree has been found to contain: a
+sweep of all 76 targets found none that are fragment-only relative to their
+current URL, and the two sites that looked closest (`responsive.mjs:549`,
+`stripcheck.mjs:135`) both already document dodging it. The deferral is right
+because nobody has checked all 76 against every state a suite can be in when
+it fires, not because one is known to be unsound.

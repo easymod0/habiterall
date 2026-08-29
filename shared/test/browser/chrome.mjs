@@ -126,11 +126,43 @@ export async function waitUntil(ev, expression, {
 }
 
 /**
- * Reload, then wait for a row belonging to THIS habit in the NEW document.
+ * Reload, then wait for an expression to be true in the NEW document — the
+ * join a reload and its wait have to be one call, because the bug this
+ * closes is IN the join between them, and every version that separated the
+ * two got it wrong. See `reloadAndWaitForRow` below for the doomed-document
+ * window this exists to close, and why naming content is not enough.
  *
- * The reload and the wait are one function because the bug is in the join
- * between them, and every version of this that separated the two got the
- * join wrong.
+ * The default reload is `location.reload()`, evaluated by `ev` in the same
+ * expression as the marker (`window.__doomed = 1`) — so the two are one
+ * evaluation and nothing can land between them. A reload issued over CDP
+ * (`Page.reload`) is a separate call, not an expression the page can run, so
+ * it cannot literally join with the marker that way; the `reload` option
+ * lets a caller hand in that call instead. The marker is still set FIRST, in
+ * its own evaluation — which is still sound, because nothing navigates the
+ * page between that evaluation and the `reload()` call that follows it.
+ *
+ * @param {(expression: string) => Promise<any>} ev  the caller's evaluator
+ * @param {string} expression  evaluated in the page until truthy, alongside
+ *   the marker. Wrapped in parentheses before joining — load-bearing, since a
+ *   caller's expression may contain `||`, which would otherwise bind wrong.
+ * @param {{reload?: () => Promise<any>, timeoutMs?: number, intervalMs?: number,
+ *   what?: string}} [opts]  `reload`, if given, replaces the in-page
+ *   `location.reload()` and is NOT forwarded to `waitUntil`; the rest passes
+ *   through unchanged.
+ */
+export async function reloadAndWaitFor(ev, expression, opts = {}) {
+  const { reload = null, ...waitOpts } = opts;
+  await ev(reload
+    ? `window.__doomed = 1; true`
+    : `window.__doomed = 1; location.reload(); true`);
+  if (reload) await reload();
+  await waitUntil(ev, `!window.__doomed && (${expression})`, waitOpts);
+}
+
+/**
+ * Reload, then wait for a row belonging to THIS habit in the NEW document.
+ * The row-shaped wrapper around `reloadAndWaitFor`, above — read that for the
+ * join itself.
  *
  * **The window is the doomed document, and naming the row does not close
  * it.** `location.reload()` returns before the navigation commits, so a poll
@@ -177,11 +209,9 @@ export async function waitUntil(ev, expression, {
  *   `label` parameter for that.
  */
 export async function reloadAndWaitForRow(ev, name, opts) {
-  await ev(`window.__doomed = 1; location.reload(); true`);
-  await waitUntil(ev,
-    `!window.__doomed
-      && [...document.querySelectorAll('#grid .habit-row')]
-        .some(r => r.textContent.includes(${JSON.stringify(name)}))`,
+  await reloadAndWaitFor(ev,
+    `[...document.querySelectorAll('#grid .habit-row')]
+      .some(r => r.textContent.includes(${JSON.stringify(name)}))`,
     { what: `a row containing "${name}" in the reloaded page`, ...opts });
 }
 

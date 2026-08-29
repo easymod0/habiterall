@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9224);
 const profile=mkdtempSync(join(tmpdir(),'habsnack-'));
 const chrome=launchChrome(PORT, profile);
@@ -18,6 +18,11 @@ const detailReady=(day,id)=>`(()=>({
     hist: !!document.querySelector('#view-detail svg[aria-label="Completion history"] rect'),
     strip: !!document.querySelector('[data-focus-key="check:${id}:${day}"] .check-box'),
   }))()`;
+// A derived BOOLEAN over the same three selectors, so there is one source of
+// truth for them and no second copy to drift. `detailReady` itself returns an
+// object, which is always truthy — handing that straight to `waitUntil` would
+// return on the first poll, a worse bug than the one this file is about.
+const detailDrawn=(day,id)=>`(d=>d.cal&&d.hist&&d.strip)(${detailReady(day,id)})`;
 let ws,nid=1;const pend=new Map();
 const send=(m,p={},s)=>new Promise((res,rej)=>{const id=nid++;pend.set(id,{res,rej});
  ws.send(JSON.stringify({id,method:m,params:p,sessionId:s}));});
@@ -102,19 +107,35 @@ try{
   check('the habit override on an account still set to miss resolves true',
     target.unlogged_is_success===true, JSON.stringify(target));
 
-  // A `Page.navigate` to the SAME URL is a no-op — the habit was already open
-  // from the click above, so the fragment is unchanged and nothing re-fetches.
   // `Page.reload` forces the boot cycle to run again and read the server's
-  // post-override, post-delete state.
-  await send('Page.reload',{},sessionId);
-  let ready1=null;
-  for(let i=0;i<80;i++){ready1=await ev(detailReady(target.bareDay,target.id)).catch(()=>null);
-    if(ready1&&ready1.cal&&ready1.hist&&ready1.strip)break;await sleep(200);}
-  if(!ready1||!ready1.cal||!ready1.hist||!ready1.strip){
-    const missing=['cal','hist','strip'].filter(k=>!ready1?.[k]);
-    check('the detail page finished drawing the calendar cell, History bars and strip cell '
-      +'before the cross-check ran',false,`still missing: ${missing.join(', ')||'ev threw throughout'}`);
-  }
+  // post-override, post-delete state — and the detail view was ALREADY drawn,
+  // with all three of the cal/hist/strip selectors true, before this reload
+  // destroys that document. `reloadIntoDetail` is the join: it marks the
+  // document, issues the CDP reload, and waits for the marker AND the three
+  // selectors together, so nothing below reads a node from the doomed page.
+  const reloadIntoDetail=async what=>{
+    try{
+      await reloadAndWaitFor(ev, detailDrawn(target.bareDay,target.id), {
+        reload: () => send('Page.reload',{},sessionId),
+        what: `${what}: the calendar cell, History bars and strip cell in the reloaded page`,
+      });
+    }catch(e){
+      const s=await ev(detailReady(target.bareDay,target.id)).catch(()=>null);
+      // Three distinct outcomes, and only one of them is "the probe broke":
+      // `s === null` really is `ev` throwing (the page navigating out from
+      // under it, most likely); an empty `missing` on a non-null `s` means the
+      // OPPOSITE — all three are drawn and the timeout still fired, which is
+      // the reload never happening (its own CDP error, thrown at :32 before
+      // `waitUntil` is ever entered) or the marker surviving the navigation —
+      // the one failure mode this whole file exists to catch.
+      const detail = s===null ? 'ev threw'
+        : (()=>{const missing=['cal','hist','strip'].filter(k=>!s[k]);
+            return missing.length ? `still missing: ${missing.join(', ')}`
+              : 'all three drawn, so the reload or the marker is what did not happen';})();
+      throw new Error(`${e.message} — ${detail}`);
+    }
+  };
+  await reloadIntoDetail('after the habit override');
 
   const bareCell=await ev(`(()=>{
     const r=document.querySelector(
@@ -191,15 +212,7 @@ try{
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ questionMarks: true }) })`);
-  await send('Page.reload',{},sessionId);
-  let ready2=null;
-  for(let i=0;i<80;i++){ready2=await ev(detailReady(target.bareDay,target.id)).catch(()=>null);
-    if(ready2&&ready2.cal&&ready2.hist&&ready2.strip)break;await sleep(200);}
-  if(!ready2||!ready2.cal||!ready2.hist||!ready2.strip){
-    const missing=['cal','hist','strip'].filter(k=>!ready2?.[k]);
-    check('the detail page finished drawing the calendar cell, History bars and strip cell '
-      +'before the questionMarks cross-check ran',false,`still missing: ${missing.join(', ')||'ev threw throughout'}`);
-  }
+  await reloadIntoDetail('after questionMarks was turned on');
   const stripQMarks=await ev(`(()=>{
     const box=document.querySelector(
       '[data-focus-key="check:${target.id}:${target.bareDay}"] .check-box');
