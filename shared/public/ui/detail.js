@@ -546,9 +546,9 @@ function render(stats, entries) {
  * ask for another, and MOST of the cards here draw figures the server computed
  * — but not all of them: `buildCalendarCard` draws from the same unwindowed
  * `entriesByDate` / `skipSet`, from `stats.streaks`, and from `calendarWindow`,
- * and its ‹ Earlier still moves `state.calEnd` and then calls `open()`. That is
- * this same defect with a longer-lived offset, left out of scope here (#274);
- * do not read the paragraph below as saying no other card could be local.
+ * and its ‹ Earlier redraws locally too now, the same way — the sibling change
+ * that landed as #274, not a defect still sitting open. Do not read the
+ * paragraph below as saying no other card could be local.
  * What is still not request-free is BUILDING this one — the page it sits on
  * fetched twice to get here.
  *
@@ -702,6 +702,43 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
  * cards. That is a fact about the default order now, not about where this
  * builder is called from: `test/settings.test.js`'s adjacency assertion pins
  * it, and any account is free to move it.
+ *
+ * Everything the grid draws is already in memory, the same way "Recent days"
+ * is (see that card's own comment): `entriesByDate` / `skipSet` /
+ * `notesByDate` come from `render()`'s unwindowed `/habits/:id/entries`
+ * (`:407-413`), `stats.streaks` is already on the payload this builder was
+ * handed, and `calendarWindow` (`ui/calendar.js:113`) is pure client
+ * arithmetic over an end date and a week count — nothing in the window needs
+ * a request. Paging therefore redraws locally through `draw` below, the same
+ * shape `buildRecentDaysCard` uses: any `redraw` that can FAIL without
+ * rendering leaves the stored position and the drawn window disagreeing
+ * (`shared/public/CLAUDE.md`), and `open()`'s only `catch` is `toast` and a
+ * `return false` — so on the occasions `open()` genuinely fails (no service
+ * worker at all, a new worker claiming an open page and emptying the data
+ * cache under it, a `401`/`429`, a hung server; see
+ * `docs/decisions/dashboard-and-detail.md`'s `#274` section for the full
+ * list, and for the two plausible-sounding cases that are NOT on it) it
+ * committed `state.calEnd` and drew nothing. That was this card's own defect (#274), the calendar being the
+ * second live instance of the "Recent days" one (#245) fixed. It outlasted
+ * the strip's:
+ * `open()` clears `state.chartOffsets` when a different habit is opened
+ * (`:74`) but clears nothing for `calEnd`, so paging back and returning to
+ * the dashboard left the window you never saw the calendar move to waiting
+ * for you on reopen, where the strip's own offset had already been reset.
+ *
+ * `zoom`, `CAL_WEEKS` and `chartWidth` stay hoisted and frozen for the life of
+ * the card, unlike `calEnd` — `changeZoom` still ends in `open(habit.id)`
+ * (a different state key, a persisted setting, and every nav button's
+ * disabled state is computed from `CAL_WEEKS`, which the zoom decides), and a
+ * zoom press already rebuilds the whole page, so nothing here goes stale
+ * between a zoom and the next `draw()`. `chartWidth` itself is only ever
+ * `render()`'s build-time measurement, though — the same one exception
+ * `buildRecentDaysCard`'s own comment states in full — so a resize or a
+ * rotation is not one of the things that reaches a re-measure any more:
+ * this card keeps redrawing at the old width however far you page, where it
+ * used to self-correct on the next `open()` that SUCCEEDED — a failed one
+ * throws before `render()` and never re-measured either. Cosmetic, and left
+ * as it is for the same reason the strip's is.
  */
 function buildCalendarCard(
   { habit, color, chartWidth, entriesByDate, skipSet, notesByDate, stats, inRun }
@@ -733,10 +770,151 @@ function buildCalendarCard(
   // to be appended to, since calCard is not in the DOM yet.
   const CAL_WEEKS = weeksForWidth(chartWidth, zoom);
 
+  // Removes the previous chart + legend pair and rebuilds both from
+  // `state.calEnd`, exactly as `buildRecentDaysCard`'s own `draw` does.
+  // Nothing below is hoisted out of it: `todayISO()` most of all, which must
+  // not freeze at the moment the card was built, or paging past today would
+  // stop clamping to a stale "now".
+  const draw = () => {
+    // Optional-chained on purpose: on the first draw neither node exists.
+    calCard.querySelector('.chart-scroll')?.remove();
+    calCard.querySelector('.legend')?.remove();
+
+    const calEnd = state.calEnd ?? todayISO();
+    // BOTH ends from the same window the grid below is drawn with. Left to
+    // the parameter default this label named a date the calendar does not
+    // start on — by a day most of the week, by six whenever the anchor falls
+    // on the week's last day — and the right-hand side had the same fault
+    // for the same reason: `calEnd` is the day being asked about, not the
+    // last cell, so paging back drew up to six further days of real history
+    // beyond the labelled end.
+    //
+    // Clamped to today, because the window's last column runs to the end of
+    // the week and those days have not happened yet. The label says what is
+    // shown and answerable; the future cells are drawn but empty.
+    const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
+    const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
+    // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
+    // says "Completion calendar" reads as a serial number.
+    //
+    // Written, not ISO. Every range readout goes through one of the two
+    // formatters now, including `windowedChart`'s — which used to show the
+    // raw bucket key, so a card's header read `2026-07-03 → 2026-08-16` above
+    // an axis saying `Jul 3, 2026`.
+    navLabel.textContent =
+      `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
+      `${formatDateShort(fromISOLocal(calLast))}`;
+
+    const calScroll = document.createElement('div');
+    calScroll.className = 'chart-scroll';
+    // Held rather than passed inline, so the legend below can ask it what it
+    // actually drew — see the "In a run" swatch's own comment.
+    const calSvg = calendarChart(entriesByDate, color, habit, {
+      zoom,
+      // The account's week, which `startOfWeek` in stats.js has always
+      // honoured while the calendar snapped to Sunday regardless — so the
+      // heatmap and the history chart under it disagreed about where a week
+      // begins.
+      weekStart: settings.get('weekStart'),
+      weeks: CAL_WEEKS,
+      endDate: calEnd,
+      skips: skipSet,
+      unknownMark: settings.get('questionMarks'),
+      // Bands behind runs of 3+, so a good stretch reads as one thing rather
+      // than a scatter of filled squares.
+      streaks: stats.streaks,
+      onPick: (date) => openDayDialog(
+        habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
+      ),
+    });
+    calScroll.append(calSvg);
+    calCard.append(calScroll);
+
+    // The legend has to describe the grid above it, and for an avoided habit
+    // that grid has two colours rather than a ramp — a clean day in the
+    // habit's colour and a slip in red. A "Less ▢▢▢▢ More" ramp under it
+    // advertises a shading the cells no longer use and shows no red at all,
+    // which is the same "two surfaces over one dataset disagree" the
+    // inversion exists to end.
+    //
+    // Rebuilt on every draw, not hoisted with the nav above it: the "In a
+    // run" branch below gates on `data-run-marks`, a property of THIS
+    // window, so a legend built once would go stale the moment you page.
+    const legend = document.createElement('div');
+    legend.className = 'legend';
+    const swatch = (background, opacity) => {
+      const sw = document.createElement('span');
+      sw.className = 'legend-swatch';
+      sw.style.background = background;
+      if (opacity != null) sw.style.opacity = String(opacity);
+      legend.append(sw);
+      return sw;
+    };
+
+    // Leading, in both branches: a fill the legend does not explain is the
+    // same defect as a legend advertising a fill the cells do not use, which
+    // is why the `isAvoided` branch beside it exists at all.
+    // `unlogged_is_success` is the same server-resolved flag the cells above
+    // read, so the legend cannot disagree with them about which habits this
+    // applies to.
+    if (habit.unlogged_is_success) {
+      // Not `swatch(color, 0.07)` like the ramp below: `opacity` blends
+      // toward the CARD, while the cell it describes blends toward
+      // `--grid-empty` (`shade`, charts.js) — two different colours for the
+      // same "0.07". Passing `shade(color, 0.07)` as the background is the
+      // cell's own value, so the legend and the grid cannot disagree about
+      // what this mark is.
+      swatch(shade(color, 0.07));
+      legend.append(document.createTextNode('Kept, unlogged'));
+    }
+
+    // Only when a run actually reaches an otherwise-blank cell IN THIS
+    // WINDOW — `inRun` is the habit's whole history, so a run of
+    // `MIN_STREAK`+ days months outside the drawn weeks (or a run made
+    // entirely of logged days, where every date is in `inRun` and no cell is
+    // blank) would gate this on a mark the grid does not carry.
+    // `calendarChart` already counts the cells it gave the continuation
+    // stroke and reports that count on the `<svg>` it returned, so asking IT
+    // is the one source that cannot disagree with what is on screen —
+    // recomputing the window here would be a second derivation of "which
+    // cells got the mark", and a second one to keep in step with the first.
+    // `getAttribute`, not `dataset`: the offline fake-DOM suites drive this
+    // against a minimal `document` that implements attributes only.
+    //
+    // Built inline rather than through `swatch()`: that helper's second
+    // argument is an opacity, blending toward the CARD, and this mark is a
+    // STROKE around the cell's own `--grid-empty` fill — the same
+    // distinction the "Kept, unlogged" swatch's own comment above makes, so
+    // describing this one as an opacity would be the same "two surfaces
+    // disagree" defect a second way. `shade(color, 0.55)` is the stroke
+    // `charts.js`'s calendar block itself paints; the legend borrows the
+    // cell's own value rather than writing a second description of it.
+    if (Number(calSvg.getAttribute('data-run-marks')) > 0) {
+      const sw = document.createElement('span');
+      sw.className = 'legend-swatch';
+      sw.style.background = 'var(--grid-empty)';
+      sw.style.boxShadow = 'inset 0 0 0 1px ' + shade(color, 0.55);
+      legend.append(sw);
+      legend.append(document.createTextNode('In a run'));
+    }
+
+    if (isAvoided(habit)) {
+      legend.append(document.createTextNode('Clean'));
+      swatch(color);
+      swatch('var(--danger)');
+      legend.append(document.createTextNode('Slipped'));
+    } else {
+      legend.append(document.createTextNode('Less'));
+      for (const t of [0.2, 0.45, 0.7, 1]) swatch(color, t);
+      legend.append(document.createTextNode('More'));
+    }
+    calCard.append(legend);
+  };
+
   const shift = (weeks) => {
     state.calEnd = addDaysISO(state.calEnd ?? todayISO(), weeks * 7);
     if (state.calEnd > todayISO()) state.calEnd = todayISO();
-    open(habit.id);
+    draw();
   };
 
   /** @param {number} dir -1 zooms in (bigger squares), +1 zooms out */
@@ -760,131 +938,14 @@ function buildCalendarCard(
     mkNav('‹ Earlier', 'Show earlier months', () => shift(-CAL_WEEKS)),
     navLabel,
     mkNav('Later ›', 'Show later months', () => shift(CAL_WEEKS)),
-    mkNav('Today', 'Jump to today', () => { state.calEnd = null; open(habit.id); }),
+    mkNav('Today', 'Jump to today', () => { state.calEnd = null; draw(); }),
     zoomOut,
     zoomIn,
   );
   calHead.append(nav);
 
-  const calEnd = state.calEnd ?? todayISO();
-  // BOTH ends from the same window the grid below is drawn with. Left to the
-  // parameter default this label named a date the calendar does not start on —
-  // by a day most of the week, by six whenever the anchor falls on the week's
-  // last day — and the right-hand side had the same fault for the same reason:
-  // `calEnd` is the day being asked about, not the last cell, so paging back
-  // drew up to six further days of real history beyond the labelled end.
-  //
-  // Clamped to today, because the window's last column runs to the end of the
-  // week and those days have not happened yet. The label says what is shown
-  // and answerable; the future cells are drawn but empty.
-  const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
-  const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
-  // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
-  // says "Completion calendar" reads as a serial number.
-  //
-  // Written, not ISO. Every range readout goes through one of the two
-  // formatters now, including `windowedChart`'s — which used to show the raw
-  // bucket key, so a card's header read `2026-07-03 → 2026-08-16` above an axis
-  // saying `Jul 3, 2026`.
-  navLabel.textContent =
-    `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
-    `${formatDateShort(fromISOLocal(calLast))}`;
+  draw();
 
-  const calScroll = document.createElement('div');
-  calScroll.className = 'chart-scroll';
-  // Held rather than passed inline, so the legend below can ask it what it
-  // actually drew — see the "In a run" swatch's own comment.
-  const calSvg = calendarChart(entriesByDate, color, habit, {
-    zoom,
-    // The account's week, which `startOfWeek` in stats.js has always honoured
-    // while the calendar snapped to Sunday regardless — so the heatmap and the
-    // history chart under it disagreed about where a week begins.
-    weekStart: settings.get('weekStart'),
-    weeks: CAL_WEEKS,
-    endDate: calEnd,
-    skips: skipSet,
-    unknownMark: settings.get('questionMarks'),
-    // Bands behind runs of 3+, so a good stretch reads as one thing rather
-    // than a scatter of filled squares.
-    streaks: stats.streaks,
-    onPick: (date) => openDayDialog(
-      habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
-    ),
-  });
-  calScroll.append(calSvg);
-  calCard.append(calScroll);
-
-  // The legend has to describe the grid above it, and for an avoided habit that
-  // grid has two colours rather than a ramp — a clean day in the habit's colour
-  // and a slip in red. A "Less ▢▢▢▢ More" ramp under it advertises a shading
-  // the cells no longer use and shows no red at all, which is the same "two
-  // surfaces over one dataset disagree" the inversion exists to end.
-  const legend = document.createElement('div');
-  legend.className = 'legend';
-  const swatch = (background, opacity) => {
-    const sw = document.createElement('span');
-    sw.className = 'legend-swatch';
-    sw.style.background = background;
-    if (opacity != null) sw.style.opacity = String(opacity);
-    legend.append(sw);
-    return sw;
-  };
-
-  // Leading, in both branches: a fill the legend does not explain is the same
-  // defect as a legend advertising a fill the cells do not use, which is why
-  // the `isAvoided` branch beside it exists at all. `unlogged_is_success` is
-  // the same server-resolved flag the cells above read, so the legend cannot
-  // disagree with them about which habits this applies to.
-  if (habit.unlogged_is_success) {
-    // Not `swatch(color, 0.07)` like the ramp below: `opacity` blends toward
-    // the CARD, while the cell it describes blends toward `--grid-empty`
-    // (`shade`, charts.js) — two different colours for the same "0.07".
-    // Passing `shade(color, 0.07)` as the background is the cell's own value,
-    // so the legend and the grid cannot disagree about what this mark is.
-    swatch(shade(color, 0.07));
-    legend.append(document.createTextNode('Kept, unlogged'));
-  }
-
-  // Only when a run actually reaches an otherwise-blank cell IN THIS WINDOW —
-  // `inRun` is the habit's whole history, so a run of `MIN_STREAK`+ days
-  // months outside the drawn weeks (or a run made entirely of logged days,
-  // where every date is in `inRun` and no cell is blank) would gate this on a
-  // mark the grid does not carry. `calendarChart` already counts the cells it
-  // gave the continuation stroke and reports that count on the `<svg>` it
-  // returned, so asking IT is the one source that cannot disagree with what
-  // is on screen — recomputing the window here would be a second derivation
-  // of "which cells got the mark", and a second one to keep in step with the
-  // first. `getAttribute`, not `dataset`: the offline fake-DOM suites drive
-  // this against a minimal `document` that implements attributes only.
-  //
-  // Built inline rather than through `swatch()`: that helper's second
-  // argument is an opacity, blending toward the CARD, and this mark is a
-  // STROKE around the cell's own `--grid-empty` fill — the same distinction
-  // the "Kept, unlogged" swatch's own comment above makes, so describing this
-  // one as an opacity would be the same "two surfaces disagree" defect a
-  // second way. `shade(color, 0.55)` is the stroke `charts.js`'s calendar
-  // block itself paints; the legend borrows the cell's own value rather than
-  // writing a second description of it.
-  if (Number(calSvg.getAttribute('data-run-marks')) > 0) {
-    const sw = document.createElement('span');
-    sw.className = 'legend-swatch';
-    sw.style.background = 'var(--grid-empty)';
-    sw.style.boxShadow = 'inset 0 0 0 1px ' + shade(color, 0.55);
-    legend.append(sw);
-    legend.append(document.createTextNode('In a run'));
-  }
-
-  if (isAvoided(habit)) {
-    legend.append(document.createTextNode('Clean'));
-    swatch(color);
-    swatch('var(--danger)');
-    legend.append(document.createTextNode('Slipped'));
-  } else {
-    legend.append(document.createTextNode('Less'));
-    for (const t of [0.2, 0.45, 0.7, 1]) swatch(color, t);
-    legend.append(document.createTextNode('More'));
-  }
-  calCard.append(legend);
   return calCard;
 }
 
