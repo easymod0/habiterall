@@ -246,7 +246,20 @@ try {
     // '+' not '−': the calendar is at the widest level here, so '−' is
     // disabled and clicking it would prove nothing.
     ['zoom', `[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.trim()==='+')`],
-    ['calendar paging', `[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.includes('Earlier'))`],
+    // Scoped to the CALENDAR card by title, unlike the two either side of it.
+    // `.cal-nav` is `windowedChart`'s class and the Recent days strip pages
+    // through the same component, so an unscoped `find('Earlier')` picks the
+    // STRIP's button — that card is first on the page and the calendar's is
+    // second. '+' and 'week' are unambiguous; 'Earlier' never was, and this
+    // only ever pressed the calendar's by accident of what the strip's did.
+    // It stopped being an accident that worked when the strip started
+    // redrawing itself instead of refetching the whole page (#245): the marked
+    // calendar node then survives the press and this check reports the wrong
+    // card. Same rule as the `.cal-range` note in `shared/public/CLAUDE.md`.
+    ['calendar paging', `[...(([...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='Calendar')
+      ?.querySelectorAll('.cal-nav button')) ?? [])]
+      .find(b=>b.textContent.includes('Earlier'))`],
     ['history granularity', `[...document.querySelectorAll('.card button')].find(b=>b.textContent.trim()==='week')`],
   ]) {
     // Scroll back down FIRST, so each control is judged on its own. Reading

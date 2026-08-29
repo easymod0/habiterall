@@ -222,3 +222,92 @@ protect the dashboard's habit-name column — a column this card does not have.
   open, so a reload puts every card back at today whether the `forget` entry
   exists or not. The assertion has to be driven through the settings dialog, in
   the page, which is what the calendar's equivalent test already did.
+
+### Paging the strip redraws the card, not the page (#245)
+
+Everything **Paging deliberately did not move** says is still true — the offset
+lives in `state.chartOffsets`, `forget` clears it, `gridDays` caps the columns
+through `cappedColumns`. What it did not say is what `redraw` did, and that was
+the whole of the defect. This card's `redraw` was
+`() => refresh(habit.id)` — the page's one idiom, shared with the other nine —
+so a press of ‹ Earlier spent `open()`'s two GETs and a rebuild of up to ten
+cards of SVG to show a slice the page was already holding. `page()`
+(`ui/components.js`) writes `state.chartOffsets[key]` and *then* calls `redraw`,
+in that order, and `open()`'s one `catch` is `toast(e.message); return false` —
+so a GET that failed left the position moved and nothing redrawn.
+
+`buildRecentDaysCard` now closes over a local `draw()` and passes `redraw:
+draw`. Everything the old body did is inside it and none of it is hoisted —
+`todayISO()` least of all, which must not freeze at the moment the card was
+built — and because `windowedChart` builds into two places, the nav into the
+card's `.card-head` and the chart onto the card itself, `draw` takes `.cal-nav`
+and `.chart-scroll` away before building the next pair. No file and no export
+was added, so `sw.js`'s `SHELL` and `CACHE_VERSION` are untouched: confining the
+change to one module's internals is what keeps this from costing every installed
+client its data cache, and it is the reason the shape was chosen that way rather
+than a happy accident of it.
+
+**Why this card could and nothing else on the page could.** `open()` fetches
+`/habits/:id/entries` with no `start` and no `end`, so `entries`,
+`entriesByDate` and `skipSet` are the habit's whole history and every window
+this card can page to is already in memory; `inRun` comes off the stats payload,
+requested the same way. The dashboard holds only the fortnight it asked for and
+must ask again. The other nine cards here draw figures the SERVER computed,
+which could not move offline whatever their redraw did.
+
+**The rejected shape was rolling the offset back when the redraw fails**, in
+`page()`. It loses twice: it keeps a request this card never needed, and it
+changes every card that pages through `windowedChart` to fix the behaviour of
+one. Redrawing locally makes the
+card's own documented claim true and removes the two round trips *online* as
+well, which is the same waste seen from the other side.
+
+**What a user actually met is the smaller claim, and it is the honest one.**
+"The window jumps when something next draws it" needs a draw, and offline there
+is no draw to be had: the detail view's only draw path is `open()`, which is
+those same two GETs, and a settings change, a cell tap and a `'change'`
+broadcast all end there. Reconnecting supplies no draw either —
+`connectivity.js` emits `'reload'` from the outbox flush and again on the
+transition back, `detail.js` deliberately does not handle that event, so the app
+goes to the dashboard; reopening the habit then clears `state.chartOffsets`
+wholesale. So the disagreement between the stored position and the drawn window
+was real and is what the fix removes, and it was mostly latent. The symptom
+nobody had to construct is the plain one: offline, ‹ Earlier did nothing at all.
+`--- paging, offline ---` in `stripcheck.mjs` asserts both, in that order.
+
+**Devtools offline emulation does not reach the service worker's own fetches,
+and that nearly made the test theatre.** Measured against the unfixed code with
+`Network.emulateNetworkConditions({offline: true})` and nothing else: both of
+`open()`'s GETs came back out of `DATA_CACHE` — `CACHEABLE_API` in `sw.js`
+matches `/^\/api\/habits/` — `open()` succeeded, the strip paged perfectly well,
+and every check written for the bug passed. Deleting the data cache first did
+not help either, because the worker simply re-fetched over a socket the
+emulation was not applied to. `Network.setBypassServiceWorker` is what makes the
+app offline for a GET, and it is the load-bearing line of that block rather than
+a contrivance: it stands in for the self-hoster on a plain-`http` LAN address,
+where `isSecureContext` is false and there is no worker at all, and for the
+first offline boot after a `CACHE_VERSION` bump, which drops the data cache and
+leaves the worker answering its synthetic 503. It is also why the older
+`--- offline, the cycle still advances ---` block in the same file gets away
+with the network conditions alone: only its WRITES have to fail, and `sw.js`
+returns early for every non-GET.
+
+**A latent test defect surfaced with the fix, and it had never been testing what
+it named.** `calcheck.mjs`'s 'calendar paging' case found its button with an
+unscoped `document.querySelectorAll('.cal-nav button')` — but `.cal-nav` is
+`windowedChart`'s class rather than the calendar's, and Recent days is the FIRST
+card on the page, so it had always been pressing the STRIP's ‹ Earlier. It
+passed because that button rebuilt the whole page, which is precisely what the
+block measures (a scroll position surviving a re-render). Once the strip redrew
+itself in place the stamped node survived the press, and the check timed out
+waiting for it to go. The selector is scoped to the Calendar card by title now.
+This is the `.cal-range` hazard recorded further up met a second time, on the
+sibling class, by a check that was green throughout — which is why the note in
+`shared/public/CLAUDE.md` now names both classes.
+
+**Still open and deliberately not touched here: #230**, the strip and the
+calendar card disagreeing about the same day offline. `writeDay` ends in a
+refetch that never runs with no network, so the strip's optimistic paint stands
+while the calendar keeps the value it was drawn with. It lives in the same
+files, and it is a different question: this change is about which WINDOW is
+drawn, that one about which VALUES are in it.

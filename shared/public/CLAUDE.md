@@ -189,18 +189,25 @@ shared with the dashboard rather than copied — so a reminder can be answered
 without going through the calendar and the day editor behind it. Two things
 about it are not obvious:
 
-- **It pages by SLICING, not by asking for a window** — but it is not
-  request-free, and do not write that it is. `open()` fetches
-  `/habits/:id/entries` unwindowed, so `entriesByDate` / `skipSet` are the whole
-  history and no `end` parameter ever reaches the server from this card, where
-  the dashboard holds only the fortnight it asked for and must ask again.
-  `redraw` is still `refresh(habit.id)`, the same full `open()` the other nine
-  cards page through, so two round trips are spent redrawing a slice already in
-  memory. Offline that is visible: `page()` moves `state.chartOffsets` *before*
-  `redraw`, a GET is not replayable, and `open()` toasts and returns without
-  rendering — so the position moves, the strip does not, and the window jumps
-  when something next draws it. Redrawing from the entries in hand is what
-  would close it.
+- **It pages by SLICING, not by asking for a window, and paging it makes no
+  request.** `open()` fetches `/habits/:id/entries` unwindowed, so
+  `entriesByDate` / `skipSet` are the whole history and no `end` parameter ever
+  reaches the server from this card — which is what makes a local redraw
+  possible here and impossible on the dashboard, which holds only the fortnight
+  it asked for and must ask again. `buildRecentDaysCard`'s own `draw` is what
+  the ‹ Earlier / Later › / Now buttons call, and it rebuilds the window out of
+  the entries already in hand. Be exact about the claim, because an earlier
+  version of this bullet was not: it is request-free to PAGE, and the card is
+  still built by a page that fetched twice to get here.
+
+  **The rule that keeps it that way, and the thing worth knowing: `page()`
+  (`ui/components.js`) moves `state.chartOffsets` BEFORE it calls `redraw`, so
+  any `redraw` that can FAIL without rendering leaves the stored position and
+  the drawn window disagreeing.** `refresh(habit.id)` is such a redraw — a GET
+  is not replayable, and `open()` toasts and returns without rendering — and it
+  is what this card used to pass (#245). Its redraw must stay local.
+  The other nine cards draw figures the server computed, so they have nothing
+  local to redraw from and keep the refetch.
 - **Its host repaints CELLS IN PLACE (`repaintCells`), not the page.** The
   dashboard's `repaint` is a full `paint()`, which is cheap there; here a
   rebuild is two round trips and up to ten cards of SVG. Touching no nodes is
@@ -301,7 +308,11 @@ at its old date, and clearing both from `applyDraft` gated on "`detailCards`
 changed at all" sent a still-ticked History card back to today.
 
 `windowedChart` gives its range readout the same `.cal-range` class the calendar
-uses, so a test looking one up must scope to a card by title.
+uses, and its nav the same `.cal-nav`, so a test looking either one up must
+scope to a card by title. Recent days is FIRST on the page, so an unscoped query
+finds the strip's and not the calendar's — which `calcheck.mjs`'s paging check
+did, greenly, for as long as pressing the strip's ‹ Earlier happened to rebuild
+the page.
 
 ## A day nobody answered, drawn as kept
 
