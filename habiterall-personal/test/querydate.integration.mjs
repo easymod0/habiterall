@@ -144,11 +144,18 @@ ck('THE assertion: and exactly ONE completion in it — the broken request ' +
 // A REPEATED parameter is an array, and `DATE_RE.test` string-coerced it: the
 // joined `'2025-12-10,2026-01-01'` matched nothing, so the route quietly
 // answered about today instead of about either date the caller named.
-// `queryDate`'s `typeof` guard is what makes that a 400 — and it is also what
-// keeps a ONE-element array (which `query parser: 'extended'` would produce
-// from `?end[]=`, and this app's default 'simple' parser cannot) out of
-// `assertDate`, where it passes the coerced regex test and then meets
-// `.split` as a TypeError, i.e. a 500.
+//
+// What makes it a 400 now is `assertDate` THROWING where the old
+// `DATE_RE.test(...) ? ... : now` fell back — and the comma in that coerced
+// string is what `DATE_RE` refuses. It is NOT `queryDate`'s `typeof` guard:
+// delete the guard and this row still passes, which was review's finding
+// against an earlier version of this comment. The guard exists for the array
+// the `simple` parser cannot make — a ONE-element one, from `?end[]=` under
+// `query parser: 'extended'`, which coerces to a valid-looking date, passes
+// the regex and then meets `.split` on an array as a 500. No route can be
+// pointed at that shape, so it is pinned as a unit test instead: see
+// 'a query-string date that is not a string is REFUSED, never coerced' in
+// `shared/test/validate.test.js`.
 const arrayEnd = await get(`/habits/${habit.id}/stats?end=2025-12-10&end=2026-01-01`);
 ck('a repeated `end` is 400, not a silent fallback to today',
   arrayEnd.status === 400, `HTTP ${arrayEnd.status}`);

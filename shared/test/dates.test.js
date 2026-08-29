@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const {
-  estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
+  addDaysISO, estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
   formatDayNumber, formatDayRange, formatMonthShort, formatYear, gutterFor, iso, weekdayLetters,
   weekdayNames,
 } = await import('../public/ui/dates.js');
@@ -148,6 +148,28 @@ test('a date is formatted from its LOCAL parts, not shifted through UTC', () => 
   // anyone west of Greenwich, so these two must not print the same.
   assert.notEqual(formatDateShort(fromISOLocal('2026-01-01')),
     formatDateShort(fromISOLocal('2025-12-31')));
+});
+
+test('a storage key is spelled with FOUR year digits, because it is compared as a string', () => {
+  // `iso()` is the browser's `toISO`, and the same rule applies to it: every
+  // comparison it feeds is a string comparison — `dashboard.js`'s
+  // `(state.gridEnd ?? todayIso) >= todayIso`, and the entry lookups keyed on
+  // its output against dates the SERVER spelled — so an unpadded '999-12-31'
+  // sorts ABOVE '2016-...' and a date a thousand years back reads as one in
+  // the future.
+  //
+  // No caller can reach a year before 1000: `todayISO()` is the device clock
+  // and `addDaysISO` steps from it a fortnight per press. So this asks `iso`
+  // and `addDaysISO` DIRECTLY rather than through a view — the padding is what
+  // makes the property true of the helper rather than of its callers, which is
+  // the same argument `shared/src/stats.js`'s `toISO` was padded on.
+  //
+  // Literals, not a round trip through `fromISOLocal`: a round trip agrees
+  // with whatever spelling `iso` chose.
+  assert.equal(iso(new Date(999, 11, 31)), '0999-12-31');
+  assert.equal(iso(new Date(100, 1, 25)), '0100-02-25');
+  assert.equal(addDaysISO('1000-01-01', -1), '0999-12-31');
+  assert.equal(addDaysISO('0100-02-25', 1), '0100-02-26');
 });
 
 test('a gutter reserves more than the label needs, in any script', () => {

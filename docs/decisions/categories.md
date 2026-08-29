@@ -420,8 +420,10 @@ to `2032-06-07`, which compares NEWER than `warmStart` where the raw string
 compares older, and `landedAt` then refuses it on every day of the window:
 reported as never logged while holding a row. `shared/test/stats.test.js` pins
 that case here and `9999-99-99` at `resolveWindow`; its `0999-12-31` fixtures
-are kept for the padding and their score literals, which is all they can still
-see.
+are kept for the `earliest` CLAMP and their score literals, which is all they
+can still see — not for the padding either, measured by reverting `toISO`'s
+year padding and watching both of them stay green, since the clamp replaces
+`from` before anything reformats it.
 
 **And the ordering is necessary without being sufficient, which is #270.** Both
 fixtures above are ones where the clamp FIRES. A `firstEntry` that sorts after

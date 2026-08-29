@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 
 const {
   parseHabit, parseEntry, entryWrite, answerBody, assertDate, assertNotFuture,
-  ValidationError, LIMITS, DEFAULT_COLOR, parseIcon, parseCategory,
+  queryDate, ValidationError, LIMITS, DEFAULT_COLOR, parseIcon, parseCategory,
   foldCategoryName, parseCategoryId,
 } = await import('../src/validate.js');
 const { isCompleted } = await import('../src/stats.js');
@@ -463,6 +463,34 @@ test('dates must be YYYY-MM-DD', () => {
   for (const bad of ['12-08-2026', '2026-8-12', 'today', '', null, '2026-08-12T00:00:00Z']) {
     assert.throws(() => assertDate(bad), ValidationError, `should reject ${bad}`);
   }
+});
+
+test('a query-string date that is not a string is REFUSED, never coerced', () => {
+  // The one shape `queryDate`'s `typeof` guard is the only thing standing in
+  // front of, and it has no coverage at either edition's routes because
+  // neither can produce it: a ONE-element array, which `query parser:
+  // 'extended'` makes out of `?end[]=2026-08-18` and Express 5's default
+  // `simple` parser cannot. `String(['2026-08-18'])` is '2026-08-18', so a
+  // version that coerced would pass DATE_RE and then call `.split` on an
+  // ARRAY — a TypeError, which every route here turns into a 500 rather than
+  // the 400 this is. The class is named for exactly that reason: a TypeError
+  // reaching this assertion is the defect, not a different spelling of it.
+  assert.throws(() => queryDate(['2026-08-18'], '2026-08-18'), ValidationError);
+
+  // The repeated `?end=a&end=b` both route suites send is the OTHER array —
+  // two or more elements, so it coerces with a comma in it and `DATE_RE`
+  // refuses it with the guard deleted too. It is here for completeness and
+  // labelled so it is not mistaken for this guard's coverage.
+  assert.throws(() => queryDate(['2026-08-18', '2026-01-01'], '2026-08-18'),
+    ValidationError);
+
+  // Absence is the caller's fallback and is the only value that is not an
+  // error. Present-and-empty is present-and-wrong: there is nothing to guess.
+  assert.equal(queryDate(undefined, '2026-08-18'), '2026-08-18');
+  assert.equal(queryDate('2026-01-01', '2026-08-18'), '2026-01-01');
+  assert.throws(() => queryDate('', '2026-08-18'), ValidationError);
+  // And a present date still goes through `assertDate`, not just DATE_RE.
+  assert.throws(() => queryDate('2026-00-10', '2026-08-18'), ValidationError);
 });
 
 test('future dates are rejected against the caller\'s today', () => {

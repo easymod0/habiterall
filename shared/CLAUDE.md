@@ -280,7 +280,19 @@ reads as one in the future to every comparison in the file. `toISO` pads all
 three fields, and `dateRange` — the one place in `stats.js` that spells a date
 without calling `toISO` — pads the year on its cached `'YYYY-MM-'` prefix, not
 per element, so the walk costs the same as it did. `test/stats.test.js` pins
-both, in literals rather than against a second implementation.
+both, in literals rather than against a second implementation, and in the days
+themselves rather than in a LENGTH: `String(-1).padStart(4, '0')` is `'00-1'`,
+so `'00-1-01-01'` is ten characters and not a date, and a guard a malformed
+value satisfies is weaker than it reads. `toISO`'s domain is years 1-9999 and
+its JSDoc says so.
+
+**There is a third site and it is in the browser: `iso()` in
+`public/ui/dates.js`.** It is the source of `todayISO()` and `addDaysISO()`,
+and `ui/dashboard.js` compares its output against server dates lexically, so
+the same rule holds there and it pads the year too (`test/dates.test.js`). No
+client can reach a year before 1000 — `todayISO()` is the device clock — so
+that one is unreachability being made into canonicality, which is what stops
+the property depending on who calls it.
 
 Only the first of those is reachable through the app: `boundedRange` clamps a
 low-year start long before `dateRange` sees it, while a phantom date survives
@@ -314,7 +326,12 @@ filed under a day that does not exist are exactly what the paragraph above says
 are out there, so `assertDate` on that path would make one permanently
 undeletable through the API. `habiterall-personal/test/querydate.integration.mjs`
 and the matching block in `habiterall-cloud/test/api.integration.mjs` pin it,
-at the routes, because nothing here can say which validator a route reached for.
+at the routes, because nothing here can say which validator a route reached
+for. What those two do NOT pin is the `typeof` clause: a repeated `end` is a
+400 without it, on the comma, and both suites say so where they used to credit
+the guard. The clause is pinned in `shared/test/validate.test.js` instead,
+since no route as configured can be pointed at the one-element array it exists
+for.
 
 `computeStats` therefore normalises `from`, and that half is not optional:
 `totalCompleted` selects by STRING comparison against `from` while every other
@@ -346,15 +363,21 @@ because it changes what an affected account's figures say. Do not read the
 paragraph above as saying the window is safe — it says only which of the two
 orderings is less wrong.
 
-The trap this replaced was the same one with a shorter fuse and is worth
-knowing, because it is what the year padding closed: `toISO` used to pad the
-month and the day and not the year, so normalising `0999-12-31` yielded
-`999-12-31` — ABOVE `2016-…`, straight past the `earliest` clamp
-`MAX_RANGE_DAYS` is enforced by. `assertDate` accepts that date (999 is a real
-year and does not roll over, where `0050` does and is refused), so one
-`PUT /entries/0999-12-31` reached it: the payload collapsed to a single day and
-reported zero completions for a habit logged every other day, with nothing
-logged and no row findable through a UI that now showed no days at all.
+The year padding closed the same trap one step earlier, and it was LATENT
+rather than live — say it that way round, because the difference is the whole
+of what a reader can check. `toISO` used to pad the month and the day and not
+the year, so normalising `0999-12-31` yielded `999-12-31` — ABOVE `2016-…`,
+and above the `earliest` clamp `MAX_RANGE_DAYS` is enforced by. What stopped
+that being a wrong figure is the ordering above: `from` has already been
+clamped to `earliest` by the time anything reformats it, and
+`toISO(fromISO('2016-08-10'))` is a no-op under both spellings. Measured, by
+reverting the padding on the fixed tree: the year-0999 test in
+`test/stats.test.js` still passes and only the canonical-spelling literals
+fail. So no account's figures moved, and the padding is worth having for what
+it stops being true — invert that ordering, or normalise an unclamped stored
+date anywhere else (`assertDate` accepts `0999-12-31`, 999 being a real year
+that does not roll over where `0050` does), and an unpadded year is a payload
+collapsed to a single day with nothing findable behind it.
 
 **And `n` counts elapsed 24-hour spans while the loop takes calendar steps**,
 which agree everywhere except a zone that moved the date line WESTWARD and so

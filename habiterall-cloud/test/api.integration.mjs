@@ -913,9 +913,13 @@ ck('THE assertion: and exactly ONE completion in it — the broken request ' +
 
 // A repeated parameter is an ARRAY, which `DATE_RE.test` string-coerced: the
 // joined value matched nothing, so the route quietly answered about today
-// instead of about either date named. `queryDate`'s `typeof` guard is what
-// makes that a 400 — and what keeps a one-element array out of `assertDate`,
-// where it passes the coerced regex and then meets `.split` as a 500.
+// instead of about either date named. What makes it a 400 now is `assertDate`
+// THROWING where the old ternary fell back, over a coerced string with a comma
+// in it — NOT `queryDate`'s `typeof` guard, which this row passes without.
+// The guard is for the ONE-element array only `query parser: 'extended'` can
+// produce, which coerces to a valid-looking date and then meets `.split` as a
+// 500; no route can be pointed at that, so it is pinned as a unit test in
+// `shared/test/validate.test.js` instead.
 const repeatedEnd = await fetch(
   `${overviewBase}/api/habits/${dateHabit.id}/stats?end=2025-12-10&end=2026-01-01`);
 ck('a repeated `end` is 400, not a silent fallback to today',

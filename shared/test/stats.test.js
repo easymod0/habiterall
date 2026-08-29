@@ -187,7 +187,7 @@ test('a range whose year predates 1000 is spelled with four digits at both ends'
   assert.equal(days[days.length - 1], '0100-03-05');
 });
 
-test('every date this file spells is ten characters, year included', () => {
+test('every date this file spells is the day it is, spelled YYYY-MM-DD', () => {
   // The whole stats model compares dates as strings — `from <= date <= end`,
   // `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
   // only while every date is spelled 'YYYY-MM-DD'. An unpadded year is the one
@@ -205,21 +205,34 @@ test('every date this file spells is ten characters, year included', () => {
   // `dateRange` is the one place in stats.js that spells a date without
   // calling `toISO`, so it is asked separately: every element, not just the
   // ends the test above pins.
-  for (const day of dateRange('0100-02-25', '0100-03-05')) {
-    assert.equal(day.length, 10, `dateRange spelled '${day}'`);
-  }
+  //
+  // The DAYS, not their length. A length of ten is satisfiable by something
+  // that is not a date — `String(-1).padStart(4, '0')` is `'00-1'`, so `toISO`
+  // of year -1 is `'00-1-01-01'`, ten characters exactly — and a guard a
+  // malformed value can satisfy is weaker than it reads. The literals also
+  // carry the month rollover, which is where the cached `'YYYY-MM-'` prefix
+  // (and so its padded year) is rebuilt, and February 100 having 28 days,
+  // which is the walk agreeing with the proleptic Gregorian calendar.
+  assert.deepEqual(dateRange('0100-02-25', '0100-03-05'), [
+    '0100-02-25', '0100-02-26', '0100-02-27', '0100-02-28',
+    '0100-03-01', '0100-03-02', '0100-03-03', '0100-03-04', '0100-03-05',
+  ]);
 });
 
 test('a stored entry dated year 0999 is clamped and reads as the day it is', () => {
-  // What this covers NOW is the year padding and the two literals beneath it:
-  // '0999-12-31' normalises to itself, so the entry stays a thousand years
-  // before `earliest` and the window is the clamp's width rather than the one
-  // day it collapsed to when `toISO` wrote '999-12-31' — lexically ABOVE
-  // '2016-...' and so past the `earliest` clamp MAX_RANGE_DAYS is enforced by.
-  // `assertDate` accepts this date (999 is a real year and does not roll over,
-  // unlike 0050), so one `PUT /entries/0999-12-31` is all it took to reach it.
+  // What this covers is the CLAMP: '0999-12-31' is a date `assertDate` accepts
+  // (999 is a real year and does not roll over, unlike 0050), so one
+  // `PUT /entries/0999-12-31` puts a row a thousand years before `earliest`,
+  // and the window is `MAX_RANGE_DAYS` wide rather than a millennium.
   //
-  // What it no longer covers is the clamp/normalise ORDERING, and that is the
+  // What it does NOT cover, and this was measured rather than reasoned: the
+  // year padding. Revert `toISO`'s `padStart(4, '0')` and every assertion
+  // below still passes, because `from` is clamped to `earliest` before
+  // anything reformats it and `toISO(fromISO('2016-08-10'))` is a no-op under
+  // both spellings. The padding is pinned by the canonical-spelling literals
+  // in the test above, which is where the mutation lands.
+  //
+  // Nor does it cover the clamp/normalise ORDERING any more, and that IS the
   // padding's doing: both orderings now answer '0999-12-31' identically,
   // because there is nothing left for the normalisation to change. The
   // '9999-99-99' fixture below is what pins the ordering — a date that ROLLS
@@ -1174,12 +1187,14 @@ test('the 0999-12-31 and 2016-07-9999 fixtures are pinned to literals, not only 
   ];
   const opts = { end: '2026-08-18' };
 
-  // '0999-12-31' is the PADDING and the `earliest` clamp: a real day a
-  // thousand years back, which is where the window opens without the clamp,
-  // and which sorts ABOVE '2016-...' if `toISO` stops padding the year — either
-  // of which walks the entry into the score. It says nothing about the
-  // clamp/normalise ordering any more: normalising it is a no-op, so both
-  // orderings answer it identically.
+  // '0999-12-31' is the `earliest` CLAMP: a real day a thousand years back,
+  // which is where the window opens without the clamp, walking the entry into
+  // the score. It is not the padding and it is not the ordering — measured,
+  // by reverting `toISO`'s year padding on the fixed tree and watching this
+  // stay green, because the clamp replaces `from` before anything reformats
+  // it and normalising '2016-08-10' is a no-op under either spelling. The
+  // padding's own coverage is the canonical-spelling literals at the top of
+  // this file; the ordering's is '2016-07-9999' below.
   assert.deepEqual(summaryStats(boolHabit, [{ date: '0999-12-31', value: YES },
     ...dailyRun], opts), { score: 0.381137, currentStreak: 9 });
 

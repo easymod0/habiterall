@@ -21,10 +21,21 @@ const TWO_DIGIT = Array.from({ length: 100 }, (_, i) => String(i).padStart(2, '0
  * The canonical spelling of a day: four-digit year, two-digit month, two-digit
  * day. The year is padded for the same reason the other two fields are — every
  * comparison in this file is a STRING comparison (`from <= date <= end`,
- * `start < earliest`), and an unpadded '999-12-31' sorts ABOVE '2016-...',
- * which is how one entry dated year 0999 once collapsed a whole payload to a
- * single day. `dateRange` spells its own dates and pads its year for this same
- * reason; the two must agree, and a test pins that they do.
+ * `start < earliest`), and an unpadded '999-12-31' sorts ABOVE '2016-...' —
+ * a day a thousand years back reading as one in the future to every one of
+ * them. That is a hazard closed here rather than a wrong figure anybody saw;
+ * `resolveWindow` says at length why its own clamps kept it off the reachable
+ * path, and what it would take to put it back on one. `dateRange` spells its
+ * own dates and pads its year for this same reason; the two must agree, and a
+ * test pins that they do.
+ *
+ * Its DOMAIN is years 1-9999, which is every year a `YYYY-MM-DD` string can
+ * spell. `String(-1).padStart(4, '0')` is `'00-1'`, so year -1 comes back as
+ * `'00-1-01-01'` — exactly ten characters and not a date, which is why the
+ * test beside this one asserts the days themselves rather than their length.
+ * Nothing can hand it a year outside that: `assertDate` refuses every year
+ * below 0100, and the furthest anything walks back is `boundedRange`'s
+ * `addDays(end, -MAX_RANGE_DAYS)`, ten years.
  */
 export function toISO(d) {
   const y = String(d.getFullYear()).padStart(4, '0');
@@ -1022,12 +1033,17 @@ function resolveWindow(entries, start, end) {
   // older than the padding fix and is not something the ordering ever closed.
   // The fix is to re-apply the clamps AFTER this line; it is not done here
   // because it changes what an affected account's figures say.
-  // (`toISO` used not to pad the year at all, which was the same trap
-  // with a shorter fuse: '0999-12-31' normalised to '999-12-31', ABOVE
-  // '2016-...', and one entry dated year 0999 — `assertDate` accepts it, 999
-  // being a real year that does not roll over — collapsed the whole payload to
-  // a single day, reporting zero completions for a habit logged every other
-  // day. The padding closed that one; the ordering is what closes the rest.)
+  // (`toISO` used not to pad the year at all, and that was a LATENT hazard
+  // here rather than a wrong figure: normalising '0999-12-31' yielded
+  // '999-12-31', which sorts ABOVE '2016-...' — but under THIS ordering the
+  // clamps have already replaced such a `from` with `earliest`, and
+  // `toISO(fromISO('2016-08-10'))` is a no-op under either spelling.
+  // Measured: with the padding reverted, the year-0999 test below still
+  // passes and only the canonical-spelling literals fail. What the padding
+  // buys is that the hazard is closed at the source rather than by the clamp
+  // happening to run first — invert the ordering, or normalise an unclamped
+  // stored date anywhere else, and an unpadded year is a window a thousand
+  // years wide read as one in the future.)
   const asDate = fromISO(from);
   if (!Number.isNaN(asDate.getTime())) from = toISO(asDate);
 
