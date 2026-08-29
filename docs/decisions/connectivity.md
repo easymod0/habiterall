@@ -53,15 +53,25 @@ notice an outage, and could not notice a recovery either. It is excluded now, as
 `/auth/` already was.
 
 **A request the app makes is bounded; the one that creates a habit is not.**
-10s, in `ui/api.js` and in the worker's `networkFirst`, taken from `Api.kt`'s
-`connectTimeout` rather than invented — Chrome imposes no ceiling of its own on
-a response that never arrives (measured still pending at 300s), so before this
-a check-off could sit in a promise until the tab closed and be lost with it.
-The exemption is about REPLAYING, not latency: aborting does not recall a
-request the server has already begun, so everything bounded here has to be safe
-to arrive twice, and `POST /habits` is the one call on this path that is not —
-it yields a second habit. Import, export and the notify test bypass `api()`
-entirely, which is what makes a blanket bound safe for everything else.
+10s, in `ui/api.js`, the worker's `networkFirst` and the worker's `shellFirst`,
+taken from `Api.kt`'s `connectTimeout` rather than invented — Chrome imposes no
+ceiling of its own on a response that never arrives (measured still pending at
+300s), so before this a check-off could sit in a promise until the tab closed
+and be lost with it. `shellFirst` awaits the network BEFORE consulting the
+cache one line below it, for a navigation or a stylesheet, so an unbounded
+hang there is not a stale dashboard, it is an installed PWA that opens to
+nothing at all with `/index.html` sitting in the shell cache the whole time.
+#93 bounded only the worker's API half; `shellFirst` was missed and stayed
+unbounded until now.
+
+The exemption is about REPLAYING, not latency, and it is `ui/api.js`'s alone:
+aborting does not recall a request the server has already begun, so everything
+`ui/api.js` bounds has to be safe to arrive twice, and `POST /habits` is the
+one call on that path that is not — it yields a second habit. Import, export
+and the notify test bypass `api()` entirely, which is what makes a blanket
+bound safe for everything else it sends. Nothing in `sw.js` needs an exemption
+of its own: only GETs ever reach the worker, so there is nothing there a retry
+could duplicate.
 
 This is the bounded half of #87 and not the whole of it: the write is still
 attempted before it is durable, so the loss window is 10 seconds rather than

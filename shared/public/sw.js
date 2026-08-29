@@ -444,7 +444,24 @@ async function shellFirst(request) {
     request.destination === 'style' ||
     request.destination === 'document';
 
-  const network = fetch(request)
+  // Bounded for the same reason as `networkFirst` above, and more urgently:
+  // the cached copy is one line below, and `revalidateFirst` awaits this
+  // BEFORE consulting it, so a server that accepts the connection and never
+  // replies leaves an installed PWA awaiting the network forever with a
+  // perfectly good `/index.html` or `/style.css` already on the device — an
+  // app that opens to nothing at all. Aborting means the cache is not
+  // refreshed on this load, so a genuinely slow-but-working server keeps
+  // serving a stale shell for one more load; 10s is generous for either file,
+  // and it is the same tradeoff `networkFirst` already made for API data.
+  //
+  // Passing a non-empty `init` here downgrades a `navigate`-mode `Request` to
+  // `same-origin` per the Fetch spec's Request constructor — benign, since
+  // everything reaching this line is already same-origin (the handler above
+  // returns early on a cross-origin `url.origin`), `redirect` is preserved
+  // from the Request, and the only wire-visible change is `Sec-Fetch-Mode`
+  // going from `navigate` to `same-origin`, which nothing in this repo reads.
+  // `networkFirst` already passes an init the same way.
+  const network = fetch(request, { signal: AbortSignal.timeout(10_000) })
     .then(async (response) => {
       if (response.ok) {
         const cache = await caches.open(SHELL_CACHE);
