@@ -463,6 +463,76 @@ for (const c of categoriesAfterImport) {
   }
 }
 
+/* ---- issue #256 (review round): a replace-mode restore silently merges two
+ * of the FILE's own categories, and nothing said so ----
+ *
+ * The block above is a MERGE importing one declared category that resolves
+ * onto an account's pre-existing row — the headline case, and it must keep
+ * recording NO skip; that is the whole point of this PR. This block is the
+ * other shape: a SINGLE file declaring TWO categories, `Istanbul` and
+ * `İstanbul`, that fold to the same name. The second one is not created —
+ * `resolveOrCreateCategory` resolves it onto the first — and unlike the
+ * headline case, this loss is information only the FILE has: two categories
+ * the file itself declared came back as one, and before this fix nothing in
+ * `result.skipped` said so.
+ *
+ * Different colours and a habit each, so a fixture carrying DEFAULT_COLOR or
+ * no habits could not pass with the collapse-reporting rule deleted.
+ */
+const dupBackup = Buffer.from(JSON.stringify({
+  categories: [
+    { name: 'Istanbul', color: '#101010' },
+    { name: 'İstanbul', color: '#202020' },
+  ],
+  habits: [
+    { name: 'issue-256 dup habit A', type: 'boolean', category: 'Istanbul', entries: [] },
+    { name: 'issue-256 dup habit B', type: 'boolean', category: 'İstanbul', entries: [] },
+  ],
+}));
+const dupImportRes = await fetch(`${base}/api/import?mode=merge`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: dupBackup,
+});
+ck('the dup-category import itself succeeds',
+  dupImportRes.status === 200, String(dupImportRes.status));
+const dupImportResult = await dupImportRes.json();
+ck(
+  'THE assertion: the SECOND declared category (İstanbul, folding to the ' +
+  "same name as the FIRST declared category, Istanbul) IS reported in " +
+  "skipped — two categories the file itself declared collapsing to one is " +
+  'information only the file has, unlike the headline merge-onto-existing case',
+  Array.isArray(dupImportResult.skipped) &&
+    dupImportResult.skipped.some((s) => s.includes('İstanbul')),
+  JSON.stringify(dupImportResult.skipped));
+
+const dupCategories = await (await fetch(`${base}/api/categories`)).json();
+const dupMatching = dupCategories.filter((c) => c.name === 'Istanbul' || c.name === 'İstanbul');
+ck('still exactly ONE category named either spelling after the dup import',
+  dupMatching.length === 1, JSON.stringify(dupCategories.map((c) => c.name)));
+
+const dupHabits = await (await fetch(`${base}/api/habits`)).json();
+const dupHabitA = dupHabits.find((h) => h.name === 'issue-256 dup habit A');
+const dupHabitB = dupHabits.find((h) => h.name === 'issue-256 dup habit B');
+ck(
+  "THE assertion: both habits' category_id is the SAME id — the FIRST " +
+  "declared category's (Istanbul), never a second row",
+  dupHabitA?.category_id != null &&
+    dupHabitA.category_id === dupHabitB?.category_id &&
+    dupHabitA.category_id === dupMatching[0]?.id,
+  `A=${dupHabitA?.category_id} B=${dupHabitB?.category_id} ` +
+    `kept=${JSON.stringify(dupMatching)}`);
+
+// Clean up everything this block created.
+for (const h of [dupHabitA, dupHabitB]) {
+  if (h) await fetch(`${base}/api/habits/${h.id}`, { method: 'DELETE' });
+}
+for (const c of dupCategories) {
+  if (c.name === 'Istanbul' || c.name === 'İstanbul') {
+    await fetch(`${base}/api/categories/${c.id}`, { method: 'DELETE' });
+  }
+}
+
 /* ---- fix round item 2(b): a unique-constraint violation the route's own
  * check misses is a 409, not a 500 ----
  *

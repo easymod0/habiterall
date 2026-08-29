@@ -198,52 +198,90 @@ export function parseIcon(value) {
  * above, because the two editions' backstops disagree with each other AND (it
  * turns out) with whole-string `toLowerCase()`. Swept every codepoint against
  * this server's own Postgres (`postgres:17-alpine`, the same image the
- * shipped compose and CI use): `lower()` is a per-codepoint homomorphism, and
- * there are two divergences it collapses that whole-string `toLowerCase()`
- * does not, plus one that runs harmlessly the other way:
+ * shipped compose and CI use) **under both collation providers it can run
+ * with** — libc (what the shipped image uses) and ICU (what a managed
+ * Postgres commonly offers instead) — because `lower()` is NOT a
+ * per-codepoint homomorphism under ICU (see Final_Sigma below), so a sweep
+ * against one provider alone does not answer for the other. There are two
+ * divergences the old whole-string fold let through, plus one that runs
+ * harmlessly the other way:
  *
- * - **U+0130 (İ)**: `lower()` maps both `I` and `İ` to plain `i`. JS's
- *   *string* `toLowerCase()` maps `İ` to `i` followed by a combining dot
- *   above (U+0307) — its one multi-character simple-to-full mapping — so
- *   `İstanbul` and `Istanbul` fold to different strings and both editions'
- *   route checks let the second one through: in cloud the `INSERT` still
- *   walks into the `lower()`-backed unique index, which is caught by
+ * - **U+0130 (İ)**: `lower()` maps both `I` and `İ` to plain `i` under either
+ *   provider. JS's *string* `toLowerCase()` maps `İ` to `i` followed by a
+ *   combining dot above (U+0307) — its one multi-character simple-to-full
+ *   mapping — so `İstanbul` and `Istanbul` fold to different strings and both
+ *   editions' route checks let the second one through: in cloud the `INSERT`
+ *   still walks into the `lower()`-backed unique index, which is caught by
  *   `isCategoryNameConflict` and answered as a 409 (never a 500 — that
  *   mapping is deliberate, see `docs/decisions/categories.md`) rather than
  *   the route's own duplicate check, and `apply-import.js` records the same
  *   collision as a skip instead of resolving to the existing row; personal's
  *   ASCII-only `NOCASE` has no backstop for this pair at all, so the same
- *   import there created a second, genuinely distinct category. Folded per
- *   codepoint, `İ` is special-cased to the single character `i` instead.
+ *   import there created a second, genuinely distinct category.
+ *
+ *   A per-codepoint fold of `İ` alone is not enough, and this is the part an
+ *   ICU-provider sweep found and a libc-only sweep cannot: per-codepoint,
+ *   `'İ'.toLowerCase()` is already `i` + U+0307 — the DECOMPOSED form — and
+ *   under Postgres's **ICU** provider (never libc), `lower()` on that same
+ *   decomposed `i` + U+0307 string ALSO collapses to plain `i`. So the old
+ *   special case (fold `İ` itself to `i`, nothing else) left the decomposed
+ *   spelling — a real string, not a hypothetical one, since it is exactly
+ *   what folding `İ` per codepoint produces — folding to itself instead of to
+ *   `i`, which is a regression relative to the OLD whole-string fold for that
+ *   one pair on an ICU database. The fix folds per codepoint as before and
+ *   then strips a combining dot above that follows a plain `i`
+ *   (`.replace(/i\u0307/gu, 'i')`), which subsumes the U+0130 special case
+ *   outright: per-codepoint `'İ'.toLowerCase()` already produces `i` + U+0307,
+ *   and the strip then collapses that to `i` the same way it collapses any
+ *   other decomposed `i` + combining-dot-above spelling. One rule, not two.
+ *   This makes the fold treat a decomposed `i` + U+0307 as plain `i`, which
+ *   libc's `lower()` does NOT do — so the fold is now STRICTER than libc for
+ *   that pair and exactly as strict as ICU. That is the safe direction: this
+ *   function owes its callers containment, never equality with one provider.
  * - **Final_Sigma**: whole-string `toLowerCase()` is *context sensitive* —
  *   `'ΟΔΟΣ'.toLowerCase()` ends in U+03C2 (final sigma) because the last `Σ`
  *   sits at the end of the string, while `'Οδοσ'.toLowerCase()` ends in plain
  *   `σ` (U+03C3) because there the last cased letter was already lowercase.
  *   `lower()` applies no such rule and folds every `Σ`/`σ` to U+03C3
- *   regardless of position, so `ΟΔΟΣ` and `Οδοσ` collide in Postgres and not
- *   under the old fold — an ordinary way to type a name in ALL CAPS. Folding
- *   **per codepoint** (`for...of`, one character at a time) suppresses this
- *   for free: a lone `Σ` handed to `.toLowerCase()` has no preceding cased
- *   letter, so the context-sensitive rule never fires and it always answers
- *   the non-final `σ`.
- * - 124 codepoints go the OTHER way on this server — JS lowercases circled
- *   Latin capitals (e.g. U+24B6) that the libc collation provider's
- *   `lower()` leaves untouched. That exact count is an observation about
- *   `postgres:17-alpine`'s libc provider, not a thing to pin: a database on
- *   ICU or the C locale can draw the line elsewhere. What does not move is
- *   the RULE — containment, never looser than a backstop — which holds
- *   under libc, ICU and a C-locale database alike, because it does not
- *   depend on which codepoints land in this direction, only on none ever
- *   landing in the other. That direction is harmless regardless: the route
- *   is *stricter* than the index, never looser, which is the same asymmetry
- *   personal's ASCII-only `NOCASE` backstop already has. Do not try to fold
- *   those back to themselves to chase equality with `lower()` — the rule
- *   this function owes its callers is containment, not equality with one of
- *   them.
+ *   regardless of position (under both libc and ICU), so `ΟΔΟΣ` and `Οδοσ`
+ *   collide in Postgres and not under the old fold — an ordinary way to type
+ *   a name in ALL CAPS. Folding **per codepoint** (`for...of`, one character
+ *   at a time) suppresses this for free: a lone `Σ` handed to `.toLowerCase()`
+ *   has no preceding cased letter, so the context-sensitive rule never fires
+ *   and it always answers the non-final `σ`. This is also why `lower()` is
+ *   NOT usable as a per-codepoint homomorphism to justify a sweep against a
+ *   single provider: Final_Sigma is a whole-string, context-sensitive rule on
+ *   the Postgres side too, in the sense that it is exactly what the STRING
+ *   comparison is testing for; nothing here relies on `lower()` being
+ *   decomposable, only on measuring both providers directly.
+ * - 124 codepoints go the OTHER way on this server's libc provider — JS
+ *   lowercases circled Latin capitals (e.g. U+24B6) that the libc collation
+ *   provider's `lower()` leaves untouched. That exact count is an observation
+ *   about `postgres:17-alpine`'s libc provider, not a thing to pin: a
+ *   database on ICU or the C locale can draw the line elsewhere. What does
+ *   not move is the RULE — containment, never looser than a backstop — which
+ *   holds under libc, ICU and a C-locale database alike. That direction is
+ *   harmless regardless: the route is *stricter* than the index, never
+ *   looser, which is the same asymmetry personal's ASCII-only `NOCASE`
+ *   backstop already has. Do not try to fold those back to themselves to
+ *   chase equality with `lower()` — the rule this function owes its callers
+ *   is containment, not equality with one of them.
  *
- * NFC/NFD/NFKC/NFKD normalisation does NOT fix either divergence — all four
- * forms still fold `İstanbul` and `Istanbul` to different strings — so this
- * is a fold rewrite and not a normalise-then-fold one.
+ * Measured, swept over every codepoint 1..0x10FFFF plus the contextual pairs
+ * above, against both providers:
+ *
+ * |                | libc      | ICU                                    |
+ * |----------------|-----------|-----------------------------------------|
+ * | old whole-string fold | 0 breaks | 1 break (`İstanbul` / decomposed `i\u0307stanbul`) |
+ * | this fold      | 0 breaks | 0 breaks                                |
+ *
+ * NFC/NFD/NFKC/NFKD normalisation on their own do NOT fix either
+ * divergence — all four forms still fold `İstanbul` and `Istanbul` to
+ * different strings. That does not mean normalisation is the wrong tool
+ * generally: the combining-dot strip added above IS a targeted
+ * normalisation, one narrow rule (collapse `i` + U+0307 to `i`) rather than
+ * one of the four general Unicode normalisation forms, none of which
+ * happens to collapse this particular pair.
  *
  * Nothing stores a folded name: every call site is transient (a route's own
  * duplicate check, or the importer's in-memory dedupe), so this changes no
@@ -260,12 +298,17 @@ export function foldCategoryName(name) {
   // would split an astral character's surrogate pair across two iterations
   // and `.toLowerCase()` each half separately, corrupting it.
   for (const ch of trimmed) {
-    // U+0130 is the one codepoint whose FULL lowercase mapping is
-    // multi-character (`i` + combining dot above) where `lower()`'s simple
-    // mapping is one character (`i`); special-cased so the two agree.
-    folded += ch === 'İ' ? 'i' : ch.toLowerCase();
+    folded += ch.toLowerCase();
   }
-  return folded;
+  // Collapse a combining dot above (U+0307) that follows a plain `i` to just
+  // `i`. This is what makes U+0130 (İ) agree with `lower()` under Postgres's
+  // ICU provider: per-codepoint, `'İ'.toLowerCase()` is already `i` + U+0307,
+  // and ICU's `lower()` collapses THAT decomposed string to plain `i` too —
+  // libc's `lower()` does not, so this is stricter than libc here and exactly
+  // as strict as ICU, which is the safe direction. Written with an explicit
+  // escape (`\u0307`), never a literal combining character in the source —
+  // an invisible codepoint in a regex is unmaintainable.
+  return folded.replace(/i\u0307/gu, 'i');
 }
 
 /**

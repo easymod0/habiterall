@@ -104,30 +104,54 @@ look up `categoryByFoldedName` / `WHERE lower(name) = lower($1)`-equivalent
 through it before ever reaching the `INSERT`.
 
 **A route-level check kept alongside DB constraints as backstops must be at
-least as strict as every backstop, and for a while this one was not.** A
-first version folded the whole string at once
+least as strict as every backstop, and for a while this one was not — under
+either of the two collation providers Postgres can answer with.** A first
+version folded the whole string at once
 (`String(name ?? '').trim().toLowerCase()`), which draws the SAME line as the
 two DB-level constraints for every ASCII-adjacent input — `Élan`/`élan`
-included — but not for every input, full stop. Swept every codepoint against
-this server's own Postgres (`postgres:17-alpine`, the same image the shipped
-compose and CI use), two pairs `lower()` collapses did not collapse under that
-fold:
+included — but not for every input, full stop. Swept every codepoint
+1..0x10FFFF against this server's own Postgres (`postgres:17-alpine`, the same
+image the shipped compose and CI use) **under both collation providers it can
+run with** — libc (what the shipped image uses) and ICU (what a managed
+Postgres commonly offers instead). Both providers had to be measured
+separately rather than one extrapolated from the other, because `lower()` is
+NOT a per-codepoint homomorphism under ICU (Final_Sigma, below) — a sweep
+against one provider's answer does not stand in for the other's. Three pairs
+`lower()` collapses did not collapse under the whole-string fold:
 
 - **U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE).** `lower()` maps both
-  `I` and `İ` to plain `i`; whole-string `toLowerCase()` maps `İ` to `i`
-  followed by a combining dot above (U+0307), its one multi-character
-  simple-to-full mapping. `İstanbul` imported into an account already holding
-  `Istanbul` therefore folded to two different strings under the old fold and
-  to the SAME string under `lower()` — this is the issue's own example.
-- **Final_Sigma**, a second divergence nothing here had named before.
-  Whole-string `toLowerCase()` is context sensitive: `'ΟΔΟΣ'.toLowerCase()`
-  ends in U+03C2 (final sigma, because the last `Σ` sits at the end of the
-  string) while `'Οδοσ'.toLowerCase()` ends in plain `σ` (U+03C3, because
-  there the last cased letter was already lowercase). `lower()` applies no
-  such rule and folds every `Σ`/`σ` to U+03C3 regardless of position, so
-  `ΟΔΟΣ` and `Οδοσ` collided in Postgres and not under the old fold — and
-  ALL-CAPS Greek is at least as ordinary a way to type a name as `İstanbul`
-  is.
+  `I` and `İ` to plain `i` under either provider; whole-string `toLowerCase()`
+  maps `İ` to `i` followed by a combining dot above (U+0307), its one
+  multi-character simple-to-full mapping. `İstanbul` imported into an account
+  already holding `Istanbul` therefore folded to two different strings under
+  the old fold and to the SAME string under `lower()` — this is the issue's
+  own example.
+- **The decomposed spelling of that same pair — `i` + U+0307 typed directly,
+  never through İ at all — is a SECOND divergence an ICU-only sweep exposes
+  and a libc-only one cannot,** and it was found only in a second review round
+  after a per-codepoint fold folding `İ` alone to `i` had already been committed.
+  Per codepoint, `'İ'.toLowerCase()` is already exactly this decomposed
+  string; under Postgres's **ICU** provider (never libc), `lower()` on that
+  same decomposed string ALSO collapses to plain `i`, so a fold that special-
+  cased `İ` itself but left the decomposed spelling folding to itself was a
+  real containment break on an ICU database — a regression relative to the
+  OLD whole-string fold for that one pair, on that one provider. The fix folds
+  per codepoint as before and then strips a combining dot above that follows a
+  plain `i` (`.replace(/i\u0307/gu, 'i')`), which subsumes the U+0130 special
+  case outright — one rule rather than two — and makes the fold treat a
+  decomposed `i` + U+0307 as plain `i` everywhere, which libc's `lower()` does
+  NOT do. That is STRICTER than libc for this one pair and exactly as strict
+  as ICU, which is the safe direction: containment is owed, never equality
+  with one provider.
+- **Final_Sigma**, a third divergence nothing here had named before either
+  review round. Whole-string `toLowerCase()` is context sensitive:
+  `'ΟΔΟΣ'.toLowerCase()` ends in U+03C2 (final sigma, because the last `Σ`
+  sits at the end of the string) while `'Οδοσ'.toLowerCase()` ends in plain
+  `σ` (U+03C3, because there the last cased letter was already lowercase).
+  `lower()` applies no such rule under either provider and folds every
+  `Σ`/`σ` to U+03C3 regardless of position, so `ΟΔΟΣ` and `Οδοσ` collided in
+  Postgres and not under the old fold — and ALL-CAPS Greek is at least as
+  ordinary a way to type a name as `İstanbul` is.
 
 Both times the route-level lookup missed the existing row and tried to
 create a new one. In cloud that `INSERT` walked straight into the
@@ -140,15 +164,24 @@ Personal has no backstop for either pair (`NOCASE` is ASCII-only and sees
 neither `İ` vs `I` nor a final sigma), so the same import there created a
 second, genuinely distinct category.
 
-124 codepoints diverge the OTHER way on this server (JS lowercases circled
-Latin capitals like U+24B6 that the libc collation provider's `lower()`
-leaves alone); that direction is harmless, the route merely stricter than the
-index, the same asymmetry personal's own `NOCASE` backstop already has, and
-is not something to "fix" by folding those back to themselves. The issue also
-proposed normalising first — NFC, NFD, NFKC and NFKD were all tried against
-this server and every one of the four still folds `İstanbul` and `Istanbul`
-to different strings, so normalisation does not close this gap and is not
-part of the fix.
+124 codepoints diverge the OTHER way on this server's libc provider (JS
+lowercases circled Latin capitals like U+24B6 that libc's `lower()` leaves
+alone); that direction is harmless, the route merely stricter than the index,
+the same asymmetry personal's own `NOCASE` backstop already has, and is not
+something to "fix" by folding those back to themselves. That exact count is
+an observation about this one provider, not a rule to pin — what does not
+move is containment, which was measured under both providers rather than
+argued from either alone.
+
+The issue also proposed normalising first — NFC, NFD, NFKC and NFKD were all
+tried against this server and every one of the four still folds `İstanbul`
+and `Istanbul` (and the decomposed `i\u0307stanbul` spelling above) to
+different strings, so none of the four general Unicode normalisation forms
+closes this gap on their own. That does not mean normalisation is the wrong
+tool in general, and reads as a contradiction next to the combining-dot strip
+above only if the two are conflated: the strip IS a targeted normalisation —
+one narrow rule, collapse `i` + U+0307 to `i` — rather than one of NFC's four
+general forms, none of which happens to fold this particular pair together.
 
 So the old sentence here — "not a bug in `foldCategoryName` to fix, a fold
 agreeing with both databases on every codepoint at once does not exist to
@@ -158,12 +191,22 @@ was actually needed, which is a fold at least as *strict* as each: never
 looser than a backstop, free to be stricter. `foldCategoryName` now folds
 **per codepoint** rather than the whole string at once, which is what
 suppresses Final_Sigma for free — a lone `Σ` handed to `.toLowerCase()` has no
-preceding cased letter, so the context-sensitive rule never fires — and
-special-cases U+0130 to the single character `i`. Nothing stores a folded
-name: every call site is transient (a route's own duplicate check, or the
-importer's in-memory dedupe), so the fix changes no row, needs no migration
-and no reindex on either database — see below for what it means for an
-account that already holds both spellings.
+preceding cased letter, so the context-sensitive rule never fires — and then
+strips a combining dot above following a plain `i`, which is what makes U+0130
+agree with `lower()` under both providers (above) rather than special-casing
+`İ` alone. Nothing stores a folded name: every call site is transient (a
+route's own duplicate check, or the importer's in-memory dedupe), so the fix
+changes no row, needs no migration and no reindex on either database — see
+below for what it means for an account that already holds both spellings.
+
+Measured, swept over every codepoint plus the contextual pairs above, against
+both providers:
+
+|                        | libc      | ICU                                          |
+|------------------------|-----------|-----------------------------------------------|
+| whole-string fold      | 0 breaks  | 1 break (`İstanbul` / decomposed `i\u0307stanbul`) |
+| per-codepoint, İ special-cased alone | 0 breaks | 1 break (decomposed spelling, above) |
+| this fold (per-codepoint + strip)    | 0 breaks | 0 breaks |
 
 That is plain `toLowerCase()`, deliberately never `toLocaleLowerCase()`. A
 first version of this reasoned the other way round — "`toLocaleLowerCase()`
@@ -217,15 +260,66 @@ no stored row changes, and no reindex is needed — the index expression is
 untouched. In personal, an account created before this fix CAN hold both
 `Istanbul` and `İstanbul` (or `ΟΔΟΣ` and `Οδοσ`), because `NOCASE` saw
 neither pair. After the fix the route treats them as one name: renaming one
-onto the other now answers 409, and `apply-import`'s `categoryIdByFold` map
-collapses both spellings to one key, so an import naming EITHER one attaches
-its habits to whichever of the two rows the map kept last. No row is deleted
-and no habit loses its category — that is the fold's answer for an
-already-stored name changing, which is this fix working rather than a side
-effect to paper over, the same thing the root `CLAUDE.md` asks to be said out
-loud about a stored lapse moving a window. No migration is included: merging
-a pre-existing duplicate pair in personal would have to choose a colour, a
-position and a winner, and that is a separate decision, not a silent one.
+onto the other now answers 409 — and so does a COLOUR-ONLY edit on either
+row, which reads as an unrelated consequence until the two routes are put
+side by side. The habit dialog's save submits name and colour together
+through one `PUT /categories/:id`, and that route runs `categoryNameTaken`
+over whatever name arrives whether or not it actually changed — so an
+account holding both spellings can no longer re-save either row's colour
+alone until one of the two rows is renamed away first. And
+`apply-import`'s `categoryIdByFold` map collapses both spellings to one key,
+so a MERGE naming EITHER one attaches its habits to whichever of the two rows
+the map kept — decided by `position` (both editions preload that map
+`ORDER BY position, id`, matching each other for exactly this reason), which
+is user-draggable through `POST /categories/reorder`. A purely cosmetic drag
+on either row can therefore silently decide which of the two a later import
+attaches new habits to, with nothing about the drag itself suggesting it
+matters. In that MERGE case no row is deleted and no habit loses its category
+— that is the fold's answer for an already-stored name changing, which is
+this fix working rather than a side effect to paper over, the same thing the
+root `CLAUDE.md` asks to be said out loud about a stored lapse moving a
+window.
+
+**A REPLACE-mode restore of that same account is a different case, and "no
+row is deleted" is not true of it — a review round after this fix was first
+written found that it silently was.** `mode=replace` wipes every category
+first (`clearAllCategories` / `DELETE FROM categories`) and only then
+re-applies the file's own declared list, and a JSON export of an account
+holding both spellings declares BOTH of them — the export is naming two real
+rows, not one. The second declared category folds onto the first the same
+way any other pair does, but there is no longer a second row left to
+"attach to": the wipe already removed it, so the account comes back with one
+category where the file itself declared two, and before this fix round
+nothing said so. `resolveOrCreateCategory` now tracks the folds its OWN
+declared-categories loop has already claimed in this same file and reports a
+line in `result.skipped` naming the category that was not created, the
+moment a second declared name folds onto a first one — but only for that
+case: a fold resolving onto an account's PRE-EXISTING row (the headline
+İstanbul-into-Istanbul case above) is the merge rule working and stays
+unreported, and a habit's own `category` field is never a declaration and
+never reports either. Every habit that named either spelling still keeps A
+category — nothing here orphans a habit — but the account genuinely loses a
+row a restore of the same file used to bring back, and which of the two
+surviving is again decided by `position`. No migration is included: merging a
+pre-existing duplicate pair in personal ahead of any particular import would
+have to choose a colour, a position and a winner, and that is a separate
+decision, not a silent one — what changed is only that the loss, when an
+import causes it, is now a line in `result.skipped` rather than nothing at
+all.
+
+**`LIMITS.categories` is counted two different ways, and an account already
+holding a collapsed pair sits on the seam.** The importer counts FOLDS
+(`categoryIdByFold.size`) against the ceiling, because that is the shape it
+can cheaply ask "would this be new?" of; `POST /categories` and everywhere
+else that enforces the same ceiling counts ROWS. An account holding a
+pre-existing `Istanbul`/`İstanbul` pair is two rows behind one fold, so an
+import that adds exactly up to what the fold count allows can carry that
+account's ROW total one past `LIMITS.categories` — a ceiling nothing else
+here catches, because the row-counting routes were never asked about rows
+the importer itself is about to add. This is a known consequence of the two
+counting methods disagreeing on an account already in this specific state,
+recorded here rather than fixed: changing what the ceiling counts, or when it
+is checked, is a separate decision and not one this PR makes.
 
 **The browser holds no copy of that fold, and the suggestion chips are what
 made one tempting.** A chip is a shortcut — tap `Health` and get a category

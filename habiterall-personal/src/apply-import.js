@@ -134,6 +134,17 @@ export function applyImport(habits, mode = 'merge', categories = []) {
         .map((c) => [foldCategoryName(c.name), c.id])
     );
 
+    // Folds claimed by THIS import's own declared-category loop below,
+    // tracked separately from `categoryIdByFold` — which also holds whatever
+    // the account already had before this import ran, and a fold matching
+    // that is the merge rule working (issue #256's own headline case: an
+    // İstanbul import resolving onto an account's pre-existing Istanbul
+    // records no skip). What this set answers is the narrower question of
+    // whether a SECOND category the file itself declares folds to a name a
+    // FIRST one already claimed in the same file — information only the file
+    // can lose, and only `result.skipped` says so.
+    const declaredFoldsThisImport = new Set();
+
     /**
      * Resolve NAME to a category id, creating one if the account (or this
      * import, so far) has none by that folded name — and never renaming or
@@ -147,11 +158,27 @@ export function applyImport(habits, mode = 'merge', categories = []) {
      * @param {unknown} [declaredPosition] the file's own `position` for this
      *   category, if it declared one — a habit-derived category (named only
      *   in a habit's `category` field) never has one and always appends.
+     * @param {boolean} [declared] true only for a call from the file's own
+     *   declared-categories loop below, never for a habit's `category`
+     *   field — a habit-derived name did not declare anything and must never
+     *   report a collision, only resolve one. When true, a fold already
+     *   claimed by an EARLIER declared category in this same file is
+     *   recorded in `result.skipped` rather than silently absorbed, because
+     *   that is information the file itself loses and nothing else says.
      * @returns {number | null}
      */
-    function resolveOrCreateCategory(name, color, declaredPosition) {
+    function resolveOrCreateCategory(name, color, declaredPosition, declared = false) {
       const folded = foldCategoryName(name);
       if (!folded) return null;
+      if (declared) {
+        if (declaredFoldsThisImport.has(folded)) {
+          result.skipped.push(
+            `category "${name}" not created: an earlier category in this ` +
+            'file already folds to the same name');
+        } else {
+          declaredFoldsThisImport.add(folded);
+        }
+      }
       if (categoryIdByFold.has(folded)) return categoryIdByFold.get(folded);
       if (categoryIdByFold.size >= LIMITS.categories) {
         result.skipped.push(
@@ -188,7 +215,7 @@ export function applyImport(habits, mode = 'merge', categories = []) {
     // to invent it. `backupCategories(buf)` already caps this at
     // LIMITS.categories and drops anything nameless; the cap above is the
     // backstop for a merge pushing the account's own total past it.
-    for (const c of categories) resolveOrCreateCategory(c.name, c.color, c.position);
+    for (const c of categories) resolveOrCreateCategory(c.name, c.color, c.position, true);
 
     // node:sqlite may hand back a bigint; the column is a small integer.
     let position = Number(maxPosition.get().p);

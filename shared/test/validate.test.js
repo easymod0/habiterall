@@ -279,6 +279,24 @@ test('foldCategoryName folds U+0130 (dotted capital I) to plain i, the way ' +
   assert.equal(foldCategoryName('İstanbul'), foldCategoryName('Istanbul'));
 });
 
+test('foldCategoryName folds the DECOMPOSED spelling (plain i + combining ' +
+  'dot above, U+0307) to plain i too — the one pair Postgres\'s ICU ' +
+  'collation provider collapses that libc does not', () => {
+  // Per codepoint, `'İ'.toLowerCase()` already produces exactly this
+  // decomposed string — 'i' followed by U+0307 — so this is not a
+  // hypothetical input: it is what folding U+0130 one character at a time
+  // yields before the combining-dot strip runs. Under Postgres's ICU
+  // provider (never libc), lower() on THIS string also collapses to plain
+  // 'i', so a fold that left the decomposed form folding to itself would be
+  // a real containment break on an ICU database. Built explicitly from
+  // 'i' + the U+0307 escape rather than pasted as a literal combining
+  // character, so the input is legible in a diff.
+  const decomposedIstanbul = 'i' + '\u0307' + 'stanbul';
+  assert.equal(foldCategoryName(decomposedIstanbul), 'istanbul');
+  assert.equal(foldCategoryName(decomposedIstanbul), foldCategoryName('İstanbul'));
+  assert.equal(foldCategoryName(decomposedIstanbul), foldCategoryName('Istanbul'));
+});
+
 test('foldCategoryName folds Final_Sigma the way lower() does — position ' +
   'independent, never only the whole-string context-sensitive answer', () => {
   // Postgres's lower() has no Final_Sigma rule: every Sigma folds to the
@@ -327,7 +345,12 @@ test('foldCategoryName calls .toLowerCase() in its own SOURCE, never toLocaleLow
   // behavioural test cannot — which is also why that test stays rather than
   // being deleted as redundant.
   const src = readFileSync(new URL('../src/validate.js', import.meta.url), 'utf8');
-  const fn = /export function foldCategoryName\([^)]*\)\s*\{[^}]*\}/.exec(src);
+  // The closing brace has to be the FUNCTION's own, not the first `}` the
+  // regex meets — `[^}]*\}` used to stop at the `for` loop's closing brace,
+  // so the captured text never reached `return`. A function-level `}` sits
+  // at the start of its own line (no indentation); every inner block's does
+  // not, so `\n\}` anchors to the real end of the declaration.
+  const fn = /export function foldCategoryName\([^)]*\)\s*\{[\s\S]*?\n\}/.exec(src);
   assert.ok(fn, "foldCategoryName's declaration was not found — update this guard's regex");
   assert.match(fn[0], /\.toLowerCase\(/,
     'foldCategoryName must fold with .toLowerCase(), not a locale-aware method');

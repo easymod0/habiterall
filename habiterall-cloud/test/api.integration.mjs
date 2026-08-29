@@ -547,100 +547,251 @@ for (const c of categoriesAfterImport) {
 }
 importServer.close();
 
-/* ---- issue #256: the fold vs Postgres lower(), swept over every codepoint ----
+/* ---- issue #256 (review round): a replace-mode restore silently merges two
+ * of the FILE's own categories, and nothing said so ----
+ *
+ * The block above is a MERGE importing one declared category that resolves
+ * onto an account's pre-existing row — the headline case, and it must keep
+ * recording NO skip; that is the whole point of this PR. This block is the
+ * other shape: a SINGLE file declaring TWO categories, `Istanbul` and
+ * `İstanbul`, that fold to the same name. The second one is not created —
+ * `resolveOrCreateCategory` resolves it onto the first — and unlike the
+ * headline case, this loss is information only the FILE has: two categories
+ * the file itself declared came back as one, and before this fix nothing in
+ * `result.skipped` said so.
+ *
+ * Different colours and a habit each, so a fixture carrying DEFAULT_COLOR or
+ * no habits could not pass with the collapse-reporting rule deleted.
+ */
+const dupImportApp = express();
+dupImportApp.use((req, _res, next) => { req.session = { user: { id: alice } }; next(); });
+dupImportApp.use('/api/import', express.raw({ type: '*/*', limit: '5mb' }));
+dupImportApp.use(express.json());
+dupImportApp.use('/api', api);
+const dupImportServer = await new Promise((resolve) => {
+  const s = dupImportApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const dupImportBase = `http://127.0.0.1:${dupImportServer.address().port}`;
+
+const dupBackup = Buffer.from(JSON.stringify({
+  categories: [
+    { name: 'Istanbul', color: '#101010' },
+    { name: 'İstanbul', color: '#202020' },
+  ],
+  habits: [
+    { name: 'issue-256 dup habit A', type: 'boolean', category: 'Istanbul', entries: [] },
+    { name: 'issue-256 dup habit B', type: 'boolean', category: 'İstanbul', entries: [] },
+  ],
+}));
+const dupImportRes = await fetch(`${dupImportBase}/api/import?mode=merge`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: dupBackup,
+});
+ck('the dup-category import itself succeeds',
+  dupImportRes.status === 200, String(dupImportRes.status));
+const dupImportResult = await dupImportRes.json();
+ck(
+  'THE assertion: the SECOND declared category (İstanbul, folding to the ' +
+  "same name as the FIRST declared category, Istanbul) IS reported in " +
+  "skipped — two categories the file itself declared collapsing to one is " +
+  'information only the file has, unlike the headline merge-onto-existing case',
+  Array.isArray(dupImportResult.skipped) &&
+    dupImportResult.skipped.some((s) => s.includes('İstanbul')),
+  JSON.stringify(dupImportResult.skipped));
+
+const dupCategories = await fetch(`${overviewBase}/api/categories`).then((r) => r.json());
+const dupMatching = dupCategories.filter((c) => c.name === 'Istanbul' || c.name === 'İstanbul');
+ck('still exactly ONE category named either spelling after the dup import',
+  dupMatching.length === 1, JSON.stringify(dupCategories.map((c) => c.name)));
+
+const dupHabits = await fetch(`${overviewBase}/api/habits`).then((r) => r.json());
+const dupHabitA = dupHabits.find((h) => h.name === 'issue-256 dup habit A');
+const dupHabitB = dupHabits.find((h) => h.name === 'issue-256 dup habit B');
+ck(
+  "THE assertion: both habits' category_id is the SAME id — the FIRST " +
+  "declared category's (Istanbul), never a second row",
+  dupHabitA?.category_id != null &&
+    dupHabitA.category_id === dupHabitB?.category_id &&
+    dupHabitA.category_id === dupMatching[0]?.id,
+  `A=${dupHabitA?.category_id} B=${dupHabitB?.category_id} ` +
+    `kept=${JSON.stringify(dupMatching)}`);
+
+// Clean up everything this block created.
+for (const h of [dupHabitA, dupHabitB]) {
+  if (h) await fetch(`${overviewBase}/api/habits/${h.id}`, { method: 'DELETE' });
+}
+for (const c of dupCategories) {
+  if (c.name === 'Istanbul' || c.name === 'İstanbul') {
+    await fetch(`${overviewBase}/api/categories/${c.id}`, { method: 'DELETE' });
+  }
+}
+dupImportServer.close();
+
+/* ---- issue #256: the fold vs Postgres lower(), swept over every codepoint,
+ * under BOTH collation providers this server can answer with ----
  *
  * The block above pins the ROUTE and the IMPORTER at one worked example
  * (İstanbul/Istanbul). This one pins the PROPERTY that example is standing
- * in for: for every pair of codepoints THIS server's `lower()` collapses to
- * the same character, `foldCategoryName` must not keep them apart — the rule
- * a route-level check needs to stay at least as strict as its DB backstop.
+ * in for: for every pair of codepoints Postgres's `lower()` collapses to the
+ * same character, `foldCategoryName` must not keep them apart — the rule a
+ * route-level check needs to stay at least as strict as its DB backstop.
  *
  * It is a ONE-WAY containment and deliberately never
  * `foldCategoryName(ch) === lower(ch)` — that equality is FALSE on a correct
  * fold, for the 124 circled-capital codepoints (e.g. U+24B6) where JS's
- * `toLowerCase()` folds and musl's `lower()` does not. That direction is
+ * `toLowerCase()` folds and libc's `lower()` does not. That direction is
  * harmless (the route only gets stricter, never looser than the index) and
  * asserting equality would fail an implementation that is doing this right.
  *
- * `lower()` is read off THIS Postgres in one query rather than assumed — the
- * grouping key defaults to a codepoint's own character when the query names
- * no divergence for it, which is what puts plain 'i' (U+0069) in the same
- * group as 'I' (U+0049) and 'İ' (U+0130) even though only the latter two are
- * rows in the result set.
+ * Run under the session's DEFAULT collation (this server's database default,
+ * libc-backed — the same provider `postgres:17-alpine`'s shipped image
+ * uses) AND explicitly under `und-x-icu`, because a fold that only satisfies
+ * containment against the collation provider this suite happens to connect
+ * through says nothing about a managed Postgres that offers ICU instead —
+ * which is exactly how #256's review round found the committed fold's one
+ * remaining break (a decomposed `i` + U+0307 spelling that ICU's `lower()`
+ * collapses against `İ`/`I` and libc's does not). The ICU sweep is skipped
+ * with a printed note if this server carries no ICU collations at all,
+ * rather than failing — provisioning ICU is an operator choice this suite
+ * cannot make for them.
+ *
+ * `lower()` is read off THIS Postgres in one query per provider rather than
+ * assumed — the grouping key defaults to a codepoint's own character when
+ * the query names no divergence for it, which is what puts plain 'i'
+ * (U+0069) in the same group as 'I' (U+0049) and 'İ' (U+0130) even though
+ * only the latter two are rows in the result set.
  */
-console.log('\n--- foldCategoryName vs Postgres lower(): every codepoint ---');
-
-const codepointSqlStart = Date.now();
-const { rows: divergentRows } = await admin.query(
-  `SELECT n, lower(chr(n)) AS lo FROM generate_series(1, 1114111) AS n
-   WHERE (n < 55296 OR n > 57343) AND lower(chr(n)) <> chr(n)`
+const { rows: [{ n: icuCollationCount }] } = await admin.query(
+  `SELECT count(*) AS n FROM pg_collation WHERE collprovider = 'i'`
 );
-const codepointSqlMs = Date.now() - codepointSqlStart;
-
-// Codepoint -> what Postgres folds it to. Absent means "maps to itself",
-// which is exactly the WHERE clause above, negated.
-const postgresFold = new Map(divergentRows.map((r) => [Number(r.n), r.lo]));
-
-const codepointWalkStart = Date.now();
-const groups = new Map();   // Postgres's answer -> every codepoint folding to it
-for (let cp = 1; cp <= 0x10ffff; cp++) {
-  if (cp >= 0xd800 && cp <= 0xdfff) continue;   // surrogate range: no character there
-  const ch = String.fromCodePoint(cp);
-  // Whitespace-only: `foldCategoryName` trims before folding, so every one of
-  // these already folds to '' on its own — comparing that against a real
-  // letter sharing Postgres's group (if one ever does) would fail on the
-  // TRIM, not on anything this sweep is about.
-  if (/^\s+$/u.test(ch)) continue;
-  const key = postgresFold.get(cp) ?? ch;
-  if (!groups.has(key)) groups.set(key, []);
-  groups.get(key).push(cp);
-}
-const codepointWalkMs = Date.now() - codepointWalkStart;
-console.log(`  (query ${codepointSqlMs}ms, walk ${codepointWalkMs}ms, ${groups.size} groups)`);
+const hasIcuCollation = Number(icuCollationCount) > 0;
 
 const cpLabel = (cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')} (${String.fromCodePoint(cp)})`;
 
-let offence = null;
-for (const [key, members] of groups) {
-  if (members.length < 2) continue;
-  const first = foldCategoryName(String.fromCodePoint(members[0]));
-  for (const cp of members.slice(1)) {
-    const folded = foldCategoryName(String.fromCodePoint(cp));
-    if (folded !== first) {
-      offence = { a: members[0], b: cp, foldA: first, foldB: folded, key };
-      break;
-    }
-  }
-  if (offence) break;
-}
-ck(
-  'foldCategoryName is constant within every group Postgres lower() ' +
-  'collapses (one-way containment — the fold may be stricter than lower(), ' +
-  'never looser)',
-  offence === null,
-  offence
-    ? `${cpLabel(offence.a)} folds to ${JSON.stringify(offence.foldA)} but ` +
-      `${cpLabel(offence.b)} folds to ${JSON.stringify(offence.foldB)}, though ` +
-      "Postgres's lower() puts both in one group"
-    : '');
+async function sweepCodepoints(providerLabel, collateSql) {
+  console.log(`\n--- foldCategoryName vs Postgres lower(): every codepoint (${providerLabel}) ---`);
 
-// The sweep above reduces a STRING question (does the unique index collapse
-// two names) to one about codepoints taken in isolation, which only holds if
-// lower() folds each codepoint the same way regardless of what sits next to
-// it — unlike JS's OWN Final_Sigma rule, which is exactly the context
-// sensitivity the rewritten fold exists to route around. Checked directly
-// over a probe mixing the four cases this issue is about (İ, a final sigma,
-// an accent, and ẞ) rather than assumed.
-const homomorphismProbe = 'İΟΔΟΣélanẞ';
-const { rows: [{ whole: homomorphismWhole, per_char: homomorphismPerChar }] } = await admin.query(
-  `SELECT lower($1) AS whole,
-          (SELECT string_agg(lower(c), '' ORDER BY ord)
-           FROM unnest(string_to_array($1, NULL)) WITH ORDINALITY AS t(c, ord)) AS per_char`,
-  [homomorphismProbe]
-);
-ck("lower() is a per-codepoint homomorphism, over a probe mixing İ/Σ/é/ẞ",
-  homomorphismWhole === homomorphismPerChar,
-  `whole=${JSON.stringify(homomorphismWhole)} per_char=${JSON.stringify(homomorphismPerChar)}`);
+  const codepointSqlStart = Date.now();
+  const { rows: divergentRows } = await admin.query(
+    `SELECT n, lower(chr(n)::text ${collateSql}) AS lo FROM generate_series(1, 1114111) AS n
+     WHERE (n < 55296 OR n > 57343) AND lower(chr(n)::text ${collateSql}) <> chr(n)`
+  );
+  const codepointSqlMs = Date.now() - codepointSqlStart;
+
+  // Codepoint -> what Postgres folds it to. Absent means "maps to itself",
+  // which is exactly the WHERE clause above, negated.
+  const postgresFold = new Map(divergentRows.map((r) => [Number(r.n), r.lo]));
+
+  const codepointWalkStart = Date.now();
+  const groups = new Map();   // Postgres's answer -> every codepoint folding to it
+  for (let cp = 1; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;   // surrogate range: no character there
+    const ch = String.fromCodePoint(cp);
+    // Whitespace-only: `foldCategoryName` trims before folding, so every one of
+    // these already folds to '' on its own — comparing that against a real
+    // letter sharing Postgres's group (if one ever does) would fail on the
+    // TRIM, not on anything this sweep is about.
+    if (/^\s+$/u.test(ch)) continue;
+    const key = postgresFold.get(cp) ?? ch;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(cp);
+  }
+  const codepointWalkMs = Date.now() - codepointWalkStart;
+  console.log(`  (query ${codepointSqlMs}ms, walk ${codepointWalkMs}ms, ${groups.size} groups)`);
+
+  let offence = null;
+  for (const [key, members] of groups) {
+    if (members.length < 2) continue;
+    const first = foldCategoryName(String.fromCodePoint(members[0]));
+    for (const cp of members.slice(1)) {
+      const folded = foldCategoryName(String.fromCodePoint(cp));
+      if (folded !== first) {
+        offence = { a: members[0], b: cp, foldA: first, foldB: folded, key };
+        break;
+      }
+    }
+    if (offence) break;
+  }
+  ck(
+    `foldCategoryName is constant within every group Postgres lower() ` +
+    `collapses under ${providerLabel} (one-way containment — the fold may ` +
+    'be stricter than lower(), never looser)',
+    offence === null,
+    offence
+      ? `${cpLabel(offence.a)} folds to ${JSON.stringify(offence.foldA)} but ` +
+        `${cpLabel(offence.b)} folds to ${JSON.stringify(offence.foldB)}, though ` +
+        `Postgres's lower() under ${providerLabel} puts both in one group`
+      : '');
+}
+
+await sweepCodepoints('libc / database default', '');
+if (hasIcuCollation) {
+  await sweepCodepoints('ICU (und-x-icu)', 'collate "und-x-icu"');
+} else {
+  console.log('\n--- foldCategoryName vs Postgres lower() under ICU: SKIPPED — ' +
+    'this server has no ICU collations (SELECT count(*) FROM pg_collation ' +
+    "WHERE collprovider='i' returned 0) ---");
+}
+
+/* ---- the contextual pairs a per-codepoint sweep cannot see ----
+ *
+ * The codepoint sweep above reduces a STRING question (does the unique
+ * index collapse two names) to one about codepoints taken in isolation,
+ * which only holds where `lower()` folds each codepoint the same way
+ * regardless of what sits next to it. Final_Sigma is exactly a case where it
+ * does not: Postgres's ICU provider implements the SAME context-sensitive
+ * rule JS's `toLowerCase()` does — a lone `Σ` handed to either sees no
+ * preceding cased letter and always folds to plain `σ`, so the codepoint
+ * sweep above cannot observe the divergence at all, and asserting that
+ * `lower()` is a per-codepoint homomorphism (this suite used to) is false
+ * under ICU for exactly this reason: measured on this server, ICU's
+ * `lower('ΟΔΟΣ')` is `'οδος'` (ending in FINAL sigma, U+03C2) while
+ * `lower('Οδοσ')` is `'οδοσ'` — two different strings, so ICU does not even
+ * collapse this pair, matching JS's own context-sensitive answer for it.
+ * Under libc, by contrast, `lower()` folds every `Σ`/`σ` to U+03C3
+ * regardless of position, so libc DOES collapse the pair and per-codepoint
+ * folding (this function's whole strategy) is what is needed to catch it.
+ *
+ * So the property worth asserting is not the homomorphism — it is
+ * containment, checked directly against a small table of the pairs this
+ * issue is actually about, under BOTH providers: whenever Postgres's own
+ * `lower()` says two names are the same, `foldCategoryName` must say so too.
+ * `İstanbul`/the decomposed spelling ('i' + U+0307) is the pair the U+0130
+ * fix is FOR — built with an explicit \u0307 escape, never a pasted
+ * combining character.
+ */
+const decomposedIstanbul = 'i' + '\u0307' + 'stanbul';
+const contextualPairs = [
+  ['İstanbul', decomposedIstanbul],
+  ['İstanbul', 'Istanbul'],
+  ['ΟΔΟΣ', 'Οδοσ'],
+  ['Élan', 'élan'],
+];
+
+for (const [providerLabel, collateSql] of [
+  ['libc / database default', ''],
+  ...(hasIcuCollation ? [['ICU (und-x-icu)', 'collate "und-x-icu"']] : []),
+]) {
+  for (const [a, b] of contextualPairs) {
+    const { rows: [{ la, lb }] } = await admin.query(
+      `SELECT lower($1::text ${collateSql}) AS la, lower($2::text ${collateSql}) AS lb`,
+      [a, b]
+    );
+    const postgresCollapses = la === lb;
+    const foldCollapses = foldCategoryName(a) === foldCategoryName(b);
+    ck(
+      `[${providerLabel}] lower() collapsing (${JSON.stringify(a)}, ` +
+      `${JSON.stringify(b)}) implies foldCategoryName does too`,
+      !postgresCollapses || foldCollapses,
+      `lower(): ${JSON.stringify(la)} vs ${JSON.stringify(lb)} ` +
+      `(collapses=${postgresCollapses}); fold(): ` +
+      `${JSON.stringify(foldCategoryName(a))} vs ${JSON.stringify(foldCategoryName(b))}`);
+  }
+}
+if (!hasIcuCollation) {
+  console.log('--- contextual-pair table under ICU: SKIPPED — no ICU collations on this server ---');
+}
 
 /* ---------- an entry in a reorder list that merely COERCES to an id ----------
  *
