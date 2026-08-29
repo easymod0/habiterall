@@ -242,12 +242,69 @@ try {
 
   ck('the page can scroll down to the calendar', scrollTo > 100, `y=${scrollTo}`);
 
+  // Which value a card's granularity control is showing, scoped to that card by
+  // title. Both the History and the Habit strength cards render
+  // `segmented(['day','week','month','quarter','year'], …)`, so the pressed
+  // option names that card's own state and no other's — which is what lets the
+  // two checks after the loop say WHICH card the third selector reached, rather
+  // than trusting that the selector reached the one its label claims.
+  const GRAN = "['day','week','month','quarter','year']";
+  const pressedGran = (title) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='${title}');
+    const b=[...(c?.querySelectorAll('.seg button') ?? [])]
+      .find(b=>b.getAttribute('aria-pressed')==='true'
+        && ${GRAN}.includes(b.textContent.trim()));
+    return b?.textContent.trim() ?? null;})()`);
+
+  const granBefore = await pressedGran('History');
+  const scoreBefore = await pressedGran('Habit strength');
+
+  // Two of these three are scoped to their card BY TITLE, and the reason is
+  // that a detail card's controls are not unique on the page — `DETAIL_CARDS`
+  // (`shared/src/validate.js`) draws `recentDays, strength, calendar, streaks,
+  // resilience, awards, history, …`, all on by default, and this suite never
+  // touches `detailCards`. Position is not the scoping rule either: matching by
+  // title survives a reorder, which a `[n]` index does not.
   for (const [label, sel] of [
     // '+' not '−': the calendar is at the widest level here, so '−' is
-    // disabled and clicking it would prove nothing.
+    // disabled and clicking it would prove nothing. Genuinely unambiguous —
+    // `git grep "'+'"` under `shared/public` hits only the calendar's `zoomIn`.
     ['zoom', `[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.trim()==='+')`],
-    ['calendar paging', `[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.includes('Earlier'))`],
-    ['history granularity', `[...document.querySelectorAll('.card button')].find(b=>b.textContent.trim()==='week')`],
+    // Scoped to the CALENDAR card. `.cal-nav` is `windowedChart`'s class and
+    // the Recent days strip pages through the same component, so an unscoped
+    // `find('Earlier')` picks the STRIP's button — that card is FIRST on the
+    // page and the calendar is THIRD, with `strength` between them. 'Earlier'
+    // was never unambiguous, and this only ever pressed the calendar's by
+    // accident of what the strip's did. It stopped being an accident that
+    // worked when the strip started redrawing itself instead of refetching the
+    // whole page (#245): the marked calendar node then survives the press and
+    // this check reports the wrong card. Same rule as the `.cal-range` note in
+    // `shared/public/CLAUDE.md`.
+    ['calendar paging', `[...(([...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='Calendar')
+      ?.querySelectorAll('.cal-nav button')) ?? [])]
+      .find(b=>b.textContent.includes('Earlier'))`],
+    // Scoped to the HISTORY card for exactly the same reason, and this one had
+    // the same defect for as long as it has existed: `buildStrengthCard` puts
+    // `segmented(['day','week','month','quarter','year'], …)` in its own
+    // `.card-head` and sits SECOND, so the first `.card button` reading 'week'
+    // in document order was the strength card's score-resolution button. It
+    // stayed green because that card's `onChange` is also
+    // `state.scoreGranularity = g; open(habit.id)` — a full re-render, which is
+    // all this loop measures — so `buildHistoryCard`'s granularity control had
+    // no coverage here at all.
+    //
+    // 'month' rather than 'week' on purpose: History OPENS on 'week'
+    // (`historyGranularity`'s default in ui/settings.js), and re-pressing the
+    // option that is already pressed asserts nothing about which control was
+    // reached. 'month' moves `state.granularity`, which is what the two checks
+    // after the loop read back — and it is unique inside this card, whose other
+    // segmented control offers 'percent' and 'count'.
+    ['history granularity', `[...(([...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='History')
+      ?.querySelectorAll('.seg button')) ?? [])]
+      .find(b=>b.textContent.trim()==='month')`],
   ]) {
     // Scroll back down FIRST, so each control is judged on its own. Reading
     // `before` from wherever the last iteration left the page made the second
@@ -308,6 +365,21 @@ try {
     ck(`${label} keeps the scroll position`, Math.abs(after - before) < 120,
       `${before} -> ${after}`);
   }
+
+  // What proves the third selector is scoped rather than merely written as
+  // though it were. The unscoped version pressed the Habit strength card, which
+  // moves `scoreGranularity` and leaves History exactly where it opened — so
+  // against it the first of these is red and the second is red too, and between
+  // them they NAME the card that was reached. `granBefore !== 'month'` is there
+  // so the first cannot pass by History having already been on 'month':
+  // `fixtures.reset()` sends `DELETE /settings`, so it opens on 'week'.
+  const granAfter = await pressedGran('History');
+  const scoreAfter = await pressedGran('Habit strength');
+  ck('the granularity press reached the History card',
+    granAfter === 'month' && granBefore !== 'month',
+    `History ${granBefore} -> ${granAfter}`);
+  ck('...and left the Habit strength card above it alone',
+    scoreAfter === scoreBefore, `strength ${scoreBefore} -> ${scoreAfter}`);
 
   // Put the zoom back where the persistence checks below expect it.
   await click('−');

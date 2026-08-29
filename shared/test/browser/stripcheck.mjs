@@ -24,6 +24,14 @@
  *    `textContent` alone — the ghost tick and a filled cell can share a glyph
  *    and differ only in colour, opacity and background, none of which the fake
  *    DOM in `atmost.mjs` or `rendercheck.mjs` can see.
+ *
+ * `--- paging, offline ---` is the only place the card's paging is asked to
+ * work with nothing to fetch, and so the only place the position it stores and
+ * the window it draws can be caught disagreeing (#245). It needs a real
+ * browser twice over: the offset lives in a module the page loaded, and the
+ * setup turns on `Network.setBypassServiceWorker`, without which the worker
+ * answers both of `open()`'s GETs from its data cache and the app is not
+ * offline at all.
  */
 
 import { mkdtempSync } from 'node:fs';
@@ -490,6 +498,95 @@ try {
   } else {
     ck('the strip pages back', false, 'no Earlier button — fixture has too little history');
   }
+
+  /* ---------- paging with nothing to fetch ---------- */
+
+  console.log('--- paging, offline ---');
+  // The claim: paging redraws the card from the entries the page already
+  // holds, so it needs no request. What makes that visible is a press with
+  // nothing to fetch. `page()` (ui/components.js) moves `state.chartOffsets`
+  // BEFORE it calls `redraw`, so a `redraw` that refetches has committed the
+  // position by the time the GET fails and `open()` toasts without rendering:
+  // the strip stays put and the window jumps by a stride whenever something
+  // next draws the card (#245).
+  //
+  // `Network.setBypassServiceWorker` is what makes "offline" mean it here, and
+  // it is the load-bearing line of the block. Devtools offline emulation on
+  // this session does NOT reach the WORKER's own fetches, so with the worker in
+  // front both `/api/habits/:id/stats` and `/api/habits/:id/entries` come back
+  // out of DATA_CACHE (`CACHEABLE_API`, sw.js) and `open()` succeeds — measured
+  // against the unfixed code, where the strip then pages perfectly well and
+  // every check below passes. That is why the offline block further up can get
+  // away with the network conditions alone: only its WRITES have to fail, and
+  // the worker returns early for every non-GET.
+  //
+  // Bypassing the worker is not a contrivance for the sake of the test. It is
+  // the self-hoster on a plain-`http` LAN address, where `isSecureContext` is
+  // false and there is no service worker at all, and it stands in equally for
+  // the first offline boot after a `CACHE_VERSION` bump, which drops the data
+  // cache and gets the worker's synthetic 503 (root CLAUDE.md).
+  await send('Network.enable', {}, sessionId);
+
+  /**
+   * Where the card thinks it is, as opposed to what it drew. `page()` writes
+   * this and `windowedChart` reads it, so it is one half of the disagreement
+   * below; `stripRange()` is the other.
+   */
+  const stripOffset = () => ev(
+    `(async () => (await import('/shared/ui/store.js')).state.chartOffsets.recentDays ?? null)()`);
+
+  // The reference press, made with the network UP on this same page and this
+  // same fixture — so the offline press is compared against a window this app
+  // actually draws rather than against a date literal that would go stale
+  // tomorrow.
+  await openHabit();
+  const atNowRef = await stripRange();
+  await pageBack();
+  await sleep(900);
+  const pagedOnline = await stripRange();
+  const offsetOnline = await stripOffset();
+  ck('a reference press with the network up moves the strip one page back',
+     pagedOnline !== '' && pagedOnline !== atNowRef && offsetOnline > 0,
+     `${atNowRef} -> ${pagedOnline} (offset ${offsetOnline})`);
+
+  // A fresh document, so `state.chartOffsets` starts empty again.
+  await openHabit();
+  const beforeOffline = await stripRange();
+  await send('Network.setBypassServiceWorker', { bypass: true }, sessionId);
+  await send('Network.emulateNetworkConditions',
+    { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
+
+  const pressed = await pageBack();
+  await sleep(1500);
+  const afterPress = await stripRange();
+  const offsetOffline = await stripOffset();
+  ck('the offline ‹ Earlier press was made at all', pressed === true);
+
+  // (a) The disagreement itself. Unfixed, the offset moves to exactly where an
+  // online press puts it while the drawn window does not move at all — which
+  // is the whole of the bug, since the next draw of the card obeys the offset.
+  //
+  // The first two conjuncts are ABSOLUTE, and they are what let the label above
+  // be read as written: a comparison against the reference press alone is
+  // satisfied by two windows that both stayed put, so anything breaking BOTH
+  // presses equally would leave this green. `beforeOffline` is the readout on
+  // THIS document, taken just before the network went — not `atNowRef`, which
+  // belongs to the reference document.
+  ck('offline, the position and the drawn window land on the same page the '
+     + 'network-up press landed on',
+     offsetOffline > 0 && afterPress !== beforeOffline
+       && offsetOffline === offsetOnline && afterPress === pagedOnline,
+     `offset ${offsetOffline} (online ${offsetOnline}), strip ${beforeOffline} `
+     + `-> ${afterPress} (online ${pagedOnline})`);
+
+  // (b) The same fault said the way a user meets it.
+  ck('...so ‹ Earlier actually moves the strip with no network',
+     afterPress !== beforeOffline, `${beforeOffline} -> ${afterPress}`);
+
+  await send('Network.emulateNetworkConditions',
+    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: false }, sessionId);
+  await sleep(1500);
 
   /* ---------- focus survives the rebuild a tap causes ---------- */
 

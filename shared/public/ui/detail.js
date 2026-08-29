@@ -240,8 +240,11 @@ const detailHost = {
  * `open()` is two round trips and a full rebuild, so three quick taps would
  * otherwise fire three of them — and nothing guarantees the third resolves
  * last, which means a later-started reload can finish first and leave OLDER
- * data on screen. The hazard predates the strip (two fast presses on ‹ Earlier
- * do it) but the strip makes rapid re-entry the normal case.
+ * data on screen. The hazard predates the strip — two fast presses on the
+ * History card's ‹ Earlier, which still refetches, do it — but the strip makes
+ * rapid re-entry the normal case. Note the strip's OWN ‹ Earlier no longer
+ * arrives here at all (#245): it redraws locally, and a redraw with nothing to
+ * fetch has no reload to race.
  *
  * A request arriving mid-flight is remembered rather than dropped: the write
  * that prompted it has already landed, so skipping the reload would leave the
@@ -537,71 +540,118 @@ function render(stats, entries) {
  * asking for a different window — the dashboard holds only the fortnight it
  * requested, and no `end` parameter reaches the server from here.
  *
- * What that does NOT mean is request-free, and an earlier version of this
- * comment claimed it. `redraw` is `refresh(habit.id)` — the same full `open()`
- * every other card on this page redraws through, two round trips — so paging
- * spends a refetch to show a slice it already had. It is the page's one idiom
- * rather than this card's own bug, and it costs something visible in exactly
- * one place: offline, `page()` has already moved `state.chartOffsets` before
- * `redraw` runs, the GET is not replayable, and `open()` toasts and returns
- * without rendering. The position has moved and the strip has not, so the
- * window jumps when something next draws it. Redrawing from `entries` in hand
- * is what would make the stronger claim true; it is not what this does.
+ * Paging it therefore costs NO request. `draw` below is what the
+ * ‹ Earlier / Later › / Now buttons call, and it rebuilds the window out of the
+ * `entries` this card was handed. The dashboard holds one fortnight and must
+ * ask for another, and MOST of the cards here draw figures the server computed
+ * — but not all of them: `buildCalendarCard` draws from the same unwindowed
+ * `entriesByDate` / `skipSet`, from `stats.streaks`, and from `calendarWindow`,
+ * and its ‹ Earlier still moves `state.calEnd` and then calls `open()`. That is
+ * this same defect with a longer-lived offset, left out of scope here (#274);
+ * do not read the paragraph below as saying no other card could be local.
+ * What is still not request-free is BUILDING this one — the page it sits on
+ * fetched twice to get here.
+ *
+ * Why that is worth the shape (#245): `page()` in `ui/components.js` moves
+ * `state.chartOffsets` BEFORE it calls `redraw`, a GET is not replayable, and
+ * `open()` toasts and returns without rendering. With `redraw` as
+ * `refresh(habit.id)` a press with no network moved the position and not the
+ * strip, and the window then jumped by a stride when something next drew the
+ * card. Any redraw that can fail without rendering leaves those two
+ * disagreeing; a local one has nothing to fail.
+ *
+ * What paging now shares with a tap is `inRun`: it is `render()`'s, computed
+ * once per full `open()`, so a page draws its run marks from the run set the
+ * card was built with — the same accepted staleness `stripRuns` is declared
+ * with above, now reached by the nav buttons as well as by `repaint`.
+ *
+ * `windowedChart` builds into two places — the nav into `.card-head`, the
+ * chart onto the card itself — which is why `draw` takes `.cal-nav` and
+ * `.chart-scroll` away before building the next pair.
  */
 function buildRecentDaysCard({ habit, entries, chartWidth, inRun }) {
   const strip = card('Recent days', null);
-  const todayIso = todayISO();
-  const fits = columnsForWidth(chartWidth, CELL_PX, 0);
+  const head = strip.querySelector('.card-head');
 
-  // How far back there is to page. Trimmed by comparing ISO strings against
-  // the habit's first entry rather than by counting days between two dates:
-  // the count is the thing this repo has got wrong twice (an epoch walk
-  // repeats a day under a fall-back transition, calendar arithmetic emits a
-  // day Apia never lived), and none of it is needed to answer "which of these
-  // days predate the habit".
-  //
-  // `entries` is ordered by date, so `[0]` is the earliest. Never fewer than
-  // one screenful, so a habit with no history at all still gets a full,
-  // tappable strip — which is exactly who this card is for.
-  const all = datesEndingOn(STRIP_HISTORY_DAYS, todayIso);
-  const first = entries.length ? entries[0].date : todayIso;
-  const firstIdx = all.findIndex((d) => iso(d) >= first);
-  const dates = all.slice(Math.min(
-    firstIdx === -1 ? all.length : firstIdx,
-    Math.max(0, all.length - fits)
-  ));
+  const draw = () => {
+    // Optional on purpose: on the first draw neither node exists, and for a
+    // habit with nothing to page through `windowedChart` never builds a nav
+    // at all.
+    head.querySelector('.cal-nav')?.remove();
+    strip.querySelector('.chart-scroll')?.remove();
 
-  windowedChart({
-    card: strip,
-    key: 'recentDays',
-    items: dates,
-    density: CELL_PX,
-    // The account's `gridDays`, capping what the card's width allows — the
-    // setting means "at most this many days of grid" on both surfaces. The
-    // ladder `gridColumns` applies is NOT used here: it exists to protect the
-    // habit name beside the dashboard's cells, and this card has no name
-    // column.
-    capacity: cappedColumns(settings.get('gridDays'), fits),
-    width: chartWidth,
-    labelOf: (d) => formatDateShort(d),
-    redraw: () => refresh(habit.id),
-    render: (slice) => {
-      const shown = settings.get('dayOrder') === 'newest-left'
-        ? [...slice].reverse()
-        : slice;
-      const wrap = document.createElement('div');
-      wrap.className = 'day-strip';
-      wrap.append(
-        dateColumns(shown, todayIso), dayCells(detailHost, habit, shown, todayIso, inRun));
-      // Where `detailHost.repaint` looks for the cells, and the run set it
-      // repaints them with. Both assigned on every render, and nulled by
-      // `render()` before the rebuild, so a tap can never repaint a strip that
-      // is no longer on the page.
-      stripRoot = wrap;
-      stripRuns = inRun;
-      return wrap;
-    },
-  });
+    // Everything below is recomputed per draw rather than hoisted, because the
+    // full rebuild this replaced recomputed all of it — `todayISO()` most of
+    // all, which must not freeze at the moment the card was built.
+    const todayIso = todayISO();
+
+    // With ONE exception, stated because the line above would otherwise be read
+    // as covering it: `chartWidth` is `render()`'s build-time measurement and is
+    // frozen for the life of the card, so `fits` and the width handed to
+    // `windowedChart` are both frozen with it. Nothing in `shared/public`
+    // listens for `resize` or `orientationchange`, so every card's width already
+    // only refreshes on an `open()`; what changed is that paging this one is no
+    // longer one of the actions that reach `open()`, so after a desktop resize
+    // or a phone rotation the strip keeps redrawing at the old width however far
+    // you page, where the other cards self-correct the moment one of THEM is
+    // used. Left as it is rather than re-measured here: the effect is cosmetic
+    // (`.chart-scroll` absorbs the overflow) and re-measuring per draw needs a
+    // second path anyway, since the card is not in the DOM on the first draw and
+    // `cardInnerWidth` on a detached node answers its 720px floor.
+    const fits = columnsForWidth(chartWidth, CELL_PX, 0);
+
+    // How far back there is to page. Trimmed by comparing ISO strings against
+    // the habit's first entry rather than by counting days between two dates:
+    // the count is the thing this repo has got wrong twice (an epoch walk
+    // repeats a day under a fall-back transition, calendar arithmetic emits a
+    // day Apia never lived), and none of it is needed to answer "which of these
+    // days predate the habit".
+    //
+    // `entries` is ordered by date, so `[0]` is the earliest. Never fewer than
+    // one screenful, so a habit with no history at all still gets a full,
+    // tappable strip — which is exactly who this card is for.
+    const all = datesEndingOn(STRIP_HISTORY_DAYS, todayIso);
+    const first = entries.length ? entries[0].date : todayIso;
+    const firstIdx = all.findIndex((d) => iso(d) >= first);
+    const dates = all.slice(Math.min(
+      firstIdx === -1 ? all.length : firstIdx,
+      Math.max(0, all.length - fits)
+    ));
+
+    windowedChart({
+      card: strip,
+      key: 'recentDays',
+      items: dates,
+      density: CELL_PX,
+      // The account's `gridDays`, capping what the card's width allows — the
+      // setting means "at most this many days of grid" on both surfaces. The
+      // ladder `gridColumns` applies is NOT used here: it exists to protect the
+      // habit name beside the dashboard's cells, and this card has no name
+      // column.
+      capacity: cappedColumns(settings.get('gridDays'), fits),
+      width: chartWidth,
+      labelOf: (d) => formatDateShort(d),
+      redraw: draw,
+      render: (slice) => {
+        const shown = settings.get('dayOrder') === 'newest-left'
+          ? [...slice].reverse()
+          : slice;
+        const wrap = document.createElement('div');
+        wrap.className = 'day-strip';
+        wrap.append(
+          dateColumns(shown, todayIso), dayCells(detailHost, habit, shown, todayIso, inRun));
+        // Where `detailHost.repaint` looks for the cells, and the run set it
+        // repaints them with. Both assigned on every render, and nulled by
+        // `render()` before the rebuild, so a tap can never repaint a strip that
+        // is no longer on the page.
+        stripRoot = wrap;
+        stripRuns = inRun;
+        return wrap;
+      },
+    });
+  };
+
+  draw();
 
   // Never null, unlike the cards that decline when they have no data: a habit
   // with no history at all is exactly who this card is for.
