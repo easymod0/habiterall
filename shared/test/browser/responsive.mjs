@@ -10,7 +10,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 import { seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
@@ -224,14 +224,27 @@ try {
     // user, and the teardown closes however many are open.
     const closeAll =
       `[...document.querySelectorAll('dialog[open]')].reverse().forEach(d => d.close())`;
-    for (const [name, opener] of [
-      ['settings', `document.getElementById('btn-settings').click()`],
+    for (const [name, opener, depth] of [
+      ['settings', `document.getElementById('btn-settings').click()`, 1],
       ['backup', `document.getElementById('btn-settings').click();`
-        + ` document.getElementById('settings-backup').click()`],
+        + ` document.getElementById('settings-backup').click()`, 2],
     ]) {
       await ev(`(() => { ${closeAll}; })()`);
       await ev(opener);
-      await sleep(350);
+      // The expected DEPTH, not "a dialog is open", and that is the whole
+      // reason this is not a one-line poll. Backup opens stacked on top of
+      // settings, so a predicate satisfied by the first `dialog[open]` returns
+      // while only settings is up and hands the measurement below the WRONG
+      // dialog under the label `backup` — a check passing over a control it
+      // was not asked about, which is worse than the sleep it replaces. Laid
+      // out as well as open, for the reason the comparison block below gives
+      // at length: a rect taken before the browser has sized the element
+      // measures a zero-width box and reads it as fitting the viewport.
+      await waitUntil(ev, `(() => {
+        const open = document.querySelectorAll('dialog[open]');
+        return open.length === ${depth}
+          && open[open.length - 1].getBoundingClientRect().width > 0;
+      })()`, { what: `the ${name} dialog to open ${depth} deep and be laid out` });
       const dlg = await ev(`(() => {
         const open = document.querySelectorAll('dialog[open]');
         const d = open[open.length - 1];
@@ -433,17 +446,32 @@ try {
     await send('Emulation.setDeviceMetricsOverride',
       { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
     await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`!!document.getElementById('btn-new') && !document.getElementById('btn-new').hidden`)
-        .catch(() => false)) break;
-      await sleep(200);
-    }
+    // The DASHBOARD having painted, not `#btn-new` merely being visible.
+    // `auth-session.js` unhides that button the moment `/api/me` answers,
+    // which is well before `dashboard.load()` has put anything in
+    // `state.categories` — so a click there opens the dialog over an empty
+    // list and leaves this block depending entirely on `openDialog`'s own
+    // fire-and-forget `refreshCategoryPicker()` landing in time. Nothing else
+    // repaints the manage list, and that call swallows its own failure
+    // (`.catch(() => {})`), so one slow or stale read left the list empty for
+    // the whole 16s this used to wait and then measured it anyway. A painted
+    // `.habit-row` is what the dashboard, `gridDays` and comparison blocks
+    // already wait on, and it is the one that implies the store is populated.
+    // Not universal in this file, and deliberately: the grouped block just
+    // above waits on `#grid .category-section-header` and the detail block on
+    // `#view-detail svg`, each being the narrower predicate for what IT then
+    // measures. Pick the predicate for the block, not the file.
+    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
+      { what: 'the dashboard to paint before the habit dialog is opened' });
     await ev(`document.getElementById('btn-new').click()`);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`document.querySelectorAll('#category-manage .category-manage-row').length >= 2`)
-        .catch(() => false)) break;
-      await sleep(200);
-    }
+    // `waitUntil` THROWS naming what it wanted. The hand-rolled loop this
+    // replaces fell out of its `for` and measured regardless, so a timeout
+    // arrived as three assertions failing on an empty `rows` array — which
+    // says the row is misshapen, not that the dialog never filled. See the
+    // root CLAUDE.md: wait for the app, never for a duration.
+    await waitUntil(ev,
+      `document.querySelectorAll('#category-manage .category-manage-row').length >= 2`,
+      { what: "the habit dialog's category manage list to hold both categories" });
     await sleep(200);
 
     // FIT, not touch size — see the comment on the assertion below. Every
