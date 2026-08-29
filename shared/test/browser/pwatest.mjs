@@ -136,8 +136,15 @@ try {
   // which drives the real `shellFirst` against a fake `fetch` that hangs with
   // no signal. No browser suite drives a hung fetch INSIDE the worker's own
   // target, for either `shellFirst` or `networkFirst`: `hangcheck.mjs`
-  // intercepts only `*/api/*` and `*/healthz*` on the PAGE session, both of
-  // which `sw.js` returns early for before either function ever runs.
+  // intercepts only `*/api/*` and `*/healthz*`, but a CDP intercept installed
+  // on the PAGE session (`Fetch.requestPaused` there) never sees a fetch the
+  // WORKER itself initiates — a separate execution context CDP is not
+  // attached to here — so neither route is actually exercised through the
+  // worker by that suite, regardless of what `sw.js` does with them.
+  // `/healthz` genuinely is one `sw.js` returns early for, before reaching
+  // either function; `/api/*` is not — it is dispatched to `networkFirst`,
+  // which runs same as ever. Both are unreachable from `hangcheck.mjs` for
+  // the page-session reason above, not because `networkFirst` never runs.
   const offlineData = await ev(`(async()=>{
     const r = await fetch('/api/overview?days=7');
     return { status: r.status, habits: r.ok ? (await r.json()).habits?.length : null };

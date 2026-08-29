@@ -217,3 +217,109 @@ test('shellFirst (a script): the fast cache-first path never depends on the netw
     timeout.restore();
   }
 });
+
+/**
+ * #87's own regression, stated as behaviour rather than as "the helper was
+ * called": `AbortSignal.timeout` does not exist below Chrome 103 / Firefox
+ * 100 / Safari 16, and calling it directly THROWS synchronously — inside
+ * `shellFirst`, an `async` function, that throw becomes a REJECTED promise
+ * before `fetch` is ever invoked, so `event.respondWith(<rejected>)` is a
+ * network error on every request through this path, above `SHELL_CACHE`
+ * sitting one line below with a perfectly good `/index.html` in it. This is
+ * the exact failure `AbortSignal.timeout(10_000)` was added to FIX, arriving
+ * by the new route the guard itself introduced.
+ *
+ * `delete AbortSignal.timeout` rather than stubbing it, because a stub still
+ * proves the static exists on this runtime — the regression is that on an
+ * old one it does not. The fallback branch this forces (`AbortController` +
+ * a real 10s `setTimeout`) would otherwise make this test slow and racy
+ * against `RACE_TIMEOUT_MS`, so `setTimeout` is intercepted for exactly the
+ * 10000ms call `boundedSignal` makes and fired on the next tick instead —
+ * everything else (this file's own 2000ms race guard included) runs on the
+ * real clock.
+ */
+test('shellFirst (a navigation): falls back to AbortController when AbortSignal.timeout does not exist', async () => {
+  installFakeFetch();
+  const { seed } = installFakeCaches();
+
+  const originalTimeout = AbortSignal.timeout;
+  delete AbortSignal.timeout;
+
+  const originalSetTimeout = globalThis.setTimeout;
+  const seenDelays = [];
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    seenDelays.push(ms);
+    if (ms === 10_000) return originalSetTimeout(fn, 0, ...args);
+    return originalSetTimeout(fn, ms, ...args);
+  };
+
+  try {
+    const req = fakeRequest({
+      url: 'https://example.test/index.html', mode: 'navigate', destination: '',
+    });
+    const cached = new Response('cached shell', { status: 200 });
+    seed('preseed', req.url, cached);
+
+    const listener = await loadFetchListener();
+    const responded = dispatch(listener, req);
+
+    const response = await raceAgainstHang(
+      responded,
+      'the navigation never resolved: on a runtime with no ' +
+      'AbortSignal.timeout, shellFirst rejected instead of falling back to ' +
+      'the cached shell',
+    );
+    assert.equal(await response.text(), 'cached shell',
+      'shellFirst did not fall back to the cached copy with AbortSignal.timeout absent');
+    assert.ok(seenDelays.includes(10_000),
+      `the AbortController fallback did not bound the request at 10s (saw ${JSON.stringify(seenDelays)})`);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+/**
+ * The other reviewer finding on this file: all three tests above pass even
+ * with `revalidateFirst`'s body collapsed to `if (cached) return cached;` —
+ * every hang-shaped fetch above never resolves, so a version that lets the
+ * cache win unconditionally is indistinguishable from the fixed one as long
+ * as the network path never SETTLES. This is the branch's actual job
+ * (sw.js's own comment: "serving them stale means a deploy needs two loads
+ * to appear, and the first one renders with mismatched HTML and CSS"), so the
+ * fetch here resolves normally, fast, with a body that cannot be confused
+ * with the cached one.
+ */
+test('shellFirst (a navigation): a fresh network reply wins over a stale cache, and is cached', async () => {
+  const FRESH = 'FRESH index.html';
+  const STALE = 'STALE index.html';
+  globalThis.fetch = async () => new Response(FRESH, { status: 200 });
+  const { seed } = installFakeCaches();
+
+  const req = fakeRequest({
+    url: 'https://example.test/index.html', mode: 'navigate', destination: '',
+  });
+  seed('preseed', req.url, new Response(STALE, { status: 200 }));
+
+  const listener = await loadFetchListener();
+  const responded = dispatch(listener, req);
+  const response = await raceAgainstHang(responded, 'the navigation never resolved');
+
+  const body = await response.text();
+  assert.equal(body, FRESH,
+    `shellFirst answered with ${JSON.stringify(body)} — a revalidateFirst ` +
+    'branch that lets the cache win unconditionally would answer with the ' +
+    'stale body instead');
+
+  // Not just what reached `respondWith` — that the fresh reply was also
+  // written into the shell cache, which is the other half of what this
+  // branch is for (the NEXT load).
+  const shellCacheNames = (await caches.keys()).filter((n) => n !== 'preseed');
+  assert.equal(shellCacheNames.length, 1,
+    `expected exactly one shell cache besides the preseeded one, found ${JSON.stringify(shellCacheNames)}`);
+  const shellStore = await caches.open(shellCacheNames[0]);
+  const stored = await shellStore.match(req.url);
+  assert.ok(stored, 'the shell cache holds nothing for this request');
+  assert.equal(await stored.text(), FRESH,
+    'the fresh response did not reach the shell cache');
+});
