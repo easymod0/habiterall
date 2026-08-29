@@ -18,7 +18,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitForRow, waitUntil,
+} from './chrome.mjs';
 
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9236);
 const profile = mkdtempSync(join(tmpdir(), 'habcount-'));
@@ -260,11 +262,11 @@ try {
       body: JSON.stringify({ name:'Pages read', type:'numerical', unit:'pages',
         target_value: 0, target_type:'at_least' }) });
     return (await r.json()).id;})()`);
-  await ev(`(async()=>{ location.reload(); })()`);
-  // This one finds its row by hand rather than through `openToday`, so it needs
-  // the wait spelled out. It is a habit created moments ago, so "the grid has
-  // rows" is emphatically not the same question as "the grid has THIS row".
-  await rowReady('Pages read');
+  // This one finds its row by hand rather than through `openToday`, so the
+  // reload and the wait for it are one call. It is a habit created moments
+  // ago by a raw `fetch` the page never saw, so "the grid has rows" is
+  // emphatically not the same question as "the grid has THIS row".
+  await reloadAndWaitForRow(ev, 'Pages read');
   await ev(`(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Pages read'));
     row.querySelector('.day-cell, .check, button[data-focus-key^="check:"]').click();
@@ -636,7 +638,7 @@ try {
   await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ numberFormat: 'comma' }) }); })()`);
-  await ev(`location.reload(); true`);
+  await reloadAndWaitForRow(ev, target.name);
 
   check('reopened', await openToday());
   await typeAndSave('10.000');
