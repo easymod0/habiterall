@@ -15,7 +15,7 @@ const ADMIN_URL = process.env.ADMIN_URL ??
 
 const { withUser, pool } = await import('../src/db/pool.js');
 const { applyImport } = await import('../src/apply-import.js');
-const { parseSettings } = await import('@habiterall/shared/validate.js');
+const { parseSettings, foldCategoryName } = await import('@habiterall/shared/validate.js');
 const { writeLoopDatabase } = await import('@habiterall/shared/export-loop.js');
 const { parseLoopDatabase } = await import('@habiterall/shared/import.js');
 // Dates only. `/categories/stats`'s own ceiling is asserted as the LITERAL
@@ -428,6 +428,219 @@ const survivingHabit = await fetch(`${overviewBase}/api/habits/${habitWithCatego
   .then((r) => r.json());
 ck("the habit survives its category's deletion, and comes back uncategorised",
   Object.is(survivingHabit.category_id, null), JSON.stringify(survivingHabit.category_id));
+
+/* ---- issue #256: İstanbul / Istanbul is the same bug as Wellness / wellness
+ * above, at a codepoint the ASCII pair cannot exercise — `.toLowerCase()` maps
+ * U+0130 ('İ') to 'i' followed by a combining dot (U+0307), never to plain
+ * 'i', so the OLD fold disagreed with Postgres's `lower()`, which collapses
+ * both `I` and `İ` to plain 'i'. This edition's own unique index (migration
+ * 015, built ON `lower(name)`) already refuses the pair regardless of the
+ * fold — the divergence is that the PERSONAL edition's ASCII-only `NOCASE`
+ * does not, and so let a second row through where this edition's DB alone
+ * caught it. This block pins the ROUTE and the IMPORTER, not the fold itself
+ * — that is `shared/test/validate.test.js` — because a fold being right does
+ * not make its two callers use it.
+ *
+ * Every literal below is a literal NAME comparison, deliberately never a call
+ * to `foldCategoryName` — asserting `foldCategoryName(a) === foldCategoryName(b)`
+ * would test the function against itself and pass unchanged even with the
+ * fold reverted to plain `.toLowerCase()`.
+ */
+const istanbulRes = await fetch(`${overviewBase}/api/categories`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Istanbul', color: '#111111' }),
+});
+ck("POST /categories creates 'Istanbul'", istanbulRes.status === 201, String(istanbulRes.status));
+const istanbul = await istanbulRes.json();
+
+const dotlessIstanbulRes = await fetch(`${overviewBase}/api/categories`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'İstanbul' }),
+});
+ck(
+  "'İstanbul' (U+0130) after 'Istanbul' is 409 here regardless of the fold — " +
+  "Postgres's own lower()-backed unique index already refuses this pair on " +
+  "its own; the divergence issue #256 is about is the OTHER edition " +
+  'answering 201 to the identical request',
+  dotlessIstanbulRes.status === 409, String(dotlessIstanbulRes.status));
+
+// A dedicated app for the import route: it needs `express.raw()` mounted
+// AHEAD of `express.json()` for this one path, exactly as the real
+// server.js mounts it — see the comment there — which `overviewApp` above
+// does not carry (its `express.json()` is global, so a raw body posted
+// through it would never reach `req.body` as a Buffer). Same fake session as
+// `overviewApp`, same router, same account.
+const importApp = express();
+importApp.use((req, _res, next) => { req.session = { user: { id: alice } }; next(); });
+importApp.use('/api/import', express.raw({ type: '*/*', limit: '5mb' }));
+importApp.use(express.json());
+importApp.use('/api', api);
+const importServer = await new Promise((resolve) => {
+  const s = importApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const importBase = `http://127.0.0.1:${importServer.address().port}`;
+
+// A merge-mode import declaring 'İstanbul' as a CATEGORY (colour deliberately
+// NOT DEFAULT_COLOR — a fixture carrying the default would still pass with
+// the never-recolour rule below deleted) and a habit naming it. `entries: []`
+// because this block is about category resolution, not entry fidelity.
+const importBackup = Buffer.from(JSON.stringify({
+  categories: [{ name: 'İstanbul', color: '#abcdef' }],
+  habits: [{
+    name: 'issue-256 imported habit', type: 'boolean', category: 'İstanbul', entries: [],
+  }],
+}));
+const importRes = await fetch(`${importBase}/api/import?mode=merge`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: importBackup,
+});
+ck('the İstanbul import itself succeeds', importRes.status === 200, String(importRes.status));
+const importResult = await importRes.json();
+ck(
+  '…and records no skip — today the categories loop\'s own INSERT attempt ' +
+  "reaches Postgres's lower()-backed unique index (the old fold does not " +
+  "match the pre-existing row's fold, so nothing short-circuits it first), " +
+  'and the caught conflict is recorded as a skip — that skip is the ' +
+  'divergence issue #256 is about for this edition',
+  Array.isArray(importResult.skipped) && importResult.skipped.length === 0,
+  JSON.stringify(importResult.skipped));
+
+const categoriesAfterImport = await fetch(`${overviewBase}/api/categories`).then((r) => r.json());
+const matchingIstanbul = categoriesAfterImport
+  .filter((c) => c.name === 'Istanbul' || c.name === 'İstanbul');
+ck('THE assertion: still exactly ONE category named either spelling',
+  matchingIstanbul.length === 1, JSON.stringify(categoriesAfterImport.map((c) => c.name)));
+
+const importedHabits = await fetch(`${overviewBase}/api/habits`).then((r) => r.json());
+const importedHabit = importedHabits.find((h) => h.name === 'issue-256 imported habit');
+ck(
+  "THE assertion: the imported habit's category_id is the PRE-EXISTING " +
+  "'Istanbul' row's id — asserting the ID and not merely the count, since a " +
+  'second row could otherwise absorb the habit and still leave a count of ' +
+  'one if the pre-existing row were the one left duplicated instead',
+  importedHabit?.category_id === istanbul.id,
+  `${importedHabit?.category_id} vs ${istanbul.id} (categories: ` +
+    `${JSON.stringify(categoriesAfterImport.map((c) => ({ id: c.id, name: c.name })))})`);
+
+const istanbulAfterImport = categoriesAfterImport.find((c) => c.id === istanbul.id);
+ck(
+  "resolve-or-create must never recolour a category it found: the import's " +
+  "own colour (#abcdef, not DEFAULT_COLOR) must not have overwritten the " +
+  "pre-existing row's #111111",
+  istanbulAfterImport?.color === '#111111', JSON.stringify(istanbulAfterImport));
+
+// Clean up everything this block created, by NAME — 'İstanbul' only exists as
+// a row here when the fold is broken, so this is unconditional rather than
+// assuming which rows are present. Left dirty, the later reorder block's
+// `pinnedOrder` sanity check (position 0/1 of the WHOLE list) would be
+// reading past a category this block put there.
+if (importedHabit) {
+  await fetch(`${overviewBase}/api/habits/${importedHabit.id}`, { method: 'DELETE' });
+}
+for (const c of categoriesAfterImport) {
+  if (c.name === 'Istanbul' || c.name === 'İstanbul') {
+    await fetch(`${overviewBase}/api/categories/${c.id}`, { method: 'DELETE' });
+  }
+}
+importServer.close();
+
+/* ---- issue #256: the fold vs Postgres lower(), swept over every codepoint ----
+ *
+ * The block above pins the ROUTE and the IMPORTER at one worked example
+ * (İstanbul/Istanbul). This one pins the PROPERTY that example is standing
+ * in for: for every pair of codepoints THIS server's `lower()` collapses to
+ * the same character, `foldCategoryName` must not keep them apart — the rule
+ * a route-level check needs to stay at least as strict as its DB backstop.
+ *
+ * It is a ONE-WAY containment and deliberately never
+ * `foldCategoryName(ch) === lower(ch)` — that equality is FALSE on a correct
+ * fold, for the 124 circled-capital codepoints (e.g. U+24B6) where JS's
+ * `toLowerCase()` folds and musl's `lower()` does not. That direction is
+ * harmless (the route only gets stricter, never looser than the index) and
+ * asserting equality would fail an implementation that is doing this right.
+ *
+ * `lower()` is read off THIS Postgres in one query rather than assumed — the
+ * grouping key defaults to a codepoint's own character when the query names
+ * no divergence for it, which is what puts plain 'i' (U+0069) in the same
+ * group as 'I' (U+0049) and 'İ' (U+0130) even though only the latter two are
+ * rows in the result set.
+ */
+console.log('\n--- foldCategoryName vs Postgres lower(): every codepoint ---');
+
+const codepointSqlStart = Date.now();
+const { rows: divergentRows } = await admin.query(
+  `SELECT n, lower(chr(n)) AS lo FROM generate_series(1, 1114111) AS n
+   WHERE (n < 55296 OR n > 57343) AND lower(chr(n)) <> chr(n)`
+);
+const codepointSqlMs = Date.now() - codepointSqlStart;
+
+// Codepoint -> what Postgres folds it to. Absent means "maps to itself",
+// which is exactly the WHERE clause above, negated.
+const postgresFold = new Map(divergentRows.map((r) => [Number(r.n), r.lo]));
+
+const codepointWalkStart = Date.now();
+const groups = new Map();   // Postgres's answer -> every codepoint folding to it
+for (let cp = 1; cp <= 0x10ffff; cp++) {
+  if (cp >= 0xd800 && cp <= 0xdfff) continue;   // surrogate range: no character there
+  const ch = String.fromCodePoint(cp);
+  // Whitespace-only: `foldCategoryName` trims before folding, so every one of
+  // these already folds to '' on its own — comparing that against a real
+  // letter sharing Postgres's group (if one ever does) would fail on the
+  // TRIM, not on anything this sweep is about.
+  if (/^\s+$/u.test(ch)) continue;
+  const key = postgresFold.get(cp) ?? ch;
+  if (!groups.has(key)) groups.set(key, []);
+  groups.get(key).push(cp);
+}
+const codepointWalkMs = Date.now() - codepointWalkStart;
+console.log(`  (query ${codepointSqlMs}ms, walk ${codepointWalkMs}ms, ${groups.size} groups)`);
+
+const cpLabel = (cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')} (${String.fromCodePoint(cp)})`;
+
+let offence = null;
+for (const [key, members] of groups) {
+  if (members.length < 2) continue;
+  const first = foldCategoryName(String.fromCodePoint(members[0]));
+  for (const cp of members.slice(1)) {
+    const folded = foldCategoryName(String.fromCodePoint(cp));
+    if (folded !== first) {
+      offence = { a: members[0], b: cp, foldA: first, foldB: folded, key };
+      break;
+    }
+  }
+  if (offence) break;
+}
+ck(
+  'foldCategoryName is constant within every group Postgres lower() ' +
+  'collapses (one-way containment — the fold may be stricter than lower(), ' +
+  'never looser)',
+  offence === null,
+  offence
+    ? `${cpLabel(offence.a)} folds to ${JSON.stringify(offence.foldA)} but ` +
+      `${cpLabel(offence.b)} folds to ${JSON.stringify(offence.foldB)}, though ` +
+      "Postgres's lower() puts both in one group"
+    : '');
+
+// The sweep above reduces a STRING question (does the unique index collapse
+// two names) to one about codepoints taken in isolation, which only holds if
+// lower() folds each codepoint the same way regardless of what sits next to
+// it — unlike JS's OWN Final_Sigma rule, which is exactly the context
+// sensitivity the rewritten fold exists to route around. Checked directly
+// over a probe mixing the four cases this issue is about (İ, a final sigma,
+// an accent, and ẞ) rather than assumed.
+const homomorphismProbe = 'İΟΔΟΣélanẞ';
+const { rows: [{ whole: homomorphismWhole, per_char: homomorphismPerChar }] } = await admin.query(
+  `SELECT lower($1) AS whole,
+          (SELECT string_agg(lower(c), '' ORDER BY ord)
+           FROM unnest(string_to_array($1, NULL)) WITH ORDINALITY AS t(c, ord)) AS per_char`,
+  [homomorphismProbe]
+);
+ck("lower() is a per-codepoint homomorphism, over a probe mixing İ/Σ/é/ẞ",
+  homomorphismWhole === homomorphismPerChar,
+  `whole=${JSON.stringify(homomorphismWhole)} per_char=${JSON.stringify(homomorphismPerChar)}`);
 
 /* ---------- an entry in a reorder list that merely COERCES to an id ----------
  *

@@ -192,11 +192,80 @@ export function parseIcon(value) {
  * plain form already is. So `toLowerCase()` is the CLOSER match to `lower()`,
  * not the looser one — this used to reason the other way round.
  *
+ * A route-level check kept alongside DB constraints as backstops must be **at
+ * least as strict as every backstop**, or the constraint fires on a request
+ * the route already waved through — which used to be exactly the divergence
+ * above, because the two editions' backstops disagree with each other AND (it
+ * turns out) with whole-string `toLowerCase()`. Swept every codepoint against
+ * this server's own Postgres (`postgres:17-alpine`, the same image the
+ * shipped compose and CI use): `lower()` is a per-codepoint homomorphism, and
+ * there are two divergences it collapses that whole-string `toLowerCase()`
+ * does not, plus one that runs harmlessly the other way:
+ *
+ * - **U+0130 (İ)**: `lower()` maps both `I` and `İ` to plain `i`. JS's
+ *   *string* `toLowerCase()` maps `İ` to `i` followed by a combining dot
+ *   above (U+0307) — its one multi-character simple-to-full mapping — so
+ *   `İstanbul` and `Istanbul` fold to different strings and both editions'
+ *   route checks let the second one through: in cloud the `INSERT` still
+ *   walks into the `lower()`-backed unique index, which is caught by
+ *   `isCategoryNameConflict` and answered as a 409 (never a 500 — that
+ *   mapping is deliberate, see `docs/decisions/categories.md`) rather than
+ *   the route's own duplicate check, and `apply-import.js` records the same
+ *   collision as a skip instead of resolving to the existing row; personal's
+ *   ASCII-only `NOCASE` has no backstop for this pair at all, so the same
+ *   import there created a second, genuinely distinct category. Folded per
+ *   codepoint, `İ` is special-cased to the single character `i` instead.
+ * - **Final_Sigma**: whole-string `toLowerCase()` is *context sensitive* —
+ *   `'ΟΔΟΣ'.toLowerCase()` ends in U+03C2 (final sigma) because the last `Σ`
+ *   sits at the end of the string, while `'Οδοσ'.toLowerCase()` ends in plain
+ *   `σ` (U+03C3) because there the last cased letter was already lowercase.
+ *   `lower()` applies no such rule and folds every `Σ`/`σ` to U+03C3
+ *   regardless of position, so `ΟΔΟΣ` and `Οδοσ` collide in Postgres and not
+ *   under the old fold — an ordinary way to type a name in ALL CAPS. Folding
+ *   **per codepoint** (`for...of`, one character at a time) suppresses this
+ *   for free: a lone `Σ` handed to `.toLowerCase()` has no preceding cased
+ *   letter, so the context-sensitive rule never fires and it always answers
+ *   the non-final `σ`.
+ * - 124 codepoints go the OTHER way on this server — JS lowercases circled
+ *   Latin capitals (e.g. U+24B6) that the libc collation provider's
+ *   `lower()` leaves untouched. That exact count is an observation about
+ *   `postgres:17-alpine`'s libc provider, not a thing to pin: a database on
+ *   ICU or the C locale can draw the line elsewhere. What does not move is
+ *   the RULE — containment, never looser than a backstop — which holds
+ *   under libc, ICU and a C-locale database alike, because it does not
+ *   depend on which codepoints land in this direction, only on none ever
+ *   landing in the other. That direction is harmless regardless: the route
+ *   is *stricter* than the index, never looser, which is the same asymmetry
+ *   personal's ASCII-only `NOCASE` backstop already has. Do not try to fold
+ *   those back to themselves to chase equality with `lower()` — the rule
+ *   this function owes its callers is containment, not equality with one of
+ *   them.
+ *
+ * NFC/NFD/NFKC/NFKD normalisation does NOT fix either divergence — all four
+ * forms still fold `İstanbul` and `Istanbul` to different strings — so this
+ * is a fold rewrite and not a normalise-then-fold one.
+ *
+ * Nothing stores a folded name: every call site is transient (a route's own
+ * duplicate check, or the importer's in-memory dedupe), so this changes no
+ * row, needs no migration and no reindex.
+ *
  * @param {unknown} name
  * @returns {string}
  */
 export function foldCategoryName(name) {
-  return String(name ?? '').trim().toLowerCase();
+  const trimmed = String(name ?? '').trim();
+  let folded = '';
+  // `for...of` iterates by CODE POINT (a surrogate pair is one iteration
+  // step), never by UTF-16 unit — a `for (let i = 0; i < s.length; i++)` loop
+  // would split an astral character's surrogate pair across two iterations
+  // and `.toLowerCase()` each half separately, corrupting it.
+  for (const ch of trimmed) {
+    // U+0130 is the one codepoint whose FULL lowercase mapping is
+    // multi-character (`i` + combining dot above) where `lower()`'s simple
+    // mapping is one character (`i`); special-cased so the two agree.
+    folded += ch === 'İ' ? 'i' : ch.toLowerCase();
+  }
+  return folded;
 }
 
 /**

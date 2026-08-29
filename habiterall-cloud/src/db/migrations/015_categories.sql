@@ -22,15 +22,20 @@
 -- Unicode case folding and so is the closer match to this lower(), not
 -- toLocaleLowerCase(), which would tailor the fold to whichever locale the
 -- APP's host happens to be running instead), not this index: this stays a
--- backstop for a race or a fold disagreement, caught in the route
--- (`isCategoryNameConflict`, db/pool.js) and mapped to 409 rather than left
--- to surface as this constraint's own 500. The shared function draws the
--- SAME line as this lower() for every input the two constraints can tell
--- apart — not for every input, full stop: U+0130 (İ) is the known
--- divergence, where JS's toLowerCase() answers 'i' plus a combining dot and
--- glibc's lower() answers a bare 'i', so 'İstanbul' imported into an account
--- already holding 'Istanbul' skips the category here and creates a second
--- one in the personal edition (docs/decisions/categories.md).
+-- backstop for a RACE, caught in the route (`isCategoryNameConflict`,
+-- db/pool.js) and mapped to 409 rather than left to surface as this
+-- constraint's own 500. foldCategoryName folds per codepoint and, swept over
+-- every codepoint against this server's own lower() (issue #256), is never
+-- looser than this index — U+0130 (İ) and Final_Sigma ('ΟΔΟΣ'/'Οδοσ') were
+-- once divergences where the route missed a pair this index caught, sending
+-- 'İstanbul' imported into an account already holding 'Istanbul' here as a
+-- genuine collision (a skip in apply-import.js) rather than a 409 from the
+-- route, and creating a second, distinct category in the personal edition,
+-- which had no backstop for either pair at all. Both are folded alike now,
+-- so a single request can no longer walk that INSERT into a collision this
+-- index alone catches — what reaches this index is a race between two
+-- requests passing the route check at once, same as personal's ASCII-only
+-- NOCASE (docs/decisions/categories.md).
 CREATE TABLE IF NOT EXISTS categories (
   id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id    BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -267,6 +267,41 @@ test('foldCategoryName folds Unicode case, not only ASCII', () => {
   assert.equal(foldCategoryName(' Élan '), foldCategoryName('élan'));
 });
 
+test('foldCategoryName folds U+0130 (dotted capital I) to plain i, the way ' +
+  'Postgres\'s lower() does and whole-string toLowerCase() does not', () => {
+  // Postgres's lower() maps both 'I' (U+0049) and 'İ' (U+0130) to plain 'i'.
+  // JS's whole-string toLowerCase() instead maps 'İ' to 'i' followed by a
+  // combining dot above (U+0307) — a different string from 'istanbul' — which
+  // is the issue's own example of the route accepting a duplicate the index
+  // then 500s on. Assert the literal, not only the pairwise equality: a fold
+  // returning a constant would satisfy the equality alone.
+  assert.equal(foldCategoryName('İstanbul'), 'istanbul');
+  assert.equal(foldCategoryName('İstanbul'), foldCategoryName('Istanbul'));
+});
+
+test('foldCategoryName folds Final_Sigma the way lower() does — position ' +
+  'independent, never only the whole-string context-sensitive answer', () => {
+  // Postgres's lower() has no Final_Sigma rule: every Sigma folds to the
+  // ordinary (non-final) U+03C3 regardless of where it sits in the string.
+  // Whole-string toLowerCase() DOES apply Final_Sigma, so 'ΟΔΟΣ'.toLowerCase()
+  // ends in the final form U+03C2 instead — a different string from what
+  // 'Οδοσ' folds to, and from what Postgres's index collapses them to.
+  // Spelled with U+03C3 on purpose, so a regression to the final form (U+03C2)
+  // fails on the literal and not only on the cross-check below.
+  assert.equal(foldCategoryName('ΟΔΟΣ'), 'οδοσ');
+  assert.equal(foldCategoryName('ΟΔΟΣ'), foldCategoryName('Οδοσ'));
+});
+
+test('foldCategoryName folds an astral character by CODE POINT, not by ' +
+  'UTF-16 unit', () => {
+  // U+10400 (DESERET CAPITAL LETTER LONG I) is outside the BMP and encoded as
+  // a surrogate pair. A loop indexing by UTF-16 unit would split the pair and
+  // fold each half separately, producing neither a valid character nor the
+  // correct answer; folding by code point answers its real lowercase pair,
+  // U+10428.
+  assert.equal(foldCategoryName('𐐀'), '𐐨');
+});
+
 test('foldCategoryName folds with the DOTTED i, never a host locale\'s own', () => {
   // Plain toLowerCase() (no locale argument) always answers the dotted 'i' —
   // a Turkish- or Azeri-locale HOST would instead fold 'Ideas' to a dotless

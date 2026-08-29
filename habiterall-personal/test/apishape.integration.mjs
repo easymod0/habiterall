@@ -377,6 +377,92 @@ ck("THE assertion: 'élan' after 'Élan' is 409 — NOCASE alone would let this 
   elanFoldedRes.status === 409, String(elanFoldedRes.status));
 await fetch(`${base}/api/categories/${elan.id}`, { method: 'DELETE' });
 
+/* ---- issue #256: İstanbul / Istanbul is the same bug as Élan / élan above,
+ * and it is the one the issue was filed about — `.toLowerCase()` maps U+0130
+ * ('İ') to 'i' + a combining dot (U+0307), never to plain 'i', so the OLD
+ * fold disagreed with cloud's Postgres `lower()`, which collapses both to
+ * 'i'. Before the fix this edition's own NOCASE backstop cannot see the
+ * difference either (İ is outside NOCASE's ASCII range), so a route with the
+ * old fold let a second 'İstanbul' row through here where cloud's DB
+ * constraint would have refused it outright. This block pins the ROUTE and
+ * the IMPORTER, not the fold itself — that is `shared/test/validate.test.js`
+ * — because a fold being right does not make its two callers use it.
+ *
+ * Every literal below is a literal NAME comparison, deliberately never a call
+ * to `foldCategoryName` — asserting `foldCategoryName(a) === foldCategoryName(b)`
+ * would test the function against itself and pass unchanged even with the
+ * fold reverted to plain `.toLowerCase()`, which is exactly the trap this
+ * suite's own header names.
+ */
+const istanbulRes = await postJson('/api/categories', { name: 'Istanbul', color: '#111111' });
+ck("POST /categories creates 'Istanbul'", istanbulRes.status === 201, String(istanbulRes.status));
+const istanbul = await istanbulRes.json();
+
+const dotlessIstanbulRes = await postJson('/api/categories', { name: 'İstanbul' });
+ck("THE assertion: 'İstanbul' (U+0130) after 'Istanbul' is 409 — today this " +
+  'edition answers 201 (two categories) because the old fold and NOCASE both ' +
+  'miss this pair; cloud already answers 409 from its lower()-backed index',
+  dotlessIstanbulRes.status === 409, String(dotlessIstanbulRes.status));
+
+// A merge-mode import of a backup that declares 'İstanbul' as a CATEGORY (with
+// a colour that is deliberately NOT DEFAULT_COLOR — a fixture carrying the
+// default would still pass with the never-recolour rule deleted) and a habit
+// naming it. `entries: []` because this block is about category resolution,
+// not entry fidelity.
+const importBackup = Buffer.from(JSON.stringify({
+  categories: [{ name: 'İstanbul', color: '#abcdef' }],
+  habits: [{
+    name: 'issue-256 imported habit', type: 'boolean', category: 'İstanbul', entries: [],
+  }],
+}));
+const importRes = await fetch(`${base}/api/import?mode=merge`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: importBackup,
+});
+ck('the İstanbul import itself succeeds', importRes.status === 200, String(importRes.status));
+const importResult = await importRes.json();
+ck('…and records no skip — today this edition\'s own NOCASE backstop never ' +
+  'fires here (İ is outside its ASCII range), so nothing is skipped either way; ' +
+  'this is the parallel assertion to cloud\'s below, where a skip IS the ' +
+  "divergence",
+  Array.isArray(importResult.skipped) && importResult.skipped.length === 0,
+  JSON.stringify(importResult.skipped));
+
+const categoriesAfterImport = await (await fetch(`${base}/api/categories`)).json();
+const matchingIstanbul = categoriesAfterImport
+  .filter((c) => c.name === 'Istanbul' || c.name === 'İstanbul');
+ck('THE assertion: still exactly ONE category named either spelling — today ' +
+  "this edition's NOCASE backstop lets the import's İstanbul spelling create " +
+  'a second row',
+  matchingIstanbul.length === 1, JSON.stringify(categoriesAfterImport.map((c) => c.name)));
+
+const importedHabits = await (await fetch(`${base}/api/habits`)).json();
+const importedHabit = importedHabits.find((h) => h.name === 'issue-256 imported habit');
+ck("THE assertion: the imported habit's category_id is the PRE-EXISTING " +
+  "'Istanbul' row's id — asserting the ID and not merely the count, since a " +
+  "second row could otherwise absorb the habit and still leave a count of one " +
+  'if the pre-existing row were the one left duplicated instead',
+  importedHabit?.category_id === istanbul.id,
+  `${importedHabit?.category_id} vs ${istanbul.id} (categories named either spelling: ` +
+    `${JSON.stringify(categoriesAfterImport.map((c) => ({ id: c.id, name: c.name })))})`);
+
+const istanbulAfterImport = categoriesAfterImport.find((c) => c.id === istanbul.id);
+ck('resolve-or-create must never recolour a category it found: the import\'s ' +
+  "own colour (#abcdef, not DEFAULT_COLOR) must not have overwritten the " +
+  "pre-existing row's #111111",
+  istanbulAfterImport?.color === '#111111', JSON.stringify(istanbulAfterImport));
+
+// Clean up everything this block created, by id — 'İstanbul' only exists as a
+// row here when the fold is broken, so this is unconditional rather than
+// assuming which rows are present.
+if (importedHabit) await fetch(`${base}/api/habits/${importedHabit.id}`, { method: 'DELETE' });
+for (const c of categoriesAfterImport) {
+  if (c.name === 'Istanbul' || c.name === 'İstanbul') {
+    await fetch(`${base}/api/categories/${c.id}`, { method: 'DELETE' });
+  }
+}
+
 /* ---- fix round item 2(b): a unique-constraint violation the route's own
  * check misses is a 409, not a 500 ----
  *

@@ -99,31 +99,71 @@ as two different categories, while `UNIQUE (user_id, lower(name))` in
 That is exactly the class of edition divergence `shared/src/validate.js`
 exists to prevent — the same input succeeding in one edition and failing in
 the other, silently, depending on which database happens to be running. So
-`foldCategoryName` is one function in shared code (`String(name ??
-'').trim().toLowerCase()`) and both editions' routes look up
-`categoryByFoldedName` / `WHERE lower(name) = lower($1)`-equivalent through it
-before ever reaching the `INSERT`.
+`foldCategoryName` is one function in shared code and both editions' routes
+look up `categoryByFoldedName` / `WHERE lower(name) = lower($1)`-equivalent
+through it before ever reaching the `INSERT`.
 
-That draws the SAME line for every input the two DB-level constraints can
-tell apart — it does not make the two editions agree for every input, full
-stop, and nothing here should be read as claiming it does. `toLowerCase()`
-and glibc's `lower()` are two independent implementations of Unicode case
-folding, and U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE) is where they
-part: JS's `toLowerCase()` answers `'i̇'` — a bare `i` plus a combining dot,
-U+0069 U+0307 — while glibc's `lower()` answers a bare `i`, U+0069 alone.
-Importing `İstanbul` into an account already holding `Istanbul` therefore
-folds to two different strings under `foldCategoryName` and to the SAME
-string under Postgres's `lower()`: the route-level lookup misses the existing
-row and tries to create a new one, and in cloud that INSERT is what walks
-straight into the `lower()`-backed unique index as a genuine collision —
-caught as a 409 by the route, or as a constraint violation `apply-import.js`'s
-own savepoint has to roll back cleanly for. Personal has no such backstop for
-this pair (`NOCASE` is ASCII-only and does not see `İ` vs `I` either), so the
-same import there creates a second, genuinely distinct category. Not a bug in
-`foldCategoryName` to fix — a fold agreeing with both databases on every
-codepoint at once does not exist to reach for — but the reason the INSERT
-path has to survive a collision cleanly rather than assume the route-level
-check already ruled one out.
+**A route-level check kept alongside DB constraints as backstops must be at
+least as strict as every backstop, and for a while this one was not.** A
+first version folded the whole string at once
+(`String(name ?? '').trim().toLowerCase()`), which draws the SAME line as the
+two DB-level constraints for every ASCII-adjacent input — `Élan`/`élan`
+included — but not for every input, full stop. Swept every codepoint against
+this server's own Postgres (`postgres:17-alpine`, the same image the shipped
+compose and CI use), two pairs `lower()` collapses did not collapse under that
+fold:
+
+- **U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE).** `lower()` maps both
+  `I` and `İ` to plain `i`; whole-string `toLowerCase()` maps `İ` to `i`
+  followed by a combining dot above (U+0307), its one multi-character
+  simple-to-full mapping. `İstanbul` imported into an account already holding
+  `Istanbul` therefore folded to two different strings under the old fold and
+  to the SAME string under `lower()` — this is the issue's own example.
+- **Final_Sigma**, a second divergence nothing here had named before.
+  Whole-string `toLowerCase()` is context sensitive: `'ΟΔΟΣ'.toLowerCase()`
+  ends in U+03C2 (final sigma, because the last `Σ` sits at the end of the
+  string) while `'Οδοσ'.toLowerCase()` ends in plain `σ` (U+03C3, because
+  there the last cased letter was already lowercase). `lower()` applies no
+  such rule and folds every `Σ`/`σ` to U+03C3 regardless of position, so
+  `ΟΔΟΣ` and `Οδοσ` collided in Postgres and not under the old fold — and
+  ALL-CAPS Greek is at least as ordinary a way to type a name as `İstanbul`
+  is.
+
+Both times the route-level lookup missed the existing row and tried to
+create a new one. In cloud that `INSERT` walked straight into the
+`lower()`-backed unique index as a genuine collision, caught by
+`isCategoryNameConflict` and answered as a **409** — never a 500, that
+mapping is deliberate (below) — but from the constraint rather than from the
+route's own duplicate check, and `apply-import.js`'s savepoint recorded the
+same collision as a **skip** instead of resolving to the existing row.
+Personal has no backstop for either pair (`NOCASE` is ASCII-only and sees
+neither `İ` vs `I` nor a final sigma), so the same import there created a
+second, genuinely distinct category.
+
+124 codepoints diverge the OTHER way on this server (JS lowercases circled
+Latin capitals like U+24B6 that the libc collation provider's `lower()`
+leaves alone); that direction is harmless, the route merely stricter than the
+index, the same asymmetry personal's own `NOCASE` backstop already has, and
+is not something to "fix" by folding those back to themselves. The issue also
+proposed normalising first — NFC, NFD, NFKC and NFKD were all tried against
+this server and every one of the four still folds `İstanbul` and `Istanbul`
+to different strings, so normalisation does not close this gap and is not
+part of the fix.
+
+So the old sentence here — "not a bug in `foldCategoryName` to fix, a fold
+agreeing with both databases on every codepoint at once does not exist to
+reach for" — was right about a fold *equal* to both backstops (one does not
+exist; the 124 harmless codepoints alone rule it out) and wrong about what
+was actually needed, which is a fold at least as *strict* as each: never
+looser than a backstop, free to be stricter. `foldCategoryName` now folds
+**per codepoint** rather than the whole string at once, which is what
+suppresses Final_Sigma for free — a lone `Σ` handed to `.toLowerCase()` has no
+preceding cased letter, so the context-sensitive rule never fires — and
+special-cases U+0130 to the single character `i`. Nothing stores a folded
+name: every call site is transient (a route's own duplicate check, or the
+importer's in-memory dedupe), so the fix changes no row, needs no migration
+and no reindex on either database — see below for what it means for an
+account that already holds both spellings.
 
 That is plain `toLowerCase()`, deliberately never `toLocaleLowerCase()`. A
 first version of this reasoned the other way round — "`toLocaleLowerCase()`
@@ -138,31 +178,54 @@ it is a *looser* match to Postgres's locale-independent `lower()` and
 SQLite's `NOCASE` than the plain, locale-free form already is. Plain
 `toLowerCase()` is the closer match, not the looser one.
 
-The DB-level `UNIQUE` constraints stay, but only as a backstop against a race
-between two concurrent requests passing the route check at once, or against
-`foldCategoryName` disagreeing with a constraint it is only an approximation
-of (NOCASE's ASCII-only fold, in personal's direction). A duplicate that
-reaches the constraint is caught and answered as a **409**
-(`isCategoryNameConflict` in each edition's storage module,
-`habiterall-personal/src/db.js` and `habiterall-cloud/src/db/pool.js`), matched
-on the driver's own report of *which* constraint fired — node:sqlite's error
-code plus the column named in its message, Postgres's `23505` plus
-`err.constraint` — rather than allowed to surface as that constraint's own
-500. `resolveOrCreateCategory` in both editions' `apply-import.js` catches the
-same conflict, because that INSERT runs inside the whole import's one
-transaction and an uncaught constraint violation there took every habit and
-entry down with it, not only the category that collided. Note which way round personal's asymmetry actually runs: the ROUTE is the
-stricter of the two, because `toLowerCase()` folds the whole of Unicode while
-`NOCASE` folds ASCII alone — so `Élan` and `élan` are one category to the
-route and two to the constraint. The consequence is that in personal the
-constraint can only fire on a genuine RACE: any pair NOCASE would reject
-differs by ASCII case alone, and that is a pair `foldCategoryName` has already
-refused. The 409 mapping there is live for the race and otherwise unreachable
-through any single request — measured, by removing the route's own duplicate
-check and watching every existing assertion still pass. In cloud it is
-reachable both ways, because `lower()` and `toLowerCase()` are two
-implementations of Unicode case folding rather than one, and they need not
-agree on every codepoint.
+The DB-level `UNIQUE` constraints stay, but now only as a backstop against a
+RACE between two concurrent requests passing the route check at once —
+`foldCategoryName` disagreeing with a constraint it approximates is no longer
+a live path on either edition, because containment (never looser than a
+backstop) is what the fold is for. A duplicate that reaches the constraint is
+caught and answered as a **409** (`isCategoryNameConflict` in each edition's
+storage module, `habiterall-personal/src/db.js` and
+`habiterall-cloud/src/db/pool.js`), matched on the driver's own report of
+*which* constraint fired — node:sqlite's error code plus the column named in
+its message, Postgres's `23505` plus `err.constraint` — rather than allowed
+to surface as that constraint's own 500. `resolveOrCreateCategory` in both
+editions' `apply-import.js` catches the same conflict, because that `INSERT`
+runs inside the whole import's one transaction and an uncaught constraint
+violation there took every habit and entry down with it, not only the
+category that collided. Note which way round personal's asymmetry runs: the
+ROUTE is the stricter of the two, because `toLowerCase()` folds the whole of
+Unicode while `NOCASE` folds ASCII alone — so `Élan` and `élan` are one
+category to the route and two to the constraint. The consequence, unchanged
+from before this fix, is that in personal the constraint can only fire on a
+genuine RACE: any pair NOCASE would reject differs by ASCII case alone, and
+that is a pair `foldCategoryName` has already refused. The 409 mapping there
+is live for the race and otherwise unreachable through any single request —
+measured, by removing the route's own duplicate check and watching every
+existing assertion still pass. Cloud now has the same property for a
+different reason: the fold's containment over `lower()`, swept over every
+codepoint on this server and not merely argued, means every pair Postgres's
+index collapses is a pair the route already catches — İstanbul/Istanbul and
+ΟΔΟΣ/Οδοσ, the two pairs that used to reach the constraint from a single
+request, are both 409'd by the route now. What is left for cloud's
+constraint, same as personal's, is the race the fold cannot be asked to
+prevent by itself.
+
+**What this changes for a row that already exists.** In cloud, nothing: the
+`lower(name)` index already forbade both spellings of any pair it collapses
+from coexisting, so no account can hold a pair the new fold newly collapses,
+no stored row changes, and no reindex is needed — the index expression is
+untouched. In personal, an account created before this fix CAN hold both
+`Istanbul` and `İstanbul` (or `ΟΔΟΣ` and `Οδοσ`), because `NOCASE` saw
+neither pair. After the fix the route treats them as one name: renaming one
+onto the other now answers 409, and `apply-import`'s `categoryIdByFold` map
+collapses both spellings to one key, so an import naming EITHER one attaches
+its habits to whichever of the two rows the map kept last. No row is deleted
+and no habit loses its category — that is the fold's answer for an
+already-stored name changing, which is this fix working rather than a side
+effect to paper over, the same thing the root `CLAUDE.md` asks to be said out
+loud about a stored lapse moving a window. No migration is included: merging
+a pre-existing duplicate pair in personal would have to choose a colour, a
+position and a winner, and that is a separate decision, not a silent one.
 
 **The browser holds no copy of that fold, and the suggestion chips are what
 made one tempting.** A chip is a shortcut — tap `Health` and get a category
