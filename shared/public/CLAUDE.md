@@ -404,6 +404,22 @@ opacity distinguishes them. This is the same shape of argument this section
 already makes for the boolean day-state branch above being unreachable: state
 it, do not add an arm for a case that cannot arise.
 
+**A day before the habit existed was considered and declined, not lost.**
+`style.css` once carried `.check.today`'s neighbour, `.check.before-start {
+opacity: 0.35 }`, meant to dim a day that predates a habit's creation — but
+nothing ever set the class, on either surface that draws a `.check` cell (the
+dashboard grid and the detail page's "Recent days" strip, both `ui/day-strip.js`).
+"Before the habit existed" is not a supported cell state: the states are the
+four in the root `CLAUDE.md` plus the treatments this section describes, and
+there is no fifth — `.check.today`, the one `.check` modifier still in the
+stylesheet, is a column HIGHLIGHT marking which day is today, not a day state,
+and claims nothing about what happened on it. The rule was deleted rather than
+wired up (#231), so it must not be "restored" later by someone assuming it
+regressed. Dimming pre-start days is still a legitimate future FEATURE
+decision, but it starts by setting the class somewhere, not by re-adding a
+rule nothing sets — and `shared/test/css-dead-rules.test.js` is what makes
+doing that a deliberate act rather than a silent one.
+
 **Still open, on purpose.** Streak connectors drawn over an empty cell was
 issue #176, addressed above — a different route (`inStreak`) from anything
 else in this section, and it left `unlogged_is_success`'s own fill untouched.

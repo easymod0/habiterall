@@ -461,9 +461,6 @@ body {
 }
 .check.today .check-day { color: var(--accent); font-weight: 700; }
 
-/* Days the habit did not yet exist for are not failures; dim them. */
-.check.before-start { opacity: 0.35; }
-
 /* ---------- detail view ---------- */
 
 .detail-head {
