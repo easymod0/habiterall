@@ -474,6 +474,15 @@ jobs:
         working-directory: habiterall-personal
         run: node test/callerday.integration.mjs
 
+      # `DATE_RE` is a shape, not a day, so `?end=2026-00-10` reached the window
+      # arithmetic and its two halves disagreed — three completions reported
+      # beside a six-day window that can hold one. `assertDate` has unit tests
+      # and they pin the rule; only the real route can say which of the two
+      # validators it asked, and the weaker one passes every unit test here.
+      - name: A date into a range is a real day
+        working-directory: habiterall-personal
+        run: node test/querydate.integration.mjs
+
       # One entry filed under a day that does not exist used to make the Loop
       # export answer 500 for good. The writer's half is unit-tested; only the
       # real route can show that the request now comes back with a file on it

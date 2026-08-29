@@ -409,18 +409,44 @@ with others.
 The clamped date is normalised **after** the clamp, never before, for exactly
 the reason `resolveWindow` writes out at length: `toISO` pads the month and the
 day and not the year, so normalising `0999-12-31` yields `999-12-31`, which
-sorts above `2026-…` and walks past every bound. Clamped first, the value is
-already inside the window before anything reformats it. `landedAt` then reads
-that normalised date rather than the raw `firstEntry`, because the clamp is what
-put the two in contact and they did not agree: `computeScores` normalises the
-start it is handed (a walk from `2026-02-30` begins on `2026-03-02`) while the
-landing rule compares strings and admitted `2026-03-01`, a bucket with a member
-and no score point behind it. That summed an `undefined` into NaN, serialised as
-`null`, and `ui/categories.js`'s `p.value !== null` filter dropped the vertex —
-so the line lost a point and said nothing about it. `mean` survived, because the
-last bucket's day is `end`, long past the gap. A phantom day never happened, so
-the member lands on the real day the walk reaches instead; `unloggedExcluded` is
-unmoved, since the member has an entry whatever it is dated.
+sorts above `2026-…` and walks past every bound. Clamped first, that particular
+date is inside the window before anything reformats it.
+
+**That paragraph is the version of the trap that shipped: the year padding was
+closed by issue #214**, so `toISO` writes `0999-12-31` now and a low year is no
+longer what makes normalising first unsafe. The ordering still is, and it rests
+on the ROLLOVER instead — a member whose first entry is `2024-99-99` normalises
+to `2032-06-07`, which compares NEWER than `warmStart` where the raw string
+compares older, and `landedAt` then refuses it on every day of the window:
+reported as never logged while holding a row. `shared/test/stats.test.js` pins
+that case here and `9999-99-99` at `resolveWindow`; its `0999-12-31` fixtures
+are kept for the `earliest` CLAMP and their score literals, which is all they
+can still see — not for the padding either, measured by reverting `toISO`'s
+year padding and watching both of them stay green, since the clamp replaces
+`from` before anything reformats it.
+
+**And the ordering is necessary without being sufficient, which is #270.** Both
+fixtures above are ones where the clamp FIRES. A `firstEntry` that sorts after
+`warmStart` is not clamped at all, and the rollover can then carry it past
+`end`: `2025-99-99` against a `warmStart` of `2025-04-27` normalises to
+`2033-06-07`, and `landedAt` refuses the member on every day of the window —
+`unloggedExcluded: 1` and a category reading 1.00 because the member dragging it
+down was excluded rather than scored, which is verbatim the outcome this
+paragraph says the ordering prevents. Older than the padding fix and identical
+on master. The fix is to re-apply the clamps after the reformat; it is filed
+rather than done because it changes what an affected account's figures say.
+
+`landedAt` reads that normalised date rather than the raw `firstEntry`, because
+the clamp is what put the two in contact and they did not agree: `computeScores`
+normalises the start it is handed (a walk from `2026-02-30` begins on
+`2026-03-02`) while the landing rule compares strings and admitted `2026-03-01`,
+a bucket with a member and no score point behind it. That summed an `undefined`
+into NaN, serialised as `null`, and `ui/categories.js`'s `p.value !== null`
+filter dropped the vertex — so the line lost a point and said nothing about it.
+`mean` survived, because the last bucket's day is `end`, long past the gap. A
+phantom day never happened, so the member lands on the real day the walk reaches
+instead; `unloggedExcluded` is unmoved, since the member has an entry whatever
+it is dated.
 
 What makes this worth writing down at length is how easy it is to remove
 without noticing. Measured on this branch, by setting `SCORE_WARMUP_DAYS` to 0

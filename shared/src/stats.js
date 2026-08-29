@@ -17,8 +17,28 @@ export const MAX_RANGE_DAYS = 3660;
  */
 const TWO_DIGIT = Array.from({ length: 100 }, (_, i) => String(i).padStart(2, '0'));
 
+/**
+ * The canonical spelling of a day: four-digit year, two-digit month, two-digit
+ * day. The year is padded for the same reason the other two fields are — every
+ * comparison in this file is a STRING comparison (`from <= date <= end`,
+ * `start < earliest`), and an unpadded '999-12-31' sorts ABOVE '2016-...' —
+ * a day a thousand years back reading as one in the future to every one of
+ * them. That is a hazard closed here rather than a wrong figure anybody saw;
+ * `resolveWindow` says at length why its own clamps kept it off the reachable
+ * path, and what it would take to put it back on one. `dateRange` spells its
+ * own dates and pads its year for this same reason; the two must agree, and a
+ * test pins that they do.
+ *
+ * Its DOMAIN is years 1-9999, which is every year a `YYYY-MM-DD` string can
+ * spell. `String(-1).padStart(4, '0')` is `'00-1'`, so year -1 comes back as
+ * `'00-1-01-01'` — exactly ten characters and not a date, which is why the
+ * test beside this one asserts the days themselves rather than their length.
+ * Nothing can hand it a year outside that: `assertDate` refuses every year
+ * below 0100, and the furthest anything walks back is `boundedRange`'s
+ * `addDays(end, -MAX_RANGE_DAYS)`, ten years.
+ */
 export function toISO(d) {
-  const y = d.getFullYear();
+  const y = String(d.getFullYear()).padStart(4, '0');
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
@@ -85,10 +105,12 @@ export function dateRange(start, end) {
   // Consecutive days share a `'YYYY-MM-'` prefix for a month at a time, so it
   // is built on a rollover rather than per day: one string concatenation and
   // one array lookup per element, against `toISO`'s three `Date` accessors,
-  // two `String()`s, two `padStart`s and a four-part template. The output is
-  // byte-identical and `test/stats.test.js` pins that against `toISO` itself,
-  // because this is now the one place in the file that spells a date without
-  // calling it.
+  // three `String()`s, three `padStart`s and a four-part template. The output
+  // is byte-identical and `test/stats.test.js` pins that against `toISO`
+  // itself, because this is now the one place in the file that spells a date
+  // without calling it — which is why the year is padded HERE too, and why
+  // that padding sits in the prefix rather than in the loop body: a rollover
+  // happens ~40 times over a 1200-day range, an element 1200.
   //
   // That one test does TWO jobs, and `prevDay = 32` is the second of them.
   // No real day exceeds 31, so the opening iteration always takes the branch
@@ -113,7 +135,9 @@ export function dateRange(start, end) {
   let prevDay = 32;
   for (let i = 0; i <= n; i++) {
     const day = cur.getDate();
-    if (day <= prevDay) prefix = `${cur.getFullYear()}-${TWO_DIGIT[cur.getMonth() + 1]}-`;
+    if (day <= prevDay) {
+      prefix = `${String(cur.getFullYear()).padStart(4, '0')}-${TWO_DIGIT[cur.getMonth() + 1]}-`;
+    }
     prevDay = day;
     out[i] = prefix + TWO_DIGIT[day];
     cur.setDate(day + 1);
@@ -127,13 +151,13 @@ export function dateRange(start, end) {
   // count shrinks with the calendar and both agree. Costs one comparison in
   // the ordinary case, where the last element is already `end`.
   //
-  // Compared through `daysBetween` rather than as strings, because `toISO`
-  // pads the month and the day and NOT the year: for a year before 1000 it
-  // writes '100-03-05', which is lexically ABOVE '0100-03-05' and would make
-  // a string test pop the entire range. `boundedRange` clamps such a start
-  // long before it reaches here, so nothing in the app can ask for it — but a
-  // trim that empties a range on an input the function itself accepts is a
-  // trap to leave lying around.
+  // Compared through `daysBetween` rather than as strings, because `end` is a
+  // ROUTE INPUT and is not guaranteed to be a real day even when it is
+  // canonically spelled: `end = '2026-02-30'` walks to 2026-03-02, and a
+  // string test against the phantom date it was handed would pop the last two
+  // elements of a range that is exactly right. Every date the loop itself
+  // spells is canonical — the year is padded here as it is in `toISO` — so it
+  // is the argument, not the output, that this cannot trust.
   while (out.length && daysBetween(out[out.length - 1], end) < 0) out.pop();
   return out;
 }
@@ -991,13 +1015,35 @@ function resolveWindow(entries, start, end) {
   // are inside the window.
   //
   // AFTER the clamps, never before, and that ordering is the whole safety of
-  // it: `toISO` does not pad the YEAR, so normalising '0999-12-31' yields
-  // '999-12-31', which sorts ABOVE '2016-...' and walks straight past the
-  // `earliest` clamp. One entry dated year 0999 — which `assertDate` accepts,
-  // 999 being a real year that does not roll over — then collapsed the whole
-  // payload to a single day and reported zero completions for a habit logged
-  // every other day. Clamped first, `from` is already inside the window
-  // before anything reformats it.
+  // it. Normalising is a ROLLOVER of a string that came out of storage, and a
+  // rollover moves the date by an amount nothing here bounds: '9999-99-99'
+  // lands in year 10007, which is FIVE digits and so sorts below '2026-...'
+  // however the year is padded. Normalised first it clamps to `earliest` and
+  // one junk row opens the widest window MAX_RANGE_DAYS allows, on every
+  // request, for a habit that has none of those days; clamped first it is
+  // `end`.
+  //
+  // NECESSARY AND NOT SUFFICIENT, and the difference is filed as #270 rather
+  // than fixed here. The clamp is a STRING comparison and the reformat is a
+  // rollover worth up to ~8 years, so a date inside the window lexically can
+  // still land outside it afterwards, with neither clamp having run since:
+  // '2026-07-99' sorts below an `end` of '2026-08-18', normalises to
+  // '2026-10-07', and `boundedRange` then answers [] — every figure zero for a
+  // habit with a live streak. Measured, and byte-identical on master, so it is
+  // older than the padding fix and is not something the ordering ever closed.
+  // The fix is to re-apply the clamps AFTER this line; it is not done here
+  // because it changes what an affected account's figures say.
+  // (`toISO` used not to pad the year at all, and that was a LATENT hazard
+  // here rather than a wrong figure: normalising '0999-12-31' yielded
+  // '999-12-31', which sorts ABOVE '2016-...' — but under THIS ordering the
+  // clamps have already replaced such a `from` with `earliest`, and
+  // `toISO(fromISO('2016-08-10'))` is a no-op under either spelling.
+  // Measured: with the padding reverted, the year-0999 test below still
+  // passes and only the canonical-spelling literals fail. What the padding
+  // buys is that the hazard is closed at the source rather than by the clamp
+  // happening to run first — invert the ordering, or normalise an unclamped
+  // stored date anywhere else, and an unpadded year is a window a thousand
+  // years wide read as one in the future.)
   const asDate = fromISO(from);
   if (!Number.isNaN(asDate.getTime())) from = toISO(asDate);
 
@@ -1455,14 +1501,25 @@ export function computeCategoryStats(categories, members,
     // an entry, whatever that entry is dated.
     //
     // The ORDERING is the whole safety of it, exactly as it is in
-    // `resolveWindow`: `toISO` pads the month and the day and NOT the year, so
-    // normalising '0999-12-31' yields '999-12-31', which sorts ABOVE '2026-...'
-    // and walks straight past every bound in this function. Clamped first, the
-    // value being reformatted is at or after `warmStart` — itself derived from
-    // `end` — so it is already inside the window. A `firstEntry` OLDER than
-    // `warmStart` is never reformatted at all and does not need to be:
-    // `memberWarm` is then `warmStart`, a real day, and the member is admitted
-    // on every day of the window under either spelling.
+    // `resolveWindow`: the clamp above is a string comparison and normalising
+    // is a rollover of a stored string, so normalising first lets the rollover
+    // decide which of the two dates the comparison picks. '9999-99-99' lands in
+    // year 10007 — five digits, which sorts BELOW '2026-...' however the year
+    // is padded — so a member holding one junk row would compare as OLDER than
+    // `warmStart` and be scored over the full warm-up from a day it did not
+    // exist, which is the reading the clamp above exists to refuse. A
+    // `firstEntry` OLDER than `warmStart` is never reformatted at all and does
+    // not need to be: `memberWarm` is then `warmStart`, a real day, and the
+    // member is admitted on every day of the window under either spelling.
+    //
+    // NECESSARY AND NOT SUFFICIENT here too, and filed as #270 with
+    // `resolveWindow`'s half. A `firstEntry` that sorts AFTER `warmStart` is
+    // not clamped, and the rollover can then carry it past `end`: '2025-99-99'
+    // against a `warmStart` of '2025-04-27' normalises to '2033-06-07', and
+    // `landedAt` refuses the member on every day of the window — reported as
+    // never logged while holding a row, and the category reads 1.00 because
+    // the member dragging it down was excluded rather than scored. Measured,
+    // and identical on master.
     if (memberWarm) {
       const asDate = fromISO(memberWarm);
       if (!Number.isNaN(asDate.getTime())) memberWarm = toISO(asDate);

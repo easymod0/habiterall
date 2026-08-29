@@ -6,8 +6,22 @@
  * date for anyone west of Greenwich.
  */
 
+/**
+ * The canonical spelling of a day, and the same one `toISO` in
+ * `shared/src/stats.js` produces: four-digit year, two-digit month, two-digit
+ * day. The YEAR is padded for the reason the other two fields are — this
+ * output is compared LEXICALLY (`dashboard.js`'s
+ * `(state.gridEnd ?? todayIso) >= todayIso`) and keys entry lookups against
+ * dates the server spelled, and `'999-12-31'` sorts ABOVE `'2016-…'`.
+ *
+ * Nothing here can reach a year before 1000 today: `todayISO()` is the device
+ * clock and `addDaysISO` steps from it a fortnight at a time. That is
+ * unreachability, not canonicality — the padding is what makes it true of
+ * `iso()` itself rather than of its two current callers, which is the whole
+ * argument the server-side copy was fixed on.
+ */
 export const iso = (d) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  `${String(d.getFullYear()).padStart(4, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 /**
  * `n` consecutive dates ending on `endDate` (default: today), oldest first.

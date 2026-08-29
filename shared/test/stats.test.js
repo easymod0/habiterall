@@ -6,7 +6,7 @@ const {
   computeWeekdays, computeFrequency, computeScores, computeStats, summaryStats,
   computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS,
   summariseMembers, summariseByCategory,
-  isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, MAX_RANGE_DAYS,
+  isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
 } = await import('../src/stats.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
@@ -169,26 +169,74 @@ test('totalCompleted counts the same window the walked figures do, even when the
   assert.equal(stats.totalCompleted, 1);
 });
 
-test('the past-end trim does not empty a range whose year predates 1000', () => {
-  // `toISO` pads the month and the day and NOT the year, so it writes
-  // '100-03-05' where the range was asked for '0100-03-05' — lexically ABOVE
-  // it, so a string-compared trim popped every element and returned nothing.
-  // `boundedRange` clamps such a start long before `dateRange` sees it, so
-  // the app cannot ask for this; it is pinned because the trim is new code
-  // and emptying a range is the worst way for it to be wrong.
+test('a range whose year predates 1000 is spelled with four digits at both ends', () => {
+  // `dateRange` pads its own year, as `toISO` does, so every element of this
+  // range is canonical and the past-end trim has a last element that compares
+  // as the day it is. It used to write '100-03-05' where the range was asked
+  // for '0100-03-05' — lexically ABOVE it, so a string-compared trim would
+  // have popped every element and returned nothing, which is why that trim
+  // goes through `daysBetween`. `boundedRange` clamps such a start long before
+  // `dateRange` sees it, so the app cannot ask for this; it is pinned because
+  // the whole stats model compares dates as strings and a range that spells
+  // one of them short is a comparison that answers backwards.
   const days = dateRange('0100-02-25', '0100-03-05');
+  // Nine days: year 100 is not a leap year under proleptic Gregorian, so its
+  // February has 28.
   assert.equal(days.length, 9);
-  assert.equal(days[days.length - 1], '100-03-05');
+  assert.equal(days[0], '0100-02-25');
+  assert.equal(days[days.length - 1], '0100-03-05');
 });
 
-test('a stored entry dated year 0999 is clamped, not normalised past the clamp', () => {
-  // `toISO` does not pad the YEAR, so normalising '0999-12-31' yields
-  // '999-12-31' — which sorts ABOVE '2016-...' and sails past the `earliest`
-  // clamp that MAX_RANGE_DAYS is enforced by. `assertDate` accepts this date
+test('every date this file spells is the day it is, spelled YYYY-MM-DD', () => {
+  // The whole stats model compares dates as strings — `from <= date <= end`,
+  // `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+  // only while every date is spelled 'YYYY-MM-DD'. An unpadded year is the one
+  // way a real day can be spelled shorter: '999-12-31' sorts ABOVE '2016-...',
+  // so a date a thousand years in the past reads as one in the future to every
+  // comparison in the file.
+  //
+  // Asserted against literals rather than against a second implementation of
+  // `toISO`, which would share whatever bug `toISO` has.
+  assert.equal(toISO(fromISO('0999-12-31')), '0999-12-31');
+  assert.equal(toISO(fromISO('0100-02-25')), '0100-02-25');
+  assert.equal(addDays('0100-02-25', 1), '0100-02-26');
+  assert.equal(addDays('1000-01-01', -1), '0999-12-31');
+
+  // `dateRange` is the one place in stats.js that spells a date without
+  // calling `toISO`, so it is asked separately: every element, not just the
+  // ends the test above pins.
+  //
+  // The DAYS, not their length. A length of ten is satisfiable by something
+  // that is not a date — `String(-1).padStart(4, '0')` is `'00-1'`, so `toISO`
+  // of year -1 is `'00-1-01-01'`, ten characters exactly — and a guard a
+  // malformed value can satisfy is weaker than it reads. The literals also
+  // carry the month rollover, which is where the cached `'YYYY-MM-'` prefix
+  // (and so its padded year) is rebuilt, and February 100 having 28 days,
+  // which is the walk agreeing with the proleptic Gregorian calendar.
+  assert.deepEqual(dateRange('0100-02-25', '0100-03-05'), [
+    '0100-02-25', '0100-02-26', '0100-02-27', '0100-02-28',
+    '0100-03-01', '0100-03-02', '0100-03-03', '0100-03-04', '0100-03-05',
+  ]);
+});
+
+test('a stored entry dated year 0999 is clamped and reads as the day it is', () => {
+  // What this covers is the CLAMP: '0999-12-31' is a date `assertDate` accepts
   // (999 is a real year and does not roll over, unlike 0050), so one
-  // `PUT /entries/0999-12-31` is all it takes to reach it, and the whole
-  // payload collapsed to a single day reporting zero completions for a habit
-  // logged every other day. The clamp therefore runs BEFORE the normalisation.
+  // `PUT /entries/0999-12-31` puts a row a thousand years before `earliest`,
+  // and the window is `MAX_RANGE_DAYS` wide rather than a millennium.
+  //
+  // What it does NOT cover, and this was measured rather than reasoned: the
+  // year padding. Revert `toISO`'s `padStart(4, '0')` and every assertion
+  // below still passes, because `from` is clamped to `earliest` before
+  // anything reformats it and `toISO(fromISO('2016-08-10'))` is a no-op under
+  // both spellings. The padding is pinned by the canonical-spelling literals
+  // in the test above, which is where the mutation lands.
+  //
+  // Nor does it cover the clamp/normalise ORDERING any more, and that IS the
+  // padding's doing: both orderings now answer '0999-12-31' identically,
+  // because there is nothing left for the normalisation to change. The
+  // '9999-99-99' fixture below is what pins the ordering — a date that ROLLS
+  // OVER is the only kind that still can.
   const habit = {
     type: 'boolean', target_value: 0, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1,
@@ -205,6 +253,46 @@ test('a stored entry dated year 0999 is clamped, not normalised past the clamp',
   assert.equal(stats.history.length, MAX_RANGE_DAYS + 1);
   assert.equal(stats.totalCompleted, 2);
   assert.equal(stats.streaks.length, 2);
+});
+
+test('a stored entry of \'9999-99-99\' is clamped BEFORE it is normalised', () => {
+  // The ordering `resolveWindow` says is "the whole safety of it", pinned by
+  // the one shape that can still see it. Normalising is a ROLLOVER, and a
+  // rollover moves the date by an amount nothing in `resolveWindow` bounds:
+  // '9999-99-99' lands in year 10007, and '10007-...' sorts BELOW '2026-...'
+  // however the year is padded, because it is a digit longer.
+  //
+  //   clamped first:    '9999-99-99' > end       -> from = end        (1 day)
+  //   normalised first: '10007-06-07' < earliest -> from = earliest (3661 days)
+  //
+  // So one junk row opens the widest window MAX_RANGE_DAYS allows, on every
+  // request, for a habit that has none of those days — 3660 day-steps per
+  // aggregation pass, eight passes to a `/habits/:id/stats`.
+  //
+  // The junk row is this habit's ONLY row on purpose, and it is not a fixture
+  // that could have been written any other way: `from` is `start ?? firstEntry`
+  // and `firstEntry` is the lexical MIN of the entries, so a date whose year
+  // field must reach 9999 to roll into five digits sorts ABOVE every real one
+  // and is never the min while a real row exists beside it. A single
+  // unparseable row is what an import that went around `assertDate` leaves.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const stats = computeStats(habit, [{ date: '9999-99-99', value: YES }],
+    { end: '2026-08-18' });
+
+  // Literals, and the window's first day rather than only its width: a length
+  // of 1 is what several unrelated ways of being wrong also produce, while
+  // '2026-08-18' names the clamp that was applied.
+  assert.equal(stats.history.length, 1);
+  assert.equal(stats.history[0].bucket, '2026-08-18');
+  assert.equal(stats.scores.length, 1);
+  assert.equal(stats.scores[0].date, '2026-08-18');
+  // The phantom row is outside `[from, end]` under either ordering, so this is
+  // not what discriminates — it is here because `totalCompleted` selects by
+  // string comparison against `from` and is the one figure that would count it.
+  assert.equal(stats.totalCompleted, 0);
 });
 
 test('addDays crosses month and year boundaries', () => {
@@ -1049,8 +1137,9 @@ test('summaryStats matches the score and currentStreak computeStats would return
     // An entry older than MAX_RANGE_DAYS before end.
     { habit: boolHabit, entries: [{ date: '2000-01-01', value: YES }, ...dailyRun],
       opts: { end: END } },
-    // An entry dated '0999-12-31' — not a real day once toISO drops its
-    // year's padding, which is what the post-clamp normalisation is for.
+    // An entry dated '0999-12-31' — a real day, and a thousand years before
+    // `earliest`, so it exercises the clamp and the year padding that keeps
+    // it sorting as the past. Not the ordering: see the literal test below.
     { habit: boolHabit, entries: [{ date: '0999-12-31', value: YES }, ...dailyRun],
       opts: { end: END } },
     // A best run that ENDED before `end`, with a shorter run live at `end` —
@@ -1081,18 +1170,15 @@ test('summaryStats matches the score and currentStreak computeStats would return
   }
 });
 
-test('the 0999-12-31 fixture is pinned to a literal, not only to computeStats', () => {
+test('the 0999-12-31 and 2016-07-9999 fixtures are pinned to literals, not only to computeStats', () => {
   // The parity assertion above compares `summaryStats` against a LIVE
   // `computeStats` call, so a bug shared by both — one inside the window
   // preamble both of them call — moves both readings the same way and the
-  // comparison still passes. This is the case that bites: normalising
-  // '0999-12-31' BEFORE the `earliest` clamp (rather than after) turns it into
-  // '999-12-31', which sorts ABOVE the clamp boundary and walks the entry
-  // straight into the score, changing what both functions return TOGETHER.
-  // The literal is what catches that; the comparison above is what catches
-  // `summaryStats` disagreeing with `computeStats` on its own.
-  const entries = [
-    { date: '0999-12-31', value: YES },
+  // comparison still passes. The literal is what catches that; the comparison
+  // above is what catches `summaryStats` disagreeing with `computeStats`.
+  //
+  // Two junk rows, because one date can no longer carry both halves.
+  const dailyRun = [
     { date: '2026-08-10', value: YES }, { date: '2026-08-11', value: YES },
     { date: '2026-08-12', value: YES }, { date: '2026-08-13', value: YES },
     { date: '2026-08-14', value: YES }, { date: '2026-08-15', value: YES },
@@ -1100,8 +1186,32 @@ test('the 0999-12-31 fixture is pinned to a literal, not only to computeStats', 
     { date: '2026-08-18', value: YES },
   ];
   const opts = { end: '2026-08-18' };
-  assert.deepEqual(summaryStats(boolHabit, entries, opts),
-    { score: 0.381137, currentStreak: 9 });
+
+  // '0999-12-31' is the `earliest` CLAMP: a real day a thousand years back,
+  // which is where the window opens without the clamp, walking the entry into
+  // the score. It is not the padding and it is not the ordering — measured,
+  // by reverting `toISO`'s year padding on the fixed tree and watching this
+  // stay green, because the clamp replaces `from` before anything reformats
+  // it and normalising '2016-08-10' is a no-op under either spelling. The
+  // padding's own coverage is the canonical-spelling literals at the top of
+  // this file; the ordering's is '2016-07-9999' below.
+  assert.deepEqual(summaryStats(boolHabit, [{ date: '0999-12-31', value: YES },
+    ...dailyRun], opts), { score: 0.381137, currentStreak: 9 });
+
+  // '2016-07-9999' is the ORDERING, and a rollover is the only shape left that
+  // can see it here. It sorts just BELOW `earliest` (end - MAX_RANGE_DAYS,
+  // '2016-08-10'), so clamped first it becomes `earliest` and the reading is
+  // the one above — the junk row moves nothing. Normalised first it is
+  // '2043-11-15', past `end`, so the window collapses to the single day `end`
+  // and the same nine completions read 0.051922 with a current streak of 1.
+  //
+  // Note that the score cannot see the ordering the way `computeStats`'
+  // window WIDTH can (see the '9999-99-99' fixture near the top of this file):
+  // the EWMA starts at 0, so a window that merely opens EARLIER over days with
+  // no rows leaves the score untouched. It takes a fixture that collapses the
+  // window the other way, which is why this date and not that one.
+  assert.deepEqual(summaryStats(boolHabit, [{ date: '2016-07-9999', value: YES },
+    ...dailyRun], opts), { score: 0.381137, currentStreak: 9 });
 });
 
 test('the current-vs-best-streak fixture is pinned to a literal, not only to computeStats', () => {
@@ -1366,6 +1476,55 @@ test('a member whose first entry is not a real calendar day lands on the day the
   assert.equal(health.members, 1);
   assert.equal(health.unloggedExcluded, 0);
   assert.equal(typeof health.mean, 'number');
+  assert.equal(health.series.at(-1).value, health.mean);
+});
+
+test('a member whose first entry ROLLS OVER is clamped to warmStart BEFORE it is normalised', () => {
+  // `memberWarm` clamps and then normalises, exactly as `resolveWindow` does
+  // and for the same reason, and nothing in this suite could see that ordering
+  // — reversing it left `npm test` at zero failures. The clamp is a STRING
+  // comparison against `warmStart` and normalising is a ROLLOVER of a stored
+  // string, so normalising first lets the rollover decide which of the two
+  // dates the comparison picks.
+  //
+  // '2024-99-99' is the fixture, and every digit of it is doing work.
+  // `warmStart` is CAT_START - 400 = '2025-04-27', so:
+  //
+  //   clamped first:    '2024-99-99' <= warmStart  -> memberWarm = warmStart
+  //   normalised first: '2032-06-07' >  warmStart  -> memberWarm = '2032-06-07'
+  //
+  // and '2032-06-07' is past CAT_END, so `landedAt` refuses the member on every
+  // day of the window: it drops out of `mean`, out of `worst`, out of every
+  // bucket's `members`, and into `unloggedExcluded` — a habit reported as never
+  // logged when it holds a row, and a category reading 1.00 because the member
+  // dragging it down was quietly excluded rather than scored.
+  //
+  // NOT '9999-99-99', which is the date `resolveWindow`'s own fixture uses:
+  // here it is invisible under either ordering. It sorts above `warmStart`, so
+  // clamped first `memberWarm` is '10007-06-07' — and `boundedRange` inside
+  // `computeScores` re-clamps that to end - MAX_RANGE_DAYS, because five year
+  // digits sort BELOW four. Both orderings then score the member over days it
+  // has no rows on and answer 0. The rollover has to land on the far side of
+  // `warmStart` to be seen, not merely be a rollover.
+  const ghost = { ...boolHabit, id: 31, name: 'Ghost', category_id: 1 };
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: ghost, entries: [{ date: '2024-99-99', value: YES, status: '' }] },
+  ];
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+
+  // The member has an entry, whatever that entry is dated, so it is scored
+  // rather than excused — and a row on a day that never happened credits
+  // nothing, which is an honest 0 and half the mean of the pair.
+  assert.equal(health.members, 2);
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(health.mean, 0.499968);
+  assert.equal(health.worst.name, 'Ghost');
+  assert.equal(health.worst.score, 0);
+  // And the series carries it from the window's first day, not from partway in:
+  // an excluded member is a chart whose early buckets count one habit and whose
+  // late ones count two, which reads as the category improving.
+  assert.equal(health.series[0].members, 2);
   assert.equal(health.series.at(-1).value, health.mean);
 });
 

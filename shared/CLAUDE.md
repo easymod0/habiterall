@@ -263,12 +263,36 @@ calls, because `/habits/:id/stats` still needs every one of the eight.
 element.** The old walk pushed the string it was handed before normalising
 anything, so element 0 was the raw `start` and every later element was
 `toISO`'d. The two differ exactly when `toISO(fromISO(start)) !== start`, which
-is a date that is not a real day (`dateRange('2026-02-30', …)` opened on
-2026-02-30 and then skipped 2026-03-02, the real day the rollover lands on) or
-a year before 1000, where `toISO` drops the padding and the old list was
-internally inconsistent — `0100-02-25` followed by `100-02-26`. Building the
-`Date` up front means every element is normalised, so the list is a contiguous
-run of days that happened, spelled one way.
+is a date that is not a real day — `dateRange('2026-02-30', …)` opened on
+2026-02-30 and then skipped 2026-03-02, the real day the rollover lands on.
+A year before 1000 used to be a second case, because `toISO` dropped the
+padding and the old list was internally inconsistent — `0100-02-25` followed
+by `100-02-26`; both `toISO` and `dateRange`'s own prefix pad the year to four
+digits now. Building the `Date` up front means every element is normalised, so
+the list is a contiguous run of days that happened, spelled one way.
+
+**A date is a real day spelled `YYYY-MM-DD`, and the padding is not
+cosmetic.** The whole stats model compares dates as strings — `from <= date <=
+end`, `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+only while every date has four year digits, two month digits and two day
+digits. `999-12-31` sorts ABOVE `2016-…`, so a day a thousand years in the past
+reads as one in the future to every comparison in the file. `toISO` pads all
+three fields, and `dateRange` — the one place in `stats.js` that spells a date
+without calling `toISO` — pads the year on its cached `'YYYY-MM-'` prefix, not
+per element, so the walk costs the same as it did. `test/stats.test.js` pins
+both, in literals rather than against a second implementation, and in the days
+themselves rather than in a LENGTH: `String(-1).padStart(4, '0')` is `'00-1'`,
+so `'00-1-01-01'` is ten characters and not a date, and a guard a malformed
+value satisfies is weaker than it reads. `toISO`'s domain is years 1-9999 and
+its JSDoc says so.
+
+**There is a third site and it is in the browser: `iso()` in
+`public/ui/dates.js`.** It is the source of `todayISO()` and `addDaysISO()`,
+and `ui/dashboard.js` compares its output against server dates lexically, so
+the same rule holds there and it pads the year too (`test/dates.test.js`). No
+client can reach a year before 1000 — `todayISO()` is the device clock — so
+that one is unreachability being made into canonicality, which is what stops
+the property depending on who calls it.
 
 Only the first of those is reachable through the app: `boundedRange` clamps a
 low-year start long before `dateRange` sees it, while a phantom date survives
@@ -278,6 +302,37 @@ it matters because `computeStats` takes `from` as the earliest STORED entry
 when a caller names no window. An account holding such a row sees its derived
 figures move once. That is the phantom day leaving them, not a regression.
 
+**Every route that takes a date into a RANGE calls `assertDate`, and one route
+deliberately does not.** `DATE_RE` is a shape and nothing more, so it admits
+`2026-00-10` and `2026-02-30` — and a route that takes one of those into the
+window arithmetic gets two answers to one question, because `fromISO` ROLLS the
+bad component over while `totalCompleted` compares the raw string. `queryDate`
+(`src/validate.js`) is the one guard for that: absence returns the caller's
+fallback, everything else goes through `assertDate`, and a non-string — a
+REPEATED query parameter is an array — is turned into `''` rather than
+string-coerced. That last clause is a rule stated, not a bug patched, and the
+JSDoc there says which: under Express 5's default `simple` parser a repeated
+`end` is always a two-or-more-element array, so it carries a comma and
+`DATE_RE` refuses it either way. It is the `extended` parser, which can produce
+a ONE-element array, where the coercion yields a valid-looking date and
+`assertDate` then calls `.split` on an array — a 500. Neither edition sets that
+parser; the guard is what makes it not matter if one ever does.
+Three routes and five parameters, in each of the two editions: `end` and
+`start` on `GET /habits/:id/stats` and on `GET /categories/stats`, and `end` on
+`GET /overview`. The exception is
+`DELETE /habits/:id/entries/:date`, which stays on `DATE_RE` — its date keys a
+single row and reaches no range, no comparison and no computed figure, and rows
+filed under a day that does not exist are exactly what the paragraph above says
+are out there, so `assertDate` on that path would make one permanently
+undeletable through the API. `habiterall-personal/test/querydate.integration.mjs`
+and the matching block in `habiterall-cloud/test/api.integration.mjs` pin it,
+at the routes, because nothing here can say which validator a route reached
+for. What those two do NOT pin is the `typeof` clause: a repeated `end` is a
+400 without it, on the comma, and both suites say so where they used to credit
+the guard. The clause is pinned in `shared/test/validate.test.js` instead,
+since no route as configured can be pointed at the one-element array it exists
+for.
+
 `computeStats` therefore normalises `from`, and that half is not optional:
 `totalCompleted` selects by STRING comparison against `from` while every other
 figure is read off the walked list, so an un-normalised `from` counts the
@@ -285,15 +340,44 @@ phantom row in one figure and in none of the others — exactly the disagreement
 the note above `totalCompleted` says was fixed.
 
 **It normalises AFTER the two clamps, never before, and the ordering is the
-whole safety of it.** `toISO` pads the month and the day and **not the year**,
-so normalising `0999-12-31` yields `999-12-31` — which sorts ABOVE `2016-…`
-and sails straight past the `earliest` clamp that `MAX_RANGE_DAYS` is enforced
-by. `assertDate` accepts that date (999 is a real year and does not roll over,
-where `0050` does and is refused), so one `PUT /entries/0999-12-31` reached it:
-the payload collapsed to a single day and reported zero completions for a
-habit logged every other day, with nothing logged and no row findable through
-a UI that now showed no days at all. Clamped first, `from` is inside the
-window before anything reformats it.
+whole safety of it.** Normalising is a ROLLOVER of a string that came out of
+storage, and a rollover moves the date by an amount nothing in `resolveWindow`
+bounds: `9999-99-99` lands in year 10007, five digits, which sorts BELOW
+`2026-…` however the year is padded. Normalised first it clamps to `earliest`,
+so one junk row opens the widest window `MAX_RANGE_DAYS` allows on every
+request for a habit that has none of those days; clamped first it is `end`. The
+same ordering, for the same reason, in `computeCategoryStats`' `memberWarm`,
+where that five-digit year would otherwise compare as OLDER than `warmStart`
+and score a member over a warm-up it never had.
+
+**It is NECESSARY AND NOT SUFFICIENT, which is #270.** The clamp is a string
+comparison and the reformat is a rollover worth up to ~8 years, so a date
+inside the window *lexically* can land outside it afterwards with neither clamp
+having run since. `2026-07-99` sorts below an `end` of `2026-08-18`, normalises
+to `2026-10-07`, and `boundedRange` answers `[]` — every figure zero for a
+habit with a live nine-day streak. `memberWarm` has the same hole above
+`warmStart`. Both are older than the year padding (measured byte-identical on
+master) and neither is something the ordering ever closed; the fix is to
+re-apply the clamps AFTER the reformat, and it is filed rather than done
+because it changes what an affected account's figures say. Do not read the
+paragraph above as saying the window is safe — it says only which of the two
+orderings is less wrong.
+
+The year padding closed the same trap one step earlier, and it was LATENT
+rather than live — say it that way round, because the difference is the whole
+of what a reader can check. `toISO` used to pad the month and the day and not
+the year, so normalising `0999-12-31` yielded `999-12-31` — ABOVE `2016-…`,
+and above the `earliest` clamp `MAX_RANGE_DAYS` is enforced by. What stopped
+that being a wrong figure is the ordering above: `from` has already been
+clamped to `earliest` by the time anything reformats it, and
+`toISO(fromISO('2016-08-10'))` is a no-op under both spellings. Measured, by
+reverting the padding on the fixed tree: the year-0999 test in
+`test/stats.test.js` still passes and only the canonical-spelling literals
+fail. So no account's figures moved, and the padding is worth having for what
+it stops being true — invert that ordering, or normalise an unclamped stored
+date anywhere else (`assertDate` accepts `0999-12-31`, 999 being a real year
+that does not roll over where `0050` does), and an unpadded year is a payload
+collapsed to a single day with nothing findable behind it.
 
 **And `n` counts elapsed 24-hour spans while the loop takes calendar steps**,
 which agree everywhere except a zone that moved the date line WESTWARD and so
