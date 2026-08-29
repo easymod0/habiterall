@@ -40,9 +40,18 @@ const css = readFileSync(join(root, 'public', 'style.css'), 'utf8');
  * setting it.
  *
  * WHAT is actually checked, and why it has to be this narrow: a class token
- * is set through `className` or `classList` (`.add`, `.toggle`, `.remove`,
- * `.replace`), so this looks only at LINES containing one of those and reads
- * their string literals, split into whitespace-delimited tokens. A literal
+ * is set through `className` or `classList` (`.add`, `.toggle`), so this
+ * looks only at LINES containing one of those and reads their string
+ * literals, split into whitespace-delimited tokens. The line test is the
+ * bare `classList.` prefix rather than the setting methods spelled out, so
+ * `.remove`, `.replace` and `.contains` come along with them — and a REMOVAL
+ * is not a set: `classList.remove('x')` on a class nothing anywhere adds
+ * would satisfy this guard, the same family as the `contains` counterexample
+ * in the next paragraph, and `.replace`'s first argument is a removal too.
+ * Spelling out `.add`/`.toggle` would not make the test exact — `className`
+ * carries no method name at all, and every counterexample here is a literal
+ * sharing a LINE with a setter rather than a wrong method — so the prefix
+ * stays and the permissiveness is stated rather than papered over. A literal
  * on a class-setting LINE is not a guarantee that literal is the class being
  * set — see the two counterexamples below — but a literal anywhere else in the
  * file (a comment, a URL, an error message, a UI label) is not even that
@@ -66,12 +75,24 @@ const css = readFileSync(join(root, 'public', 'style.css'), 'utf8');
  * do not overlap: the guard still catches a modifier outside that
  * vocabulary, which is the case it exists for.
  *
- * WHAT this cannot see, split by which direction it is wrong in. Three are
+ * WHAT this cannot see, split by which direction it is wrong in. Four are
  * loud false FAILURES — the guard names a modifier dead when a module does
  * set it, which sends a reader to look and cannot ship silently:
  *   - a class ASSEMBLED dynamically, e.g. a template literal that
  *     interpolates the modifier rather than spelling it
  *     (`` `check ${state}` ``);
+ *   - a class set through `setAttribute('class', …)`, or spelled as a static
+ *     `class="…"` attribute in `index.html`: neither carries the token
+ *     `className` or `classList.`, and the second is out of reach twice over
+ *     since `jsFilesUnder` collects `.js` and no HTML at all. It stays a
+ *     documented gap rather than a code change because nothing needs it
+ *     today — `setAttribute('class'`/`'className'` appears NOWHERE under
+ *     `shared/public/`, and while `index.html` is full of static `class`
+ *     attributes, none of them is a `.check` cell: every one of those is
+ *     built by `ui/day-strip.js`, which is the same fact the whole guard
+ *     rests on. Widening the scan to HTML would have to be paid for by a
+ *     rule about which attribute values are class names, for a false failure
+ *     nothing in this tree can currently produce;
  *   - a `className`/`classList` call whose class-bearing string literal
  *     sits on a DIFFERENT LINE from the `className`/`classList` token
  *     itself (a multi-line assignment or call);
@@ -152,8 +173,20 @@ test('every .check-qualified CSS modifier is a class some module actually sets',
   // `.check.`). `.checks`, `.check-box` and `.checkbox` are excluded the
   // same way the single-modifier version excluded them: the character right
   // after `check` has to be a literal `.`.
+  //
+  // COMMENTS ARE STRIPPED FIRST, because this is a scan of raw file text and
+  // `style.css` documents itself at length (`.day-strip`'s three overrides,
+  // `.setting-ordered-row`, the `.check.today` note). The likeliest next edit
+  // at the scene of #231 is a marker where the rule was — `/* .check.
+  // before-start was deleted in #231 — do not re-add. */` — which unstripped
+  // puts `before-start` back into the modifier set and fails this test naming
+  // it, telling its reader the class is meant to be SET when the note they
+  // just wrote says the opposite. Non-greedy to the first `*/`, which is what
+  // ends a CSS comment; they do not nest, so there is no case to be lazy
+  // about. Nothing else here reads `css` raw.
+  const cssRules = css.replace(/\/\*[\s\S]*?\*\//g, '');
   const modifiers = new Set();
-  for (const m of css.matchAll(/\.check((?:\.[A-Za-z0-9_-]+)+)/g)) {
+  for (const m of cssRules.matchAll(/\.check((?:\.[A-Za-z0-9_-]+)+)/g)) {
     for (const part of m[1].split('.')) {
       if (part) modifiers.add(part);
     }
