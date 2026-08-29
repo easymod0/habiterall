@@ -542,10 +542,15 @@ function render(stats, entries) {
  *
  * Paging it therefore costs NO request. `draw` below is what the
  * ‹ Earlier / Later › / Now buttons call, and it rebuilds the window out of the
- * `entries` this card was handed. It is the only card on the page that can:
- * the dashboard holds one fortnight and must ask for another, and the other
- * nine cards here draw figures the server computed. What is still not
- * request-free is BUILDING it — the page it sits on fetched twice to get here.
+ * `entries` this card was handed. The dashboard holds one fortnight and must
+ * ask for another, and MOST of the cards here draw figures the server computed
+ * — but not all of them: `buildCalendarCard` draws from the same unwindowed
+ * `entriesByDate` / `skipSet`, from `stats.streaks`, and from `calendarWindow`,
+ * and its ‹ Earlier still moves `state.calEnd` and then calls `open()`. That is
+ * this same defect with a longer-lived offset, left out of scope here (#274);
+ * do not read the paragraph below as saying no other card could be local.
+ * What is still not request-free is BUILDING this one — the page it sits on
+ * fetched twice to get here.
  *
  * Why that is worth the shape (#245): `page()` in `ui/components.js` moves
  * `state.chartOffsets` BEFORE it calls `redraw`, a GET is not replayable, and
@@ -579,6 +584,20 @@ function buildRecentDaysCard({ habit, entries, chartWidth, inRun }) {
     // full rebuild this replaced recomputed all of it — `todayISO()` most of
     // all, which must not freeze at the moment the card was built.
     const todayIso = todayISO();
+
+    // With ONE exception, stated because the line above would otherwise be read
+    // as covering it: `chartWidth` is `render()`'s build-time measurement and is
+    // frozen for the life of the card, so `fits` and the width handed to
+    // `windowedChart` are both frozen with it. Nothing in `shared/public`
+    // listens for `resize` or `orientationchange`, so every card's width already
+    // only refreshes on an `open()`; what changed is that paging this one is no
+    // longer one of the actions that reach `open()`, so after a desktop resize
+    // or a phone rotation the strip keeps redrawing at the old width however far
+    // you page, where the other cards self-correct the moment one of THEM is
+    // used. Left as it is rather than re-measured here: the effect is cosmetic
+    // (`.chart-scroll` absorbs the overflow) and re-measuring per draw needs a
+    // second path anyway, since the card is not in the DOM on the first draw and
+    // `cardInnerWidth` on a detached node answers its 720px floor.
     const fits = columnsForWidth(chartWidth, CELL_PX, 0);
 
     // How far back there is to page. Trimmed by comparing ISO strings against

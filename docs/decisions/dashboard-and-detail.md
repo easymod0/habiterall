@@ -248,13 +248,49 @@ change to one module's internals is what keeps this from costing every installed
 client its data cache, and it is the reason the shape was chosen that way rather
 than a happy accident of it.
 
-**Why this card could and nothing else on the page could.** `open()` fetches
-`/habits/:id/entries` with no `start` and no `end`, so `entries`,
-`entriesByDate` and `skipSet` are the habit's whole history and every window
-this card can page to is already in memory; `inRun` comes off the stats payload,
-requested the same way. The dashboard holds only the fortnight it asked for and
-must ask again. The other nine cards here draw figures the SERVER computed,
-which could not move offline whatever their redraw did.
+**Why this card could.** `open()` fetches `/habits/:id/entries` with no `start`
+and no `end`, so `entries`, `entriesByDate` and `skipSet` are the habit's whole
+history and every window this card can page to is already in memory; `inRun`
+comes off the stats payload, requested the same way. The dashboard holds only
+the fortnight it asked for and must ask again. Most of the other cards here draw
+figures the SERVER computed, which could not move offline whatever their redraw
+did.
+
+**And the calendar is not one of those — it is a second instance of the same
+defect, left out of scope and filed as #274.** An earlier draft of this section
+said "and nothing else on the page could", and shipped that reason into
+`shared/public/CLAUDE.md` and into `detail.js`'s own comment beside it. It was
+simply false, and it is worth recording as false rather than quietly narrowing:
+a `CLAUDE.md` is loaded into context for every future change to this page, and a
+wrong reason there is more expensive than no reason. `buildCalendarCard` draws
+from `entriesByDate` and `skipSet` — fetched unwindowed exactly as the strip's
+`entries` are — plus `stats.streaks` for the bands, already in memory, and
+`calendarWindow(calEnd, CAL_WEEKS, weekStart)`, which is pure client arithmetic.
+Nothing in its window needs the server. And its `shift` is the shape this whole
+section is about:
+
+```js
+const shift = (weeks) => {
+  state.calEnd = addDaysISO(state.calEnd ?? todayISO(), weeks * 7);
+  if (state.calEnd > todayISO()) state.calEnd = todayISO();
+  open(habit.id);                       // offline: toast, return false, no render
+};
+```
+
+The difference is that the calendar's stored position OUTLIVES the strip's, so
+this one is not mostly latent the way the strip's was. `open()` clears
+`state.chartOffsets` only when a different habit is opened
+(`if (!redraw) state.chartOffsets = {}`), and `dashboard.paint()` nulls
+`state.openHabitId`, so going back to the list and reopening does clear the
+strip's offset. Nothing on that path clears `state.calEnd`: it is nulled only by
+the calendar's own `Today` button and by the card's `forget` entry
+(`detail.js`), which runs when the card is hidden — and the comment on that
+entry already says why, that `chartOffsets` alone was never enough for the one
+card paged by a date. Press ‹ Earlier offline, go back to the dashboard, come
+back online and reopen the habit — and the calendar renders a window you never
+saw it move to, which is #245's own headline symptom surviving a navigation the
+strip's did not. It is scoped out here for the reason #230 is, not because the
+rule above stops at this card's edge.
 
 **The rejected shape was rolling the offset back when the redraw fails**, in
 `page()`. It loses twice: it keeps a request this card never needed, and it
