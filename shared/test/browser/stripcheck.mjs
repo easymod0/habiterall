@@ -565,11 +565,19 @@ try {
   // (a) The disagreement itself. Unfixed, the offset moves to exactly where an
   // online press puts it while the drawn window does not move at all — which
   // is the whole of the bug, since the next draw of the card obeys the offset.
+  //
+  // The first two conjuncts are ABSOLUTE, and they are what let the label above
+  // be read as written: a comparison against the reference press alone is
+  // satisfied by two windows that both stayed put, so anything breaking BOTH
+  // presses equally would leave this green. `beforeOffline` is the readout on
+  // THIS document, taken just before the network went — not `atNowRef`, which
+  // belongs to the reference document.
   ck('offline, the position and the drawn window land on the same page the '
      + 'network-up press landed on',
-     offsetOffline === offsetOnline && afterPress === pagedOnline,
-     `offset ${offsetOffline} (online ${offsetOnline}), strip ${afterPress} `
-     + `(online ${pagedOnline})`);
+     offsetOffline > 0 && afterPress !== beforeOffline
+       && offsetOffline === offsetOnline && afterPress === pagedOnline,
+     `offset ${offsetOffline} (online ${offsetOnline}), strip ${beforeOffline} `
+     + `-> ${afterPress} (online ${pagedOnline})`);
 
   // (b) The same fault said the way a user meets it.
   ck('...so ‹ Earlier actually moves the strip with no network',

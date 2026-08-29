@@ -240,8 +240,11 @@ const detailHost = {
  * `open()` is two round trips and a full rebuild, so three quick taps would
  * otherwise fire three of them — and nothing guarantees the third resolves
  * last, which means a later-started reload can finish first and leave OLDER
- * data on screen. The hazard predates the strip (two fast presses on ‹ Earlier
- * do it) but the strip makes rapid re-entry the normal case.
+ * data on screen. The hazard predates the strip — two fast presses on the
+ * History card's ‹ Earlier, which still refetches, do it — but the strip makes
+ * rapid re-entry the normal case. Note the strip's OWN ‹ Earlier no longer
+ * arrives here at all (#245): it redraws locally, and a redraw with nothing to
+ * fetch has no reload to race.
  *
  * A request arriving mid-flight is remembered rather than dropped: the write
  * that prompted it has already landed, so skipping the reload would leave the
@@ -551,6 +554,11 @@ function render(stats, entries) {
  * strip, and the window then jumped by a stride when something next drew the
  * card. Any redraw that can fail without rendering leaves those two
  * disagreeing; a local one has nothing to fail.
+ *
+ * What paging now shares with a tap is `inRun`: it is `render()`'s, computed
+ * once per full `open()`, so a page draws its run marks from the run set the
+ * card was built with — the same accepted staleness `stripRuns` is declared
+ * with above, now reached by the nav buttons as well as by `repaint`.
  *
  * `windowedChart` builds into two places — the nav into `.card-head`, the
  * chart onto the card itself — which is why `draw` takes `.cal-nav` and

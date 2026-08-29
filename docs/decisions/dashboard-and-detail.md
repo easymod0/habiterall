@@ -190,7 +190,8 @@ the button that was just pressed.
 `open()` is two requests and a full rebuild, so three quick taps fire three of
 them and nothing guarantees the third resolves last — a later-started reload can
 finish first and leave OLDER data painted. The hazard predates the strip (two
-fast presses on ‹ Earlier do it) but the strip makes rapid re-entry normal.
+fast presses on the History card's ‹ Earlier, which still refetches, do it) but
+the strip makes rapid re-entry normal.
 
 **Paging deliberately did not move.** The dashboard refetches a window; the
 detail page holds its whole history already and slices it through
