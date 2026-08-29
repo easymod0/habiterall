@@ -24,7 +24,7 @@
  *
  * What a suite reports is a row that has vanished — historically a bare
  * `Cannot read properties of undefined`, which is also exactly what a wait too
- * weak to see its own row produces (see `reloadAndWaitForRow` in avoidcheck.mjs). Two
+ * weak to see its own row produces (see `reloadAndWaitForRow` in chrome.mjs). Two
  * causes, one signature, and only one of them is in the code.
  *
  * That is why **the parallelism here is the number of BASES and cannot be set

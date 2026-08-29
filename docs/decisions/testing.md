@@ -71,3 +71,77 @@ literal made the second attach to the first's browser and hang.
 `searchcheck`/`unknowncheck` and `notifycheck`/`nudgecheck` both did — invisibly,
 for as long as the run was serial, because a serial run never has two attached at
 once.
+
+## A reload and the wait after it are one call
+
+From #130, then #153, then #154.
+
+`avoidcheck` reloaded and then polled a `#grid .habit-row` selector — a
+condition the fixtures' own rows already satisfy, and, worse, one the
+PRE-reload document satisfies too, because `location.reload()` returns before
+the navigation commits and the old document is still painting everything it
+had a moment ago. A poll landing in that window breaks the loop on a document
+about to be thrown away, and the suite either clicks into nothing or dies with
+`Cannot read properties of undefined (reading 'querySelector')`, naming
+neither the habit nor the wait that was too weak.
+
+#130 proposed the obvious strengthening: wait for THIS habit's row rather than
+any row. Checked against all four of `avoidcheck`'s reload sites, evaluated
+synchronously inside the doomed document immediately before the reload
+committed:
+
+    site                          any row   this habit's row
+    A  after Smoking is created   true      false
+    B  the skips reload           true      TRUE
+    C  after Coffee is created    true      false
+    D  the switch to amount       true      TRUE
+
+Naming the row only helps where the habit did not exist a moment ago (A, C).
+Sites B and D reload a page that is already painting Smoking, so the
+strengthened predicate is satisfied by the very page about to be destroyed —
+exactly as weak as "any row" was. #153 is that fix, and #154 is the same
+defect found a second time at a fifth call site (`countcheck.mjs`), because
+naming happened to close it by an accident of ordering (the row's habit was
+created moments earlier by a raw `fetch` the page never saw) rather than by
+the predicate being sound.
+
+The predicate that actually distinguishes the two documents does not ask what
+is painted at all: it asks WHICH document it is in. `window.__doomed` is set
+in the same evaluation as `location.reload()`, immediately before it, and
+cannot survive the navigation — a fresh document has no such property, so
+`!window.__doomed` is false in the old page and true in the new one, whatever
+either is painting. That is `reloadAndWaitForRow` (`shared/test/browser/chrome.mjs`),
+and it is why no suite calls `location.reload()` on its own: the reload and
+the wait are one call because the bug is in the join between them, and every
+version that separated the two got the join wrong.
+
+#130 measured the pre-reload window itself: under a tight CDP poll the old
+document was gone by the first round trip in 6 of 6 trials, so it put the
+window at under ~8ms. That is #130's own measurement, and six trials that saw
+nothing is a weak bound rather than a small number — it does not claim the
+window is always that narrow, only that a runner under load is exactly where
+a wider one opens.
+
+**The new measurement is the interesting half, and it is why a browser suite
+holding the window open with CDP to prove the join behaviourally could not be
+built.** On Chrome for Testing 152.0.7977.42, the doomed document is not
+observable through CDP at all:
+
+- Pausing the reload's Document request with `Fetch.requestPaused` makes
+  `Runtime.evaluate` on that target never answer — not throw, never answer.
+- That is not a `Fetch` artifact: stalling the document response 4s at a proxy
+  does the same thing instead. `Runtime.evaluate` answered once at +0ms and
+  then blocked until the response arrived at +4073ms.
+- In every configuration tried — cache on, cache disabled, response stalled —
+  the +0ms answer came from a NEW, empty document (`readyState: 'interactive'`,
+  0 rows, no sentinel). **0 probes out of 400 ever saw the old document.**
+
+So on this build, CDP's own `Runtime.evaluate` cannot be the witness to the
+window it would need to observe, which rules out a browser suite as the test
+for this: it could neither reproduce the bug nor be mutation-tested against
+it. `reloadAndWaitForRow` takes its evaluator (`ev`) as a parameter and
+touches no browser API of its own — its whole contract is which strings it
+sends to `ev`, and in what order — so the test that actually exercises it is a
+unit test over a fake `ev` that models a window/document/location well enough
+to hold the doomed document open on purpose, which a real browser on this
+build will not (`shared/test/browser-runner.test.js`).

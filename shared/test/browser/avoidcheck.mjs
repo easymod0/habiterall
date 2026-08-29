@@ -14,7 +14,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitForRow,
+} from './chrome.mjs';
 
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9237);
 const profile = mkdtempSync(join(tmpdir(), 'habavoid-'));
@@ -50,65 +52,6 @@ try {
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description);
     return r.result.value;
   };
-  /**
-   * Reload, then wait for a row belonging to THIS habit in the NEW document.
-   *
-   * The reload and the wait are one function because the bug is in the join
-   * between them, and every version of this that separated the two got the
-   * join wrong.
-   *
-   * **The window is the doomed document, and naming the row does not close
-   * it.** `location.reload()` returns before the navigation commits, so a poll
-   * landing in between reads the page that is about to be thrown away — which
-   * is already painting every row it had a moment ago, including this habit's.
-   * The loop breaks, the `rows.find(...)` that follows finds a node belonging
-   * to a document that then disappears, and the suite either clicks into
-   * nothing or dies with `Cannot read properties of undefined (reading
-   * 'querySelector')` — naming neither the habit nor the wait that was too
-   * weak.
-   *
-   * So the predicate asks which document it is in. `window.__doomed` is set
-   * immediately before the reload and cannot survive it: a fresh document has
-   * no such property, so `!window.__doomed` is false in the old page and true
-   * in the new one, whatever either is painting. Strengthening "any row" to
-   * "this habit's row" — the fix #130 proposed and an earlier draft of this
-   * shipped — only helps where the habit did not exist before the reload, so
-   * it closed two of these four sites and left the two that reload a page
-   * already showing Smoking exactly as weak as they were.
-   *
-   * The name is still worth asking for, because it is what turns a failure
-   * into a sentence: `no row containing "Coffee"` rather than a TypeError two
-   * lines later.
-   *
-   * Seen in CI: this suite failed in 1.3s, passed on a re-run, and cost an
-   * unrelated pull request a red tick. #130 measured the doomed-document
-   * window at under ~8ms — its measurement, not one repeated here, and six
-   * trials that saw nothing is a weak bound rather than a small number. A
-   * runner under load is where it opens.
-   *
-   * @param {string} name the habit's name, as it appears in the row
-   * @param {string} label what to call the check in the output
-   */
-  const reloadAndWaitForRow = async (name, label) => {
-    await ev(`window.__doomed = 1; location.reload(); true`);
-    let painted = false;
-    let polls = 0;
-    for (let i = 0; i < 80; i++) {
-      painted = await ev(`!window.__doomed
-        && [...document.querySelectorAll('#grid .habit-row')]
-          .some(r => r.textContent.includes(${JSON.stringify(name)}))`)
-        .catch(() => false) === true;
-      if (painted) break;
-      polls++;
-      await sleep(250);
-    }
-    // Polls, not elapsed time — the CDP round trips are not counted, so this
-    // is "which poll found it" and reads a little under the wall clock.
-    check(label, painted,
-      painted ? `on poll ${polls + 1}` : `no row containing "${name}" after 20s`);
-    return painted;
-  };
-
   await send('Page.enable', {}, sessionId);
   await send('Page.navigate', { url: BASE }, sessionId);
   // The first wait is the only one that legitimately takes any row: nothing of
@@ -132,7 +75,7 @@ try {
   console.log(`    habit ${made.id}, show_as=${made.show_as}`);
   check('the server stores the rendering choice', made.show_as === 'avoid', made.show_as);
 
-  await reloadAndWaitForRow('Smoking', 'the habit painted on the dashboard');
+  await reloadAndWaitForRow(ev, 'Smoking');
 
   const cell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Smoking'));
@@ -192,7 +135,7 @@ try {
   await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ skipDays: true }) }); })()`);
-  await reloadAndWaitForRow('Smoking', 'the row is back after the skips reload');
+  await reloadAndWaitForRow(ev, 'Smoking');
   // The day is at `no` when these run, so this is slip -> clean -> skip. The
   // cycle itself is Loop's DONE -> SKIP -> NO, which the rendering does not
   // reorder — stated again at the limit-of-two section below.
@@ -211,7 +154,7 @@ try {
       body: JSON.stringify({ name:'Coffee', type:'numerical', unit:'cups',
         target_value: 2, target_type:'at_most', show_as:'avoid' }) });
     return (await r.json()).id;})()`);
-  await reloadAndWaitForRow('Coffee', 'the limit-of-two habit painted');
+  await reloadAndWaitForRow(ev, 'Coffee');
   const twoCell = `(()=>{const rows=[...document.querySelectorAll('#grid .habit-row')];
     const row = rows.find(r => r.textContent.includes('Coffee'));
     // Named, for the reason the Smoking cell above is: a regression here
@@ -253,7 +196,7 @@ try {
     await fetch('/api/habits/${made.id}', { method:'PUT',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ ...h, show_as:'amount' }) });})()`);
-  await reloadAndWaitForRow('Smoking', 'the row is back after the switch to amount');
+  await reloadAndWaitForRow(ev, 'Smoking');
   row = await stored();
   // Both non-null, or "unchanged" is two absences agreeing and the check says
   // nothing at all.
