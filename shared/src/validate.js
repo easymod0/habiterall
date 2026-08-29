@@ -852,6 +852,33 @@ export function assertDate(date) {
   return date;
 }
 
+/**
+ * A date out of a query string, for a route that takes one into a RANGE.
+ *
+ * Absence is not an error: `?end=` unnamed means "the caller has no opinion",
+ * and every one of these routes has a fallback — the caller's today, or a
+ * window derived from it. Present-and-wrong is a 400, including a present but
+ * empty `end=`, because there is nothing to guess at from that.
+ *
+ * The `typeof` guard states a rule rather than patching a live bug, and the
+ * distinction is worth writing down because it decides how the guard may be
+ * rewritten. A REPEATED parameter — `?end=a&end=b` — is an array here; `?end[]=`
+ * is not, because Express 5 defaults to the `simple` query parser and leaves
+ * `end[]` a literal key that never matches `end`. Measured on express 5.2.1.
+ * So the array that is reachable today always has two or more elements, and
+ * string-coerces with a comma in it, which `DATE_RE` refuses inside
+ * `assertDate` anyway: the answer is a 400 either way. What the guard buys is
+ * that it stays a 400 under a parser that CAN produce a one-element array
+ * (`query parser: 'extended'`, which neither edition sets today) — where the
+ * coercion would produce a valid-looking date and `assertDate` would then call
+ * `.split` on an array, a TypeError and so a 500. Do not "simplify" this to
+ * `String(value)`: that is exactly the coercion, and it accepts the array.
+ */
+export function queryDate(value, fallback) {
+  if (value === undefined) return fallback;
+  return assertDate(typeof value === 'string' ? value : '');
+}
+
 /** Reject a date in the future, using the caller's notion of today. */
 export function assertNotFuture(date, today) {
   if (date > today) {

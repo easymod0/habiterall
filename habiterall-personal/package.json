@@ -17,6 +17,7 @@
     "test:overview": "node test/overview.integration.mjs",
     "test:awards": "node test/awards.integration.mjs",
     "test:callerday": "node test/callerday.integration.mjs",
+    "test:querydate": "node test/querydate.integration.mjs",
     "test:exportloop": "node test/export-loop.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:auth": "node test/auth.integration.mjs",

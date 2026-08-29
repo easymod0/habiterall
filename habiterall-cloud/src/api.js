@@ -28,7 +28,7 @@ import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
   assertNotFuture, parseCategory, parseCategoryId, foldCategoryName, LIMITS,
-  DATE_RE,
+  DATE_RE, queryDate,
 } from '@habiterall/shared/validate.js';
 import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
@@ -394,10 +394,10 @@ api.get('/categories/stats', route(async (req, res) => {
   // That route walks one habit; this one walks every habit the account has, so
   // the same span costs the habit count times as much.
   const now = callerToday(req);
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const requestedEnd = queryDate(req.query.end, now);
   const end = requestedEnd > now ? now : requestedEnd;
 
-  const requestedStart = DATE_RE.test(req.query.start ?? '') ? req.query.start : undefined;
+  const requestedStart = queryDate(req.query.start, undefined);
   if (requestedStart) {
     if (requestedStart > end) throw httpError(400, 'start must not be after end');
     if (daysBetween(requestedStart, end) > MAX_COMPARE_DAYS) {
@@ -667,10 +667,10 @@ api.get('/habits/:id/stats', route(async (req, res) => {
   const habit = await getHabit(req);
 
   const now = callerToday(req);
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const requestedEnd = queryDate(req.query.end, now);
   const end = requestedEnd > now ? now : requestedEnd;
 
-  const start = DATE_RE.test(req.query.start ?? '') ? req.query.start : undefined;
+  const start = queryDate(req.query.start, undefined);
   if (start) {
     if (start > end) throw httpError(400, 'start must not be after end');
     if (daysBetween(start, end) > MAX_RANGE_DAYS) {
@@ -741,7 +741,7 @@ api.get('/overview', route(async (req, res) => {
   // is actually showing. Without this the grid rendered empty cells for any
   // day outside the most recent fortnight — the entries were never fetched.
   const now = callerToday(req);
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const requestedEnd = queryDate(req.query.end, now);
   const end = requestedEnd > now ? now : requestedEnd;
   const start = addDays(end, -(days - 1));
   const archived = req.query.archived === 'true';

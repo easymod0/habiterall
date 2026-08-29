@@ -840,6 +840,100 @@ await withUser(alice, (db) => db.query(
     avoidHabit.id]]
 ));
 
+/* ---------- which validator a date-into-a-RANGE route asks ----------
+ *
+ * `DATE_RE` is four digits, a dash, two digits, a dash, two digits, and
+ * nothing more, so `2026-00-10` and `2026-02-30` are shaped like dates and are
+ * not days. All three routes below took one straight into the window
+ * arithmetic, whose two halves then disagreed: `fromISO` ROLLS a bad component
+ * over, so `?end=2026-00-10` walked a history ending 2025-12-10, while
+ * `totalCompleted` selects by the string comparison `date <= '2026-00-10'`,
+ * which admits every real day up to 2025-12-31.
+ *
+ * The same block habiterall-personal's `querydate.integration.mjs` carries,
+ * asking the same questions of the same URLs — this edition had the identical
+ * five sites, and the two editions answering one request differently is the
+ * defect class this repo names most often.
+ */
+
+console.log('\n--- a date into a range ---');
+
+const NOT_A_MONTH = '2026-00-10';
+const NOT_A_DAY = '2026-02-30';
+
+const dateHabit = await postHabit({ name: 'Query date', type: 'boolean' });
+// Spread so the pre-fix answer to `?end=2026-00-10` and the honest answer to a
+// canonical `?end=2025-12-10` are different NUMBERS rather than the same one
+// reached two ways: the last two sit after the honest window closes and inside
+// the string comparison's reach.
+for (const date of ['2025-12-05', '2025-12-20', '2025-12-31']) {
+  await logDay(dateHabit.id, date);
+}
+
+for (const [route, path] of [
+  ['/habits/:id/stats', `/api/habits/${dateHabit.id}/stats`],
+  ['/categories/stats', '/api/categories/stats'],
+  ['/overview', '/api/overview'],
+]) {
+  for (const bad of [NOT_A_MONTH, NOT_A_DAY]) {
+    const r = await fetch(`${overviewBase}${path}?end=${bad}`);
+    ck(`GET ${route}?end=${bad} is 400`, r.status === 400, `HTTP ${r.status}`);
+  }
+  // The control. Without it this block passes against a route that answers 400
+  // to everything, which is not the fix.
+  const good = await fetch(`${overviewBase}${path}?end=2025-12-10`);
+  ck(`GET ${route}?end=2025-12-10 is still 200`, good.status === 200, `HTTP ${good.status}`);
+}
+
+// `start` had the same gap as `end` on the two routes that take one.
+for (const [route, path] of [
+  ['/habits/:id/stats', `/api/habits/${dateHabit.id}/stats`],
+  ['/categories/stats', '/api/categories/stats'],
+]) {
+  for (const bad of [NOT_A_MONTH, NOT_A_DAY]) {
+    const r = await fetch(`${overviewBase}${path}?start=${bad}`);
+    ck(`GET ${route}?start=${bad} is 400`, r.status === 400, `HTTP ${r.status}`);
+  }
+}
+
+// A 400 proves the guard fired; it does not prove the figure it guarded was
+// ever wrong. `2025-12-10` is the day `fromISO('2026-00-10')` rolls back to, so
+// this is the window the broken request walked — and over it the habit has
+// exactly ONE completion against the three that comparison counted. Both
+// numbers are literals: a count derived from the fixture would agree with
+// whatever the route did to it.
+const honestWindow = await fetch(
+  `${overviewBase}/api/habits/${dateHabit.id}/stats?end=2025-12-10`
+).then((r) => r.json());
+ck('the window the broken request walked holds 6 days',
+  honestWindow.history?.length === 6, `history.length=${honestWindow.history?.length}`);
+ck('THE assertion: and exactly ONE completion in it — the broken request ' +
+  'reported 3, counted by `date <= "2026-00-10"` over a window ending 2025-12-10',
+  honestWindow.totalCompleted === 1, `totalCompleted=${honestWindow.totalCompleted}`);
+
+// A repeated parameter is an ARRAY, which `DATE_RE.test` string-coerced: the
+// joined value matched nothing, so the route quietly answered about today
+// instead of about either date named. `queryDate`'s `typeof` guard is what
+// makes that a 400 — and what keeps a one-element array out of `assertDate`,
+// where it passes the coerced regex and then meets `.split` as a 500.
+const repeatedEnd = await fetch(
+  `${overviewBase}/api/habits/${dateHabit.id}/stats?end=2025-12-10&end=2026-01-01`);
+ck('a repeated `end` is 400, not a silent fallback to today',
+  repeatedEnd.status === 400, `HTTP ${repeatedEnd.status}`);
+
+// Present and empty is present-and-invalid. Absent is different, and is the
+// fallback every one of these routes has.
+const emptyEnd = await fetch(`${overviewBase}/api/habits/${dateHabit.id}/stats?end=`);
+ck('a present but empty `end=` is 400', emptyEnd.status === 400, `HTTP ${emptyEnd.status}`);
+
+const noEnd = await fetch(`${overviewBase}/api/habits/${dateHabit.id}/stats`);
+ck('naming no date at all is still 200', noEnd.status === 200, `HTTP ${noEnd.status}`);
+
+// Same reason as the block above: the import-isolation checks below count
+// every entry alice has.
+await withUser(alice, (db) => db.query(
+  `DELETE FROM entries WHERE habit_id = $1`, [dateHabit.id]));
+
 /* ---------- /overview's own categorySummaries ----------
  *
  * Same three assertions habiterall-personal's overview.integration.mjs pins,
