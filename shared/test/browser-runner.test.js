@@ -171,6 +171,18 @@ test("reloadAndWaitForRow: a document that commits without this habit's row is s
 });
 
 /**
+ * The guard below reads source text one line at a time, and that decision is
+ * extracted here so the guard's own sanity checks can run a synthetic offender
+ * and a synthetic comment through the SAME predicate the scan uses — not
+ * through a second copy of it, which would pin a regex nobody reads and leave
+ * the one that runs free to be broadened.
+ */
+const isReloadCallSite = (line) => (
+  !/^\s*(\*|\/\/)/.test(line)     // a comment mentioning it is not a call site
+  && line.includes('location.reload(')
+);
+
+/**
  * What this guard does NOT cover, said plainly so the next reader does not
  * mistake a green run for a swept directory: it matches the literal text
  * `location.reload(`, so a reload issued over CDP as `send('Page.reload', …)`
@@ -182,20 +194,54 @@ test("reloadAndWaitForRow: a document that commits without this habit's row is s
  */
 test('no suite calls location.reload() on its own — the reload and the wait after it are one call', () => {
   const offenders = [];
+  let scanned = 0;
   for (const file of readdirSync(browserDir).filter((f) => f.endsWith('.mjs') && f !== 'chrome.mjs')) {
+    scanned++;
     const src = readFileSync(join(browserDir, file), 'utf8');
     src.split('\n').forEach((line, i) => {
-      if (/^\s*(\*|\/\/)/.test(line)) return; // a comment mentioning it is not a call site
-      if (line.includes('location.reload(')) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
+      if (isReloadCallSite(line)) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
     });
   }
   assert.deepEqual(offenders, []);
 
-  // A sanity floor for the assertion above, so it cannot pass by the pattern
-  // silently stopping matching: `chrome.mjs` — the one file excluded above —
-  // must still hold exactly the join this guard exists to keep everyone else
-  // from re-inventing. This is a floor on the SOURCE TEXT only; the BEHAVIOUR
-  // (that the wait cannot be satisfied by the doomed document) is pinned by
+  // `deepEqual(offenders, [])` is satisfied by an EMPTY SCAN as readily as by a
+  // clean tree, which is the shape of dead test this repo ships most — the same
+  // hole `seen.size > 20` closes for the port test above. Two things can empty
+  // this one silently, so there is a floor for each.
+  //
+  // The file filter: widen `endsWith('.mjs')`, point `browserDir` a directory
+  // wrong, or exclude more than `chrome.mjs`, and nothing is read at all.
+  assert.ok(scanned > 25, `only scanned ${scanned} suite files; has the filter or the directory changed?`);
+
+  // The predicate: broadening the comment skip, or losing the literal, disarms
+  // the scan while every assertion above still passes. Each line below is run
+  // through the SAME predicate the loop just used, in both directions — a table
+  // that only listed offenders would be satisfied by a predicate that returned
+  // `true` for everything, which reports the whole tree.
+  const cases = [
+    ['  await ev(`location.reload(); true`);', true, 'a bare call site'],
+    ['location.reload();', true, 'an unindented bare call site'],
+    // This one is the boundary, and it is why the skip must be a COMMENT-LINE
+    // test rather than a leading-slash one: `/^\s*[*\/]/` reads identically,
+    // is the obvious "tidy-up" of the regex above, and silently swallows every
+    // line whose first non-space character is a slash along with the block
+    // comment it was aimed at.
+    ['/* a note */ await ev(`location.reload(); true`);', true, 'a call site after a block comment'],
+    ['  // location.reload() is what this guard forbids', false, 'a line comment'],
+    ['   * `location.reload()` and the wait after it are one call', false, 'a JSDoc line'],
+    ['  await reloadAndWaitForRow(ev, "Smoking");', false, 'the helper this guard points everyone at'],
+  ];
+  for (const [line, offends, what] of cases) {
+    assert.equal(
+      isReloadCallSite(line), offends,
+      `the scan misreads ${what}, so it can no longer see what it exists to see: ${line.trim()}`,
+    );
+  }
+
+  // And a floor on the one file excluded above: `chrome.mjs` must still hold
+  // exactly the join this guard exists to keep everyone else from re-inventing.
+  // This is a floor on the SOURCE TEXT only; the BEHAVIOUR (that the wait
+  // cannot be satisfied by the doomed document) is pinned by
   // `reloadAndWaitForRow`'s own tests above, not by this one.
   const chromeSrc = readFileSync(join(browserDir, 'chrome.mjs'), 'utf8');
   assert.match(

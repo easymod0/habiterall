@@ -171,7 +171,10 @@ export async function waitUntil(ev, expression, {
  *
  * @param {(expression: string) => Promise<any>} ev  the caller's evaluator
  * @param {string} name the habit's name, as it appears in the row
- * @param {{timeoutMs?: number, intervalMs?: number}} [opts] passed through to `waitUntil`
+ * @param {{timeoutMs?: number, intervalMs?: number, what?: string}} [opts] passed
+ *   through to `waitUntil`. `what` OVERRIDES the sentence built from `name`,
+ *   which is what every call site here uses it for — do not add a second
+ *   `label` parameter for that.
  */
 export async function reloadAndWaitForRow(ev, name, opts) {
   await ev(`window.__doomed = 1; location.reload(); true`);
