@@ -351,6 +351,16 @@ const CACHEABLE_API = [/^\/api\/overview/, /^\/api\/habits/, /^\/api\/me$/];
  * `init` with no handle back to the timer, and threading one through would
  * restructure both functions to save one harmless 10s timer in a worker that
  * outlives neither.
+ *
+ * A third path, below `AbortController`'s own availability, answers
+ * `undefined` — the request then goes out UNBOUNDED, which is #87's own hang,
+ * reopened on exactly the runtime old enough to need the bound most (Chrome
+ * <40, Firefox <44). Accepted rather than closed: a runtime with no
+ * `AbortController` at all predates every browser this file is otherwise
+ * written for, and there is nothing better to hand `fetch` in its place. The
+ * same path also means `{signal: undefined}` — EMPTY per WebIDL, not merely
+ * unbounded — so at the `shellFirst` call site the navigate→same-origin
+ * downgrade described there does not occur on this path either.
  */
 function boundedSignal(ms) {
   if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {

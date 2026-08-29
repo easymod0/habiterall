@@ -280,6 +280,64 @@ test('shellFirst (a navigation): falls back to AbortController when AbortSignal.
 });
 
 /**
+ * A reviewer finding on this file: the commit message claims
+ * `boundedSignal(10_000)` covers both call sites, `shellFirst` and
+ * `networkFirst`, but nothing above ever drives an `/api/*` request through
+ * the worker's fetch listener — so reverting only `networkFirst`'s site back
+ * to a raw, unguarded `AbortSignal.timeout(10_000)` left every test above
+ * green. This pins `networkFirst`'s half directly, the same way the
+ * `shellFirst` test two above pins its: with `AbortSignal.timeout` deleted
+ * (so a raw call would throw), a hung `/api/*` fetch must still resolve — to
+ * the cached copy, tagged `X-Habiterall-Offline: 1`, which is `networkFirst`'s
+ * documented fallback — rather than reject. `networkFirst` also passes
+ * `cache: 'no-store'` alongside the signal; `installFakeFetch` above ignores
+ * whatever `init` it is not looking at, so that needs no change here.
+ */
+test('networkFirst: falls back to the cached copy when AbortSignal.timeout does not exist', async () => {
+  installFakeFetch();
+  const { seed } = installFakeCaches();
+
+  const originalTimeout = AbortSignal.timeout;
+  delete AbortSignal.timeout;
+
+  const originalSetTimeout = globalThis.setTimeout;
+  const seenDelays = [];
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    seenDelays.push(ms);
+    if (ms === 10_000) return originalSetTimeout(fn, 0, ...args);
+    return originalSetTimeout(fn, ms, ...args);
+  };
+
+  try {
+    const req = fakeRequest({
+      url: 'https://example.test/api/overview', mode: '', destination: '',
+    });
+    const cached = new Response(JSON.stringify({ habits: [] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+    seed('preseed', req.url, cached);
+
+    const listener = await loadFetchListener();
+    const responded = dispatch(listener, req);
+
+    const response = await raceAgainstHang(
+      responded,
+      'the API request never resolved: on a runtime with no ' +
+      'AbortSignal.timeout, networkFirst rejected instead of falling back ' +
+      'to the cached copy',
+    );
+    assert.equal(response.headers.get('X-Habiterall-Offline'), '1',
+      'networkFirst did not tag its cache fallback as offline — did it ' +
+      'reject instead of catching the abort?');
+    assert.ok(seenDelays.includes(10_000),
+      `networkFirst did not bound the request at 10s (saw ${JSON.stringify(seenDelays)})`);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+/**
  * The other reviewer finding on this file: all three tests above pass even
  * with `revalidateFirst`'s body collapsed to `if (cached) return cached;` —
  * every hang-shaped fetch above never resolves, so a version that lets the
@@ -293,33 +351,38 @@ test('shellFirst (a navigation): falls back to AbortController when AbortSignal.
 test('shellFirst (a navigation): a fresh network reply wins over a stale cache, and is cached', async () => {
   const FRESH = 'FRESH index.html';
   const STALE = 'STALE index.html';
+  const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(FRESH, { status: 200 });
-  const { seed } = installFakeCaches();
+  try {
+    const { seed } = installFakeCaches();
 
-  const req = fakeRequest({
-    url: 'https://example.test/index.html', mode: 'navigate', destination: '',
-  });
-  seed('preseed', req.url, new Response(STALE, { status: 200 }));
+    const req = fakeRequest({
+      url: 'https://example.test/index.html', mode: 'navigate', destination: '',
+    });
+    seed('preseed', req.url, new Response(STALE, { status: 200 }));
 
-  const listener = await loadFetchListener();
-  const responded = dispatch(listener, req);
-  const response = await raceAgainstHang(responded, 'the navigation never resolved');
+    const listener = await loadFetchListener();
+    const responded = dispatch(listener, req);
+    const response = await raceAgainstHang(responded, 'the navigation never resolved');
 
-  const body = await response.text();
-  assert.equal(body, FRESH,
-    `shellFirst answered with ${JSON.stringify(body)} — a revalidateFirst ` +
-    'branch that lets the cache win unconditionally would answer with the ' +
-    'stale body instead');
+    const body = await response.text();
+    assert.equal(body, FRESH,
+      `shellFirst answered with ${JSON.stringify(body)} — a revalidateFirst ` +
+      'branch that lets the cache win unconditionally would answer with the ' +
+      'stale body instead');
 
-  // Not just what reached `respondWith` — that the fresh reply was also
-  // written into the shell cache, which is the other half of what this
-  // branch is for (the NEXT load).
-  const shellCacheNames = (await caches.keys()).filter((n) => n !== 'preseed');
-  assert.equal(shellCacheNames.length, 1,
-    `expected exactly one shell cache besides the preseeded one, found ${JSON.stringify(shellCacheNames)}`);
-  const shellStore = await caches.open(shellCacheNames[0]);
-  const stored = await shellStore.match(req.url);
-  assert.ok(stored, 'the shell cache holds nothing for this request');
-  assert.equal(await stored.text(), FRESH,
-    'the fresh response did not reach the shell cache');
+    // Not just what reached `respondWith` — that the fresh reply was also
+    // written into the shell cache, which is the other half of what this
+    // branch is for (the NEXT load).
+    const shellCacheNames = (await caches.keys()).filter((n) => n !== 'preseed');
+    assert.equal(shellCacheNames.length, 1,
+      `expected exactly one shell cache besides the preseeded one, found ${JSON.stringify(shellCacheNames)}`);
+    const shellStore = await caches.open(shellCacheNames[0]);
+    const stored = await shellStore.match(req.url);
+    assert.ok(stored, 'the shell cache holds nothing for this request');
+    assert.equal(await stored.text(), FRESH,
+      'the fresh response did not reach the shell cache');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
