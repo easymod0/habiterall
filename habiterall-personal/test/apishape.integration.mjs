@@ -974,6 +974,84 @@ const overCeiling = await postJson('/api/categories', { name: 'One too many' });
 ck('a category past LIMITS.categories gives 400',
   overCeiling.status === 400, String(overCeiling.status));
 
+/* ---- issue #256 (round 2, FIX 3): the same collapse, under mode=replace ----
+ *
+ * Every block above is a MERGE. `mode=replace` wipes the account's
+ * categories, habits and entries FIRST and only then re-applies the file's
+ * own declared list, so there is no pre-existing row for a second declared
+ * category to "attach to" the way a merge does — the account genuinely
+ * loses a row a restore of the same file used to bring back, and before this
+ * fix nothing said so.
+ *
+ * Run LAST, deliberately, and for the same reason as the LIMITS.categories
+ * block just above it needs to be: this account is single-user, so there is
+ * no second account to isolate a destructive `replace` against, and by this
+ * point in the suite it is filled to LIMITS.categories with rows several
+ * earlier blocks depend on staying put. Asserted against that pre-seeded
+ * account rather than a fresh one — the category count is capped at
+ * LIMITS.categories and there are many habits from every block above — or a
+ * replace that quietly behaved like a merge (kept the seed, added the file's
+ * rows beside it) would still pass every assertion below about the file's
+ * own two categories.
+ */
+const seededCategoryCount = (await (await fetch(`${base}/api/categories`)).json()).length;
+const seededHabitCount = (await (await fetch(`${base}/api/habits`)).json()).length;
+ck('sanity: the account is seeded with more than the two rows this file ' +
+  'declares, before the replace',
+  seededCategoryCount > 2 && seededHabitCount > 2,
+  JSON.stringify({ seededCategoryCount, seededHabitCount }));
+
+const replaceBackup = Buffer.from(JSON.stringify({
+  categories: [
+    { name: 'Istanbul', color: '#101010' },
+    { name: 'İstanbul', color: '#202020' },
+  ],
+  habits: [
+    { name: 'issue-256 replace habit A', type: 'boolean', category: 'Istanbul', entries: [] },
+    { name: 'issue-256 replace habit B', type: 'boolean', category: 'İstanbul', entries: [] },
+  ],
+}));
+const replaceImportRes = await fetch(`${base}/api/import?mode=replace`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: replaceBackup,
+});
+ck('the replace-mode import itself succeeds',
+  replaceImportRes.status === 200, String(replaceImportRes.status));
+const replaceImportResult = await replaceImportRes.json();
+ck(
+  'THE assertion: the SECOND declared category (İstanbul) is reported in ' +
+  'skipped under mode=replace too — the same collision-reporting rule the ' +
+  'merge blocks above pin, now exercised on the path that wipes first',
+  Array.isArray(replaceImportResult.skipped) &&
+    replaceImportResult.skipped.some((s) => s.includes('İstanbul')),
+  JSON.stringify(replaceImportResult.skipped));
+
+const replaceCategories = await (await fetch(`${base}/api/categories`)).json();
+ck('every pre-seeded category is GONE — proving this actually replaced ' +
+  'rather than merged (a merge would have kept all ' +
+  `${seededCategoryCount} of them beside the file's own)`,
+  replaceCategories.length === 1, JSON.stringify(replaceCategories.map((c) => c.name)));
+ck('THE assertion: exactly ONE category named either spelling survives the ' +
+  'replace, carrying both habits',
+  replaceCategories.length === 1 &&
+    (replaceCategories[0].name === 'Istanbul' || replaceCategories[0].name === 'İstanbul'),
+  JSON.stringify(replaceCategories));
+
+const replaceHabits = await (await fetch(`${base}/api/habits`)).json();
+ck('every pre-seeded habit is GONE too',
+  replaceHabits.length === 2, JSON.stringify(replaceHabits.map((h) => h.name)));
+const replaceHabitA = replaceHabits.find((h) => h.name === 'issue-256 replace habit A');
+const replaceHabitB = replaceHabits.find((h) => h.name === 'issue-256 replace habit B');
+ck(
+  "THE assertion: both habits' category_id is the SAME id — the surviving " +
+  'category, never a second row that was silently dropped',
+  replaceHabitA?.category_id != null &&
+    replaceHabitA.category_id === replaceHabitB?.category_id &&
+    replaceHabitA.category_id === replaceCategories[0]?.id,
+  `A=${replaceHabitA?.category_id} B=${replaceHabitB?.category_id} ` +
+    `kept=${JSON.stringify(replaceCategories)}`);
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

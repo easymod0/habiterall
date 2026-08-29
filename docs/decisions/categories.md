@@ -119,23 +119,30 @@ NOT a per-codepoint homomorphism under ICU (Final_Sigma, below) — a sweep
 against one provider's answer does not stand in for the other's. Three pairs
 `lower()` collapses did not collapse under the whole-string fold:
 
-- **U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE).** `lower()` maps both
-  `I` and `İ` to plain `i` under either provider; whole-string `toLowerCase()`
-  maps `İ` to `i` followed by a combining dot above (U+0307), its one
-  multi-character simple-to-full mapping. `İstanbul` imported into an account
-  already holding `Istanbul` therefore folded to two different strings under
-  the old fold and to the SAME string under `lower()` — this is the issue's
-  own example.
+- **U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE).** `lower()` UNDER
+  LIBC maps both `I` and `İ` to plain `i` — libc applies Unicode's SIMPLE,
+  per-codepoint case mapping, which has no multi-character form for `İ`.
+  Whole-string `toLowerCase()` instead maps `İ` to `i` followed by a
+  combining dot above (U+0307), its one multi-character simple-to-full
+  mapping — the same FULL mapping Postgres's ICU provider applies, below.
+  `İstanbul` imported into an account already holding `Istanbul` therefore
+  folded to two different strings under the old fold and to the SAME string
+  under libc's `lower()` — this is the issue's own example. It is NOT the
+  same story under ICU, which is the opposite provider in the pair below.
 - **The decomposed spelling of that same pair — `i` + U+0307 typed directly,
   never through İ at all — is a SECOND divergence an ICU-only sweep exposes
   and a libc-only one cannot,** and it was found only in a second review round
   after a per-codepoint fold folding `İ` alone to `i` had already been committed.
   Per codepoint, `'İ'.toLowerCase()` is already exactly this decomposed
-  string; under Postgres's **ICU** provider (never libc), `lower()` on that
-  same decomposed string ALSO collapses to plain `i`, so a fold that special-
-  cased `İ` itself but left the decomposed spelling folding to itself was a
-  real containment break on an ICU database — a regression relative to the
-  OLD whole-string fold for that one pair, on that one provider. The fix folds
+  string. ICU applies Unicode's FULL, context-sensitive case mapping — the
+  same mapping JS's whole-string `toLowerCase()` implements — so `lower('İ')`
+  under Postgres's **ICU** provider (never libc) is ALSO `i` followed by
+  U+0307, and ICU's `lower()` therefore collapses `İstanbul` with this exact
+  decomposed spelling AT the decomposed form (never at plain `i` — ICU keeps
+  plain `I` apart from both). A fold that special-cased `İ` itself but left
+  the decomposed spelling folding to itself was a real containment break on
+  an ICU database — a regression relative to the OLD whole-string fold for
+  that one pair, on that one provider. The fix folds
   per codepoint as before and then strips a combining dot above that follows a
   plain `i` (`.replace(/i\u0307/gu, 'i')`), which subsumes the U+0130 special
   case outright — one rule rather than two — and makes the fold treat a
@@ -144,14 +151,18 @@ against one provider's answer does not stand in for the other's. Three pairs
   as ICU, which is the safe direction: containment is owed, never equality
   with one provider.
 - **Final_Sigma**, a third divergence nothing here had named before either
-  review round. Whole-string `toLowerCase()` is context sensitive:
-  `'ΟΔΟΣ'.toLowerCase()` ends in U+03C2 (final sigma, because the last `Σ`
-  sits at the end of the string) while `'Οδοσ'.toLowerCase()` ends in plain
-  `σ` (U+03C3, because there the last cased letter was already lowercase).
-  `lower()` applies no such rule under either provider and folds every
-  `Σ`/`σ` to U+03C3 regardless of position, so `ΟΔΟΣ` and `Οδοσ` collided in
-  Postgres and not under the old fold — and ALL-CAPS Greek is at least as
-  ordinary a way to type a name as `İstanbul` is.
+  review round — and one whose own first telling here was wrong, corrected
+  in the round-2 section below. Whole-string `toLowerCase()` is context
+  sensitive: `'ΟΔΟΣ'.toLowerCase()` ends in U+03C2 (final sigma, because the
+  last `Σ` sits at the end of the string) while `'Οδοσ'.toLowerCase()` ends
+  in plain `σ` (U+03C3, because there the last cased letter was already
+  lowercase). Libc's `lower()` applies NO such rule and folds every `Σ`/`σ`
+  to U+03C3 regardless of position, so `ΟΔΟΣ` and `Οδοσ` collided under libc
+  and not under the old fold — and ALL-CAPS Greek is at least as ordinary a
+  way to type a name as `İstanbul` is. ICU is the OPPOSITE of libc here: it
+  HAS Final_Sigma, and what it collapses `ΟΔΟΣ` with is not `Οδοσ` at all —
+  see the round-2 section below, which the first version of this paragraph
+  got backwards.
 
 Both times the route-level lookup missed the existing row and tried to
 create a new one. In cloud that `INSERT` walked straight into the
@@ -207,6 +218,79 @@ both providers:
 | whole-string fold      | 0 breaks  | 1 break (`İstanbul` / decomposed `i\u0307stanbul`) |
 | per-codepoint, İ special-cased alone | 0 breaks | 1 break (decomposed spelling, above) |
 | this fold (per-codepoint + strip)    | 0 breaks | 0 breaks |
+
+**Round 2: the fix above was STILL not contained under both providers, and
+the fix is two more clauses, not one.** The table just above came from a
+sweep of every single codepoint plus four hand-picked contextual pairs. A
+second review round ran an exhaustive PAIRWISE sweep instead — every string
+of length <= 3 over the alphabet `I İ i ı U+0307 Σ σ U+03C2 É é ẞ ß x`
+(2,379 strings), each fed to Postgres's `lower()` under both providers — plus
+the same full 1..0x10FFFF codepoint sweep, and found two divergences neither
+the codepoint sweep nor the four pairs above could see, because both need
+more than one codepoint of context: one needs two adjacent codepoints in the
+folded output, the other needs a preceding cased letter.
+
+The two providers pull in OPPOSITE directions, and stating that correctly is
+the point of this section — an earlier telling of the U+0130 bullet and the
+Final_Sigma bullet above got half of this backwards, in the direction that
+hid exactly what round 2 found:
+
+- **libc applies Unicode's SIMPLE, per-codepoint mapping.** `İ` -> `i`, so it
+  collapses `{I, İ}` at plain `i`; it leaves a standalone U+0307 alone; and it
+  has no Final_Sigma, so `Σ` -> `σ` always and it collapses `{ΟΔΟΣ, Οδοσ}`.
+- **ICU applies Unicode's FULL, context-sensitive mapping** — the same
+  mapping JS's whole-string `toLowerCase()` implements. `İ` -> `i` + U+0307,
+  so it collapses `İ` against its own decomposed spelling ('i' + U+0307)
+  at that DECOMPOSED form and keeps `I` apart; and it
+  HAS Final_Sigma, so `lower('ΟΔΟΣ')` ends U+03C2 and it collapses `ΟΔΟΣ`
+  with a lowercase spelling that ALSO ends U+03C2 while NOT collapsing it
+  with `Οδοσ` (which ends the ordinary, non-final `σ`, U+03C3).
+
+Being contained under both therefore needs the fold to collapse strictly more
+than either provider alone: the dots AND the two lowercase spellings of
+sigma. The two breaks in `foldCategoryName` as it stood after round 1:
+
+- **A `+` quantifier, not a bare `/i\u0307/gu`.** `.replace` is
+  non-overlapping, so for `İ` immediately followed by the caller's OWN
+  U+0307 the per-codepoint loop already produces `i` + U+0307 + U+0307 (two
+  consecutive combining dots) before the strip runs, and a bare (non-
+  quantified) `/i\u0307/gu` eats only the first dot and resumes past the
+  survivor: `İ` + U+0307 folded to `i` + U+0307 (still decomposed) while
+  plain `I` + U+0307 folded all the way to `i` — two different strings.
+  libc's `lower()` measurably collapses BOTH spellings to the SAME
+  single-dot string, so the round-1 fix was looser than its own libc
+  backstop again, in a narrower form than the U+0130 special case it had
+  just replaced. `/i\u0307+/gu` matches the WHOLE run of trailing combining
+  dots in one match, so both spellings collapse to `i` together.
+- **U+03C2 -> `σ` (U+03C3).** Per-codepoint folding is exactly what
+  suppresses Final_Sigma for libc (a lone `Σ` has no preceding cased letter,
+  so the context-sensitive rule never fires), and that is exactly what
+  BREAKS containment under ICU, which applies Final_Sigma itself: ICU
+  collapses `ΟΔΟΣ` with a lowercase spelling ending U+03C2, and per-codepoint
+  folding alone answers a string ending U+03C3 for the first and U+03C2 for
+  the second — two different strings. Mapping U+03C2 onto `σ` collapses both
+  spellings of a lowercase sigma regardless of which one the caller typed,
+  which is what Unicode's own CASE FOLDING does for it and plain lowercasing
+  does not. (Written with an explicit `\u03c2` escape in the source, never
+  the look-alike character pasted where a diff cannot tell it from `σ`.)
+
+Measured, over every codepoint plus the pairwise sweep, against both
+providers:
+
+| fold                                          | libc       | ICU       |
+|------------------------------------------------|------------|-----------|
+| old whole-string `.toLowerCase()`               | 245 breaks | 0 breaks  |
+| round 1 (`/i\u0307/gu`, no `+`, no sigma clause) | 17 breaks  | 95 breaks |
+| `+` quantifier only (`/i\u0307+/gu`)            | 0 breaks   | 95 breaks |
+| `+` quantifier AND U+03C2 -> `σ` (round 2, shipped) | 0 breaks   | 0 breaks  |
+
+The question `foldCategoryName` answers — are these two strings the same
+NAME — is Unicode's CASE FOLDING, not lowercasing. JS exposes no
+`toCaseFold`, so this is per-codepoint `toLowerCase()` plus the two
+adjustments above where the two providers disagree with EACH OTHER, not a
+fold that "matches Postgres" — that framing is what went stale twice, in the
+two bullets corrected above, because Postgres's own `lower()` does not answer
+one way.
 
 That is plain `toLowerCase()`, deliberately never `toLocaleLowerCase()`. A
 first version of this reasoned the other way round — "`toLocaleLowerCase()`

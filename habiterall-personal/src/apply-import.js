@@ -170,16 +170,28 @@ export function applyImport(habits, mode = 'merge', categories = []) {
     function resolveOrCreateCategory(name, color, declaredPosition, declared = false) {
       const folded = foldCategoryName(name);
       if (!folded) return null;
-      if (declared) {
-        if (declaredFoldsThisImport.has(folded)) {
-          result.skipped.push(
-            `category "${name}" not created: an earlier category in this ` +
-            'file already folds to the same name');
-        } else {
-          declaredFoldsThisImport.add(folded);
-        }
+      // The collision check has to run BEFORE the `categoryIdByFold.has`
+      // early return just below — that map is exactly what answers this
+      // fold once a PRIOR declared category has actually resolved it, so
+      // checking after would report nothing for a second declared name that
+      // collides with a first. `declaredFoldsThisImport` is populated only
+      // on a path below that actually resolves or creates a row — never
+      // here, unconditionally, which is what this used to do: it marked a
+      // fold "claimed" even when the LIMITS check or a conflict just below
+      // answered null and created nothing, so a file declaring two colliding
+      // names against an account already at the ceiling had its first call
+      // report "at most N are allowed" and its second call report "an
+      // earlier category in this file already folds to the same name" —
+      // naming a category that was never created.
+      if (declared && declaredFoldsThisImport.has(folded)) {
+        result.skipped.push(
+          `category "${name}" not created: an earlier category in this ` +
+          'file already folds to the same name');
       }
-      if (categoryIdByFold.has(folded)) return categoryIdByFold.get(folded);
+      if (categoryIdByFold.has(folded)) {
+        if (declared) declaredFoldsThisImport.add(folded);
+        return categoryIdByFold.get(folded);
+      }
       if (categoryIdByFold.size >= LIMITS.categories) {
         result.skipped.push(
           `category "${name}" not created: at most ${LIMITS.categories} are allowed`);
@@ -207,6 +219,7 @@ export function applyImport(habits, mode = 'merge', categories = []) {
       // node:sqlite may hand back a bigint; the column is a small integer.
       const id = Number(info.lastInsertRowid);
       categoryIdByFold.set(folded, id);
+      if (declared) declaredFoldsThisImport.add(folded);
       return id;
     }
 

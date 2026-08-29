@@ -297,17 +297,66 @@ test('foldCategoryName folds the DECOMPOSED spelling (plain i + combining ' +
   assert.equal(foldCategoryName(decomposedIstanbul), foldCategoryName('Istanbul'));
 });
 
-test('foldCategoryName folds Final_Sigma the way lower() does — position ' +
-  'independent, never only the whole-string context-sensitive answer', () => {
-  // Postgres's lower() has no Final_Sigma rule: every Sigma folds to the
-  // ordinary (non-final) U+03C3 regardless of where it sits in the string.
-  // Whole-string toLowerCase() DOES apply Final_Sigma, so 'ΟΔΟΣ'.toLowerCase()
-  // ends in the final form U+03C2 instead — a different string from what
-  // 'Οδοσ' folds to, and from what Postgres's index collapses them to.
-  // Spelled with U+03C3 on purpose, so a regression to the final form (U+03C2)
-  // fails on the literal and not only on the cross-check below.
+test('foldCategoryName collapses a RUN of combining dots above following i, ' +
+  'not only a single one — the libc break the `+` quantifier exists for', () => {
+  // Two spellings a caller could type, each carrying its OWN combining dot
+  // above (U+0307) in addition to whatever the per-codepoint fold produces:
+  // 'İ' + the caller's dot, and plain 'I' + the caller's dot. Per codepoint,
+  // 'İ'.toLowerCase() is already 'i' + U+0307, so folding the FIRST one
+  // produces 'i' + U+0307 + U+0307 — two consecutive combining dots — before
+  // either strip runs; folding the SECOND produces only 'i' + U+0307 — one
+  // dot. `.replace` is non-overlapping, so a bare (non-quantified)
+  // `/i\u0307/gu` eats only the FIRST dot of a run and resumes searching
+  // past the survivor: it leaves the first spelling as 'i' + U+0307 (still
+  // one dot) while folding the second all the way to plain 'i' — two
+  // different strings. Postgres's libc `lower()` measurably does NOT keep
+  // them apart: `lower()` maps both 'İ' and 'I' to plain 'i', so libc's
+  // answer for both spellings is the SAME string ('i' + U+0307, the user's
+  // own dot untouched). That was the shape of the bug the `+` quantifier
+  // fixes: a bare strip was looser than its own libc backstop for this pair,
+  // in a narrower form than the U+0130 special case it replaced. The `+`
+  // matches the WHOLE run of dots in one match, so both spellings collapse
+  // to plain 'i' together. Built explicitly from 'İ'/'I' + the U+0307 escape
+  // + 'stanbul', never a pasted double-dot glyph, so the two combining marks
+  // are legible in a diff.
+  const dottedCapitalIPlusOwnDot = 'İ' + '\u0307' + 'stanbul';
+  const plainIPlusOwnDot = 'I' + '\u0307' + 'stanbul';
+  assert.equal(foldCategoryName(dottedCapitalIPlusOwnDot), 'istanbul');
+  assert.equal(foldCategoryName(dottedCapitalIPlusOwnDot), foldCategoryName(plainIPlusOwnDot));
+});
+
+test("foldCategoryName folds Final_Sigma the way libc's lower() does — " +
+  'position independent, never only the whole-string context-sensitive answer', () => {
+  // libc's lower() has no Final_Sigma rule: every Sigma folds to the ordinary
+  // (non-final) U+03C3 regardless of where it sits in the string. Whole-string
+  // toLowerCase() DOES apply Final_Sigma, so 'ΟΔΟΣ'.toLowerCase() ends in the
+  // final form U+03C2 instead — a different string from what 'Οδοσ' folds
+  // to, and from what libc's lower()-backed index collapses them to.
+  // (Postgres's ICU provider is the OPPOSITE of libc here — it HAS
+  // Final_Sigma too, which is a separate pair tested below and is not what
+  // this test is about.) Spelled with U+03C3 on purpose, so a regression to
+  // the final form (U+03C2) fails on the literal and not only on the
+  // cross-check below.
   assert.equal(foldCategoryName('ΟΔΟΣ'), 'οδοσ');
   assert.equal(foldCategoryName('ΟΔΟΣ'), foldCategoryName('Οδοσ'));
+});
+
+test('foldCategoryName folds BOTH lowercase spellings of sigma — final ' +
+  '(U+03C2) and ordinary (σ, U+03C3) — onto one, the ICU break the ' +
+  'U+03C2 -> σ clause exists for', () => {
+  // Postgres's ICU provider implements Final_Sigma itself, unlike libc:
+  // lower('ΟΔΟΣ') under ICU ends U+03C2 (the FINAL form) because the last
+  // Sigma sits at the end of the string, so ICU collapses 'ΟΔΟΣ' with a
+  // lowercase spelling that ALSO ends U+03C2 — and per-codepoint folding
+  // alone (this function's whole strategy, which is what suppresses
+  // Final_Sigma for libc) answers a string ending U+03C3 for 'ΟΔΟΣ' and one
+  // ending U+03C2 for that lowercase spelling — two different strings, a
+  // real containment break on an ICU database. Built with an explicit U+03C2
+  // escape rather than the look-alike character pasted in source, where a
+  // diff cannot tell it apart from plain σ (U+03C3).
+  const odosEndingFinalSigma = '\u03bf\u03b4\u03bf\u03c2';   // 'odos' spelled with Greek letters, ending U+03C2
+  assert.equal(foldCategoryName('ΟΔΟΣ'), 'οδοσ');
+  assert.equal(foldCategoryName('ΟΔΟΣ'), foldCategoryName(odosEndingFinalSigma));
 });
 
 test('foldCategoryName folds an astral character by CODE POINT, not by ' +

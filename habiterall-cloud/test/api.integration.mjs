@@ -628,6 +628,111 @@ for (const c of dupCategories) {
 }
 dupImportServer.close();
 
+/* ---- issue #256 (round 2, FIX 3): the same collapse, under mode=replace ----
+ *
+ * The block above is a MERGE. `mode=replace` wipes the account's categories,
+ * habits and entries FIRST and only then re-applies the file's own declared
+ * list — so there is no pre-existing row for a second declared category to
+ * "attach to" the way the merge block above does; the account genuinely
+ * loses a row a restore of the same file used to bring back in silence,
+ * before this fix. This needs its own account: alice already carries rows
+ * from every block above and after, and a replace wipes ALL of them, not
+ * just what this block is about — running this against her would corrupt
+ * every assertion elsewhere in this file that expects her earlier data to
+ * still be there.
+ *
+ * Seeded with a category and a habit of its own BEFORE the replace-mode
+ * import, and both are asserted GONE afterward — asserting against a
+ * pre-seeded account, or a replace that quietly behaved like a merge (kept
+ * the seed, added the file's rows beside it) would still pass every
+ * assertion below about the file's own two categories.
+ */
+const carol = await mkUser('ci-carol-replace');
+await withUser(carol, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO categories (user_id, name, color, position)
+     VALUES ($1, 'Pre-existing seed category', '#123456', 0) RETURNING id`,
+    [carol]
+  );
+  await db.query(
+    `INSERT INTO habits (user_id, name, type, unit, target_value, target_type,
+                         freq_numerator, freq_denominator, color, position,
+                         category_id)
+     VALUES ($1, 'issue-256 pre-existing seed habit', 'boolean', '', 0,
+             'at_least', 1, 1, '#123456', 0, $2)`,
+    [carol, rows[0].id]
+  );
+});
+
+const replaceImportApp = express();
+replaceImportApp.use((req, _res, next) => { req.session = { user: { id: carol } }; next(); });
+replaceImportApp.use('/api/import', express.raw({ type: '*/*', limit: '5mb' }));
+replaceImportApp.use(express.json());
+replaceImportApp.use('/api', api);
+const replaceImportServer = await new Promise((resolve) => {
+  const s = replaceImportApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const replaceImportBase = `http://127.0.0.1:${replaceImportServer.address().port}`;
+
+const replaceBackup = Buffer.from(JSON.stringify({
+  categories: [
+    { name: 'Istanbul', color: '#101010' },
+    { name: 'İstanbul', color: '#202020' },
+  ],
+  habits: [
+    { name: 'issue-256 replace habit A', type: 'boolean', category: 'Istanbul', entries: [] },
+    { name: 'issue-256 replace habit B', type: 'boolean', category: 'İstanbul', entries: [] },
+  ],
+}));
+const replaceImportRes = await fetch(`${replaceImportBase}/api/import?mode=replace`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: replaceBackup,
+});
+ck('the replace-mode import itself succeeds',
+  replaceImportRes.status === 200, String(replaceImportRes.status));
+const replaceImportResult = await replaceImportRes.json();
+ck(
+  'THE assertion: the SECOND declared category (İstanbul) is reported in ' +
+  'skipped under mode=replace too — the same collision-reporting rule the ' +
+  'merge block above pins, now exercised on the path that wipes first',
+  Array.isArray(replaceImportResult.skipped) &&
+    replaceImportResult.skipped.some((s) => s.includes('İstanbul')),
+  JSON.stringify(replaceImportResult.skipped));
+
+const replaceCategories = await withUser(carol, (db) =>
+  db.query(`SELECT id, name FROM categories`).then((r) => r.rows));
+ck('the pre-seeded category is GONE — proving this actually replaced rather ' +
+  'than merged',
+  !replaceCategories.some((c) => c.name === 'Pre-existing seed category'),
+  JSON.stringify(replaceCategories));
+const replaceMatching = replaceCategories.filter(
+  (c) => c.name === 'Istanbul' || c.name === 'İstanbul');
+ck('THE assertion: exactly ONE category named either spelling survives the ' +
+  'replace, carrying both habits',
+  replaceMatching.length === 1, JSON.stringify(replaceCategories));
+
+const replaceHabits = await withUser(carol, (db) =>
+  db.query(`SELECT name, category_id FROM habits`).then((r) => r.rows));
+ck('the pre-seeded habit is GONE too',
+  !replaceHabits.some((h) => h.name === 'issue-256 pre-existing seed habit'),
+  JSON.stringify(replaceHabits));
+const replaceHabitA = replaceHabits.find((h) => h.name === 'issue-256 replace habit A');
+const replaceHabitB = replaceHabits.find((h) => h.name === 'issue-256 replace habit B');
+ck(
+  "THE assertion: both habits' category_id is the SAME id — the surviving " +
+  'category, never a second row that was silently dropped',
+  replaceHabitA?.category_id != null &&
+    replaceHabitA.category_id === replaceHabitB?.category_id &&
+    replaceHabitA.category_id === replaceMatching[0]?.id,
+  `A=${replaceHabitA?.category_id} B=${replaceHabitB?.category_id} ` +
+    `kept=${JSON.stringify(replaceMatching)}`);
+
+replaceImportServer.close();
+// carol is a throwaway account for this block alone; the `ci-%` cleanup at
+// the end of this file removes her along with everything CASCADE-deleted
+// from her.
+
 /* ---- issue #256: the fold vs Postgres lower(), swept over every codepoint,
  * under BOTH collation providers this server can answer with ----
  *
@@ -760,14 +865,38 @@ if (hasIcuCollation) {
  * `İstanbul`/the decomposed spelling ('i' + U+0307) is the pair the U+0130
  * fix is FOR — built with an explicit \u0307 escape, never a pasted
  * combining character.
+ *
+ * Two more pairs, from the round-2 review of this fix, that neither the
+ * codepoint sweep NOR the pair above can see:
+ *
+ * - `İ` + the caller's OWN U+0307, against plain `I` + the caller's OWN
+ *   U+0307 — the libc break the `+` quantifier exists for
+ *   (`shared/test/validate.test.js` has the full argument). Per codepoint,
+ *   'İ'.toLowerCase() is already 'i' + U+0307, so the first spelling folds
+ *   (before either strip runs) to 'i' + U+0307 + U+0307 (two consecutive
+ *   dots) while the second folds to only 'i' + U+0307 (one dot) — a bare,
+ *   non-quantified strip leaves these two different strings, where libc's
+ *   `lower()` maps both 'İ' and 'I' to plain 'i' and so answers the SAME
+ *   string for both.
+ * - `ΟΔΟΣ` against a lowercase spelling ending in FINAL sigma (U+03C2) — the
+ *   ICU break the U+03C2 -> σ clause exists for. ICU's `lower('ΟΔΟΣ')`
+ *   ends U+03C2 too, so ICU collapses this pair (the OPPOSITE of the
+ *   `ΟΔΟΣ`/`Οδοσ` pair below, which ICU does NOT collapse) while
+ *   per-codepoint folding alone answers two different strings for it.
  */
 const decomposedIstanbul = 'i' + '\u0307' + 'stanbul';
+const dottedCapitalIPlusOwnDot = 'İ' + '\u0307' + 'stanbul';
+const plainIPlusOwnDot = 'I' + '\u0307' + 'stanbul';
+const odosEndingFinalSigma = '\u03bf\u03b4\u03bf\u03c2';   // 'odos' spelled with Greek letters, ending U+03C2
 const contextualPairs = [
   ['İstanbul', decomposedIstanbul],
   ['İstanbul', 'Istanbul'],
   ['ΟΔΟΣ', 'Οδοσ'],
   ['Élan', 'élan'],
+  [dottedCapitalIPlusOwnDot, plainIPlusOwnDot],
+  ['ΟΔΟΣ', odosEndingFinalSigma],
 ];
+
 
 for (const [providerLabel, collateSql] of [
   ['libc / database default', ''],
