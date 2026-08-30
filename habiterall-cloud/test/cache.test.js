@@ -738,18 +738,43 @@ test('the /overview key carries the version, and the version is read BEFORE the 
   assert.ok(read < build, 'the version is read before the rebuild, never after');
 });
 
-test('the version read and the rebuild share ONE transaction', () => {
-  // A miss is already checking out a connection, so the read is free there —
-  // and a second `withUser` would make every miss pay two checkouts to save
-  // nothing. Both halves are guarded: the route opens the transaction and hands
-  // it down, and `buildOverview` no longer opens one of its own.
+test('a miss pays ONE checkout on the main pool, not two', () => {
+  // **What this protects is the CHECKOUT COUNT, not the transaction count**, and
+  // the distinction is worth the longer name. A miss is already taking a
+  // connection to run five queries, so the version read is free there — and a
+  // second `withUser` beside it would make every miss queue twice for the same
+  // ten connections to save nothing. `PG_POOL_MAX` is 10; doubling what a miss
+  // spends of it halves how many can be in flight.
+  //
+  // It used to be spelled `the version read and the rebuild share ONE
+  // transaction`, which is how it is satisfied TODAY and not what is at stake.
+  // #280 proposes giving the version read a pool of its own — a tiny one
+  // nothing else draws from, so a herd of misses cannot starve the hit path —
+  // and under that shape the two are deliberately separate transactions while
+  // the property here is untouched: still one checkout of the MAIN pool per
+  // miss. A guard that pins the current spelling of a decision is one the next
+  // change has to argue with rather than satisfy.
+  //
+  // The version read's own ORDERING is not here. `the /overview key carries the
+  // version, and the version is read BEFORE the data` is that, and it is the
+  // one guard in this block #280 does still have to move: it anchors on the
+  // literal `SELECT data_version`, which under a second pool lives in
+  // `db/pool.js` rather than in the route.
   const text = src('api.js');
   const route = code(region(text, "api.get('/overview'", '}));'));
 
-  const tx = region(route, 'await withUser(user,', '  });');
-  assert.match(tx, /SELECT data_version/, 'the version read is inside the transaction');
-  assert.match(tx, /overviewMemo\(key, \{ db, \.\.\.arg \}\)/,
-    'and so is the rebuild, on the same connection');
+  // `withUserWrite(` does not match this — the paren is what separates them,
+  // the same distinction the mutating-route guard above relies on. And this is
+  // a COUNT rather than a presence check, because a second one added beside
+  // the first is exactly the regression and every presence check passes on it.
+  const opens = route.match(/withUser\(/g) ?? [];
+  assert.equal(opens.length, 1,
+    `the /overview route opens ${opens.length} transactions on the main pool; `
+    + 'one request must cost it one checkout, however the version is read');
+
+  // ...and the rebuild runs inside that one, on the connection already in hand.
+  assert.match(route, /overviewMemo\(key, \{ db, \.\.\.arg \}\)/,
+    'the rebuild must run on the connection the route already holds');
 
   const build = code(region(text, 'async function buildOverview(', '\n}\n'));
   assert.ok(!build.includes('withUser('),
