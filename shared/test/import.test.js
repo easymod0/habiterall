@@ -1255,6 +1255,64 @@ test('a Categories.csv over LIMITS.categories reports how many were dropped', ()
   assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
 });
 
+test('a hand-written Categories.csv with spaces after the commas keeps its colours', () => {
+  // The way people write CSV by hand. `COLOR_RE` is anchored, so one leading
+  // space was the difference between a colour restoring and silently becoming
+  // `#3b82f6` — and because both rows are NAMED, `named` is 2, no
+  // `categorySkip` is set, and `result.skipped` says nothing. The file looked
+  // like it restored with exactly one of the two properties #257 is about
+  // gone. The name has always been trimmed here and `Number(' 5')` is `5`, so
+  // the colour was the only one of the three fields that the whitespace
+  // reached.
+  const csv = 'Name,Color,Position\nHealth, #10b981, 5\nFitness, #f43f5e, 3\n';
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: csv },
+  ]);
+  const cats = backupCategories(buf);
+  assert.deepEqual(cats, [
+    { name: 'Health', color: '#10b981', position: 5 },
+    { name: 'Fitness', color: '#f43f5e', position: 3 },
+  ]);
+  assert.equal(cats.categorySkip, undefined, 'nothing was lost, so nothing is reported');
+});
+
+test('a JSON backup gets the same colour trim, because the repair tail is shared', () => {
+  // The trim lives in `normalizeCategories` rather than in the CSV row reader
+  // precisely so this holds: fixing it in the reader would have left the two
+  // formats repairing one field differently, which is the thing that function
+  // exists to prevent.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [{ name: 'Health', color: ' #10b981 ', position: 2 }],
+  }));
+  assert.deepEqual(backupCategories(buf), [
+    { name: 'Health', color: '#10b981', position: 2 },
+  ]);
+});
+
+test('a JSON backup over LIMITS.categories reports the cut too, not just a zip', () => {
+  // The cap lives in the shared repair tail; the REPORT of it used to live in
+  // the zip branch alone, so the same loss was announced or silent depending
+  // on which format carried it. The nearest thing to a channel on this side
+  // was `resolveOrCreateCategory` noticing a habit that named a cut category
+  // — which reports only when a cut category happened to be in use.
+  const many = Array.from({ length: LIMITS.categories + 3 },
+    (_, i) => ({ name: `Cat ${i}`, color: '#111111', position: i }));
+  const cats = backupCategories(Buffer.from(JSON.stringify({ categories: many })));
+  assert.equal(cats.length, LIMITS.categories);
+  assert.match(cats.categorySkip, /3 of \d+ categories in the backup were dropped/);
+  assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
+});
+
+test('a JSON backup inside the cap carries no note', () => {
+  // So the test above is proving the cut and not merely that a string exists.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [{ name: 'Health', color: '#10b981', position: 0 }],
+  }));
+  assert.equal(backupCategories(buf).categorySkip, undefined);
+});
+
 test('a blank Position cell falls back to row index, not to 0 for every row', () => {
   // `Number('')` is `0`, and `Number.isInteger(0)` is true — so a blank cell
   // used to look like a stated position of 0 rather than an absent one, and

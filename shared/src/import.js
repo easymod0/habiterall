@@ -287,19 +287,73 @@ export function backupSettings(buf) {
  */
 function normalizeCategories(raw, diagnostics) {
   const named = raw
-    .map((c) => ({
-      name: String(c.name ?? '').trim().slice(0, LIMITS.name),
-      // The same regex `normalizeColor` below already validates a habit's own
-      // colour with — a category's is never a Loop palette index, so
-      // `normalizeColor` itself is the wrong tool despite being right there.
-      color: COLOR_RE.test(c.color ?? '') ? c.color : '#3b82f6',
-      position: c.position,
-    }))
+    .map((c) => {
+      // TRIMMED before the test, and that is not cosmetic. `COLOR_RE` is
+      // anchored, so one leading space is the difference between a colour
+      // restoring and silently becoming the default — and a hand-edited
+      // `Categories.csv` written the way people write CSV by hand
+      // (`Health, #10b981, 5`) is exactly that. The name has always been
+      // trimmed here and `Number` tolerates the space on a position, so the
+      // colour was the one field of the three where the whitespace survived
+      // to be judged. Trimming here rather than in the CSV row reader is what
+      // keeps the promise this function exists for: both formats repair the
+      // field the same way.
+      const color = String(c.color ?? '').trim();
+      return {
+        name: String(c.name ?? '').trim().slice(0, LIMITS.name),
+        // The same regex `normalizeColor` below already validates a habit's
+        // own colour with — a category's is never a Loop palette index, so
+        // `normalizeColor` itself is the wrong tool despite being right there.
+        color: COLOR_RE.test(color) ? color : '#3b82f6',
+        position: c.position,
+      };
+    })
     .filter((c) => c.name);
   if (diagnostics) diagnostics.named = named.length;
   return named
     .slice(0, LIMITS.categories)
     .map((c, i) => ({ ...c, position: Number.isInteger(c.position) ? c.position : i }));
+}
+
+/**
+ * CATEGORIES with a one-line explanation of what it lost attached, for the
+ * route to append to `result.skipped`.
+ *
+ * Non-enumerable, so the property cannot reach a response body or a comparison
+ * of the list against itself — it is a channel to the caller, not a member.
+ *
+ * @param {Array<{name: string, color: string, position: number}>} categories
+ * @param {string} message
+ */
+function withSkip(categories, message) {
+  Object.defineProperty(categories, 'categorySkip', { value: message });
+  return categories;
+}
+
+/**
+ * ...specifically, that `normalizeCategories` capped the list.
+ *
+ * Both formats, not just the zip. The cap lives in the shared repair tail, so
+ * a habiterall JSON backup declaring more than `LIMITS.categories` is cut in
+ * exactly the same silence a zip was — and the reporting used to be the one
+ * half of the repair that was NOT shared, which made the message depend on the
+ * format rather than on what happened. The nearest thing to a channel on the
+ * JSON side was `resolveOrCreateCategory` noticing a habit that named a cut
+ * category, which reports the loss only when a cut category was in USE.
+ *
+ * `source` names the file in the sentence the user reads, since by the time
+ * they see it the two formats are the only thing that tells them where to look.
+ *
+ * @param {Array<{name: string, color: string, position: number}>} categories
+ * @param {{named?: number}} diagnostics
+ * @param {string} source
+ */
+function overCapSkip(categories, diagnostics, source) {
+  const named = diagnostics.named ?? 0;
+  if (named <= LIMITS.categories) return categories;
+  return withSkip(categories,
+    `${named - LIMITS.categories} of ${named} categories in ${source} `
+    + `were dropped: at most ${LIMITS.categories} are allowed`);
 }
 
 /**
@@ -420,19 +474,15 @@ export function backupCategories(buf) {
     // gets one, because there `Categories.csv` was never there to lose.
     const diagnostics = {};
     const categories = normalizeCategories(parseCategoriesCsvRows(categoriesCsv), diagnostics);
-    const named = diagnostics.named ?? 0;
-    let categorySkip;
-    if (named === 0) {
-      categorySkip =
-        'Categories.csv carried no usable categories: colours and positions were not restored';
-    } else if (named > LIMITS.categories) {
-      categorySkip = `${named - LIMITS.categories} of ${named} categories in Categories.csv ` +
-        `were dropped: at most ${LIMITS.categories} are allowed`;
+    if ((diagnostics.named ?? 0) === 0) {
+      // Zip-only, and deliberately: a JSON backup with an empty `categories`
+      // array is a legitimate shape that says "this account has none", while a
+      // `Categories.csv` member that parsed to nothing is a file that was
+      // supposed to carry something.
+      return withSkip(categories,
+        'Categories.csv carried no usable categories: colours and positions were not restored');
     }
-    if (categorySkip) {
-      Object.defineProperty(categories, 'categorySkip', { value: categorySkip });
-    }
-    return categories;
+    return overCapSkip(categories, diagnostics, 'Categories.csv');
   }
 
   const head = buf.toString('utf8').replace(/^﻿/, '').trimStart();
@@ -448,8 +498,14 @@ export function backupCategories(buf) {
   const categories = data?.categories;
   if (!Array.isArray(categories)) return null;
 
-  return normalizeCategories(
-    categories.filter((c) => c && typeof c === 'object' && !Array.isArray(c))
+  const diagnostics = {};
+  return overCapSkip(
+    normalizeCategories(
+      categories.filter((c) => c && typeof c === 'object' && !Array.isArray(c)),
+      diagnostics
+    ),
+    diagnostics,
+    'the backup'
   );
 }
 

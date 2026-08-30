@@ -1078,11 +1078,18 @@ api.post('/import', (req, res, next) => {
       // NAME rather than by any id the file happens to carry.
       const parsedCategories = backupCategories(buf);
       const result = applyImport(habits, mode, parsedCategories ?? []);
-      // `categorySkip` is set only for a zip whose `Categories.csv` carried
-      // nothing usable — see its own comment in `backupCategories`. Added
-      // here rather than in `apply-import.js`, which never sees the file's
-      // raw category rows, only the already-repaired list handed to it above.
-      if (parsedCategories?.categorySkip) result.skipped.push(parsedCategories.categorySkip);
+      // `categorySkip` is set when the file's categories carried nothing
+      // usable, or when more were declared than `LIMITS.categories` allows —
+      // see its own comment in `backupCategories`. Added here rather than in
+      // `apply-import.js`, which never sees the file's raw category rows, only
+      // the already-repaired list handed to it above.
+      //
+      // UNSHIFTED, not pushed. `applyImport` has already filled `skipped` with
+      // one line per bad row, and the dialog renders `slice(0, 8)` and then
+      // "…and N more" — so an import that also carries eight bad dates would
+      // hide the one message this whole channel exists for behind the ellipsis,
+      // and a hand-edited file is precisely the shape that has both.
+      if (parsedCategories?.categorySkip) result.skipped.unshift(parsedCategories.categorySkip);
 
       // Replace mode only: it means "make this account look like the file", and
       // the file's preferences are part of that. A merge is "add these habits to

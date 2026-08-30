@@ -1042,6 +1042,35 @@ ck('a Categories.csv over LIMITS.categories names how many were dropped',
     (s) => s.includes('were dropped') && s.includes(`at most ${LIMITS.categories}`)),
   JSON.stringify(overCapResult.skipped));
 
+// ...and it must be READABLE, which `.some()` above cannot see. The dialog
+// renders `skipped.slice(0, 8)` and then "…and N more", and `applyImport`
+// fills the array with one line per bad row BEFORE the route appends the
+// category message — so a file carrying eight bad rows as well hid the one
+// sentence this whole channel was added for behind the ellipsis. A
+// hand-edited file is precisely the shape that has both.
+//
+// A JSON backup rather than a zip, for two reasons: the CSV reader drops a
+// malformed date before `applyImport` ever sees it, so a zip cannot produce
+// the eight noisy lines; and the over-cap report used to be the zip branch's
+// alone, so this pins that it now reaches this format too.
+const noisyFile = JSON.stringify({
+  version: 1, app: 'habiterall',
+  categories: Array.from({ length: LIMITS.categories + 5 },
+    (_, i) => ({ name: `Noisy Cat ${i}`, color: '#111111', position: i })),
+  habits: [{
+    name: 'Noisy Habit', type: 'boolean',
+    entries: Array.from({ length: 9 }, (_, i) => ({ date: `not-a-date-${i}`, value: 2 })),
+  }],
+});
+const noisyResult = await restore(Buffer.from(noisyFile, 'utf8'), 'replace');
+const noisySkipped = noisyResult.skipped ?? [];
+ck('...and the file that needs it most still carries eight other lines',
+  noisySkipped.length > 8, `${noisySkipped.length} lines`);
+ck('the category message is FIRST, so the dialog\'s eight-line cap cannot hide it',
+  noisySkipped[0]?.includes('were dropped')
+    && noisySkipped[0]?.includes(`at most ${LIMITS.categories}`),
+  JSON.stringify(noisySkipped.slice(0, 3)));
+
 await restore(jsonBackup, 'replace');
 
 /* ---------- done ---------- */
