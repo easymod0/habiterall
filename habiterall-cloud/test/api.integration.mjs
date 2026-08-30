@@ -421,6 +421,43 @@ ck('and describes a habit exactly as the personal edition does',
   JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),
   Object.keys(exported ?? {}).sort().join(','));
 
+// `GET /export.csv` itself, which nothing in the repo called before this: the
+// cloud round-trip suite hand-builds its own archive with
+// `buildCsvArchive(seeded, ..., FIXTURE_CATEGORIES)`, so its fidelity
+// assertions compare the shared builder against a literal the test itself
+// supplied and never reach this route. Seeded with a non-default colour and
+// position, so a SELECT that dropped either column fails here rather than
+// happening to already agree with the defaults.
+const csvCategoryIds = await withUser(alice, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO categories (user_id, name, color, position)
+     VALUES ($1, 'Zip Colour Check', '#123456', 7),
+            ($1, 'Zip Position Check', '#abcdef', 3)
+     RETURNING id`,
+    [alice]
+  );
+  return rows.map((r) => r.id);
+});
+
+const { unzip } = await import('@habiterall/shared/unzip.js');
+const csvExportZip = Buffer.from(
+  await (await fetch(`${overviewBase}/api/export.csv`)).arrayBuffer());
+const csvExportMembers = unzip(csvExportZip);
+ck('GET /export.csv carries a Categories.csv when the account has categories',
+  csvExportMembers.has('Categories.csv'), [...csvExportMembers.keys()].join(', '));
+
+const categoriesCsvText = csvExportMembers.get('Categories.csv')?.toString('utf8') ?? '';
+ck("and it carries the colour the route's own SELECT reads, not the default",
+  categoriesCsvText.includes('Zip Colour Check,#123456,7'), categoriesCsvText);
+ck("and the position the route's own SELECT reads, not 0 for every row",
+  categoriesCsvText.includes('Zip Position Check,#abcdef,3'), categoriesCsvText);
+
+// Clean up — the reorder block below asserts positions 0/1 of the WHOLE
+// category list and would otherwise read past these.
+for (const id of csvCategoryIds) {
+  await fetch(`${overviewBase}/api/categories/${id}`, { method: 'DELETE' });
+}
+
 /* ---------- the device-clock middleware ---------- */
 //
 // The whole reporting half of `notifyTimezone: 'auto'` — and until this, every

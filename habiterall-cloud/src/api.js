@@ -1451,7 +1451,7 @@ api.get('/export.csv', route(async (req, res) => {
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
        FROM entries ORDER BY date`);
     const { rows: categoryRows } = await db.query(
-      `SELECT id, name, color, position FROM categories`);
+      `SELECT id, name, color, position FROM categories ORDER BY position, id`);
     return { habits, entries, categoryRows };
   });
 
@@ -1542,7 +1542,13 @@ api.post('/import', route(async (req, res) => {
   // the personal edition's route and `apply-import.js`'s own comment for why
   // a habit's `category` is resolved against this by NAME rather than by any
   // id the file happens to carry.
-  const result = await applyImport(uid(req), habits, mode, backupCategories(buf) ?? []);
+  const parsedCategories = backupCategories(buf);
+  const result = await applyImport(uid(req), habits, mode, parsedCategories ?? []);
+  // `categorySkip` is set only for a zip whose `Categories.csv` carried
+  // nothing usable — see its own comment in `backupCategories`. Added here
+  // rather than in `apply-import.js`, which never sees the file's raw
+  // category rows, only the already-repaired list handed to it above.
+  if (parsedCategories?.categorySkip) result.skipped.push(parsedCategories.categorySkip);
 
   // Replace mode only — "make this account look like the file". A merge adds
   // habits to what is already here and must not rewrite the rest of the

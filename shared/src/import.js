@@ -276,11 +276,17 @@ export function backupSettings(buf) {
  * `Categories.csv` — call this rather than repeating it, so the two formats
  * cannot repair one field differently from the other.
  *
+ * `diagnostics`, when handed an object, is filled in with `named` — the count
+ * that survived the nameless-entry drop, before the `LIMITS.categories`
+ * slice — so a caller that needs to know whether the slice actually cut
+ * anything does not have to repeat the filter to find out.
+ *
  * @param {Array<{name?: any, color?: any, position?: any}>} raw
+ * @param {{named?: number}} [diagnostics]
  * @returns {Array<{name: string, color: string, position: number}>}
  */
-function normalizeCategories(raw) {
-  return raw
+function normalizeCategories(raw, diagnostics) {
+  const named = raw
     .map((c) => ({
       name: String(c.name ?? '').trim().slice(0, LIMITS.name),
       // The same regex `normalizeColor` below already validates a habit's own
@@ -289,7 +295,9 @@ function normalizeCategories(raw) {
       color: COLOR_RE.test(c.color ?? '') ? c.color : '#3b82f6',
       position: c.position,
     }))
-    .filter((c) => c.name)
+    .filter((c) => c.name);
+  if (diagnostics) diagnostics.named = named.length;
+  return named
     .slice(0, LIMITS.categories)
     .map((c, i) => ({ ...c, position: Number.isInteger(c.position) ? c.position : i }));
 }
@@ -318,10 +326,15 @@ function parseCategoriesCsvRows(text) {
   return rows.slice(1).map((row) => ({
     name: row[cName] ?? '',
     color: cColor === -1 ? '' : (row[cColor] ?? ''),
-    // A blank or junk cell becomes NaN, which `normalizeCategories`'s own
+    // Junk text becomes NaN, which `normalizeCategories`'s own
     // `Number.isInteger` check already treats as "no position" — the same
-    // outcome an absent field gets in the JSON branch.
-    position: cPosition === -1 ? undefined : Number(row[cPosition] ?? ''),
+    // outcome an absent field gets in the JSON branch. A BLANK cell is not
+    // junk to `Number`, though: `Number('')` is `0`, and `Number.isInteger(0)`
+    // is true, so the fallback never runs and every blank row lands at
+    // position 0. Checked for explicitly, so a blank or missing cell reads
+    // the same as an absent column.
+    position: cPosition === -1 || !row[cPosition]?.trim()
+      ? undefined : Number(row[cPosition]),
   }));
 }
 
@@ -348,8 +361,14 @@ function parseCategoriesCsvRows(text) {
  * and non-objects are dropped the way `parseHabiterallJSON` filters its own
  * `habits` array — a file is not to be trusted merely for being valid JSON.
  *
+ * From a zip's `Categories.csv`, the returned array may carry a non-enumerable
+ * `categorySkip` string naming a whole-file failure the caller cannot see any
+ * other way — a header with no usable rows, or more rows than the cap allows.
+ * Each edition's `/api/import` route pushes it onto `result.skipped`.
+ *
  * @param {Buffer} buf the raw request body
- * @returns {Array<{name: string, color: string, position: number}>|null}
+ * @returns {(Array<{name: string, color: string, position: number}> &
+ *   {categorySkip?: string})|null}
  */
 export function backupCategories(buf) {
   if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
@@ -359,6 +378,18 @@ export function backupCategories(buf) {
     // read it as a zip is reported by `parseUpload` itself when the real
     // import runs — this reader only ever answers `null` on a doubt, never
     // throws.
+    //
+    // This is the SECOND `unzip()` of the same buffer on an ordinary import:
+    // both routes call `parseUpload(buf)` (whose zip branch decompresses
+    // every member to reach `Habits.csv`/`Checkmarks.csv`) and then this
+    // function on the identical `buf`, so a large `Checkmarks.csv` is
+    // inflated twice, once for no reason a Loop zip can ever satisfy — it has
+    // no `Categories.csv` to find. `MAX_TOTAL_BYTES` is a per-call bound, so
+    // this doubles the inflate cost a request may spend rather than the
+    // memory held at once. The right fix is `parseUpload` returning
+    // categories alongside habits from its own single unzip, which is a
+    // wider change than a review round should carry — filed as #282 rather
+    // than done here.
     let files;
     try {
       files = unzip(buf);
@@ -376,7 +407,32 @@ export function backupCategories(buf) {
     const categoriesCsv = find('categories.csv');
     if (categoriesCsv === null) return null;   // a Loop zip, or one of ours with none
 
-    return normalizeCategories(parseCategoriesCsvRows(categoriesCsv));
+    // Unlike the JSON branch below, a zip's `Categories.csv` is new with this
+    // format (#257) and every way it can carry nothing was silent: a header
+    // with no `name` column, a header-only file, or more rows than
+    // `LIMITS.categories` allows. In every case the import still succeeds —
+    // habits still name their categories from `Habits.csv`, and
+    // `resolveOrCreateCategory` re-invents each at the default colour — and
+    // nothing told the user their file's own colours and positions were
+    // dropped. `categorySkip` carries that sentence for the route to add to
+    // `result.skipped`, the channel already built for exactly this; a `null`
+    // result above (no member, or an unreadable zip) is not this, and never
+    // gets one, because there `Categories.csv` was never there to lose.
+    const diagnostics = {};
+    const categories = normalizeCategories(parseCategoriesCsvRows(categoriesCsv), diagnostics);
+    const named = diagnostics.named ?? 0;
+    let categorySkip;
+    if (named === 0) {
+      categorySkip =
+        'Categories.csv carried no usable categories: colours and positions were not restored';
+    } else if (named > LIMITS.categories) {
+      categorySkip = `${named - LIMITS.categories} of ${named} categories in Categories.csv ` +
+        `were dropped: at most ${LIMITS.categories} are allowed`;
+    }
+    if (categorySkip) {
+      Object.defineProperty(categories, 'categorySkip', { value: categorySkip });
+    }
+    return categories;
   }
 
   const head = buf.toString('utf8').replace(/^﻿/, '').trimStart();

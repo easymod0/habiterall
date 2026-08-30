@@ -1076,7 +1076,13 @@ api.post('/import', (req, res, next) => {
       // `applyImport` iterates this before a single habit is written; see its
       // own comment for why a habit's `category` is resolved against it by
       // NAME rather than by any id the file happens to carry.
-      const result = applyImport(habits, mode, backupCategories(buf) ?? []);
+      const parsedCategories = backupCategories(buf);
+      const result = applyImport(habits, mode, parsedCategories ?? []);
+      // `categorySkip` is set only for a zip whose `Categories.csv` carried
+      // nothing usable — see its own comment in `backupCategories`. Added
+      // here rather than in `apply-import.js`, which never sees the file's
+      // raw category rows, only the already-repaired list handed to it above.
+      if (parsedCategories?.categorySkip) result.skipped.push(parsedCategories.categorySkip);
 
       // Replace mode only: it means "make this account look like the file", and
       // the file's preferences are part of that. A merge is "add these habits to

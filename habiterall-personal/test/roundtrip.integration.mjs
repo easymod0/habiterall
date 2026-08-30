@@ -25,6 +25,10 @@ import { LIMITS } from '@habiterall/shared/validate.js';
 // Used only to hand-build a zip carrying a `Categories.csv` for the merge-rule
 // test below — the real export route is what's under test everywhere else.
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
+// Only for the two malformed `Categories.csv` files below — a header with no
+// data rows and one over `LIMITS.categories` — which `buildCsvArchive` cannot
+// produce; our own writer never emits either shape.
+import { zip } from '@habiterall/shared/zip.js';
 
 let fails = 0;
 const ck = (label, cond, extra = '') => {
@@ -1000,6 +1004,43 @@ const positioned = await getCategories();
 ck('a category restores at the position the file declared, not the order it was listed',
   positioned.map((c) => c.name).join(',') === 'Alpha,Mid,Zeta,Undeclared Category',
   JSON.stringify(positioned.map((c) => [c.name, c.position])));
+
+await restore(jsonBackup, 'replace');
+
+/* ---------- a Categories.csv that carries nothing is reported, not silent ---------- */
+
+console.log('\n--- unusable Categories.csv is reported ---');
+
+// A header with no data rows at all — the likeliest shape a hand-truncated
+// file takes. The import still succeeds (`Habits.csv` names a real habit),
+// and until now nothing said the file's own colours and positions never made
+// it in: the habit lands uncategorised and `skipped` said nothing about it.
+const headerOnlyZip = zip([
+  { name: 'Habits.csv', data: 'Name\nHeader Only Habit\n' },
+  { name: 'Checkmarks.csv', data: 'Date,Header Only Habit\n' },
+  { name: 'Categories.csv', data: 'Name,Color,Position\n' },
+]);
+const headerOnlyResult = await restore(headerOnlyZip, 'replace');
+ck('a header-only Categories.csv is named in skipped, not silently dropped',
+  (headerOnlyResult.skipped ?? []).some(
+    (s) => s.includes('Categories.csv') && s.includes('no usable')),
+  JSON.stringify(headerOnlyResult.skipped));
+
+// More rows than `LIMITS.categories` allows — `normalizeCategories` still
+// slices to the cap, but until now nothing said how many were cut.
+const tooManyRows = Array.from(
+  { length: LIMITS.categories + 5 }, (_, i) => `Over Cap ${i},#111111,${i}`
+).join('\n');
+const overCapZip = zip([
+  { name: 'Habits.csv', data: 'Name\nOver Cap Habit\n' },
+  { name: 'Checkmarks.csv', data: 'Date,Over Cap Habit\n' },
+  { name: 'Categories.csv', data: `Name,Color,Position\n${tooManyRows}\n` },
+]);
+const overCapResult = await restore(overCapZip, 'replace');
+ck('a Categories.csv over LIMITS.categories names how many were dropped',
+  (overCapResult.skipped ?? []).some(
+    (s) => s.includes('were dropped') && s.includes(`at most ${LIMITS.categories}`)),
+  JSON.stringify(overCapResult.skipped));
 
 await restore(jsonBackup, 'replace');
 
