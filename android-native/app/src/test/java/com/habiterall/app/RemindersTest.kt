@@ -184,9 +184,11 @@ class RemindersTest {
     @Test
     fun `a delivery that names a day may only be posted on that day`() {
         // The other half, because arming is not the last chance to be wrong: an
-        // inexact alarm — the ordinary case on Android 14+, where
-        // SCHEDULE_EXACT_ALARM is not granted by default — armed at 22:52 for
-        // 23:52 can arrive at 00:03 with nobody having pressed anything late.
+        // inexact alarm — API 31-32 with "Alarms & reminders" revoked, since
+        // USE_EXACT_ALARM covers 33+ unconditionally — armed at 22:52 for 23:52
+        // can arrive at 00:03 with nobody having pressed anything late. The
+        // rule below is version-independent and so is this assertion; what
+        // changed with the manifest is only how often the loose case is hit.
         assertTrue(Reminders.stillAboutToday("2026-08-16", "2026-08-16"))
         assertFalse(Reminders.stillAboutToday("2026-08-16", "2026-08-17"))
         // The DAILY alarm names no day and means whichever one it arrives on,

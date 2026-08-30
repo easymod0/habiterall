@@ -15,16 +15,19 @@
     "test:tenancy": "node test/tenancy.integration.mjs",
     "test:api": "node test/api.integration.mjs",
     "test:healthz": "node test/healthz.integration.mjs",
+    "test:drain": "node test/drain.integration.mjs",
     "test:claims": "node test/login-claims.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:ntfyanswer": "node test/ntfy-answer.integration.mjs",
     "test:memo": "node test/overview-memo.integration.mjs",
-    "test:roundtrip": "node test/roundtrip.integration.mjs"
+    "test:roundtrip": "node test/roundtrip.integration.mjs",
+    "test:plans": "node test/schema-plans.integration.mjs",
+    "bench:queries": "node scripts/bench-queries.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",
     "pg": "^8.13.1",
-    "openid-client": "^6.1.7",
+    "openid-client": "^6.8.7",
     "express-session": "^1.18.1",
     "connect-pg-simple": "^10.0.0",
     "helmet": "^8.0.0",

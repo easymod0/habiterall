@@ -98,8 +98,8 @@ export const devtoolsPort = (fallback) =>
  * Throwing rather than returning false is the point of the shape. A sleep that
  * was too short carries on into the assertions and fails somewhere else, with
  * output describing a row that has vanished rather than a page that never
- * loaded — the same one-signature-two-causes trap `reloadAndWaitForRow` is
- * about. This names what it was waiting for.
+ * loaded — the same one-signature-two-causes trap `reloadAndWaitForRow`
+ * (below) is about. This names what it was waiting for.
  *
  * The predicate has to be everything the caller depends on, not merely
  * something that appears early. `sleep` at least waited a fixed length; a poll
@@ -123,6 +123,66 @@ export async function waitUntil(ev, expression, {
   throw new Error(
     `timed out after ${timeoutMs / 1000}s waiting for ${what ?? expression}`
   );
+}
+
+/**
+ * Reload, then wait for a row belonging to THIS habit in the NEW document.
+ *
+ * The reload and the wait are one function because the bug is in the join
+ * between them, and every version of this that separated the two got the
+ * join wrong.
+ *
+ * **The window is the doomed document, and naming the row does not close
+ * it.** `location.reload()` returns before the navigation commits, so a poll
+ * landing in between reads the page that is about to be thrown away — which
+ * is already painting every row it had a moment ago, including this habit's.
+ * The loop breaks, the `rows.find(...)` that follows finds a node belonging
+ * to a document that then disappears, and the suite either clicks into
+ * nothing or dies with `Cannot read properties of undefined (reading
+ * 'querySelector')` — naming neither the habit nor the wait that was too
+ * weak.
+ *
+ * So the predicate asks which document it is in. `window.__doomed` is set
+ * immediately before the reload and cannot survive it: a fresh document has
+ * no such property, so `!window.__doomed` is false in the old page and true
+ * in the new one, whatever either is painting. Strengthening "any row" to
+ * "this habit's row" — the fix #130 proposed and an earlier draft of this
+ * shipped — only helps where the habit did not exist before the reload: a
+ * reload of a page already showing it leaves the predicate exactly as
+ * satisfiable in the doomed document as "any row" was.
+ *
+ * The name is still worth asking for, because it is what turns a failure
+ * into a sentence: `no row containing "Coffee"` rather than a TypeError two
+ * lines later.
+ *
+ * Seen in CI: avoidcheck failed in 1.3s, passed on a re-run, and cost an
+ * unrelated pull request a red tick. #130 measured the doomed-document
+ * window at under ~8ms — its measurement, not one repeated here, and six
+ * trials that saw nothing is a weak bound rather than a small number. A
+ * runner under load is where it opens.
+ *
+ * On Chrome for Testing 152.0.7977.42 that window is not observable through
+ * CDP at all — pausing the reload's Document request with `Fetch` makes
+ * `Runtime.evaluate` never answer it, and stalling the response 4s at a proxy
+ * does the same; every configuration answered at +0ms from a new empty
+ * document, and 0 probes of 400 ever saw the old one. That is why this is
+ * tested as a unit, over a fake `ev` (`shared/test/browser-runner.test.js`),
+ * rather than by a browser suite trying to catch the window open.
+ *
+ * @param {(expression: string) => Promise<any>} ev  the caller's evaluator
+ * @param {string} name the habit's name, as it appears in the row
+ * @param {{timeoutMs?: number, intervalMs?: number, what?: string}} [opts] passed
+ *   through to `waitUntil`. `what` OVERRIDES the sentence built from `name`,
+ *   which is what every call site here uses it for — do not add a second
+ *   `label` parameter for that.
+ */
+export async function reloadAndWaitForRow(ev, name, opts) {
+  await ev(`window.__doomed = 1; location.reload(); true`);
+  await waitUntil(ev,
+    `!window.__doomed
+      && [...document.querySelectorAll('#grid .habit-row')]
+        .some(r => r.textContent.includes(${JSON.stringify(name)}))`,
+    { what: `a row containing "${name}" in the reloaded page`, ...opts });
 }
 
 /**

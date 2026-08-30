@@ -8,6 +8,26 @@ import { MAX_CACHED, createMemo, forgetAccount, remember } from '../src/cache.js
 const src = (name) =>
   readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
 
+/**
+ * The slice of TEXT between two anchors, or a failure naming the missing one.
+ *
+ * The point is the failure. `text.slice(text.indexOf(a), text.indexOf(b))`
+ * with a reworded `b` gives `indexOf` = -1, and `slice(i, -1)` is not empty —
+ * it is everything from `a` to one character short of the end. A guard built
+ * that way silently stops asking about the function it named and starts asking
+ * about the rest of the file, which is the "test that cannot fail" shape the
+ * root CLAUDE.md lists first. Every guard below narrows to a region, so every
+ * one of them can be defeated by an edit to a comment; asserting the anchors
+ * were found is what turns that into a red test instead of a green one.
+ */
+function region(text, from, to) {
+  const start = text.indexOf(from);
+  assert.notEqual(start, -1, `anchor not found, so this guard tested nothing: ${from}`);
+  const end = text.indexOf(to, start + from.length);
+  assert.notEqual(end, -1, `anchor not found, so this guard tested nothing: ${to}`);
+  return text.slice(start, end);
+}
+
 /** A clock the test moves by hand, so a 60s TTL costs no seconds. */
 const clock = (start = 1_000) => {
   let t = start;
@@ -286,6 +306,132 @@ test('the sweep leaves an in-flight computation alone however old it is', async 
   assert.equal(calls, 1, 'the settled answer was stored, not recomputed');
 });
 
+test('a FULL cache does not evict the computation it is holding', async () => {
+  // The other sweep. `createMemo`'s miss path exempts an in-flight placeholder
+  // and `remember`'s did not, so the exemption held right up until the memo
+  // reached `max` — which is to say it held until load, which is the only time
+  // it matters. Then the placeholder was evicted by the TTL pass, the answer
+  // in flight failed the store-identity guard and was never cached, and the
+  // burst it was collapsing re-formed: a memo at its bound recomputing the
+  // very thing it was already holding.
+  const time = clock();
+  const held = gate();
+  let calls = 0;
+  const memo = createMemo(async (arg) => {
+    calls++;
+    return arg === 'slow' ? held.opened : arg;
+  }, { ttlMs: 100, max: 3, now: time.now });
+
+  const first = memo('slow:w', 'slow');
+  time.advance(500);                       // the placeholder is now older than the TTL
+  for (const k of ['a', 'b', 'c']) await memo(`${k}:w`, k);   // fills to max, forcing remember's sweep
+
+  assert.equal(calls, 4, 'control: one held computation plus the three that filled it');
+
+  // The heart of it: a second caller arriving for the SAME still-computing key
+  // must still find the placeholder rather than start its own run.
+  const second = memo('slow:w', 'slow');
+  held.release('answer');
+  assert.equal(await first, 'answer');
+  assert.equal(await second, 'answer');
+  assert.equal(calls, 4, 'the in-flight computation was not evicted, so it was not repeated');
+});
+
+test('a settled entry is given up before an in-flight one, and the bound still holds', async () => {
+  // The preference is settled-first, but `max` is not negotiable: if every
+  // entry is a placeholder there is nothing cheap left and one goes anyway.
+  const time = clock();
+  const gates = [gate(), gate(), gate()];
+  const memo = createMemo(async (i) => gates[i].opened, { ttlMs: 100, max: 2, now: time.now });
+
+  const held = gates.map((_, i) => memo(`h${i}:w`, i));
+  assert.ok(memo.size() <= 2, `the bound holds even with nothing settled, size=${memo.size()}`);
+
+  gates.forEach((g, i) => g.release(`v${i}`));
+  assert.deepEqual(await Promise.all(held), ['v0', 'v1', 'v2'],
+    'and every caller is still answered, evicted placeholder or not');
+});
+
+/* ---------- one account's share of the bound ---------- */
+
+test('one account cannot spend the whole shared bound', async () => {
+  // `max` alone is a bound an account can take by itself: `end` is any date and
+  // `days` is 1-365, so paging back through history is thousands of distinct
+  // keys and no write is involved, so `forget` never fires. The account doing
+  // it evicts every other account's answers and the memo becomes pure overhead
+  // for everyone else — all of the sweep, none of the hits.
+  const time = clock();
+  const memo = createMemo(async (arg) => arg,
+    { ttlMs: 2_000, max: 50, maxPerAccount: 4, perAccount: true, now: time.now });
+
+  await memo('victim:w', 'still here');
+  for (let i = 0; i < 40; i++) await memo(`hog:window${i}`, i);
+
+  assert.equal(await memo('victim:w', 'recomputed'), 'still here',
+    'the quiet account keeps its answer while another pages through 40 windows');
+  assert.ok(memo.size() <= 5, `the hog is held to its share, size=${memo.size()}`);
+});
+
+test('the per-account cap gives up a settled entry before a computing one', async () => {
+  // The same preference as `evict`, and it needs its own test because the two
+  // sweeps are separate code: an account at its cap whose OLDEST entry is
+  // still computing must lose a settled one instead. Taking the placeholder
+  // would waste the computation, lose its answer to the store-identity guard,
+  // and re-form the burst it was collapsing — for an account that has done
+  // nothing but page, which is the shape this cap exists to handle gently.
+  const time = clock();
+  const held = gate();
+  let slowCalls = 0;
+  const memo = createMemo(async (arg) => {
+    if (arg !== 'slow') return arg;
+    slowCalls++;
+    return held.opened;
+  }, { ttlMs: 2_000, max: 50, maxPerAccount: 2, perAccount: true, now: time.now });
+
+  const slow = memo('7:slow', 'slow');     // oldest, and still running
+  await memo('7:settled', 'settled');      // newer, and cheap to lose
+  await memo('7:third', 'third');          // the account is now over its cap
+
+  const again = memo('7:slow', 'slow');
+  held.release('answer');
+  assert.equal(await slow, 'answer');
+  assert.equal(await again, 'answer');
+  assert.equal(slowCalls, 1, 'the computing entry was kept, so it was not run twice');
+
+  // ...and the settled one is what actually went.
+  assert.equal(await memo('7:settled', 'recomputed'), 'recomputed',
+    'the settled entry is the one the cap took');
+});
+
+test('the per-account cap is per account, not a second global bound', async () => {
+  const time = clock();
+  const memo = createMemo(async (arg) => arg,
+    { ttlMs: 2_000, max: 50, maxPerAccount: 2, perAccount: true, now: time.now });
+
+  // Six accounts, two windows each: nobody is over their share, so nothing is
+  // evicted. A cap that counted every key rather than the prefix's own would
+  // leave two entries here instead of twelve.
+  //
+  // 1 and 12 are in the list on purpose — the separator matters here exactly
+  // as it does in `forget`, and `'12:w1'.startsWith('1')` is the way to get it
+  // wrong.
+  const users = [1, 12, 2, 3, 4, 5];
+  for (const user of users) {
+    await memo(`${user}:w1`, `${user}-1`);
+    await memo(`${user}:w2`, `${user}-2`);
+  }
+  assert.equal(memo.size(), 12, 'nobody is over their share, so nothing was evicted');
+
+  // Account 1 goes one over and loses its OWN oldest window...
+  await memo('1:w3', '1-3');
+  assert.equal(await memo('1:w1', 'recomputed'), 'recomputed',
+    "the capped account gives up its own least recently written window");
+
+  // ...and account 12 is untouched by it.
+  assert.equal(await memo('12:w1', 'recomputed'), '12-1',
+    'account 1 reaching its cap must not evict account 12');
+});
+
 /* ---------- invalidation from outside the router ---------- */
 
 test('forgetAccount reaches a per-account memo, and only those', async () => {
@@ -334,19 +480,13 @@ test('the notifier forgets AFTER its transaction commits, not inside it', () => 
   // which nothing over HTTP can arrange — the same limitation
   // `overview-memo.integration.mjs` already states for the `/api` path, and
   // the reason this is worth having at all.
-  const text = src('notifier.js');
-  const record = text.slice(
-    text.indexOf('async record(account,'),
-    text.indexOf('/* ---------- answering from an ntfy button')
-  );
-  assert.ok(record.length > 0, 'control: record() was found in notifier.js');
+  const record = region(src('notifier.js'),
+    'async record(account,', '/* ---------- answering from an ntfy button');
+
   assert.match(record, /\}\s*finally\s*\{\s*forgetAccount\(account\.id\);\s*\}/,
     'forgetAccount must run in a finally OUTSIDE withUser, so it follows the COMMIT');
 
-  const inside = record.slice(
-    record.indexOf('withUser(account.id'),
-    record.lastIndexOf('});')
-  );
+  const inside = region(record, 'withUser(account.id', '} finally {');
   assert.ok(!inside.includes('forgetAccount'),
     'forgetAccount inside the withUser callback forgets before the write commits');
 });
@@ -360,18 +500,28 @@ test('the /overview memo does not inherit a bound sized for 100-byte entries', (
   // measure 499 KB at 20 habits × 365 days. Ten thousand of those is 4.9 GB.
   //
   // The behavioural halves are above: the sweep is what actually bounds
-  // residency, and `forgetAccount` is what the non-router writes call. Neither
-  // can see whether THIS memo asks for either, and no test can drive 500
-  // distinct dashboard windows through a real Postgres to find out.
+  // residency, the per-account cap is what stops one account spending the
+  // shared bound, and `forgetAccount` is what the non-router writes call. None
+  // of them can see whether THIS memo asks for any of it, and no test can
+  // drive a hundred distinct dashboard windows through a real Postgres.
   const text = src('api.js');
 
-  // The literal, so this fails if the number is widened back toward MAX_CACHED.
-  assert.match(text, /const MAX_OVERVIEW_CACHED = 500;/,
+  // The literals, so this fails if either number is widened back toward
+  // MAX_CACHED. 100 x the measured 499 KB is ~50 MB; 500 was ~250 MB, and
+  // neither compose file sets a memory limit for that to be survivable in.
+  assert.match(text, /const MAX_OVERVIEW_CACHED = 100;/,
     'MAX_OVERVIEW_CACHED must be its own number, stated here');
+  assert.match(text, /const MAX_OVERVIEW_PER_ACCOUNT = 8;/,
+    'one account must not be able to spend the whole shared bound');
 
-  const call = text.match(/createMemo\([\s\S]*?\}\);/)?.[0] ?? '';
+  // Anchored on the binding, not on `createMemo(` — the first such call in the
+  // file is this one only by luck, and a second memo added above it would
+  // leave this guard quietly checking the wrong one.
+  const call = region(text, 'const overviewMemo = createMemo(', '});');
   assert.ok(call.includes('max: MAX_OVERVIEW_CACHED'),
     'the overview memo must pass its own max, not inherit MAX_CACHED');
+  assert.ok(call.includes('maxPerAccount: MAX_OVERVIEW_PER_ACCOUNT'),
+    'without a per-account cap, one account paging history evicts every other account');
   assert.ok(call.includes('perAccount: true'),
     'the overview memo must be reachable by forgetAccount, or a button press cannot clear it');
 });

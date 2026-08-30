@@ -8,14 +8,37 @@
     <!--
       A reminder that drifts by an hour is not a reminder.
 
-      SCHEDULE_EXACT_ALARM only — deliberately NOT USE_EXACT_ALARM. That one
-      is restricted by Google Play to alarm clocks and calendars, which a
-      habit tracker is not, so declaring it risks rejection. It also makes
-      `canScheduleExactAlarms()` return true unconditionally, which would turn
-      the inexact fallback in Reminders.schedule into dead code — the
-      permission and that fallback contradicted each other.
+      BOTH exact-alarm permissions, split at the version where the second one
+      begins to exist. USE_EXACT_ALARM is protection level `normal` — granted at
+      install, not revocable, and it makes `canScheduleExactAlarms()` return true
+      unconditionally — so from API 33 up every reminder takes the exact branch
+      with no prompt and no trip into system Settings. Below 33 it does not
+      exist, and SCHEDULE_EXACT_ALARM carries 31-32, where it is granted by
+      default and user-revocable. Below 31 no permission is needed at all.
+
+      This REVERSES the earlier "SCHEDULE_EXACT_ALARM only, deliberately not
+      USE_EXACT_ALARM". That shape declared a permission it never REQUESTED —
+      ACTION_REQUEST_SCHEDULE_EXACT_ALARM appears nowhere in this client — and an
+      app targeting 33+ is denied that one by default on Android 14, so
+      `canScheduleExactAlarms()` was false forever and every reminder rode
+      `setAndAllowWhileIdle`. That reads as flakiness rather than as a missing
+      permission, because the drift grows with how long the app has gone
+      unopened: a reminder set from the app looks punctual, and the same one set
+      from a browser and left overnight looks like it never fired.
+
+      The Play restriction the old comment cited does not reach this client. The
+      APK is sideloaded from a GitHub release (release.yml), there is no review
+      to fail, and Loop — a habit tracker — ships USE_EXACT_ALARM on Play anyway.
+
+      The inexact fallback in `Reminders.setAlarm` is NOT dead code, which was
+      the old comment's other objection. It stays reachable on 31-32 for a user
+      who has revoked "Alarms & reminders", and `setAlarm` re-reads the
+      permission on every arm — so a grant or a revocation needs no migration.
     -->
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission
+        android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        android:maxSdkVersion="32" />
     <!-- Alarms do not survive a reboot; the receiver re-arms them. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 

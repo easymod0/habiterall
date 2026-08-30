@@ -64,6 +64,118 @@ different things by width: above 640px `.check` is a fixed 44px so the gain is
 room for the NAME; under 640px the row shares evenly and the gain is thumb
 targets.
 
+**A grouped section header's mean and spread hide under the same two guards
+`reorderable` already answers to, and for the same reason.** `reorderable`
+(`dashboard.js:299`) is false while a search filter is on and while archived
+habits are shown, because a drag write reorders the wrong set otherwise;
+`summarised` sits right beside it and refuses the same two things, because a
+mean over a filtered or an archive-inflated set is a figure over a different
+set of habits than the count sitting right next to it, and because `#/categories`
+already excludes archived habits from the same aggregation — a dashboard figure
+that included them would disagree with the comparison view about the same
+category. `summarised` can still be true while there is nothing to draw:
+`state.categorySummaries` is read as possibly `undefined` even then —
+`?archived=true` sends no such key at all, and an older cached payload under
+`shellFirst`'s stale-while-revalidate may carry none either — and `sectionHeader`
+treats a missing summary exactly like `summarised` being false, by drawing the
+header it always drew and nothing more.
+
+**A grouped section's ORDER is `position`, and the habit dialog's category
+manage list is the one surface that writes it.** Both editions already read
+every category list `ORDER BY position, id` and a create already lands a new
+one at `MAX(position) + 1`, so `POST /categories/reorder` (`moveCategory`,
+`ui/habit-dialog.js`) is a caller for existing storage semantics rather than
+new ones — nothing on the read side, including the grouped dashboard's own
+section order, had to learn anything. The ↑/↓ pair on each manage row are
+disabled while `editingCategoryId != null`, because `repaintCategories` will
+not rebuild that list while a rename box is open (a live `<input>` a rebuild
+would tear out from under whoever is typing in it); a press there would send a
+write and repaint nothing, which reads as the click having done nothing at
+all. See `docs/decisions/categories.md`'s phase 5 for the disable rules in
+full and for why `moveCategory` keeps the optimistic order on `err.queued`
+where `persistOrder` (the habit list's own reorder) does not.
+
+**`state.categories` has several writers that can be in flight at once, so a
+read may only INSTALL its answer if it is still the newest one.**
+`state.categoryReadSeq` (`ui/store.js`) is that counter. It lives beside the
+field it protects rather than beside any one reader, because **the writers are
+in two modules and the one that is easiest to forget is in the other one**:
+`load()` (`ui/dashboard.js`) assigns `data.categories` from `/overview`, and
+`announce()` sends every category mutation in the habit dialog EXCEPT
+`moveCategory` through `'reload'`, which is what calls it. Five halves, and
+each fails differently — a version with any four of them still ships the bug:
+
+- `refreshCategoryPicker` takes a ticket and assigns only while it holds the
+  current one.
+- `moveCategory` bumps at its optimistic splice, so a press retires every read
+  already out. **Not implied by the first** — the read in flight is often
+  `openDialog`'s fire-and-forget refetch, fired before the press existed and
+  landing while the press's own read has not started, so nothing newer has
+  taken a ticket to supersede it.
+- `load()` takes a ticket before `/overview` goes out and installs
+  `data.categories` only while it holds it. Its own `paint()` does not rebuild
+  the manage list, so under the unfixed code the dialog goes on showing a move
+  the store no longer has. Add a category and press ↑ on it — the ordinary
+  gesture, since a create lands at `MAX(position) + 1` and so at the BOTTOM —
+  and the Add's own `'reload'` is in flight for exactly that press. `habits`
+  and `categorySummaries` are deliberately NOT ticketed: neither has a writer
+  that can be newer, and summaries are read by id rather than by position.
+- `moveCategory`'s catch keeps its ticket and reverts only while it holds it.
+  `previous` is captured before the splice, so the revert is as stale a writer
+  as any reply — two presses overlapping with the EARLIER one failing last put
+  an order two presses old back in the store.
+- **The queued DELETE's optimistic removal bumps too**, and it is the half a
+  reader looking only at the reorder feature would not think to check. It is
+  `moveCategory`'s splice in every structural respect — an optimistic write of
+  the field with no read of its own — and the read it loses to is the same
+  `openDialog` refetch. What is different is the harm, which is not a display
+  one: the removal exists precisely so `saveHabit` cannot submit an id the
+  replay is about to destroy (`resolveCategoryId` answers 400 on replay, and
+  `PUT /habits/:id` REPLACES, so the WHOLE habit edit is dropped as
+  permanently inapplicable behind a toast naming neither the habit nor the
+  field). A stale answer landing behind it puts the category back in the
+  picker and re-arms exactly that. It needs no prior outage: `api()` queues a
+  `replayable()` write on any network error, the 10s timeout included, while a
+  GET is never pre-empted.
+
+A superseded read still repaints (from current state, which can only
+re-confirm what is there); the ASSIGNMENT is the half that can be stale.
+`persistOrder` needs none of this because it never refetches after its own
+write and so cannot race a second call's read — do not read its shape as the
+precedent here. Blocks `j`, `k`, `l`, `m` and `n` in `categorycheck.mjs` pin
+one half each, and each one passes with any of the other four deleted.
+
+The rule for anything added next is the shape rather than the list: **a writer
+of `state.categories` that is not itself the newest read must take a ticket** —
+an optimistic write bumps, a read installs only while it holds one. Two of the
+five were found by review after the counter shipped, both by asking that
+question of a writer nobody had enumerated.
+
+**And a reorder arrow may not be restored with `restoreFocus`.** Its fallback
+for a control that has stopped being operable is the first still-operable
+`[data-focus-key]` in the same parent, which is right for `Today` and wrong in
+a manage row, where ↑ and ↓ are the only two focus keys and each is the
+other's undo: the press that lands a category at row 0 disables its ↑ and
+handed the keyboard its ↓, so the next Enter walked it back down and a held
+Enter ping-ponged it between the ends with a write per step.
+`restoreArrowFocus` (`ui/habit-dialog.js`) parks focus on the list itself at a
+boundary instead — the gesture stops where the boundary says it stops, and
+focus stays inside the dialog rather than dropping to `<body>`, which is the
+whole reason a restore runs there. Block `2b` pins both halves.
+
+**And that made the scroll a separate question, which it always should have
+been.** `.focus()` scrolls its target into view as a side effect, so while the
+keyboard followed the row up the list the VIEW came along for free — a boundary
+parks focus on the list with `preventScroll`, and the last press of a walk was
+then the only one that did not follow, dropping the row above the fold from a
+list scrolled a single row down. `revealArrow` (`ui/habit-dialog.js`) owns
+visibility now and `restoreArrowFocus` owns only the keyboard: both `.focus()`
+calls pass `preventScroll`, and each of `moveCategory`'s two repaints reveals
+the moved row after putting `scrollTop` back, whether or not focus moved. This
+is the same "`.focus()` is not a scroll mechanism" that `moveCategory`'s own
+scroll save/restore records having been bitten by in Safari, met a second time
+one call further out.
+
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears
@@ -77,18 +189,40 @@ shared with the dashboard rather than copied — so a reminder can be answered
 without going through the calendar and the day editor behind it. Two things
 about it are not obvious:
 
-- **It pages by SLICING, not by asking for a window** — but it is not
-  request-free, and do not write that it is. `open()` fetches
-  `/habits/:id/entries` unwindowed, so `entriesByDate` / `skipSet` are the whole
-  history and no `end` parameter ever reaches the server from this card, where
-  the dashboard holds only the fortnight it asked for and must ask again.
-  `redraw` is still `refresh(habit.id)`, the same full `open()` the other nine
-  cards page through, so two round trips are spent redrawing a slice already in
-  memory. Offline that is visible: `page()` moves `state.chartOffsets` *before*
-  `redraw`, a GET is not replayable, and `open()` toasts and returns without
-  rendering — so the position moves, the strip does not, and the window jumps
-  when something next draws it. Redrawing from the entries in hand is what
-  would close it.
+- **It pages by SLICING, not by asking for a window, and paging it makes no
+  request.** `open()` fetches `/habits/:id/entries` unwindowed, so
+  `entriesByDate` / `skipSet` are the whole history and no `end` parameter ever
+  reaches the server from this card — which is what makes a local redraw
+  possible here and impossible on the dashboard, which holds only the fortnight
+  it asked for and must ask again. `buildRecentDaysCard`'s own `draw` is what
+  the ‹ Earlier / Later › / Now buttons call, and it rebuilds the window out of
+  the entries already in hand. Be exact about the claim, because an earlier
+  version of this bullet was not: it is request-free to PAGE, and the card is
+  still built by a page that fetched twice to get here.
+
+  **The rule that keeps it that way, and the thing worth knowing: `page()`
+  (`ui/components.js`) moves `state.chartOffsets` BEFORE it calls `redraw`, so
+  any `redraw` that can FAIL without rendering leaves the stored position and
+  the drawn window disagreeing.** `refresh(habit.id)` is such a redraw — a GET
+  is not replayable, and `open()` toasts and returns without rendering — and it
+  is what this card used to pass (#245). Its redraw must stay local.
+  Most of the other cards draw figures the server computed, so they have
+  nothing local to redraw from and keep the refetch.
+
+  **The calendar redraws locally too, the same way (#274).** `buildCalendarCard`
+  draws from the same unwindowed `entriesByDate` / `skipSet`, from
+  `stats.streaks` already in memory, and from `calendarWindow(...)`, which is
+  pure client arithmetic — nothing in its window needs the server either, so its
+  ‹ Earlier no longer moves `state.calEnd` and then calls `open()`. Both cards
+  now redraw from data already in hand rather than refetching.
+  `open()` also resets `state.calEnd` alongside `state.chartOffsets`, both at
+  `detail.js:74`, so reopening a habit — the SAME one or a different one —
+  starts the calendar at today rather than carrying a paged position across the
+  navigation; every in-page redraw (a tap, a zoom press, a granularity change,
+  the settings dialog, the `'change'` broadcast) is `redraw === true` and keeps
+  it. See `docs/decisions/dashboard-and-detail.md`'s `#274` section for the
+  argument, including why a same-habit reopen is folded into the same reset
+  rather than kept as a per-habit position.
 - **Its host repaints CELLS IN PLACE (`repaintCells`), not the page.** The
   dashboard's `repaint` is a full `paint()`, which is cheap there; here a
   rebuild is two round trips and up to ten cards of SVG. Touching no nodes is
@@ -189,7 +323,11 @@ at its old date, and clearing both from `applyDraft` gated on "`detailCards`
 changed at all" sent a still-ticked History card back to today.
 
 `windowedChart` gives its range readout the same `.cal-range` class the calendar
-uses, so a test looking one up must scope to a card by title.
+uses, and its nav the same `.cal-nav`, so a test looking either one up must
+scope to a card by title. Recent days is FIRST on the page, so an unscoped query
+finds the strip's and not the calendar's — which `calcheck.mjs`'s paging check
+did, greenly, for as long as pressing the strip's ‹ Earlier happened to rebuild
+the page.
 
 ## A day nobody answered, drawn as kept
 
@@ -292,6 +430,22 @@ opacity distinguishes them. This is the same shape of argument this section
 already makes for the boolean day-state branch above being unreachable: state
 it, do not add an arm for a case that cannot arise.
 
+**A day before the habit existed was considered and declined, not lost.**
+`style.css` once carried `.check.today`'s neighbour, `.check.before-start {
+opacity: 0.35 }`, meant to dim a day that predates a habit's creation — but
+nothing ever set the class, on either surface that draws a `.check` cell (the
+dashboard grid and the detail page's "Recent days" strip, both `ui/day-strip.js`).
+"Before the habit existed" is not a supported cell state: the states are the
+four in the root `CLAUDE.md` plus the treatments this section describes, and
+there is no fifth — `.check.today`, the one `.check` modifier still in the
+stylesheet, is a column HIGHLIGHT marking which day is today, not a day state,
+and claims nothing about what happened on it. The rule was deleted rather than
+wired up (#231), so it must not be "restored" later by someone assuming it
+regressed. Dimming pre-start days is still a legitimate future FEATURE
+decision, but it starts by setting the class somewhere, not by re-adding a
+rule nothing sets — and `shared/test/css-dead-rules.test.js` is what makes
+doing that a deliberate act rather than a silent one.
+
 **Still open, on purpose.** Streak connectors drawn over an empty cell was
 issue #176, addressed above — a different route (`inStreak`) from anything
 else in this section, and it left `unlogged_is_success`'s own fill untouched.
@@ -317,16 +471,51 @@ is the one that matters, because `inputmode="decimal"` is what shows it and most
 of Europe's keyboards offer it; `HabitFormScreen.parseAmount` on the phone has a
 comment about the same input.
 
-So the box is `type="text"`, both surfaces are `ui/count-field.js` over the rules
-in `ui/amount.js`, and that module owns the reading — with the same three-answer
-convention `parseTimeInput` uses and the same trap in it: `''` (empty — a
-delete), `null` (unreadable — say so, write nothing) and a number, of which `0`
-is a real answer. Two of the three are falsy, so callers compare with `===`.
-`parseAmount` is also stricter than `Number()`, which `shared/CLAUDE.md` records
-as too generous about form — `1e3` is not a thing anyone types into a box asking
-how many glasses of water they drank. The dashboard keeps its own write path —
-`recordValue`, which paints before awaiting, because offline `api()` queues the
-write and THEN throws.
+So the box is `type="text"`, the day editor and the dashboard grid are both
+`ui/count-field.js` over the rules in `ui/amount.js`, and that module owns the
+reading — with the same three-answer convention `parseTimeInput` uses and the
+same trap in it: `''` (empty — a delete), `null` (unreadable — say so, write
+nothing) and a number, of which `0` is a real answer. Two of the three are
+falsy, so callers compare with `===`. `parseAmount` is also stricter than
+`Number()`, which `shared/CLAUDE.md` records as too generous about form —
+`1e3` is not a thing anyone types into a box asking how many glasses of water
+they drank. The dashboard keeps its own write path — `recordValue`, which
+paints before awaiting, because offline `api()` queues the write and THEN
+throws.
+
+**A third typed-amount surface is deliberately not a `count-field`.** The habit
+dialog's Target box is a GOAL, not a day's amount, and `stepFor(goal)` plus a
+preset offering the goal back are both meaningless in the box where the goal
+itself is being typed — so it is a plain `type="text"` box straight over
+`ui/amount.js`, asking `count-field.js`'s exported `convention()` so there is
+still one answer to the decimal-point question rather than a second guess at
+it. `readTarget` (`ui/habit-dialog.js`) is the reader, and two decisions about
+it are not obvious from the code alone.
+
+**The target box submits what was typed; an untouched box submits what was
+stored.** Typing runs through `parseAmount`, bounded to `[1e-6, 1e12]` and
+quantised to six places exactly as a day's amount is; leaving the box alone
+submits the stored `target_value` verbatim, whatever it is. A target has never
+been bounded server-side — not in `parseHabit`, not on the phone, not on any
+import path — and `PUT /habits/:id` REPLACES, so inheriting the day amount's
+domain whole would let a colour-only edit quantise a stored `3.14159265`, and
+would make a habit whose target sits outside that domain unsavable over a
+field nobody touched, with no in-domain spelling to retype it as. This changes
+what no stored row means, which is why it needed no further approval than the
+one it already has.
+
+**A refusal is gated on the target box being ON SCREEN, not on the parse.**
+Mistype the target, decide the habit is Yes/No after all, and press Save: the
+box lives inside `.numerical-only`, which `syncTypeFields` hides the moment
+Type stops being Measurable, and hidden, a complaint would land in a hidden
+span while `focus()` landed on a hidden input — the dialog would just stop
+saving with nothing visible saying why. A refusal nobody can see is not a
+refusal, so hidden and unreadable, the stored target stands instead.
+
+**An empty Target box still means a habit with no target — 0 — not a
+delete.** That is what `Number(f.target_value.value) || 0` meant before this
+and what `parseHabit` stores for one; it is deliberately not the day editor's
+empty box, which is a DELETE, because there is no row here to delete.
 
 **A refusal has to be actionable, and what it QUOTES has to be true of what it
 quoted.** `parseAmount` refuses `10,000` as ambiguous; `amountComplaint` names
@@ -485,6 +674,64 @@ The Android WebView and a browser then disagree on purpose; see
 `android-native/CLAUDE.md`, whose back-stack rules depend on exactly what
 `app.js` writes to history during boot.
 
+**`#/categories` is the second fragment route, and the app is exactly one
+fragment entry deep at all times.** `ui/routes.js` keeps `ourEntry` as a single
+boolean and `go(LIST)` unwinds with one `history.back()`, so neither can
+describe a stack two of ours deep. Nothing in `routes.js` enforces that; two
+rules in `ui/categories.js` do, and they are why the single boolean is still
+honest. **The comparison links to no habit** — `best` and `worst` are named as
+text and neither is an `<a>`, because dashboard → categories → habit would be
+two entries of ours and Back from that habit lands on `#/categories` with the
+dashboard painted underneath it. And **its top-bar button is hidden whenever a
+habit is open** (`syncEntry`, which reads `state.openHabitId`), which closes the
+same hole from the other side: no habit can sit UNDER the comparison either. One
+invariant, two constraints — weakening either means teaching `routes.js` a real
+stack first, and neither is a tidiness rule.
+
+**And `go()` must not be made to REPLACE for this route.** It looks like the
+one-line answer to the same problem and it is not: on Android a same-document
+open counts an entry in `WebBackStack.floorAfterShow`, so replacing leaves
+`currentIndex` AT the floor and the next system Back closes the screen out from
+under the user rather than reaching the dashboard.
+`android-native/CLAUDE.md` requires all three back-stack rules re-read together
+and checked on an emulator whenever `go()` changes, and records that every wrong
+version still passes `WebBackStackTest`. `routecheck.mjs` pins the push at
+exactly one entry and Back returning to the dashboard, which is the browser half
+of it only.
+
+**"Is the dashboard what is showing?" is `dashboardShowing()` in
+`ui/store.js`, and it is never spelled out a second time.** Six guards ask it
+— `app.js` twice (which view a traversal lands on; whether the browser reminder
+may reload the list), `dashboard.js` twice (the `'change'` listener and the
+`matchMedia` reflow), `settings-dialog.js` once and `habit-dialog.js` through
+its own `announce()` — and until `#/categories` existed every one of them could
+write `state.openHabitId == null` and be right. A second full-page view made
+that spelling wrong at all six AT ONCE, and the two that were missed on the
+first pass are why this paragraph exists: the breakpoint reflow painted the
+dashboard over the comparison **on a phone rotation**, and the habit dialog's
+`'reload'` did the same on Save. Neither is a `routes.js` question — the URL is
+already correct in both — so do not go looking there. A THIRD view means
+editing that one function and nothing else.
+
+**A dialog does not know which view it was opened over, so it announces rather
+than navigates.** `'reload'` means "go to the dashboard and fetch it"
+(`ui/store.js`), which is right only when the dashboard is what is showing;
+`'change'` is what every other view answers by refetching itself in place.
+`#btn-new` is in `auth-session.js`'s `SIGNED_IN_ONLY` and nothing hides it per
+view, so the habit dialog — and with it the in-place category manager — opens
+over a habit's own page and over the comparison as readily as over the list.
+Its four category mutations emitted `'reload'` unconditionally, which is how
+**adding a category while editing a habit dropped the user on the dashboard**;
+`announce()` is the one rule now. The three emitters that stay unconditional
+are the ones where going home IS the answer: a habit deleted, a habit restored,
+and a create whose request was abandoned. Note what the modal hides: nothing
+repaints behind it, so the view that was pulled out from under it only becomes
+visible when the dialog closes — which is why a suite that opens and closes
+this dialog a dozen times never saw it, and why `categorycheck.mjs` now asserts
+the URL as well as the visible view (measured against the unfixed code, the
+`history.back()` inside `paint()` landed on ANOTHER habit's page, so
+`#view-detail` was still showing and only the fragment gave it away).
+
 ## Boot and auth
 
 **Boot has to be able to fail visibly.** Everything `start()` does before the
@@ -500,12 +747,18 @@ render goes to that view, and `handleLaunchAction` afterwards only toasts.
 a module at package time. `GET /api/me` carries `mode`, and so does its **401**.
 See the root `CLAUDE.md` for what the other status codes mean.
 
-**A request the app makes is bounded** — 10s, in `ui/api.js` and in the worker's
-`networkFirst`, taken from `Api.kt`'s `connectTimeout`. Chrome imposes no ceiling
-of its own (measured still pending at 300s). The exemption is about REPLAYING,
-not latency: aborting does not recall a request the server has begun, so
-everything bounded has to be safe to arrive twice, and `POST /habits` is the one
-call on this path that is not. Import, export and the notify test bypass `api()`.
+**A request the app makes is bounded** — 10s, in `ui/api.js`, the worker's
+`networkFirst` and the worker's `shellFirst`, taken from `Api.kt`'s
+`connectTimeout`. Chrome imposes no ceiling of its own (measured still pending
+at 300s). `shellFirst` awaits the network before consulting a cached copy one
+line below it, so unbounded it is an installed PWA that opens to nothing
+rather than one showing a stale shell — missed by #93, which bounded only the
+worker's API half. The exemption is about REPLAYING, not latency, and it is
+`ui/api.js`'s alone: aborting does not recall a request the server has begun,
+so everything it bounds has to be safe to arrive twice, and `POST /habits` is
+the one call on this path that is not. Import, export and the notify test
+bypass `api()`. Nothing in `sw.js` needs the exemption — only GETs reach the
+worker, so there is nothing there a retry could duplicate.
 
 This is the bounded half of #87: the write is still attempted before it is
 durable, so the loss window is 10 seconds rather than unbounded. Closing it means
@@ -548,6 +801,22 @@ fallen behind — with twenty-six modules where there was one, a hand-maintained
 precache list drifts silently.
 
 ## Traps
+
+**A text box added inside a dialog's `<form>` inherits Enter, and Enter means
+that form's submit button.** The habit dialog manages the account's categories
+in place, so its "New category" and rename boxes sit inside `#habit-form` —
+where Enter closed the dialog, WROTE THE HABIT, and dropped the category that
+had just been typed, inventing a whole habit from the form's defaults on the
+create path. Nothing said so: `saveHabit` succeeds on its own terms and
+`#category-hint` is written only by the category handlers. `enterPresses`
+(`ui/habit-dialog.js`) routes the key to the button beside the box rather than
+calling `preventDefault` alone — a box where Enter does nothing is its own bug
+report. Ask this of any control added to a sub-form of a dialog next.
+
+And pinning it needs a REAL key event: implicit submission is the browser's
+own behaviour on a trusted keypress, so a `new KeyboardEvent('keydown')` from
+script does not trigger it and a test built on one passes against the
+unguarded code. `categorycheck.mjs` drives CDP `Input.dispatchKeyEvent`.
 
 **A localised name is never indexed by a Gregorian field.** `getMonth()`,
 `getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
@@ -679,6 +948,20 @@ dialog spin until the OS gave up while the create may or may not have landed.
 Abandoned, not replayed, and reported as *indeterminate* is the honest shape; the
 dialog closes and reloads the list on that error, so "check whether it was
 created" is something the user can see rather than a thing they are told to do.
+
+**`POST /categories` is replayable, and it ALSO yields a second row on a
+literal reading of "arrives twice safely" — the reasoning above is not "any
+create is fine to replay", or `POST /habits` would not need its own
+exception.** What makes this one different is that a second attempt cannot
+succeed *silently*: the account's own name is unique (`categoryNameTaken`,
+backed by the DB constraint `isCategoryNameConflict` maps to 409 rather than
+letting surface as a 500), so a staged write that lands twice gets the second
+attempt refused as a duplicate of the first, and the outbox drops every 4xx as
+a permanent failure rather than retrying it — never a second category with the
+same name. `POST /habits` has no name uniqueness to fall back on; two habits
+named the same thing are simply two habits. Do not relax the duplicate-name
+check on this route without re-reading this paragraph — it is not merely a
+validation nicety, it is what keeps this write safe to stage and replay at all.
 
 A GET still goes to the network, because
 the service worker may hold a cached copy and skipping the request throws that
@@ -874,13 +1157,15 @@ for every key Done actually changed — otherwise the dialog appears to do
 nothing once a toggle has been touched. Read through the accessor, never
 `state.X` directly.
 
-**Saving a habit returns you to where the edit started.** `habit-dialog` emits
-`'change'` when `openHabitId` is set and `'reload'` otherwise, so editing from
-a habit's own page reloads that page and creating from the dashboard reloads
-the list. It cannot simply call the detail view — that is the import cycle the
-store exists to break — and it cannot always emit `'change'`, because on the
-dashboard that is a repaint from stale state and a newly created habit would
-not appear. Deleting still goes home: the page you were on is gone.
+**Saving a habit returns you to where the edit started**, and so does adding a
+category from the same dialog. `habit-dialog`'s `announce()` emits `'reload'`
+only when `dashboardShowing()`, `'change'` otherwise — see "A dialog does not
+know which view it was opened over" under Routing for the whole rule. So
+editing from a habit's own page reloads that page and creating from the
+dashboard reloads the list. It cannot simply call the detail view — that is the
+import cycle the store exists to break — and it cannot always emit `'change'`,
+because on the dashboard that is a repaint from stale state and a newly created
+habit would not appear. Deleting still goes home: the page you were on is gone.
 
 **The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
 `android-native/.../ReminderTime.kt` accept the same inputs and produce the same

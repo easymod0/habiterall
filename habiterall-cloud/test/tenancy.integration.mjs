@@ -64,6 +64,108 @@ const allEntries = await withUser(alice.id, (db) =>
   db.query('SELECT * FROM entries').then(r => r.rows.length));
 check('entries with no WHERE returns only alice rows', allEntries === 1, `rows=${allEntries}`);
 
+console.log('--- attack: does isolation survive a PARALLEL plan? ---');
+// Migration 016 marks both policy functions PARALLEL SAFE, and that is the one
+// change in it that can move a boundary. A policy qual may now be evaluated in
+// a worker PROCESS rather than only in the leader, so the question this block
+// asks is whether `app.user_id` — set with `set_config(..., true)` by
+// `withUser` — reaches that worker. If it did not, the scan running there would
+// see either nothing or everything, and only one of those two is loud.
+//
+// `debug_parallel_query` is both the lever and the probe: it forces a Gather
+// over a plan that is parallel SAFE and adds nothing at all to one that is not,
+// so before 016 there is no Gather here whatever the fixture size. It is
+// `context = user`, so `habiterall_app` may set it, and `SET LOCAL` is what
+// keeps it from following this connection back into the pool.
+//
+// ANALYZE, not a bare EXPLAIN, and that is the difference between this block
+// testing something and testing nothing. A plan is a statement about SHAPE:
+// with `max_parallel_workers = 0` at the server the planner still emits
+// `Gather / Single Copy: true`, then at execution launches no worker at all
+// and runs the whole thing in the LEADER — so the Gather check and both
+// isolation checks below would pass having exercised none of what 016 changed,
+// and this block would decay in silence into a copy of the baseline four lines
+// above. A CI runner that has its parallel workers spoken for gets there
+// intermittently. Only ANALYZE reports `Workers Launched`, and `EXPLAIN
+// ANALYZE` over a `SELECT count(*)` executes the query and writes nothing.
+//
+// And the plan is taken of the ISOLATION READS THEMSELVES, not of a stand-in
+// beside them. Round one asserted `Workers Launched: 1` on `SELECT count(*)
+// FROM entries` and then ran the two reads that carry the security claim as
+// separate statements, with the prose saying they are "themselves answered
+// under a Gather". That is narrower than it sounds — the `max_parallel_workers
+// = 0` decay above is still caught, because the stand-in's own assertion goes
+// red — but what is left open is the case where the stand-in gets a worker and
+// an isolation read does not. `COUNT(DISTINCT ...)` is exactly the sort of
+// aggregate whose parallel-safety is worth not assuming, and this block's own
+// lesson is that a plan is a statement about shape and only ANALYZE says what
+// ran. So each read is EXPLAIN ANALYZEd for its plan and then issued again for
+// its rows, inside the same forced-parallel transaction, and the worker count
+// is asserted on the plan of the statement whose ANSWER is being trusted.
+const ENTRY_READ = `SELECT COUNT(*)::int AS n, COUNT(DISTINCT user_id)::int AS owners,
+            COALESCE(MIN(user_id), 0)::int AS owner FROM entries`;
+const HABIT_READ = 'SELECT name FROM habits ORDER BY name';
+
+const parallel = await withUser(alice.id, async (db) => {
+  await db.query('SET LOCAL debug_parallel_query = on');
+  const explain = async (sql) => (await db.query(
+    `EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ${sql}`))
+    .rows.map((r) => r['QUERY PLAN']).join('\n');
+
+  const plan = await explain('SELECT count(*) FROM entries');
+  const entryPlan = await explain(ENTRY_READ);
+  const habitPlan = await explain(HABIT_READ);
+  // Still the same transaction, so still forced parallel: these two reads are
+  // the ones the plans above were taken of, run again for their rows. That is
+  // the point — what is under test is what a worker returns, not what an
+  // EXPLAIN says it would.
+  const entries = (await db.query(ENTRY_READ)).rows[0];
+  const habits = (await db.query(HABIT_READ)).rows.map((r) => r.name);
+  return { plan, entryPlan, habitPlan, entries, habits };
+});
+// `Gather` says the plan is parallel-SAFE, which is the half 016's ALTER
+// FUNCTIONs buy. `Workers Planned` and `Single Copy` are not asserted on:
+// they are debug_parallel_query's own forcing artefacts and say nothing about
+// the schema, so pinning them would pin the GUC's behaviour rather than the
+// functions'. `Workers Launched` is a different kind of line and is the reason
+// the EXPLAIN above is an ANALYZE — it is the one number that says the process
+// boundary was actually crossed, and everything below this asserts about a
+// worker rather than about the leader.
+//
+// Asserted POSITIVELY, and that is the whole of the difference. `not
+// "Workers Launched: 0"` is also satisfied when the line is absent entirely —
+// which is exactly the no-Gather case, i.e. the regression this block exists to
+// catch — so the negative form contributed nothing in the one direction that
+// matters. `Single Copy: true` means one worker or none, so 1 is the only
+// number a launched worker can report here; that is not the GUC's artefact but
+// its consequence, and it fails in both directions.
+check('a plan over entries inside withUser can be parallelised at all',
+  parallel.plan.includes('Gather'), parallel.plan);
+check('and a worker was actually launched, so the reads below ran in one',
+  parallel.plan.includes('Workers Launched: 1'), parallel.plan);
+// Each isolation read carries its OWN worker count, so "the answer below came
+// from a worker" is a claim about the statement that produced the answer. A
+// read that quietly stopped being parallelisable — an aggregate the planner
+// will not push down, a policy function marked restricted — fails here by name
+// instead of leaving the assertion beneath it true of the leader.
+check("the entry read is itself answered under a launched worker",
+  parallel.entryPlan.includes('Gather')
+    && parallel.entryPlan.includes('Workers Launched: 1'), parallel.entryPlan);
+check('and so is the habit read',
+  parallel.habitPlan.includes('Gather')
+    && parallel.habitPlan.includes('Workers Launched: 1'), parallel.habitPlan);
+// The counts are the baseline block's, unchanged, and both directions of being
+// wrong are visible: bob owns a habit and an entry too, so a worker reading
+// without the setting propagated would report 2, and one reading with the
+// setting empty would fail closed and report 0.
+check('the worker sees alice\'s one entry, and it is hers',
+  parallel.entries.n === 1 && parallel.entries.owners === 1
+    && parallel.entries.owner === alice.id,
+  `${JSON.stringify(parallel.entries)} alice=${alice.id}`);
+check('and alice\'s one habit, and it is hers',
+  parallel.habits.length === 1 && parallel.habits[0] === 'Alice Secret Habit',
+  JSON.stringify(parallel.habits));
+
 console.log('--- attack: address another user by id directly ---');
 const stolen = await withUser(alice.id, (db) =>
   db.query('SELECT * FROM habits WHERE id = $1', [bobHabit]).then(r => r.rows.length));
@@ -195,6 +297,149 @@ try {
   victimOk = cleared === 1;
 } catch { victimOk = false; }
 check('bob can still write and clear that day', victimOk);
+
+/* ---------- categories ---------- */
+
+console.log('--- categories: isolated like everything else ---');
+
+const bobCategory = await withUser(bob.id, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO categories (user_id, name) VALUES ($1, 'Bob Category') RETURNING id`,
+    [bob.id]
+  );
+  return rows[0].id;
+});
+
+const aliceSeesBobCategory = await withUser(alice.id, (db) =>
+  db.query('SELECT * FROM categories WHERE id = $1', [bobCategory]).then(r => r.rows.length));
+check("alice cannot SELECT bob's category", aliceSeesBobCategory === 0,
+  `rows=${aliceSeesBobCategory}`);
+
+// This one does NOT get blocked, and that is the point of the check. Postgres
+// runs a foreign-key check internally, with RLS not applied to that internal
+// lookup — so alice's own habit can carry bob's category id and the INSERT
+// succeeds outright. The FK is therefore not a tenancy boundary at all; it is
+// exactly why the route validates existence itself (resolveCategoryId) rather
+// than trusting the constraint to 400 on a foreign id.
+const aliceHabitWithBobsCategory = await withUser(alice.id, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO habits (user_id, name, type, category_id)
+     VALUES ($1, 'FK is not RLS', 'boolean', $2) RETURNING id`,
+    [alice.id, bobCategory]
+  );
+  return rows[0].id;
+});
+check(
+  "a DB-layer INSERT succeeds pointing alice's habit at bob's category id " +
+  '(the FK check runs inside Postgres with RLS not applied to it)',
+  Number.isInteger(aliceHabitWithBobsCategory)
+);
+
+/* ---------- attack: read another account through GET /categories/stats ------
+ *
+ * The one route that reads EVERY habit and EVERY category the caller has, with
+ * a `SELECT * FROM habits` carrying no `WHERE` at all — deliberately, because
+ * it must hand `computeCategoryStats` the archived ones too. RLS is the whole
+ * of what scopes it, so this is the route where a query left outside `withUser`
+ * would hand one account another's habit names in `best`/`worst` rather than
+ * merely a count.
+ *
+ * Driven over the real router, unlike everything above it: what is under attack
+ * here is what reaches the RESPONSE. Alice's `FK is not RLS` habit, created
+ * just above, points at BOB's category id — the FK check runs inside Postgres
+ * with RLS not applied to it, so that row exists — which makes it the sharpest
+ * probe available: a route that resolved a habit's category by id without
+ * scoping the lookup would name bob's category on alice's payload.
+ */
+
+console.log('--- attack: another account through GET /categories/stats ---');
+
+const express = (await import('express')).default;
+const { api } = await import('../src/api.js');
+
+const tenancyApp = express();
+tenancyApp.use(express.json());
+tenancyApp.use((req, _res, next) => { req.session = { user: { id: alice.id } }; next(); });
+tenancyApp.use('/api', api);
+const tenancyServer = await new Promise((resolve) => {
+  const s = tenancyApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const tenancyBase = `http://127.0.0.1:${tenancyServer.address().port}`;
+
+// Bob's category is given a name nothing else in this file uses, so "absent
+// from the response" can be asked of the whole payload as text and not only of
+// the fields this test happened to think of.
+await withUser(bob.id, (db) => db.query(
+  `UPDATE categories SET name = 'Bob Private Category' WHERE id = $1`, [bobCategory]));
+
+// Alice needs a category and a habit in it, and that is not scene-setting: with
+// none, every "bob's category is absent" check below passes against a route
+// that reads NO categories at all — which is what a `SELECT` left outside
+// `withUser` would do here, since RLS fails closed and returns nothing. Her own
+// section being present and populated is the control that makes the rest of
+// this block able to fail.
+// A habit of her own rather than one of the survivors: the replace-mode import
+// above deleted alice's original, so which of her rows still exists is not this
+// block's business to know.
+const aliceCategory = await withUser(alice.id, async (db) => {
+  const { rows: [cat] } = await db.query(
+    `INSERT INTO categories (user_id, name) VALUES ($1, 'Alice Own Category') RETURNING id`,
+    [alice.id]
+  );
+  await db.query(
+    `INSERT INTO habits (user_id, name, type, category_id) VALUES ($1,$2,'boolean',$3)`,
+    [alice.id, 'Alice Compared Habit', cat.id]
+  );
+  return cat.id;
+});
+
+// A one-day window: the sections and the counts are what is under attack, and
+// a year of buckets would make every failure below unreadable.
+const compare = await fetch(
+  `${tenancyBase}/api/categories/stats?start=2026-01-01&end=2026-01-01`
+).then((r) => r.json());
+// The substring checks read the WHOLE payload, buckets and all; what is printed
+// on a failure is the sections alone.
+const compareText = JSON.stringify(compare);
+const sections = JSON.stringify(compare.categories?.map(
+  (c) => ({ id: c.id, name: c.name, members: c.members, best: c.best?.name })));
+
+// The control, first: the route really does read categories, and it read
+// alice's. Without this, every absence check below is satisfied by a payload
+// carrying no categories at all.
+const own = compare.categories.find((c) => c.id === aliceCategory);
+check("alice's own category is a section on her comparison, with its habit in it",
+  own?.name === 'Alice Own Category' && own?.members === 1, sections);
+
+check("bob's category is not a section on alice's comparison",
+  !compare.categories.some((c) => c.id === bobCategory), sections);
+check("...and its name appears nowhere in the payload at all",
+  !compareText.includes('Bob Private Category'), sections);
+check("bob's habit is not named as anybody's best or worst",
+  !compareText.includes('Bob Secret Habit'), sections);
+
+// The other direction of the same leak: alice's habit DOES point at bob's
+// category id, and a section keyed on that id must not appear. It falls into
+// Uncategorised instead — `computeCategoryStats` folds a category_id naming no
+// category the caller can see into the trailing section, so the member is
+// counted exactly once rather than dropped or filed under a foreign label.
+const uncategorised = compare.categories.at(-1);
+check('the trailing section is Uncategorised, carrying id null',
+  Object.is(uncategorised?.id, null), JSON.stringify(uncategorised?.id));
+check("alice's habit pointing at bob's category id lands there, not in a " +
+  "section named after bob's category",
+  uncategorised?.members >= 1, sections);
+
+// And the counts are alice's own. Bob has one habit; if any of his had been
+// read, the member counts across every section would exceed what alice owns.
+const aliceHabitCount = await withUser(alice.id, (db) =>
+  db.query(`SELECT COUNT(*)::int c FROM habits`).then((r) => r.rows[0].c));
+const counted = compare.categories.reduce((n, c) => n + c.members, 0)
+  + compare.archivedExcluded;
+check('every habit the payload counts is one alice owns',
+  counted === aliceHabitCount, `counted=${counted} alice owns=${aliceHabitCount}`);
+
+tenancyServer.close();
 
 /* ---------- the reminder scheduler's scope ---------- */
 //

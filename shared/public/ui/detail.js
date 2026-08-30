@@ -12,6 +12,7 @@ import {
 } from '/shared/charts.js';
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
+import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 import {
   card, cardInnerWidth, focusKeyOf, habitIcon, restoreFocus, segmented,
   subheading, windowedChart,
@@ -69,8 +70,18 @@ export async function open(id) {
   const scroll = redraw ? window.scrollY : 0;
 
   // Opening a different habit starts at "now". Carrying the offsets over
-  // would drop you into 2024 on a habit you have only just opened.
-  if (!redraw) state.chartOffsets = {};
+  // would drop you into 2024 on a habit you have only just opened. `calEnd`
+  // is the calendar's own equivalent position and resets here for the same
+  // reason (#274) — and `!redraw` already covers reopening the SAME habit
+  // too, since `dashboard.paint()` nulls `state.openHabitId` on the way back
+  // to the list, deliberately: every in-page redraw (a tap, a zoom press, a
+  // granularity change, the settings dialog, the `'change'` broadcast) is
+  // `redraw === true` and so keeps both positions, which is what makes
+  // resetting them here affordable.
+  if (!redraw) {
+    state.chartOffsets = {};
+    state.calEnd = null;
+  }
 
   try {
     const stats = await api(`/habits/${id}/stats?granularity=${historyGranularity()}`);
@@ -239,8 +250,11 @@ const detailHost = {
  * `open()` is two round trips and a full rebuild, so three quick taps would
  * otherwise fire three of them — and nothing guarantees the third resolves
  * last, which means a later-started reload can finish first and leave OLDER
- * data on screen. The hazard predates the strip (two fast presses on ‹ Earlier
- * do it) but the strip makes rapid re-entry the normal case.
+ * data on screen. The hazard predates the strip — two fast presses on the
+ * History card's ‹ Earlier, which still refetches, do it — but the strip makes
+ * rapid re-entry the normal case. Note the strip's OWN ‹ Earlier no longer
+ * arrives here at all (#245): it redraws locally, and a redraw with nothing to
+ * fetch has no reload to race.
  *
  * A request arriving mid-flight is remembered rather than dropped: the write
  * that prompted it has already landed, so skipping the reload would leave the
@@ -361,11 +375,31 @@ function render(stats, entries) {
   const habit = stats.habit;
   const color = habit.color;
   state.openHabitId = habit.id;
+  // ...and the comparison is not what is showing any more, however this habit
+  // was reached. The two in-app rules — the comparison links to no habit, its
+  // button is hidden while a habit is open — close every route the app itself
+  // offers, and they cannot close a same-document fragment navigation made from
+  // OUTSIDE it. The app ships one: `appLink` in `shared/src/notify.js` builds
+  // `#/habit/42` for the ntfy `click` and the Discord `embed.url`, and typing
+  // the fragment reaches it too. Arriving that way over `#/categories` left the
+  // flag true, so Back fired `onRoute({view: 'categories'})`, `app.js`'s
+  // `!state.openCategories` guard was false, `categories.open()` was skipped —
+  // and the app sat with `#/categories` in the address bar and the habit still
+  // rendered. This does not make `ourEntry` a real stack and does not claim to;
+  // it removes the user-visible half.
+  state.openCategories = false;
   // Set here rather than in `open()`, so the URL only names a habit that
   // actually rendered: `open()` is also the failure path, and a fragment
   // pointing at a habit the server refused would survive a reload as a link
   // that goes nowhere.
   routes.go({ view: 'habit', id: habit.id });
+  // The top bar's Compare button goes away while a habit is open, and it is
+  // `syncEntry` that decides — `openHabitId` above is one of its two inputs,
+  // so this only has to say that the input moved. The rule is not cosmetic:
+  // it is what makes `dashboard → habit → categories` unreachable, which is
+  // what keeps `routes.js`'s single `ourEntry` boolean honest. See the note on
+  // `syncEntry` in `ui/categories.js` before changing either half.
+  syncCompareEntry();
   const host = views.showDetail();
 
   // Captured before the rebuild below destroys whatever had it. The day strip
@@ -516,71 +550,118 @@ function render(stats, entries) {
  * asking for a different window — the dashboard holds only the fortnight it
  * requested, and no `end` parameter reaches the server from here.
  *
- * What that does NOT mean is request-free, and an earlier version of this
- * comment claimed it. `redraw` is `refresh(habit.id)` — the same full `open()`
- * every other card on this page redraws through, two round trips — so paging
- * spends a refetch to show a slice it already had. It is the page's one idiom
- * rather than this card's own bug, and it costs something visible in exactly
- * one place: offline, `page()` has already moved `state.chartOffsets` before
- * `redraw` runs, the GET is not replayable, and `open()` toasts and returns
- * without rendering. The position has moved and the strip has not, so the
- * window jumps when something next draws it. Redrawing from `entries` in hand
- * is what would make the stronger claim true; it is not what this does.
+ * Paging it therefore costs NO request. `draw` below is what the
+ * ‹ Earlier / Later › / Now buttons call, and it rebuilds the window out of the
+ * `entries` this card was handed. The dashboard holds one fortnight and must
+ * ask for another, and MOST of the cards here draw figures the server computed
+ * — but not all of them: `buildCalendarCard` draws from the same unwindowed
+ * `entriesByDate` / `skipSet`, from `stats.streaks`, and from `calendarWindow`,
+ * and its ‹ Earlier redraws locally too now, the same way — the sibling change
+ * that landed as #274, not a defect still sitting open. Do not read the
+ * paragraph below as saying no other card could be local.
+ * What is still not request-free is BUILDING this one — the page it sits on
+ * fetched twice to get here.
+ *
+ * Why that is worth the shape (#245): `page()` in `ui/components.js` moves
+ * `state.chartOffsets` BEFORE it calls `redraw`, a GET is not replayable, and
+ * `open()` toasts and returns without rendering. With `redraw` as
+ * `refresh(habit.id)` a press with no network moved the position and not the
+ * strip, and the window then jumped by a stride when something next drew the
+ * card. Any redraw that can fail without rendering leaves those two
+ * disagreeing; a local one has nothing to fail.
+ *
+ * What paging now shares with a tap is `inRun`: it is `render()`'s, computed
+ * once per full `open()`, so a page draws its run marks from the run set the
+ * card was built with — the same accepted staleness `stripRuns` is declared
+ * with above, now reached by the nav buttons as well as by `repaint`.
+ *
+ * `windowedChart` builds into two places — the nav into `.card-head`, the
+ * chart onto the card itself — which is why `draw` takes `.cal-nav` and
+ * `.chart-scroll` away before building the next pair.
  */
 function buildRecentDaysCard({ habit, entries, chartWidth, inRun }) {
   const strip = card('Recent days', null);
-  const todayIso = todayISO();
-  const fits = columnsForWidth(chartWidth, CELL_PX, 0);
+  const head = strip.querySelector('.card-head');
 
-  // How far back there is to page. Trimmed by comparing ISO strings against
-  // the habit's first entry rather than by counting days between two dates:
-  // the count is the thing this repo has got wrong twice (an epoch walk
-  // repeats a day under a fall-back transition, calendar arithmetic emits a
-  // day Apia never lived), and none of it is needed to answer "which of these
-  // days predate the habit".
-  //
-  // `entries` is ordered by date, so `[0]` is the earliest. Never fewer than
-  // one screenful, so a habit with no history at all still gets a full,
-  // tappable strip — which is exactly who this card is for.
-  const all = datesEndingOn(STRIP_HISTORY_DAYS, todayIso);
-  const first = entries.length ? entries[0].date : todayIso;
-  const firstIdx = all.findIndex((d) => iso(d) >= first);
-  const dates = all.slice(Math.min(
-    firstIdx === -1 ? all.length : firstIdx,
-    Math.max(0, all.length - fits)
-  ));
+  const draw = () => {
+    // Optional on purpose: on the first draw neither node exists, and for a
+    // habit with nothing to page through `windowedChart` never builds a nav
+    // at all.
+    head.querySelector('.cal-nav')?.remove();
+    strip.querySelector('.chart-scroll')?.remove();
 
-  windowedChart({
-    card: strip,
-    key: 'recentDays',
-    items: dates,
-    density: CELL_PX,
-    // The account's `gridDays`, capping what the card's width allows — the
-    // setting means "at most this many days of grid" on both surfaces. The
-    // ladder `gridColumns` applies is NOT used here: it exists to protect the
-    // habit name beside the dashboard's cells, and this card has no name
-    // column.
-    capacity: cappedColumns(settings.get('gridDays'), fits),
-    width: chartWidth,
-    labelOf: (d) => formatDateShort(d),
-    redraw: () => refresh(habit.id),
-    render: (slice) => {
-      const shown = settings.get('dayOrder') === 'newest-left'
-        ? [...slice].reverse()
-        : slice;
-      const wrap = document.createElement('div');
-      wrap.className = 'day-strip';
-      wrap.append(
-        dateColumns(shown, todayIso), dayCells(detailHost, habit, shown, todayIso, inRun));
-      // Where `detailHost.repaint` looks for the cells, and the run set it
-      // repaints them with. Both assigned on every render, and nulled by
-      // `render()` before the rebuild, so a tap can never repaint a strip that
-      // is no longer on the page.
-      stripRoot = wrap;
-      stripRuns = inRun;
-      return wrap;
-    },
-  });
+    // Everything below is recomputed per draw rather than hoisted, because the
+    // full rebuild this replaced recomputed all of it — `todayISO()` most of
+    // all, which must not freeze at the moment the card was built.
+    const todayIso = todayISO();
+
+    // With ONE exception, stated because the line above would otherwise be read
+    // as covering it: `chartWidth` is `render()`'s build-time measurement and is
+    // frozen for the life of the card, so `fits` and the width handed to
+    // `windowedChart` are both frozen with it. Nothing in `shared/public`
+    // listens for `resize` or `orientationchange`, so every card's width already
+    // only refreshes on an `open()`; what changed is that paging this one is no
+    // longer one of the actions that reach `open()`, so after a desktop resize
+    // or a phone rotation the strip keeps redrawing at the old width however far
+    // you page, where the other cards self-correct the moment one of THEM is
+    // used. Left as it is rather than re-measured here: the effect is cosmetic
+    // (`.chart-scroll` absorbs the overflow) and re-measuring per draw needs a
+    // second path anyway, since the card is not in the DOM on the first draw and
+    // `cardInnerWidth` on a detached node answers its 720px floor.
+    const fits = columnsForWidth(chartWidth, CELL_PX, 0);
+
+    // How far back there is to page. Trimmed by comparing ISO strings against
+    // the habit's first entry rather than by counting days between two dates:
+    // the count is the thing this repo has got wrong twice (an epoch walk
+    // repeats a day under a fall-back transition, calendar arithmetic emits a
+    // day Apia never lived), and none of it is needed to answer "which of these
+    // days predate the habit".
+    //
+    // `entries` is ordered by date, so `[0]` is the earliest. Never fewer than
+    // one screenful, so a habit with no history at all still gets a full,
+    // tappable strip — which is exactly who this card is for.
+    const all = datesEndingOn(STRIP_HISTORY_DAYS, todayIso);
+    const first = entries.length ? entries[0].date : todayIso;
+    const firstIdx = all.findIndex((d) => iso(d) >= first);
+    const dates = all.slice(Math.min(
+      firstIdx === -1 ? all.length : firstIdx,
+      Math.max(0, all.length - fits)
+    ));
+
+    windowedChart({
+      card: strip,
+      key: 'recentDays',
+      items: dates,
+      density: CELL_PX,
+      // The account's `gridDays`, capping what the card's width allows — the
+      // setting means "at most this many days of grid" on both surfaces. The
+      // ladder `gridColumns` applies is NOT used here: it exists to protect the
+      // habit name beside the dashboard's cells, and this card has no name
+      // column.
+      capacity: cappedColumns(settings.get('gridDays'), fits),
+      width: chartWidth,
+      labelOf: (d) => formatDateShort(d),
+      redraw: draw,
+      render: (slice) => {
+        const shown = settings.get('dayOrder') === 'newest-left'
+          ? [...slice].reverse()
+          : slice;
+        const wrap = document.createElement('div');
+        wrap.className = 'day-strip';
+        wrap.append(
+          dateColumns(shown, todayIso), dayCells(detailHost, habit, shown, todayIso, inRun));
+        // Where `detailHost.repaint` looks for the cells, and the run set it
+        // repaints them with. Both assigned on every render, and nulled by
+        // `render()` before the rebuild, so a tap can never repaint a strip that
+        // is no longer on the page.
+        stripRoot = wrap;
+        stripRuns = inRun;
+        return wrap;
+      },
+    });
+  };
+
+  draw();
 
   // Never null, unlike the cards that decline when they have no data: a habit
   // with no history at all is exactly who this card is for.
@@ -631,6 +712,46 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
  * cards. That is a fact about the default order now, not about where this
  * builder is called from: `test/settings.test.js`'s adjacency assertion pins
  * it, and any account is free to move it.
+ *
+ * Everything the grid draws is already in memory, the same way "Recent days"
+ * is (see that card's own comment): `entriesByDate` / `skipSet` /
+ * `notesByDate` come from `render()`'s unwindowed `/habits/:id/entries`
+ * (`:407-413`), `stats.streaks` is already on the payload this builder was
+ * handed, and `calendarWindow` (`ui/calendar.js:113`) is pure client
+ * arithmetic over an end date and a week count — nothing in the window needs
+ * a request. Paging therefore redraws locally through `draw` below, the same
+ * shape `buildRecentDaysCard` uses: any `redraw` that can FAIL without
+ * rendering leaves the stored position and the drawn window disagreeing
+ * (`shared/public/CLAUDE.md`), and `open()`'s only `catch` is `toast` and a
+ * `return false` — so on the occasions `open()` genuinely fails (no service
+ * worker at all, a new worker claiming an open page and emptying the data
+ * cache under it, a `401`/`429`, a hung server; see
+ * `docs/decisions/dashboard-and-detail.md`'s `#274` section for the full
+ * list, and for the two plausible-sounding cases that are NOT on it) it
+ * committed `state.calEnd` and drew nothing. That was this card's own defect
+ * (#274), the calendar being the second live instance of the "Recent days"
+ * one (#245) fixed. It USED to
+ * outlast the strip's: `open()` cleared `state.chartOffsets` when a
+ * different habit was opened (`:74`) but cleared nothing for `calEnd`, so
+ * paging back and returning to the dashboard left the window you never saw
+ * the calendar move to waiting for you on reopen, where the strip's own
+ * offset had already been reset — which is exactly why this card's defect was
+ * never mostly latent the way the strip's was. Both now reset together at
+ * `:74`.
+ *
+ * `zoom`, `CAL_WEEKS` and `chartWidth` stay hoisted and frozen for the life of
+ * the card, unlike `calEnd` — `changeZoom` still ends in `open(habit.id)`
+ * (a different state key, a persisted setting, and every nav button's
+ * disabled state is computed from `CAL_WEEKS`, which the zoom decides), and a
+ * zoom press already rebuilds the whole page, so nothing here goes stale
+ * between a zoom and the next `draw()`. `chartWidth` itself is only ever
+ * `render()`'s build-time measurement, though — the same one exception
+ * `buildRecentDaysCard`'s own comment states in full — so a resize or a
+ * rotation is not one of the things that reaches a re-measure any more:
+ * this card keeps redrawing at the old width however far you page, where it
+ * used to self-correct on the next `open()` that SUCCEEDED — a failed one
+ * throws before `render()` and never re-measured either. Cosmetic, and left
+ * as it is for the same reason the strip's is.
  */
 function buildCalendarCard(
   { habit, color, chartWidth, entriesByDate, skipSet, notesByDate, stats, inRun }
@@ -662,10 +783,151 @@ function buildCalendarCard(
   // to be appended to, since calCard is not in the DOM yet.
   const CAL_WEEKS = weeksForWidth(chartWidth, zoom);
 
+  // Removes the previous chart + legend pair and rebuilds both from
+  // `state.calEnd`, exactly as `buildRecentDaysCard`'s own `draw` does.
+  // Nothing below is hoisted out of it: `todayISO()` most of all, which must
+  // not freeze at the moment the card was built, or paging past today would
+  // stop clamping to a stale "now".
+  const draw = () => {
+    // Optional-chained on purpose: on the first draw neither node exists.
+    calCard.querySelector('.chart-scroll')?.remove();
+    calCard.querySelector('.legend')?.remove();
+
+    const calEnd = state.calEnd ?? todayISO();
+    // BOTH ends from the same window the grid below is drawn with. Left to
+    // the parameter default this label named a date the calendar does not
+    // start on — by a day most of the week, by six whenever the anchor falls
+    // on the week's last day — and the right-hand side had the same fault
+    // for the same reason: `calEnd` is the day being asked about, not the
+    // last cell, so paging back drew up to six further days of real history
+    // beyond the labelled end.
+    //
+    // Clamped to today, because the window's last column runs to the end of
+    // the week and those days have not happened yet. The label says what is
+    // shown and answerable; the future cells are drawn but empty.
+    const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
+    const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
+    // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
+    // says "Completion calendar" reads as a serial number.
+    //
+    // Written, not ISO. Every range readout goes through one of the two
+    // formatters now, including `windowedChart`'s — which used to show the
+    // raw bucket key, so a card's header read `2026-07-03 → 2026-08-16` above
+    // an axis saying `Jul 3, 2026`.
+    navLabel.textContent =
+      `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
+      `${formatDateShort(fromISOLocal(calLast))}`;
+
+    const calScroll = document.createElement('div');
+    calScroll.className = 'chart-scroll';
+    // Held rather than passed inline, so the legend below can ask it what it
+    // actually drew — see the "In a run" swatch's own comment.
+    const calSvg = calendarChart(entriesByDate, color, habit, {
+      zoom,
+      // The account's week, which `startOfWeek` in stats.js has always
+      // honoured while the calendar snapped to Sunday regardless — so the
+      // heatmap and the history chart under it disagreed about where a week
+      // begins.
+      weekStart: settings.get('weekStart'),
+      weeks: CAL_WEEKS,
+      endDate: calEnd,
+      skips: skipSet,
+      unknownMark: settings.get('questionMarks'),
+      // Bands behind runs of 3+, so a good stretch reads as one thing rather
+      // than a scatter of filled squares.
+      streaks: stats.streaks,
+      onPick: (date) => openDayDialog(
+        habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
+      ),
+    });
+    calScroll.append(calSvg);
+    calCard.append(calScroll);
+
+    // The legend has to describe the grid above it, and for an avoided habit
+    // that grid has two colours rather than a ramp — a clean day in the
+    // habit's colour and a slip in red. A "Less ▢▢▢▢ More" ramp under it
+    // advertises a shading the cells no longer use and shows no red at all,
+    // which is the same "two surfaces over one dataset disagree" the
+    // inversion exists to end.
+    //
+    // Rebuilt on every draw, not hoisted with the nav above it: the "In a
+    // run" branch below gates on `data-run-marks`, a property of THIS
+    // window, so a legend built once would go stale the moment you page.
+    const legend = document.createElement('div');
+    legend.className = 'legend';
+    const swatch = (background, opacity) => {
+      const sw = document.createElement('span');
+      sw.className = 'legend-swatch';
+      sw.style.background = background;
+      if (opacity != null) sw.style.opacity = String(opacity);
+      legend.append(sw);
+      return sw;
+    };
+
+    // Leading, in both branches: a fill the legend does not explain is the
+    // same defect as a legend advertising a fill the cells do not use, which
+    // is why the `isAvoided` branch beside it exists at all.
+    // `unlogged_is_success` is the same server-resolved flag the cells above
+    // read, so the legend cannot disagree with them about which habits this
+    // applies to.
+    if (habit.unlogged_is_success) {
+      // Not `swatch(color, 0.07)` like the ramp below: `opacity` blends
+      // toward the CARD, while the cell it describes blends toward
+      // `--grid-empty` (`shade`, charts.js) — two different colours for the
+      // same "0.07". Passing `shade(color, 0.07)` as the background is the
+      // cell's own value, so the legend and the grid cannot disagree about
+      // what this mark is.
+      swatch(shade(color, 0.07));
+      legend.append(document.createTextNode('Kept, unlogged'));
+    }
+
+    // Only when a run actually reaches an otherwise-blank cell IN THIS
+    // WINDOW — `inRun` is the habit's whole history, so a run of
+    // `MIN_STREAK`+ days months outside the drawn weeks (or a run made
+    // entirely of logged days, where every date is in `inRun` and no cell is
+    // blank) would gate this on a mark the grid does not carry.
+    // `calendarChart` already counts the cells it gave the continuation
+    // stroke and reports that count on the `<svg>` it returned, so asking IT
+    // is the one source that cannot disagree with what is on screen —
+    // recomputing the window here would be a second derivation of "which
+    // cells got the mark", and a second one to keep in step with the first.
+    // `getAttribute`, not `dataset`: the offline fake-DOM suites drive this
+    // against a minimal `document` that implements attributes only.
+    //
+    // Built inline rather than through `swatch()`: that helper's second
+    // argument is an opacity, blending toward the CARD, and this mark is a
+    // STROKE around the cell's own `--grid-empty` fill — the same
+    // distinction the "Kept, unlogged" swatch's own comment above makes, so
+    // describing this one as an opacity would be the same "two surfaces
+    // disagree" defect a second way. `shade(color, 0.55)` is the stroke
+    // `charts.js`'s calendar block itself paints; the legend borrows the
+    // cell's own value rather than writing a second description of it.
+    if (Number(calSvg.getAttribute('data-run-marks')) > 0) {
+      const sw = document.createElement('span');
+      sw.className = 'legend-swatch';
+      sw.style.background = 'var(--grid-empty)';
+      sw.style.boxShadow = 'inset 0 0 0 1px ' + shade(color, 0.55);
+      legend.append(sw);
+      legend.append(document.createTextNode('In a run'));
+    }
+
+    if (isAvoided(habit)) {
+      legend.append(document.createTextNode('Clean'));
+      swatch(color);
+      swatch('var(--danger)');
+      legend.append(document.createTextNode('Slipped'));
+    } else {
+      legend.append(document.createTextNode('Less'));
+      for (const t of [0.2, 0.45, 0.7, 1]) swatch(color, t);
+      legend.append(document.createTextNode('More'));
+    }
+    calCard.append(legend);
+  };
+
   const shift = (weeks) => {
     state.calEnd = addDaysISO(state.calEnd ?? todayISO(), weeks * 7);
     if (state.calEnd > todayISO()) state.calEnd = todayISO();
-    open(habit.id);
+    draw();
   };
 
   /** @param {number} dir -1 zooms in (bigger squares), +1 zooms out */
@@ -689,131 +951,14 @@ function buildCalendarCard(
     mkNav('‹ Earlier', 'Show earlier months', () => shift(-CAL_WEEKS)),
     navLabel,
     mkNav('Later ›', 'Show later months', () => shift(CAL_WEEKS)),
-    mkNav('Today', 'Jump to today', () => { state.calEnd = null; open(habit.id); }),
+    mkNav('Today', 'Jump to today', () => { state.calEnd = null; draw(); }),
     zoomOut,
     zoomIn,
   );
   calHead.append(nav);
 
-  const calEnd = state.calEnd ?? todayISO();
-  // BOTH ends from the same window the grid below is drawn with. Left to the
-  // parameter default this label named a date the calendar does not start on —
-  // by a day most of the week, by six whenever the anchor falls on the week's
-  // last day — and the right-hand side had the same fault for the same reason:
-  // `calEnd` is the day being asked about, not the last cell, so paging back
-  // drew up to six further days of real history beyond the labelled end.
-  //
-  // Clamped to today, because the window's last column runs to the end of the
-  // week and those days have not happened yet. The label says what is shown
-  // and answerable; the future cells are drawn but empty.
-  const calWindow = calendarWindow(calEnd, CAL_WEEKS, settings.get('weekStart'));
-  const calLast = calWindow.end > todayISO() ? todayISO() : calWindow.end;
-  // Written, not ISO: `2026-08-03 → 2026-09-14` under a heading that already
-  // says "Completion calendar" reads as a serial number.
-  //
-  // Written, not ISO. Every range readout goes through one of the two
-  // formatters now, including `windowedChart`'s — which used to show the raw
-  // bucket key, so a card's header read `2026-07-03 → 2026-08-16` above an axis
-  // saying `Jul 3, 2026`.
-  navLabel.textContent =
-    `${formatDateShort(fromISOLocal(calWindow.start))} → ` +
-    `${formatDateShort(fromISOLocal(calLast))}`;
+  draw();
 
-  const calScroll = document.createElement('div');
-  calScroll.className = 'chart-scroll';
-  // Held rather than passed inline, so the legend below can ask it what it
-  // actually drew — see the "In a run" swatch's own comment.
-  const calSvg = calendarChart(entriesByDate, color, habit, {
-    zoom,
-    // The account's week, which `startOfWeek` in stats.js has always honoured
-    // while the calendar snapped to Sunday regardless — so the heatmap and the
-    // history chart under it disagreed about where a week begins.
-    weekStart: settings.get('weekStart'),
-    weeks: CAL_WEEKS,
-    endDate: calEnd,
-    skips: skipSet,
-    unknownMark: settings.get('questionMarks'),
-    // Bands behind runs of 3+, so a good stretch reads as one thing rather
-    // than a scatter of filled squares.
-    streaks: stats.streaks,
-    onPick: (date) => openDayDialog(
-      habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
-    ),
-  });
-  calScroll.append(calSvg);
-  calCard.append(calScroll);
-
-  // The legend has to describe the grid above it, and for an avoided habit that
-  // grid has two colours rather than a ramp — a clean day in the habit's colour
-  // and a slip in red. A "Less ▢▢▢▢ More" ramp under it advertises a shading
-  // the cells no longer use and shows no red at all, which is the same "two
-  // surfaces over one dataset disagree" the inversion exists to end.
-  const legend = document.createElement('div');
-  legend.className = 'legend';
-  const swatch = (background, opacity) => {
-    const sw = document.createElement('span');
-    sw.className = 'legend-swatch';
-    sw.style.background = background;
-    if (opacity != null) sw.style.opacity = String(opacity);
-    legend.append(sw);
-    return sw;
-  };
-
-  // Leading, in both branches: a fill the legend does not explain is the same
-  // defect as a legend advertising a fill the cells do not use, which is why
-  // the `isAvoided` branch beside it exists at all. `unlogged_is_success` is
-  // the same server-resolved flag the cells above read, so the legend cannot
-  // disagree with them about which habits this applies to.
-  if (habit.unlogged_is_success) {
-    // Not `swatch(color, 0.07)` like the ramp below: `opacity` blends toward
-    // the CARD, while the cell it describes blends toward `--grid-empty`
-    // (`shade`, charts.js) — two different colours for the same "0.07".
-    // Passing `shade(color, 0.07)` as the background is the cell's own value,
-    // so the legend and the grid cannot disagree about what this mark is.
-    swatch(shade(color, 0.07));
-    legend.append(document.createTextNode('Kept, unlogged'));
-  }
-
-  // Only when a run actually reaches an otherwise-blank cell IN THIS WINDOW —
-  // `inRun` is the habit's whole history, so a run of `MIN_STREAK`+ days
-  // months outside the drawn weeks (or a run made entirely of logged days,
-  // where every date is in `inRun` and no cell is blank) would gate this on a
-  // mark the grid does not carry. `calendarChart` already counts the cells it
-  // gave the continuation stroke and reports that count on the `<svg>` it
-  // returned, so asking IT is the one source that cannot disagree with what
-  // is on screen — recomputing the window here would be a second derivation
-  // of "which cells got the mark", and a second one to keep in step with the
-  // first. `getAttribute`, not `dataset`: the offline fake-DOM suites drive
-  // this against a minimal `document` that implements attributes only.
-  //
-  // Built inline rather than through `swatch()`: that helper's second
-  // argument is an opacity, blending toward the CARD, and this mark is a
-  // STROKE around the cell's own `--grid-empty` fill — the same distinction
-  // the "Kept, unlogged" swatch's own comment above makes, so describing this
-  // one as an opacity would be the same "two surfaces disagree" defect a
-  // second way. `shade(color, 0.55)` is the stroke `charts.js`'s calendar
-  // block itself paints; the legend borrows the cell's own value rather than
-  // writing a second description of it.
-  if (Number(calSvg.getAttribute('data-run-marks')) > 0) {
-    const sw = document.createElement('span');
-    sw.className = 'legend-swatch';
-    sw.style.background = 'var(--grid-empty)';
-    sw.style.boxShadow = 'inset 0 0 0 1px ' + shade(color, 0.55);
-    legend.append(sw);
-    legend.append(document.createTextNode('In a run'));
-  }
-
-  if (isAvoided(habit)) {
-    legend.append(document.createTextNode('Clean'));
-    swatch(color);
-    swatch('var(--danger)');
-    legend.append(document.createTextNode('Slipped'));
-  } else {
-    legend.append(document.createTextNode('Less'));
-    for (const t of [0.2, 0.45, 0.7, 1]) swatch(color, t);
-    legend.append(document.createTextNode('More'));
-  }
-  calCard.append(legend);
   return calCard;
 }
 

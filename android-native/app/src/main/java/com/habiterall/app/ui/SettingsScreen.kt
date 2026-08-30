@@ -33,6 +33,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.habiterall.app.data.AppSettings
@@ -93,6 +95,17 @@ data class PatchOutcome(
 fun SettingsScreen(
     initial: AppSettings,
     androidRemindersSupported: Boolean,
+    /**
+     * [com.habiterall.app.notify.Reminders.exactAlarmsRevoked]'s answer.
+     *
+     * A DIFFERENT question from [androidRemindersSupported] — that one asks
+     * whether Android will post a notification at all, this one asks whether
+     * the alarm behind it will be on time — which is why each gets its own
+     * `Text` below rather than the two being folded into one contended
+     * `subtitle`: with notifications off AND exact alarms revoked, both
+     * statements are true at once and neither has to win.
+     */
+    exactAlarmsRevoked: Boolean,
     onPatch: suspend (Map<String, JsonElement>) -> PatchOutcome,
     /** Closes, saying whether any setting was actually stored. */
     onClose: (changed: Boolean) -> Unit,
@@ -210,6 +223,37 @@ fun SettingsScreen(
                 },
             )
 
+            // The sentence asserts nothing about the current alarm set, and it
+            // must not be edited back into one. "Reminders are still armed but
+            // can arrive late" was the first version, and the app cannot know
+            // that: the gate answers what the PLATFORM permits, so a user with
+            // reminders on and no habit carrying a `reminder_time` — or every
+            // such habit archived — has nothing armed and would be told
+            // otherwise, with nothing on the screen to disprove it. What is
+            // true in every state this gate admits is the consequence, so that
+            // is the whole of what it says. `SettingsScreenTest` keys its five
+            // cases on "can arrive late" for the same reason.
+            //
+            // Also gated on this phone still being a reminder destination: with
+            // the switch above off, `Reminders.schedule` calls `cancel()` and
+            // returns before `setAlarm` is ever reached, so there is no REMINDER
+            // for lateness to be about — and the sentence would sit directly
+            // under the control that made it so. "No reminder" rather than
+            // "nothing": the widget's midnight redraw (`HabitWidget.armMidnight`)
+            // goes through the same `setAlarm` and asks nothing about
+            // destinations, so on 31-32 revoked it is still armed, still
+            // inexact, and deliberately has no sentence here — this one is about
+            // reminders, and the widget's own staleness is written up in
+            // `android-native/CLAUDE.md`.
+            if (exactAlarmsRevoked && settings.androidRemindersEnabled) {
+                Text(
+                    "\"Alarms & reminders\" is switched off for this app in Android " +
+                        "settings, so reminders can arrive late — by an hour or more.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             HorizontalDivider()
 
             /* ---------------------------------------------------- what a tap does */
@@ -286,6 +330,13 @@ fun SettingsScreen(
                 checked = settings.confirmDeleteEnabled,
                 enabled = !busy,
                 onChange = { put("confirmDelete", "the delete confirmation", JsonPrimitive(it)) },
+            )
+            SwitchRow(
+                title = "Group by category",
+                subtitle = "Draw one section per category, with an Uncategorised section last.",
+                checked = settings.groupByCategoryEnabled,
+                enabled = !busy,
+                onChange = { put("groupByCategory", "grouping by category", JsonPrimitive(it)) },
             )
 
             HorizontalDivider()
@@ -372,7 +423,18 @@ private fun SwitchRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+        // Named, because a `Switch` beside a `Text` is not labelled by it:
+        // neither the `Row` nor the `Column` carries a semantics node, so the
+        // title is a sibling leaf rather than an ancestor, and TalkBack
+        // announced every one of these as a bare "off, switch" with nothing
+        // saying which setting it governed. It is also what lets a test name
+        // one of five switches without resorting to its position on screen.
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            enabled = enabled,
+            modifier = Modifier.semantics { contentDescription = title },
+        )
     }
 }
 

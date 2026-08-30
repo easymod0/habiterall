@@ -3,10 +3,12 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { db, UNSET, YES, SKIP } from './db.js';
+import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
 import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
+  computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
+  summariseByCategory,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
@@ -21,13 +23,13 @@ const SUMMARY_WINDOW_DAYS = 400;
 const STREAK_HISTORY_DAYS = 1830;
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
-import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
+import { backupSettings, backupCategories, parseUpload } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
-  assertNotFuture,
-  DATE_RE,
+  assertNotFuture, parseCategory, parseCategoryId, foldCategoryName, LIMITS,
+  DATE_RE, queryDate,
 } from '@habiterall/shared/validate.js';
 import {
   writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
@@ -106,23 +108,53 @@ const q = {
   allHabits: db.prepare(
     `SELECT * FROM habits WHERE archived = ? ORDER BY position, id`
   ),
+  /**
+   * Every habit, whatever its state — a query of its own rather than two calls
+   * to `allHabits` concatenated, which is the same rows at twice the work and
+   * in an order neither statement promises.
+   *
+   * `GET /categories/stats` is its only caller and needs the archived ones:
+   * `computeCategoryStats` reports `archivedExcluded` from the members it is
+   * handed, so a route that filtered them out in SQL would make that figure
+   * permanently 0 and leave the comparison view with nothing to say about what
+   * it left out.
+   */
+  everyHabit: db.prepare(`SELECT * FROM habits ORDER BY position, id`),
   habitById: db.prepare(`SELECT * FROM habits WHERE id = ?`),
   insertHabit: db.prepare(`
     INSERT INTO habits (name, description, type, unit, target_value, target_type,
                         freq_numerator, freq_denominator, color, reminder_time,
-                        reminder_message, at_most_unlogged, show_as, icon, position)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        reminder_message, at_most_unlogged, show_as, icon,
+                        category_id, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
   `),
   updateHabit: db.prepare(`
     UPDATE habits SET name = ?, description = ?, type = ?, unit = ?,
       target_value = ?, target_type = ?, freq_numerator = ?,
       freq_denominator = ?, color = ?, reminder_time = ?, reminder_message = ?,
-      at_most_unlogged = ?, show_as = ?, icon = ?, archived = ?
+      at_most_unlogged = ?, show_as = ?, icon = ?, category_id = ?, archived = ?
     WHERE id = ?
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
   setPosition: db.prepare(`UPDATE habits SET position = ? WHERE id = ?`),
+  // Categories: a user's own habit groupings, never seeded — see db.js.
+  allCategories: db.prepare(`SELECT * FROM categories ORDER BY position, id`),
+  categoryById: db.prepare(`SELECT * FROM categories WHERE id = ?`),
+  // Folded in JS (foldCategoryName), not in SQL: the same rule has to answer
+  // identically in the cloud edition's Postgres, so one function decides it
+  // for both rather than two different COLLATE/lower() expressions agreeing
+  // by coincidence. This reads every category and filters here, which is fine
+  // at LIMITS.categories's ceiling of 30 rows.
+  categoriesForFold: db.prepare(`SELECT id, name FROM categories`),
+  insertCategory: db.prepare(`
+    INSERT INTO categories (name, color, position)
+    VALUES (?, ?, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
+  `),
+  updateCategory: db.prepare(`UPDATE categories SET name = ?, color = ? WHERE id = ?`),
+  deleteCategory: db.prepare(`DELETE FROM categories WHERE id = ?`),
+  setCategoryPosition: db.prepare(`UPDATE categories SET position = ? WHERE id = ?`),
+  countCategories: db.prepare(`SELECT COUNT(*) AS n FROM categories`),
   // `status` is carried alongside `value` rather than folded into it: a
   // numerical habit may legitimately record 3, which must never be mistaken
   // for the SKIP sentinel.
@@ -148,6 +180,21 @@ const q = {
   entriesInRange: db.prepare(`
     SELECT habit_id, date, value, status
     FROM entries WHERE date >= ? AND date <= ? ORDER BY date
+  `),
+  /**
+   * Every habit's LIFETIME earliest entry, grouped in SQLite — one query, not
+   * one per habit, and it reads the `(habit_id, date)` primary key rather than
+   * any row.
+   *
+   * `GET /categories/stats` fetches entries from a bounded window, so a habit
+   * last logged before that window comes back with none — and a member with no
+   * entries in hand is indistinguishable from one that has never been logged,
+   * which is the difference between an abandoned habit dragging its category
+   * down and one that has no strength to average in at all. This answers the
+   * question the fetched slice cannot.
+   */
+  firstEntryPerHabit: db.prepare(`
+    SELECT habit_id, MIN(date) AS first_date FROM entries GROUP BY habit_id
   `),
   entriesForSince: db.prepare(`
     SELECT date, value, status, notes
@@ -212,6 +259,29 @@ function httpError(status, message) {
 }
 
 /**
+ * Resolve an already-parsed habit's `category_id` into something safe to
+ * store. `parseHabit` has already decided the SHAPE — a positive safe
+ * integer or `null`, with anything malformed (a string, a float, 0, a
+ * negative id, `true`, a crafted `'__proto__'`) folded to `null` and no 400 —
+ * so this only decides EXISTENCE, which is a database question the shared
+ * validator has no connection to answer.
+ *
+ * A null/absent id passes straight through as the stated clear it is. A
+ * present id that names nothing is a 400: storing it anyway would leave a
+ * habit pointing at a category that was never created, and `ON DELETE SET
+ * NULL` would have nothing to ever fire on.
+ *
+ * @param {{category_id?: number | null}} body - the output of `parseHabit`
+ * @returns {number | null}
+ */
+function resolveCategoryId(body) {
+  const id = body.category_id ?? null;
+  if (id === null) return null;
+  if (!q.categoryById.get(id)) throw httpError(400, 'category not found');
+  return id;
+}
+
+/**
  * node:sqlite returns loosely-typed rows; this is the one place we assert the
  * shape our own schema guarantees.
  * @param {unknown} row
@@ -228,10 +298,11 @@ api.get('/habits', (req, res) => {
 
 api.post('/habits', (req, res) => {
   const h = habitRow(req.body);
+  const categoryId = resolveCategoryId(h);
   const info = q.insertHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value,
     h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon
+    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId
   );
   res.status(201).json(toApiHabit(q.habitById.get(info.lastInsertRowid)));
 });
@@ -247,10 +318,12 @@ api.put('/habits/:id', (req, res) => {
   if (!q.habitById.get(id)) throw httpError(404, 'habit not found');
 
   const h = habitRow(req.body);
+  const categoryId = resolveCategoryId(h);
   q.updateHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
     h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, h.archived, id
+    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId,
+    h.archived, id
   );
   res.json(toApiHabit(q.habitById.get(id)));
 });
@@ -292,6 +365,224 @@ api.post('/habits/reorder', (req, res) => {
     throw e;
   }
   res.json(q.allHabits.all(0).map(toApiHabit));
+});
+
+/* ---------- categories ---------- */
+
+/**
+ * A category id from the URL. The SHAPE check has to run before EXISTENCE —
+ * see the ordering comment above the two routes below — or a non-numeric id
+ * and one that is merely absent answer identically: `Number('abc')` is `NaN`,
+ * which matches no row and used to fall straight through to the same 404 a
+ * real, missing id gets.
+ *
+ * The shape itself is `parseCategoryId` (shared/src/validate.js), which cloud
+ * asks too — the rule was written out in both editions, which is one rule in
+ * two places even when the two copies agree.
+ *
+ * @param {import('express').Request} req
+ * @returns {number}
+ */
+function categoryId(req) {
+  const id = parseCategoryId(req.params.id);
+  if (id === null) throw httpError(400, 'invalid category id');
+  return id;
+}
+
+/**
+ * Whether NAME already names a category other than EXCLUDE_ID.
+ *
+ * Folded through `foldCategoryName` — the one shared rule, so this and the
+ * cloud edition's `lower()`-based Postgres check agree on 'Élan' vs 'élan'
+ * rather than each drawing its own line. `LIMITS.categories` keeps this a
+ * scan of at most 30 rows, so there is no reason to push it into SQL.
+ *
+ * @param {string} name
+ * @param {number | null} excludeId
+ * @returns {boolean}
+ */
+function categoryNameTaken(name, excludeId) {
+  const folded = foldCategoryName(name);
+  return /** @type {any[]} */ (q.categoriesForFold.all())
+    .some((c) => c.id !== excludeId && foldCategoryName(c.name) === folded);
+}
+
+api.get('/categories', (req, res) => {
+  res.json(q.allCategories.all());
+});
+
+/**
+ * Which of this account's categories is holding up, over one window.
+ *
+ * The arithmetic is `computeCategoryStats` (shared/src/stats.js) and every word
+ * about what it means is there. This route's whole job is the three things a
+ * pure function cannot do for itself, and each of them is a way the figures go
+ * quietly wrong rather than loudly:
+ *
+ *   1. Hand it EVERY habit, archived included. Filtering here makes
+ *      `archivedExcluded` permanently 0 — see `q.everyHabit`.
+ *   2. Supply each member's lifetime `firstEntry` — see `q.firstEntryPerHabit`.
+ *   3. Read the entries in ONE pass. `WHERE habit_id = ?` inside the loop is
+ *      the shape that took 13.5 seconds in the importer (`shared/CLAUDE.md`),
+ *      and this route runs it against however many habits the account has.
+ *
+ * Registered ABOVE the `/categories/:id` routes, and a `GET /categories/:id`
+ * added later must go below this line: `parseCategoryId('stats')` is null, so a
+ * pattern route reaching this path first answers 400 for a URL that is not an
+ * id at all.
+ */
+api.get('/categories/stats', (req, res) => {
+  // The three bounds `/habits/:id/stats` states, in the same order and for the
+  // same reason: never compute past the CALLER's today, never backwards, and
+  // never more than a ceiling, because every pass below allocates one element
+  // per day. The ceiling itself is NOT that route's — see `MAX_COMPARE_DAYS`.
+  // That route walks one habit; this one walks every habit the account has, so
+  // the same span costs the habit count times as much.
+  const now = callerToday(req);
+  const requestedEnd = queryDate(req.query.end, now);
+  const end = requestedEnd > now ? now : requestedEnd;
+
+  const requestedStart = queryDate(req.query.start, undefined);
+  if (requestedStart) {
+    if (requestedStart > end) throw httpError(400, 'start must not be after end');
+    if (daysBetween(requestedStart, end) > MAX_COMPARE_DAYS) {
+      throw httpError(400, `range must not exceed ${MAX_COMPARE_DAYS} days`);
+    }
+  }
+
+  // A caller that named no start gets a YEAR, not the ceiling: the simplest
+  // possible request must not be the most expensive one this route can answer,
+  // and five years is available to anyone who asks for it. Derived from `end`
+  // rather than read back from the earliest stored entry — a date out of the
+  // database is attacker-controlled (root CLAUDE.md), and it is the wrong
+  // question here anyway, since a comparison has as many first entries as it
+  // has members.
+  const start = requestedStart ?? addDays(end, -COMPARE_WINDOW_DAYS);
+
+  const granularity = req.query.granularity ?? 'day';
+
+  const habits = /** @type {any[]} */ (q.everyHabit.all());
+
+  const firstEntry = new Map(
+    /** @type {any[]} */ (q.firstEntryPerHabit.all())
+      .map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+  );
+
+  // One SELECT over `entries`, bucketed by habit — the same shape `/overview`
+  // uses, for the same reason. The warm-up start is DERIVED from the window,
+  // never from a stored date, and the range it opens is bounded by the clamp
+  // above plus the fixed 400 days.
+  const rows = q.entriesInRange.all(addDays(start, -SCORE_WARMUP_DAYS), end);
+  const byHabit = new Map(habits.map((h) => [h.id, []]));
+  for (const r of rows) {
+    const bucket = byHabit.get(r.habit_id);
+    if (!bucket) continue;
+    bucket.push(r);
+  }
+
+  // Read once for the whole payload rather than per habit, exactly as
+  // `/overview` reads `unlogged`: they are one answer for the account, and the
+  // map below runs once per habit.
+  const unlogged = storedUnlogged();
+  const weekStart = storedWeekStart();
+
+  res.json(computeCategoryStats(
+    /** @type {any} */ (q.allCategories.all()),
+    habits.map((h) => ({
+      habit: asHabit(h),
+      entries: /** @type {any} */ (byHabit.get(h.id) ?? []),
+      // `?? null`, and never left absent: an omitted key tells
+      // `computeCategoryStats` to derive the answer from the entries it was
+      // given, which is the truncated slice this route deliberately fetched.
+      firstEntry: firstEntry.get(h.id) ?? null,
+    })),
+    { start, end, granularity, weekStart, unlogged }
+  ));
+});
+
+/**
+ * The order every category route below follows, and the reason it is
+ * written down rather than left to be re-derived per route: SHAPE (a
+ * positive integer id, else 400) before EXISTENCE (else 404) before the BODY
+ * through `parseCategory` (else its own 400) before the DUPLICATE name (else
+ * 409). Cloud's `PUT /categories/:id` used to parse the body before checking
+ * existence; this is the order both editions now share, so add a route here
+ * later in that same sequence rather than inventing a new one.
+ */
+api.post('/categories', (req, res) => {
+  const c = parseCategory(req.body);
+  if (categoryNameTaken(c.name, null)) throw httpError(409, 'category already exists');
+  if (/** @type {any} */ (q.countCategories.get()).n >= LIMITS.categories) {
+    throw httpError(400, `at most ${LIMITS.categories} categories are allowed`);
+  }
+  let info;
+  try {
+    info = q.insertCategory.run(c.name, c.color);
+  } catch (err) {
+    // The route's own check above covers the ordinary path; this is what
+    // catches a fold that disagrees with SQLite's ASCII-only NOCASE backstop,
+    // or a genuine race between two requests, rather than surfacing the
+    // constraint violation as an unexplained 500.
+    if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+    throw err;
+  }
+  res.status(201).json(q.categoryById.get(info.lastInsertRowid));
+});
+
+api.put('/categories/:id', (req, res) => {
+  const id = categoryId(req);
+  if (!q.categoryById.get(id)) throw httpError(404, 'category not found');
+
+  const c = parseCategory(req.body);
+  if (categoryNameTaken(c.name, id)) throw httpError(409, 'category already exists');
+  try {
+    q.updateCategory.run(c.name, c.color, id);
+  } catch (err) {
+    if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+    throw err;
+  }
+  res.json(q.categoryById.get(id));
+});
+
+api.delete('/categories/:id', (req, res) => {
+  const id = categoryId(req);
+  if (!q.categoryById.get(id)) throw httpError(404, 'category not found');
+  // ON DELETE SET NULL, never CASCADE (db.js): this is tidying up a label,
+  // not a request to destroy every habit that wore it. Its habits, and every
+  // entry on them, survive — uncategorised.
+  q.deleteCategory.run(id);
+  res.status(204).end();
+});
+
+api.post('/categories/reorder', (req, res) => {
+  const order = req.body.order;
+  if (!Array.isArray(order)) throw httpError(400, 'order must be an array of category ids');
+  if (order.length > LIMITS.categories) {
+    throw httpError(400, `order may not exceed ${LIMITS.categories} ids`);
+  }
+  // `parseCategoryId`, the same rule `categoryId` above asks of the URL — not
+  // `isFinite(Number(n))`, which accepted `1.5` here and 400'd it in cloud, and
+  // not `Number.isInteger(Number(n))` either, which answers YES to `null`,
+  // `''` and `[]` (all 0) and to `true` (1). Every one of those reached
+  // `setCategoryPosition` as an id nobody named: 0 matches no row and reports
+  // 200 having moved nothing, and 1 moves whichever category happens to be
+  // id 1. A reorder that reports success and applies to something the caller
+  // did not name is the failure a client cannot see, which is what this check
+  // was added for in the first place.
+  const ids = order.map((n) => parseCategoryId(n));
+  if (ids.some((id) => id === null)) {
+    throw httpError(400, 'order must contain only category ids');
+  }
+  const tx = db.prepare('BEGIN');
+  tx.run();
+  try {
+    ids.forEach((id, i) => q.setCategoryPosition.run(i, id));
+    db.prepare('COMMIT').run();
+  } catch (e) {
+    db.prepare('ROLLBACK').run();
+    throw e;
+  }
+  res.json(q.allCategories.all());
 });
 
 /* ---------- entries ---------- */
@@ -345,10 +636,10 @@ api.get('/habits/:id/stats', (req, res) => {
   // stats passes allocate one element per day, so an unbounded range is a
   // trivial denial of service.
   const now = callerToday(req);
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const requestedEnd = queryDate(req.query.end, now);
   const end = requestedEnd > now ? now : requestedEnd;
 
-  let start = DATE_RE.test(req.query.start ?? '') ? req.query.start : undefined;
+  let start = queryDate(req.query.start, undefined);
   if (start) {
     if (start > end) throw httpError(400, 'start must not be after end');
     if (daysBetween(start, end) > MAX_RANGE_DAYS) {
@@ -400,7 +691,7 @@ api.get('/overview', (req, res) => {
   // is actually showing. Without this the grid rendered empty cells for any
   // day outside the most recent fortnight — the entries were never fetched.
   const now = callerToday(req);
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const requestedEnd = queryDate(req.query.end, now);
   const end = requestedEnd > now ? now : requestedEnd;
   const start = addDays(end, -(days - 1));
 
@@ -413,15 +704,26 @@ api.get('/overview', (req, res) => {
   const summaryEnd = now;
 
   // Archived habits are hidden by default but can be requested explicitly.
-  const habits = /** @type {any[]} */ (req.query.archived === 'true'
-    ? q.allHabits.all(1)
-    : q.allHabits.all(0));
+  const archived = req.query.archived === 'true';
+  const habits = /** @type {any[]} */ (archived ? q.allHabits.all(1) : q.allHabits.all(0));
   const rows = q.entriesInRange.all(start, end);
 
   // Read once for the whole payload rather than per habit: it is one answer
   // for the account, and this loop already runs once per habit on the
   // dashboard's hot path.
   const unlogged = storedUnlogged();
+
+  // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
+  // (`q.firstEntryPerHabit`), reused here so a section header can tell "never
+  // logged" from "scored zero" — the bounded windows below cannot answer that,
+  // and `first_date` is used for a null check only, never `addDays` or
+  // `dateRange` (root CLAUDE.md). Skipped entirely in archived mode: that
+  // fetch has nothing active to average, so `categorySummaries` is omitted
+  // below rather than computed and discarded.
+  const firstEntry = archived ? null : new Map(
+    /** @type {any[]} */ (q.firstEntryPerHabit.all())
+      .map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+  );
 
   // For the grid the frontend only needs something paintable, so skips are
   // flattened onto the SKIP wire value here. Scoring never uses this map.
@@ -440,69 +742,87 @@ api.get('/overview', (req, res) => {
     }
   }
 
+  // One extra SELECT, read once for the whole payload for the same reason
+  // `unlogged` is above: the dashboard groups by category behind
+  // `groupByCategory`, and every habit on the page needs the same list.
+  const categories = /** @type {any[]} */ (q.allCategories.all());
+
+  const habitPayloads = habits.map((h) => {
+    // The dashboard summary only needs a bounded lookback: with a 30-day
+    // half-life the score has long since converged, and streaks that matter
+    // here are recent. This keeps the dashboard O(window) rather than
+    // O(lifetime) per habit.
+    // Bounded, not lifetime. Reading every entry per habit made the
+    // dashboard O(lifetime x habits) and, worse, fed an unbounded array
+    // into computeStreaks — hundreds of thousands of iterations of
+    // synchronous work on a single-threaded server.
+    //
+    // Both lookbacks count back from `summaryEnd`, not from the grid's
+    // `end`: these three figures describe the habit today.
+    const entries = /** @type {any} */ (
+      q.entriesForSince.all(h.id, addDays(summaryEnd, -STREAK_HISTORY_DAYS))
+    );
+    const windowed = /** @type {any} */ (
+      q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
+    );
+    // Two numbers are read below — `score` and `currentStreak` — so this
+    // calls `summaryStats` rather than `computeStats`: the same window and
+    // the same two passes (`computeScores`, `computeStreaks`), with the five
+    // passes `computeStats` also runs — `computeHistory`, `computeWeekdays`,
+    // `computeWeekdayByMonth`, `computeFrequency`, `computeResilience` — never
+    // started, once per habit, on the dashboard's hot path. Awards are out of
+    // this route for the same reason, stated at the `/stats` call site above.
+    const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged });
+
+    // Counted in SQLite rather than by walking every row in JS. The
+    // expression mirrors isCompleted exactly, including that a skip is
+    // "not applicable" and never a completion — passing `e.value` instead
+    // of the whole row is what made this edition count skips as done on
+    // at_most habits while cloud did not.
+    const totalCompleted = /** @type {any} */ (
+      q.countCompleted.get(
+        h.id, h.type, h.target_type, h.target_value, h.target_value
+      )
+    ).n;
+
+    const allStreaks = computeStreaks(
+      h,
+      new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
+      entries.length ? entries[0].date : summaryEnd,
+      summaryEnd,
+      unlogged
+    );
+
+    return {
+      ...toApiHabit(h),
+      entries: byHabit.get(h.id) ?? {},
+      skips: skipsByHabit.get(h.id) ?? [],
+      score: stats.score,
+      currentStreak: stats.currentStreak,
+      bestStreak: bestStreak(allStreaks),
+      totalCompleted,
+      // Same field, same reason as the `/stats` call site above: resolved
+      // server-side because no renderer can import `unansweredCounts`, and
+      // derived rather than stored.
+      unlogged_is_success: unansweredCounts(h, unlogged),
+    };
+  });
+
+  // The mean is over `habitPayloads`' own `score` — the same number drawn on
+  // the row beneath each header — never a second scoring pass. See
+  // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
+  // rule — the same one the grouped dashboard makes (`dashboard.js`) and
+  // `computeCategoryStats` makes.
+  const categorySummaries = archived
+    ? undefined
+    : summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd);
+
   res.json({
     start,
     end,
-    habits: habits.map((h) => {
-      // The dashboard summary only needs a bounded lookback: with a 30-day
-      // half-life the score has long since converged, and streaks that matter
-      // here are recent. This keeps the dashboard O(window) rather than
-      // O(lifetime) per habit.
-      // Bounded, not lifetime. Reading every entry per habit made the
-      // dashboard O(lifetime x habits) and, worse, fed an unbounded array
-      // into computeStreaks — hundreds of thousands of iterations of
-      // synchronous work on a single-threaded server.
-      //
-      // Both lookbacks count back from `summaryEnd`, not from the grid's
-      // `end`: these three figures describe the habit today.
-      const entries = /** @type {any} */ (
-        q.entriesForSince.all(h.id, addDays(summaryEnd, -STREAK_HISTORY_DAYS))
-      );
-      const windowed = /** @type {any} */ (
-        q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
-      );
-      // Two numbers are read below — `score` and `currentStreak` — so this
-      // calls `summaryStats` rather than `computeStats`: the same window and
-      // the same two passes (`computeScores`, `computeStreaks`), with the five
-      // passes `computeStats` also runs — `computeHistory`, `computeWeekdays`,
-      // `computeWeekdayByMonth`, `computeFrequency`, `computeResilience` — never
-      // started, once per habit, on the dashboard's hot path. Awards are out of
-      // this route for the same reason, stated at the `/stats` call site above.
-      const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged });
-
-      // Counted in SQLite rather than by walking every row in JS. The
-      // expression mirrors isCompleted exactly, including that a skip is
-      // "not applicable" and never a completion — passing `e.value` instead
-      // of the whole row is what made this edition count skips as done on
-      // at_most habits while cloud did not.
-      const totalCompleted = /** @type {any} */ (
-        q.countCompleted.get(
-          h.id, h.type, h.target_type, h.target_value, h.target_value
-        )
-      ).n;
-
-      const allStreaks = computeStreaks(
-        h,
-        new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
-        entries.length ? entries[0].date : summaryEnd,
-        summaryEnd,
-        unlogged
-      );
-
-      return {
-        ...toApiHabit(h),
-        entries: byHabit.get(h.id) ?? {},
-        skips: skipsByHabit.get(h.id) ?? [],
-        score: stats.score,
-        currentStreak: stats.currentStreak,
-        bestStreak: bestStreak(allStreaks),
-        totalCompleted,
-        // Same field, same reason as the `/stats` call site above: resolved
-        // server-side because no renderer can import `unansweredCounts`, and
-        // derived rather than stored.
-        unlogged_is_success: unansweredCounts(h, unlogged),
-      };
-    }),
+    categories,
+    habits: habitPayloads,
+    ...(categorySummaries ? { categorySummaries } : {}),
   });
 });
 
@@ -619,11 +939,28 @@ api.get('/notify/status', (req, res) => {
 
 api.get('/export', (req, res) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
+  // The backup carries a category by NAME, not by id: an id is meaningless
+  // once restored somewhere else (or nowhere, on a Loop round trip), and a
+  // name is what `normaliseImportedHabit` and `backupCategories` (import.js)
+  // already agree the wire format is.
+  // Read once and used twice below — the habit-by-habit name lookup and the
+  // top-level list are two views of the same rows, and this handler asked for
+  // them separately.
+  const categories = /** @type {any[]} */ (q.allCategories.all());
+  const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
   const payload = {
     version: 1,
     app: 'habiterall',
     exported_at: new Date().toISOString(),
-    habits: habits.map((h) => ({ ...toApiHabit(h), entries: q.entriesFor.all(h.id) })),
+    habits: habits.map((h) => ({
+      ...toApiHabit(h),
+      category: categoryNames.get(h.category_id) ?? '',
+      entries: q.entriesFor.all(h.id),
+    })),
+    // A user's own categories, so a backup can recreate them by name rather
+    // than by an id that means nothing once restored — see apply-import.js.
+    categories: categories
+      .map((c) => ({ name: c.name, color: c.color, position: c.position })),
     // Preferences travel with the data. They are the account, not the device —
     // and two of them (skipDays, questionMarks) now decide what the same rows
     // MEAN, so a backup that dropped them restored a history the app then read
@@ -651,7 +988,16 @@ api.get('/export', (req, res) => {
  */
 api.get('/export.csv', (req, res) => {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
-  const body = buildCsvArchive(habits, (id) => q.entriesFor.all(id));
+  // `buildHabitsCsv` reads `h.category` by NAME, the same as `/export`
+  // above — a raw habit row only carries `category_id`, which means nothing
+  // once restored elsewhere (or nowhere, on a Loop round trip).
+  const categoryNames = new Map(
+    /** @type {any[]} */ (q.allCategories.all()).map((c) => [c.id, c.name])
+  );
+  const withCategory = habits.map((h) => ({
+    ...h, category: categoryNames.get(h.category_id) ?? '',
+  }));
+  const body = buildCsvArchive(withCategory, (id) => q.entriesFor.all(id));
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
@@ -727,7 +1073,11 @@ api.post('/import', (req, res, next) => {
   parseUpload(buf)
     .then((habits) => {
       if (!habits.length) throw httpError(400, 'no habits found in the uploaded file');
-      const result = applyImport(habits, mode);
+      // `[]`, never `null`, for a format with nowhere to carry a category —
+      // `applyImport` iterates this before a single habit is written; see its
+      // own comment for why a habit's `category` is resolved against it by
+      // NAME rather than by any id the file happens to carry.
+      const result = applyImport(habits, mode, backupCategories(buf) ?? []);
 
       // Replace mode only: it means "make this account look like the file", and
       // the file's preferences are part of that. A merge is "add these habits to

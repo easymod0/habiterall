@@ -55,6 +55,22 @@ export const MAX_CACHED = 10_000;
  * The stored shape is `{...value, at}` — every caller here already carried an
  * `at` for its own TTL, and reusing it is what lets the sweep be free.
  *
+ * **An in-flight placeholder is not an eviction candidate.** `createMemo`
+ * registers one under the key it is computing, and callers arriving meanwhile
+ * find it instead of starting their own computation. Dropping it costs far
+ * more than the entry it frees: the answer in flight fails the store-identity
+ * guard and is never cached, AND the herd it was collapsing re-forms, so a
+ * memo at its bound starts recomputing the very thing it is holding. Both
+ * passes below therefore step over one — the TTL pass because a placeholder is
+ * not stale but *running*, whichever way its `at` reads, and the eviction pass
+ * because a settled entry is always the cheaper thing to lose. The bound stays
+ * absolute: if nothing but placeholders is left, the second pass takes one
+ * anyway rather than let the map grow past `max`.
+ *
+ * `createMemo`'s own sweep exempts a placeholder for this reason and this one
+ * did not, which meant the exemption held right up until the memo reached
+ * `max` — which is to say until load, which is the only time it matters.
+ *
  * @param {Map<any, any>} map
  * @param {any} key
  * @param {object} value
@@ -73,20 +89,40 @@ export function remember(map, key, value, { ttlMs, max = MAX_CACHED, now = Date.
     // The stale ones first. An entry past its TTL is one no reader would trust
     // anyway, so dropping it costs a caller nothing at all.
     const cutoff = now() - ttlMs;
-    for (const [k, v] of map) if (v.at < cutoff) map.delete(k);
+    for (const [k, v] of map) if (!v.inflight && v.at < cutoff) map.delete(k);
 
-    // Still full, so everything in here is fresh and something live has to go.
-    // Least recently written, which is what the delete above makes true.
-    if (map.size >= max) {
-      let excess = map.size - max + 1;
-      for (const k of map.keys()) {
-        map.delete(k);
-        if (--excess <= 0) break;
-      }
-    }
+    // Still full, so everything left is fresh and something live has to go.
+    // Least recently written, which is what the delete above makes true —
+    // and settled first, so a placeholder is the last thing given up.
+    if (map.size >= max) evict(map, map.size - max + 1);
   }
 
   map.set(key, { ...value, at: now() });
+}
+
+/**
+ * Drop `excess` entries, least recently written first, settled before
+ * in-flight.
+ *
+ * Two passes rather than one, because "prefer a settled entry" and "the map
+ * never exceeds `max`" are both requirements and only the order between them
+ * is a choice. The first pass can come up short — every entry may be a
+ * placeholder — so the second runs without the preference and takes whatever
+ * is oldest.
+ *
+ * @param {Map<any, any>} map
+ * @param {number} excess
+ */
+function evict(map, excess) {
+  for (const [k, v] of map) {
+    if (v.inflight) continue;
+    map.delete(k);
+    if (--excess <= 0) return;
+  }
+  for (const k of map.keys()) {
+    map.delete(k);
+    if (--excess <= 0) return;
+  }
 }
 
 /**
@@ -121,12 +157,25 @@ export function remember(map, key, value, { ttlMs, max = MAX_CACHED, now = Date.
  * pool connection, is bounded by `PG_POOL_MAX` × the TTL and not by `max` at
  * all.
  *
+ * **`max` alone is a shared bound, and a shared bound is one an account can
+ * spend on its own.** Nothing about a per-account key stops ONE account
+ * filling every slot — `end` is any date up to the caller's today and `days`
+ * is 1–365, so paging back through a few years is thousands of distinct keys
+ * and none of it involves a write. The account doing it evicts every other
+ * account's answers, and the memo becomes pure overhead for everyone else: all
+ * of the sweep, none of the hits. `maxPerAccount` is the second half of the
+ * bound and the one that makes the first fair — it caps what any single
+ * account can hold, so `max` is only ever reached by genuinely many accounts
+ * being active at once. Needs `perAccount`, which is what declares that a key
+ * begins with `<account id>:`.
+ *
  * @param {(arg: any) => Promise<any>} compute
  * @param {{ttlMs: number, max?: number, now?: () => number,
- *   perAccount?: boolean}} opts
+ *   perAccount?: boolean, maxPerAccount?: number}} opts
  */
 export function createMemo(compute, {
   ttlMs, max = MAX_CACHED, now = Date.now, perAccount = false,
+  maxPerAccount = Infinity,
 }) {
   /**
    * key -> `{at, value}` once settled, `{at, inflight}` while computing.
@@ -151,6 +200,15 @@ export function createMemo(compute, {
     // every slow computation into an uncacheable one.
     const cutoff = now() - ttlMs;
     for (const [k, v] of entries) if (!v.inflight && v.at < cutoff) entries.delete(k);
+
+    // ...and then this account's own share, so the slot about to be taken is
+    // taken from ITS allowance and not from the shared bound. Done here rather
+    // than in `remember` because only the memo knows a key is `<account>:...`
+    // — `remember` is also `blockCache` and `lastReportedZone`, whose keys are
+    // bare user ids with no window after them.
+    if (perAccount && maxPerAccount < Infinity) {
+      capAccount(entries, accountPrefix(key), maxPerAccount);
+    }
 
     // `Promise.resolve().then(...)` rather than calling `compute` here, so a
     // synchronous throw lands in the rejection path with everything else
@@ -236,8 +294,56 @@ const perAccountMemos = new Set();
  * @param {number|string} userId
  */
 export function forgetAccount(userId) {
-  // The separator is load bearing exactly as it is in `memo.forget`: `'1'`
-  // would forget user 12 as well.
-  const prefix = `${userId}:`;
+  const prefix = `${userId}${ACCOUNT_SEP}`;
   for (const memo of perAccountMemos) memo.forget(prefix);
+}
+
+/**
+ * What separates the account id from the rest of a per-account key.
+ *
+ * One constant because two things have to agree on it and both are silent when
+ * they do not: `forgetAccount` under-forgets without it (`'1'` matches user
+ * 12), and `capAccount` counts — and evicts — the wrong account's entries the
+ * same way. Spelling it once is what stops the second caller getting it right
+ * by coincidence.
+ */
+const ACCOUNT_SEP = ':';
+
+/**
+ * The `<account id>:` prefix of a per-account key.
+ *
+ * @param {string} key
+ */
+const accountPrefix = (key) => key.slice(0, key.indexOf(ACCOUNT_SEP) + 1);
+
+/**
+ * Hold one account to `limit` entries, dropping its own oldest to get there.
+ *
+ * Called on a MISS and before the new placeholder is registered, so the
+ * account is left with room for exactly the entry it is about to take — which
+ * is why the comparison below is `- limit + 1` and not `- limit`.
+ *
+ * Settled before in-flight and least recently written first, the same
+ * preference `evict` applies to the shared bound and for the same reason: a
+ * placeholder has callers attached to it, and taking one both wastes the
+ * computation and re-forms the herd it was collapsing. Unlike `evict` this one
+ * has no second pass — if an account really is holding `limit` computations at
+ * once it may exceed its share until they settle, and that is the right way to
+ * be wrong. The shared `max` is still absolute above it.
+ *
+ * @param {Map<string, any>} entries
+ * @param {string} prefix
+ * @param {number} limit
+ */
+function capAccount(entries, prefix, limit) {
+  const mine = [];
+  for (const [k, v] of entries) if (k.startsWith(prefix)) mine.push([k, v]);
+  let excess = mine.length - limit + 1;
+  if (excess <= 0) return;
+
+  for (const [k, v] of mine) {
+    if (v.inflight) continue;
+    entries.delete(k);
+    if (--excess <= 0) return;
+  }
 }

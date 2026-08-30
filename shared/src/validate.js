@@ -93,6 +93,13 @@ export const LIMITS = {
    * and a four-person family with skin tones (19).
    */
   icon: 32,
+  /**
+   * A user's own categories, per account. Six suggestion chips ship in the
+   * picker, but they are not seeded — an account can create at most this many
+   * of its own, chip-created or typed. Mark's answer; not derived from
+   * anything else here.
+   */
+  categories: 30,
 };
 
 /**
@@ -165,6 +172,268 @@ export function parseIcon(value) {
 }
 
 /**
+ * The one rule for whether two category names are the SAME category, so both
+ * editions agree. SQLite's `NOCASE` collation folds ASCII only and Postgres's
+ * `lower()` is Unicode-aware, so `Élan` and `élan` would be one category in
+ * cloud and two in personal if the DB constraint alone decided it — the exact
+ * divergence this file exists to prevent. The uniqueness check is therefore a
+ * route-level lookup through this function, with the DB constraints kept only
+ * as backstops; a duplicate is a 409 from the route, not a 500 from a
+ * constraint violation.
+ *
+ * The question this function asks — are these two strings the same NAME — is
+ * CASE FOLDING, not lowercasing. JS exposes no `toCaseFold`, so this is
+ * per-codepoint `toLowerCase()` plus two narrow adjustments where the two
+ * genuinely differ. Do not describe this as "matching Postgres" — that
+ * framing has gone stale twice already, because Postgres's own `lower()`
+ * does not answer one way: it disagrees with ITSELF depending on which
+ * collation PROVIDER the server happens to be running, in opposite
+ * directions for the two adjustments below, and this function has to be
+ * contained under both providers at once, not equal to either.
+ *
+ * Plain `toLowerCase()`, never `toLocaleLowerCase()`. `toLowerCase()` is
+ * ALREADY full Unicode Default Case Conversion with no locale argument
+ * needed (`'É'.toLowerCase() === 'é'`) — the only thing a locale argument
+ * adds is host-locale TAILORING (Turkish/Azeri's dotless `ı`, Lithuanian's
+ * accent-sensitive casing), which is the wrong direction twice over: the
+ * same account would fold names differently depending on which server
+ * answers it, and a tailored fold is a *looser* match to Postgres's
+ * locale-independent `lower()` and SQLite's `NOCASE` backstop than the
+ * plain form already is. So `toLowerCase()` is the CLOSER match to `lower()`,
+ * not the looser one — this used to reason the other way round.
+ *
+ * A route-level check kept alongside DB constraints as backstops must be **at
+ * least as strict as every backstop**, or the constraint fires on a request
+ * the route already waved through — which used to be exactly the divergence
+ * above, because the two editions' backstops disagree with each other AND (it
+ * turns out) with whole-string `toLowerCase()`. Swept every codepoint against
+ * this server's own Postgres (`postgres:17-alpine`, the same image the
+ * shipped compose and CI use) **under both collation providers it can run
+ * with** — libc (what the shipped image uses) and ICU (what a managed
+ * Postgres commonly offers instead) — plus an exhaustive PAIRWISE sweep of
+ * every string of length <= 3 over the alphabet this issue's own examples
+ * come from, because neither divergence below is visible one codepoint at a
+ * time: one needs two adjacent codepoints in the folded output, the other
+ * needs a preceding cased letter. The two providers pull in OPPOSITE
+ * directions, so a sweep against one says nothing about the other:
+ *
+ * - **libc applies Unicode's SIMPLE, per-codepoint mapping.** `İ` (U+0130)
+ *   maps to plain `i`, so libc collapses `{I, İ}` at plain `i`; it leaves a
+ *   standalone combining dot above (U+0307) alone; and it has NO
+ *   Final_Sigma, so a lone `Σ` always maps to the non-final `σ` (U+03C3) and
+ *   libc collapses `{ΟΔΟΣ, Οδοσ}`.
+ * - **ICU applies Unicode's FULL, context-sensitive mapping — the same
+ *   mapping JS's whole-string `toLowerCase()` implements.** `İ` maps to `i`
+ *   FOLLOWED BY a combining dot above (U+0307), so ICU collapses `İ` against
+ *   its own DECOMPOSED spelling (`i` + U+0307) at that decomposed form and
+ *   keeps plain `I` apart from both. And ICU HAS Final_Sigma:
+ *   `lower('ΟΔΟΣ')` ends U+03C2 (the FINAL form), so ICU collapses `ΟΔΟΣ`
+ *   with a lowercase spelling ending U+03C2 while NOT collapsing it with one
+ *   ending U+03C3 (`Οδοσ`) — the opposite of libc's answer for that exact
+ *   pair.
+ *
+ * Being contained under BOTH therefore needs the fold to collapse strictly
+ * more than either provider does alone: the dots (`İ`, its decomposed
+ * spelling, and any RUN of combining dots above that follows a plain `i`)
+ * AND the two lowercase spellings of sigma (U+03C2 folded onto `σ`, U+03C3)
+ * — which is what Unicode's own CASE FOLDING does for sigma and plain
+ * lowercasing does not.
+ *
+ * Measured, over every codepoint 1..0x10FFFF plus the pairwise sweep above,
+ * against both providers:
+ *
+ * | fold                                                     | libc       | ICU       |
+ * |------------------------------------------------------------|------------|-----------|
+ * | old whole-string `.toLowerCase()`                           | 245 breaks | 0 breaks  |
+ * | per-codepoint + bare combining-dot strip (`/i\u0307/gu`)    | 17 breaks  | 95 breaks |
+ * | `+` quantifier only (`/i\u0307+/gu`)                        | 0 breaks   | 95 breaks |
+ * | `+` quantifier AND U+03C2 -> `σ` (this fold)                 | 0 breaks   | 0 breaks  |
+ *
+ * The full codepoint sweep alone (no pairwise strings) is 0 breaks under both
+ * providers for this fold too — the pairwise sweep is what the middle two
+ * rows needed to be caught by at all, since neither divergence they name is
+ * visible one codepoint at a time.
+ *
+ * **Why a `+` quantifier and not a bare `/i\u0307/gu`.** `.replace` is
+ * non-overlapping, so for `İ` immediately followed by the caller's OWN
+ * U+0307 the per-codepoint loop above already produces `i` + U+0307 + U+0307
+ * (two consecutive combining dots) before either strip runs, and a bare
+ * `/i\u0307/gu` eats only the first one and resumes the search past the
+ * survivor: `İ` + U+0307 folds to `i` + U+0307 (still decomposed) while
+ * plain `I` + U+0307 folds all the way to `i`. libc's `lower()` collapses
+ * BOTH spellings to the SAME single-dot string — measured — so the bare
+ * strip was looser than its own backstop again, in a narrower form than the
+ * U+0130 special case it replaced. `/i\u0307+/gu` matches the WHOLE run of
+ * trailing combining dots in one match, so both spellings collapse to `i`
+ * together.
+ *
+ * **Why U+03C2 -> `σ`.** Per-codepoint folding is what suppresses
+ * Final_Sigma for libc (a lone `Σ` handed to `.toLowerCase()` has no
+ * preceding cased letter, so the context-sensitive rule never fires), and
+ * that is exactly what BREAKS containment under ICU, which applies
+ * Final_Sigma itself: ICU collapses `ΟΔΟΣ` with a lowercase spelling ending
+ * U+03C2, and per-codepoint folding alone answers a string ending U+03C3 for
+ * the first and U+03C2 for the second — two different strings. Mapping
+ * U+03C2 onto `σ` collapses both spellings of a lowercase sigma regardless
+ * of which one the caller typed, which is what Unicode's own CASE FOLDING
+ * does for it and plain lowercasing does not.
+ *
+ * 124 codepoints go the OTHER way on this server's libc provider — JS
+ * lowercases circled Latin capitals (e.g. U+24B6) that the libc collation
+ * provider's `lower()` leaves untouched. That exact count is an observation
+ * about `postgres:17-alpine`'s libc provider, not a thing to pin: a
+ * database on ICU or the C locale can draw the line elsewhere. What makes
+ * THOSE 124 harmless is narrower than it first reads, and does not
+ * generalise: the OLD whole-string fold already collapsed every one of them
+ * too (`toLowerCase()` is what produced the divergence from `lower()` in the
+ * first place), so nothing about them is NEW — no account could ever have
+ * held both spellings, in either edition, before or after this fold.
+ *
+ * **This fold collapses at least two pairs that neither provider's
+ * `lower()` and neither the OLD fold collapses**, and both are FORCED, not
+ * sloppy. `Οδοσ` spelled with an ordinary lowercase final letter (U+03C3,
+ * σ) and the same word spelled with the FINAL form instead (U+03C2, ς) —
+ * two already-lowercase spellings differing only in which sigma ends
+ * them — are folded onto one string by the U+03C2 -> σ clause, though
+ * `lower()` leaves them apart under BOTH providers: an already-lowercase
+ * codepoint is a no-op for `toLowerCase()` wherever it sits, so the OLD
+ * fold never merged them either, and nothing has ever stopped an account
+ * holding both, in EITHER edition. The same is true of `i` + U+0307 +
+ * `stanbul` against plain `istanbul`: the dot-stripping clause merges them
+ * though `lower()` again leaves them apart under both providers.
+ *
+ * That is forced by TRANSITIVITY, not a choice. libc merges `{I, İ}` and
+ * ICU merges `{İ, i + U+0307}` — two DIFFERENT pairs of the same triple —
+ * so any fold contained under both must merge both, and therefore must
+ * merge `{I, i + U+0307}` too, which NEITHER provider merges on its own.
+ * The same argument runs on `{Οδοσ, ΟΔΟΣ}` (libc merges this pair, no
+ * Final_Sigma) and `{ΟΔΟΣ, a lowercase spelling ending U+03C2}` (ICU merges
+ * this one, Final_Sigma applied to both): contained under both means
+ * merging `{Οδοσ, that same U+03C2-ending lowercase spelling}` too, which
+ * neither provider merges either. Over-collapse is not a cost of
+ * carelessness in this fold; it is a theorem about any fold contained under
+ * two providers that disagree with each other. What does not move is the
+ * RULE — containment, never looser than a backstop — which holds under
+ * libc, ICU and a C-locale database alike. Do not try to fold the 124
+ * harmless codepoints back to themselves to chase equality with `lower()`
+ * — the rule this function owes its callers is containment, not equality
+ * with one of them.
+ *
+ * NFC/NFD/NFKC/NFKD normalisation on their own do NOT fix either
+ * divergence — all four forms still fold `İstanbul` and `Istanbul` to
+ * different strings, and none of them touches Final_Sigma at all. That does
+ * not mean normalisation is the wrong tool generally: the combining-dot
+ * strip above IS a targeted normalisation, one narrow rule (collapse a run
+ * of `i` + U+0307 to `i`) rather than one of the four general Unicode
+ * normalisation forms, none of which happens to collapse this particular
+ * pair.
+ *
+ * Nothing stores a folded name: every call site is transient (a route's own
+ * duplicate check, or the importer's in-memory dedupe), so this changes no
+ * row, needs no migration and no reindex.
+ *
+ * @param {unknown} name
+ * @returns {string}
+ */
+export function foldCategoryName(name) {
+  const trimmed = String(name ?? '').trim();
+  let folded = '';
+  // `for...of` iterates by CODE POINT (a surrogate pair is one iteration
+  // step), never by UTF-16 unit — a `for (let i = 0; i < s.length; i++)` loop
+  // would split an astral character's surrogate pair across two iterations
+  // and `.toLowerCase()` each half separately, corrupting it.
+  for (const ch of trimmed) {
+    folded += ch.toLowerCase();
+  }
+  return folded
+    // Collapse a RUN of one or more combining dots above (U+0307) that
+    // follows a plain `i` to just `i`. This is what makes U+0130 (İ) agree
+    // with `lower()` under Postgres's ICU provider: per-codepoint,
+    // `'İ'.toLowerCase()` is already `i` + U+0307, and ICU's `lower()`
+    // collapses THAT decomposed string to plain `i` too — libc's `lower()`
+    // does not, so this is stricter than libc here and exactly as strict as
+    // ICU, which is the safe direction. The `+` (not a bare `/i\u0307/gu`)
+    // is load bearing — see the JSDoc's "why a `+` quantifier" paragraph —
+    // for an `İ` immediately followed by the caller's own combining dot,
+    // which a non-quantified strip only half-collapses. Written with an
+    // explicit escape (`\u0307`), never a literal combining character in
+    // the source — an invisible codepoint in a regex is unmaintainable.
+    .replace(/i\u0307+/gu, 'i')
+    // Fold the FINAL form of lowercase sigma (U+03C2) onto the ordinary one
+    // (`σ`, U+03C3). Per-codepoint folding suppresses Final_Sigma for libc
+    // for free, and that is exactly what breaks containment under ICU,
+    // which applies Final_Sigma itself — see the JSDoc's "why U+03C2 -> σ"
+    // paragraph. Written with an explicit escape (`\u03c2`), never the
+    // two look-alike Greek letters pasted in the source where a diff
+    // cannot tell them apart.
+    .replace(/\u03c2/gu, 'σ');
+}
+
+/**
+ * A category id arriving as TEXT — a URL segment, or one entry in the list
+ * `POST /categories/reorder` takes — as a number, or `null` when it is not
+ * the shape of one.
+ *
+ * Deliberately NOT the rule `parseHabit` applies to `body.category_id`, and
+ * the difference is where the id came from. There it arrives inside a JSON
+ * body, where a number is the only honest spelling and a string is a client
+ * bug, so anything else folds to "no category". Here it arrives as text by
+ * construction (`req.params.id` is always a string) or in a list a client may
+ * reasonably spell either way, so a numeric string is normal and is coerced.
+ *
+ * What it refuses is a value that merely COERCES to an id. Both editions
+ * asked `Number.isInteger(Number(n))` of every entry in a reorder list, and
+ * `Number()` answers 0 for `null`, `''` and `[]`, and 1 for `true` — so
+ * `{order: [true]}` passed the shape check and then moved whichever category
+ * is id 1, and `{order: [null]}` passed it and answered 200 having matched no
+ * row at all. A reorder that reports success and applies to something nobody
+ * named is precisely the failure a client cannot see, which is the reasoning
+ * the fractional-id check beside it was already added for. The `typeof` gate
+ * is what makes those unrepresentable rather than filtered one spelling at a
+ * time.
+ *
+ * `Number.isSafeInteger`, not `Number.isInteger`: past 2^53 an id no longer
+ * round-trips through a double, so `9007199254740993` and its neighbour are
+ * one value here and two rows in Postgres. That is the bound `parseHabit`
+ * already draws for this same field, so the two now agree.
+ *
+ * It is here rather than per edition because it is a pure rule over a value —
+ * the two copies of `categoryId(req)` were per edition only because they take
+ * an Express request, and that was already one rule written twice.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+export function parseCategoryId(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * Validate and normalise a category payload.
+ *
+ * An EMPTY name throws; an over-long one is capped at `LIMITS.name`. That
+ * split is deliberate and it is the one place this disagrees with
+ * `parseHabit`, which throws on both: a category is a short label typed into a
+ * picker, so trimming a pasted-in essay to 100 characters is what the user
+ * meant, while a nameless category is nothing at all. The cap is what the
+ * section header can draw; the throw is what has no answer.
+ *
+ * @param {Record<string, any>} [body]
+ * @returns {{name: string, color: string}}
+ */
+export function parseCategory(body = {}) {
+  const name = String(body.name ?? '').trim().slice(0, LIMITS.name);
+  if (!name) throw new ValidationError('name is required');
+
+  return {
+    name,
+    color: COLOR_RE.test(body.color ?? '') ? body.color : DEFAULT_COLOR,
+  };
+}
+
+/**
  * Validate and normalise a habit payload.
  *
  * Returns a plain object with every field present and coerced. Throws
@@ -227,6 +496,15 @@ export function parseHabit(body = {}) {
     // it". See parseIcon for what one grapheme means and why over-long input
     // is dropped rather than sliced.
     icon: parseIcon(body.icon),
+    // A habit PUT REPLACES, so an omitted category is a stated clear — the
+    // same rule `icon`'s comment states just above. Anything that is not a
+    // positive safe integer (a string, a float, 0, a negative id, `true`, a
+    // crafted `'__proto__'`) is `null` rather than a 400: whether the id
+    // NAMES a category is a question for the route (`resolveCategoryId`),
+    // which is where an unknown id becomes a 400. This only decides the
+    // SHAPE of what may be stored.
+    category_id: Number.isSafeInteger(body.category_id) && body.category_id > 0
+      ? body.category_id : null,
     archived: !!body.archived,
   };
 }
@@ -483,6 +761,12 @@ export const SETTING_VALUES = {
   dayOrder: ['newest-right', 'newest-left'],
   weekStart: ['monday', 'sunday'],
   confirmDelete: [true, false],
+  // Whether the dashboard draws one section per category (plus a trailing
+  // Uncategorised one) instead of a flat list. Off by default: a fresh
+  // account has no categories, and a grouped list with one section — the
+  // trailing Uncategorised one, holding everything — is strictly worse than
+  // the flat list it would replace.
+  groupByCategory: [true, false],
   // How many day columns the dashboard grid shows. A CAP and not an absolute —
   // `gridColumns` in ui/window.js takes the smaller of this and what the
   // viewport fits, because the per-width ladder is the fix for a real layout
@@ -603,6 +887,12 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'weekStart',
   'confirmDelete',
   'calendarZoom',
+  // A display preference carrying no capability, like `theme` — it decides
+  // whether the dashboard is drawn in sections or as a flat list, not what any
+  // row MEANS. A category referenced by `category_id` on a habit already
+  // travels with that habit; this only says how the same data is arranged on
+  // screen after the restore.
+  'groupByCategory',
   // Both are display preferences carrying no capability, so they travel for the
   // reason `theme` and `calendarZoom` do. Neither changes what a row MEANS —
   // restoring them moves no figure, only how much of the page you are shown.
@@ -730,6 +1020,33 @@ export function assertDate(date) {
   }
 
   return date;
+}
+
+/**
+ * A date out of a query string, for a route that takes one into a RANGE.
+ *
+ * Absence is not an error: `?end=` unnamed means "the caller has no opinion",
+ * and every one of these routes has a fallback — the caller's today, or a
+ * window derived from it. Present-and-wrong is a 400, including a present but
+ * empty `end=`, because there is nothing to guess at from that.
+ *
+ * The `typeof` guard states a rule rather than patching a live bug, and the
+ * distinction is worth writing down because it decides how the guard may be
+ * rewritten. A REPEATED parameter — `?end=a&end=b` — is an array here; `?end[]=`
+ * is not, because Express 5 defaults to the `simple` query parser and leaves
+ * `end[]` a literal key that never matches `end`. Measured on express 5.2.1.
+ * So the array that is reachable today always has two or more elements, and
+ * string-coerces with a comma in it, which `DATE_RE` refuses inside
+ * `assertDate` anyway: the answer is a 400 either way. What the guard buys is
+ * that it stays a 400 under a parser that CAN produce a one-element array
+ * (`query parser: 'extended'`, which neither edition sets today) — where the
+ * coercion would produce a valid-looking date and `assertDate` would then call
+ * `.split` on an array, a TypeError and so a 500. Do not "simplify" this to
+ * `String(value)`: that is exactly the coercion, and it accepts the array.
+ */
+export function queryDate(value, fallback) {
+  if (value === undefined) return fallback;
+  return assertDate(typeof value === 'string' ? value : '');
 }
 
 /** Reject a date in the future, using the caller's notion of today. */

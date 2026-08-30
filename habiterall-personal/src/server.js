@@ -13,6 +13,7 @@ import {
 import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
+import { armShutdown, installShutdown } from '@habiterall/shared/shutdown.js';
 import {
   cspDirectives, HSTS, SESSION_NAME, SESSION_COOKIE, STATIC_CACHE, RATE_LIMITS,
   trustProxy, sameOriginOnly, warnOnUntrustedProxy,
@@ -45,6 +46,28 @@ const publicIsHttps = publicUrl.startsWith('https://');
 // asked for.
 const upgradeInsecure = (process.env.HABITERALL_UPGRADE_INSECURE ?? '')
   .trim().toLowerCase() === 'on';
+
+// Whether this module is being RUN or merely imported for its routes. It used
+// to be computed beside `app.listen` at the bottom; it is up here because the
+// arm below needs the answer before the first `await` in this file.
+const isEntryPoint = process.argv[1] != null &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+
+// Take the signals NOW, ahead of every await below. Node is PID 1 in the image
+// (exec-form CMD, no init), and for PID 1 a signal with default disposition is
+// *discarded* rather than fatal — so until something installs a handler a
+// `docker stop` did nothing whatever and the operator waited the full grace for
+// a SIGKILL. `await initAuth()` below is that window here: it hashes, and
+// `adoptEnvCredential` runs scrypt against whatever hash is stored, whose cost
+// parameters come out of that string.
+//
+// `db` was opened by its import above, so the SQLite handle is the "whatever
+// has been opened" the early path closes. `installShutdown` at the bottom
+// ADOPTS this once the server exists, so there is never an instant with no
+// listener. Gated on `isEntryPoint` for the same reason `listen` and the
+// notifier are: importing this module for its routes must not install process
+// signal handlers.
+const arm = isEntryPoint ? armShutdown({ log, cleanup: () => db.close() }) : null;
 
 const app = express();
 
@@ -260,9 +283,6 @@ app.use((err, req, res, next) => {
 // fight over port 3000 — hence the entry-point check below.
 export { app };
 
-const isEntryPoint = process.argv[1] != null &&
-  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
-
 if (isEntryPoint) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     logStartup(log, {
@@ -296,15 +316,15 @@ if (isEntryPoint) {
   // webhook the developer's own database happens to hold.
   const notifier = startNotifier();
 
-  for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => {
-      log.info('shutdown', { signal });
+  // The drain between the signal and the exit, including the deadline that
+  // bounds it: `shared/src/shutdown.js`, which both editions call.
+  installShutdown(server, {
+    log,
+    arm,
+    beforeClose: () => {
       runtime.stop();
       notifier?.stop();
-      server.close(() => {
-        db.close();
-        process.exit(0);
-      });
-    });
-  }
+    },
+    cleanup: () => db.close(),
+  });
 }

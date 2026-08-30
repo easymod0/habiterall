@@ -124,7 +124,7 @@ export function buildHabitsCsv(habits) {
   const header = [
     'Position', 'Name', 'Question', 'Description', 'NumRepetitions',
     'Interval', 'Color', 'Type', 'Unit', 'Target Value', 'Target Type',
-    'Archived',
+    'Archived', 'Category',
   ];
 
   const lines = [header.join(',')];
@@ -147,6 +147,10 @@ export function buildHabitsCsv(habits) {
       csvNumber(h.target_value ?? 0),
       h.target_type === 'at_most' ? 'AT_MOST' : 'AT_LEAST',
       h.archived ? 'true' : 'false',
+      // The category's NAME, the same as the JSON backup — Loop has nowhere
+      // to put this, which is why it is habiterall's own trailing column
+      // rather than one Loop's dialect ever wrote.
+      esc(h.category ?? ''),
     ].join(','));
   });
 

@@ -85,8 +85,8 @@ services:
       MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
       MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
       PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
-      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if an export of a long history is cancelled
-      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if a long export is cancelled; 0 disables
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug; 0 disables
       PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
       LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
       LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
@@ -95,6 +95,19 @@ services:
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
+    # Docker's own default, written down because the app now has a deadline
+    # sitting under it: on SIGTERM it finishes the requests already accepted
+    # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
+    # shared/src/shutdown.js). An ordinary restart does not go near either
+    # number -- a drain with nothing slow in flight finishes in about 150ms,
+    # so a much shorter grace costs nothing on a normal day. What the 10s
+    # buys is the bad day: a request still running when the grace expires is
+    # cut off by SIGKILL rather than answered, so anything under ~9s starts
+    # trading the app's own deadline away for a request that was going to be
+    # slow anyway. Raising it does not lengthen the drain -- the 8s is fixed
+    # in the app, so a longer grace only means the process leaves earlier
+    # than the grace allows.
+    stop_grace_period: 10s
 
 volumes:
   db-data:

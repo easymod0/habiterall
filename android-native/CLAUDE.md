@@ -45,7 +45,9 @@ below a correct pure function.
 unfiltered one** — the reorder hand-off and its `enabled`, the full-screen error
 branch, and the search icon's own `habits.isNotEmpty() || filtering` gate —
 **while two must read the rendered one**: `ScrollRestore`'s item count and the
-`focusHabit` index. A reorder against a subset writes a wrong `position` for
+`focusHabit` index. Since grouping, "the rendered one" for those two is
+`listRows` and not `visible` — see the section-header paragraph below, which is
+where that distinction now lives. A reorder against a subset writes a wrong `position` for
 habits that were never on screen, and it is the only one of the five that
 reaches storage; the rest only look wrong — the error screen replacing a working
 list, the search icon itself disappearing (were it gated on `visible` instead)
@@ -99,6 +101,59 @@ reaches storage, so there is no shared truth for the two to have drifted out
 of — only two different "is this control worth its space" answers to two
 budgets that are not comparable.
 
+**The client now HAS a picker and a grouped list, and `groupByCategory` is
+still not a sixth mirror.** Issue #65's Android half added `CategoryPicker`
+(`ui/HabitFormScreen.kt`) and the grouped `LazyColumn` (`ui/HabitList.kt`,
+`ui/HabitSections.kt`), so "there is no picker: setting a category is a web
+action" is no longer true — picking one is now a native action, same as
+setting a habit's colour. What stays true, and is why `groupByCategory` joins
+`AppSettings` without joining `Settings.kt`'s three cached mirrors: a category
+never runs from an alarm — the notification path never asks which one a habit
+is in — so there is nothing here that has to work with no network. The setting
+is read from the settings fetch (`AppSettings.groupByCategoryEnabled`) and used
+to draw, and no more. The replace hazard is also unchanged and is still why
+`Habit`, `HabitInput`, `Draft`, `Habit.toInput()`, `Habit.toDraft()` and
+`Draft.toInput()` all carry `category_id` untouched: `PUT /habits/:id` runs the
+body through `parseHabit`, which defaults every absent field, so a write that
+omits it CLEARS a category set on the web. The picker inherits that hazard
+rather than removing it — see `Draft.categoryId`'s KDoc for the shape it takes
+when `existing`'s category is not in the account's current list, the same
+silent-clear bug #251's web habit dialog actually shipped.
+
+**Grouping makes `HabitList`'s item count stop being its habit count, and two
+places had to stop reading `visible` because of it.** `HabitSections.rows`
+(`ui/HabitSections.kt`) interleaves a `ListRow.Header` per category into
+`listRows`, so once grouping is on, `visible.size` items become `listRows.size`
+items and a habit's position in `visible` is not its position in what the
+`LazyColumn` actually holds. `ScrollRestore.needsSnapToTop` and the
+notification-focus effect (`ui/HabitList.kt`) both read `listRows`, keyed and
+indexed into by `ListRow.Entry`, for exactly that reason. A future change that
+puts `visible.indexOfFirst { it.id == focusHabit }` back is the same defect
+shape this file names repeatedly — a correct pure function (`HabitSections`)
+with a caller one line away that stopped reading its output — and its
+observable symptom is a notification tap scrolling to whatever row is that
+many slots down, a different habit's row once a section boundary sits between
+them.
+
+**Reorder does not disable while grouped, unlike the web, and does not need
+to.** `dashboard.js:300` sets `reorderable = … && !grouped` because the web's
+drag writes a flat id list back, which would then be read as the *grouped*
+order. Android's reorder is a separate full-screen `ReorderScreen` handed
+`habits` — unfiltered, in the server's own `position, id` order, never passed
+through `HabitSections.rows` — so a grouped view cannot leak into what a drag
+writes. `HabitList.kt`'s `enabled = habits.size > 1` on the reorder hand-off is
+therefore unchanged by this work and should stay that way; adding `&& !grouped`
+to it would be porting a fix for a hazard this client's reorder screen was
+never exposed to.
+
+`HabitFieldCoverageTest` reads `JSON_HABIT_FIELDS` out of
+`shared/test/roundtrip-fixture.mjs` and would demand a field called `category`,
+because that is what the BACKUP carries — a name, resolved from the id at export
+time. The wire carries `category_id`. So `category` is exempt there, in a map
+with its reason, paired with a positive assertion that `category_id` itself
+reaches the wire from the habit's own value through BOTH bridges. An exemption
+with no replacement assertion is a hole; that pairing is the decision.
+
 **`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two
 clients disagreeing about diacritic folding costs a search result, not a wrong
@@ -147,13 +202,70 @@ records nothing. Two rules in it:
   unanswered. Yes / No / Skip on that same stale notification write to the date
   it names; refusing costs nothing.
 
+**The manifest declares BOTH exact-alarm permissions, and that reverses a
+decision this file used to state the other way.** `USE_EXACT_ALARM` uncapped
+plus `SCHEDULE_EXACT_ALARM` with `android:maxSdkVersion="32"`. The first is
+protection level `normal` — granted at install, not revocable — so from 33 up
+`canScheduleExactAlarms()` is true with nobody asked and every reminder takes
+the exact branch. The old shape declared `SCHEDULE_EXACT_ALARM` alone, which for
+an app targeting 33+ is denied by default from Android 14 on, and nothing in
+this client ever called `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` — so the exact
+branch was unreachable on any phone on 14 or later, and every test still passed,
+because no test asked what the APK requests. `ExactAlarmPermissionTest` is that
+assertion now, read from the MERGED manifest through `PackageManager`. The Play
+restriction the old comment cited does not reach a sideloaded APK;
+`docs/decisions/android.md` has the argument in full.
+
 **Arming is not the last chance to be wrong, which is why the day rides on the
 alarm.** `setAlarm` falls back to `setAndAllowWhileIdle` when exact alarms are
-not permitted, and on Android 14+ that is the ORDINARY path — `SCHEDULE_EXACT_ALARM`
-is not granted by default. So one armed at 22:52 for 23:52 can arrive at 00:03.
-The snooze intent carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`.
-The daily alarm carries no date deliberately: it names no day and means whichever
-one it arrives on, so refusing a null would silence every reminder there is.
+not permitted, which since the manifest change means API 31-32 for a user who
+revoked "Alarms & reminders" — not the ordinary path any more, but not dead
+either. So one armed at 22:52 for 23:52 can arrive at 00:03. The snooze intent
+carries `EXTRA_DATE` and `NotifyWorker` asks `stillAboutToday`, load-bearing on
+31-32 and belt-and-braces above. The daily alarm carries no date deliberately:
+it names no day and means whichever one it arrives on, so refusing a null would
+silence every reminder there is.
+
+**The fallback stopped being silent about itself, and is quiet about repeating
+itself.** `setAlarm`'s `else` logs a WARN under the tag `habiterall.notify`
+**once per CHANGE of state, not once per arm** — `schedule` runs per habit on
+every fetch and the widget's midnight alarm comes through the same function, so
+unconditional it was one line per habit per resume, describing a single
+persistent state hundreds of times a day. `lastArmWasExact` is the dedupe and it
+caches the LOGGING only: the permission is still read on every arm, so a grant or
+a revocation still takes effect on the next alarm and still gets exactly one line
+when it does, in either direction. It is `internal` because Robolectric caches a
+sandbox per SDK level across test classes, so an `object`'s field outlives the
+test that set it and `ReminderWiringTest` has to clear it in `@Before`. The
+settings screen draws a
+separate line under the Reminders switch when `Reminders.exactAlarmsRevoked`
+says so — 31-32 with "Alarms & reminders" revoked, never 33+, where
+`USE_EXACT_ALARM` is held from install with nothing to have revoked, **and**
+only while `settings.androidRemindersEnabled` — the same switch the line sits
+under — is still true: with the switch off, `Reminders.schedule` cancels
+rather than arms, so there is no reminder for lateness to be about and the
+line would sit directly under the control that made it so. Three decisions a
+later change would otherwise re-open: it stays SOFT — the alarm still arms,
+refusing (Loop's `SchedulerResult.IGNORED`) is not this client's answer — the
+SDK upper bound is what keeps the sentence from being false on every current
+phone, and **the sentence asserts nothing about the current alarm set**. It
+says only that reminders "can arrive late". An earlier version said they "are
+still armed but can arrive late", which the gate cannot know: it answers what
+the PLATFORM permits, so a user with reminders on and no habit carrying a
+`reminder_time` was told something false with nothing on the screen able to
+disprove it. The consequence is the part that is true in every state the gate
+admits, so it is the whole of what the line says.
+
+**Both platform questions on that screen are asked in `ManageScreen`, which is
+`internal` for that reason.** `SettingsScreenTest` pins the rendering and
+`RemindersTest` pins the predicate; the line that joins them —
+`exactAlarmsRevoked = Reminders.exactAlarmsRevoked(context)`, and its sibling
+`areNotificationsEnabled()` — is reachable from neither, and a constant written
+at either leaves every other test green. `ManageScreenWiringTest` renders the
+real composable and moves the PLATFORM instead (the reported SDK,
+`ShadowAlarmManager`, `ShadowNotificationManager`); each of the four constants
+that could be written there fails exactly one of its cases. Same reason
+`HabitList` is top-level, and the same defect shape this file names twice.
 
 **Two alarms are two PendingIntents** (`habiterall://snooze/<id>` against
 `habiterall://remind/<id>`), because `filterEquals` ignores extras and one intent

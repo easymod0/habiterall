@@ -341,6 +341,42 @@ body {
 
 .grid { display: flex; flex-direction: column; gap: 10px; }
 
+/* One per category, drawn directly into `#grid` when `groupByCategory` is on
+   (dashboard.js). Left border rather than a filled background, for the same
+   reason the category chip's border is — a header has to stay legible
+   whatever the category's own colour is. */
+.category-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-left: 3px solid var(--chip-color, var(--accent));
+}
+.category-section-header:first-child { margin-top: 0; }
+/* The trailing Uncategorised section has no colour of its own to border with. */
+.category-section-header.uncategorised { border-left-color: var(--border); }
+.category-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.category-section-count { flex: none; color: var(--text-dim); }
+
+/* The mean + spread `dashboard.js` draws when `summarised` is true. `flex:
+   none` on both, like `.category-section-count` above — the row is already
+   `flex` with an ellipsising NAME, so at 360px it is the name that gives up
+   width, never these figures. */
+.category-section-figure {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.category-section-mean { font-weight: 700; color: var(--text); }
+.category-section-spread { color: var(--text-dim); }
+
 /* Flex rather than a fixed grid: the drag handle is absent in the archived
    view and when there is only one habit, and the row must still line up. */
 .habit-row {
@@ -424,9 +460,6 @@ body {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .check.today .check-day { color: var(--accent); font-weight: 700; }
-
-/* Days the habit did not yet exist for are not failures; dim them. */
-.check.before-start { opacity: 0.35; }
 
 /* ---------- detail view ---------- */
 
@@ -698,6 +731,152 @@ dialog select {
   padding: 7px 9px;
 }
 dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
+
+/* The habit dialog's target box says why it was refused (#156). `.field-hint`
+   is the quiet grey every field's explanatory line takes, and the `.error`
+   colour is scoped per hint — `.timefield`, `.countfield`, `#category-hint` —
+   so a refusal here reads as ordinary help text without this line. */
+#target-hint.error { color: var(--danger); }
+
+/* ---------- category field (habit dialog) ---------- */
+
+.category-field { margin-bottom: 11px; }
+.category-field label { margin-bottom: 4px; }
+
+.category-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+/* A coloured left edge, not a filled chip — a label has to stay legible
+   whatever the suggestion's own colour is, the same reason the "New" pill in
+   detail.js takes --accent rather than a per-habit colour. */
+.category-chip { border-left: 3px solid var(--chip-color, var(--accent)); }
+
+.category-new {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.category-new input[type='text'] { flex: 1; min-width: 0; margin-top: 0; }
+.category-new input[type='color'] { margin-top: 0; flex: none; width: 44px; }
+
+.category-manage {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.category-manage-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; }
+.category-swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.category-manage-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.category-manage-row input[type='text'] { flex: 1; min-width: 0; margin-top: 0; }
+.category-manage-row input[type='color'] {
+  margin-top: 0;
+  flex: none;
+  width: 36px;
+  height: 32px;
+}
+/* Four buttons now share this row with the swatch and the name — `flex: none`
+   keeps them at their own intrinsic size so `.category-manage-name`'s
+   `flex: 1; min-width: 0` is what absorbs a narrow screen, not them. Tighter
+   padding than the ordinary `.btn-icon` (declared for every icon button in
+   this row, not only the two new ones, so ✎ and ✕ shrink by the same amount
+   rather than sitting wider than their new neighbours) is what keeps the row
+   fitting at 360px with four of them in play. */
+.category-manage-row .btn-icon {
+  flex: none;
+  padding: 5px 7px;
+}
+#category-hint.error { color: var(--danger); }
+
+/* ---------- category comparison (#/categories) ---------- */
+
+/*
+ * `auto-fit` with a minimum rather than a fixed count, the same shape the
+ * awards row uses and for the same reason: an account may have one category
+ * or thirty, and a fixed two-column grid is a column of whitespace at 360px
+ * and a wasted half-screen at 1440. The minimum is 360 rather than the awards
+ * row's 190 because each cell holds a chart, and `ui/categories.js` measures
+ * one cell to size that chart — below ~300px of card the axis labels start to
+ * meet in the middle. `minmax(0, 1fr)` as the second half, or a long category
+ * name makes the track wider than the grid and the page scrolls sideways.
+ */
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 0 16px;
+  align-items: start;
+}
+
+/* The card already carries its own bottom margin; the grid's row gap would
+   double it. */
+.compare-card { margin-bottom: 16px; }
+.compare-card .card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* Uncategorised is a state a habit is in and has no colour of its own, so its
+   swatch is an outline rather than a fill — the same distinction the grouped
+   dashboard's trailing section header draws with its border. */
+.compare-card.uncategorised .category-swatch {
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.compare-figure { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.compare-mean {
+  font-size: 27px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.compare-note { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
+
+.compare-spread {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 10px 0 8px;
+  font-size: 13px;
+}
+/* Best and worst are TEXT and link nowhere — see the comment in
+   `ui/categories.js` for the back-stack reason. Styled as a row of plain
+   spans rather than anything that reads as tappable, deliberately. */
+.compare-member { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.compare-member-label {
+  flex: none;
+  width: 56px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.compare-member-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compare-member-score { flex: none; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+
+@media (max-width: 400px) {
+  /* One column below the minimum above, which `auto-fit` already does — what
+     this buys is the track being allowed to be NARROWER than 360px, or the
+     grid overflows a 360px viewport by the difference. */
+  .compare-grid { grid-template-columns: minmax(0, 1fr); }
+}
 
 .freq {
   border: 1px solid var(--border);

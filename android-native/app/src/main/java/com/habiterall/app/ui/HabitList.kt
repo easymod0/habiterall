@@ -6,6 +6,7 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -18,8 +19,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -71,10 +72,14 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.habiterall.app.data.Category
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.HabitFilter
 
@@ -93,7 +98,7 @@ import com.habiterall.app.data.HabitFilter
  * is why: `habits` is the fetched list, unfiltered; `rows` is `habits` with the
  * pending-write overlay laid on, still unfiltered; and `visible` — computed
  * here from `rows.filter { HabitFilter.matches(it, query) }` — is what the
- * `LazyColumn` actually renders. The reorder hand-off, its `enabled`, the
+ * search box narrows the list to. The reorder hand-off, its `enabled`, the
  * full-screen error branch and the search icon's own
  * `habits.isNotEmpty() || filtering` gate all read `habits`, on purpose:
  * handing any of those a filtered subset is wrong in a way that ranges from
@@ -101,15 +106,23 @@ import com.habiterall.app.data.HabitFilter
  * to "corrupts stored data" (a reorder rewriting the position of every habit
  * that was not on screen). The icon's second clause is not a hedge on the
  * first: `filtering` is what keeps the only control that can clear a filter on
- * screen once `habits` itself goes empty underneath one. `ScrollRestore`
- * and the `focusHabit` index read `visible`, because both are about what the
- * `LazyColumn` actually holds.
+ * screen once `habits` itself goes empty underneath one.
+ *
+ * `listRows` — `HabitSections.rows(visible, categories, grouped)` — is a
+ * fourth list and the one the `LazyColumn` actually renders: ungrouped it is
+ * `visible` wearing `ListRow.Entry`, grouped it interleaves a `ListRow.Header`
+ * per category. `ScrollRestore` and the `focusHabit` index read `listRows`,
+ * not `visible`, because once a header can be an item the item count is not
+ * the habit count and a habit's index is not its position in `visible` — see
+ * `HabitSections`'s own KDoc for the defect shape this avoids.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HabitList(
     habits: List<Habit>,          // the fetched list, unfiltered
     rows: List<Habit>,            // habits + the pending-write overlay, still unfiltered
+    categories: List<Category>,   // this account's categories, in the server's own order
+    grouped: Boolean,             // whether to draw one section per category
     loading: Boolean,
     loaded: Boolean,
     error: String?,
@@ -143,6 +156,17 @@ fun HabitList(
     // search box, if it holds anything. `remember`ed on both, not recomputed
     // per recomposition for no reason — this runs per keystroke.
     val visible = remember(rows, query) { rows.filter { HabitFilter.matches(it, query) } }
+
+    // What the `LazyColumn` below actually iterates. Ungrouped this is
+    // `visible` wearing `ListRow.Entry` and nothing else — see `HabitSections`.
+    // `ScrollRestore` and the `focusHabit` index below read THIS list, not
+    // `visible`: once a category header can be an item, the item count is not
+    // the habit count and a habit's position in `listRows` is not its
+    // position in `visible`.
+    val listRows = remember(visible, categories, grouped) {
+        HabitSections.rows(visible, categories, grouped)
+    }
+
     // `HabitFilter.isActive`, not `query.isNotBlank()`: this drives the active
     // badge, the tint, the "filter active" description, the long-press to clear
     // and the "N of M" count — five claims that a filter is narrowing the list
@@ -157,14 +181,15 @@ fun HabitList(
     // See ScrollRestore for what can go wrong and why; the rule is there,
     // and unit-tested, because the version inlined here only covered a
     // clipped FIRST row and left a clipped row at any other index — which
-    // is the case that kept being reported. Reads `visible`, not `habits`:
-    // once a query can make the two differ, a restored offset has to be
-    // judged against what the `LazyColumn` actually holds.
-    LaunchedEffect(visible.size) {
+    // is the case that kept being reported. Reads `listRows`, not `habits`
+    // or `visible`: once a query can make those differ, and a header can be
+    // an item, a restored offset has to be judged against what the
+    // `LazyColumn` actually holds.
+    LaunchedEffect(listRows.size) {
         if (ScrollRestore.needsSnapToTop(
                 listState.firstVisibleItemIndex,
                 listState.firstVisibleItemScrollOffset,
-                visible.size,
+                listRows.size,
             )
         ) {
             listState.scrollToItem(0)
@@ -183,7 +208,7 @@ fun HabitList(
     // A notification tap wins over a filter: a query live when one arrives is
     // cleared first, on the (separate) pass that follows, rather than have the
     // habit it names hunted for in a list a live query may have narrowed past
-    // it. `query` has to be a key and not just read: keyed on `visible` alone,
+    // it. `query` has to be a key and not just read: keyed on `listRows` alone,
     // a query that happens to match every habit produces a list that is
     // `equals` to the unfiltered one once it clears, so the effect would never
     // re-run and `onFocused()` would never fire — the focus left pending for
@@ -194,7 +219,7 @@ fun HabitList(
     // pass that looks for it. `searchOpen` joins `query` as both a guard and a
     // key for the identical reason: a tap arriving with the field expanded but
     // no text typed would otherwise leave the field open over a list the user
-    // never filtered, and keyed on `visible` alone this effect would not even
+    // never filtered, and keyed on `listRows` alone this effect would not even
     // re-run to collapse it once `query` had nothing to change.
     //
     // This one guard stays `query.isNotBlank()` rather than `filtering`, and
@@ -204,14 +229,19 @@ fun HabitList(
     // text, and leaving it there means the next thing typed is appended to it.
     // Being the wider predicate costs one extra pass and ends in the same
     // empty box.
-    LaunchedEffect(focusHabit, visible, loaded, query, searchOpen) {
+    LaunchedEffect(focusHabit, listRows, loaded, query, searchOpen) {
         if (focusHabit == null || !loaded) return@LaunchedEffect
         if (query.isNotBlank() || searchOpen) {
             onQueryChange("")
             onSearchOpenChange(false)
             return@LaunchedEffect
         }
-        val index = visible.indexOfFirst { it.id == focusHabit }
+        // `listRows`, not `visible`: once a category header can be an item,
+        // a habit's index in `visible` is not its index in what the
+        // `LazyColumn` actually holds, and scrolling by the latter lands on
+        // whatever row is that many slots down — a different habit's row,
+        // once headers are in the mix.
+        val index = listRows.indexOfFirst { it is ListRow.Entry && it.habit.id == focusHabit }
         if (index >= 0) listState.scrollToItem(index)
         onFocused()
     }
@@ -617,20 +647,36 @@ fun HabitList(
                             DayHeader(dates = dates, today = today, scroll = dayScroll)
                             HorizontalDivider()
                             LazyColumn(Modifier.fillMaxSize(), state = listState) {
-                                items(visible, key = { it.id }) { habit ->
-                                    HabitGridRow(
-                                        habit = habit,
-                                        dates = dates,
-                                        today = today,
-                                        scroll = dayScroll,
-                                        onOpen = { onOpenHabit(habit) },
-                                        onEdit = { onEditHabit(habit) },
-                                        onSetReminder = { onSetReminder(habit) },
-                                        onTapDay = { date -> onTapDay(habit, date) },
-                                        onHoldDay = { date -> onHoldDay(habit, date) },
-                                        questionMarks = questionMarks,
-                                    )
-                                    HorizontalDivider()
+                                // Iterates `listRows`, not `visible`: ungrouped that is
+                                // `visible` wearing `ListRow.Entry` and nothing else, so
+                                // this collapses to the old `items(visible, …)` byte for
+                                // byte. Grouped, a `ListRow.Header` is a `stickyHeader` so
+                                // it stays pinned over its own section while that section
+                                // scrolls underneath it, and a `ListRow.Entry` is the same
+                                // `HabitGridRow` + `HorizontalDivider` as before. Keys must
+                                // not collide across the two kinds.
+                                for (row in listRows) {
+                                    when (row) {
+                                        is ListRow.Header -> stickyHeader(key = "c:${row.categoryId ?: "none"}") {
+                                            CategorySectionHeader(row)
+                                        }
+                                        is ListRow.Entry -> item(key = "h:${row.habit.id}") {
+                                            val habit = row.habit
+                                            HabitGridRow(
+                                                habit = habit,
+                                                dates = dates,
+                                                today = today,
+                                                scroll = dayScroll,
+                                                onOpen = { onOpenHabit(habit) },
+                                                onEdit = { onEditHabit(habit) },
+                                                onSetReminder = { onSetReminder(habit) },
+                                                onTapDay = { date -> onTapDay(habit, date) },
+                                                onHoldDay = { date -> onHoldDay(habit, date) },
+                                                questionMarks = questionMarks,
+                                            )
+                                            HorizontalDivider()
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -638,6 +684,51 @@ fun HabitList(
                 }
             }
         }
+    }
+}
+
+/**
+ * A category's section header, drawn as a `stickyHeader` so it stays pinned
+ * over its own section as the grid scrolls beneath it — the same information
+ * the web draws (`dashboard.js`'s `sectionHeader`): the category's colour, its
+ * name and its count, and no collapse control (#74).
+ *
+ * `row.color` is `null` for Uncategorised and `""` for a category whose colour
+ * a server omitted (`Category.color`'s own default) — both are "no colour" and
+ * neither is handed to [habitColor], which would otherwise try to parse `""`
+ * as hex and fall back to the theme's primary rather than drawing no dot.
+ *
+ * `clearAndSetSemantics`, not a bare `semantics {}`: without it TalkBack would
+ * still walk the name and count as two further nodes underneath this one's own
+ * description, saying the same thing twice.
+ */
+@Composable
+private fun CategorySectionHeader(row: ListRow.Header) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clearAndSetSemantics {
+                // "1 habit", not "1 habits". A section of one is the ordinary
+                // case on an account that has just made a category, so the
+                // ungrammatical form is the one most people would hear.
+                val unit = if (row.count == 1) "habit" else "habits"
+                contentDescription = "${row.name} section, ${row.count} $unit"
+            },
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!row.color.isNullOrEmpty()) {
+                Box(Modifier.size(12.dp).background(habitColor(row.color), CircleShape))
+            }
+            Text(row.name, fontWeight = FontWeight.Medium)
+        }
+        Text(row.count.toString())
     }
 }
 

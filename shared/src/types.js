@@ -53,6 +53,19 @@
  *   validate.js; '' means none. Never a second name field
  * @property {number} [position]       display order
  * @property {boolean|0|1} archived    boolean in Postgres, 0/1 in SQLite
+ * @property {number|null} [category_id] which Category this habit belongs
+ *   to, or null for uncategorised. A habit PUT REPLACES, so an absent value is
+ *   a stated clear — see `parseHabit` in validate.js. At most one category per
+ *   habit; grouping a list needs a partition, not a set of memberships
+ */
+
+/**
+ * @typedef {object} Category
+ * @property {number} id
+ * @property {number} [user_id]        cloud only; absent in the personal edition
+ * @property {string} name
+ * @property {string} color            #rrggbb
+ * @property {number} [position]       display order
  */
 
 /**
@@ -133,6 +146,95 @@
  * @typedef {object} SummaryStats
  * @property {number} score            latest strength, 0..1
  * @property {number} currentStreak
+ */
+
+/**
+ * A category's strongest or weakest member, named rather than linked: the
+ * comparison view links to no habit, because `ui/routes.js` tracks `ourEntry`
+ * as a single boolean and `go(LIST)` unwinds by `history.back()`, which assumes
+ * the entry underneath a habit is the dashboard.
+ * @typedef {object} CategoryMember
+ * @property {number} id
+ * @property {string} name
+ * @property {number} score            that member's strength at `end`, 0..1
+ */
+
+/**
+ * The mean, spread and n over one set of category members, at a single
+ * reading — what `summariseMembers` returns. The same shape `CategorySection`
+ * carries for its own aggregate figures, factored out so a second caller can
+ * ask the identical question without re-implementing which members count.
+ * @typedef {object} MemberSummary
+ * @property {number} members          rows handed in, landed or not
+ * @property {number} unloggedExcluded members that have NEVER been logged,
+ *   counted here instead of averaged in as a zero
+ * @property {number|null} mean        equal weight per habit, over the
+ *   members that have landed; null when none have, never 0
+ * @property {CategoryMember|null} best
+ * @property {CategoryMember|null} worst
+ */
+
+/**
+ * One row of `summariseByCategory` — a `MemberSummary` named by category id.
+ * `id: null` is Uncategorised, always present and always last, the same
+ * convention `CategorySection` uses for the same reason.
+ * @typedef {object} CategorySummaryRow
+ * @property {number|null} id
+ * @property {number} members
+ * @property {number} unloggedExcluded
+ * @property {number|null} mean
+ * @property {CategoryMember|null} best
+ * @property {CategoryMember|null} worst
+ */
+
+/**
+ * One bucket of a category's aggregate strength, on the axis shared by every
+ * category in the same response.
+ * @typedef {object} CategorySeriesPoint
+ * @property {string} bucket           as `HistoryBucket.bucket` spells it
+ * @property {number|null} value       mean strength of the members that had
+ *   landed by this bucket; null when none had
+ * @property {number} members          how many members that mean is over — an
+ *   absent member is never counted as 0
+ */
+
+/**
+ * One row of a category comparison. `id: null` is Uncategorised, which is
+ * always present and always last and carries no name or colour of its own —
+ * naming it belongs to the view, as it already does on the grouped dashboard.
+ * @typedef {object} CategorySection
+ * @property {number|null} id
+ * @property {string|null} name
+ * @property {string|null} color
+ * @property {number} members          habits in this category, archived aside
+ * @property {number} archivedExcluded archived habits in THIS category, left out
+ *   of `members` and every figure below it. Its own count rather than a share of
+ *   the payload's total, because a section whose habits are all archived and one
+ *   nobody has filled both arrive with `members: 0` and are different sentences
+ * @property {number} unloggedExcluded members that have NEVER been logged,
+ *   which have no strength rather than a strength of zero: counted here instead
+ *   of averaged in, so adding a habit never moves a figure downward. Not
+ *   "nothing in the fetched slice" — an abandoned habit has a real strength
+ *   near zero and is in the mean. See `computeCategoryStats`
+ * @property {number|null} mean        equal weight per habit, at `end`, over
+ *   the members that have landed; null when none have, never 0
+ * @property {CategoryMember|null} best
+ * @property {CategoryMember|null} worst
+ * @property {CategorySeriesPoint[]} series always ends at `mean`
+ * @property {number|null} recoveryRate mean of the members whose rate is a
+ *   number; null when no member has one
+ * @property {number} recoveryExcluded members whose rate was null — no CLOSED
+ *   lapse in the window, whether because nothing was ever missed, nothing was
+ *   ever logged, or the only lapse is still open. Not the same claim as 100%
+ */
+
+/**
+ * Which of an account's categories is holding up, over one window.
+ * @typedef {object} CategoryStats
+ * @property {string[]} buckets        the axis every `series` is drawn on
+ * @property {number} archivedExcluded archived habits left out of every figure,
+ *   account-wide; each section carries its own count as well
+ * @property {CategorySection[]} categories
  */
 
 /**

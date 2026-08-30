@@ -76,6 +76,22 @@ deletes one. It carries an error string straight from Discord, which is why the
 tenancy suite attacks it: a leak would hand one account a running commentary on
 another's destinations.
 
+**`categories` (migration 015) is the one habit-adjacent table whose grant
+includes DELETE.** Same shape as `notify_status` — ordinary owner policy,
+`user_id` leads the key, `FORCE ROW LEVEL SECURITY`, the owner policy on
+`app_current_user_id()` for both `USING` and `WITH CHECK` — but the grant is
+`SELECT, INSERT, UPDATE, DELETE`, because a category is a label its owner
+manages and can remove, where `notify_status` is upserted in place and nothing
+ever deletes a row. `habits.category_id` is `ON DELETE SET NULL`, never
+`CASCADE`: removing a category must not take its habits' history with it.
+That foreign key runs inside Postgres with RLS not applied to its own check,
+so it is not a tenancy boundary by itself — a DB-layer write can point a
+habit's `category_id` at another account's category and the constraint will
+not stop it. That is exactly why the route resolves `category_id` against the
+caller's own rows before the insert or update, and why the tenancy suite
+attacks the DB layer directly rather than trusting the route to always be the
+caller.
+
 **A button press is authorised by its channel.** `interactionAdapter` in
 `src/notifier.js` resolves the account from `interaction.channel_id` — through
 the notifier scope, since it spans users — and everything after that runs in
@@ -89,6 +105,102 @@ validated in `shared/src/notify.js` against Discord's own hosts and stored
 canonicalised; `/api/notify/test` re-reads it from the database rather than
 taking one from the request body, and carries its own tight rate limit because
 it causes outbound traffic.
+
+## Both policy functions are `PARALLEL SAFE`, and that flag goes away in silence
+
+`app_current_user_id()` and `app_is_notifier()` were marked `PARALLEL SAFE` by
+migration 016 and must stay that way. `CREATE FUNCTION` defaults to UNSAFE and
+a later `CREATE OR REPLACE FUNCTION` that omits the clause resets it without
+saying so — and because both sit in the `USING` clause of a policy on every
+table, one unsafe function takes parallelism away from the whole application at
+once. That is what the before measurement showed: with `debug_parallel_query =
+on`, a `count(*)` over `entries` inside `withUser` produced an identical plan
+with no `Gather` node in it at all.
+
+`test/schema-plans.integration.mjs` is what notices. It walks `pg_depend` from
+the policies rather than naming these two functions, so a policy added later
+brings its function into the check with it, and the index invariants beside it
+are read out of `pg_index` / `pg_attribute` for the same reason — a table added
+next year is already covered. `test/tenancy.integration.mjs` holds the other
+half: forced parallel, inside `withUser`, an account still sees only its own
+rows. Parallel safety says the body may run in a worker; it does not widen what
+that worker can see, and that is asserted rather than argued.
+
+**`SAFE` is the requirement, and `RESTRICTED` fails it exactly as `UNSAFE`
+does.** The catalog walk asks `proparallel <> 's'`, not `= 'u'`, and that is
+not pedantry: `PARALLEL RESTRICTED` means the function may run only in the
+parallel group LEADER, so an expression containing it cannot appear in a
+partial path — and an RLS qual is applied at the scan, so a restricted policy
+function is a scan that cannot be parallelised at all. There is no `Gather` in
+the plan, which is byte for byte the regression 016 exists to undo. The first
+version of this suite asked `= 'u'`, so a THIRD policy function marked `'r'` by
+an author being cautious would have passed it while taking parallelism away
+from every query the app role issues; the named control beside it covers only
+these two functions and would not have seen it either. Mutation-tested both
+ways round.
+
+**And the plan that carries a security claim must be the plan of the statement
+whose ANSWER is trusted.** Round one of that tenancy block asserted `Workers
+Launched: 1` on a stand-in — `SELECT count(*) FROM entries` — and then ran the
+two isolation reads as separate statements, on the reasoning that the same
+forced-parallel transaction makes them parallel too. It does not follow: a
+`COUNT(DISTINCT ...)` is the sort of aggregate whose parallel-safety is worth
+not assuming, and a single `random()` (which Postgres marks `PARALLEL
+RESTRICTED`) anywhere in the select list is enough to take the `Gather` off one
+read while the stand-in beside it keeps its worker — measured. Each isolation
+read is now `EXPLAIN ANALYZE`d for its own plan and then issued again for its
+rows, and the worker count is asserted per statement. Same lesson as the
+`ANALYZE`-not-`EXPLAIN` one above, one level further in: a plan is a statement
+about shape, and the shape asserted has to be the shape of the query being
+believed.
+
+`LEAKPROOF` is deliberately not applied to either and must not be: it is the
+opposite lever — permission to push a user-supplied qual *below* a security
+barrier — and these functions **are** the barrier.
+
+**`test:plans` pins CAPABILITY; `bench:queries` is what measured CHOICE, and it
+is not a suite.** `planFor` sets `enable_seqscan = off` (and, for the grid read,
+`enable_bitmapscan = off` as well), so what it asserts is that the index can
+serve the predicate and that the planner prefers it *among indexes* — which is
+the half a test can pin, because the alternative is a cost estimate that moves
+with table size. Whether the planner reaches for it UNFORCED is what
+`scripts/bench-queries.mjs` reports, and that is where #185's before/after
+numbers come from. It has an npm script (`npm run bench:queries -w
+habiterall-cloud`) so it is invocable by name rather than by path, and it is
+deliberately **not** in CI: it is DESTRUCTIVE — it empties `users`, `habits`,
+`entries` and `notify_log` and seeds its own 20,000-user fixture, like the
+tenancy suite — and it reports figures rather than passing or failing. Point it
+at a throwaway database. If an index here is ever changed again, that script is
+what re-establishes the numbers, and it is the file to update first.
+
+None of this re-keys anything. `entries_pkey (habit_id, date)` and
+`notify_log_pkey (habit_id, channel, date)` not leading with `user_id` is a
+security decision with migrations 007 and 008 behind it — the composite foreign
+key to `habits (id, user_id)` is what stops an invisible-row squat — and 016's
+indexes are additions *beside* those keys. Read "the key does not lead with
+`user_id`" as a thing that was paid for, not as an oversight to correct.
+
+## An RLS table cannot be indexed on a non-leakproof operator
+
+`jsonb_exists_any` (`?|`), `jsonb_exists` (`?`) and `jsonb_contains` (`@>`) all
+have `proleakproof = false`. With a policy on the table, Postgres will not
+evaluate a non-leakproof qual of the caller's ahead of the security qual — a
+leaky operator could reveal a row the policy was about to hide — and an index
+condition is by definition evaluated first. So on a table under RLS such a qual
+can **never** become an `Index Cond`, whatever index exists. No jsonb index on
+`users` can serve `candidates()` in `src/notifier.js`, and that scan is
+knowingly a sequential one.
+
+The trap is that nothing complains. The index builds, `ANALYZE` is happy, the
+catalog says it is there, and the plan is byte for byte what it was. It only
+looks otherwise if the `EXPLAIN` is taken on the admin connection, which is the
+owner and bypasses RLS: no policy, no security qual, and the qual is free to
+become an index condition in a plan of a query this application never issues.
+That is exactly how #185 came to propose a GIN index on `users.settings` that
+the app role could not have used; the measurements are in that issue's comment
+thread. **Every plan taken in this edition must therefore be taken as
+`habiterall_app` through `withUser` / `withNotifierScope`**, which is what
+`test/schema-plans.integration.mjs` does and what anything added to it must do.
 
 ## `/healthz` has four callers, not the two it looks like
 
@@ -117,6 +229,26 @@ It lives in its own file because `server.js` starts a server at import time, so
 nothing declared in it can be unit tested — and the failure mode here is silent
 in the worst direction, an `inflight` left set reporting the last good answer
 forever while Postgres is down.
+
+**Both pool timeouts are settable, `0` means OFF, and a cancellation is named.**
+`statement_timeout` (15 s) and `idle_in_transaction_session_timeout` (30 s) are
+passed as connection parameters, so they reach every session the pool opens and
+`SHOW` is the only thing that can confirm it — `test/api.integration.mjs` reads
+both back against a real session for that reason. They are parsed by
+`timeoutFromEnv` and not by `Number(env) || default`, which is the idiom next
+door at `PG_POOL_MAX` and is wrong here: **0 is a value Postgres has a meaning
+for** — it disables the timeout — and `||` swallows exactly that spelling, so
+the one setting the README tells an operator to reach for when a long export is
+being cancelled would be the one setting they could not make. An unparseable
+value falls back *and warns*, because a typo must not silently remove a bound.
+
+And `noteTimeout` logs `pg.statement_timeout` / `pg.idle_tx_timeout` on the way
+past, then rethrows untouched. Without it the timeouts trade one anonymous
+failure for another: the problem they were added for was a pathological
+statement surfacing as *other* requests failing their checkout, "naming nothing
+about the query responsible", and a bare 500 out of SQLSTATE `57014` names
+nothing either. Logged rather than converted to a 503, which would tell the
+offline outbox to replay a write that cannot finish in the time allowed.
 
 **The route is mounted ABOVE `app.use(session(...))`, and that is a rule rather
 than a tidy-up.** It reads no session and never has, but below the middleware it
@@ -189,9 +321,25 @@ dashboard, measured at **499 KB** for 20 habits × 365 days and 1.2 MB for 50 ×
 365. Inherited, the bound was ~4.9 GB — reachable by an account paging back
 through its own history, since `end` and `days` make every window a distinct key
 and none of it involves a write, so `forget` never fires. `MAX_OVERVIEW_CACHED`
-is 500 and is a backstop; what actually bounds residency is the TTL sweep in
+is 100 and is a backstop; what actually bounds residency is the TTL sweep in
 `createMemo`, because `remember` sweeps only when FULL and a 2 s TTL otherwise
 caps how long an answer is *trusted* rather than how long it is *kept*.
+
+**A backstop has to be a number the box survives reaching.** It was 500, which
+is ≈ 250 MB of dashboards, and neither compose file sets a memory limit — so
+the bound was sized such that hitting it killed the process it was protecting.
+100 × 499 KB ≈ 50 MB is the same backstop at a size that leaves something to
+recover with.
+
+**And a SHARED bound is one an account can spend alone.** Per-account keys do
+not stop one account taking every slot: paging back through a few years is
+thousands of distinct windows, no write is involved, and the account doing it
+evicts everybody else's answers — leaving every other tenant the sweep and none
+of the hits, which is worse than having no memo. `MAX_OVERVIEW_PER_ACCOUNT` is
+8, roughly what the 300 req/min read limiter can hold live inside a 2 s TTL, so
+it caps the abusive shape and not the ordinary one. Both sweeps step over an
+in-flight placeholder: taking one wastes the computation, loses its answer to
+the store-identity guard, and re-forms the burst it was collapsing.
 
 `test/cache.test.js` covers the memo in isolation, including the case only an
 injected computation can reach — a write landing while a read is still
@@ -201,10 +349,13 @@ a unit test cannot see: that the route uses the memo at all, that a write
 reaches `forget`, that a write arriving OUTSIDE the `/api` router does too — it
 presses a real signed ntfy button — and that the caller's day is in the key.
 
-The TTL is two seconds and is meant to become a version check once #192 lands,
-which turns the remaining staleness into none. Note it is per PROCESS, so N
-replicas means N memos and a 1/N hit rate — worth knowing before reading a
-hit-rate metric and concluding it is broken.
+**The TTL is two seconds, and per PROCESS is a statement about correctness and
+not only about a hit rate.** "A write invalidates" is true inside one process;
+on two replicas a tap handled by A and a refetch balanced to B can be served
+B's own pre-tap answer — the very regression the invalidation exists to
+prevent, arriving through the load balancer. The TTL is what bounds it, and
+#192's version check is what removes it. So read a hit-rate metric knowing it
+is 1/N, and read this knowing the staleness window is per replica.
 
 ## Which claim names the account
 

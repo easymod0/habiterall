@@ -48,6 +48,11 @@ db.exec(`
     show_as       TEXT    NOT NULL DEFAULT 'amount',
     -- one grapheme, decided by parseIcon; '' = none
     icon          TEXT    NOT NULL DEFAULT '',
+    -- which of this account's categories the habit belongs to, or none.
+    -- Uncategorised is category_id IS NULL, never a category of its own; see
+    -- categories below. A habit PUT replaces this field along with every
+    -- other, so an omitted category_id is a stated clear (validate.js).
+    category_id   INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     position      INTEGER NOT NULL DEFAULT 0,
     archived      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -65,6 +70,34 @@ db.exec(`
     status    TEXT    NOT NULL DEFAULT '',
     notes     TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (habit_id, date)
+  );
+
+  -- A user's own habit groupings. Never seeded — an account starts with none,
+  -- and the six suggestion chips in the picker create one only when tapped
+  -- (LIMITS.categories caps how many, chip-created or typed, an account may
+  -- hold). Uncategorised is a STATE (habits.category_id IS NULL), not a row
+  -- here, so there is deliberately no "Other" category.
+  --
+  -- UNIQUE folds ASCII case only (SQLite NOCASE); the Unicode-aware check that
+  -- keeps 'Élan' and 'élan' one category in both editions is a route-level
+  -- lookup through foldCategoryName (validate.js — plain toLowerCase(), not
+  -- toLocaleLowerCase(), which would tailor the fold to whichever locale this
+  -- host happens to be running rather than matching this NOCASE and
+  -- Postgres's lower() consistently). foldCategoryName folds per codepoint
+  -- and is the strictest of the three (route, this NOCASE, Postgres's
+  -- lower()) — it is a superset of what NOCASE folds and, swept over every
+  -- codepoint against Postgres, never looser than lower() either (issue
+  -- #256; docs/decisions/categories.md). So this constraint is race-only:
+  -- any pair it would still reject is one the route has already refused —
+  -- see isCategoryNameConflict below, which is what turns hitting it into a
+  -- 409 rather than a 500.
+  CREATE TABLE IF NOT EXISTS categories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    color      TEXT    NOT NULL DEFAULT '#3b82f6',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(name COLLATE NOCASE)
   );
 
   -- Preferences. A single-row key/value table rather than a users table,
@@ -216,6 +249,30 @@ if (!habitColumns.has('icon')) {
   db.exec(`ALTER TABLE habits ADD COLUMN icon TEXT NOT NULL DEFAULT ''`);
   console.log('migrated habits: added icon');
 }
+if (!habitColumns.has('category_id')) {
+  // SQLite requires an added column to default NULL when it carries a foreign
+  // key — which is exactly what every pre-existing habit should become:
+  // uncategorised, not a category that has to be invented for it.
+  db.exec(
+    `ALTER TABLE habits ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL`
+  );
+  console.log('migrated habits: added category_id');
+}
+
+// Indexed because `habits.category_id` is the REFERENCING side of a foreign
+// key with `ON DELETE SET NULL`: deleting a category obliges SQLite to find
+// every habit pointing at it, and without an index that is a full scan of
+// `habits`. Deletes are rare and this table is one account's, so this is
+// cheap insurance rather than a measured win — but the cost of the index is
+// smaller still, since nothing writes `category_id` in bulk.
+//
+// Declared HERE and not beside the other `CREATE INDEX` lines in the schema
+// above, and that placement is the whole point: those run in the same `exec`
+// as the `CREATE TABLE`s, which is BEFORE the `PRAGMA table_info` guard that
+// adds this column to a database that predates it. An index on a column that
+// does not exist yet throws, so it would have taken out every upgrade while
+// passing on every fresh install.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_habits_category ON habits(category_id)`);
 
 const entryColumns = new Set(
   db.prepare(`PRAGMA table_info(entries)`).all().map((c) => c.name)
@@ -237,5 +294,37 @@ if (!entryColumns.has('status')) {
 export const UNSET = 0;
 export const YES = 2;
 export const SKIP = 3;
+
+/**
+ * Whether ERR is node:sqlite reporting the categories table's own
+ * `UNIQUE(name COLLATE NOCASE)` constraint (above) refusing an INSERT or
+ * UPDATE — the DB-level backstop firing on a race the route's own
+ * `categoryNameTaken` check missed, or on a name whose only difference from
+ * an existing one is outside ASCII case, which this constraint cannot fold
+ * the way `foldCategoryName` does.
+ *
+ * Matched on the SQLite constraint-violation code AND the column named at
+ * the END of the message, not on the message alone: `errcode` narrows to a
+ * UNIQUE violation of any kind, and anchoring the column name to the end
+ * narrows it to a violation whose LAST (here, only) column is this table's
+ * own `name` — so a caller cannot mistake some other table's collision for a
+ * duplicate category name. It does NOT, on its own, distinguish every
+ * possible future second constraint on this table: node:sqlite lists every
+ * column a compound UNIQUE names, in order, so a hypothetical
+ * `UNIQUE(name, position)` violation would read
+ * `"... categories.name, categories.position"` — caught by an unanchored
+ * match, correctly excluded by this one, because `position` and not `name`
+ * is the column actually named last. A compound constraint whose LAST column
+ * happened to be `name` would still match; there is no such constraint on
+ * this table today, so this is a bound on what this check happens to answer
+ * for a message shaped like SQLite's own, not a proof that it always will.
+ *
+ * @param {any} err
+ * @returns {boolean}
+ */
+export function isCategoryNameConflict(err) {
+  return err?.code === 'ERR_SQLITE_ERROR' && err.errcode === 2067 &&
+    /categories\.name$/.test(String(err?.message ?? ''));
+}
 
 export default db;

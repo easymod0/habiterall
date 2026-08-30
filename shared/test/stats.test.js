@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 const {
   computeStreaks, currentStreak, bestStreak, computeHistory,
   computeWeekdays, computeFrequency, computeScores, computeStats, summaryStats,
-  isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, MAX_RANGE_DAYS,
+  computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS,
+  summariseMembers, summariseByCategory,
+  isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
 } = await import('../src/stats.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
@@ -167,26 +169,74 @@ test('totalCompleted counts the same window the walked figures do, even when the
   assert.equal(stats.totalCompleted, 1);
 });
 
-test('the past-end trim does not empty a range whose year predates 1000', () => {
-  // `toISO` pads the month and the day and NOT the year, so it writes
-  // '100-03-05' where the range was asked for '0100-03-05' — lexically ABOVE
-  // it, so a string-compared trim popped every element and returned nothing.
-  // `boundedRange` clamps such a start long before `dateRange` sees it, so
-  // the app cannot ask for this; it is pinned because the trim is new code
-  // and emptying a range is the worst way for it to be wrong.
+test('a range whose year predates 1000 is spelled with four digits at both ends', () => {
+  // `dateRange` pads its own year, as `toISO` does, so every element of this
+  // range is canonical and the past-end trim has a last element that compares
+  // as the day it is. It used to write '100-03-05' where the range was asked
+  // for '0100-03-05' — lexically ABOVE it, so a string-compared trim would
+  // have popped every element and returned nothing, which is why that trim
+  // goes through `daysBetween`. `boundedRange` clamps such a start long before
+  // `dateRange` sees it, so the app cannot ask for this; it is pinned because
+  // the whole stats model compares dates as strings and a range that spells
+  // one of them short is a comparison that answers backwards.
   const days = dateRange('0100-02-25', '0100-03-05');
+  // Nine days: year 100 is not a leap year under proleptic Gregorian, so its
+  // February has 28.
   assert.equal(days.length, 9);
-  assert.equal(days[days.length - 1], '100-03-05');
+  assert.equal(days[0], '0100-02-25');
+  assert.equal(days[days.length - 1], '0100-03-05');
 });
 
-test('a stored entry dated year 0999 is clamped, not normalised past the clamp', () => {
-  // `toISO` does not pad the YEAR, so normalising '0999-12-31' yields
-  // '999-12-31' — which sorts ABOVE '2016-...' and sails past the `earliest`
-  // clamp that MAX_RANGE_DAYS is enforced by. `assertDate` accepts this date
+test('every date this file spells is the day it is, spelled YYYY-MM-DD', () => {
+  // The whole stats model compares dates as strings — `from <= date <= end`,
+  // `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+  // only while every date is spelled 'YYYY-MM-DD'. An unpadded year is the one
+  // way a real day can be spelled shorter: '999-12-31' sorts ABOVE '2016-...',
+  // so a date a thousand years in the past reads as one in the future to every
+  // comparison in the file.
+  //
+  // Asserted against literals rather than against a second implementation of
+  // `toISO`, which would share whatever bug `toISO` has.
+  assert.equal(toISO(fromISO('0999-12-31')), '0999-12-31');
+  assert.equal(toISO(fromISO('0100-02-25')), '0100-02-25');
+  assert.equal(addDays('0100-02-25', 1), '0100-02-26');
+  assert.equal(addDays('1000-01-01', -1), '0999-12-31');
+
+  // `dateRange` is the one place in stats.js that spells a date without
+  // calling `toISO`, so it is asked separately: every element, not just the
+  // ends the test above pins.
+  //
+  // The DAYS, not their length. A length of ten is satisfiable by something
+  // that is not a date — `String(-1).padStart(4, '0')` is `'00-1'`, so `toISO`
+  // of year -1 is `'00-1-01-01'`, ten characters exactly — and a guard a
+  // malformed value can satisfy is weaker than it reads. The literals also
+  // carry the month rollover, which is where the cached `'YYYY-MM-'` prefix
+  // (and so its padded year) is rebuilt, and February 100 having 28 days,
+  // which is the walk agreeing with the proleptic Gregorian calendar.
+  assert.deepEqual(dateRange('0100-02-25', '0100-03-05'), [
+    '0100-02-25', '0100-02-26', '0100-02-27', '0100-02-28',
+    '0100-03-01', '0100-03-02', '0100-03-03', '0100-03-04', '0100-03-05',
+  ]);
+});
+
+test('a stored entry dated year 0999 is clamped and reads as the day it is', () => {
+  // What this covers is the CLAMP: '0999-12-31' is a date `assertDate` accepts
   // (999 is a real year and does not roll over, unlike 0050), so one
-  // `PUT /entries/0999-12-31` is all it takes to reach it, and the whole
-  // payload collapsed to a single day reporting zero completions for a habit
-  // logged every other day. The clamp therefore runs BEFORE the normalisation.
+  // `PUT /entries/0999-12-31` puts a row a thousand years before `earliest`,
+  // and the window is `MAX_RANGE_DAYS` wide rather than a millennium.
+  //
+  // What it does NOT cover, and this was measured rather than reasoned: the
+  // year padding. Revert `toISO`'s `padStart(4, '0')` and every assertion
+  // below still passes, because `from` is clamped to `earliest` before
+  // anything reformats it and `toISO(fromISO('2016-08-10'))` is a no-op under
+  // both spellings. The padding is pinned by the canonical-spelling literals
+  // in the test above, which is where the mutation lands.
+  //
+  // Nor does it cover the clamp/normalise ORDERING any more, and that IS the
+  // padding's doing: both orderings now answer '0999-12-31' identically,
+  // because there is nothing left for the normalisation to change. The
+  // '9999-99-99' fixture below is what pins the ordering — a date that ROLLS
+  // OVER is the only kind that still can.
   const habit = {
     type: 'boolean', target_value: 0, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1,
@@ -203,6 +253,46 @@ test('a stored entry dated year 0999 is clamped, not normalised past the clamp',
   assert.equal(stats.history.length, MAX_RANGE_DAYS + 1);
   assert.equal(stats.totalCompleted, 2);
   assert.equal(stats.streaks.length, 2);
+});
+
+test('a stored entry of \'9999-99-99\' is clamped BEFORE it is normalised', () => {
+  // The ordering `resolveWindow` says is "the whole safety of it", pinned by
+  // the one shape that can still see it. Normalising is a ROLLOVER, and a
+  // rollover moves the date by an amount nothing in `resolveWindow` bounds:
+  // '9999-99-99' lands in year 10007, and '10007-...' sorts BELOW '2026-...'
+  // however the year is padded, because it is a digit longer.
+  //
+  //   clamped first:    '9999-99-99' > end       -> from = end        (1 day)
+  //   normalised first: '10007-06-07' < earliest -> from = earliest (3661 days)
+  //
+  // So one junk row opens the widest window MAX_RANGE_DAYS allows, on every
+  // request, for a habit that has none of those days — 3660 day-steps per
+  // aggregation pass, eight passes to a `/habits/:id/stats`.
+  //
+  // The junk row is this habit's ONLY row on purpose, and it is not a fixture
+  // that could have been written any other way: `from` is `start ?? firstEntry`
+  // and `firstEntry` is the lexical MIN of the entries, so a date whose year
+  // field must reach 9999 to roll into five digits sorts ABOVE every real one
+  // and is never the min while a real row exists beside it. A single
+  // unparseable row is what an import that went around `assertDate` leaves.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const stats = computeStats(habit, [{ date: '9999-99-99', value: YES }],
+    { end: '2026-08-18' });
+
+  // Literals, and the window's first day rather than only its width: a length
+  // of 1 is what several unrelated ways of being wrong also produce, while
+  // '2026-08-18' names the clamp that was applied.
+  assert.equal(stats.history.length, 1);
+  assert.equal(stats.history[0].bucket, '2026-08-18');
+  assert.equal(stats.scores.length, 1);
+  assert.equal(stats.scores[0].date, '2026-08-18');
+  // The phantom row is outside `[from, end]` under either ordering, so this is
+  // not what discriminates — it is here because `totalCompleted` selects by
+  // string comparison against `from` and is the one figure that would count it.
+  assert.equal(stats.totalCompleted, 0);
 });
 
 test('addDays crosses month and year boundaries', () => {
@@ -1047,8 +1137,9 @@ test('summaryStats matches the score and currentStreak computeStats would return
     // An entry older than MAX_RANGE_DAYS before end.
     { habit: boolHabit, entries: [{ date: '2000-01-01', value: YES }, ...dailyRun],
       opts: { end: END } },
-    // An entry dated '0999-12-31' — not a real day once toISO drops its
-    // year's padding, which is what the post-clamp normalisation is for.
+    // An entry dated '0999-12-31' — a real day, and a thousand years before
+    // `earliest`, so it exercises the clamp and the year padding that keeps
+    // it sorting as the past. Not the ordering: see the literal test below.
     { habit: boolHabit, entries: [{ date: '0999-12-31', value: YES }, ...dailyRun],
       opts: { end: END } },
     // A best run that ENDED before `end`, with a shorter run live at `end` —
@@ -1079,18 +1170,15 @@ test('summaryStats matches the score and currentStreak computeStats would return
   }
 });
 
-test('the 0999-12-31 fixture is pinned to a literal, not only to computeStats', () => {
+test('the 0999-12-31 and 2016-07-9999 fixtures are pinned to literals, not only to computeStats', () => {
   // The parity assertion above compares `summaryStats` against a LIVE
   // `computeStats` call, so a bug shared by both — one inside the window
   // preamble both of them call — moves both readings the same way and the
-  // comparison still passes. This is the case that bites: normalising
-  // '0999-12-31' BEFORE the `earliest` clamp (rather than after) turns it into
-  // '999-12-31', which sorts ABOVE the clamp boundary and walks the entry
-  // straight into the score, changing what both functions return TOGETHER.
-  // The literal is what catches that; the comparison above is what catches
-  // `summaryStats` disagreeing with `computeStats` on its own.
-  const entries = [
-    { date: '0999-12-31', value: YES },
+  // comparison still passes. The literal is what catches that; the comparison
+  // above is what catches `summaryStats` disagreeing with `computeStats`.
+  //
+  // Two junk rows, because one date can no longer carry both halves.
+  const dailyRun = [
     { date: '2026-08-10', value: YES }, { date: '2026-08-11', value: YES },
     { date: '2026-08-12', value: YES }, { date: '2026-08-13', value: YES },
     { date: '2026-08-14', value: YES }, { date: '2026-08-15', value: YES },
@@ -1098,8 +1186,32 @@ test('the 0999-12-31 fixture is pinned to a literal, not only to computeStats', 
     { date: '2026-08-18', value: YES },
   ];
   const opts = { end: '2026-08-18' };
-  assert.deepEqual(summaryStats(boolHabit, entries, opts),
-    { score: 0.381137, currentStreak: 9 });
+
+  // '0999-12-31' is the `earliest` CLAMP: a real day a thousand years back,
+  // which is where the window opens without the clamp, walking the entry into
+  // the score. It is not the padding and it is not the ordering — measured,
+  // by reverting `toISO`'s year padding on the fixed tree and watching this
+  // stay green, because the clamp replaces `from` before anything reformats
+  // it and normalising '2016-08-10' is a no-op under either spelling. The
+  // padding's own coverage is the canonical-spelling literals at the top of
+  // this file; the ordering's is '2016-07-9999' below.
+  assert.deepEqual(summaryStats(boolHabit, [{ date: '0999-12-31', value: YES },
+    ...dailyRun], opts), { score: 0.381137, currentStreak: 9 });
+
+  // '2016-07-9999' is the ORDERING, and a rollover is the only shape left that
+  // can see it here. It sorts just BELOW `earliest` (end - MAX_RANGE_DAYS,
+  // '2016-08-10'), so clamped first it becomes `earliest` and the reading is
+  // the one above — the junk row moves nothing. Normalised first it is
+  // '2043-11-15', past `end`, so the window collapses to the single day `end`
+  // and the same nine completions read 0.051922 with a current streak of 1.
+  //
+  // Note that the score cannot see the ordering the way `computeStats`'
+  // window WIDTH can (see the '9999-99-99' fixture near the top of this file):
+  // the EWMA starts at 0, so a window that merely opens EARLIER over days with
+  // no rows leaves the score untouched. It takes a fixture that collapses the
+  // window the other way, which is why this date and not that one.
+  assert.deepEqual(summaryStats(boolHabit, [{ date: '2016-07-9999', value: YES },
+    ...dailyRun], opts), { score: 0.381137, currentStreak: 9 });
 });
 
 test('the current-vs-best-streak fixture is pinned to a literal, not only to computeStats', () => {
@@ -1184,4 +1296,727 @@ test('an explicit start after end collapses the window to [end, end], not an emp
   const entries = [{ date: '2026-08-18', value: YES }];
   const stats = computeStats(boolHabit, entries, { start: '2026-08-20', end: '2026-08-18' });
   assert.equal(stats.totalCompleted, 1);
+});
+
+/* ---------- comparing categories ---------- */
+
+const CAT_START = '2026-06-01';
+const CAT_END = '2026-06-30';
+const CAT_WINDOW = { start: CAT_START, end: CAT_END };
+// Where every fixture's history begins: comfortably inside the 400-day warm-up
+// and five months before the window, so a comparison that starts its EWMA cold
+// at CAT_START reports a different number from the habit's own page.
+const CAT_HISTORY = '2026-01-01';
+
+const dowOf = (iso) => new Date(iso + 'T12:00:00').getDay();
+const rowsOn = (from, to, value, pred = () => true) =>
+  dateRange(from, to).filter(pred).map((d) => ({ date: d, value, status: '' }));
+const entryMapOf = (entries) =>
+  new Map(entries.map((e) => [e.date, { value: e.value, status: e.status ?? '' }]));
+
+// The three shapes whose scores are arrived at differently, each set off its
+// defaults on purpose: a daily boolean, a 3x/week numerical, and a limit.
+const readHabit = { ...boolHabit, id: 11, name: 'Read', category_id: 1 };
+const gymHabit = {
+  ...numHabit, id: 12, name: 'Gym', unit: 'sets', target_value: 5,
+  freq_numerator: 3, freq_denominator: 7, category_id: 1,
+};
+const smokeHabit = { ...atMostHabit, id: 13, name: 'Smoke', category_id: 1 };
+
+const readRows = rowsOn(CAT_HISTORY, CAT_END, YES);
+const gymRows = rowsOn(CAT_HISTORY, CAT_END, 5, (d) => [1, 3, 5].includes(dowOf(d)));
+const smokeRows = rowsOn(CAT_HISTORY, CAT_END, 2);
+
+const CATS = [
+  { id: 1, name: 'Health', color: '#2e7d32', position: 0 },
+  { id: 2, name: 'Admin', color: '#6a1b9a', position: 1 },
+];
+
+test('SCORE_WARMUP_DAYS is 400, the number /overview already spends', () => {
+  // The literal, not the imported name: both editions' SUMMARY_WINDOW_DAYS is
+  // 400 for the same reason, and a warm-up that quietly widened here would
+  // change every figure on the comparison and nothing else in the suite.
+  assert.equal(SCORE_WARMUP_DAYS, 400);
+});
+
+test('a category\'s mean is the mean of its members\' own strengths, warmed up the way their own pages are', () => {
+  // Decision 2 of the brief, and the whole reason the warm-up exists.
+  // `ui/detail.js` sends no `start` to /habits/:id/stats, so a habit's own page
+  // shows a score converged from its first entry. A comparison starting cold at
+  // CAT_START reports every one of these habits weaker than its own page does,
+  // and two surfaces disagreeing about the same habit is indistinguishable
+  // from one of them being broken.
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: gymHabit, entries: gymRows },
+    { habit: smokeHabit, entries: smokeRows },
+  ];
+  const own = members.map((m) => computeStats(m.habit, m.entries, { end: CAT_END }).score);
+  const expected = own.reduce((a, b) => a + b, 0) / own.length;
+
+  // The fixture separates only if the habits are actually converged: a cold
+  // start would put the daily members at ~0.80 and the 3x/week one at ~0.65.
+  assert.ok(own.every((s) => s > 0.99), `members are not converged: ${own.join(', ')}`);
+
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+
+  // Not zero tolerance, and the reason is a real property rather than
+  // floating-point slack: `onPaceSeries`/`computeScores` pro-rate the
+  // requirement over the first `den - 1` days, so starting the 3x/week member
+  // 400 days earlier re-judges those days against a full week's requirement
+  // (shared/CLAUDE.md says so). That residue decays by alpha^n and is ~2e-3
+  // here; the cold-start mutation this test exists for moves the mean by ~0.25.
+  assert.ok(Math.abs(health.mean - expected) < 5e-3,
+    `mean ${health.mean} should track the members' own pages (${expected})`);
+  assert.ok(health.mean > 0.99, `a category of three converged habits read ${health.mean}`);
+
+  // And exactly, for a category whose only member is daily — `num >= den`, so
+  // there is no leniency window for the warm-up to re-judge and the two windows
+  // must agree to the last bit.
+  const solo = computeCategoryStats(CATS, [{ habit: readHabit, entries: readRows }],
+    CAT_WINDOW).categories[0];
+  assert.ok(Math.abs(solo.mean - own[0]) < 1e-12,
+    `a daily member's category mean ${solo.mean} must equal its own page's ${own[0]}`);
+});
+
+test('a member is warmed up from ITS first entry, so an at-most habit whose unlogged days count as kept is not converged by days before it existed', () => {
+  // The clamp on `memberWarm`, and the shape the warm-up is most dangerous for.
+  // Every other fixture in this section is at-least, or is `smokeHabit` with a
+  // row on every day of the window and `at_most_unlogged` left at its 'miss'
+  // default — none of which can see this, and all of them pass either way.
+  //
+  // A habit's own page opens at `start ?? firstEntry` (`resolveWindow`), so
+  // scoring a member from 400 days before it was created compares it against a
+  // window it never had. For an at-least member those phantom days credit 0 and
+  // the two surfaces agree anyway; under `at_most_unlogged: 'success'` an
+  // unlogged day is FULL credit, so they converge it upward. Measured against
+  // the unclamped code: 0.969536 here, against an own page of 0.41327 — which
+  // is every avoid/limit habit's opening state, for its first ~430 days.
+  const avoid = {
+    ...atMostHabit, id: 23, name: 'No soda', target_value: 0,
+    at_most_unlogged: 'success', show_as: 'avoid', category_id: 1,
+  };
+  // Created INSIDE the window — one slip, ten days before it closes — so there
+  // is nothing earlier for a warm-up to legitimately reach back for.
+  const slip = [{ date: addDays(CAT_END, -10), value: 1, status: '' }];
+
+  const own = computeStats(avoid, slip, { end: CAT_END }).score;
+  // The fixture separates only while the habit is a long way from converged: a
+  // member handed 400 days of full credit reads ~0.97 here, so a check that
+  // merely compared the two numbers could pass on a fixture that had climbed
+  // there honestly.
+  assert.ok(own > 0.2 && own < 0.6, `the fixture must sit mid-scale: ${own}`);
+
+  const health = computeCategoryStats(CATS, [{ habit: avoid, entries: slip }],
+    CAT_WINDOW).categories[0];
+
+  assert.ok(Math.abs(health.mean - own) < 1e-12,
+    `the comparison says ${health.mean} where the habit's own page says ${own}`);
+  assert.ok(health.mean < 0.6,
+    `an unclamped warm-up reads ~0.97 for this habit; this read ${health.mean}`);
+  // And the series is the same members on the same day, as it is everywhere
+  // else — a clamp that moved only the headline would leave the chart saying
+  // the other number.
+  assert.equal(health.series.at(-1).value, health.mean);
+
+  // The control, and it is what says this is about the SHAPE rather than about
+  // the fixture: the identical rows on an at-least habit agree with their own
+  // page whether or not the clamp is there, which is exactly why nothing in
+  // this suite caught it.
+  const atLeast = {
+    ...avoid, id: 24, name: 'Push-ups', target_type: 'at_least',
+    at_most_unlogged: 'default', show_as: 'amount',
+  };
+  const control = computeCategoryStats(CATS, [{ habit: atLeast, entries: slip }],
+    CAT_WINDOW).categories[0];
+  assert.ok(Math.abs(control.mean - computeStats(atLeast, slip, { end: CAT_END }).score) < 1e-12,
+    `the at-least control disagrees too, so the fixture is not isolating the shape: ${control.mean}`);
+});
+
+test('a member whose first entry is not a real calendar day lands on the day the walk actually reaches', () => {
+  // The clamp above is what put these two in contact, so this is its own
+  // defect. `firstEntry` comes out of STORAGE and does not have to be a real
+  // day — `assertDate` refuses one on the way in, but a row predating that
+  // guard, a direct insert or an import around it does not. `computeScores`
+  // normalises the start it is handed and begins its walk on 2026-03-02;
+  // `landedAt` selects by STRING comparison and admits 2026-03-01. That bucket
+  // then had a member and no score point behind it — an `undefined` summed into
+  // NaN, which serialises as `null` and is dropped by `ui/categories.js`'s
+  // `p.value !== null` filter, so the drawn line silently loses a vertex.
+  //
+  // `mean` itself survives, which is why this is small and why nothing else
+  // here can see it: the last bucket's day is `end`, long past the two-day gap.
+  const PHANTOM = '2026-02-30';
+  const opts = { start: '2026-02-25', end: '2026-03-31' };
+  const entries = [
+    { date: PHANTOM, value: YES, status: '' },
+    ...rowsOn('2026-03-02', opts.end, YES),
+  ];
+  const health = computeCategoryStats(CATS,
+    [{ habit: readHabit, entries, firstEntry: PHANTOM }], opts).categories[0];
+  const at = (bucket) => health.series.find((p) => p.bucket === bucket);
+
+  // The fixture is only about this while the window holds the gap.
+  assert.ok(at('2026-03-01'),
+    'the window must contain the day the phantom date normalises past');
+
+  const nan = health.series.filter((p) => Number.isNaN(p.value));
+  assert.equal(nan.length, 0,
+    `NaN buckets: ${nan.map((p) => `${p.bucket} over ${p.members}`).join(', ')}`);
+
+  // ...and it does not pass by excluding the member everywhere instead: it
+  // lands on the real day, and every bucket from there carries it.
+  assert.equal(at('2026-03-01').members, 0, 'a phantom day never happened');
+  assert.equal(at('2026-03-01').value, null);
+  assert.equal(at('2026-03-02').members, 1);
+  assert.equal(typeof at('2026-03-02').value, 'number');
+
+  // `unloggedExcluded` is unmoved — the member has an entry, whatever it is
+  // dated — and the headline figure is still a number over it.
+  assert.equal(health.members, 1);
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(typeof health.mean, 'number');
+  assert.equal(health.series.at(-1).value, health.mean);
+});
+
+test('a member whose first entry ROLLS OVER is clamped to warmStart BEFORE it is normalised', () => {
+  // `memberWarm` clamps and then normalises, exactly as `resolveWindow` does
+  // and for the same reason, and nothing in this suite could see that ordering
+  // — reversing it left `npm test` at zero failures. The clamp is a STRING
+  // comparison against `warmStart` and normalising is a ROLLOVER of a stored
+  // string, so normalising first lets the rollover decide which of the two
+  // dates the comparison picks.
+  //
+  // '2024-99-99' is the fixture, and every digit of it is doing work.
+  // `warmStart` is CAT_START - 400 = '2025-04-27', so:
+  //
+  //   clamped first:    '2024-99-99' <= warmStart  -> memberWarm = warmStart
+  //   normalised first: '2032-06-07' >  warmStart  -> memberWarm = '2032-06-07'
+  //
+  // and '2032-06-07' is past CAT_END, so `landedAt` refuses the member on every
+  // day of the window: it drops out of `mean`, out of `worst`, out of every
+  // bucket's `members`, and into `unloggedExcluded` — a habit reported as never
+  // logged when it holds a row, and a category reading 1.00 because the member
+  // dragging it down was quietly excluded rather than scored.
+  //
+  // NOT '9999-99-99', which is the date `resolveWindow`'s own fixture uses:
+  // here it is invisible under either ordering. It sorts above `warmStart`, so
+  // clamped first `memberWarm` is '10007-06-07' — and `boundedRange` inside
+  // `computeScores` re-clamps that to end - MAX_RANGE_DAYS, because five year
+  // digits sort BELOW four. Both orderings then score the member over days it
+  // has no rows on and answer 0. The rollover has to land on the far side of
+  // `warmStart` to be seen, not merely be a rollover.
+  const ghost = { ...boolHabit, id: 31, name: 'Ghost', category_id: 1 };
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: ghost, entries: [{ date: '2024-99-99', value: YES, status: '' }] },
+  ];
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+
+  // The member has an entry, whatever that entry is dated, so it is scored
+  // rather than excused — and a row on a day that never happened credits
+  // nothing, which is an honest 0 and half the mean of the pair.
+  assert.equal(health.members, 2);
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(health.mean, 0.499968);
+  assert.equal(health.worst.name, 'Ghost');
+  assert.equal(health.worst.score, 0);
+  // And the series carries it from the window's first day, not from partway in:
+  // an excluded member is a chart whose early buckets count one habit and whose
+  // late ones count two, which reads as the category improving.
+  assert.equal(health.series[0].members, 2);
+  assert.equal(health.series.at(-1).value, health.mean);
+});
+
+test('the mean is equal weight per HABIT, never per entry', () => {
+  // A daily habit logged every day carries seven times the rows of a 3x/week
+  // one, so weighting by entries lets it drown its category-mate — the daily
+  // member here is near 1.0 and the weekly one is held at a third of its
+  // target, and an entry-weighted mean reads 0.92 where an equal-weighted one
+  // reads 0.67.
+  const mondaysOnly = rowsOn(CAT_HISTORY, CAT_END, 5, (d) => dowOf(d) === 1);
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: gymHabit, entries: mondaysOnly },
+  ];
+  assert.ok(readRows.length > 6 * mondaysOnly.length,
+    `the fixture must be lopsided in ENTRIES: ${readRows.length} vs ${mondaysOnly.length}`);
+
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+
+  // best/worst are these two members' own scores, so this states the rule
+  // without restating the arithmetic: the mean of a two-member category is the
+  // midpoint of its spread, whatever the two habits' entry counts are.
+  assert.ok(health.best.score - health.worst.score > 0.5,
+    `the fixture must be lopsided in STRENGTH: ${health.best.score} vs ${health.worst.score}`);
+  assert.ok(Math.abs(health.mean - (health.best.score + health.worst.score) / 2) < 1e-12,
+    `mean ${health.mean} is not the midpoint of ${health.worst.score}..${health.best.score}`);
+  assert.ok(health.mean < 0.7,
+    `an entry-weighted mean reads ~0.92 here; this read ${health.mean}`);
+});
+
+test('a member joins the series when its first entry lands, and is never counted as 0 before', () => {
+  // A habit added mid-window must read as a line STARTING, not as a category
+  // that was doing half as well for every bucket before it existed.
+  const joinerRows = rowsOn('2026-06-16', CAT_END, YES);
+  const joiner = { ...boolHabit, id: 14, name: 'Stretch', category_id: 1 };
+  const members = [
+    { habit: readHabit, entries: readRows },
+    { habit: joiner, entries: joinerRows },
+  ];
+  // The incumbent's own daily series, derived independently of the aggregation.
+  const ownScores = new Map(
+    computeStats(readHabit, readRows, { end: CAT_END }).scores.map((p) => [p.date, p.score])
+  );
+
+  const health = computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+  const at = (bucket) => health.series.find((s) => s.bucket === bucket);
+
+  assert.equal(health.series.length, 30);
+  assert.equal(at('2026-06-01').members, 1, 'only one habit existed on the 1st');
+  assert.ok(Math.abs(at('2026-06-01').value - ownScores.get('2026-06-01')) < 1e-12,
+    `the 1st read ${at('2026-06-01').value}, not the one member's own ${ownScores.get('2026-06-01')}`);
+  assert.equal(at('2026-06-15').members, 1, 'the day before the joiner\'s first entry');
+  assert.equal(at('2026-06-16').members, 2, 'the day it lands');
+  assert.equal(at(CAT_END).members, 2);
+
+  // The last bucket reads the last day the window holds, which is what keeps
+  // the chart's final point and the headline `mean` from disagreeing.
+  assert.ok(Math.abs(at(CAT_END).value - health.mean) < 1e-12,
+    `the final bucket ${at(CAT_END).value} disagrees with the mean ${health.mean}`);
+});
+
+test('a member that has never missed is excluded from recoveryRate, and counted', () => {
+  // `rate === null` means nothing has ever been missed, which is a different
+  // claim from 100%: averaging it in as either number invents a reading.
+  const lapsed = ['2026-06-05', '2026-06-10', '2026-06-15', '2026-06-16', '2026-06-17'];
+  const lapsedRows = rowsOn(CAT_HISTORY, CAT_END, YES, (d) => !lapsed.includes(d));
+  const lapser = { ...boolHabit, id: 15, name: 'Floss', category_id: 1 };
+  const spotless = { ...boolHabit, id: 16, name: 'Vitamins', category_id: 2 };
+
+  // The fixture, pinned through the same pair the aggregation uses: three
+  // CLOSED lapses of which two lasted a single day.
+  const own = computeRecovery(
+    computeMissRuns(lapser, entryMapOf(lapsedRows), CAT_START, CAT_END), CAT_END
+  );
+  assert.equal(own.lapses, 3);
+  assert.equal(own.rate, 2 / 3);
+
+  const result = computeCategoryStats(CATS, [
+    { habit: lapser, entries: lapsedRows },
+    { habit: { ...spotless, category_id: 1 }, entries: readRows },
+    { habit: spotless, entries: readRows },
+  ], CAT_WINDOW);
+
+  // One member with a rate, one without: the answer is the first member's own
+  // rate. Averaging the null as 0 reads 1/3 here.
+  assert.equal(result.categories[0].members, 2);
+  assert.equal(result.categories[0].recoveryRate, 2 / 3);
+  assert.equal(result.categories[0].recoveryExcluded, 1);
+
+  // And where every member has never missed, the category says so rather than
+  // reporting a recovery rate of 0.
+  assert.equal(result.categories[1].members, 1);
+  assert.equal(result.categories[1].recoveryRate, null);
+  assert.equal(result.categories[1].recoveryExcluded, 1);
+});
+
+test('a category of one is its own best and worst member', () => {
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: { ...gymHabit, category_id: 2 }, entries: gymRows },
+    { habit: { ...smokeHabit, category_id: 2 }, entries: rowsOn('2026-06-20', CAT_END, 9) },
+  ], CAT_WINDOW);
+
+  const [health, admin] = result.categories;
+  assert.equal(health.members, 1);
+  assert.deepEqual(health.best, health.worst,
+    'a category of one has the same habit at both ends of its spread');
+  assert.equal(health.best.id, 11);
+  assert.equal(health.best.name, 'Read');
+  assert.equal(health.best.score, health.mean);
+
+  // And with two, the ends are the two ends — a reducer that answers the first
+  // member for both, or skips one, fails here as well as above.
+  assert.equal(admin.members, 2);
+  assert.equal(admin.best.id, 12, 'the kept 3x/week habit is the stronger');
+  assert.equal(admin.worst.id, 13, 'the limit blown for ten days is the weaker');
+  assert.ok(admin.best.score > admin.worst.score);
+});
+
+test('Uncategorised is present and last even with no members, and so is an empty category', () => {
+  // Uncategorised is a state a habit is in, never a category — the same
+  // discipline the four day states get — so it is drawn whether or not anything
+  // is in it, exactly as the grouped dashboard draws its trailing section.
+  // An empty NAMED category is present for the neighbouring reason: sections
+  // are not collapsed away.
+  const result = computeCategoryStats(CATS,
+    [{ habit: readHabit, entries: readRows }], CAT_WINDOW);
+
+  assert.equal(result.categories.length, 3);
+  assert.deepEqual(result.categories.map((c) => c.id), [1, 2, null]);
+
+  const empty = result.categories[1];
+  assert.equal(empty.name, 'Admin');
+  assert.equal(empty.members, 0);
+  assert.equal(empty.mean, null, 'an empty category has measured nothing, and is not 0');
+  assert.equal(empty.best, null);
+  assert.equal(empty.worst, null);
+  assert.equal(empty.recoveryRate, null);
+  assert.equal(empty.recoveryExcluded, 0);
+  assert.equal(empty.unloggedExcluded, 0);
+
+  const none = result.categories[2];
+  assert.equal(none.name, null, 'naming Uncategorised is the view\'s job, as on the dashboard');
+  assert.equal(none.color, null);
+  assert.equal(none.members, 0);
+  assert.equal(none.mean, null);
+  // The axis is still shared, so the view can draw an empty small multiple
+  // against the same buckets as its neighbours.
+  assert.deepEqual(none.series.map((s) => s.bucket), result.buckets);
+  assert.ok(none.series.every((s) => s.members === 0 && s.value === null));
+});
+
+test('a habit whose category was deleted since the fetch falls into Uncategorised', () => {
+  // The grouped dashboard makes the same fallback for the same reason: every
+  // habit is drawn exactly once, and a dangling id must not drop one.
+  const orphan = { ...readHabit, id: 17, name: 'Orphan', category_id: 99 };
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: orphan, entries: readRows },
+    { habit: { ...readHabit, id: 18, name: 'Nulled', category_id: null }, entries: readRows },
+  ], CAT_WINDOW);
+
+  assert.equal(result.categories[0].members, 1);
+  assert.equal(result.categories[2].id, null);
+  assert.equal(result.categories[2].members, 2);
+});
+
+test('archived members are excluded from every figure, and counted — per SECTION as well as account-wide', () => {
+  const shelved = { ...readHabit, id: 19, name: 'Shelved', archived: 1 };
+  // A category whose ONLY member is archived. It arrives with `members: 0`,
+  // exactly as an empty one does, and one account-wide number cannot tell the
+  // view which of the two it is looking at — so the card said "No habits in
+  // this category yet." about a category the user filled and later shelved.
+  const allShelved = {
+    ...readHabit, id: 25, name: 'Old routine', category_id: 2, archived: 1,
+  };
+  // And a dangling `category_id` falls into Uncategorised here for the same
+  // reason a live member's does: one partition rule, asked twice, not two.
+  const orphanShelved = {
+    ...readHabit, id: 26, name: 'Loose end', category_id: 99, archived: 1,
+  };
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: shelved, entries: readRows },
+    { habit: allShelved, entries: readRows },
+    { habit: orphanShelved, entries: readRows },
+  ], CAT_WINDOW);
+
+  assert.equal(result.archivedExcluded, 3, 'the account-wide total is still every one of them');
+  assert.equal(result.categories[0].members, 1);
+  assert.equal(result.categories[0].best.id, 11);
+
+  assert.equal(result.categories[0].archivedExcluded, 1);
+  assert.equal(result.categories[1].members, 0);
+  assert.equal(result.categories[1].archivedExcluded, 1,
+    'a category whose habits are all archived is not an empty category');
+  assert.equal(result.categories[2].id, null);
+  assert.equal(result.categories[2].archivedExcluded, 1);
+
+  // ...and a genuinely empty category still says 0, rather than inheriting the
+  // total — which is the reading that would make the two indistinguishable
+  // again from the other side.
+  const noneShelvedHere = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: shelved, entries: readRows },
+  ], CAT_WINDOW);
+  assert.equal(noneShelvedHere.archivedExcluded, 1);
+  assert.equal(noneShelvedHere.categories[1].members, 0);
+  assert.equal(noneShelvedHere.categories[1].archivedExcluded, 0);
+  assert.equal(noneShelvedHere.categories[2].archivedExcluded, 0);
+});
+
+test('the bucket axis is the one computeHistory draws, at the same granularity', () => {
+  // Shared so the comparison's small multiples line up with the history chart
+  // a habit's own page draws — including `weekStart`, which is why this asks
+  // for Sunday weeks rather than the default.
+  const opts = { ...CAT_WINDOW, granularity: 'week', weekStart: 'sunday' };
+  const result = computeCategoryStats(CATS, [{ habit: readHabit, entries: readRows }], opts);
+  const history = computeHistory(readHabit, entryMapOf(readRows),
+    CAT_START, CAT_END, 'week', 'sunday');
+
+  assert.deepEqual(result.buckets, history.map((b) => b.bucket));
+  assert.equal(result.buckets[0], '2026-05-31', 'the Sunday the window opens inside');
+  assert.deepEqual(result.categories[0].series.map((s) => s.bucket), result.buckets);
+});
+
+test('an inherited property is not a granularity here either', () => {
+  // `granularity` reaches this straight off a query string, and
+  // `BUCKETERS['valueOf']` is truthy — the same shape computeHistory pays for.
+  for (const key of ['valueOf', 'toString', 'hasOwnProperty', '__proto__', 'constructor']) {
+    const result = computeCategoryStats(CATS, [{ habit: readHabit, entries: readRows }],
+      { start: '2026-06-01', end: '2026-06-02', granularity: key });
+    assert.deepEqual(result.buckets, ['2026-06-01', '2026-06-02'],
+      `${key} should fall back to daily buckets`);
+  }
+});
+
+test('a habit with no entries yet is counted in `members` and excluded from the mean', () => {
+  // A habit added to a category has no strength yet, which is not a strength of
+  // zero — the same claim `recovery.rate === null` makes, and this file already
+  // refuses to average that one into a number. Averaging it in would report
+  // that the category got worse on the day you decided to do more about it.
+  const fresh = { ...boolHabit, id: 20, name: 'Fresh start', category_id: 1 };
+  const health = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: fresh, entries: [] },
+  ], CAT_WINDOW).categories[0];
+
+  // n still describes the category: the new habit IS in it.
+  assert.equal(health.members, 2);
+  // And the reason it is not in the mean is stated rather than hidden.
+  assert.equal(health.unloggedExcluded, 1);
+
+  const own = computeStats(readHabit, readRows, { end: CAT_END }).score;
+  assert.ok(Math.abs(health.mean - own) < 1e-12,
+    `mean ${health.mean} should be the one logged member's ${own}, not half of it`);
+  assert.equal(health.best.id, 11, 'the unlogged member is not the spread either');
+  assert.deepEqual(health.best, health.worst);
+});
+
+test('the final bucket and the headline mean are the same number, unconditionally', () => {
+  // The property the last-day bucket rule and the landing rule exist to hold
+  // together: a chart whose final point disagrees with the number printed over
+  // it reads as a bug whichever of the two is right. Asserted over a category
+  // holding a never-logged member, which is the shape that breaks it if `mean`
+  // is taken over all members while the series is not.
+  const fresh = { ...boolHabit, id: 20, name: 'Fresh start', category_id: 1 };
+  const opts = { ...CAT_WINDOW, granularity: 'week', weekStart: 'sunday' };
+  const result = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: fresh, entries: [] },
+    { habit: { ...gymHabit, category_id: 2 }, entries: gymRows },
+  ], opts);
+
+  for (const cat of result.categories) {
+    const last = cat.series.at(-1);
+    assert.equal(last.value, cat.mean,
+      `category ${cat.id}: the last bucket says ${last.value} and the mean says ${cat.mean}`);
+    assert.equal(last.members, cat.members - cat.unloggedExcluded,
+      `category ${cat.id}: the last bucket is over a different set from the mean`);
+  }
+  // ...and the fixture is not passing by having nothing to compare: two of the
+  // three categories carry a real number, and one of them holds the unlogged
+  // member the property is at risk from.
+  assert.equal(result.categories[0].unloggedExcluded, 1);
+  assert.ok(result.categories[0].mean > 0.99);
+  assert.ok(result.categories[1].mean > 0.99);
+  assert.equal(result.categories[2].mean, null);
+});
+
+test('an ABANDONED habit is in the mean at its decayed score, not mistaken for a new one', () => {
+  // A route fetches entries from `start - SCORE_WARMUP_DAYS`, so a habit last
+  // logged two years ago — still active, never archived — has NOTHING in that
+  // slice. Deriving `firstEntry` from the slice calls it never logged, which
+  // excludes it from the mean (the category then reads healthier than it is)
+  // and describes it with a sentence that is false about a habit with years
+  // behind it. The caller supplies the lifetime date instead.
+  const abandoned = { ...boolHabit, id: 21, name: 'Guitar', category_id: 1 };
+  const health = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows, firstEntry: CAT_HISTORY },
+    { habit: abandoned, entries: [], firstEntry: '2023-01-01' },
+  ], CAT_WINDOW).categories[0];
+
+  assert.equal(health.members, 2);
+  assert.equal(health.unloggedExcluded, 0,
+    'a habit logged for years and then dropped has been logged');
+
+  // It lands in every bucket, at the strength it has actually decayed to.
+  assert.equal(health.series[0].members, 2);
+  assert.equal(health.series.at(-1).members, 2);
+  assert.equal(health.worst.id, 21);
+  assert.equal(health.worst.score, 0, 'two years untouched IS a strength of zero');
+
+  // And it drags the category down, because it really is dragging it down.
+  const own = computeStats(readHabit, readRows, { end: CAT_END }).score;
+  assert.ok(Math.abs(health.mean - own / 2) < 1e-12,
+    `mean ${health.mean} should be halved by the abandoned member, from ${own}`);
+  assert.equal(health.series.at(-1).value, health.mean);
+
+  // `recoveryExcluded` is a different count from `unloggedExcluded`, and this
+  // fixture separates them: 0 against 2. Both members have a null rate for the
+  // two reasons the JSDoc now names beside "never logged" — the kept habit has
+  // never missed, and the abandoned one's single lapse never closes, so neither
+  // has a CLOSED lapse to judge. Neither is excluded from the mean.
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(health.recoveryExcluded, 2);
+  assert.equal(health.recoveryRate, null);
+});
+
+test('firstEntry falls back to the entries when the caller omits it', () => {
+  // The function stays usable standalone — every other test in this section
+  // relies on it — and a caller holding a whole history need not restate it.
+  const joinerRows = rowsOn('2026-06-16', CAT_END, YES);
+  const joiner = { ...boolHabit, id: 22, name: 'Stretch', category_id: 1 };
+  const health = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: joiner, entries: joinerRows },
+  ], CAT_WINDOW).categories[0];
+
+  const at = (bucket) => health.series.find((s) => s.bucket === bucket);
+  assert.equal(at('2026-06-15').members, 1, 'derived from the earliest entry, not from nothing');
+  assert.equal(at('2026-06-16').members, 2);
+  assert.equal(health.unloggedExcluded, 0);
+  assert.equal(health.members, 2);
+
+  // An explicit `null` is a caller saying there is no entry at all, which is
+  // NOT the same as omitting the key — so it must not fall back to the rows.
+  const stated = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: joiner, entries: joinerRows, firstEntry: null },
+  ], CAT_WINDOW).categories[0];
+  assert.equal(stated.unloggedExcluded, 1);
+  assert.equal(stated.series.at(-1).members, 1);
+});
+
+test('summariseMembers: a single landed member is its own best and worst', () => {
+  const result = summariseMembers([{ id: 1, name: 'Read', score: 0.6, landed: true }]);
+  assert.equal(result.members, 1);
+  assert.equal(result.unloggedExcluded, 0);
+  assert.equal(result.mean, 0.6);
+  assert.deepEqual(result.best, result.worst,
+    'a set of one has the same member at both ends of its spread');
+  assert.equal(result.best.id, 1);
+});
+
+test('summariseMembers: every member unlanded reports null, never 0', () => {
+  const result = summariseMembers([
+    { id: 1, name: 'Read', score: 0, landed: false },
+    { id: 2, name: 'Gym', score: 0, landed: false },
+  ]);
+  assert.equal(result.members, 2);
+  assert.equal(result.unloggedExcluded, 2);
+  assert.equal(result.mean, null, 'never logged is not a strength of zero');
+  assert.notEqual(result.mean, 0);
+  assert.equal(result.best, null);
+  assert.equal(result.worst, null);
+});
+
+test('summariseMembers: a mixed category averages only what has landed', () => {
+  const result = summariseMembers([
+    { id: 1, name: 'Read', score: 0.8, landed: true },
+    { id: 2, name: 'Gym', score: 0.4, landed: true },
+    { id: 3, name: 'New', score: 0, landed: false },
+  ]);
+  assert.equal(result.members, 3);
+  assert.equal(result.unloggedExcluded, 1);
+  assert.ok(Math.abs(result.mean - 0.6) < 1e-9);
+  assert.equal(result.best.id, 1);
+  assert.equal(result.worst.id, 2);
+});
+
+test('summariseMembers: adding an unlanded member never moves mean, best or worst', () => {
+  const before = summariseMembers([
+    { id: 1, name: 'Read', score: 0.8, landed: true },
+    { id: 2, name: 'Gym', score: 0.4, landed: true },
+  ]);
+  const after = summariseMembers([
+    { id: 1, name: 'Read', score: 0.8, landed: true },
+    { id: 2, name: 'Gym', score: 0.4, landed: true },
+    { id: 3, name: 'New', score: 0, landed: false },
+  ]);
+
+  assert.equal(after.members, before.members + 1);
+  assert.equal(after.unloggedExcluded, before.unloggedExcluded + 1);
+  assert.equal(after.mean, before.mean,
+    'a new habit must never move a figure downward');
+  assert.deepEqual(after.best, before.best);
+  assert.deepEqual(after.worst, before.worst);
+});
+
+test('summariseByCategory: an unknown category_id lands in Uncategorised, not dropped', () => {
+  const categories = [{ id: 1, name: 'Health', color: '#fff' }];
+  const payloads = [
+    { id: 10, name: 'Read', score: 0.5, category_id: 1 },
+    { id: 11, name: 'Gym', score: 0.9, category_id: 99 }, // names no row in `categories`
+    { id: 12, name: 'Sleep', score: 0.2, category_id: null },
+  ];
+  const firstEntry = new Map([[10, '2026-01-01'], [11, '2026-01-01'], [12, '2026-01-01']]);
+  const result = summariseByCategory(categories, payloads, firstEntry, '2026-06-01');
+
+  const totalCounted = result.reduce((sum, section) => sum + section.members, 0);
+  assert.equal(totalCounted, payloads.length,
+    'every habit handed in is counted exactly once across the returned sections');
+
+  const uncategorised = result.find((s) => s.id === null);
+  assert.equal(uncategorised.members, 2,
+    'the unknown-category habit joins the null-category one rather than being dropped');
+});
+
+test('summariseByCategory: Uncategorised is always present with id: null, and an empty category still gets a section', () => {
+  const categories = [{ id: 1, name: 'Health', color: '#fff' }];
+  const result = summariseByCategory(categories, [], new Map(), '2026-06-01');
+
+  assert.equal(result.length, 2, 'the one known category plus Uncategorised');
+
+  const uncategorised = result.find((s) => s.id === null);
+  assert.ok(uncategorised, 'Uncategorised is present even with no members at all');
+  assert.equal(uncategorised.members, 0);
+
+  const health = result.find((s) => s.id === 1);
+  assert.ok(health, 'an empty category still draws a section');
+  assert.equal(health.members, 0);
+});
+
+test('summariseByCategory: a member whose firstEntry is AFTER the reading day is not landed', () => {
+  // The defect this pins: `landed` used to be `firstEntry.get(h.id) != null`,
+  // which asks only "does this member have an entry at all" — true for a
+  // habit whose only entry is dated tomorrow relative to the day the route is
+  // reading. `landedAt` (`computeCategoryStats`'s `section`) asks the RIGHT
+  // question — has this member landed BY the day being read — and this must
+  // match it: `first != null && first <= day`.
+  const categories = [{ id: 1, name: 'Health', color: '#fff' }];
+  const day = '2026-06-15';
+  const payloads = [
+    { id: 10, name: 'Daily', score: 0.7, category_id: 1 },
+    { id: 11, name: 'Future', score: 0, category_id: 1 }, // score is 0: a
+    // one-day window with no entry on it, exactly what `resolveWindow`
+    // clamping `from` to `end` for an unlanded member produces.
+  ];
+  const firstEntry = new Map([
+    [10, '2026-01-01'],
+    [11, '2026-06-16'], // one day AFTER `day`
+  ]);
+
+  const result = summariseByCategory(categories, payloads, firstEntry, day);
+  const health = result.find((s) => s.id === 1);
+
+  assert.equal(health.members, 2, 'both members are counted');
+  assert.equal(health.unloggedExcluded, 1,
+    'the future-dated member is excluded, not averaged in at its 0 score');
+  assert.equal(health.mean, 0.7,
+    'the mean is over the landed member alone — averaging the future-dated ' +
+    'one in at 0 would report 0.35');
+  assert.equal(health.best.id, 10);
+  assert.equal(health.worst.id, 10);
+});
+
+test('summariseByCategory: a member whose firstEntry EQUALS the reading day is landed', () => {
+  const categories = [{ id: 1, name: 'Health', color: '#fff' }];
+  const day = '2026-06-15';
+  const payloads = [
+    { id: 10, name: 'Daily', score: 0.7, category_id: 1 },
+    { id: 11, name: 'JustLanded', score: 0.3, category_id: 1 },
+  ];
+  const firstEntry = new Map([
+    [10, '2026-01-01'],
+    [11, day], // firstEntry === day, the boundary in the other direction
+  ]);
+
+  const result = summariseByCategory(categories, payloads, firstEntry, day);
+  const health = result.find((s) => s.id === 1);
+
+  assert.equal(health.unloggedExcluded, 0, 'a member landing ON the reading day already counts');
+  assert.equal(health.mean, 0.5, 'both members are averaged in: (0.7 + 0.3) / 2');
 });

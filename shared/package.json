@@ -19,6 +19,7 @@
     "./log.js": "./src/log.js",
     "./observe.js": "./src/observe.js",
     "./security.js": "./src/security.js",
+    "./shutdown.js": "./src/shutdown.js",
     "./password.js": "./src/password.js",
     "./unzip.js": "./src/unzip.js",
     "./zip.js": "./src/zip.js",

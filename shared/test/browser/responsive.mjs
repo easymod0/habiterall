@@ -10,7 +10,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import { seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9303);
@@ -223,14 +224,27 @@ try {
     // user, and the teardown closes however many are open.
     const closeAll =
       `[...document.querySelectorAll('dialog[open]')].reverse().forEach(d => d.close())`;
-    for (const [name, opener] of [
-      ['settings', `document.getElementById('btn-settings').click()`],
+    for (const [name, opener, depth] of [
+      ['settings', `document.getElementById('btn-settings').click()`, 1],
       ['backup', `document.getElementById('btn-settings').click();`
-        + ` document.getElementById('settings-backup').click()`],
+        + ` document.getElementById('settings-backup').click()`, 2],
     ]) {
       await ev(`(() => { ${closeAll}; })()`);
       await ev(opener);
-      await sleep(350);
+      // The expected DEPTH, not "a dialog is open", and that is the whole
+      // reason this is not a one-line poll. Backup opens stacked on top of
+      // settings, so a predicate satisfied by the first `dialog[open]` returns
+      // while only settings is up and hands the measurement below the WRONG
+      // dialog under the label `backup` — a check passing over a control it
+      // was not asked about, which is worse than the sleep it replaces. Laid
+      // out as well as open, for the reason the comparison block below gives
+      // at length: a rect taken before the browser has sized the element
+      // measures a zero-width box and reads it as fitting the viewport.
+      await waitUntil(ev, `(() => {
+        const open = document.querySelectorAll('dialog[open]');
+        return open.length === ${depth}
+          && open[open.length - 1].getBoundingClientRect().width > 0;
+      })()`, { what: `the ${name} dialog to open ${depth} deep and be laid out` });
       const dlg = await ev(`(() => {
         const open = document.querySelectorAll('dialog[open]');
         const d = open[open.length - 1];
@@ -351,6 +365,269 @@ try {
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({gridDays:'auto'})}).then(r=>r.ok)`);
+
+  /* ---------- the grouped dashboard (#65), at every width ---------- */
+  //
+  // A section header is a row shape `#grid` never drew before this feature —
+  // its own padding, its coloured left border and its count text — and none
+  // of the checks above ever turn `groupByCategory` on, so this is the only
+  // pass that could catch it overflowing a narrow phone. Both habits
+  // assigned into a category below are real fixture habits the seed logs
+  // over 60 days, so `categorySummaries` carries a real mean and a real
+  // `.category-section-figure` is on the row this probes — an empty (`—`)
+  // header would tell nothing about the figures' own width.
+  console.log('\n--- grouped dashboard ---');
+  await ev(`(async()=>{
+    const cats = await (await fetch('/api/categories')).json();
+    for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
+    const a = await (await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Health', color: '#10b981' }) })).json();
+    const b = await (await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Work', color: '#f59e0b' }) })).json();
+    const habits = await (await fetch('/api/habits')).json();
+    // One habit into each category; the rest stay Uncategorised, so that
+    // trailing section actually has something in it too.
+    await fetch('/api/habits/' + habits[0].id, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...habits[0], category_id: a.id }) });
+    await fetch('/api/habits/' + habits[1].id, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...habits[1], category_id: b.id }) });
+    await fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupByCategory: true }) });
+  })()`);
+
+  for (const vp of VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
+    await send('Page.navigate', { url: APP }, sessionId);
+    for (let i = 0; i < 80; i++) {
+      if (await ev(`document.querySelectorAll('#grid .category-section-header').length >= 3`).catch(() => 0)) break;
+      await sleep(200);
+    }
+    await sleep(400);
+
+    const probe = await ev(LAYOUT_PROBE);
+    ck(`${vp.label}: grouped dashboard does not scroll sideways`,
+      probe.pageScrollsSideways === false, JSON.stringify(probe.overflowing));
+    ck(`${vp.label}: nothing overflows the viewport while grouped`,
+      probe.overflowing.length === 0, JSON.stringify(probe.overflowing));
+
+    const headers = await ev(
+      `document.querySelectorAll('#grid .category-section-header').length`);
+    ck(`${vp.label}: both categories plus the trailing Uncategorised section are drawn`,
+      headers === 3, String(headers));
+
+    // The probe above is only meaningful for this feature if a real figure
+    // was actually on the row it measured — logged habits, not filtered, not
+    // archived, so `summarised` is true and `categorySummaries` was fetched.
+    const figures = await ev(
+      `document.querySelectorAll('#grid .category-section-figure').length`);
+    ck(`${vp.label}: at least one section drew a summary figure to be measured`,
+      figures > 0, String(figures));
+  }
+
+  /* ---------- the habit dialog's category manage row (issue #65 step 2), at
+     every width ---------- */
+  //
+  // Buttons, not drag: the ↑/↓ pair this issue adds share the row with the
+  // swatch, the name and the existing ✎/✕, and `.category-manage-name`'s own
+  // `flex: 1; min-width: 0` is the one thing meant to absorb a narrow
+  // screen — everything else in the row is `flex: none`. The two categories
+  // (Health, Work) created for the grouped-dashboard block just above are
+  // still on the account, which is what `canReorder` needs before either
+  // arrow is drawn at all.
+  console.log('\n--- habit dialog: category manage row ---');
+
+  for (const vp of VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
+    await send('Page.navigate', { url: APP }, sessionId);
+    // The DASHBOARD having painted, not `#btn-new` merely being visible.
+    // `auth-session.js` unhides that button the moment `/api/me` answers,
+    // which is well before `dashboard.load()` has put anything in
+    // `state.categories` — so a click there opens the dialog over an empty
+    // list and leaves this block depending entirely on `openDialog`'s own
+    // fire-and-forget `refreshCategoryPicker()` landing in time. Nothing else
+    // repaints the manage list, and that call swallows its own failure
+    // (`.catch(() => {})`), so one slow or stale read left the list empty for
+    // the whole 16s this used to wait and then measured it anyway. A painted
+    // `.habit-row` is what the dashboard, `gridDays` and comparison blocks
+    // already wait on, and it is the one that implies the store is populated.
+    // Not universal in this file, and deliberately: the grouped block just
+    // above waits on `#grid .category-section-header` and the detail block on
+    // `#view-detail svg`, each being the narrower predicate for what IT then
+    // measures. Pick the predicate for the block, not the file.
+    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
+      { what: 'the dashboard to paint before the habit dialog is opened' });
+    await ev(`document.getElementById('btn-new').click()`);
+    // `waitUntil` THROWS naming what it wanted. The hand-rolled loop this
+    // replaces fell out of its `for` and measured regardless, so a timeout
+    // arrived as three assertions failing on an empty `rows` array — which
+    // says the row is misshapen, not that the dialog never filled. See the
+    // root CLAUDE.md: wait for the app, never for a duration.
+    await waitUntil(ev,
+      `document.querySelectorAll('#category-manage .category-manage-row').length >= 2`,
+      { what: "the habit dialog's category manage list to hold both categories" });
+    await sleep(200);
+
+    // FIT, not touch size — see the comment on the assertion below. Every
+    // focusable control in a row (swatch excluded; it is not a button) has
+    // its right edge measured against `.category-manage`'s own client width,
+    // which is the row's actual container (the `<ul>`), not the dialog.
+    const rows = await ev(`(() => {
+      const manage = document.querySelector('.category-manage');
+      const manageRight = manage.getBoundingClientRect().right;
+      return [...manage.querySelectorAll('.category-manage-row')].map((r) => {
+        const controls = [...r.querySelectorAll('button, input')];
+        const rightmost = controls.reduce(
+          (max, el) => Math.max(max, el.getBoundingClientRect().right), 0);
+        const name = r.querySelector('.category-manage-name');
+        return {
+          overflowsBy: Math.round(rightmost - manageRight),
+          nameWidth: name ? Math.round(name.getBoundingClientRect().width) : 0,
+          buttonCount: r.querySelectorAll('button').length,
+        };
+      });
+    })()`);
+
+    ck(`${vp.label}: every manage row's controls fit inside .category-manage`,
+      rows.length > 0 && rows.every((r) => r.overflowsBy <= 1), JSON.stringify(rows));
+    // `MIN_TOUCH` (44px) is deliberately not asked here: `.btn-icon`'s
+    // existing `padding: 7px 10px` for ✎ and ✕ is already smaller than that,
+    // so a touch-size assertion would fail on controls this change did not
+    // add. This is a FIT check — nothing pushed past the row's own edge —
+    // and a non-zero name width, so the row did not "fit" by squeezing the
+    // name away to nothing.
+    ck(`${vp.label}: the category name still has real width, not squeezed away`,
+      rows.length > 0 && rows.every((r) => r.nameWidth > 0), JSON.stringify(rows));
+    // The two checks above measure whatever `button, input` happens to find,
+    // so they pass just as well over a row with its ↑/↓ pair deleted — two
+    // fewer controls to overflow is not a fit, it is a smaller row. Pin the
+    // count too: a non-editing row (none of these is mid-rename — the dialog
+    // was only just opened) holds exactly four buttons, ↑ ↓ ✎ ✕, `canReorder`
+    // having two categories to move between.
+    ck(`${vp.label}: every manage row holds all four buttons (↑ ↓ ✎ ✕)`,
+      rows.length > 0 && rows.every((r) => r.buttonCount === 4), JSON.stringify(rows));
+
+    await ev(`document.getElementById('dialog-cancel').click()`);
+    await sleep(150);
+  }
+
+  await ev(`(async()=>{
+    await fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupByCategory: false }) });
+    const cats = await (await fetch('/api/categories')).json();
+    for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
+  })()`);
+
+  /* ---------- the category comparison (#65), at every width ---------- */
+  //
+  // A grid of cards, each holding a chart sized from the card it sits in — a
+  // shape no other view in the app has, and the one place `svg.chart {
+  // max-width: 100% }` can silently scale a whole drawing down rather than
+  // clipping it. Nothing above ever opens `#/categories`, so this is the only
+  // pass that could catch either failure on a phone.
+  console.log('\n--- category comparison ---');
+  await seedCategorySpread({ base: APP });
+
+  for (const vp of VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
+    // Back to the dashboard and in through the button, rather than navigating
+    // straight to `#/categories` at each width. A second `Page.navigate` to a
+    // URL that differs only in its FRAGMENT is a same-document navigation and
+    // does not re-render anything — so every width after the first measured
+    // the previous one's charts, and the SVGs drawn for a 768px tablet then
+    // read as scaled down inside a 1440px desktop's narrower two-column card.
+    // A spurious failure that looked exactly like the real defect the
+    // `downscaled` check below is for.
+    await send('Page.navigate', { url: APP }, sessionId);
+    for (let i = 0; i < 100; i++) {
+      const ready = await ev(`!!document.querySelector('#grid .habit-row')
+        && document.getElementById('btn-compare').hidden === false`).catch(() => 0);
+      if (ready) break;
+      await sleep(200);
+    }
+    await ev(`document.getElementById('btn-compare').click()`);
+
+    // **The view unhidden AND the first card laid out**, not a card count.
+    // `render()` unhides the container before `replaceChildren()` empties it,
+    // so a previous render's cards are still in it — a poll that counts
+    // `.compare-card` matches those and returns before this render has laid
+    // anything out, which is how a zero-width page comes to be measured.
+    for (let i = 0; i < 100; i++) {
+      const ready = await ev(`(() => {
+        const view = document.getElementById('view-categories');
+        const first = view && !view.hidden && view.querySelector('.compare-card');
+        return !!first && first.getBoundingClientRect().width > 0;
+      })()`).catch(() => 0);
+      if (ready) break;
+      await sleep(200);
+    }
+    await sleep(300);
+
+    const probe = await ev(LAYOUT_PROBE);
+    ck(`${vp.label}: the comparison does not scroll sideways`,
+      probe.pageScrollsSideways === false, JSON.stringify(probe.overflowing));
+    ck(`${vp.label}: nothing overflows the viewport on the comparison`,
+      probe.overflowing.length === 0, JSON.stringify(probe.overflowing));
+
+    const compare = await ev(`(() => {
+      const de = document.documentElement;
+      const cards = [...document.querySelectorAll('#view-categories .compare-card')];
+      const svgs = [...document.querySelectorAll('#view-categories svg')];
+      return {
+        cards: cards.length,
+        narrowest: Math.min(...cards.map(c => Math.round(c.getBoundingClientRect().width))),
+        outside: cards.filter(c => {
+          const b = c.getBoundingClientRect();
+          return b.left < -1 || b.right > de.clientWidth + 1;
+        }).length,
+        charts: svgs.length,
+        // The silent downscale innerWidthOf exists to prevent: an SVG asked
+        // for more width than its card has is SCALED, not clipped, so the whole
+        // drawing shrinks with nothing overflowing to say so. A chart rendered
+        // narrower than the width it asked for is that, and nothing else.
+        downscaled: svgs.filter(s => {
+          const asked = Number(s.getAttribute('width'));
+          return asked - s.getBoundingClientRect().width > 1;
+        }).length,
+        // A member name is free text and one long enough to widen its track
+        // would push the grid past the viewport; .compare-member-name
+        // ellipsises for that reason, so it must not be the widest thing here.
+        namesClipped: [...document.querySelectorAll('.compare-member-name')]
+          .filter(n => n.getBoundingClientRect().right > de.clientWidth + 1).length,
+      };
+    })()`);
+
+    ck(`${vp.label}: every category is drawn as a card`,
+      compare.cards === 5, `${compare.cards} cards`);
+    ck(`${vp.label}: no card sits outside the viewport`,
+      compare.outside === 0, `${compare.outside} of ${compare.cards}`);
+    ck(`${vp.label}: the cards have real width`,
+      compare.narrowest > 200, `narrowest ${compare.narrowest}px`);
+    ck(`${vp.label}: every category with a strength drew its chart`,
+      compare.charts === 3, `${compare.charts} charts`);
+    ck(`${vp.label}: no chart was silently scaled down inside its card`,
+      compare.downscaled === 0, `${compare.downscaled} of ${compare.charts}`);
+    ck(`${vp.label}: no member name spills off the screen`,
+      compare.namesClipped === 0, String(compare.namesClipped));
+  }
+
+  // Cleaned up for the reason the grouped block above cleans up its own: the
+  // top-bar Compare button exists only for an account that HAS a category, so
+  // leaving these behind puts a fifth control in the top bar for the next
+  // standalone run — including this suite's own dashboard checks, which are
+  // the ones measuring whether that bar fits a 360px phone.
+  await ev(`(async()=>{
+    const cats = await (await fetch('/api/categories')).json();
+    for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
+  })()`);
 
   console.log(fails === 0 ? '\nALL RESPONSIVE CHECKS PASSED' : `\n${fails} RESPONSIVE CHECK(S) FAILED`);
 } catch (e) {

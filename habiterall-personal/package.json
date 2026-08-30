@@ -17,12 +17,14 @@
     "test:overview": "node test/overview.integration.mjs",
     "test:awards": "node test/awards.integration.mjs",
     "test:callerday": "node test/callerday.integration.mjs",
+    "test:querydate": "node test/querydate.integration.mjs",
     "test:exportloop": "node test/export-loop.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:auth": "node test/auth.integration.mjs",
     "test:signin": "node test/signin.browser.mjs",
     "test:credchange": "node test/credential-change.integration.mjs",
-    "test:staticcache": "node test/static-cache.integration.mjs"
+    "test:staticcache": "node test/static-cache.integration.mjs",
+    "test:drain": "node test/drain.integration.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",

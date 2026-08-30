@@ -189,6 +189,15 @@ jobs:
       - name: Credential change evicts sessions
         run: npm run test:credchange -w habiterall-personal
 
+      # SIGTERM has to drain rather than be SIGKILLed, and the shared unit
+      # suite cannot show that: it exercises the module, not the entry point.
+      # This one spawns the real src/server.js and signals it. No browser and
+      # no services, exactly like the two steps above it. ~10s, most of it the
+      # deadline check, which is the only assertion that pins the 8s ceiling
+      # to a real process.
+      - name: SIGTERM drains, and the deadline holds
+        run: npm run test:drain -w habiterall-personal
+
   types:
     name: Type check
     runs-on: ubuntu-latest
@@ -319,6 +328,21 @@ jobs:
           APP_DB_PASSWORD: apptestpw
         run: node src/db/migrate.js
 
+      # What the schema lets Postgres DO, which no API suite can see: every
+      # answer here is byte-identical whether or not the indexes exist and
+      # whether or not the policy functions are parallel safe. A later
+      # `CREATE OR REPLACE FUNCTION` that omits `PARALLEL SAFE` resets it in
+      # silence and takes parallelism away from every table at once, and that
+      # is the regression this catches. First after the migrations on purpose:
+      # it takes plans against a database nothing else has put rows in, and it
+      # deletes its own fixture and re-analyses before the suites below run.
+      - name: Query plans and schema invariants
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: npm run test:plans
+
       # The cloud API was previously only ever exercised by hand. These are
       # the paths where a regression is most expensive: per-user isolation,
       # settings, and the import writer.
@@ -339,6 +363,17 @@ jobs:
           DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/healthz.integration.mjs
+
+      # The same signal as the personal drain step, against the edition whose
+      # cleanup is the async one: exit code 0 is only reachable through
+      # `await closePool()` resolving, so a pool that never closes is a
+      # non-zero exit rather than a line nobody reads.
+      - name: Cloud SIGTERM drains, and the pool closes
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/drain.integration.mjs
 
       # A mapping change inside completeLogin only matters if it reaches
       # GET /api/me. Boots the real server.js and drives a real OIDC callback
@@ -451,6 +486,15 @@ jobs:
       - name: The day a route judges by is the caller's
         working-directory: habiterall-personal
         run: node test/callerday.integration.mjs
+
+      # `DATE_RE` is a shape, not a day, so `?end=2026-00-10` reached the window
+      # arithmetic and its two halves disagreed — three completions reported
+      # beside a six-day window that can hold one. `assertDate` has unit tests
+      # and they pin the rule; only the real route can say which of the two
+      # validators it asked, and the weaker one passes every unit test here.
+      - name: A date into a range is a real day
+        working-directory: habiterall-personal
+        run: node test/querydate.integration.mjs
 
       # One entry filed under a day that does not exist used to make the Loop
       # export answer 500 for good. The writer's half is unit-tested; only the

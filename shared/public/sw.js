@@ -195,7 +195,86 @@ const sw = self;
 // that never draws the stroke it describes — or a cached old `day-strip.js`
 // that never draws the tick — same failure shape as v22, one export further
 // upstream.
-const CACHE_VERSION = 'v23';
+// v24: a habit gained a category (#65 phases 1+2). No new FILE — the picker
+// lives inside the existing `ui/habit-dialog.js` — but `index.html` IS in
+// `SHELL`, and it now carries the `<select name="category_id">` the form
+// reads. `shellFirst`'s stale-while-revalidate could serve the OLD
+// `index.html`, with no such control, alongside the NEW `habit-dialog.js`
+// that reads `form.category_id` unconditionally: `currentCategoryId()` throws
+// on the missing element the moment the dialog opens, before any save is
+// attempted. The reverse pairing is silent rather than loud — a new
+// `index.html` with the select, held against an old `habit-dialog.js` that
+// never populates or reads it — which is exactly why this is a version bump
+// and not a "the new file will just 404 and get refetched" shrug.
+// v25: the category comparison (#65 phase 3). This is BOTH shapes of bump at
+// once, which is why it is one version and not an argument about whether it
+// needs to be.
+//
+// It is v9's and v17's: `ui/categories.js` is a brand-new shell asset that
+// `app.js` imports STATICALLY, so an installed PWA would otherwise first fetch
+// it at the moment somebody presses the button — and offline that is a module
+// link error before `start()`, outside `#view-error`, which is a blank page
+// rather than a view that says something.
+//
+// And it is v13's and v24's: `index.html` is in `SHELL` and now carries
+// `#btn-compare` and `#view-categories`. `ui/categories.js` looks the button
+// up at module scope and dereferences it in `syncEntry`, and `ui/views.js`
+// puts `#view-categories` in `all` and sets `.hidden` on it — so a stale v24
+// `index.html` served alongside the new scripts throws on the first paint of
+// the dashboard, which is the one path every boot takes.
+//
+// The reverse pairing is the silent one, as it was at v24: a new
+// `index.html` with a top-bar button that no cached script ever wires or
+// reveals. `shellFirst` is stale-while-revalidate and writes into the RUNNING
+// worker's cache, so both pairings are reachable in the window between
+// installs; naming the new shell separately is what makes the swap atomic at
+// the cache level. It costs every installed client its data cache.
+//
+// `ui/routes.js`, `ui/dashboard.js`, `ui/settings-dialog.js`, `ui/detail.js`,
+// `ui/habit-dialog.js` and `auth-session.js` moved with it — `dashboard.js`
+// imports `syncEntry` from the new module, which is v16's case exactly and
+// covered by the same bump. `ui/store.js` adds an EXPORT of its own,
+// `dashboardShowing`, which four of those files import: that is v9's case
+// again in miniature, and the reason it is named here rather than left to the
+// list above is that an export is the half a reader checking "did anything new
+// appear?" would otherwise miss. `style.css` is a shell asset too and gained
+// this view's rules.
+// v26 adds no file and no export, and is a bump for the OTHER half of the rule
+// in `shared/public/CLAUDE.md`: the shape of a value read by more than one
+// shell module. `state` (`ui/store.js`) gains `categoryReadSeq`, the ticket
+// that decides which answer may install `state.categories`, and BOTH
+// `ui/habit-dialog.js` and `ui/dashboard.js` now take one.
+//
+// The dangerous pairing is a new `ui/dashboard.js` over a cached v25
+// `ui/store.js`, which is exactly what `shellFirst`'s stale-while-revalidate
+// can serve in the window between installs. There is no such field, so
+// `++state.categoryReadSeq` is **NaN**, `NaN === NaN` is false, and every
+// guarded assignment is skipped forever: `state.categories` stays `[]` through
+// every `/overview` and every `GET /categories`, so the grouped dashboard
+// draws no sections and the habit dialog's picker offers no category. Not a
+// throw, not a link error — a working-looking app with the account's
+// categories silently gone. This is #163's case (`detailCards`) again, and the
+// reason that clause is in the rule at all.
+// v27: the habit dialog's Target box became a text box read through
+// `parseAmount` (#156), and `ui/count-field.js` gained an EXPORT — `convention`,
+// the one declaration of which character a decimal point is — which
+// `ui/habit-dialog.js` now imports STATICALLY. That is v20's case: a shell
+// holding the new `habit-dialog.js` over a cached v26 `count-field.js` throws
+// "does not provide an export named 'convention'" at module LINK time, before
+// `start()` runs and so outside `#view-error`.
+//
+// And it is v24's, on `index.html`, which is in `SHELL`: the target input lost
+// `type="number"` and gained `#target-hint`, the element a refusal is written
+// into. A cached v26 `index.html` under the new `habit-dialog.js` is a number
+// input that still eats the comma this change is about, beside a
+// `targetHint()` dereferencing an element that is not there — so the refusal
+// throws instead of being shown. The reverse pairing is the quiet one: a new
+// `index.html` whose text box accepts "8,5" held against a cached
+// `habit-dialog.js` that still reads it with `Number(...) || 0`, which is 85.
+// No new FILE, so `SHELL` is unchanged — `/index.html`, `/shared/ui/amount.js`,
+// `/shared/ui/count-field.js` and `/shared/ui/habit-dialog.js` are all already
+// in it.
+const CACHE_VERSION = 'v27';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -223,6 +302,7 @@ const SHELL = [
   '/shared/ui/amount.js',
   '/shared/ui/api.js',
   '/shared/ui/calendar.js',
+  '/shared/ui/categories.js',
   '/shared/ui/components.js',
   '/shared/ui/connectivity.js',
   '/shared/ui/count-field.js',
@@ -251,6 +331,46 @@ const SHELL = [
 
 /** GET endpoints worth keeping a copy of for offline rendering. */
 const CACHEABLE_API = [/^\/api\/overview/, /^\/api\/habits/, /^\/api\/me$/];
+
+/**
+ * An abort signal bounding one request, falling back to `AbortController` +
+ * `setTimeout` below `AbortSignal.timeout`'s availability (Chrome 103 /
+ * Firefox 100 / Safari 16). Calling `AbortSignal.timeout` unguarded THROWS
+ * there, and inside an `async` function that throw is a rejected promise —
+ * `event.respondWith(<rejected>)` is a network error, on every request that
+ * reaches the call, on exactly the browsers old enough to need the bound
+ * most. `ui/settings.js`'s `bound()` and `offline.js`'s `isReachable` already
+ * hand-roll this same fallback; this is a third copy rather than a fourth
+ * unguarded call, which is the drift that put an unguarded
+ * `AbortSignal.timeout(10_000)` in `networkFirst` (below, unguarded since
+ * #93) and then again in `shellFirst` in the very commit meant to fix the
+ * second one.
+ *
+ * The `setTimeout` below is left uncleared, matching `ui/settings.js`'s
+ * `bound()`: both call sites here pass the signal straight into `fetch`'s
+ * `init` with no handle back to the timer, and threading one through would
+ * restructure both functions to save one harmless 10s timer in a worker that
+ * outlives neither.
+ *
+ * A third path, below `AbortController`'s own availability, answers
+ * `undefined` — the request then goes out UNBOUNDED, which is #87's own hang,
+ * reopened on exactly the runtime old enough to need the bound most (Chrome
+ * <40, Firefox <44). Accepted rather than closed: a runtime with no
+ * `AbortController` at all predates every browser this file is otherwise
+ * written for, and there is nothing better to hand `fetch` in its place. The
+ * same path also means `{signal: undefined}` — EMPTY per WebIDL, not merely
+ * unbounded — so at the `shellFirst` call site the navigate→same-origin
+ * downgrade described there does not occur on this path either.
+ */
+function boundedSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(ms);
+  }
+  if (typeof AbortController === 'undefined') return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms);
+  return controller.signal;
+}
 
 sw.addEventListener('install', (event) => {
   event.waitUntil(
@@ -325,7 +445,7 @@ async function networkFirst(request, url) {
     // here is an app that opens to nothing at all. Only GETs reach the worker,
     // so there is nothing here that a retry could duplicate.
     const response = await fetch(request, {
-      cache: 'no-store', signal: AbortSignal.timeout(10_000),
+      cache: 'no-store', signal: boundedSignal(10_000),
     });
     if (response.ok && CACHEABLE_API.some((re) => re.test(url.pathname))) {
       const cache = await caches.open(DATA_CACHE);
@@ -364,7 +484,31 @@ async function shellFirst(request) {
     request.destination === 'style' ||
     request.destination === 'document';
 
-  const network = fetch(request)
+  // Bounded for the same reason as `networkFirst` above, and more urgently:
+  // the cached copy is one line below, and `revalidateFirst` awaits this
+  // BEFORE consulting it, so a server that accepts the connection and never
+  // replies leaves an installed PWA awaiting the network forever with a
+  // perfectly good `/index.html` or `/style.css` already on the device — an
+  // app that opens to nothing at all. Aborting means the cache is not
+  // refreshed on this load, so a genuinely slow-but-working server keeps
+  // serving a stale shell for one more load; 10s is generous for either file,
+  // and it is the same tradeoff `networkFirst` already made for API data.
+  //
+  // Passing a non-empty `init` here downgrades a `navigate`-mode `Request` to
+  // `same-origin` per the Fetch spec's Request constructor — benign, since
+  // everything reaching this line is already same-origin (the handler above
+  // returns early on a cross-origin `url.origin`). The same spec step also
+  // sets the request's referrer to "client" and its referrer policy to the
+  // empty string, so the `Referer` sent can change from the referring
+  // document to the worker's own scope URL — nothing in this repo reads it,
+  // but say it accurately rather than name only `Sec-Fetch-Mode` (which does
+  // flip, from `navigate` to `same-origin`). `redirect` genuinely does
+  // survive untouched: it is copied from the input `Request` and only an
+  // explicit `init.redirect` would override it, which this passes none of —
+  // and an opaque redirect answer comes back with `ok === false`, so the
+  // `if (response.ok)` guard just below never caches it. `networkFirst`
+  // already passes an init the same way.
+  const network = fetch(request, { signal: boundedSignal(10_000) })
     .then(async (response) => {
       if (response.ok) {
         const cache = await caches.open(SHELL_CACHE);

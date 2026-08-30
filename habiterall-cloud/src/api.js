@@ -10,7 +10,7 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { withUser } from './db/pool.js';
+import { withUser, isCategoryNameConflict } from './db/pool.js';
 import { createMemo, forgetAccount, remember } from './cache.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
@@ -24,16 +24,18 @@ import {
 import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
-import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
+import { backupSettings, backupCategories, parseUpload } from '@habiterall/shared/import.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
-  assertNotFuture,
-  DATE_RE,
+  assertNotFuture, parseCategory, parseCategoryId, foldCategoryName, LIMITS,
+  DATE_RE, queryDate,
 } from '@habiterall/shared/validate.js';
 import {
   computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
+  computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
+  summariseByCategory,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
@@ -214,6 +216,35 @@ api.use((req, res, next) => {
  */
 const callerToday = (req) => callerDay(req.get(DEVICE_ZONE_HEADER));
 
+/**
+ * Resolve an already-parsed habit's `category_id` into something safe to
+ * store. `parseHabit` has already decided the SHAPE — a positive safe
+ * integer or `null`, with anything malformed folded to `null` and no 400 —
+ * so this only decides EXISTENCE, a database question the shared validator
+ * has no connection to answer.
+ *
+ * A null/absent id passes straight through as the stated clear it is. A
+ * present id that names nothing is a 400: storing it anyway would leave a
+ * habit pointing at a category that was never created, and `ON DELETE SET
+ * NULL` would have nothing to ever fire on.
+ *
+ * The SELECT runs on DB, already inside `withUser` — RLS scopes it to the
+ * caller's own categories, so an id that belongs to another user is
+ * indistinguishable from one that does not exist at all, and gives the same
+ * 400 rather than an existence oracle.
+ *
+ * @param {{query: Function}} db - already inside `withUser`
+ * @param {{category_id?: number | null}} body - the output of `parseHabit`
+ * @returns {Promise<number | null>}
+ */
+async function resolveCategoryId(db, body) {
+  const id = body.category_id ?? null;
+  if (id === null) return null;
+  const { rows } = await db.query(`SELECT id FROM categories WHERE id = $1`, [id]);
+  if (!rows.length) throw httpError(400, 'category not found');
+  return id;
+}
+
 /* ---------- habits ---------- */
 
 api.get('/habits', route(async (req, res) => {
@@ -231,6 +262,8 @@ api.post('/habits', route(async (req, res) => {
   const h = parseHabit(req.body);
 
   const created = await withUser(uid(req), async (db) => {
+    const categoryId = await resolveCategoryId(db, h);
+
     const { rows: [{ count }] } = await db.query(
       `SELECT COUNT(*)::int AS count FROM habits`
     );
@@ -242,14 +275,14 @@ api.post('/habits', route(async (req, res) => {
       `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                            target_type, freq_numerator, freq_denominator, color,
                            reminder_time, reminder_message, at_most_unlogged,
-                           show_as, icon, archived, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                           show_as, icon, category_id, archived, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
                COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
        RETURNING *`,
       [uid(req), h.name, h.description, h.type, h.unit, h.target_value,
        h.target_type, h.freq_numerator, h.freq_denominator, h.color,
        h.reminder_time, h.reminder_message, h.at_most_unlogged, h.show_as,
-       h.icon, h.archived]
+       h.icon, categoryId, h.archived]
     );
     return rows[0];
   });
@@ -267,16 +300,19 @@ api.put('/habits/:id', route(async (req, res) => {
   const id = habitId(req);
 
   const updated = await withUser(uid(req), async (db) => {
+    const categoryId = await resolveCategoryId(db, h);
+
     const { rows } = await db.query(
       `UPDATE habits SET name=$1, description=$2, type=$3, unit=$4,
               target_value=$5, target_type=$6, freq_numerator=$7,
               freq_denominator=$8, color=$9, reminder_time=$10,
               reminder_message=$11, at_most_unlogged=$12, show_as=$13,
-              icon=$14, archived=$15
-       WHERE id = $16 RETURNING *`,
+              icon=$14, category_id=$15, archived=$16
+       WHERE id = $17 RETURNING *`,
       [h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
        h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-       h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, h.archived, id]
+       h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId,
+       h.archived, id]
     );
     return rows[0];
   });
@@ -324,6 +360,289 @@ api.post('/habits/reorder', route(async (req, res) => {
     return db.query(
       `SELECT * FROM habits WHERE archived = false ORDER BY position, id`
     ).then((r) => r.rows);
+  });
+
+  res.json(rows);
+}));
+
+/* ---------- categories ---------- */
+
+/**
+ * Whether NAME already names a category other than EXCLUDE_ID, for the
+ * caller whose scope DB is already inside.
+ *
+ * Folded through `foldCategoryName` — the one shared rule, so this and the
+ * personal edition's SQLite `NOCASE` check agree on 'Élan' vs 'élan' rather
+ * than each drawing its own line. `LIMITS.categories` keeps this a scan of at
+ * most 30 rows, so there is no reason to push it into SQL — Postgres's own
+ * `lower()` unique index (migration 015) stays a backstop.
+ *
+ * @param {{query: Function}} db
+ * @param {string} name
+ * @param {number | null} excludeId
+ * @returns {Promise<boolean>}
+ */
+async function categoryNameTaken(db, name, excludeId) {
+  const folded = foldCategoryName(name);
+  const { rows } = await db.query(`SELECT id, name FROM categories`);
+  return rows.some((c) => c.id !== excludeId && foldCategoryName(c.name) === folded);
+}
+
+api.get('/categories', route(async (req, res) => {
+  const rows = await withUser(uid(req), (db) =>
+    db.query(`SELECT * FROM categories ORDER BY position, id`).then((r) => r.rows)
+  );
+  res.json(rows);
+}));
+
+/**
+ * Which of this account's categories is holding up, over one window.
+ *
+ * The arithmetic is `computeCategoryStats` (shared/src/stats.js) and every word
+ * about what it means is there. This route's whole job is the three things a
+ * pure function cannot do for itself, and each of them is a way the figures go
+ * quietly wrong rather than loudly:
+ *
+ *   1. Hand it EVERY habit, archived included — hence a SELECT with no
+ *      `archived` predicate rather than the two `/habits` takes a parameter
+ *      for. `archivedExcluded` is derived from the members handed over, so a
+ *      route that filtered here reports 0 forever and the comparison view has
+ *      nothing to say about what it left out.
+ *   2. Supply each member's LIFETIME `firstEntry`. The entry read below is
+ *      bounded, so a habit last logged before that window comes back with an
+ *      empty slice — indistinguishable, from the slice alone, from one that has
+ *      never been logged. An abandoned habit has a real strength near zero and
+ *      belongs in its category's mean; a never-logged one has no strength to
+ *      average in at all. One grouped `MIN(date)` answers the question the
+ *      slice cannot, off the `(habit_id, date)` primary key.
+ *   3. Read the entries in ONE pass. `WHERE habit_id = $1` inside the loop is
+ *      the shape that took 13.5 seconds in the importer (`shared/CLAUDE.md`),
+ *      and this route runs it against however many habits the account has.
+ *
+ * Every query is inside one `withUser`, so RLS scopes all five to the session's
+ * user and a forgotten predicate returns nothing rather than somebody else's
+ * account — which is exactly what the `SELECT * FROM habits` with no `WHERE` of
+ * its own is relying on. That is also why the categories and the habits are
+ * read in the same transaction as the entries: a category deleted between two
+ * of them would leave its habits pointing at an id no section carries, and
+ * `computeCategoryStats` folds those into Uncategorised rather than dropping
+ * them.
+ *
+ * Registered ABOVE the `/categories/:id` routes, and a `GET /categories/:id`
+ * added later must go below this line: `parseCategoryId('stats')` is null, so a
+ * pattern route reaching this path first answers 400 for a URL that is not an
+ * id at all.
+ *
+ * Identical to the personal edition's, deliberately and to the day — the two
+ * bounds it enforces are imported from `shared/src/stats.js` for exactly that
+ * reason.
+ */
+api.get('/categories/stats', route(async (req, res) => {
+  // The three bounds `/habits/:id/stats` states, in the same order and for the
+  // same reason: never compute past the CALLER's today, never backwards, and
+  // never more than a ceiling, because every pass below allocates one element
+  // per day. The ceiling itself is NOT that route's — see `MAX_COMPARE_DAYS`.
+  // That route walks one habit; this one walks every habit the account has, so
+  // the same span costs the habit count times as much.
+  const now = callerToday(req);
+  const requestedEnd = queryDate(req.query.end, now);
+  const end = requestedEnd > now ? now : requestedEnd;
+
+  const requestedStart = queryDate(req.query.start, undefined);
+  if (requestedStart) {
+    if (requestedStart > end) throw httpError(400, 'start must not be after end');
+    if (daysBetween(requestedStart, end) > MAX_COMPARE_DAYS) {
+      throw httpError(400, `range must not exceed ${MAX_COMPARE_DAYS} days`);
+    }
+  }
+
+  // A caller that named no start gets a YEAR, not the ceiling: the simplest
+  // possible request must not be the most expensive one this route can answer,
+  // and five years is available to anyone who asks for it. Derived from `end`
+  // rather than read back from the earliest stored entry — a date out of the
+  // database is attacker-controlled (root CLAUDE.md), and it is the wrong
+  // question here anyway, since a comparison has as many first entries as it
+  // has members.
+  const start = requestedStart ?? addDays(end, -COMPARE_WINDOW_DAYS);
+
+  const granularity = req.query.granularity ?? 'day';
+
+  const payload = await withUser(uid(req), async (db) => {
+    const { rows: categories } = await db.query(
+      `SELECT * FROM categories ORDER BY position, id`
+    );
+    // No `archived` predicate — see (1) above.
+    const { rows: habits } = await db.query(
+      `SELECT * FROM habits ORDER BY position, id`
+    );
+
+    // One answer for the account, read once for the whole payload rather than
+    // per habit, exactly as `/overview` reads `unlogged`: the map below runs
+    // once per habit and neither of these is a per-habit question.
+    const { rows: [prefs] } = await db.query(
+      `SELECT settings ->> 'weekStart'      AS week_start,
+              settings ->> 'atMostUnlogged' AS unlogged
+         FROM users WHERE id = $1`,
+      [uid(req)]
+    );
+    const weekStart = /** @type {'monday'|'sunday'} */ (
+      prefs?.week_start === 'sunday' ? 'sunday' : 'monday');
+    const unlogged = unloggedFrom(prefs);
+
+    const ids = habits.map((h) => h.id);
+
+    // One SELECT over the window and one grouped MIN over the lifetime — see
+    // (2) and (3) above. The warm-up start is DERIVED from the window, never
+    // read back from a stored date, and the span it opens is the clamp above
+    // plus the fixed 400 days.
+    const { rows: entryRows } = ids.length ? await db.query(
+      `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+       FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
+       ORDER BY date`,
+      [ids, addDays(start, -SCORE_WARMUP_DAYS), end]
+    ) : { rows: [] };
+    const { rows: firstRows } = ids.length ? await db.query(
+      `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
+       FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
+      [ids]
+    ) : { rows: [] };
+
+    const byHabit = new Map(ids.map((id) => [id, []]));
+    for (const r of entryRows) byHabit.get(r.habit_id).push(r);
+    const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
+
+    return computeCategoryStats(
+      categories,
+      habits.map((h) => ({
+        habit: h,
+        entries: byHabit.get(h.id) ?? [],
+        // `?? null`, and never left absent: an omitted key tells
+        // `computeCategoryStats` to derive the answer from the entries it was
+        // given, which is the truncated slice this route deliberately fetched.
+        firstEntry: firstEntry.get(h.id) ?? null,
+      })),
+      { start, end, granularity, weekStart, unlogged }
+    );
+  });
+
+  res.json(payload);
+}));
+
+/**
+ * The order every category route below follows, and the reason it is
+ * written down rather than left to be re-derived per route: SHAPE (a
+ * positive integer id, else 400, `categoryId` above) before EXISTENCE (else
+ * 404) before the BODY through `parseCategory` (else its own 400) before the
+ * DUPLICATE name (else 409). `PUT /categories/:id` used to parse the body
+ * before checking existence, which personal never did; this is the order
+ * both editions now share, so add a route here later in that same sequence
+ * rather than inventing a new one.
+ */
+api.post('/categories', route(async (req, res) => {
+  const c = parseCategory(req.body);
+
+  const created = await withUser(uid(req), async (db) => {
+    if (await categoryNameTaken(db, c.name, null)) {
+      throw httpError(409, 'category already exists');
+    }
+    const { rows: [{ count }] } = await db.query(
+      `SELECT COUNT(*)::int AS count FROM categories`
+    );
+    if (count >= LIMITS.categories) {
+      throw httpError(400, `at most ${LIMITS.categories} categories are allowed`);
+    }
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO categories (user_id, name, color, position)
+         VALUES ($1, $2, $3, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
+         RETURNING *`,
+        [uid(req), c.name, c.color]
+      );
+      return rows[0];
+    } catch (err) {
+      // The route's own check above covers the ordinary path; this is what
+      // catches a fold that disagrees with Postgres's own lower() backstop,
+      // or a genuine race between two requests, rather than surfacing the
+      // constraint violation as an unexplained 500.
+      if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+      throw err;
+    }
+  });
+
+  res.status(201).json(created);
+}));
+
+api.put('/categories/:id', route(async (req, res) => {
+  const id = categoryId(req);
+
+  const updated = await withUser(uid(req), async (db) => {
+    // Existence checked BEFORE the body is parsed, matching the personal
+    // edition's ordering — see the comment above `POST /categories`. A
+    // request naming a category that is not (or no longer) the caller's own
+    // gets a 404 rather than a 400 from a body it will never use.
+    const { rows: existing } = await db.query(`SELECT id FROM categories WHERE id = $1`, [id]);
+    if (!existing.length) throw httpError(404, 'category not found');
+
+    const c = parseCategory(req.body);
+    if (await categoryNameTaken(db, c.name, id)) {
+      throw httpError(409, 'category already exists');
+    }
+    try {
+      const { rows } = await db.query(
+        `UPDATE categories SET name = $1, color = $2 WHERE id = $3 RETURNING *`,
+        [c.name, c.color, id]
+      );
+      return rows[0];
+    } catch (err) {
+      if (isCategoryNameConflict(err)) throw httpError(409, 'category already exists');
+      throw err;
+    }
+  });
+
+  res.json(updated);
+}));
+
+api.delete('/categories/:id', route(async (req, res) => {
+  const id = categoryId(req);
+  // ON DELETE SET NULL, never CASCADE (migration 015): this is tidying up a
+  // label, not a request to destroy every habit that wore it. Its habits,
+  // and every entry on them, survive — uncategorised.
+  const gone = await withUser(uid(req), (db) =>
+    db.query(`DELETE FROM categories WHERE id = $1 RETURNING id`, [id])
+      .then((r) => r.rowCount > 0)
+  );
+  if (!gone) throw httpError(404, 'category not found');
+  res.status(204).end();
+}));
+
+api.post('/categories/reorder', route(async (req, res) => {
+  const order = req.body.order;
+  if (!Array.isArray(order)) throw httpError(400, 'order must be an array of category ids');
+  if (order.length > LIMITS.categories) {
+    throw httpError(400, `order may not exceed ${LIMITS.categories} ids`);
+  }
+  // `parseCategoryId`, the same rule `categoryId` below asks of the URL — not
+  // `Number.isInteger(Number(n))`, which answers YES to `null`, `''` and `[]`
+  // (all 0) and to `true` (1), so every one of those reached the UPDATE as an
+  // id nobody named. See the personal edition's copy of this route for the
+  // whole reasoning; the two are checked in the same order, with the same
+  // three sentences, because a reorder refused in one edition and accepted in
+  // the other is the divergence `shared/src/validate.js` exists to prevent.
+  const ids = order.map((n) => parseCategoryId(n));
+  if (ids.some((id) => id === null)) {
+    throw httpError(400, 'order must contain only category ids');
+  }
+
+  const rows = await withUser(uid(req), async (db) => {
+    if (ids.length) {
+      await db.query(
+        `UPDATE categories SET position = v.position
+           FROM (SELECT * FROM unnest($1::bigint[], $2::int[]) AS t(id, position)) AS v
+          WHERE categories.id = v.id`,
+        [ids, ids.map((_, i) => i)]
+      );
+    }
+    return db.query(`SELECT * FROM categories ORDER BY position, id`).then((r) => r.rows);
   });
 
   res.json(rows);
@@ -399,10 +718,10 @@ api.get('/habits/:id/stats', route(async (req, res) => {
   const habit = await getHabit(req);
 
   const now = callerToday(req);
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const requestedEnd = queryDate(req.query.end, now);
   const end = requestedEnd > now ? now : requestedEnd;
 
-  const start = DATE_RE.test(req.query.start ?? '') ? req.query.start : undefined;
+  const start = queryDate(req.query.start, undefined);
   if (start) {
     if (start > end) throw httpError(400, 'start must not be after end');
     if (daysBetween(start, end) > MAX_RANGE_DAYS) {
@@ -502,14 +821,35 @@ const OVERVIEW_TTL_MS = 2_000;
  * limiter's 300 req/min is the dishonest one, and neither involves a write, so
  * `forget` never fires.
  *
- * 500 is the backstop and not the working bound. The bound is the TTL sweep in
+ * 100 is the backstop and not the working bound. The bound is the TTL sweep in
  * `createMemo`: entries live `OVERVIEW_TTL_MS`, a computation holds one of
  * `PG_POOL_MAX` = 10 connections while it runs, so the live set is what ten
  * connections can produce in two seconds. This number is what that has to stay
- * under, and 500 × 499 KB ≈ 250 MB is the arithmetic if the sweep ever stops
- * working.
+ * under, and it is chosen so that the arithmetic if the sweep ever stops
+ * working — 100 × 499 KB ≈ 50 MB — is a number a container survives. It was
+ * 500, which is ≈ 250 MB, and neither compose file sets a memory limit: the
+ * backstop was sized so that reaching it killed the process it was protecting.
  */
-const MAX_OVERVIEW_CACHED = 500;
+const MAX_OVERVIEW_CACHED = 100;
+
+/**
+ * How many of those one account may hold.
+ *
+ * `MAX_OVERVIEW_CACHED` on its own is a bound an account can spend alone —
+ * every distinct `end`/`days` pair is a key, so paging back through a few
+ * years fills it, and the account doing that evicts everybody else's answers.
+ * The memo then costs every other tenant the sweep and returns them no hits,
+ * which is worse than not having it.
+ *
+ * Eight, because that is roughly what one account can legitimately have live:
+ * the read limiter allows 300 req/min = 5/s, entries live 2 s, so a client
+ * hammering distinct windows as fast as it is allowed to holds ~10 — and a
+ * real dashboard holds one or two, since the grid window only changes when the
+ * user pages. So this is a cap on the abusive shape and not on the ordinary
+ * one, and `MAX_OVERVIEW_CACHED` is now only reachable by genuinely many
+ * accounts being active at once, which is what a backstop should mean.
+ */
+const MAX_OVERVIEW_PER_ACCOUNT = 8;
 
 /**
  * `/overview`, memoised per account, per window and per CALLER DAY.
@@ -521,12 +861,19 @@ const MAX_OVERVIEW_CACHED = 500;
  * answer. `res.vary(DEVICE_ZONE_HEADER)` says exactly this to HTTP caches;
  * a server-side memo has to say it in its key.
  *
- * Per process, so N replicas means N memos and a 1/N hit rate. That is fine and
- * worth knowing before anyone reads a hit-rate metric and concludes it is
- * broken.
+ * Per process, and that is a statement about CORRECTNESS and not only about a
+ * hit rate. "A write invalidates" is true inside one process: on two replicas,
+ * a tap handled by A and a refetch balanced to B can be served B's own pre-tap
+ * answer, which is the very regression the invalidation exists to prevent,
+ * arriving through the load balancer. The TTL is what bounds it — two seconds,
+ * once — and #192's version check is what removes it. Read the hit-rate metric
+ * knowing it is 1/N; read this knowing the staleness window is per replica.
  */
 const overviewMemo = createMemo((arg) => buildOverview(arg), {
-  ttlMs: OVERVIEW_TTL_MS, max: MAX_OVERVIEW_CACHED, perAccount: true,
+  ttlMs: OVERVIEW_TTL_MS,
+  max: MAX_OVERVIEW_CACHED,
+  maxPerAccount: MAX_OVERVIEW_PER_ACCOUNT,
+  perAccount: true,
 });
 
 api.get('/overview', route(async (req, res) => {
@@ -536,7 +883,7 @@ api.get('/overview', route(async (req, res) => {
   // is actually showing. Without this the grid rendered empty cells for any
   // day outside the most recent fortnight — the entries were never fetched.
   const now = callerToday(req);
-  const requestedEnd = DATE_RE.test(req.query.end ?? '') ? req.query.end : now;
+  const requestedEnd = queryDate(req.query.end, now);
   const end = requestedEnd > now ? now : requestedEnd;
   const start = addDays(end, -(days - 1));
   const archived = req.query.archived === 'true';
@@ -574,7 +921,22 @@ async function buildOverview({ user, start, end, summaryEnd, archived }) {
       `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
       [archived]
     );
-    if (!habits.length) return { start, end, habits: [] };
+    // One extra SELECT, read once for the whole payload for the same reason
+    // `unlogged` is below: the dashboard groups by category behind
+    // `groupByCategory`, and every habit on the page needs the same list. Read
+    // even with no habits — a category with none yet still draws its header.
+    const { rows: categories } = await db.query(
+      `SELECT * FROM categories ORDER BY position, id`
+    );
+    if (!habits.length) {
+      // Same key shape as the full path below: `categorySummaries` is absent
+      // only in archived mode, never merely because there is nothing to
+      // summarise yet — an empty category still draws its header.
+      return {
+        start, end, categories, habits: [],
+        ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
+      };
+    }
 
     const ids = habits.map((h) => h.id);
 
@@ -585,6 +947,20 @@ async function buildOverview({ user, start, end, summaryEnd, archived }) {
       [user]
     );
     const unlogged = unloggedFrom(prefs);
+
+    // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
+    // (same shape, line 453 there), reused here so a section header can tell
+    // "never logged" from "scored zero" — the bounded windows below cannot
+    // answer that, and `first_date` is used for a null check only, never
+    // `addDays` or `dateRange` (root CLAUDE.md). Skipped entirely in archived
+    // mode: that fetch has nothing active to average, so `categorySummaries`
+    // is omitted below rather than computed and discarded.
+    const { rows: firstRows } = archived ? { rows: [] } : await db.query(
+      `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
+       FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
+      [ids]
+    );
+    const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
 
     // One query for the grid window, one for the lifetime figures, rather
     // than two per habit.
@@ -646,46 +1022,54 @@ async function buildOverview({ user, start, end, summaryEnd, archived }) {
 
     const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
 
+    const habitPayloads = habits.map((h) => {
+      const all = byHabit.get(h.id) ?? [];
+      const recent = all.filter((e) => e.date >= cutoff);
+      // Two numbers are read below — `score` and `currentStreak` — so this
+      // calls `summaryStats` rather than `computeStats`: the same window and
+      // the same two passes (`computeScores`, `computeStreaks`), with the
+      // five passes `computeStats` also runs — `computeHistory`,
+      // `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
+      // `computeResilience` — never started, once per habit, on the
+      // dashboard's hot path. Awards are out of this route for the same
+      // reason, stated at the `/stats` call site above.
+      const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
+
+      const totalCompleted = totals.get(h.id) ?? 0;
+
+      const streaks = computeStreaks(
+        h,
+        new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
+        all.length ? all[0].date : summaryEnd,
+        summaryEnd,
+        unlogged
+      );
+
+      return {
+        ...h,
+        entries: grid.get(h.id) ?? {},
+        skips: skips.get(h.id) ?? [],
+        score: stats.score,
+        currentStreak: stats.currentStreak,
+        bestStreak: bestStreak(streaks),
+        totalCompleted,
+        // Same field, same reason as the `/stats` call site above: resolved
+        // server-side because no renderer can import `unansweredCounts`, and
+        // derived rather than stored.
+        unlogged_is_success: unansweredCounts(h, unlogged),
+      };
+    });
+
+    // The mean is over `habitPayloads`' own `score` — the same number drawn
+    // on the row beneath each header — never a second scoring pass. See
+    // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
+    // rule.
     return {
       start,
       end,
-      habits: habits.map((h) => {
-        const all = byHabit.get(h.id) ?? [];
-        const recent = all.filter((e) => e.date >= cutoff);
-        // Two numbers are read below — `score` and `currentStreak` — so this
-        // calls `summaryStats` rather than `computeStats`: the same window and
-        // the same two passes (`computeScores`, `computeStreaks`), with the
-        // five passes `computeStats` also runs — `computeHistory`,
-        // `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
-        // `computeResilience` — never started, once per habit, on the
-        // dashboard's hot path. Awards are out of this route for the same
-        // reason, stated at the `/stats` call site above.
-        const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
-
-        const totalCompleted = totals.get(h.id) ?? 0;
-
-        const streaks = computeStreaks(
-          h,
-          new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
-          all.length ? all[0].date : summaryEnd,
-          summaryEnd,
-          unlogged
-        );
-
-        return {
-          ...h,
-          entries: grid.get(h.id) ?? {},
-          skips: skips.get(h.id) ?? [],
-          score: stats.score,
-          currentStreak: stats.currentStreak,
-          bestStreak: bestStreak(streaks),
-          totalCompleted,
-          // Same field, same reason as the `/stats` call site above: resolved
-          // server-side because no renderer can import `unansweredCounts`, and
-          // derived rather than stored.
-          unlogged_is_success: unansweredCounts(h, unlogged),
-        };
-      }),
+      categories,
+      habits: habitPayloads,
+      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
     };
   });
 }
@@ -787,7 +1171,7 @@ api.get('/notify/status', route(async (req, res) => {
 /* ---------- export ---------- */
 
 api.get('/export', route(async (req, res) => {
-  const { data, settings } = await withUser(uid(req), async (db) => {
+  const { data, categories, settings } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
       `SELECT * FROM habits ORDER BY archived, position, id`
     );
@@ -795,6 +1179,14 @@ api.get('/export', route(async (req, res) => {
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status, notes
        FROM entries ORDER BY habit_id, date`
     );
+    const { rows: categoryRows } = await db.query(
+      `SELECT * FROM categories ORDER BY position, id`
+    );
+    // The backup carries a category by NAME, not by id: an id is meaningless
+    // once restored somewhere else (or nowhere, on a Loop round trip), and a
+    // name is what `normaliseImportedHabit` and `backupCategories` (import.js)
+    // already agree the wire format is.
+    const categoryNames = new Map(categoryRows.map((c) => [c.id, c.name]));
     const byHabit = new Map(habits.map((h) => [h.id, []]));
     for (const e of entries) {
       const { habit_id, ...rest } = e;
@@ -813,7 +1205,14 @@ api.get('/export', route(async (req, res) => {
       // query, because a backup that silently omits a NEW column is the worse
       // failure of the two: migration 009 added `reminder_message`, and a
       // hand-kept SELECT list is exactly what would have left it behind.
-      data: habits.map(({ user_id, ...h }) => ({ ...h, entries: byHabit.get(h.id) ?? [] })),
+      data: habits.map(({ user_id, ...h }) => ({
+        ...h,
+        category: categoryNames.get(h.category_id) ?? '',
+        entries: byHabit.get(h.id) ?? [],
+      })),
+      // A user's own categories, so a backup can recreate them by name rather
+      // than by an id that means nothing once restored — see apply-import.js.
+      categories: categoryRows.map((c) => ({ name: c.name, color: c.color, position: c.position })),
       settings: rows[0]?.settings ?? {},
     };
   });
@@ -827,6 +1226,7 @@ api.get('/export', route(async (req, res) => {
     app: 'habiterall',
     exported_at: new Date().toISOString(),
     habits: data,
+    categories,
     // Part of the account, and two of them now decide what the rows MEAN — see
     // the personal edition's export for the whole reasoning. Filtered: a webhook
     // URL is a capability, and a backup file travels.
@@ -836,19 +1236,28 @@ api.get('/export', route(async (req, res) => {
 
 /** All checkmarks as a single Loop-shaped CSV. */
 api.get('/export.csv', route(async (req, res) => {
-  const { habits, entries } = await withUser(uid(req), async (db) => {
+  const { habits, entries, categoryRows } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
       `SELECT * FROM habits ORDER BY archived, position, id`);
     const { rows: entries } = await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
        FROM entries ORDER BY date`);
-    return { habits, entries };
+    const { rows: categoryRows } = await db.query(`SELECT id, name FROM categories`);
+    return { habits, entries, categoryRows };
   });
 
   const byHabit = new Map(habits.map((h) => [h.id, []]));
   for (const e of entries) byHabit.get(e.habit_id)?.push(e);
 
-  const body = buildCsvArchive(habits, (id) => byHabit.get(id) ?? []);
+  // `buildHabitsCsv` reads `h.category` by NAME, the same as `/export`
+  // above — a raw habit row only carries `category_id`, which means nothing
+  // once restored elsewhere (or nowhere, on a Loop round trip).
+  const categoryNames = new Map(categoryRows.map((c) => [c.id, c.name]));
+  const withCategory = habits.map((h) => ({
+    ...h, category: categoryNames.get(h.category_id) ?? '',
+  }));
+
+  const body = buildCsvArchive(withCategory, (id) => byHabit.get(id) ?? []);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
@@ -920,7 +1329,11 @@ api.post('/import', route(async (req, res) => {
   const habits = await parseUpload(buf);
   if (!habits.length) throw httpError(400, 'no habits found in the uploaded file');
 
-  const result = await applyImport(uid(req), habits, mode);
+  // `[]`, never `null`, for a format with nowhere to carry a category — see
+  // the personal edition's route and `apply-import.js`'s own comment for why
+  // a habit's `category` is resolved against this by NAME rather than by any
+  // id the file happens to carry.
+  const result = await applyImport(uid(req), habits, mode, backupCategories(buf) ?? []);
 
   // Replace mode only — "make this account look like the file". A merge adds
   // habits to what is already here and must not rewrite the rest of the
@@ -959,6 +1372,13 @@ api.post('/import', route(async (req, res) => {
 function habitId(req) {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid habit id');
+  return id;
+}
+
+/** A category id from the URL, validated the same way `habitId` is. */
+function categoryId(req) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw httpError(400, 'invalid category id');
   return id;
 }
 

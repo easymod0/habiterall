@@ -13,14 +13,50 @@ docker run -d --name hab-pg-test -p 55432:5432 \
 DATABASE_URL_ADMIN='postgres://owner:testpw@localhost:55432/habiterall' \
 APP_DB_PASSWORD='apptestpw' node src/db/migrate.js
 
+node test/schema-plans.integration.mjs
 node test/tenancy.integration.mjs
 node test/api.integration.mjs
 node test/roundtrip.integration.mjs
 node test/notify.integration.mjs
 ```
 
+`schema-plans` goes first because it is the only one that wants a database
+nothing has put rows in yet, and because the others reset what they need.
+
 Run them after ANY change to the schema, the RLS policies, `db/pool.js`, or
 `apply-import.js`.
+
+## `schema-plans.integration.mjs`
+
+What the schema lets Postgres *do*. Migration 016 changed no answer — every
+query returns exactly what it returned before it ran — so there is nothing here
+for an API suite to see, and this one asserts against the catalog and the
+planner instead of against a payload: that no function an RLS policy depends on
+is `PARALLEL UNSAFE`, that no table carries two indexes with identical
+definitions, that every foreign key has an index to cascade through, and that
+`idx_entries_owner_habit` and `idx_notify_log_owner_date` carry exactly the key
+columns — in order — and the INCLUDE lists they were added for. The first of
+those is the one that goes away in silence: a later
+`CREATE OR REPLACE FUNCTION` omitting the clause resets the flag, and both
+functions sit in the `USING` clause of a policy on every table.
+
+What an index IS and whether the planner CHOOSES it are two different
+questions, and the second one needs rows. The structural halves come out of
+`pg_index` / `pg_attribute` and run on an empty database; the one
+planner-choice assertion seeds 6,000 entries, `ANALYZE`s, and forces off both
+sequential and bitmap scans, because a bitmap scan over the right index is
+still not an index-only scan and would not falsify a missing INCLUDE list. It
+deletes that fixture and re-analyses afterwards, since the CI `cloud` job runs
+several suites against one database and stale statistics for a table that is
+now empty are the next suite's problem.
+
+**Every plan it takes is taken as `habiterall_app` through `withUser` /
+`withNotifierScope`, and any plan added here must be too.** An `EXPLAIN` on the
+admin connection bypasses RLS, so it describes a query this application never
+issues — the security qual that decides which index is usable at all is simply
+not in it. That is not a style preference; it is how #185 came to propose an
+index the app role can never use. See `../CLAUDE.md`, "An RLS table cannot be
+indexed on a non-leakproof operator".
 
 ## `notify.integration.mjs`
 

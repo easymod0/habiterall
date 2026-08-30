@@ -18,6 +18,7 @@
  * in?" is answered by asking the server, never by inspecting storage.
  */
 
+import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 import { hideAll } from '/shared/ui/views.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -190,6 +191,13 @@ export const auth = {
       hideAll();
       show(chip, false);
       for (const id of SIGNED_IN_ONLY) show($(`#${id}`), false);
+      // Compare goes too, and it cannot be in the list above: that list turns
+      // its buttons ON again for any signed-in account, and this one is shown
+      // only for an account that HAS a category. So the module that owns it is
+      // asked to put it away, which is the one direction the two rules agree
+      // on — nothing here ever reveals it, and `dashboard.paint()` is what
+      // decides whether it comes back.
+      syncCompareEntry(false);
       return;
     }
 

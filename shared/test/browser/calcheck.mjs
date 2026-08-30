@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9294);
 const profile = mkdtempSync(join(tmpdir(), 'habcal-'));
@@ -242,12 +242,66 @@ try {
 
   ck('the page can scroll down to the calendar', scrollTo > 100, `y=${scrollTo}`);
 
+  // Which value a card's granularity control is showing, scoped to that card by
+  // title. Both the History and the Habit strength cards render
+  // `segmented(['day','week','month','quarter','year'], …)`, so the pressed
+  // option names that card's own state and no other's — which is what lets the
+  // two checks after the loop say WHICH card the third selector reached, rather
+  // than trusting that the selector reached the one its label claims.
+  const GRAN = "['day','week','month','quarter','year']";
+  const pressedGran = (title) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='${title}');
+    const b=[...(c?.querySelectorAll('.seg button') ?? [])]
+      .find(b=>b.getAttribute('aria-pressed')==='true'
+        && ${GRAN}.includes(b.textContent.trim()));
+    return b?.textContent.trim() ?? null;})()`);
+
+  const granBefore = await pressedGran('History');
+  const scoreBefore = await pressedGran('Habit strength');
+
+  // Two of these three are scoped to their card BY TITLE, and the reason is
+  // that a detail card's controls are not unique on the page — `DETAIL_CARDS`
+  // (`shared/src/validate.js`) draws `recentDays, strength, calendar, streaks,
+  // resilience, awards, history, …`, all on by default, and this suite never
+  // touches `detailCards`. Position is not the scoping rule either: matching by
+  // title survives a reorder, which a `[n]` index does not.
   for (const [label, sel] of [
     // '+' not '−': the calendar is at the widest level here, so '−' is
-    // disabled and clicking it would prove nothing.
+    // disabled and clicking it would prove nothing. Genuinely unambiguous —
+    // `git grep "'+'"` under `shared/public` hits only the calendar's `zoomIn`.
     ['zoom', `[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.trim()==='+')`],
-    ['calendar paging', `[...document.querySelectorAll('.cal-nav button')].find(b=>b.textContent.includes('Earlier'))`],
-    ['history granularity', `[...document.querySelectorAll('.card button')].find(b=>b.textContent.trim()==='week')`],
+    // The calendar's own ‹ Earlier used to be checked here too, scoped to the
+    // Calendar card for exactly the reason 'history granularity' below is
+    // scoped to History: `.cal-nav` is `windowedChart`'s class and the Recent
+    // days strip — FIRST on the page — pages through the same component, so
+    // an unscoped `find('Earlier')` would reach the strip's button instead.
+    // It no longer belongs in a loop whose label is "re-renders the detail
+    // view": after #274 the calendar's ‹ Earlier redraws itself locally, the
+    // same shape #245 gave the strip, so a press that correctly leaves the
+    // rest of the page alone would fail a check asserting the opposite. Its
+    // own coverage is the "paging redraws the card" block below, which reads
+    // the range readout and `state.calEnd` instead of a re-render marker.
+    // Scoped to the HISTORY card for exactly the same reason, and this one had
+    // the same defect for as long as it has existed: `buildStrengthCard` puts
+    // `segmented(['day','week','month','quarter','year'], …)` in its own
+    // `.card-head` and sits SECOND, so the first `.card button` reading 'week'
+    // in document order was the strength card's score-resolution button. It
+    // stayed green because that card's `onChange` is also
+    // `state.scoreGranularity = g; open(habit.id)` — a full re-render, which is
+    // all this loop measures — so `buildHistoryCard`'s granularity control had
+    // no coverage here at all.
+    //
+    // 'month' rather than 'week' on purpose: History OPENS on 'week'
+    // (`historyGranularity`'s default in ui/settings.js), and re-pressing the
+    // option that is already pressed asserts nothing about which control was
+    // reached. 'month' moves `state.granularity`, which is what the two checks
+    // after the loop read back — and it is unique inside this card, whose other
+    // segmented control offers 'percent' and 'count'.
+    ['history granularity', `[...(([...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='History')
+      ?.querySelectorAll('.seg button')) ?? [])]
+      .find(b=>b.textContent.trim()==='month')`],
   ]) {
     // Scroll back down FIRST, so each control is judged on its own. Reading
     // `before` from wherever the last iteration left the page made the second
@@ -309,6 +363,21 @@ try {
       `${before} -> ${after}`);
   }
 
+  // What proves the third selector is scoped rather than merely written as
+  // though it were. The unscoped version pressed the Habit strength card, which
+  // moves `scoreGranularity` and leaves History exactly where it opened — so
+  // against it the first of these is red and the second is red too, and between
+  // them they NAME the card that was reached. `granBefore !== 'month'` is there
+  // so the first cannot pass by History having already been on 'month':
+  // `fixtures.reset()` sends `DELETE /settings`, so it opens on 'week'.
+  const granAfter = await pressedGran('History');
+  const scoreAfter = await pressedGran('Habit strength');
+  ck('the granularity press reached the History card',
+    granAfter === 'month' && granBefore !== 'month',
+    `History ${granBefore} -> ${granAfter}`);
+  ck('...and left the Habit strength card above it alone',
+    scoreAfter === scoreBefore, `strength ${scoreBefore} -> ${scoreAfter}`);
+
   // Put the zoom back where the persistence checks below expect it.
   await click('−');
 
@@ -321,6 +390,181 @@ try {
   await sleep(700);
   const onOpen = await ev(`Math.round(window.scrollY)`);
   ck('opening a habit starts at the top', onOpen < 60, `y=${onOpen}`);
+
+  /* ---------- paging redraws the card (#274) ---------- */
+
+  console.log('\n--- paging redraws the card ---');
+  // Scoped to the Calendar card BY TITLE, never a bare `.cal-nav` / `.cal-range`
+  // query: `windowedChart` gives Recent days' own nav and range readout the
+  // same two class names (`shared/public/CLAUDE.md`), and Recent days sits
+  // FIRST on the page — an unscoped selector would press and read the strip's
+  // controls instead. Modelled on the `['calendar paging', …]` selector
+  // deleted from the re-render loop above.
+  const calCardSel = `[...document.querySelectorAll('#view-detail .card')]
+    .find(c=>c.querySelector('.card-title')?.textContent==='Calendar')`;
+  const calRange = () => ev(`(() => {
+    const c = ${calCardSel};
+    return c?.querySelector('.cal-range')?.textContent ?? '';})()`);
+  const calNav = (text) => ev(`(() => {
+    const c = ${calCardSel};
+    const b = [...(c?.querySelectorAll('.cal-nav button') ?? [])]
+      .find(b => b.textContent.includes(${JSON.stringify(text)}));
+    if (!b || b.disabled) return false;
+    b.click(); return true;})()`);
+  const calEndState = () =>
+    ev(`(async () => (await import('/shared/ui/store.js')).state.calEnd ?? null)()`);
+  // The page's own notion of today, read the same way `calEndState` reads
+  // `state.calEnd` — used only to guard the online/offline comparison below
+  // against a run that crosses local midnight in the gap between the two
+  // presses, not to derive any of the values being compared.
+  const pageTodayISO = () =>
+    ev(`(async () => (await import('/shared/ui/dates.js')).todayISO())()`);
+  const calSvgCount = () => ev(`(() => {
+    const c = ${calCardSel};
+    return c ? c.querySelectorAll('[aria-label="Completion calendar"]').length : 0;})()`);
+  const legendCount = () => ev(`(() => {
+    const c = ${calCardSel};
+    return c ? c.querySelectorAll('.legend').length : 0;})()`);
+
+  // Bounded rather than `waitUntil`, at the same 20s ceiling and for the exact
+  // reason given above the re-render loop's own bounded poll: a throw here
+  // would leave the try block and take the rest of the suite with it, so a
+  // regression in ONE of these five presses would cost the other four their
+  // own named failure and the persistence checks their run entirely —
+  // mutation-tested below, where `shift` and `Today` reverted to `open()` each
+  // surfaced as `FAIL harness error :: timed out …` before this existed. Every
+  // caller compares an ABSOLUTE value afterwards (`onlineAfter !==
+  // onlineBefore`, `offlineAfterEarlier === onlineAfter`, `calEnd === null`),
+  // so a poll that times out just leaves the readout unchanged and that
+  // comparison fails BY NAME — the ceiling is judged, not merely spent.
+  const settled = async (expr, ms = 20_000) => {
+    for (let i = 0; i < Math.ceil(ms / 50); i++) {
+      if (await ev(expr).catch(() => false)) return true;
+      await sleep(50);
+    }
+    return false;
+  };
+
+  // A full navigation, not the in-app back button: `state.calEnd` is cleared
+  // by neither reopening the same habit nor a different one (nothing on the
+  // dashboard->reopen path touches it, which is why #274 outlasted #245), so
+  // only a fresh document is guaranteed to start with it unset.
+  const openFirstHabit = async () => {
+    await send('Page.navigate', { url: APP }, sessionId);
+    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
+      { what: 'the dashboard grid' });
+    await sleep(500);
+    await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);
+    await waitUntil(ev, `!!document.querySelector('[aria-label="Completion calendar"]')`,
+      { what: 'the calendar card' });
+    await sleep(400);
+  };
+
+  /* ----- the reference press, online ----- */
+
+  const todayAtOnlinePress = await pageTodayISO();
+  const onlineBefore = await calRange();
+  ck('the calendar has a range readout', onlineBefore !== '', onlineBefore);
+
+  const pressedOnline = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(onlineBefore)}`);
+  const onlineAfter = await calRange();
+  const onlineCalEnd = await calEndState();
+  const onlineSvgCount = await calSvgCount();
+  const onlineLegendCount = await legendCount();
+
+  ck('the online ‹ Earlier press was made at all', pressedOnline === true);
+  ck('‹ Earlier moves the range readout', onlineAfter !== onlineBefore,
+    `${onlineBefore} -> ${onlineAfter}`);
+  ck('...and stores a non-null calEnd', onlineCalEnd !== null, String(onlineCalEnd));
+  // Catches a `draw()` that appends its new pair without removing the old one.
+  ck('...and leaves exactly one calendar and one legend',
+    onlineSvgCount === 1 && onlineLegendCount === 1,
+    `svg=${onlineSvgCount} legend=${onlineLegendCount}`);
+
+  /* ----- the scroll does not move ----- */
+
+  // A local redraw collapses no page height, so this is stronger than the
+  // restore-within-tolerance check the re-render loop above asserts.
+  // `scrollToCalendar` is the one declared above, for the "scroll position"
+  // section — the calendar's `[aria-label="Completion calendar"]` is unique on
+  // the page, so it needs no card-title scoping of its own.
+  const scrollBefore = await scrollToCalendar();
+  await sleep(300);
+  const rangeBeforeScrollPress = await calRange();
+  const pressedForScroll = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== `
+    + `${JSON.stringify(rangeBeforeScrollPress)}`);
+  const scrollAfter = await ev(`Math.round(window.scrollY)`);
+  ck('paging the calendar does not move the scroll position',
+    pressedForScroll === true && scrollAfter === scrollBefore,
+    `${scrollBefore} -> ${scrollAfter}`);
+
+  /* ----- offline ----- */
+
+  console.log('--- calendar paging, offline ---');
+  // A fresh document, so this run's own presses above are not still sitting in
+  // `state.calEnd` when the network goes down.
+  await openFirstHabit();
+  // `onlineAfter` / `onlineCalEnd` above and `offlineAfterEarlier` /
+  // `offlineCalEndAfterEarlier` below are compared for equality further down,
+  // but they are derived from `todayISO()` calls on either side of a full
+  // `Page.navigate` — a run that crosses local midnight in that gap would
+  // fail both conjuncts and print four dates naming nothing. This says so by
+  // name instead of leaving that comparison to fail as if it were a
+  // regression.
+  const todayAfterNav = await pageTodayISO();
+  ck('the run did not cross local midnight between the online and offline presses',
+    todayAfterNav === todayAtOnlinePress, `${todayAtOnlinePress} -> ${todayAfterNav}`);
+  const offlineAtNow = await calRange();
+  ck('the calendar starts at today on a fresh document', offlineAtNow !== '', offlineAtNow);
+
+  await send('Network.enable', {}, sessionId);
+  // `Network.setBypassServiceWorker` is load-bearing, for the reason
+  // stripcheck.mjs's own offline block records having measured: devtools
+  // network emulation does not reach the WORKER's own fetches, so with the
+  // worker in front `open()`'s two GETs answer out of `DATA_CACHE`
+  // (`CACHEABLE_API`, sw.js), `open()` succeeds, and every check below would
+  // pass against the unfixed code.
+  await send('Network.setBypassServiceWorker', { bypass: true }, sessionId);
+  await send('Network.emulateNetworkConditions',
+    { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
+
+  const pressedOffline = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(offlineAtNow)}`);
+  const offlineAfterEarlier = await calRange();
+  const offlineCalEndAfterEarlier = await calEndState();
+
+  ck('the offline ‹ Earlier press was made at all', pressedOffline === true);
+  // Absolute conjuncts, not "different from before" alone: a comparison
+  // against the reference press alone is satisfied by two windows that both
+  // stayed put.
+  ck('offline, ‹ Earlier moves the range and lands on the same page the '
+    + 'online press landed on, with the same calEnd',
+    offlineAfterEarlier !== offlineAtNow && offlineAfterEarlier === onlineAfter
+      && offlineCalEndAfterEarlier === onlineCalEnd,
+    `range ${offlineAtNow} -> ${offlineAfterEarlier} (online ${onlineAfter}), `
+    + `calEnd ${offlineCalEndAfterEarlier} (online ${onlineCalEnd})`);
+
+  const pressedToday = await calNav('Today');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== `
+    + `${JSON.stringify(offlineAfterEarlier)}`);
+  const offlineAfterToday = await calRange();
+  const offlineCalEndAfterToday = await calEndState();
+
+  ck('the offline Today press was made at all', pressedToday === true);
+  ck('offline, Today returns to the at-now readout and clears calEnd',
+    offlineAfterToday === offlineAtNow && offlineCalEndAfterToday === null,
+    `range ${offlineAfterToday} (expected ${offlineAtNow}), calEnd ${offlineCalEndAfterToday}`);
+
+  await send('Network.emulateNetworkConditions',
+    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: false }, sessionId);
+  await sleep(500);
 
   /* ---------- the zoom choice persists ---------- */
 
@@ -349,6 +593,135 @@ try {
     `cell=${afterReload.cell}px span=${afterReload.span}`);
   ck('today is visible after a reload',
     afterReload.last >= cal.todayISO, `last=${afterReload.last}`);
+
+  /* ---------- reopening a habit resets the paged position (#274) ---------- */
+
+  // Placed here rather than beside the "paging redraws the card" block above:
+  // it must not disturb the persistence checks just run (which assert the
+  // zoom was left at 'wide' and reload to prove it) or the restoring PUT
+  // below. It runs at whatever zoom the persistence block left the page on —
+  // 'wide', per the check just above — which the in-page-redraw check further
+  // down verifies rather than assumes.
+  console.log('\n--- reopening a habit resets calEnd ---');
+
+  // `.detail-head button` (as used at `:385`) plus a fresh row click — the
+  // in-app path, not `openFirstHabit`'s `Page.navigate`, because a full
+  // navigation would reset `state.calEnd` for a reason that has nothing to do
+  // with `!redraw` and prove nothing about it.
+  const backToDashboard = async () => {
+    await ev(`document.querySelector('.detail-head button')?.click()`);
+    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
+      { what: 'the dashboard grid' });
+    await sleep(400);
+  };
+  // Opens by INDEX rather than by name: the fixtures give four habits
+  // (Meditate, Gym, Read, No late-night snacks — fixtures.mjs), and index 1
+  // (Gym) only has to be "a different habit from index 0", not any specific
+  // one.
+  const openHabitByIndex = async (i) => {
+    await ev(`[...document.querySelectorAll('.habit-row .habit-name, .habit-row .name')]
+      [${i}]?.click()`);
+    await waitUntil(ev, `!!document.querySelector('[aria-label="Completion calendar"]')`,
+      { what: 'the calendar card' });
+    await sleep(400);
+  };
+
+  // The reload just above left habit 1 open on a brand new document, so
+  // `state.calEnd` is null there and this is the at-now readout every check
+  // below compares against — captured once rather than re-derived per check,
+  // which is what keeps a local-midnight crossing from producing three
+  // different "at-now" strings that quietly still agree with each other.
+  const atNowReadout = await calRange();
+  ck('the calendar has a range readout to compare against',
+    atNowReadout !== '', atNowReadout);
+  const freshCalEnd = await calEndState();
+  ck('...and calEnd is null on this freshly reloaded page',
+    freshCalEnd === null, String(freshCalEnd));
+
+  /* ----- 1: opening a DIFFERENT habit resets calEnd — the case Mark called not in question ----- */
+
+  const pagedHabit1 = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(atNowReadout)}`);
+  const habit1PagedEnd = await calEndState();
+  const habit1PagedRange = await calRange();
+  ck('paging habit 1 sets a non-null calEnd',
+    pagedHabit1 === true && habit1PagedEnd !== null,
+    `pressed=${pagedHabit1} calEnd=${habit1PagedEnd}`);
+  ck('...and moves the range off the at-now readout',
+    habit1PagedRange !== atNowReadout, `${atNowReadout} -> ${habit1PagedRange}`);
+
+  await backToDashboard();
+  await openHabitByIndex(1); // a different habit (Gym)
+  const crossHabitCalEnd = await calEndState();
+  const crossHabitRange = await calRange();
+  ck('opening a DIFFERENT habit resets calEnd to null',
+    crossHabitCalEnd === null, String(crossHabitCalEnd));
+  ck("...and habit 2 opens at the at-now readout, not habit 1's paged window",
+    crossHabitRange === atNowReadout,
+    `${crossHabitRange} (expected ${atNowReadout}; habit 1 was showing ${habit1PagedRange})`);
+
+  /* ----- 2: reopening the SAME habit ALSO resets calEnd — the decision, not the bug ----- */
+
+  await backToDashboard();
+  await openHabitByIndex(0); // habit 1 again
+  const pagedAgain = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(atNowReadout)}`);
+  const habit1PagedEnd2 = await calEndState();
+  ck('paging habit 1 (again) sets a non-null calEnd',
+    pagedAgain === true && habit1PagedEnd2 !== null,
+    `pressed=${pagedAgain} calEnd=${habit1PagedEnd2}`);
+
+  await backToDashboard();
+  // Reopen the SAME habit: `dashboard.paint()` nulls `state.openHabitId` on
+  // the way back, so `open()`'s `redraw` reads false here exactly as it does
+  // for a different habit — this is the half the "cross-habit" check above
+  // cannot exercise, and it must be its own named check.
+  await openHabitByIndex(0);
+  const sameHabitCalEnd = await calEndState();
+  const sameHabitRange = await calRange();
+  ck('reopening the SAME habit resets calEnd to null too',
+    sameHabitCalEnd === null, String(sameHabitCalEnd));
+  ck('...and it opens at the at-now readout',
+    sameHabitRange === atNowReadout, `${sameHabitRange} (expected ${atNowReadout})`);
+
+  /* ----- 3: an in-page redraw (a zoom press) KEEPS the position ----- */
+
+  const pagedForZoom = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(atNowReadout)}`);
+  const beforeZoomCalEnd = await calEndState();
+  ck('paging before the redraw check sets a non-null calEnd',
+    pagedForZoom === true && beforeZoomCalEnd !== null,
+    `pressed=${pagedForZoom} calEnd=${beforeZoomCalEnd}`);
+
+  // Verify which zoom direction is live rather than assume '+': the suite
+  // leaves the calendar at 'wide' by the time this block runs (the
+  // persistence check just above confirms it), where zooming further OUT is
+  // already disabled.
+  const zoomBefore = await measure();
+  ck('exactly one zoom direction is live before the redraw check',
+    zoomBefore.zoomIn !== zoomBefore.zoomOut, JSON.stringify(zoomBefore));
+  const liveZoomLabel = zoomBefore.zoomIn ? '−' : '+';
+
+  const zoomPressed = await calNav(liveZoomLabel);
+  // A zoom press is `redraw === true` (same habit) and legitimately changes
+  // `CAL_WEEKS`, so settle on the cell size moving rather than on the range
+  // readout — asserting the readout stayed put would be asserting the zoom
+  // did nothing, not that the position survived it.
+  await settled(`(()=>{
+    const svg=document.querySelector('[aria-label="Completion calendar"]');
+    const r=[...svg.querySelectorAll('rect')].find(x=>x.dataset.date) ?? svg.querySelector('rect');
+    return Math.round(r.getBoundingClientRect().width) !== ${zoomBefore.cell};})()`);
+  const afterZoomCalEnd = await calEndState();
+  ck('an in-page redraw (a zoom press) keeps the paged position instead of resetting it',
+    zoomPressed === true && afterZoomCalEnd === beforeZoomCalEnd && afterZoomCalEnd !== null,
+    `calEnd ${beforeZoomCalEnd} -> ${afterZoomCalEnd}`);
+
+  // This press moves the stored zoom off 'wide'; the restoring PUT just below
+  // sets `calendarZoom` back to 'default' regardless, so nothing here needs
+  // its own cleanup.
 
   // Leave the account as it was found.
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',

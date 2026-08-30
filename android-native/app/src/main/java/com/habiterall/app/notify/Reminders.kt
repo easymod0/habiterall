@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.Data
@@ -29,6 +30,9 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.TimeUnit
+
+/** `adb logcat -s habiterall.notify` is the whole point of this being one tag. */
+private const val TAG = "habiterall.notify"
 
 /**
  * Turns each habit's `reminder_time` into an Android alarm.
@@ -82,11 +86,15 @@ object Reminders {
      * [Notifications.EXTRA_SNOOZED] tells the receiver not to arm tomorrow's
      * from this firing, and [Notifications.EXTRA_DATE] carries **the day the
      * reminder was about**, because the rule this feature exists for cannot be
-     * enforced at arm time alone: the alarm may be inexact — which is the
-     * ordinary case on Android 14+, where `SCHEDULE_EXACT_ALARM` is not granted
-     * by default — and an inexact alarm set for 23:52 can be delivered at 00:03,
-     * after which `LocalDate.now()` names a day the reminder was never about.
-     * The worker checks it against its own today; see [stillAboutToday].
+     * enforced at arm time alone: the alarm may be inexact — on API 31-32 for a
+     * user who has revoked "Alarms & reminders", since `USE_EXACT_ALARM` covers
+     * 33+ unconditionally and nothing below 31 needs a permission — and an
+     * inexact alarm set for 23:52 can be delivered at 00:03, after which
+     * `LocalDate.now()` names a day the reminder was never about. The worker
+     * checks it against its own today; see [stillAboutToday]. Above 32 that
+     * check is belt and braces and stays anyway: it costs one string in an
+     * extra, and an exact alarm is a promise about when the system WAKES, not
+     * about how long the work behind it then takes.
      *
      * @param date null when CANCELLING, where the extras are irrelevant:
      *   `filterEquals` ignores them, so the uri alone finds the live one.
@@ -202,6 +210,34 @@ object Reminders {
     }
 
     /**
+     * What the last arm decided, so the fallback WARN in [setAlarm] is one line
+     * per CHANGE of state rather than one per arm.
+     *
+     * [schedule] runs once per habit on every fetch and
+     * `HabitWidget.armMidnight` goes through [setAlarm] too, so an
+     * unconditional line is one WARN per habit per app resume — on a phone with
+     * thirty reminder habits, hundreds of identical lines a day describing a
+     * single persistent state. That is the shape `shared/CLAUDE.md` names on the
+     * server side ("1,440 lines a day is how a log stops being read"), and the
+     * server's answer is the `once` dedupe in `shared/src/notify.js`. This is
+     * the same answer with a smaller key.
+     *
+     * It caches the LOGGING, never the permission: [setAlarm] still calls
+     * `canScheduleExactAlarms()` on every arm, so a grant or a revocation still
+     * takes effect on the very next alarm — it just also gets exactly one line
+     * when it does, in either direction. `null` is "nothing armed yet in this
+     * process", so the first inexact arm after a cold start always speaks.
+     *
+     * `internal` rather than `private` for `ManageScreen`'s reason, one file
+     * over: Robolectric caches a sandbox per SDK level ACROSS test classes, so
+     * an `object`'s field outlives the test that set it and a suite asserting
+     * "the fallback logs" would depend on which test ran first. `ReminderWiringTest`
+     * resets it in `@Before`. Nothing in production writes it but [setAlarm].
+     */
+    @Volatile
+    internal var lastArmWasExact: Boolean? = null
+
+    /**
      * Set one alarm, as punctually as this install is allowed to.
      *
      * Public because the home-screen widget's midnight redraw wants the same
@@ -213,15 +249,83 @@ object Reminders {
      */
     fun setAlarm(context: Context, at: Long, intent: PendingIntent) {
         val manager = alarmManager(context)
-        // Exact alarms can be revoked by the user on API 31+. Falling back to
-        // an inexact alarm keeps reminders working, just less punctually —
-        // better than silently dropping them.
+        // Which permission answers this depends on the version, and the
+        // manifest declares both. From 33 up it is `USE_EXACT_ALARM`, which is
+        // protection level `normal` — granted at install and not revocable —
+        // so this is true there with nobody asked. On 31-32 it is
+        // `SCHEDULE_EXACT_ALARM`, granted by default but revocable under
+        // "Alarms & reminders", and that is the one range where the fallback
+        // below is reachable. Under 31 no permission exists to revoke. Falling
+        // back to an inexact alarm keeps reminders working, just less
+        // punctually — better than silently dropping them. The read happens on
+        // every arm, so a grant or a revocation needs no migration.
+        //
+        // This is deliberately SOFT, not Loop's answer: `IntentScheduler` there
+        // logs "No permission to schedule exact alarms", answers
+        // `SchedulerResult.IGNORED` and schedules nothing at all. That is
+        // rejected here — on 31-32 the user affected is already receiving
+        // late-but-real reminders, and refusing would convert a punctuality bug
+        // into silence. So the `else` below still arms, and now only stops
+        // being quiet about it.
         val canBeExact = Build.VERSION.SDK_INT < 31 || manager.canScheduleExactAlarms()
+        // Read and cleared around the branch, not inside it, so a return to the
+        // exact path re-arms the warning for the next revocation — see
+        // `lastArmWasExact`. The `at` is deliberately gone from the message: it
+        // was the one part that differed between otherwise identical lines, so
+        // it made a repeat look like news while saying nothing about the state
+        // being reported. The alarm's own time is not what is wrong here.
+        val stateChanged = lastArmWasExact != canBeExact
+        lastArmWasExact = canBeExact
         if (canBeExact) {
             manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         } else {
+            if (stateChanged) {
+                Log.w(
+                    TAG,
+                    "exact alarms not permitted; arming inexactly until this changes " +
+                        "(\"Alarms & reminders\" is off for this app)",
+                )
+            }
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
         }
+    }
+
+    /**
+     * Whether an alarm armed right now would be INEXACT for a reason the user
+     * can undo — a narrower question than `!canScheduleExactAlarms()`, which is
+     * also true below 31 (no permission exists to ask about) and would be true
+     * on every phone from 33 up with nothing anybody can do about it.
+     *
+     * The upper bound is the load-bearing half: from 33 the app holds
+     * `USE_EXACT_ALARM`, protection level `normal`, granted at install and never
+     * revocable, so there is no toggle to have turned off — a line saying
+     * otherwise would be false on every current phone, and false in the
+     * direction nobody notices, since nothing on 33+ is ever late to disprove
+     * it. Below 31 there is no permission to have revoked either, which is the
+     * lower bound.
+     *
+     * Read at DRAW time, same as [setAlarm]'s own check, and nothing here
+     * caches it: a grant or a revocation made in Android's own settings shows
+     * up with no migration and nothing to invalidate.
+     *
+     * **Do not hoist this call into a `remember { }` or a `LaunchedEffect(Unit)`.**
+     * It is an argument expression at `ManageScreen`'s call site, so it is
+     * asked again on every recomposition — and `account` being `mutableStateOf`
+     * means a patch or the list's own fetch recomposes that screen, which is
+     * how a toggle flipped while Settings was open still corrects itself
+     * without being closed. Remembering it would freeze the one answer that
+     * has to be able to change underneath the screen.
+     *
+     * What is genuinely missing is an `ON_RESUME` re-read: come back from
+     * Android's own settings having flipped the toggle and touch nothing else,
+     * and the old answer stands until something recomposes or Settings is
+     * closed and reopened. `androidRemindersSupported` on the line above has
+     * carried exactly the same gap since it was written.
+     */
+    fun exactAlarmsRevoked(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 31) return false
+        if (Build.VERSION.SDK_INT > 32) return false
+        return !alarmManager(context).canScheduleExactAlarms()
     }
 
     /**
@@ -260,12 +364,14 @@ object Reminders {
      *
      * The second half of the rule above, and it exists because arming is not
      * the last chance to be wrong. `setAlarm` falls back to
-     * `setAndAllowWhileIdle` when exact alarms are not permitted — which on
-     * Android 14+ is the ordinary case, since `SCHEDULE_EXACT_ALARM` is not
-     * granted by default — and an inexact alarm is loose by minutes: armed at
+     * `setAndAllowWhileIdle` when exact alarms are not permitted — API 31-32
+     * with "Alarms & reminders" revoked, `USE_EXACT_ALARM` covering 33+
+     * unconditionally — and an inexact alarm is loose by minutes: armed at
      * 22:52 for 23:52, delivered at 00:03. The press was legal and the delivery
      * is late, so the check has to happen where `today` is known, at the point
-     * of posting.
+     * of posting. On 33+ it is belt and braces rather than dead, and cheap
+     * enough to keep: an exact alarm bounds the WAKE, not the fetch and the
+     * notification build that follow it.
      *
      * [about] is null for the DAILY alarm, which names no day and means
      * whichever day it arrives on. Only a snooze carries one.

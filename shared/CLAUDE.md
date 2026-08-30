@@ -25,6 +25,7 @@ Postgres one.
 | `src/password.js` | hashing, verification, and the one answer to "is auth on?". Personal's half of the shared sign-in flow; cloud uses none of it |
 | `src/log.js` | structured logging: one event per line, one stream, and the redaction that keeps personal data out |
 | `src/observe.js` | `logStartup`, `requestLog` and `watchRuntime` — an Express-shaped middleware that never imports Express |
+| `src/shutdown.js` | the drain between the signal and the exit, and the deadline that bounds it — handed a server, importing no HTTP framework |
 | `src/types.js` | JSDoc typedefs, exporting nothing at runtime. The contract between three packages |
 | `public/app.js` | boot, the top bar, the PWA; `start(authAdapter)` is the entry |
 | `public/ui/store.js` | view state, and the `'change'` / `'reload'` channel views listen on |
@@ -168,6 +169,28 @@ screen reader gets. It is in `JSON_HABIT_FIELDS` and in no Loop list: Loop's
 schema has nowhere to put it, so a Loop round trip correctly returns it to `''`,
 the same asymmetry `at_most_unlogged` and `show_as` already have.
 
+**A habit's `category_id` is a replace-rule field too, and its absent value is
+a stated clear.** Because `PUT /habits/:id` REPLACES, a write that omits
+`category_id` clears the habit's category exactly as an omitted `icon` clears
+that field — there is no partial-update path that leaves a category alone by
+not mentioning it. Every writer has to carry the current value forward on
+every edit, including a phone edit: Android's contribution here is
+carry-through only — it must never clear a category, and it gains neither a
+picker nor a grouped list this PR. `parseHabit` only ever produces a positive
+safe
+integer or `null` from it; it does not check the id refers to a category that
+exists — that lookup needs the caller's own rows, which is why it happens in
+the route (`resolveCategoryId`) and not in the shared parser.
+
+**Uncategorised is a state a habit is in, never a category it belongs to.**
+`category_id IS NULL` is the whole representation: there is no row named
+"Other" for it, no category a user can rename or delete on its behalf, and the
+dashboard's grouped view always draws it as a trailing section rather than
+omitting it — the same discipline the four day states get in the root
+`CLAUDE.md`. Deleting a category does not delete its habits: `ON DELETE SET
+NULL`, never `CASCADE`, moves them into that same uncategorised state with
+every entry and note untouched.
+
 ## Scoring, streaks and stats
 
 **The score is a trailing-window ratio**, not per-day credit scaled by frequency.
@@ -240,12 +263,36 @@ calls, because `/habits/:id/stats` still needs every one of the eight.
 element.** The old walk pushed the string it was handed before normalising
 anything, so element 0 was the raw `start` and every later element was
 `toISO`'d. The two differ exactly when `toISO(fromISO(start)) !== start`, which
-is a date that is not a real day (`dateRange('2026-02-30', …)` opened on
-2026-02-30 and then skipped 2026-03-02, the real day the rollover lands on) or
-a year before 1000, where `toISO` drops the padding and the old list was
-internally inconsistent — `0100-02-25` followed by `100-02-26`. Building the
-`Date` up front means every element is normalised, so the list is a contiguous
-run of days that happened, spelled one way.
+is a date that is not a real day — `dateRange('2026-02-30', …)` opened on
+2026-02-30 and then skipped 2026-03-02, the real day the rollover lands on.
+A year before 1000 used to be a second case, because `toISO` dropped the
+padding and the old list was internally inconsistent — `0100-02-25` followed
+by `100-02-26`; both `toISO` and `dateRange`'s own prefix pad the year to four
+digits now. Building the `Date` up front means every element is normalised, so
+the list is a contiguous run of days that happened, spelled one way.
+
+**A date is a real day spelled `YYYY-MM-DD`, and the padding is not
+cosmetic.** The whole stats model compares dates as strings — `from <= date <=
+end`, `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+only while every date has four year digits, two month digits and two day
+digits. `999-12-31` sorts ABOVE `2016-…`, so a day a thousand years in the past
+reads as one in the future to every comparison in the file. `toISO` pads all
+three fields, and `dateRange` — the one place in `stats.js` that spells a date
+without calling `toISO` — pads the year on its cached `'YYYY-MM-'` prefix, not
+per element, so the walk costs the same as it did. `test/stats.test.js` pins
+both, in literals rather than against a second implementation, and in the days
+themselves rather than in a LENGTH: `String(-1).padStart(4, '0')` is `'00-1'`,
+so `'00-1-01-01'` is ten characters and not a date, and a guard a malformed
+value satisfies is weaker than it reads. `toISO`'s domain is years 1-9999 and
+its JSDoc says so.
+
+**There is a third site and it is in the browser: `iso()` in
+`public/ui/dates.js`.** It is the source of `todayISO()` and `addDaysISO()`,
+and `ui/dashboard.js` compares its output against server dates lexically, so
+the same rule holds there and it pads the year too (`test/dates.test.js`). No
+client can reach a year before 1000 — `todayISO()` is the device clock — so
+that one is unreachability being made into canonicality, which is what stops
+the property depending on who calls it.
 
 Only the first of those is reachable through the app: `boundedRange` clamps a
 low-year start long before `dateRange` sees it, while a phantom date survives
@@ -255,6 +302,37 @@ it matters because `computeStats` takes `from` as the earliest STORED entry
 when a caller names no window. An account holding such a row sees its derived
 figures move once. That is the phantom day leaving them, not a regression.
 
+**Every route that takes a date into a RANGE calls `assertDate`, and one route
+deliberately does not.** `DATE_RE` is a shape and nothing more, so it admits
+`2026-00-10` and `2026-02-30` — and a route that takes one of those into the
+window arithmetic gets two answers to one question, because `fromISO` ROLLS the
+bad component over while `totalCompleted` compares the raw string. `queryDate`
+(`src/validate.js`) is the one guard for that: absence returns the caller's
+fallback, everything else goes through `assertDate`, and a non-string — a
+REPEATED query parameter is an array — is turned into `''` rather than
+string-coerced. That last clause is a rule stated, not a bug patched, and the
+JSDoc there says which: under Express 5's default `simple` parser a repeated
+`end` is always a two-or-more-element array, so it carries a comma and
+`DATE_RE` refuses it either way. It is the `extended` parser, which can produce
+a ONE-element array, where the coercion yields a valid-looking date and
+`assertDate` then calls `.split` on an array — a 500. Neither edition sets that
+parser; the guard is what makes it not matter if one ever does.
+Three routes and five parameters, in each of the two editions: `end` and
+`start` on `GET /habits/:id/stats` and on `GET /categories/stats`, and `end` on
+`GET /overview`. The exception is
+`DELETE /habits/:id/entries/:date`, which stays on `DATE_RE` — its date keys a
+single row and reaches no range, no comparison and no computed figure, and rows
+filed under a day that does not exist are exactly what the paragraph above says
+are out there, so `assertDate` on that path would make one permanently
+undeletable through the API. `habiterall-personal/test/querydate.integration.mjs`
+and the matching block in `habiterall-cloud/test/api.integration.mjs` pin it,
+at the routes, because nothing here can say which validator a route reached
+for. What those two do NOT pin is the `typeof` clause: a repeated `end` is a
+400 without it, on the comma, and both suites say so where they used to credit
+the guard. The clause is pinned in `shared/test/validate.test.js` instead,
+since no route as configured can be pointed at the one-element array it exists
+for.
+
 `computeStats` therefore normalises `from`, and that half is not optional:
 `totalCompleted` selects by STRING comparison against `from` while every other
 figure is read off the walked list, so an un-normalised `from` counts the
@@ -262,15 +340,44 @@ phantom row in one figure and in none of the others — exactly the disagreement
 the note above `totalCompleted` says was fixed.
 
 **It normalises AFTER the two clamps, never before, and the ordering is the
-whole safety of it.** `toISO` pads the month and the day and **not the year**,
-so normalising `0999-12-31` yields `999-12-31` — which sorts ABOVE `2016-…`
-and sails straight past the `earliest` clamp that `MAX_RANGE_DAYS` is enforced
-by. `assertDate` accepts that date (999 is a real year and does not roll over,
-where `0050` does and is refused), so one `PUT /entries/0999-12-31` reached it:
-the payload collapsed to a single day and reported zero completions for a
-habit logged every other day, with nothing logged and no row findable through
-a UI that now showed no days at all. Clamped first, `from` is inside the
-window before anything reformats it.
+whole safety of it.** Normalising is a ROLLOVER of a string that came out of
+storage, and a rollover moves the date by an amount nothing in `resolveWindow`
+bounds: `9999-99-99` lands in year 10007, five digits, which sorts BELOW
+`2026-…` however the year is padded. Normalised first it clamps to `earliest`,
+so one junk row opens the widest window `MAX_RANGE_DAYS` allows on every
+request for a habit that has none of those days; clamped first it is `end`. The
+same ordering, for the same reason, in `computeCategoryStats`' `memberWarm`,
+where that five-digit year would otherwise compare as OLDER than `warmStart`
+and score a member over a warm-up it never had.
+
+**It is NECESSARY AND NOT SUFFICIENT, which is #270.** The clamp is a string
+comparison and the reformat is a rollover worth up to ~8 years, so a date
+inside the window *lexically* can land outside it afterwards with neither clamp
+having run since. `2026-07-99` sorts below an `end` of `2026-08-18`, normalises
+to `2026-10-07`, and `boundedRange` answers `[]` — every figure zero for a
+habit with a live nine-day streak. `memberWarm` has the same hole above
+`warmStart`. Both are older than the year padding (measured byte-identical on
+master) and neither is something the ordering ever closed; the fix is to
+re-apply the clamps AFTER the reformat, and it is filed rather than done
+because it changes what an affected account's figures say. Do not read the
+paragraph above as saying the window is safe — it says only which of the two
+orderings is less wrong.
+
+The year padding closed the same trap one step earlier, and it was LATENT
+rather than live — say it that way round, because the difference is the whole
+of what a reader can check. `toISO` used to pad the month and the day and not
+the year, so normalising `0999-12-31` yielded `999-12-31` — ABOVE `2016-…`,
+and above the `earliest` clamp `MAX_RANGE_DAYS` is enforced by. What stopped
+that being a wrong figure is the ordering above: `from` has already been
+clamped to `earliest` by the time anything reformats it, and
+`toISO(fromISO('2016-08-10'))` is a no-op under both spellings. Measured, by
+reverting the padding on the fixed tree: the year-0999 test in
+`test/stats.test.js` still passes and only the canonical-spelling literals
+fail. So no account's figures moved, and the padding is worth having for what
+it stops being true — invert that ordering, or normalise an unclamped stored
+date anywhere else (`assertDate` accepts `0999-12-31`, 999 being a real year
+that does not roll over where `0050` does), and an unpadded year is a payload
+collapsed to a single day with nothing findable behind it.
 
 **And `n` counts elapsed 24-hour spans while the loop takes calendar steps**,
 which agree everywhere except a zone that moved the date line WESTWARD and so
@@ -381,6 +488,76 @@ positional: `calendarWindow` decides which day the column starts on and the
 grid fills sequentially from there. What it does need is the labels, and
 Home/End, which jumped to `getDay() === 0` and so walked off the top of a
 Monday-start grid.
+
+**A CATEGORY has no score of its own, and `computeCategoryStats` aggregates
+HABITS rather than entries.** The decay above carries a `sqrt(frequency)` term,
+and that term is the whole reason a 3×/week habit's number is comparable with a
+daily one's — a category has as many frequencies as it has members, plus a mix
+of boolean/numerical and at_least/at_most, so there is no single frequency
+`onPaceSeries` could be handed for one. What is reported is the mean of the
+members' own strengths, **equal weight per habit**: never per entry, which lets
+a daily member drown a weekly one, and never re-derived from raw entries, which
+would be a second answer to a question `computeStats` already answers. The mean
+never travels alone either — `members` is the n and `best`/`worst` are the
+spread, on the same payload, because a mean over an unstated number of habits
+is a figure its reader cannot check.
+
+**Each member is scored over `[start - SCORE_WARMUP_DAYS, end]` — clamped
+forward to that member's own first entry — and sliced back to `[start, end]`.**
+`computeScores` starts its EWMA at 0 on the first day of the range it is handed,
+and `ui/detail.js` sends **no `start`** to `/habits/:id/stats` — so a habit's own
+page is always converged from its first entry, while a comparison starting cold
+at `start` reports that same habit weaker. Two surfaces disagreeing about one
+habit is indistinguishable from one of them being broken. `SCORE_WARMUP_DAYS` is
+400, the number both editions' `/overview` already spends on the same problem,
+and it is exported from `stats.js` and imported by both routes rather than
+spelled once per edition. What makes it easy to lose again: a year of window
+swamps the warm-up, so dropping it moves nothing on the DEFAULT request and only
+an explicitly short `start` can falsify it — measured in
+`docs/decisions/categories.md`, and the reason the suite's window is 20 days
+rather than the route's own year.
+
+**The CLAMP is the other half and is not a detail**, because a habit's own page
+opens at `start ?? firstEntry` and a warm-up reaching further back is scoring a
+member over a window it never had. On an at-least member those phantom days
+credit 0 and the two surfaces agree anyway, which is what made this survive a
+suite of them; under `at_most_unlogged: 'success'` — every `show_as: 'avoid'`
+habit when the account says so — an unlogged day is FULL credit, so 400 days
+before the habit existed converged a limit to **0.97** against an own page of
+**0.41**, for the first ~430 days of its life. The clamped date is normalised
+**after** the clamp for the reason `resolveWindow` gives at length, and
+`landedAt` reads that same normalised date rather than the raw `firstEntry`:
+`computeScores` normalises the start it is handed while the landing rule
+compares strings, so a member dated `2026-02-30` was admitted on `2026-03-01`
+with no score point behind it and put one NaN bucket through the series.
+
+**A member that has never been logged has no strength, which is not a strength
+of zero** — the same claim `recovery.rate === null` already makes, and the same
+refusal to average it into a number. It is counted in `members` and in
+`unloggedExcluded` and left out of `mean`, `best`, `worst` and every bucket of
+`series` until its first entry lands, so adding a habit to a category raises two
+counts and moves no figure downward; a bare mean would report that your health
+got worse on the day you decided to do more about it. That landing rule is asked
+once and used by all four, which is what makes `series.at(-1).value === mean`
+hold unconditionally — the same members, the same day, the same arithmetic —
+because a chart whose last point disagrees with the number printed over it reads
+as a bug whichever of the two is right. "Never logged" is not "nothing in the
+entry slice": a route fetches a bounded window, so the LIFETIME first-entry date
+is supplied per member, and an abandoned habit keeps its genuine near-zero
+strength in the mean instead of being excused from it.
+
+**`MAX_COMPARE_DAYS` is 1830 and is deliberately not `MAX_RANGE_DAYS`.** That
+ceiling bounds a route walking ONE habit; a comparison walks every habit the
+account has, so the same span costs the habit count times as much — at 50
+habits, `MAX_RANGE_DAYS` is ~385,000 synchronous day-steps before the warm-up is
+added, the order of the year-0100 entry the root `CLAUDE.md` records blocking
+the event loop for 32 seconds. `COMPARE_WINDOW_DAYS` is what an absent `start`
+opens, 365 and never the ceiling, because the ORDINARY request must not be the
+worst case the route can be asked for — the shape `/overview` already has, where
+`days` defaults to 30 against a cap of 365. Both live here beside
+`SCORE_WARMUP_DAYS` and are imported by both editions: a ceiling that drifted
+would have one edition refuse a URL the other served, and a default that drifted
+would have them answer one `start`-less URL with different bucket counts.
 
 ## Awards
 
@@ -926,6 +1103,16 @@ at the sleep rather than fixed there.
 
 ## Traps
 
+**An id that COERCES is not an id.** `Number()` answers 0 for `null`, `''` and
+`[]`, 1 for `true`, and 7 for `[7]`, so `Number.isInteger(Number(n))` accepts
+all of them — which is how `POST /categories/reorder` came to move a category
+nobody had named in one edition and answer 200 having moved nothing in the
+other. `parseCategoryId` gates on `typeof` FIRST, which makes those spellings
+unrepresentable rather than filtered one at a time, and both editions ask it
+so a malformed reorder cannot be a 400 in one and a 200 in the other. Note it
+is deliberately not the rule `parseHabit` applies to `body.category_id`: there
+the id arrives in a JSON body, where a number is the only honest spelling.
+
 **A READER must never collapse `unknown` into `no`.** The root `CLAUDE.md` has
 the four states, the ban on `?? UNSET` and what a stored lapse does to a window;
 what belongs here is the shape that makes the mistake unreachable.
@@ -938,6 +1125,122 @@ so that decision is written once, and `normalizeEntry` answers
 was the exception and did not know it — six passes wrote `?? UNSET`, harmless
 for an at-least habit, and a limit with no entries at all reported a 30-day
 streak.
+
+**`server.close()` is not a drain.** On Node 26 it does sweep the connections
+that are idle at the instant it is called, which is what makes the obvious fix
+look like it works; it says nothing about a connection that was IN FLIGHT when
+the signal landed and goes idle a moment later. Nothing closes that one — it sits
+until `keepAliveTimeout`, and a pooling reverse proxy never leaves it idle long
+enough to expire at all, so the process runs until Docker's SIGKILL takes it with
+its in-flight requests. Measured on the real personal server: 5ms when the socket
+was already idle, **6158ms** when it went idle after the signal, and **20188ms
+having served 70 further requests** when the peer kept using the pool.
+`docs/decisions/connectivity.md` has the numbers and the mutations behind them.
+
+The mechanism is therefore the sweep hooked to **every response's `close` while
+draining**, and it is attached at INSTALL time rather than by the signal handler.
+A request already in flight had its `request` event long ago, so a hook installed
+by the handler could never see it — and that is the only case that hangs.
+
+**The sweep is a trade, and every measurement flatters it, so say the other half
+out loud.** Shutting a pooled socket the moment it goes idle DROPS a request the
+peer had already written onto it — those 70 requests master served are requests
+this branch does not — and a proxy will not retry that one, because bytes were
+already on the wire when the connection went. Caddy pools upstream connections
+and `examples/Caddyfile` is a bare `reverse_proxy` with no retry configured, so
+it surfaces as a 502. The trade is still right (one bounded loss against an
+unbounded wait that ends in a SIGKILL losing in-flight work anyway) and it is
+still not free, which is why check 2 of the personal drain suite bounds "further
+requests served" at `<= 1` rather than `=== 0`. It is also the argument for #208:
+a readiness signal is the only thing that stops the proxy handing us the request
+we are about to drop.
+
+Two more consequences worth knowing before touching `installShutdown`: the
+deadline is a
+constant (8s) and not an environment variable, because it has to hold for an
+operator who never sets `stop_grace_period` and so gets Docker's default 10s; and
+the deadline path deliberately runs **no** `cleanup`, since something is already
+stuck and a `closePool()` that hangs too would lose the exit the deadline just
+bought. A cleanup that REJECTS **or throws synchronously** — cloud's
+`closePool()` is the first, personal's `db.close()` the second, and
+`.then(() => cleanup())` rather than `Promise.resolve(cleanup())` is the one line
+that covers both — is the third exit: `shutdown.cleanup_failed` and
+`exit(1)`, caught rather than left to become an unhandled rejection — because
+there the drain SUCCEEDED and only the storage teardown failed, and an unhandled
+rejection would have reported that as a crash: no line, a raw stack, and nothing
+to tell it from the SIGKILL this whole module exists to get ahead of.
+
+**There is a second hole and it is earlier: the signal that arrives before
+anything is listening.** Node is PID 1 in both images (exec-form `CMD`, no init),
+and for PID 1 a signal with DEFAULT disposition is *discarded* rather than
+fatal — so between process start and `installShutdown` a `docker stop` did
+nothing whatever and the operator waited the full grace for the SIGKILL, which is
+the failure above arriving by a second route and before the server it drains
+exists. Both editions have the window and **neither is unbounded** — cloud's is
+merely the long one. `await initAuth()` there is OIDC discovery, and
+openid-client 6.8.5's `performDiscovery` is `const timeout = options?.timeout ??
+30`, which neither call site in `habiterall-cloud/src/auth.js` overrides, so an
+IdP that accepts the connection and never answers aborts the boot with a
+`TimeoutError` at ~30s. That is what makes the arm necessary rather than what
+would: 30s is **three times** the `stop_grace_period: 10s` all three shipped
+compose files set, so a `docker stop` landing anywhere in that window waits out
+the whole grace and is SIGKILLed regardless of the bound. Check the bound again
+after an openid-client bump. Personal's window is `await initAuth()` too, where
+`verifyPassword` runs scrypt with the cost parameters read out of the STORED
+hash — measured with a p=128 credential, `shutdown.armed` at 91-101 ms against a
+`startup` at 3292-3382 ms, and signalled inside that it left in 30-34 ms;
+cloud's in 12-19 ms. Spreads rather than single figures, over the runs this
+took: one number here is pinned to whichever run got written down.
+
+**What the arm covers is the entry module's BODY onward, and on personal that
+leaves the larger window outside it.** ES modules evaluate every import fully
+before the importing module's body runs, so the express/helmet/session import
+cost (~100–300 ms, fixed) is ahead of any arm placed in a module body — and so,
+on personal, is `habiterall-personal/src/db.js`, which at module scope opens the
+handle, runs the whole schema and runs the one-time `entries.status` migration:
+`ALTER TABLE entries ADD COLUMN status …` then an `UPDATE entries SET status =
+'skip' … WHERE value = 3 AND habit_id IN (…)`. That `UPDATE` is
+data-proportional and unbounded by anything this code controls, and it runs on
+the FIRST start after an upgrade from a pre-`status` build — the boot an operator
+is most likely to interrupt. What the arm does cover on personal is
+`await initAuth()`, which is one or two p=1 scrypts at 28 ms each on an instance
+with an environment credential and NO scrypt at all on one whose credential is
+in the database — `initAuth` hashes only inside `if (env)`, and the shipped
+compose file leaves all three credential variables empty. The suite has to seed
+a p=128 credential to make the window measurable at all, and that is the tell.
+So personal's covered window is small in production and cloud's
+is the one that matters. It is not closed here because closing it is a different
+change: a wrapper entry point that arms and then dynamically `import()`s the
+server touches a new entry file, both Dockerfiles' `CMD`, both `start` scripts and
+both drain suites' `serverPath`. Do not add one without deciding that separately.
+
+`armShutdown` is what closes it: a bare handler taken at the top of each entry
+point's module body ahead of every `await` — in cloud ahead of the `config_missing`
+env check too, so a process that exits on a missing `SESSION_SECRET` or
+`PUBLIC_URL` is still one that could have been stopped, and in personal gated on
+`isEntryPoint`, because importing the module for its routes must not install
+process signal handlers. **`DATABASE_URL` is not one of those two**, however that
+loop reads: `db/pool.js` calls `assertConnectionString(process.env.DATABASE_URL,
+…)` at MODULE scope and `server.js` imports it, and every import is evaluated
+before the importing module's body — so a missing or malformed `DATABASE_URL`
+kills the process on an uncaught throw at import time, before the arm and before
+the loop, whose `DATABASE_URL` branch is unreachable for the missing case. No arm
+in a module body could have covered it, and it exits in microseconds, so there is
+no window there worth having. It cannot drain
+anything, nothing having been accepted, so it closes whatever HAS been opened and
+exits **0**: nothing was dropped, and 1 stays reserved for the two failures
+above. It runs no `beforeClose`, because at arm time neither the notifier nor the
+runtime watcher exists. `installShutdown` then ADOPTS it and registers nothing of
+its own — a `process.off` + `process.on` pair has a gap between the two calls and
+this has none, and a second registration beside the arm is not a harmless
+redundancy but this fix's own defect re-created: one press runs both sequences,
+the early exit wins at ~5 ms, and the in-flight request goes with it. The two
+boot-window checks cannot see that (inside the window a doubled handler is
+indistinguishable from a single one) and the drain checks can, which is why the
+unit suite asserts `installShutdown` given an arm calls `onSignal` never.
+`shutdown.armed` is one info line per start, and it is also the predicate both
+drain suites wait on — what lets them signal INSIDE the window rather than after
+a sleep.
 
 **`shared/src` is not served to the browser.** Only `shared/public` is mounted,
 so `ui/settings.js` cannot import `notify.js` — the channel list is declared in

@@ -14,12 +14,15 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import androidx.work.WorkManager
 import androidx.work.testing.WorkManagerTestInitHelper
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowAlarmManager
+import org.robolectric.shadows.ShadowLog
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
@@ -50,6 +53,19 @@ import java.time.ZonedDateTime
 class ReminderWiringTest {
 
     private val app: Application get() = RuntimeEnvironment.getApplication()
+
+    /**
+     * `Reminders` is an `object`, and Robolectric caches one sandbox per SDK
+     * level ACROSS test classes in a JVM fork — so `lastArmWasExact` outlives
+     * the test that set it, and "does the fallback log?" would otherwise depend
+     * on which test in which class ran first. Cleared here so each test below
+     * starts from "nothing armed yet in this process", which is the state a
+     * cold start is in and the one the dedupe is specified against.
+     */
+    @Before
+    fun forgetTheLastArm() {
+        Reminders.lastArmWasExact = null
+    }
 
     private val manager
         get() = app.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -153,6 +169,106 @@ class ReminderWiringTest {
         assertEquals(2, alarms().size)
         assertTrue(Reminders.alarmUri(43, snoozed = false) in uris())
         assertTrue(Reminders.alarmUri(43, snoozed = true) in uris())
+    }
+
+    /* ---------- soft, not loud: an inexact arm still arms, and says so ---------- */
+
+    /**
+     * On 31-32 with "Alarms & reminders" revoked, `setAlarm` still arms — that
+     * is decision 1, "soft, not loud", and it is written down HERE: refusing
+     * (Loop's `SchedulerResult.IGNORED`) was rejected, so a future change
+     * toward that shape has to fail this test. It also stops being silent: a
+     * WARN reaches the tag this subsystem's logs share.
+     */
+    @Config(sdk = [32])
+    @Test
+    fun `an inexact arm still arms, and logs that it did`() {
+        // Stated rather than inherited. The shadow's own default IS "revoked",
+        // and that is the state a user who has not touched the toggle in this
+        // range is in — but a Robolectric bump that flipped the default would
+        // send this test down the EXACT branch, where the alarm count below is
+        // still 1 and only the window assertion notices. A test about the
+        // fallback must not be able to stop exercising the fallback quietly.
+        ShadowAlarmManager.setCanScheduleExactAlarms(false)
+        Reminders.schedule(app, habit(), androidEnabled = true)
+
+        assertEquals("refusing here is the rejected design", 1, alarms().size)
+
+        // WHAT ALARMMANAGER WAS HANDED, which is the half a count and a log
+        // line cannot see: `setAndAllowWhileIdle` records `WINDOW_HEURISTIC`
+        // (-1) and `setExactAndAllowWhileIdle` records `WINDOW_EXACT` (0), so
+        // this is the only assertion here that can tell the two branches apart.
+        // Both other assertions in this test are true whichever call was made.
+        assertEquals(
+            "the fallback must be the INEXACT call and not merely a logged one",
+            ShadowAlarmManager.WINDOW_HEURISTIC,
+            alarms().single().windowLengthMs,
+        )
+
+        val warnings = ShadowLog.getLogsForTag("habiterall.notify")
+            .filter { it.type == android.util.Log.WARN }
+        assertTrue(
+            "expected a WARN naming the fallback",
+            warnings.any { it.msg.contains("inexactly") },
+        )
+    }
+
+    /**
+     * The dedupe is a property of the WARN and not of the arming, so both
+     * halves are asserted: a second arm in the same state adds no line, and the
+     * alarm it was quiet about is armed exactly as the first one was.
+     *
+     * Without this, moving the `Log.w` back above the `stateChanged` gate — or
+     * deleting the gate — is invisible, and the tag goes back to one line per
+     * habit per fetch, which is what made it unreadable.
+     */
+    @Config(sdk = [32])
+    @Test
+    fun `the fallback warns once per state, not once per alarm`() {
+        ShadowAlarmManager.setCanScheduleExactAlarms(false)
+        Reminders.schedule(app, habit(), androidEnabled = true)
+        Reminders.schedule(app, habit().copy(id = 43), androidEnabled = true)
+        Reminders.schedule(app, habit().copy(id = 44), androidEnabled = true)
+
+        val warnings = ShadowLog.getLogsForTag("habiterall.notify")
+            .filter { it.type == android.util.Log.WARN }
+        assertEquals(
+            "three habits armed inexactly must be one line, not three: $warnings",
+            1,
+            warnings.size,
+        )
+        // And the two it said nothing about are still inexact alarms, so the
+        // dedupe cannot be read as the fallback having stopped.
+        assertEquals(3, alarms().size)
+        assertTrue(
+            "every arm must still be inexact, silent or not",
+            alarms().all { it.windowLengthMs == ShadowAlarmManager.WINDOW_HEURISTIC },
+        )
+    }
+
+    /**
+     * The control for the two tests above: with the permission held, the alarm
+     * is still scheduled — unsurprising — it is scheduled EXACTLY, and nothing
+     * is logged for this tag. Without this, a `Log.w` fired unconditionally
+     * (not just in the `else`) would pass them for the wrong reason.
+     */
+    @Config(sdk = [34])
+    @Test
+    fun `a granted permission arms exactly and logs nothing`() {
+        ShadowAlarmManager.setCanScheduleExactAlarms(true)
+        Reminders.schedule(app, habit(), androidEnabled = true)
+
+        assertEquals(1, alarms().size)
+        // The half this test is NAMED for, and it was missing. An alarm count
+        // and an empty log are both equally true of `setAndAllowWhileIdle`, so
+        // swapping the call inside `if (canBeExact)` — #233's own symptom, every
+        // reminder on every phone inexact again — left this green.
+        assertEquals(
+            "the granted branch must make the EXACT call",
+            ShadowAlarmManager.WINDOW_EXACT,
+            alarms().single().windowLengthMs,
+        )
+        assertTrue(ShadowLog.getLogsForTag("habiterall.notify").isEmpty())
     }
 
     /* ---------- what a delivery does when it arrives ---------- */

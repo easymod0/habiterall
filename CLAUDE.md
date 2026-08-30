@@ -78,8 +78,8 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 
 | working in | read | archive |
 |---|---|---|
-| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md` |
-| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md` |
+| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md` |
+| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md` |
 | `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md` |
 | `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md` |
@@ -273,6 +273,7 @@ Several layers, and they catch different things:
 | Browser | `npm run test:browser` | Chrome (starts its own fleet) |
 | Auth modes | `npm run test:auth -w habiterall-personal` | nothing |
 | Credential change | `npm run test:credchange -w habiterall-personal` | nothing |
+| SIGTERM drains and the deadline holds | `npm run test:drain -w habiterall-personal` | nothing |
 | Sign-in view | `npm run test:signin -w habiterall-personal` | Chrome (starts its own server) |
 | Habit JSON shape | `npm run test:apishape -w habiterall-personal` | nothing |
 | Reminders | `npm run test:notify` | nothing |
@@ -283,12 +284,15 @@ Several layers, and they catch different things:
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |
 | Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
+| Which validator a date-taking route asks | `npm run test:querydate -w habiterall-personal` | nothing |
 | What a cache is told about an asset | `npm run test:staticcache -w habiterall-personal` | nothing |
 | Loop export vs a bad date | `npm run test:exportloop -w habiterall-personal` | nothing |
 | Cloud API | `npm run test:cloud` | Postgres |
 | The probe reaches no session store | `npm run test:healthz -w habiterall-cloud` | Postgres |
+| Cloud SIGTERM drains, and the pool closes | `npm run test:drain -w habiterall-cloud` | Postgres |
 | Which claim names the account | `npm run test:claims -w habiterall-cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
+| Query plans and schema invariants | `npm run test:plans -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
 | Compose files | `npm run docs:compose -- --check`, and the CI `compose` job | Docker, for the job |
 | The website, and every link in it | `npm run site:build -- --offline` | nothing |
@@ -336,6 +340,16 @@ on — a poll on a weak condition returns the instant the DOM has anything in it
 which is worse than the sleep it replaced. Post-action settles are a different
 thing and stay: waiting to see that something did NOT happen has no predicate to
 poll.
+
+**A reload and the wait after it are ONE call, `reloadAndWaitForRow`
+(`chrome.mjs`).** `location.reload()` returns before the navigation commits, so
+a poll landing in between reads the old document — which is still painting
+every row it had, including the one being waited for. Naming the habit's row
+does not close that window when the page was already showing it before the
+reload; only a page that did not have the row yet is saved by naming. So the
+document is marked (`window.__doomed`) in the same evaluation as the reload,
+and the predicate checks the marker as well as the row. No suite calls
+`location.reload()` on its own.
 
 **The browser suites run in parallel, and a worker OWNS the instance it points
 at.** `fixtures.reset()` deletes every habit on its server, so the parallelism is

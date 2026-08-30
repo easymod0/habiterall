@@ -116,6 +116,7 @@ class AppSettingsDefaultsTest {
         assertEquals(default("skipDays").toBoolean(), untouched.skipDaysEnabled)
         assertEquals(default("questionMarks").toBoolean(), untouched.questionMarksEnabled)
         assertEquals(default("confirmDelete").toBoolean(), untouched.confirmDeleteEnabled)
+        assertEquals(default("groupByCategory").toBoolean(), untouched.groupByCategoryEnabled)
     }
 
     @Test
@@ -146,7 +147,7 @@ class AppSettingsDefaultsTest {
     private val mirrored = setOf(
         "dayOrder", "weekStart", "calendarZoom", "skipDays", "questionMarks",
         "atMostUnlogged", "scoreGranularity", "historyGranularity", "historyMode",
-        "notifyChannels", "confirmDelete",
+        "notifyChannels", "confirmDelete", "groupByCategory",
     )
 
     private val notMirrored = mapOf(

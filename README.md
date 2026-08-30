@@ -94,6 +94,44 @@ of breaking it and holds your score steady. Use it for illness or travel.
 
 **Reorder** — drag by the handle, or focus it and use ↑ / ↓.
 
+**Categories** — put a habit under a label of your own, one category per habit,
+each with a name and a colour. Set it from the habit's own edit screen: six
+starter suggestions (Health, Work, Fitness, Mind, Social, Home) show as chips
+and create the category the first time you tap one, but nothing is created for
+you on a fresh account. Turn on **Group by category** (⚙ → Dashboard, off by
+default) to draw one section per category, with an always-present
+**Uncategorised** section last for every habit with no label — uncategorised
+is something the dashboard shows you, never a category you create or manage
+yourself. Sections start in the order you made their categories in, and stay
+there until you change it: the same habit dialog's category list carries a ↑
+and a ↓ on each row (once there are two or more categories to move), which
+write the new order straight through — no separate save. The setting governs
+the native list too: the Android app offers a picker on its own habit form
+(options only — creating, renaming, recolouring, deleting and reordering a
+category stay web actions), and draws the same sections in the same order.
+Deleting a category never deletes its habits: they fall back to uncategorised
+with every entry and note untouched. Each section header also carries its own
+mean strength and the spread between its weakest and strongest habit — the
+same rule for which habits count as the comparison view below — and it steps
+aside while you are searching or showing archived habits, exactly as
+reordering does, rather than draw a mean over a different set of habits than
+the count sitting right beside it.
+
+**Compare your categories** — once you have one category, a **▤** button
+(*Compare categories*) appears in the header and opens a card per category: the
+mean strength of its habits over the last year, how many habits that is over,
+the strongest and the weakest of them by name, how often its lapses are
+recovered from, and a chart of the whole thing. Uncategorised gets a card of
+the same kind. There is no category-level *score*, deliberately — the strength
+curve is what makes a daily habit and a 3×/week one comparable in the first
+place, and a category holds habits at whatever frequencies you gave them — so
+what is shown is the average of the members' own strengths, one vote each, the
+same numbers their own pages show. A habit you have never logged has no
+strength *yet* rather than a strength of zero: it is counted and left out of
+the average, so adding a habit to a category never drags that category down on
+the day you decide to do more about it. Archived habits are left out too, and
+the page says how many.
+
 **Undo** — deleting a habit offers an Undo that restores every entry and note.
 
 **Reminders, where you want them** — set a time on a habit, choose what it
@@ -295,6 +333,19 @@ services:
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                        # 60000
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                      # 200
     restart: unless-stopped
+    # Docker's own default, written down because the app now has a deadline
+    # sitting under it: on SIGTERM it finishes the requests already accepted
+    # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
+    # shared/src/shutdown.js). An ordinary restart does not go near either
+    # number -- a drain with nothing slow in flight finishes in about 150ms,
+    # so a much shorter grace costs nothing on a normal day. What the 10s
+    # buys is the bad day: a request still running when the grace expires is
+    # cut off by SIGKILL rather than answered, so anything under ~9s starts
+    # trading the app's own deadline away for a request that was going to be
+    # slow anyway. Raising it does not lengthen the drain -- the 8s is fixed
+    # in the app, so a longer grace only means the process leaves earlier
+    # than the grace allows.
+    stop_grace_period: 10s
 
 volumes:
   habiterall-data:
@@ -677,8 +728,8 @@ services:
       MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
       MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
       PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
-      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if an export of a long history is cancelled
-      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if a long export is cancelled; 0 disables
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug; 0 disables
       PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
       LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
       LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
@@ -687,6 +738,19 @@ services:
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
+    # Docker's own default, written down because the app now has a deadline
+    # sitting under it: on SIGTERM it finishes the requests already accepted
+    # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
+    # shared/src/shutdown.js). An ordinary restart does not go near either
+    # number -- a drain with nothing slow in flight finishes in about 150ms,
+    # so a much shorter grace costs nothing on a normal day. What the 10s
+    # buys is the bad day: a request still running when the grace expires is
+    # cut off by SIGKILL rather than answered, so anything under ~9s starts
+    # trading the app's own deadline away for a request that was going to be
+    # slow anyway. Raising it does not lengthen the drain -- the 8s is fixed
+    # in the app, so a longer grace only means the process leaves earlier
+    # than the grace allows.
+    stop_grace_period: 10s
 
 volumes:
   db-data:
@@ -938,8 +1002,8 @@ MAX_UPLOAD_MB=16
 #LOG_RUNTIME_MS=60000
 #LOG_LAG_WARN_MS=200
 #PG_POOL_MAX=10                 # what the /healthz memo is sized against
-#PG_STATEMENT_TIMEOUT_MS=15000  # a query past this is cancelled; raise it for a very long export
-#PG_IDLE_TX_TIMEOUT_MS=30000    # a transaction open and idle for this long is a bug, not a slow query
+#PG_STATEMENT_TIMEOUT_MS=15000  # a query past this is cancelled; raise for a very long export, 0 to disable
+#PG_IDLE_TX_TIMEOUT_MS=30000    # idle-in-transaction for this long is a bug, not a slow query; 0 disables
 #PGSSL=                         # `require` for a managed Postgres reached over TLS
 ```
 <!-- /generated -->
@@ -1084,8 +1148,8 @@ services:
       MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
       MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
       PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
-      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if an export of a long history is cancelled
-      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if a long export is cancelled; 0 disables
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug; 0 disables
       PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
       LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
       LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
@@ -1094,6 +1158,19 @@ services:
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}                  # 60000
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}                # 200
     restart: unless-stopped
+    # Docker's own default, written down because the app now has a deadline
+    # sitting under it: on SIGTERM it finishes the requests already accepted
+    # and exits, giving up after 8s (DRAIN_DEADLINE_MS in
+    # shared/src/shutdown.js). An ordinary restart does not go near either
+    # number -- a drain with nothing slow in flight finishes in about 150ms,
+    # so a much shorter grace costs nothing on a normal day. What the 10s
+    # buys is the bad day: a request still running when the grace expires is
+    # cut off by SIGKILL rather than answered, so anything under ~9s starts
+    # trading the app's own deadline away for a request that was going to be
+    # slow anyway. Raising it does not lengthen the drain -- the 8s is fixed
+    # in the app, so a longer grace only means the process leaves earlier
+    # than the grace allows.
+    stop_grace_period: 10s
 
 volumes:
   db-data:
@@ -1497,10 +1574,14 @@ reminder *times* live on the server and follow your account to a new phone.
 
 The list is native too — a row of days per habit, its streak beside the name,
 tappable squares back through a year, running whichever way your `dayOrder`
-setting says. It carries the same search described under
-[Features](#features), behind an icon in the top bar. Everything a web page does
-well — charts, the calendar, history editing — opens the server's own UI inside
-the app, so there is one implementation of the statistics rather than two.
+setting says. With **Group by category** on, it draws the same sections the
+dashboard does, one per category plus a trailing Uncategorised, and the habit
+form offers a category picker of its own — picking only, since creating,
+renaming, recolouring and deleting a category stay web actions. It carries the
+same search described under [Features](#features), behind an icon in the top
+bar. Everything a web page does well — charts, the calendar, history editing —
+opens the server's own UI inside the app, so there is one implementation of
+the statistics rather than two.
 
 Its light and dark are the **phone's**, not the account's: the native screens
 follow the system setting, so they change with whatever the device is doing at
@@ -1956,7 +2037,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 
 ## API
 
-20 endpoints, identical in both editions. Dates are local calendar dates
+26 endpoints, identical in both editions. Dates are local calendar dates
 (`YYYY-MM-DD`).
 
 <details>
@@ -1968,6 +2049,10 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 | `POST` | `/habits` | Create |
 | `GET` `PUT` `DELETE` | `/habits/:id` | Read, update, delete (cascades to entries) |
 | `POST` | `/habits/reorder` | Reorder — `{ "order": [id, …] }` |
+| `GET` `POST` | `/categories` | List, create a habit's group (name + colour) |
+| `PUT` `DELETE` | `/categories/:id` | Rename/recolour, or delete (habits survive, uncategorised) |
+| `POST` | `/categories/reorder` | Reorder — `{ "order": [id, …] }` |
+| `GET` | `/categories/stats` | Compare categories: mean strength of each one's habits (`?start&end&granularity`, a year by default and five years at most) |
 | `GET` | `/habits/:id/entries` | Every entry for a habit |
 | `PUT` | `/habits/:id/entries/:date` | Record a value, a skip, or a note |
 | `DELETE` | `/habits/:id/entries/:date` | Clear a day |

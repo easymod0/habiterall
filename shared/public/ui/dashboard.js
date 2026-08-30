@@ -26,12 +26,13 @@ import {
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
-import { isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
+import { dashboardShowing, isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 import { SKIP } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
 import { GRID_DAYS, gridColumns } from '/shared/ui/window.js';
 import { open as openHabit } from '/shared/ui/detail.js';
+import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -185,8 +186,34 @@ export async function load() {
   const params = new URLSearchParams({ days: String(GRID_DAYS) });
   if (state.gridEnd) params.set('end', state.gridEnd);
   if (state.showArchived) params.set('archived', 'true');
+  // This request is also a read of `state.categories`, so it takes a ticket
+  // before it goes out — see `categoryReadSeq` in `ui/store.js`.
+  const categoryRead = ++state.categoryReadSeq;
   const data = await api(`/overview?${params}`);
   state.habits = data.habits;
+  // The habit dialog's category picker reads this rather than fetching its
+  // own copy — every load already carries it. Installed only while this is
+  // still the newest read: `announce()` (ui/habit-dialog.js) sends every OTHER
+  // category mutation through `emit('reload')`, which lands here, and a
+  // category is created at `MAX(position) + 1` — so "add one, then press ↑ to
+  // move it up" puts an arrow press inside this request's own round trip as a
+  // matter of course. `/overview` computes every habit's window plus
+  // `categorySummaries` against a reorder's few `UPDATE`s, so it is the one
+  // likely to lose that race, and its answer knows nothing of the move.
+  //
+  // `habits` and `categorySummaries` are NOT guarded with it. Neither has a
+  // second writer that can be newer than this reply: a reorder moves no
+  // figure, and `categorySummaries` is read by id rather than by position
+  // (`sectionHeader` below), so an order this answer is stale about cannot
+  // reach either of them.
+  if (categoryRead === state.categoryReadSeq) state.categories = data.categories;
+  // Each grouped section's mean/spread, one row per category plus a trailing
+  // `id: null` for Uncategorised. `?archived=true` sends no such key at all —
+  // that mode has nothing active to average — and an older cached payload
+  // (the service worker's stale-while-revalidate) may hold none either, so
+  // this is read as `undefined` rather than assumed present; see `summarised`
+  // and `sectionHeader` below.
+  state.categorySummaries = data.categorySummaries;
   // Recorded beside them, because `habit.entries` means anything only for the
   // days this answer covered and nothing else in the payload says which those
   // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
@@ -222,6 +249,27 @@ function visibleHabits() {
 
 export function paint() {
   state.openHabitId = null;
+  // ...and neither is the comparison, which this paint is about to cover. Set
+  // beside `openHabitId` because the two answer one question between them —
+  // see the note on the field in `ui/store.js`.
+  state.openCategories = false;
+  // The top-bar entry point to that comparison, which `ui/categories.js`
+  // owns: this is the one place that runs after `state.categories` has been
+  // refreshed. Not every category mutation ends in a 'reload' any more —
+  // `moveCategory` (habit-dialog.js) deliberately emits 'change' instead of
+  // going through `announce()`, see its own comment — but this still runs
+  // after every one of them, because `paint()` is where both events end up.
+  // 'reload' reaches it through `load()`, which always ends in a `paint()`
+  // (below); 'change' reaches it straight through this file's own listener
+  // (`on('change', () => { if (dashboardShowing()) paint(); })`), which is
+  // conditional — but that condition is exactly "is this the render this line
+  // needs to run for right now", so a 'change' that arrives while some other
+  // view is showing costs nothing: `state.categories` is already updated by
+  // the time this file's view is next entered, and every path back to it
+  // (Back from a habit, from the comparison, on boot) goes through `load()`,
+  // which paints from the fresh value regardless of which event got there
+  // first.
+  syncCompareEntry(state.categories.length > 0);
   // The URL follows the view. Cheap to call on every repaint — and this is
   // called on every check-off — because `go` does nothing when the address bar
   // already says this.
@@ -285,72 +333,249 @@ export function paint() {
   if (settings.get('dayOrder') === 'newest-left') dates.reverse();
   renderGridHeader(dates, todayIso);
 
-  for (const habit of shown) {
-    const row = document.createElement('div');
-    row.className = 'habit-row' + (habit.archived ? ' archived' : '');
-    row.dataset.habitId = String(habit.id);
+  // `position` is one flat order and `persistOrder` sends a flat id list, so
+  // dragging while grouped would clump the habits by category permanently —
+  // an action that never said it would. Same reasoning as `!state.showArchived`
+  // and `!filtering` just above: dragging only means something in the list's
+  // one real order, and grouping is a VIEW of that order, not a second one.
+  const grouped = settings.get('groupByCategory');
 
-    // Drag handle. Reordering only makes sense in the active list, and only
-    // when there is more than one habit to move.
-    // ...and not while a filter is on. Dragging only means something in the
-    // list's real order: a drop against a filtered list computes a `position`
-    // from neighbours that are not the habit's actual neighbours, so the write
-    // lands somewhere nobody asked for and the rows appear to jump when the
-    // query is cleared. The order that goes to the server is the FULL list —
-    // `state.habits.map(h => h.id)` — so nothing is dropped from it; what a
-    // drop against a subset gets wrong is where in that list the habit lands.
-    const reorderable =
-      !state.showArchived && !filtering && state.habits.length > 1;
-    if (reorderable) {
-      const handle = document.createElement('button');
-      handle.className = 'drag-handle';
-      handle.type = 'button';
-      handle.draggable = true;
-      handle.textContent = '⠿';
-      handle.title = 'Drag to reorder — or focus and use ↑ / ↓';
-      handle.setAttribute('aria-label', `Reorder ${habit.name}. Use arrow up or arrow down.`);
-      handle.dataset.focusKey = `handle:${habit.id}`;
-      attachDragHandlers(handle, row, habit);
-      row.append(handle);
+  // Drag handle. Reordering only makes sense in the active list, only when
+  // there is more than one habit to move, only ungrouped (see above), and not
+  // while a filter is on. Dragging only means something in the list's real
+  // order: a drop against a filtered list computes a `position` from
+  // neighbours that are not the habit's actual neighbours, so the write lands
+  // somewhere nobody asked for and the rows appear to jump when the query is
+  // cleared. The order that goes to the server is the FULL list —
+  // `state.habits.map(h => h.id)` — so nothing is dropped from it; what a drop
+  // against a subset gets wrong is where in that list the habit lands.
+  const reorderable =
+    !state.showArchived && !filtering && !grouped && state.habits.length > 1;
+
+  // Same reasoning as `reorderable` just above, and the same two guards:
+  // showing archived habits or a filtered subset would draw a mean over a
+  // different set than the count sitting right beside it, and a dashboard
+  // figure must never include archived habits when `#/categories` excludes
+  // them from the very same aggregation. `state.categorySummaries` can still
+  // be absent even when this is true — `?archived=true` sends no such key and
+  // neither does an older cached payload — and `sectionHeader` treats that the
+  // same way, by drawing no figures at all.
+  const summarised = grouped && !state.showArchived && !filtering;
+
+  // Sections are drawn over `shown`, which the empty state and the no-match
+  // sentence above have already decided there is nothing worth grouping in:
+  // an account with no habits gets six empty headers under the onboarding
+  // panel, and searching past every result gets "No habits match that."
+  // sitting above a full set of headers each reading 0 — a section list
+  // answering a question the sentence above it already answered the other
+  // way. Neither state has a `shown` to partition in the first place.
+  if (grouped && !isEmpty && !noMatch) {
+    // Every category in its own `position` order, an empty one still drawing
+    // its header (sections may be empty — no collapsing), then an
+    // always-present trailing Uncategorised section. `category_id` pointing
+    // at a category not in `state.categories` (deleted since this list was
+    // fetched) falls into Uncategorised rather than being dropped, so every
+    // habit in `shown` is drawn exactly once.
+    const byCategory = new Map(state.categories.map((c) => [c.id, []]));
+    const uncategorised = [];
+    for (const habit of shown) {
+      const bucket = habit.category_id != null && byCategory.get(habit.category_id);
+      (bucket || uncategorised).push(habit);
     }
-
-    const meta = document.createElement('div');
-    meta.className = 'habit-meta';
-    meta.setAttribute('role', 'button');
-    meta.tabIndex = 0;
-
-    const name = document.createElement('div');
-    name.className = 'habit-name';
-    const dot = document.createElement('span');
-    dot.className = 'habit-dot';
-    dot.style.background = habit.color;
-    const nameText = document.createElement('span');
-    nameText.className = 'habit-name-text';
-    nameText.textContent = habit.name;
-    const icon = habitIcon(habit);
-    name.append(dot, ...(icon ? [icon] : []), nameText);
-
-    const sub = document.createElement('div');
-    sub.className = 'habit-sub';
-    const bits = [
-      freqLabel(habit),
-      targetLabel(habit),
-      `${Math.round(habit.score * 100)}%`,
-      habit.currentStreak > 0 ? `🔥 ${habit.currentStreak}` : '',
-    ].filter(Boolean);
-    sub.textContent = bits.join(' · ');
-
-    meta.append(name, sub);
-    meta.addEventListener('click', () => openHabit(habit.id));
-    meta.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHabit(habit.id); }
-    });
-
-    row.append(meta, dayCells(listHost, habit, dates, todayIso));
-    grid.append(row);
+    // `null` when `summarised` is false, or when it is true but the payload
+    // carries no matching row (or no `categorySummaries` at all) — both read
+    // as "nothing to draw" rather than a crash.
+    const summaryFor = (id) => (summarised
+      ? state.categorySummaries?.find((s) => s.id === id) ?? null
+      : null);
+    for (const cat of state.categories) {
+      grid.append(sectionHeader(
+        cat.name, cat.color, byCategory.get(cat.id).length, cat.id, summaryFor(cat.id)));
+      for (const habit of byCategory.get(cat.id)) grid.append(habitRow(habit, dates, todayIso, reorderable));
+    }
+    grid.append(sectionHeader('Uncategorised', null, uncategorised.length, null, summaryFor(null)));
+    for (const habit of uncategorised) grid.append(habitRow(habit, dates, todayIso, reorderable));
+  } else {
+    for (const habit of shown) grid.append(habitRow(habit, dates, todayIso, reorderable));
   }
 
   restoreFocus(root, focused);
+}
+
+/** English plurals — the same trivial rule `ui/categories.js` keeps its own
+ * copy of, for the counts this header says out loud. */
+const plural = (n, word) => (n === 1 ? word : `${word}s`);
+
+const pct = (v) => `${Math.round(v * 100)}%`;
+
+/**
+ * A section header drawn above a category's rows when `groupByCategory` is
+ * on. `color` is null for the trailing Uncategorised section, which has none.
+ *
+ * `summary` is this section's `{members, unloggedExcluded, mean, best, worst}`
+ * from `/overview`'s `categorySummaries` (see `summariseMembers`,
+ * `shared/src/stats.js`) — or `null`, when there is nothing to draw: while
+ * filtering, while showing archived, or when the payload carried no matching
+ * row at all. `null` draws exactly what this header always drew, count and
+ * all — and so does `summary.members === 0`: `/overview` only fetches
+ * active habits, so a category every member of which is archived arrives
+ * with `members: 0` too, and is not told apart from an empty one.
+ */
+function sectionHeader(name, color, count, categoryId, summary) {
+  const header = document.createElement('div');
+  header.className = 'category-section-header' + (categoryId == null ? ' uncategorised' : '');
+  header.dataset.categoryId = categoryId == null ? '' : String(categoryId);
+  // A bare `<div>` maps to role="generic", which ARIA specifies as
+  // name-prohibited — confirmed against this app's own accessibility tree
+  // (CDP `Accessibility.getPartialAXTree`, see `categorycheck.mjs`): a
+  // generic element here is never reachable by a screen reader's "next
+  // heading" navigation and never reports a `level`, whatever its
+  // `aria-label` says. `role="heading"` is the honest fix: this element IS
+  // the heading of a section of the list, and it is set unconditionally —
+  // for every header, summarised or not — so the markup does not change
+  // shape depending on whether a summary happens to be present. Level 2:
+  // `#view-list` carries no page-title heading of its own (unlike
+  // `#view-categories`'s own `<h2>`), so this is the first heading reached
+  // inside it, directly under the app's own `<h1>` in index.html's topbar —
+  // level 3 would skip a level.
+  header.setAttribute('role', 'heading');
+  header.setAttribute('aria-level', '2');
+  // Same custom property the category chips set (habit-dialog.js) — a border
+  // has to stay legible whatever the category's own colour is, so it is
+  // never a filled background.
+  if (color) header.style.setProperty('--chip-color', color);
+
+  // Reuses the swatch class the habit dialog's own manage list already
+  // defines, rather than a second small coloured dot with its own rule.
+  const dot = document.createElement('span');
+  dot.className = 'category-swatch';
+  if (color) dot.style.background = color;
+  header.append(dot);
+
+  const label = document.createElement('span');
+  label.className = 'category-section-name';
+  label.textContent = name;
+  header.append(label);
+
+  const countEl = document.createElement('span');
+  countEl.className = 'category-section-count';
+  countEl.textContent = String(count);
+  header.append(countEl);
+
+  // `summary.members === 0` draws NO figure at all — not a different
+  // sentence. `/overview` without `?archived=true` fetches only active
+  // habits while `categories` is fetched whole, so a category the user
+  // filled and later archived every member of arrives here with
+  // `members: 0` too, indistinguishable from one nobody has put anything in
+  // — exactly the shape `ui/categories.js` (`sectionCard`, ~line 268-279)
+  // already refuses to say "No habits in this category yet." about. The
+  // visible `0` beside the name already says everything `/overview` knows;
+  // `#/categories` is the surface with the count to explain the rest.
+  if (summary && summary.members > 0) {
+    const figure = document.createElement('span');
+    figure.className = 'category-section-figure';
+
+    const meanEl = document.createElement('span');
+    meanEl.className = 'category-section-mean';
+
+    // `title` and the sentence below both use the never-logged sentence
+    // `ui/categories.js` already settled on (`sectionCard`, ~line 259-283) —
+    // a category with members has members with no strength YET, which is
+    // not a strength of zero. `summary.members === 1` reads more obviously
+    // than `summary.unloggedExcluded === 1` and is equivalent on this
+    // branch: `mean === null` implies `unloggedExcluded === members` here.
+    let sentence;
+    if (summary.mean === null) {
+      meanEl.textContent = '—';
+      const reason = `${summary.members} ${plural(summary.members, 'habit')}, `
+        + `${summary.members === 1 ? 'never logged' : 'none logged yet'}`
+        + ' — no strength to average.';
+      figure.title = reason;
+      figure.append(meanEl);
+      sentence = reason;
+    } else {
+      meanEl.textContent = pct(summary.mean);
+      const spreadEl = document.createElement('span');
+      spreadEl.className = 'category-section-spread';
+      // A one-member category has `best === worst` by construction
+      // (`summariseMembers`), and any tie reads the same way: one number,
+      // never `62–62%`.
+      const spread = summary.best.score === summary.worst.score
+        ? pct(summary.best.score)
+        : `${pct(summary.worst.score)}–${pct(summary.best.score)}`;
+      spreadEl.textContent = spread;
+      const excluded = summary.unloggedExcluded
+        ? ` · ${summary.unloggedExcluded} ${plural(summary.unloggedExcluded, 'habit')} never logged, left out`
+        : '';
+      const detail = `${pct(summary.mean)} average over ${summary.members} `
+        + `${plural(summary.members, 'habit')}, spread ${spread}${excluded}`;
+      figure.title = detail;
+      figure.append(meanEl, spreadEl);
+      sentence = detail;
+    }
+    header.append(figure);
+    // The header is not a table row — there is no cell structure an assistive
+    // technology could read the figures against — so the whole sentence is
+    // named here rather than left to be read off the child text nodes.
+    header.setAttribute('aria-label', `${name}, ${sentence}`);
+  }
+
+  return header;
+}
+
+/** One habit row, built the same way whether the list is flat or grouped. */
+function habitRow(habit, dates, todayIso, reorderable) {
+  const row = document.createElement('div');
+  row.className = 'habit-row' + (habit.archived ? ' archived' : '');
+  row.dataset.habitId = String(habit.id);
+
+  if (reorderable) {
+    const handle = document.createElement('button');
+    handle.className = 'drag-handle';
+    handle.type = 'button';
+    handle.draggable = true;
+    handle.textContent = '⠿';
+    handle.title = 'Drag to reorder — or focus and use ↑ / ↓';
+    handle.setAttribute('aria-label', `Reorder ${habit.name}. Use arrow up or arrow down.`);
+    handle.dataset.focusKey = `handle:${habit.id}`;
+    attachDragHandlers(handle, row, habit);
+    row.append(handle);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'habit-meta';
+  meta.setAttribute('role', 'button');
+  meta.tabIndex = 0;
+
+  const name = document.createElement('div');
+  name.className = 'habit-name';
+  const dot = document.createElement('span');
+  dot.className = 'habit-dot';
+  dot.style.background = habit.color;
+  const nameText = document.createElement('span');
+  nameText.className = 'habit-name-text';
+  nameText.textContent = habit.name;
+  const icon = habitIcon(habit);
+  name.append(dot, ...(icon ? [icon] : []), nameText);
+
+  const sub = document.createElement('div');
+  sub.className = 'habit-sub';
+  const bits = [
+    freqLabel(habit),
+    targetLabel(habit),
+    `${Math.round(habit.score * 100)}%`,
+    habit.currentStreak > 0 ? `🔥 ${habit.currentStreak}` : '',
+  ].filter(Boolean);
+  sub.textContent = bits.join(' · ');
+
+  meta.append(name, sub);
+  meta.addEventListener('click', () => openHabit(habit.id));
+  meta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHabit(habit.id); }
+  });
+
+  row.append(meta, dayCells(listHost, habit, dates, todayIso));
+  return row;
 }
 
 /**
@@ -640,12 +865,21 @@ export function init() {
 
   // Reflow the day grid when crossing the narrow/wide breakpoint (rotation,
   // window resize) so the column count always matches the available width.
+  //
+  // `dashboardShowing()` and not `openHabitId == null`: `paint()` does not
+  // merely reflow, it SHOWS the list and unwinds the fragment. Turning a phone
+  // sideways crosses 640px, so with the comparison on screen this used to
+  // replace it with the dashboard and fire `history.back()` — a navigation
+  // nobody asked for, from a gesture that is not a navigation at all. The
+  // reflow is for the grid, and the grid is only on screen when the dashboard
+  // is.
   window.matchMedia('(max-width: 640px)').addEventListener('change', () => {
-    if (state.openHabitId == null && state.habits.length) paint();
+    if (dashboardShowing() && state.habits.length) paint();
   });
 
   // The dashboard repaints from what it already has; only a 'reload' goes back
-  // to the server. Both are ignored while the detail view is the one showing.
-  on('change', () => { if (state.openHabitId == null) paint(); });
+  // to the server. Both are ignored while another view is the one showing —
+  // painting over it would navigate away from a page nobody had left.
+  on('change', () => { if (dashboardShowing()) paint(); });
   on('reload', () => { load().catch((e) => toast(e.message)); });
 }

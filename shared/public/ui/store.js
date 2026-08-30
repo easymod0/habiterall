@@ -21,8 +21,41 @@
 
 export const state = {
   habits: [],
+  // The account's own categories, `{id, name, color, position}[]`. Kept
+  // alongside `habits` for the same reason: `/overview` already reads it for
+  // the dashboard's (future, behind `groupByCategory`) sections, and the habit
+  // dialog's picker needs the same list rather than a fetch of its own.
+  categories: [],
+  // Which read of `categories` is the CURRENT one. Bumped by everything that
+  // starts a read of the list (`refreshCategoryPicker` in `ui/habit-dialog.js`,
+  // `load()` in `ui/dashboard.js`) and by the one thing that changes its order
+  // without one (`moveCategory`'s optimistic splice); an answer may only be
+  // INSTALLED while it still holds the number it took.
+  //
+  // It lives here rather than beside either reader because the field it
+  // protects has readers in two modules and no single owner. `/overview` and
+  // `GET /categories` both answer with the whole list, so the last reply to
+  // arrive used to win regardless of which was freshest — and once a section
+  // can be REORDERED that is not merely a repaint of the same thing: a reply
+  // issued before a move, delivered after it, puts the pre-move order back in
+  // the store, the next press computes its payload from that, and the SERVER
+  // takes the regression. The manage list is not repainted by `load()`, so
+  // nothing on screen says it happened.
+  //
+  // A counter and not a timestamp: `Date.now()` has no ordering guarantee
+  // finer than a millisecond, and two of these can start in the same one.
+  categoryReadSeq: 0,
   editingId: null,
   openHabitId: null,   // habit shown in the detail view, null on the dashboard
+  // The category comparison is showing. It is a THIRD answer to the question
+  // `openHabitId == null` used to settle on its own — "is the dashboard what
+  // the user is looking at?" — which several guards ask before repainting or
+  // reloading the list. Left out, opening Settings from the comparison and
+  // pressing Done emits a 'change' the dashboard answers by painting itself
+  // over a view nobody had left. **Read it through `dashboardShowing()` below,
+  // never as a second hand-written conjunction** — that is the whole reason the
+  // predicate exists.
+  openCategories: false,
   // null means "use the saved setting". The per-habit toggles set these for
   // the session, so trying a different view does not rewrite your default —
   // same arrangement as calZoom below.
@@ -57,6 +90,32 @@ export const state = {
   offline: false,      // showing cached data / writes are being queued
   pending: 0,          // writes waiting in the outbox
 };
+
+/**
+ * Whether the DASHBOARD is the view the user is looking at.
+ *
+ * **One question, one predicate, and it is here because it has already been
+ * copied wrong.** Six places need it — `app.js` twice (which view a traversal
+ * lands on, and whether the browser reminder may reload the list),
+ * `dashboard.js` twice (the `'change'` listener and the breakpoint reflow),
+ * `settings-dialog.js` once and `habit-dialog.js` five times — and until
+ * `#/categories` existed they could all spell it `state.openHabitId == null`
+ * and be right. Adding a second full-page view made that spelling wrong at
+ * every one of them at once, and the two that were missed on the first pass
+ * failed in exactly the way this file's comment on `openCategories` predicts:
+ * the breakpoint reflow painted the dashboard over the comparison on a phone
+ * ROTATION, and the habit dialog's `'reload'` did the same on Save. Neither is
+ * a `routes.js` question — the URL is already right — it is only ever "is the
+ * list what is on screen".
+ *
+ * A function rather than a getter on `state`, so it cannot be spread, cached
+ * into a local at render time, or serialised into a payload by accident.
+ *
+ * A THIRD view means editing this and nothing else. That is the point.
+ */
+export function dashboardShowing() {
+  return state.openHabitId == null && !state.openCategories;
+}
 
 /** Fold case and strip the accents, so "cafe" finds "Café". */
 const fold = (s) => String(s ?? '')
