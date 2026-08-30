@@ -191,9 +191,31 @@ with the marker, which a callback would undo.
 is the rest of #269.** `send('Page.navigate', …)` resolves before the new
 document commits, exactly as `location.reload()` and `Page.reload` do, so a
 wait written as a separate statement after it can be answered by the document
-the navigation is destroying. There were 76 such sends across 29 suites; 27
-suites now join theirs through
-`reloadAndWaitFor(ev, PRED, { reload: () => send('Page.navigate', …), what })`.
+the navigation is destroying. There are **77 such sends across 29 suite
+files**, of which **66 in 27 files** now join theirs through
+`reloadAndWaitFor(ev, PRED, { reload: () => send('Page.navigate', …), what })`
+and **11 in 9 files** are deliberately unjoined and registered below.
+
+Those figures are on one stated population, because three plausible ones give
+three different numbers and an unqualified count here has already gone stale
+once. The population is **a literal `send('Page.navigate', …)` call in
+`shared/test/browser/*.mjs`** — so it excludes `browser-runner.test.js`, which
+is a unit test in `shared/test/` rather than a suite in `shared/test/browser/`,
+and it counts nothing in `chrome.mjs`, which is inside that directory but
+contains no send at all (only prose naming the method, and the guard does not
+scan it). It also counts *sends*, not text matches: a bare `grep` for
+`Page.navigate` over the same files answers **86** here, because comments and
+JSDoc mention the method too — it answered 84 before this sweep, and that 84
+is how the scope of #269 was first mis-stated.
+
+Two of those numbers moved during the work rather than being miscounted, which
+is the more useful warning: the sweep **added** a send (`themecheck`'s
+same-document branch, so 76 before and 77 after) and it **added** prose (84
+text matches before, 86 after). Every count in this section is therefore of
+the tree as it stands with the sweep applied. A figure measured before a
+change and quoted after it reads exactly like a correct one, and that is the
+drift this file exists to prevent — it is also, twice now, the drift it
+failed to prevent.
 
 **The rule for deciding soundness is checkable from the call site alone, and
 it is about the TARGET url.** A marker is sound only where the navigation is
@@ -207,7 +229,7 @@ the wait hangs to its full 20s — trading a sub-10ms race for a guaranteed
   `Page.navigate({url: APP})` is a real document load even from
   `APP/#/habit/3`. `APP` and `BASE` are `process.env.BASE ?? 'http://localhost:3000'`
   in every suite — fragment-less — which is why this one clause covers the
-  overwhelming majority of the 76.
+  overwhelming majority of the 77.
 
 **That premise is measured, not only read out of the spec.** Chrome for
 Testing 152.0.7977.42, personal edition on a throwaway SQLite instance, 20
