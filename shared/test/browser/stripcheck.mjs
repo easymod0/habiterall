@@ -37,7 +37,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9321);
 const profile = mkdtempSync(join(tmpdir(), 'habstrip-'));
@@ -87,9 +89,10 @@ try {
   // every fetch from it fails, which is the whole of a "Failed to fetch" here.
   // Same-origin paths below rather than absolute ones, for the same reason
   // every other suite uses them — they follow whichever base this worker owns.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
-    { what: 'the dashboard' });
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
 
   /** A yes/no habit, and the days around today cleared on each shape. */
   const seeded = await ev(`(async () => {
@@ -132,10 +135,15 @@ try {
   // instead of asking for an amount. A query nobody reads is unambiguous.
   let opens = 0;
   const openHabit = async (id = seeded.habit, expect = '.day-strip .check') => {
-    await send('Page.navigate',
-      { url: `${APP}/?open=${++opens}#/habit/${id}` }, sessionId);
-    await waitUntil(ev, `!!document.querySelector('#view-detail ${expect}')`,
-      { what: `the detail page (${expect})` });
+    // That query is also what makes the JOINED wait below sound. The marker
+    // `reloadAndWaitFor` sets cannot survive a document load, which is the
+    // point of it — but it survives a SAME-document one, where the wait would
+    // then never return. The unique query keeps every open cross-document.
+    const url = `${APP}/?open=${++opens}#/habit/${id}`;
+    await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail ${expect}')`, {
+      reload: () => send('Page.navigate', { url }, sessionId),
+      what: `the detail page (${expect})`,
+    });
     await sleep(500);
   };
 

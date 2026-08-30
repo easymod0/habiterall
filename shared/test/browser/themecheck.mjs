@@ -24,7 +24,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9317);
@@ -81,10 +83,40 @@ try {
   const READY = `!!(document.querySelector('.habit-row')`
     + ` && document.documentElement.dataset.theme)`;
 
-  /** Load the app and wait for it, in place of a fixed sleep. */
+  /**
+   * Load the app and wait for it, in place of a fixed sleep.
+   *
+   * The wait is JOINED to the navigation — `reloadAndWaitFor` marks the
+   * outgoing document, so the predicate answers "which document am I in" and
+   * not merely "is something painting a row" (#269) — but ONLY when the
+   * navigation is genuinely CROSS-document. That condition is the whole care
+   * in this helper and it must not be dropped: on a SAME-document (fragment
+   * only) navigation the window is never replaced, so `window.__doomed`
+   * SURVIVES, `!window.__doomed` is never true, and the wait hangs for its
+   * full 20s. Closing a sub-10ms race by buying a guaranteed 20s hang is the
+   * wrong trade, so the marker is conditional rather than unconditional.
+   *
+   * The caller that can reach that case is the deep link below, the only
+   * fragment-carrying `boot` in the tree. It is cross-document TODAY only
+   * because it is the first navigation in this file and the page is still
+   * `about:blank` — move it down, or give it a sibling called from a page
+   * already at `${APP}/#/...`, and an unconditional marker would hang there.
+   * So the question is asked of the two URLs rather than assumed, and it is
+   * asked in the page so the browser's own parser resolves both: a target
+   * with no fragment is always a real document load, and a target with one is
+   * a real load only if something before the `#` differs too.
+   */
   const boot = async (url = `${APP}/`, until = READY) => {
-    await send('Page.navigate', { url }, sessionId);
-    await waitUntil(ev, until, { what: `the app to boot at ${url}` });
+    const what = `the app to boot at ${url}`;
+    const sameDocument = await ev(`(u => u.includes('#')
+      && new URL(u, location.href).href.split('#')[0] === location.href.split('#')[0]
+    )(${JSON.stringify(url)})`);
+    if (sameDocument) {
+      await send('Page.navigate', { url }, sessionId); // navigate-unjoined: the same-document branch, where the marker would survive and never clear
+      await waitUntil(ev, until, { what });
+      return;
+    }
+    await reloadAndWaitFor(ev, until, { reload: () => send('Page.navigate', { url }, sessionId), what });
   };
 
   const habits = await (await fetch(`${APP}/api/habits`)).json();

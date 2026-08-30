@@ -2,7 +2,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT = devtoolsPort(9291);
 const profile=mkdtempSync(join(tmpdir(),'habset-'));
 const chrome=launchChrome(PORT, profile);
@@ -31,14 +33,14 @@ try{
   await send('Network.setCacheDisabled',{cacheDisabled:true},sessionId);
   // A registered service worker would serve a cached stylesheet, so this
   // suite measured stale CSS and reported phantom misalignment. Clear it.
-  await send('Page.navigate',{url:APP},sessionId); await sleep(1200);
+  await send('Page.navigate',{url:APP},sessionId); await sleep(1200); // navigate-unjoined: a bare sleep, with no predicate to join
   await ev(`(async()=>{
     for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
     for (const k of await caches.keys()) await caches.delete(k);
   })()`).catch(()=>{});
   // Reload AFTER unregistering: the first load was already styled by the
   // worker, so measuring now would report the stale stylesheet.
-  await send('Page.navigate',{url:APP},sessionId); await sleep(1500);
+  await send('Page.navigate',{url:APP},sessionId); await sleep(1500); // navigate-unjoined: a bare sleep, with no predicate to join
 
   // This suite measures alignment and widths, so what it has to wait for is a
   // LAID-OUT row, not merely a present one — `height > 0` is that, and it is
@@ -52,9 +54,9 @@ try{
   // size: 0}`, and sampled every 15ms from navigation it reads `loaded:0` at
   // every point. A term that is constant-true cannot gate anything; it only
   // makes the wait look stronger than it is.
-  const load=async()=>{await send('Page.navigate',{url:APP},sessionId);
-    await waitUntil(ev,`(()=>{const r=document.querySelector('#grid .habit-row');
-      return !!r && r.getBoundingClientRect().height > 0;})()`,{what:'a measurable dashboard'});};
+  const load=async()=>{await reloadAndWaitFor(ev,`(()=>{const r=document.querySelector('#grid .habit-row');
+      return !!r && r.getBoundingClientRect().height > 0;})()`,
+    {reload:()=>send('Page.navigate',{url:APP},sessionId),what:'a measurable dashboard'});};
   await load();
 
   console.log('--- dialog ---');

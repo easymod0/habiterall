@@ -19,7 +19,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9320);
@@ -83,10 +85,21 @@ try {
   const READY = `!!(document.querySelector('.habit-row')`
     + ` && document.documentElement.dataset.theme)`;
 
-  /** Load the app and wait for it, in place of a fixed sleep. */
+  /**
+   * Load the app and wait for it, in place of a fixed sleep.
+   *
+   * Joined through `reloadAndWaitFor` so a document already showing `READY`
+   * (a prior boot's dashboard, still painting when this one lands) cannot
+   * satisfy the wait before the new document commits. Every caller here uses
+   * the fragment-less default, which is always cross-document — a caller
+   * that ever passed a `#`-fragment URL would need this reconsidered, since
+   * a same-document navigation never replaces `window.__doomed`.
+   */
   const boot = async (url = `${APP}/`, until = READY) => {
-    await send('Page.navigate', { url }, sessionId);
-    await waitUntil(ev, until, { what: `the app to boot at ${url}` });
+    await reloadAndWaitFor(ev, until, {
+      reload: () => send('Page.navigate', { url }, sessionId),
+      what: `the app to boot at ${url}`,
+    });
   };
   /**
    * A loaded page and a KNOWN device preference, both of which this half used to

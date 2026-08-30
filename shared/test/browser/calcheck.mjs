@@ -9,7 +9,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9294);
 const profile = mkdtempSync(join(tmpdir(), 'habcal-'));
@@ -49,17 +51,16 @@ try {
   // Start from a known zoom. The checks below are relative ("bigger than
   // before"), so inheriting whatever the account was left on makes them
   // assert nothing — or fail at an end stop that is already disabled.
-  await send('Page.navigate', { url: APP }, sessionId);
+  await send('Page.navigate', { url: APP }, sessionId); // navigate-unjoined: a bare sleep follows, with no predicate to join
   await sleep(800);
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({calendarZoom:'default'})}).then(r=>r.ok)`);
   await ev(`localStorage.removeItem('habiterall-settings')`).catch(() => {});
-  await send('Page.navigate', { url: APP }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
   await sleep(500);
 
   // Open the first habit's detail view, where the calendar lives.
@@ -450,9 +451,10 @@ try {
   // dashboard->reopen path touches it, which is why #274 outlasted #245), so
   // only a fresh document is guaranteed to start with it unset.
   const openFirstHabit = async () => {
-    await send('Page.navigate', { url: APP }, sessionId);
-    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
-      { what: 'the dashboard grid' });
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard grid',
+    });
     await sleep(500);
     await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);
     await waitUntil(ev, `!!document.querySelector('[aria-label="Completion calendar"]')`,
@@ -574,11 +576,10 @@ try {
     .then(r=>r.json()).then(s=>s.calendarZoom)`);
   ck('the zoom level was saved to the server', saved === 'wide', String(saved));
 
-  await send('Page.navigate', { url: APP }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
   await sleep(500);
   await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);
   for (let i = 0; i < 40; i++) {

@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor,
+} from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9229);
 
@@ -50,20 +52,18 @@ try {
   })()`);
 
   const reload = async (waitForRows = true) => {
-    await send('Page.navigate', { url: BASE }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      const ok = await ev(waitForRows
-        ? `!!document.querySelector('#grid .habit-row')`
-        : `!document.getElementById('empty').hidden || !!document.querySelector('#grid .habit-row')`
-      ).catch(() => 0);
-      if (ok) break;
-      await sleep(200);
-    }
+    await reloadAndWaitFor(ev, waitForRows
+      ? `!!document.querySelector('#grid .habit-row')`
+      : `!document.getElementById('empty').hidden || !!document.querySelector('#grid .habit-row')`,
+    {
+      reload: () => send('Page.navigate', { url: BASE }, sessionId),
+      what: waitForRows ? 'a habit row' : 'the dashboard, empty or not',
+    });
   };
 
   /* ---------- 1. empty state ---------- */
   console.log('--- empty state ---');
-  await send('Page.navigate', { url: BASE }, sessionId);
+  await send('Page.navigate', { url: BASE }, sessionId); // navigate-unjoined: a bare sleep follows, with no predicate to join
   await sleep(1200);
   await wipe();
   await reload(false);

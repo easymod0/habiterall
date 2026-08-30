@@ -8,7 +8,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor,
+} from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9223);
 
@@ -65,14 +67,12 @@ async function main() {
   };
 
   await send('Page.enable', {}, sessionId);
-  await send('Page.navigate', { url: BASE }, sessionId);
 
   // Wait for the dashboard to finish its first render.
-  for (let i = 0; i < 80; i++) {
-    const ready = await evaluate(`!!document.querySelector('#grid .habit-row')`).catch(() => false);
-    if (ready) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(evaluate, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+    what: 'the dashboard',
+  });
 
   console.log('--- page loaded ---');
   check('dashboard rendered habits',
@@ -102,11 +102,10 @@ async function main() {
         if (d.open) d.close();
       })()
     `);
-    await send('Page.navigate', { url: BASE }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await evaluate(`!!document.querySelector('#grid .habit-row')`).catch(() => false)) break;
-      await sleep(200);
-    }
+    await reloadAndWaitFor(evaluate, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: BASE }, sessionId),
+      what: 'the dashboard',
+    });
 
     const openedName = await evaluate(`
       (async () => {

@@ -340,15 +340,29 @@ which is worse than the sleep it replaced. Post-action settles are a different
 thing and stay: waiting to see that something did NOT happen has no predicate to
 poll.
 
-**A reload and the wait after it are ONE call, `reloadAndWaitForRow`
+**A reload and the wait after it are ONE call, `reloadAndWaitFor`
 (`chrome.mjs`).** `location.reload()` returns before the navigation commits, so
 a poll landing in between reads the old document — which is still painting
 every row it had, including the one being waited for. Naming the habit's row
 does not close that window when the page was already showing it before the
 reload; only a page that did not have the row yet is saved by naming. So the
 document is marked (`window.__doomed`) in the same evaluation as the reload,
-and the predicate checks the marker as well as the row. No suite calls
-`location.reload()` on its own.
+and the predicate checks the marker as well as the row. `reloadAndWaitForRow`
+is the row-shaped wrapper over it, and a **CDP** `Page.reload` — a suite
+driving the browser over DevTools rather than evaluating in the page — goes
+through the same join via a `reload:` callback, since the marker and a CDP
+call cannot be one evaluation. No suite issues either kind of reload on its
+own.
+
+**A `Page.navigate` is the same race and joins the same way** — it too resolves
+before the new document commits. The marker is sound only where the navigation
+is CROSS-document, and a target with no `#` fragment always is, which is every
+suite's `APP` / `BASE`; on a fragment-only navigation `window.__doomed` would
+survive and the wait would hang for its full 20s. The eleven sends left
+unjoined each carry a `// navigate-unjoined: <reason>` at the call site and a
+per-file count in `NAVIGATE_UNJOINED` (`shared/test/browser-runner.test.js`),
+which is what makes adding a twelfth a reviewed act. `docs/decisions/testing.md`
+has the sweep, the reasons and why `themecheck`'s `boot` decides at runtime.
 
 **The browser suites run in parallel, and a worker OWNS the instance it points
 at.** `fixtures.reset()` deletes every habit on its server, so the parallelism is

@@ -52,7 +52,7 @@ try {
     offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
   }, sessionId);
 
-  const goto = async (u) => { await send('Page.navigate', { url: u }, sessionId); await sleep(1500); };
+  const goto = async (u) => { await send('Page.navigate', { url: u }, sessionId); await sleep(1500); }; // navigate-unjoined: called online at boot and again with the network cut, and the sleep plus a check is a NAMED fail either way
 
   /* ---- 1. service worker registers ---- */
   console.log('--- service worker ---');

@@ -19,7 +19,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9325);
@@ -126,15 +128,17 @@ try {
       : `.category-section-header[data-category-id="${found.categoryId}"]`;
   };
 
-  await send('Page.navigate', { url: APP }, sessionId);
   // `!!document.querySelector('#grid .habit-row')` returns the instant the
   // grid holds ANY row — including one left behind by whatever loaded before
   // this navigation settled. 'Meditate' is a fixture habit `reset()` always
   // creates, so its presence means the grid is showing this account's real,
   // freshly painted list rather than a stale one.
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
-    { what: 'the dashboard to load' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard to load',
+    });
 
   // Leftovers from a previous, standalone run of this same suite — not from
   // any other suite, which never touches categories.
@@ -152,10 +156,12 @@ try {
   // read once at the boot that already happened — still holds whatever a
   // previous run left. Reload so the dialog's picker renders the account as
   // it actually is now, not the one the page loaded with.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
-    { what: 'the dashboard after cleanup' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard after cleanup',
+    });
 
   const byText = (sel, text) => `[...document.querySelectorAll(${JSON.stringify(sel)})]
     .find(el => el.textContent.trim() === ${JSON.stringify(text)})`;
@@ -271,11 +277,13 @@ try {
     return r.result.value;
   };
 
-  await send('Page.navigate', { url: `${APP}/#/habit/${deepLinkHabit.id}` }, coldSessionId);
-  await waitUntil(coldEv,
+  await reloadAndWaitFor(coldEv,
     `!document.getElementById('view-detail').hidden && ${byText('#view-detail button', 'Edit')} &&
      document.querySelector('.detail-head h2')?.textContent.includes('Zzz Deep Link Habit')`,
-    { what: "the deep-linked habit's own page, with no dashboard ever painted" });
+    {
+      reload: () => send('Page.navigate', { url: `${APP}/#/habit/${deepLinkHabit.id}` }, coldSessionId),
+      what: "the deep-linked habit's own page, with no dashboard ever painted",
+    });
 
   // The whole premise of the bug: no dashboard load happened on the way here.
   const gridPainted = await coldEv(`!!document.getElementById('grid').children.length`);
@@ -391,10 +399,12 @@ try {
   // own synchronous render resolves straight to the real name, no
   // placeholder in play, and the only thing left to race is the LATE
   // continuation this block is about.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Zzz Race Habit B')`,
-    { what: 'the dashboard to load with both race fixtures' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard to load with both race fixtures',
+    });
 
   const picked = await ev(`(()=>{
     const realFetch = window.fetch.bind(window);
@@ -472,10 +482,12 @@ try {
   // one: `state.categories` still holds the two race fixtures until something
   // re-fetches it, and the next block's "no category exists yet" check reads
   // that state, not the server, through `renderCategoryManage`.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
-    { what: 'the dashboard after the race block\'s cleanup' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard after the race block\'s cleanup',
+    });
 
   /* ---------- create a category from a chip, and assign it to a habit ---------- */
 
@@ -538,12 +550,14 @@ try {
 
   /* ---------- a reload keeps the assignment ---------- */
 
-  await send('Page.navigate', { url: APP }, sessionId);
   // `openHabitByName` below finds its row with no wait of its own, so this
   // has to hold for the row it is about to look for — not merely "a" row.
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === ${JSON.stringify(HABIT_NAME)})`,
-    { what: 'the dashboard after reload' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard after reload',
+    });
   await openHabitByName(HABIT_NAME);
 
   const afterReload = await selectedCategoryOption();
@@ -695,12 +709,13 @@ try {
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupByCategory: true }) })`);
-  await send('Page.navigate', { url: APP }, sessionId);
   // Five habits total: the four fixtures plus this suite's own — a plain "a
   // row exists" predicate would pass on a grid still showing the PREVIOUS
   // (flat) paint from before this navigation settled.
-  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
-    { what: 'the grouped dashboard to load with all five habits' });
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length === 5`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the grouped dashboard to load with all five habits',
+  });
 
   const grouping = await ev(`(()=>{
     const headers = [...document.querySelectorAll('#grid .category-section-header')];
@@ -842,9 +857,10 @@ try {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(${JSON.stringify({ ...workHabit, archived: true })}),
   })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 4`,
-    { what: 'the dashboard to reload with the archived habit dropped from the active list' });
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length === 4`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard to reload with the archived habit dropped from the active list',
+  });
 
   const archivedOut = await ev(`(()=>{
     const headers = [...document.querySelectorAll('#grid .category-section-header')];
@@ -881,9 +897,10 @@ try {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(${JSON.stringify({ ...workHabit, archived: false })}),
   })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
-    { what: 'the dashboard to reload with the habit un-archived again' });
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length === 5`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard to reload with the habit un-archived again',
+  });
 
   // A query that matches only Meditate — Fitness still draws a header with a
   // real count (1), so this is unlike the no-match case below: the headers
@@ -1010,9 +1027,10 @@ try {
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupByCategory: false }) })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
-    { what: 'the flat dashboard to load again' });
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length === 5`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the flat dashboard to load again',
+  });
 
   const flat = await ev(`(()=>({
     headers: document.querySelectorAll('#grid .category-section-header').length,
@@ -1541,10 +1559,12 @@ try {
   // holds. Mutation target: delete the `await api('/categories/reorder', …)`
   // line in `moveCategory`, keeping only the optimistic splice — this must
   // FAIL, because a reload reads nothing but the server's own answer.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
-    { what: 'the dashboard to reload after the reorder' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard to reload after the reorder',
+    });
   await openHabitByName(HABIT_NAME);
 
   const afterReloadManage = await readManage();
@@ -1568,9 +1588,10 @@ try {
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupByCategory: true }) })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
-    { what: 'the grouped dashboard to reload after the reorder' });
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length === 5`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the grouped dashboard to reload after the reorder',
+  });
 
   const sectionOrder = await ev(`[...document.querySelectorAll(
     '#grid .category-section-header:not(.uncategorised) .category-section-name')]
@@ -1582,9 +1603,10 @@ try {
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupByCategory: false }) })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
-    { what: 'the flat dashboard to load again after the section-order check' });
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length === 5`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the flat dashboard to load again after the section-order check',
+  });
 
   // f: every arrow on every row is disabled while a row is mid-rename —
   // `repaintCategories` refuses to rebuild this list while
@@ -1651,10 +1673,12 @@ try {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groupByCategory: true }) });
   })()`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
-    { what: 'the grouped dashboard to load for h' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the grouped dashboard to load for h',
+    });
 
   await ev(`document.getElementById('btn-new').click()`);
   await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
@@ -1726,9 +1750,10 @@ try {
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupByCategory: false }) })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
-    { what: 'the flat dashboard to load again after h' });
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length === 5`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the flat dashboard to load again after h',
+  });
 
   /* ---------- i: a refetch that fails AFTER a committed reorder must not
      revert it, and must not paint the hint as an error (review round 2,
@@ -2194,10 +2219,12 @@ try {
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupByCategory: true }) })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .category-section-header')].length > 0`,
-    { what: 'the grouped dashboard to load for l' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the grouped dashboard to load for l',
+    });
 
   // Count in flight before opening, so the wait below catches `openDialog`'s
   // own fire-and-forget refetch rather than a page that merely has content —
@@ -2339,11 +2366,13 @@ try {
   await ev(`fetch('/api/settings', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupByCategory: false }) })`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].length > 0
       && document.querySelectorAll('#grid .category-section-header').length === 0`,
-    { what: 'the ungrouped dashboard to come back after l' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the ungrouped dashboard to come back after l',
+    });
 
   /* ---------- 2b: a boundary press must not hand the keyboard the arrow that
      UNDOES it (review round 4, finding 2) ----------
@@ -3032,10 +3061,12 @@ try {
   // and `n` below want an ordinary app, and `g` left the store believing it is
   // offline. `#btn-new` because the manage list is the same in either mode and
   // that one depends on no habit's name surviving the renames above.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')].length > 0`,
-    { what: 'the dashboard to come back for 2c' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard to come back for 2c',
+    });
   await ev(`(async()=>{
     const { clearAll } = await import('/shared/offline.js');
     await clearAll();

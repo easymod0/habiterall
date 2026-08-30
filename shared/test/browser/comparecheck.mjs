@@ -19,7 +19,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 import { SPREAD_ARCHIVED_HABIT, seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
@@ -90,14 +92,16 @@ try {
     return r.result.value;
   };
 
-  await send('Page.navigate', { url: APP }, sessionId);
   // 'Meditate' by name, not "the grid has a row": a bare row predicate is
   // satisfied by whatever a previous navigation left behind — see the note on
   // the same wait in `categorycheck.mjs`.
-  await waitUntil(ev,
+  await reloadAndWaitFor(ev,
     `[...document.querySelectorAll('#grid .habit-row .habit-name')]
        .some(n => n.textContent.trim() === 'Meditate')`,
-    { what: 'the dashboard to load' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard to load',
+    });
 
   /* ---------- the entry point ---------- */
 
@@ -379,16 +383,21 @@ try {
   // Navigated rather than `history.back()`: the habit above was opened from the
   // COMPARISON's grid, so one Back lands on `#/categories` and the depth to
   // unwind is a thing this block would have to know. Aiming at the app with no
-  // fragment reaches the dashboard whether the browser treats it as a reload or
-  // as a same-document hash change.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev,
+  // fragment is always a CROSS-document load — HTML's fragment fast-path
+  // requires the TARGET url's fragment to be non-null, so a fragment-less
+  // target is a real navigation even from `#/habit/3`. That is what makes the
+  // joined wait below sound: on a same-document navigation `window.__doomed`
+  // would survive and the wait would hang for its full 20s.
+  await reloadAndWaitFor(ev,
     `location.hash === ''
        && !document.getElementById('view-list').hidden
        && document.getElementById('btn-compare').hidden === false
        && [...document.querySelectorAll('#grid .habit-row .habit-name')]
             .some(n => n.textContent.trim() === 'Meditate')`,
-    { what: 'the dashboard, with its Compare button' });
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard, with its Compare button',
+    });
 
   await ev(`(async () => {
     const habits = await (await fetch('/api/habits')).json();

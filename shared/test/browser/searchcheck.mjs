@@ -16,7 +16,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9296);
@@ -133,11 +135,10 @@ try {
       });
     };`;
 
-  await send('Page.navigate', { url: APP }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
   await sleep(600);
 
   // The fixtures are a handful of habits; the box only earns its place past a
@@ -160,12 +161,10 @@ try {
     }
     return before + extra.length;
   })()`);
-  await send('Page.navigate', { url: APP }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`document.querySelectorAll('#grid .habit-row').length >= ${seeded}`)
-      .catch(() => 0)) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(ev, `document.querySelectorAll('#grid .habit-row').length >= ${seeded}`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: `${seeded} habit rows`,
+  });
   await sleep(500);
 
   const shown = () => ev(`(() => ({
