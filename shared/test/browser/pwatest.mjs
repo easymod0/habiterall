@@ -126,8 +126,25 @@ try {
 
   // NOTE: Chrome's Network.emulateNetworkConditions does NOT apply to
   // service-worker-initiated fetches, so the SW can still reach the server
-  // here. The offline API fallback is covered by swreal.mjs, which stops the
-  // server outright. What we assert here is that the SHELL works offline.
+  // here. What we assert here is that the SHELL works offline.
+  //
+  // No browser suite here stops the server outright to watch the offline API
+  // fallback — a suite named `swreal.mjs` used to be cited for that and does
+  // not exist anywhere in this repo. The *hung*-server shape for the
+  // worker's shell path (a connection accepted and never answered, #87) is
+  // covered instead at the unit level, by `shared/test/sw-shell.test.js`,
+  // which drives the real `shellFirst` against a fake `fetch` that hangs with
+  // no signal. No browser suite drives a hung fetch INSIDE the worker's own
+  // target, for either `shellFirst` or `networkFirst`: `hangcheck.mjs`
+  // intercepts only `*/api/*` and `*/healthz*`, but a CDP intercept installed
+  // on the PAGE session (`Fetch.requestPaused` there) never sees a fetch the
+  // WORKER itself initiates — a separate execution context CDP is not
+  // attached to here — so neither route is actually exercised through the
+  // worker by that suite, regardless of what `sw.js` does with them.
+  // `/healthz` genuinely is one `sw.js` returns early for, before reaching
+  // either function; `/api/*` is not — it is dispatched to `networkFirst`,
+  // which runs same as ever. Both are unreachable from `hangcheck.mjs` for
+  // the page-session reason above, not because `networkFirst` never runs.
   const offlineData = await ev(`(async()=>{
     const r = await fetch('/api/overview?days=7');
     return { status: r.status, habits: r.ok ? (await r.json()).habits?.length : null };

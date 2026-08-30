@@ -745,12 +745,18 @@ render goes to that view, and `handleLaunchAction` afterwards only toasts.
 a module at package time. `GET /api/me` carries `mode`, and so does its **401**.
 See the root `CLAUDE.md` for what the other status codes mean.
 
-**A request the app makes is bounded** — 10s, in `ui/api.js` and in the worker's
-`networkFirst`, taken from `Api.kt`'s `connectTimeout`. Chrome imposes no ceiling
-of its own (measured still pending at 300s). The exemption is about REPLAYING,
-not latency: aborting does not recall a request the server has begun, so
-everything bounded has to be safe to arrive twice, and `POST /habits` is the one
-call on this path that is not. Import, export and the notify test bypass `api()`.
+**A request the app makes is bounded** — 10s, in `ui/api.js`, the worker's
+`networkFirst` and the worker's `shellFirst`, taken from `Api.kt`'s
+`connectTimeout`. Chrome imposes no ceiling of its own (measured still pending
+at 300s). `shellFirst` awaits the network before consulting a cached copy one
+line below it, so unbounded it is an installed PWA that opens to nothing
+rather than one showing a stale shell — missed by #93, which bounded only the
+worker's API half. The exemption is about REPLAYING, not latency, and it is
+`ui/api.js`'s alone: aborting does not recall a request the server has begun,
+so everything it bounds has to be safe to arrive twice, and `POST /habits` is
+the one call on this path that is not. Import, export and the notify test
+bypass `api()`. Nothing in `sw.js` needs the exemption — only GETs reach the
+worker, so there is nothing there a retry could duplicate.
 
 This is the bounded half of #87: the write is still attempted before it is
 durable, so the loss window is 10 seconds rather than unbounded. Closing it means

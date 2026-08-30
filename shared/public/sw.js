@@ -332,6 +332,46 @@ const SHELL = [
 /** GET endpoints worth keeping a copy of for offline rendering. */
 const CACHEABLE_API = [/^\/api\/overview/, /^\/api\/habits/, /^\/api\/me$/];
 
+/**
+ * An abort signal bounding one request, falling back to `AbortController` +
+ * `setTimeout` below `AbortSignal.timeout`'s availability (Chrome 103 /
+ * Firefox 100 / Safari 16). Calling `AbortSignal.timeout` unguarded THROWS
+ * there, and inside an `async` function that throw is a rejected promise —
+ * `event.respondWith(<rejected>)` is a network error, on every request that
+ * reaches the call, on exactly the browsers old enough to need the bound
+ * most. `ui/settings.js`'s `bound()` and `offline.js`'s `isReachable` already
+ * hand-roll this same fallback; this is a third copy rather than a fourth
+ * unguarded call, which is the drift that put an unguarded
+ * `AbortSignal.timeout(10_000)` in `networkFirst` (below, unguarded since
+ * #93) and then again in `shellFirst` in the very commit meant to fix the
+ * second one.
+ *
+ * The `setTimeout` below is left uncleared, matching `ui/settings.js`'s
+ * `bound()`: both call sites here pass the signal straight into `fetch`'s
+ * `init` with no handle back to the timer, and threading one through would
+ * restructure both functions to save one harmless 10s timer in a worker that
+ * outlives neither.
+ *
+ * A third path, below `AbortController`'s own availability, answers
+ * `undefined` — the request then goes out UNBOUNDED, which is #87's own hang,
+ * reopened on exactly the runtime old enough to need the bound most (Chrome
+ * <40, Firefox <44). Accepted rather than closed: a runtime with no
+ * `AbortController` at all predates every browser this file is otherwise
+ * written for, and there is nothing better to hand `fetch` in its place. The
+ * same path also means `{signal: undefined}` — EMPTY per WebIDL, not merely
+ * unbounded — so at the `shellFirst` call site the navigate→same-origin
+ * downgrade described there does not occur on this path either.
+ */
+function boundedSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(ms);
+  }
+  if (typeof AbortController === 'undefined') return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms);
+  return controller.signal;
+}
+
 sw.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(SHELL_CACHE)
@@ -405,7 +445,7 @@ async function networkFirst(request, url) {
     // here is an app that opens to nothing at all. Only GETs reach the worker,
     // so there is nothing here that a retry could duplicate.
     const response = await fetch(request, {
-      cache: 'no-store', signal: AbortSignal.timeout(10_000),
+      cache: 'no-store', signal: boundedSignal(10_000),
     });
     if (response.ok && CACHEABLE_API.some((re) => re.test(url.pathname))) {
       const cache = await caches.open(DATA_CACHE);
@@ -444,7 +484,31 @@ async function shellFirst(request) {
     request.destination === 'style' ||
     request.destination === 'document';
 
-  const network = fetch(request)
+  // Bounded for the same reason as `networkFirst` above, and more urgently:
+  // the cached copy is one line below, and `revalidateFirst` awaits this
+  // BEFORE consulting it, so a server that accepts the connection and never
+  // replies leaves an installed PWA awaiting the network forever with a
+  // perfectly good `/index.html` or `/style.css` already on the device — an
+  // app that opens to nothing at all. Aborting means the cache is not
+  // refreshed on this load, so a genuinely slow-but-working server keeps
+  // serving a stale shell for one more load; 10s is generous for either file,
+  // and it is the same tradeoff `networkFirst` already made for API data.
+  //
+  // Passing a non-empty `init` here downgrades a `navigate`-mode `Request` to
+  // `same-origin` per the Fetch spec's Request constructor — benign, since
+  // everything reaching this line is already same-origin (the handler above
+  // returns early on a cross-origin `url.origin`). The same spec step also
+  // sets the request's referrer to "client" and its referrer policy to the
+  // empty string, so the `Referer` sent can change from the referring
+  // document to the worker's own scope URL — nothing in this repo reads it,
+  // but say it accurately rather than name only `Sec-Fetch-Mode` (which does
+  // flip, from `navigate` to `same-origin`). `redirect` genuinely does
+  // survive untouched: it is copied from the input `Request` and only an
+  // explicit `init.redirect` would override it, which this passes none of —
+  // and an opaque redirect answer comes back with `ok === false`, so the
+  // `if (response.ok)` guard just below never caches it. `networkFirst`
+  // already passes an init the same way.
+  const network = fetch(request, { signal: boundedSignal(10_000) })
     .then(async (response) => {
       if (response.ok) {
         const cache = await caches.open(SHELL_CACHE);

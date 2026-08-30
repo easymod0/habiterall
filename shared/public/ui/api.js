@@ -66,6 +66,45 @@ const replayable = (method, path) =>
 const bounded = () => true;
 
 /**
+ * An abort signal bounding one request, falling back to `AbortController` +
+ * `setTimeout` below `AbortSignal.timeout`'s availability (Chrome 103 /
+ * Firefox 100 / Safari 16). Calling `AbortSignal.timeout` unguarded THROWS
+ * there, and that throw lands inside the `try` below, in `catch
+ * (networkError)` — every write announced as "Saved offline" and every read
+ * as a network failure, against a server that answered nothing wrong. This
+ * bug shipped once already as an unguarded call at this exact site (#87), and
+ * came back a second time inside the very PR that bounded the OTHER two
+ * sites (`sw.js`'s `shellFirst` and `networkFirst`) without noticing this one.
+ *
+ * This is a LOCAL COPY of `sw.js`'s `boundedSignal`, not an import, for two
+ * reasons neither of which is fixable by trying harder here. `sw.js` is a
+ * classic worker script, registered with no `{type: 'module'}`, so it cannot
+ * `import` — no single shared implementation could ever cover all three call
+ * sites (this one, `shellFirst`, `networkFirst`) at once. And consolidating
+ * just the two module-side copies would mean adding an EXPORT under
+ * `shared/public/`, which the root `CLAUDE.md` makes a `CACHE_VERSION`
+ * bump — every installed client loses its data cache, for an eight-line
+ * feature detect. The repo already carries this duplication on purpose:
+ * `ui/settings.js`'s `bound()` and `offline.js`'s `isReachable` both hand-roll
+ * the same fallback rather than share it. What holds the three copies
+ * together is the tests, one per site, and all three fall away together if
+ * the supported-browser floor is ever raised to Safari 16+.
+ *
+ * A third path, below `AbortController`'s own availability, answers
+ * `undefined` and the request goes out UNBOUNDED — which is #87's own hang,
+ * reopened on exactly the runtime old enough to need the bound most.
+ */
+function boundedSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    return AbortSignal.timeout(ms);
+  }
+  if (typeof AbortController === 'undefined') return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms);
+  return controller.signal;
+}
+
+/**
  * Auth adapter, injected by the edition's entry point via `start()`. The API
  * layer needs it for exactly one thing — deciding whether a 401 is a expired
  * session or a bug — so it is held here rather than threaded through calls.
@@ -159,7 +198,7 @@ export async function api(path, options = {}) {
       // refused connection and needs no branch of its own: a request that
       // never answered and one that could not be made are the same news.
       signal: options.signal ??
-        (bounded() ? AbortSignal.timeout(TIMEOUT_MS) : undefined),
+        (bounded() ? boundedSignal(TIMEOUT_MS) : undefined),
     });
   } catch (networkError) {
     // Offline, or bounded out. Queue what can be replayed; reads have nothing
