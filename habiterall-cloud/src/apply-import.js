@@ -126,12 +126,27 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
     // Preloaded with whatever the account already has — empty right after the
     // replace-mode wipe above, so the file's categories below always insert;
     // on a merge, whatever already exists by folded name is found here first.
+    // `ORDER BY position, id` so which of two fold-colliding rows this Map
+    // keeps is decided the same way personal's does, not by whatever order
+    // the plan happens to return — the same reason `position` is
+    // user-draggable and the two editions must answer identically about it.
     const { rows: existingCategories } = await db.query(
-      `SELECT id, name FROM categories`
+      `SELECT id, name FROM categories ORDER BY position, id`
     );
     const categoryIdByFold = new Map(
       existingCategories.map((c) => [foldCategoryName(c.name), c.id])
     );
+
+    // Folds claimed by THIS import's own declared-category loop below,
+    // tracked separately from `categoryIdByFold` — which also holds whatever
+    // the account already had before this import ran, and a fold matching
+    // that is the merge rule working (issue #256's own headline case: an
+    // İstanbul import resolving onto an account's pre-existing Istanbul
+    // records no skip). What this set answers is the narrower question of
+    // whether a SECOND category the file itself declares folds to a name a
+    // FIRST one already claimed in the same file — information only the file
+    // can lose, and only `result.skipped` says so.
+    const declaredFoldsThisImport = new Set();
 
     /**
      * Resolve NAME to a category id, creating one if the account (or this
@@ -146,12 +161,40 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
      * @param {unknown} [declaredPosition] the file's own `position` for this
      *   category, if it declared one — a habit-derived category (named only
      *   in a habit's `category` field) never has one and always appends.
+     * @param {boolean} [declared] true only for a call from the file's own
+     *   declared-categories loop below, never for a habit's `category`
+     *   field — a habit-derived name did not declare anything and must never
+     *   report a collision, only resolve one. When true, a fold already
+     *   claimed by an EARLIER declared category in this same file is
+     *   recorded in `result.skipped` rather than silently absorbed, because
+     *   that is information the file itself loses and nothing else says.
      * @returns {Promise<number | null>}
      */
-    async function resolveOrCreateCategory(name, color, declaredPosition) {
+    async function resolveOrCreateCategory(name, color, declaredPosition, declared = false) {
       const folded = foldCategoryName(name);
       if (!folded) return null;
-      if (categoryIdByFold.has(folded)) return categoryIdByFold.get(folded);
+      // The collision check has to run BEFORE the `categoryIdByFold.has`
+      // early return just below — that map is exactly what answers this
+      // fold once a PRIOR declared category has actually resolved it, so
+      // checking after would report nothing for a second declared name that
+      // collides with a first. `declaredFoldsThisImport` is populated only
+      // on a path below that actually resolves or creates a row — never
+      // here, unconditionally, which is what this used to do: it marked a
+      // fold "claimed" even when the LIMITS check or a conflict just below
+      // answered null and created nothing, so a file declaring two colliding
+      // names against an account already at the ceiling had its first call
+      // report "at most N are allowed" and its second call report "an
+      // earlier category in this file already folds to the same name" —
+      // naming a category that was never created.
+      if (declared && declaredFoldsThisImport.has(folded)) {
+        result.skipped.push(
+          `category "${name}" not created: an earlier category in this ` +
+          'file already folds to the same name');
+      }
+      if (categoryIdByFold.has(folded)) {
+        if (declared) declaredFoldsThisImport.add(folded);
+        return categoryIdByFold.get(folded);
+      }
       if (categoryIdByFold.size >= LIMITS.categories) {
         result.skipped.push(
           `category "${name}" not created: at most ${LIMITS.categories} are allowed`);
@@ -215,6 +258,7 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
       }
       const id = rows[0].id;
       categoryIdByFold.set(folded, id);
+      if (declared) declaredFoldsThisImport.add(folded);
       return id;
     }
 
@@ -223,7 +267,7 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
     // to invent it. `backupCategories(buf)` already caps this at
     // LIMITS.categories and drops anything nameless; the cap above is the
     // backstop for a merge pushing the account's own total past it.
-    for (const c of categories) await resolveOrCreateCategory(c.name, c.color, c.position);
+    for (const c of categories) await resolveOrCreateCategory(c.name, c.color, c.position, true);
 
     // Bound the ACCOUNT, not just this upload. `POST /habits` enforces a
     // per-user limit and import did not, so repeated merges accumulated

@@ -99,31 +99,252 @@ as two different categories, while `UNIQUE (user_id, lower(name))` in
 That is exactly the class of edition divergence `shared/src/validate.js`
 exists to prevent — the same input succeeding in one edition and failing in
 the other, silently, depending on which database happens to be running. So
-`foldCategoryName` is one function in shared code (`String(name ??
-'').trim().toLowerCase()`) and both editions' routes look up
-`categoryByFoldedName` / `WHERE lower(name) = lower($1)`-equivalent through it
-before ever reaching the `INSERT`.
+`foldCategoryName` is one function in shared code and both editions' routes
+look up `categoryByFoldedName` / `WHERE lower(name) = lower($1)`-equivalent
+through it before ever reaching the `INSERT`.
 
-That draws the SAME line for every input the two DB-level constraints can
-tell apart — it does not make the two editions agree for every input, full
-stop, and nothing here should be read as claiming it does. `toLowerCase()`
-and glibc's `lower()` are two independent implementations of Unicode case
-folding, and U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE) is where they
-part: JS's `toLowerCase()` answers `'i̇'` — a bare `i` plus a combining dot,
-U+0069 U+0307 — while glibc's `lower()` answers a bare `i`, U+0069 alone.
-Importing `İstanbul` into an account already holding `Istanbul` therefore
-folds to two different strings under `foldCategoryName` and to the SAME
-string under Postgres's `lower()`: the route-level lookup misses the existing
-row and tries to create a new one, and in cloud that INSERT is what walks
-straight into the `lower()`-backed unique index as a genuine collision —
-caught as a 409 by the route, or as a constraint violation `apply-import.js`'s
-own savepoint has to roll back cleanly for. Personal has no such backstop for
-this pair (`NOCASE` is ASCII-only and does not see `İ` vs `I` either), so the
-same import there creates a second, genuinely distinct category. Not a bug in
-`foldCategoryName` to fix — a fold agreeing with both databases on every
-codepoint at once does not exist to reach for — but the reason the INSERT
-path has to survive a collision cleanly rather than assume the route-level
-check already ruled one out.
+**A route-level check kept alongside DB constraints as backstops must be at
+least as strict as every backstop, and for a while this one was not — under
+either of the two collation providers Postgres can answer with.** A first
+version folded the whole string at once
+(`String(name ?? '').trim().toLowerCase()`), which draws the SAME line as the
+two DB-level constraints for every ASCII-adjacent input — `Élan`/`élan`
+included — but not for every input, full stop. Swept every codepoint
+1..0x10FFFF against this server's own Postgres (`postgres:17-alpine`, the same
+image the shipped compose and CI use) **under both collation providers it can
+run with** — libc (what the shipped image uses) and ICU (what a managed
+Postgres commonly offers instead). Both providers had to be measured
+separately rather than one extrapolated from the other, because `lower()` is
+NOT a per-codepoint homomorphism under ICU (Final_Sigma, below) — a sweep
+against one provider's answer does not stand in for the other's. Three pairs
+`lower()` collapses did not collapse under the whole-string fold:
+
+- **U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE).** `lower()` UNDER
+  LIBC maps both `I` and `İ` to plain `i` — libc applies Unicode's SIMPLE,
+  per-codepoint case mapping, which has no multi-character form for `İ`.
+  Whole-string `toLowerCase()` instead maps `İ` to `i` followed by a
+  combining dot above (U+0307), its one multi-character simple-to-full
+  mapping — the same FULL mapping Postgres's ICU provider applies, below.
+  `İstanbul` imported into an account already holding `Istanbul` therefore
+  folded to two different strings under the old fold and to the SAME string
+  under libc's `lower()` — this is the issue's own example. It is NOT the
+  same story under ICU, which is the opposite provider in the pair below.
+- **The decomposed spelling of that same pair — `i` + U+0307 typed directly,
+  never through İ at all — is a SECOND divergence an ICU-only sweep exposes
+  and a libc-only one cannot,** and it was found only in a second review round
+  after a per-codepoint fold folding `İ` alone to `i` had already been committed.
+  Per codepoint, `'İ'.toLowerCase()` is already exactly this decomposed
+  string. ICU applies Unicode's FULL, context-sensitive case mapping — the
+  same mapping JS's whole-string `toLowerCase()` implements — so `lower('İ')`
+  under Postgres's **ICU** provider (never libc) is ALSO `i` followed by
+  U+0307, and ICU's `lower()` therefore collapses `İstanbul` with this exact
+  decomposed spelling AT the decomposed form (never at plain `i` — ICU keeps
+  plain `I` apart from both). A fold that special-cased `İ` itself but left
+  the decomposed spelling folding to itself was a real containment break on
+  an ICU database — a regression relative to the OLD whole-string fold for
+  that one pair, on that one provider. The fix folds
+  per codepoint as before and then strips a combining dot above that follows a
+  plain `i` (`.replace(/i\u0307/gu, 'i')`), which subsumes the U+0130 special
+  case outright — one rule rather than two — and makes the fold treat a
+  decomposed `i` + U+0307 as plain `i` everywhere, which libc's `lower()` does
+  NOT do. That is STRICTER than libc for this one pair and exactly as strict
+  as ICU, which is the safe direction: containment is owed, never equality
+  with one provider.
+- **Final_Sigma**, a third divergence nothing here had named before either
+  review round — and one whose own first telling here was wrong, corrected
+  in the round-2 section below. Whole-string `toLowerCase()` is context
+  sensitive: `'ΟΔΟΣ'.toLowerCase()` ends in U+03C2 (final sigma, because the
+  last `Σ` sits at the end of the string) while `'Οδοσ'.toLowerCase()` ends
+  in plain `σ` (U+03C3, because there the last cased letter was already
+  lowercase). Libc's `lower()` applies NO such rule and folds every `Σ`/`σ`
+  to U+03C3 regardless of position, so `ΟΔΟΣ` and `Οδοσ` collided under libc
+  and not under the old fold — and ALL-CAPS Greek is at least as ordinary a
+  way to type a name as `İstanbul` is. ICU is the OPPOSITE of libc here: it
+  HAS Final_Sigma, and what it collapses `ΟΔΟΣ` with is not `Οδοσ` at all —
+  see the round-2 section below, which the first version of this paragraph
+  got backwards.
+
+Both times the route-level lookup missed the existing row and tried to
+create a new one. In cloud that `INSERT` walked straight into the
+`lower()`-backed unique index as a genuine collision, caught by
+`isCategoryNameConflict` and answered as a **409** — never a 500, that
+mapping is deliberate (below) — but from the constraint rather than from the
+route's own duplicate check, and `apply-import.js`'s savepoint recorded the
+same collision as a **skip** instead of resolving to the existing row.
+Personal has no backstop for either pair (`NOCASE` is ASCII-only and sees
+neither `İ` vs `I` nor a final sigma), so the same import there created a
+second, genuinely distinct category.
+
+124 codepoints diverge the OTHER way on this server's libc provider (JS
+lowercases circled Latin capitals like U+24B6 that libc's `lower()` leaves
+alone); the route is merely stricter than the index there, the same
+asymmetry personal's own `NOCASE` backstop already has, and is not something
+to "fix" by folding those back to themselves. That exact count is an
+observation about this one provider, not a rule to pin — what does not move
+is containment, which was measured under both providers rather than argued
+from either alone. Calling that direction "harmless" used to stop there,
+which was true only for the case measured — those 124 codepoints are ones
+the OLD whole-string fold already collapsed too, so nothing about them is
+NEW — and false in general: a review round (below) found that this fold
+also collapses at least two pairs that neither provider's `lower()` and
+neither the OLD fold collapses, which is a genuinely new coexistence rule
+for an account, not a harmless stricter-than-the-index asymmetry. See the
+round 3 section below for both pairs, why they are FORCED rather than
+sloppy, and what that means for an account that already holds one.
+
+The issue also proposed normalising first — NFC, NFD, NFKC and NFKD were all
+tried against this server and every one of the four still folds `İstanbul`
+and `Istanbul` (and the decomposed `i\u0307stanbul` spelling above) to
+different strings, so none of the four general Unicode normalisation forms
+closes this gap on their own. That does not mean normalisation is the wrong
+tool in general, and reads as a contradiction next to the combining-dot strip
+above only if the two are conflated: the strip IS a targeted normalisation —
+one narrow rule, collapse `i` + U+0307 to `i` — rather than one of NFC's four
+general forms, none of which happens to fold this particular pair together.
+
+So the old sentence here — "not a bug in `foldCategoryName` to fix, a fold
+agreeing with both databases on every codepoint at once does not exist to
+reach for" — was right about a fold *equal* to both backstops (one does not
+exist; the 124 harmless codepoints alone rule it out) and wrong about what
+was actually needed, which is a fold at least as *strict* as each: never
+looser than a backstop, free to be stricter. `foldCategoryName` now folds
+**per codepoint** rather than the whole string at once, which is what
+suppresses Final_Sigma for free — a lone `Σ` handed to `.toLowerCase()` has no
+preceding cased letter, so the context-sensitive rule never fires — and then
+strips a combining dot above following a plain `i`, which is what makes U+0130
+agree with `lower()` under both providers (above) rather than special-casing
+`İ` alone. Nothing stores a folded name: every call site is transient (a
+route's own duplicate check, or the importer's in-memory dedupe), so the fix
+changes no row, needs no migration and no reindex on either database — see
+below for what it means for an account that already holds both spellings.
+
+Measured, swept over every codepoint plus the contextual pairs above, against
+both providers:
+
+|                        | libc      | ICU                                          |
+|------------------------|-----------|-----------------------------------------------|
+| whole-string fold      | 0 breaks  | 1 break (`İstanbul` / decomposed `i\u0307stanbul`) |
+| per-codepoint, İ special-cased alone | 0 breaks | 1 break (decomposed spelling, above) |
+| this fold (per-codepoint + strip)    | 0 breaks | 0 breaks |
+
+**Round 2: the fix above was STILL not contained under both providers, and
+the fix is two more clauses, not one.** The table just above came from a
+sweep of every single codepoint plus four hand-picked contextual pairs. A
+second review round ran an exhaustive PAIRWISE sweep instead — every string
+of length <= 3 over the alphabet `I İ i ı U+0307 Σ σ U+03C2 É é ẞ ß x`
+(2,379 strings), each fed to Postgres's `lower()` under both providers — plus
+the same full 1..0x10FFFF codepoint sweep, and found two divergences neither
+the codepoint sweep nor the four pairs above could see, because both need
+more than one codepoint of context: one needs two adjacent codepoints in the
+folded output, the other needs a preceding cased letter.
+
+The two providers pull in OPPOSITE directions, and stating that correctly is
+the point of this section — an earlier telling of the U+0130 bullet and the
+Final_Sigma bullet above got half of this backwards, in the direction that
+hid exactly what round 2 found:
+
+- **libc applies Unicode's SIMPLE, per-codepoint mapping.** `İ` -> `i`, so it
+  collapses `{I, İ}` at plain `i`; it leaves a standalone U+0307 alone; and it
+  has no Final_Sigma, so `Σ` -> `σ` always and it collapses `{ΟΔΟΣ, Οδοσ}`.
+- **ICU applies Unicode's FULL, context-sensitive mapping** — the same
+  mapping JS's whole-string `toLowerCase()` implements. `İ` -> `i` + U+0307,
+  so it collapses `İ` against its own decomposed spelling ('i' + U+0307)
+  at that DECOMPOSED form and keeps `I` apart; and it
+  HAS Final_Sigma, so `lower('ΟΔΟΣ')` ends U+03C2 and it collapses `ΟΔΟΣ`
+  with a lowercase spelling that ALSO ends U+03C2 while NOT collapsing it
+  with `Οδοσ` (which ends the ordinary, non-final `σ`, U+03C3).
+
+Being contained under both therefore needs the fold to collapse strictly more
+than either provider alone: the dots AND the two lowercase spellings of
+sigma. The two breaks in `foldCategoryName` as it stood after round 1:
+
+- **A `+` quantifier, not a bare `/i\u0307/gu`.** `.replace` is
+  non-overlapping, so for `İ` immediately followed by the caller's OWN
+  U+0307 the per-codepoint loop already produces `i` + U+0307 + U+0307 (two
+  consecutive combining dots) before the strip runs, and a bare (non-
+  quantified) `/i\u0307/gu` eats only the first dot and resumes past the
+  survivor: `İ` + U+0307 folded to `i` + U+0307 (still decomposed) while
+  plain `I` + U+0307 folded all the way to `i` — two different strings.
+  libc's `lower()` measurably collapses BOTH spellings to the SAME
+  single-dot string, so the round-1 fix was looser than its own libc
+  backstop again, in a narrower form than the U+0130 special case it had
+  just replaced. `/i\u0307+/gu` matches the WHOLE run of trailing combining
+  dots in one match, so both spellings collapse to `i` together.
+- **U+03C2 -> `σ` (U+03C3).** Per-codepoint folding is exactly what
+  suppresses Final_Sigma for libc (a lone `Σ` has no preceding cased letter,
+  so the context-sensitive rule never fires), and that is exactly what
+  BREAKS containment under ICU, which applies Final_Sigma itself: ICU
+  collapses `ΟΔΟΣ` with a lowercase spelling ending U+03C2, and per-codepoint
+  folding alone answers a string ending U+03C3 for the first and U+03C2 for
+  the second — two different strings. Mapping U+03C2 onto `σ` collapses both
+  spellings of a lowercase sigma regardless of which one the caller typed,
+  which is what Unicode's own CASE FOLDING does for it and plain lowercasing
+  does not. (Written with an explicit `\u03c2` escape in the source, never
+  the look-alike character pasted where a diff cannot tell it from `σ`.)
+
+Measured, over every codepoint plus the pairwise sweep, against both
+providers:
+
+| fold                                          | libc       | ICU       |
+|------------------------------------------------|------------|-----------|
+| old whole-string `.toLowerCase()`               | 245 breaks | 0 breaks  |
+| round 1 (`/i\u0307/gu`, no `+`, no sigma clause) | 17 breaks  | 95 breaks |
+| `+` quantifier only (`/i\u0307+/gu`)            | 0 breaks   | 95 breaks |
+| `+` quantifier AND U+03C2 -> `σ` (round 2, shipped) | 0 breaks   | 0 breaks  |
+
+The question `foldCategoryName` answers — are these two strings the same
+NAME — is Unicode's CASE FOLDING, not lowercasing. JS exposes no
+`toCaseFold`, so this is per-codepoint `toLowerCase()` plus the two
+adjustments above where the two providers disagree with EACH OTHER, not a
+fold that "matches Postgres" — that framing is what went stale twice, in the
+two bullets corrected above, because Postgres's own `lower()` does not answer
+one way.
+
+**Round 3: "harmless regardless" was itself one more stale sentence, and the
+test gap behind it is the real defect.** A fresh review with no shared
+context found this, the coordinator reproduced it, and it was reproduced a
+third time before being written down here. Every test on this branch up to
+this point drove ONE direction: if `lower()` collapses two strings, so does
+the fold. Nothing asked the reverse — whether the fold collapses a pair that
+`lower()`, under EITHER provider, leaves apart — and `toLowerCase()` is a
+no-op on an already-lowercase codepoint wherever it sits, so the OLD
+whole-string fold never merged such a pair either. Two statements this
+document and the JSDoc both made were therefore false in general, true only
+for the one case measured (the 124 circled-Latin codepoints, which the OLD
+fold already collapsed, so nothing about them was new): "that direction is
+harmless regardless" here, and the PR body's "the index already forbade
+both spellings of any pair it collapses from coexisting, so no account can
+hold a pair the new fold newly collapses" (corrected below, in "what this
+changes for a row that already exists").
+
+**The better answer is not an apology — it is a proof that the over-collapse
+is FORCED.** Measured on this branch's own Postgres:
+
+| | libc merges | ICU merges | either merges X~Z? |
+|---|---|---|---|
+| `I` / `İ` / `i` + U+0307 (decomposed) | `I` ~ `İ` | `İ` ~ `i` + U+0307 | **no** |
+| `Οδοσ` / `ΟΔΟΣ` / a lowercase spelling ending U+03C2 (final sigma) | `Οδοσ` ~ `ΟΔΟΣ` | `ΟΔΟΣ` ~ that U+03C2 spelling | **no** |
+
+The two providers merge DIFFERENT pairs of each triple. Any fold contained
+under both must merge both pairs, and therefore — by transitivity — must
+merge the THIRD pair, which NEITHER provider merges on its own.
+Over-collapse is not sloppiness in this fold; it is a theorem about any fold
+contained under two providers that disagree with each other, checked against
+the database rather than argued (`habiterall-cloud/test/api.integration.mjs`
+pins exactly these two triples, both directions, against a real Postgres).
+
+**The exact blast radius, and it is complete.** Enumerating every string of
+length <= 3 over the alphabet `i I İ U+0307 σ ς Σ a` (584 strings), and
+comparing `foldCategoryName(s)` against the OLD fold's own answer with
+exactly two rewrites applied on top — `ς` (U+03C2, final sigma) -> `σ`
+(U+03C3, ordinary sigma), and `i` followed by a RUN of one or more U+0307 ->
+plain `i` — finds 0 violations: every string this fold collapses that the
+OLD fold did not is explained by one of those two rewrites, and nothing
+else. That equation IS the blast radius, complete and checkable, and
+`shared/test/validate.test.js`'s `NEWLY_COLLAPSED` table is where it is
+checked: a completeness assertion over the full 584-string enumeration,
+which fails if the fold ever collapses something the table does not list,
+and fails if a row is ever quietly dropped from it.
 
 That is plain `toLowerCase()`, deliberately never `toLocaleLowerCase()`. A
 first version of this reasoned the other way round — "`toLocaleLowerCase()`
@@ -138,31 +359,156 @@ it is a *looser* match to Postgres's locale-independent `lower()` and
 SQLite's `NOCASE` than the plain, locale-free form already is. Plain
 `toLowerCase()` is the closer match, not the looser one.
 
-The DB-level `UNIQUE` constraints stay, but only as a backstop against a race
-between two concurrent requests passing the route check at once, or against
-`foldCategoryName` disagreeing with a constraint it is only an approximation
-of (NOCASE's ASCII-only fold, in personal's direction). A duplicate that
-reaches the constraint is caught and answered as a **409**
-(`isCategoryNameConflict` in each edition's storage module,
-`habiterall-personal/src/db.js` and `habiterall-cloud/src/db/pool.js`), matched
-on the driver's own report of *which* constraint fired — node:sqlite's error
-code plus the column named in its message, Postgres's `23505` plus
-`err.constraint` — rather than allowed to surface as that constraint's own
-500. `resolveOrCreateCategory` in both editions' `apply-import.js` catches the
-same conflict, because that INSERT runs inside the whole import's one
-transaction and an uncaught constraint violation there took every habit and
-entry down with it, not only the category that collided. Note which way round personal's asymmetry actually runs: the ROUTE is the
-stricter of the two, because `toLowerCase()` folds the whole of Unicode while
-`NOCASE` folds ASCII alone — so `Élan` and `élan` are one category to the
-route and two to the constraint. The consequence is that in personal the
-constraint can only fire on a genuine RACE: any pair NOCASE would reject
-differs by ASCII case alone, and that is a pair `foldCategoryName` has already
-refused. The 409 mapping there is live for the race and otherwise unreachable
-through any single request — measured, by removing the route's own duplicate
-check and watching every existing assertion still pass. In cloud it is
-reachable both ways, because `lower()` and `toLowerCase()` are two
-implementations of Unicode case folding rather than one, and they need not
-agree on every codepoint.
+The DB-level `UNIQUE` constraints stay, but now only as a backstop against a
+RACE between two concurrent requests passing the route check at once —
+`foldCategoryName` disagreeing with a constraint it approximates is no longer
+a live path on either edition, because containment (never looser than a
+backstop) is what the fold is for. A duplicate that reaches the constraint is
+caught and answered as a **409** (`isCategoryNameConflict` in each edition's
+storage module, `habiterall-personal/src/db.js` and
+`habiterall-cloud/src/db/pool.js`), matched on the driver's own report of
+*which* constraint fired — node:sqlite's error code plus the column named in
+its message, Postgres's `23505` plus `err.constraint` — rather than allowed
+to surface as that constraint's own 500. `resolveOrCreateCategory` in both
+editions' `apply-import.js` catches the same conflict, because that `INSERT`
+runs inside the whole import's one transaction and an uncaught constraint
+violation there took every habit and entry down with it, not only the
+category that collided. Note which way round personal's asymmetry runs: the
+ROUTE is the stricter of the two, because `toLowerCase()` folds the whole of
+Unicode while `NOCASE` folds ASCII alone — so `Élan` and `élan` are one
+category to the route and two to the constraint. The consequence, unchanged
+from before this fix, is that in personal the constraint can only fire on a
+genuine RACE: any pair NOCASE would reject differs by ASCII case alone, and
+that is a pair `foldCategoryName` has already refused. The 409 mapping there
+is live for the race and otherwise unreachable through any single request —
+measured, by removing the route's own duplicate check and watching every
+existing assertion still pass. Cloud now has the same property for a
+different reason: the fold's containment over `lower()`, swept over every
+codepoint on this server and not merely argued, means every pair Postgres's
+index collapses is a pair the route already catches — İstanbul/Istanbul and
+ΟΔΟΣ/Οδοσ, the two pairs that used to reach the constraint from a single
+request, are both 409'd by the route now. What is left for cloud's
+constraint, same as personal's, is the race the fold cannot be asked to
+prevent by itself.
+
+**What this changes for a row that already exists. Cloud is not immune, and
+three drafts of this paragraph claimed it was.** The first said flatly that
+"no account can hold a pair the new fold newly collapses"; the second scoped
+that to the pairs round 1 measured; both were wrong, and the second was wrong
+in a way that reads like care, which is worse. The claim rested on cloud's
+`lower(name)` index refusing to store two rows the fold would later merge, and
+that is a claim about a UNIQUE INDEX whose expression is provider-dependent —
+so it has to be asked of every provider, not of the one the sweep ran on.
+
+Asked of both, on a real server, the answer is that **no newly-collapsed pair
+is refused by that index under both providers**, so on any given deployment at
+least one of them can already be sitting in the table as two rows:
+
+| pair | libc index refuses? | ICU index refuses? |
+|---|---|---|
+| `Istanbul` / `İstanbul` | yes | **no** |
+| `istanbul` / `i` + U+0307 + `stanbul` | **no** | **no** |
+| `λογοσ` / `λογος` | **no** | **no** |
+
+The first row is the one that kept the illusion alive: on the libc provider
+this project ships and CI runs, that pair really is unstorable, so every
+measurement taken here agreed with the claim. On a managed Postgres with the
+ICU provider it is perfectly storable, and the other two are storable
+everywhere. `categories_user_name_key` is untouched by this change and needs no
+reindex — but "the index expression did not move" was never the same statement
+as "no account holds such a pair", and conflating them is what went wrong three
+times.
+
+So everything below describes BOTH editions. In personal it arrives by a
+different road — `NOCASE` is ASCII-only and never saw any of these pairs — but
+the consequences are identical, and there is no longer a cloud paragraph and a
+personal paragraph. In personal, an account created before this fix CAN
+hold both
+`Istanbul` and `İstanbul` (or `ΟΔΟΣ` and `Οδοσ`), because `NOCASE` saw
+neither pair. After the fix the route treats them as one name: renaming one
+onto the other now answers 409 — and so does a COLOUR-ONLY edit on either
+row, which reads as an unrelated consequence until the two routes are put
+side by side. The habit dialog's save submits name and colour together
+through one `PUT /categories/:id`, and that route runs `categoryNameTaken`
+over whatever name arrives whether or not it actually changed — so an
+account holding both spellings can no longer re-save either row's colour
+alone until one of the two rows is renamed away first. And
+`apply-import`'s `categoryIdByFold` map collapses both spellings to one key,
+so a MERGE naming EITHER one attaches its habits to whichever of the two rows
+the map kept — decided by `position` (both editions preload that map
+`ORDER BY position, id`, matching each other for exactly this reason), which
+is user-draggable through `POST /categories/reorder`. A purely cosmetic drag
+on either row can therefore silently decide which of the two a later import
+attaches new habits to, with nothing about the drag itself suggesting it
+matters. In that MERGE case no row is deleted and no habit loses its category
+— that is the fold's answer for an already-stored name changing, which is
+this fix working rather than a side effect to paper over, the same thing the
+root `CLAUDE.md` asks to be said out loud about a stored lapse moving a
+window.
+
+**And the same four consequences reach a cloud account, for any of the three
+pairs its own index does not refuse.** A cloud account holding `λογος` and
+`λογοσ` as two rows — legitimate, because neither provider's `lower()` ever
+asked them to merge — or holding `Istanbul` and `İstanbul` on an ICU
+deployment, gets exactly what personal does: a rename of either onto the other
+now answers
+409 from the route's own duplicate check (never reaching the constraint,
+which would not have fired for this pair either); a COLOUR-ONLY edit through
+`PUT /categories/:id` 409s the same way, for the same reason
+(`categoryNameTaken` runs over whatever name arrives, changed or not); an
+import's `categoryIdByFold` map collapses both spellings to one key, so a
+MERGE naming either attaches its habits to whichever row `position` decided;
+and no row is deleted in that MERGE case, which is this fix working rather
+than a side effect. **No migration is included for cloud's copy of this
+either, and the reason is the same one personal's absence already gives**:
+merging a pre-existing duplicate pair ahead of any particular import would
+have to choose a colour, a position and a winner for whichever account holds
+one, and that is a decision for whoever owns the account, not a silent one
+this fix can make on their behalf. What changed is only that the
+consequence — a 409, a line in `result.skipped` on a REPLACE (below) — is
+now a stated one instead of a false "cloud cannot hold such a pair" hiding
+that there was ever a decision to make.
+
+**A REPLACE-mode restore of that same account is a different case, and "no
+row is deleted" is not true of it — a review round after this fix was first
+written found that it silently was.** `mode=replace` wipes every category
+first (`clearAllCategories` / `DELETE FROM categories`) and only then
+re-applies the file's own declared list, and a JSON export of an account
+holding both spellings declares BOTH of them — the export is naming two real
+rows, not one. The second declared category folds onto the first the same
+way any other pair does, but there is no longer a second row left to
+"attach to": the wipe already removed it, so the account comes back with one
+category where the file itself declared two, and before this fix round
+nothing said so. `resolveOrCreateCategory` now tracks the folds its OWN
+declared-categories loop has already claimed in this same file and reports a
+line in `result.skipped` naming the category that was not created, the
+moment a second declared name folds onto a first one — but only for that
+case: a fold resolving onto an account's PRE-EXISTING row (the headline
+İstanbul-into-Istanbul case above) is the merge rule working and stays
+unreported, and a habit's own `category` field is never a declaration and
+never reports either. Every habit that named either spelling still keeps A
+category — nothing here orphans a habit — but the account genuinely loses a
+row a restore of the same file used to bring back, and which of the two
+surviving is again decided by `position`. No migration is included: merging a
+pre-existing duplicate pair in personal ahead of any particular import would
+have to choose a colour, a position and a winner, and that is a separate
+decision, not a silent one — what changed is only that the loss, when an
+import causes it, is now a line in `result.skipped` rather than nothing at
+all.
+
+**`LIMITS.categories` is counted two different ways, and an account already
+holding a collapsed pair sits on the seam.** The importer counts FOLDS
+(`categoryIdByFold.size`) against the ceiling, because that is the shape it
+can cheaply ask "would this be new?" of; `POST /categories` and everywhere
+else that enforces the same ceiling counts ROWS. An account holding a
+pre-existing `Istanbul`/`İstanbul` pair is two rows behind one fold, so an
+import that adds exactly up to what the fold count allows can carry that
+account's ROW total one past `LIMITS.categories` — a ceiling nothing else
+here catches, because the row-counting routes were never asked about rows
+the importer itself is about to add. This is a known consequence of the two
+counting methods disagreeing on an account already in this specific state,
+recorded here rather than fixed: changing what the ceiling counts, or when it
+is checked, is a separate decision and not one this PR makes.
 
 **The browser holds no copy of that fold, and the suggestion chips are what
 made one tempting.** A chip is a shortcut — tap `Health` and get a category

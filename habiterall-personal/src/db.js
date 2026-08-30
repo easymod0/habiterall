@@ -83,10 +83,14 @@ db.exec(`
   -- lookup through foldCategoryName (validate.js — plain toLowerCase(), not
   -- toLocaleLowerCase(), which would tailor the fold to whichever locale this
   -- host happens to be running rather than matching this NOCASE and
-  -- Postgres's lower() consistently). This constraint stays only as a
-  -- backstop for a race the route check missed, or a fold that disagrees
-  -- with SQLite's ASCII-only NOCASE — see isCategoryNameConflict below, which
-  -- is what turns hitting it into a 409 rather than a 500.
+  -- Postgres's lower() consistently). foldCategoryName folds per codepoint
+  -- and is the strictest of the three (route, this NOCASE, Postgres's
+  -- lower()) — it is a superset of what NOCASE folds and, swept over every
+  -- codepoint against Postgres, never looser than lower() either (issue
+  -- #256; docs/decisions/categories.md). So this constraint is race-only:
+  -- any pair it would still reject is one the route has already refused —
+  -- see isCategoryNameConflict below, which is what turns hitting it into a
+  -- 409 rather than a 500.
   CREATE TABLE IF NOT EXISTS categories (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT    NOT NULL,

@@ -377,6 +377,162 @@ ck("THE assertion: 'élan' after 'Élan' is 409 — NOCASE alone would let this 
   elanFoldedRes.status === 409, String(elanFoldedRes.status));
 await fetch(`${base}/api/categories/${elan.id}`, { method: 'DELETE' });
 
+/* ---- issue #256: İstanbul / Istanbul is the same bug as Élan / élan above,
+ * and it is the one the issue was filed about — `.toLowerCase()` maps U+0130
+ * ('İ') to 'i' + a combining dot (U+0307), never to plain 'i', so the OLD
+ * fold disagreed with cloud's Postgres `lower()`, which collapses both to
+ * 'i'. Before the fix this edition's own NOCASE backstop cannot see the
+ * difference either (İ is outside NOCASE's ASCII range), so a route with the
+ * old fold let a second 'İstanbul' row through here where cloud's DB
+ * constraint would have refused it outright. This block pins the ROUTE and
+ * the IMPORTER, not the fold itself — that is `shared/test/validate.test.js`
+ * — because a fold being right does not make its two callers use it.
+ *
+ * Every literal below is a literal NAME comparison, deliberately never a call
+ * to `foldCategoryName` — asserting `foldCategoryName(a) === foldCategoryName(b)`
+ * would test the function against itself and pass unchanged even with the
+ * fold reverted to plain `.toLowerCase()`, which is exactly the trap this
+ * suite's own header names.
+ */
+const istanbulRes = await postJson('/api/categories', { name: 'Istanbul', color: '#111111' });
+ck("POST /categories creates 'Istanbul'", istanbulRes.status === 201, String(istanbulRes.status));
+const istanbul = await istanbulRes.json();
+
+const dotlessIstanbulRes = await postJson('/api/categories', { name: 'İstanbul' });
+ck("THE assertion: 'İstanbul' (U+0130) after 'Istanbul' is 409 — today this " +
+  'edition answers 201 (two categories) because the old fold and NOCASE both ' +
+  'miss this pair; cloud already answers 409 from its lower()-backed index',
+  dotlessIstanbulRes.status === 409, String(dotlessIstanbulRes.status));
+
+// A merge-mode import of a backup that declares 'İstanbul' as a CATEGORY (with
+// a colour that is deliberately NOT DEFAULT_COLOR — a fixture carrying the
+// default would still pass with the never-recolour rule deleted) and a habit
+// naming it. `entries: []` because this block is about category resolution,
+// not entry fidelity.
+const importBackup = Buffer.from(JSON.stringify({
+  categories: [{ name: 'İstanbul', color: '#abcdef' }],
+  habits: [{
+    name: 'issue-256 imported habit', type: 'boolean', category: 'İstanbul', entries: [],
+  }],
+}));
+const importRes = await fetch(`${base}/api/import?mode=merge`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: importBackup,
+});
+ck('the İstanbul import itself succeeds', importRes.status === 200, String(importRes.status));
+const importResult = await importRes.json();
+ck('…and records no skip — today this edition\'s own NOCASE backstop never ' +
+  'fires here (İ is outside its ASCII range), so nothing is skipped either way; ' +
+  'this is the parallel assertion to cloud\'s below, where a skip IS the ' +
+  "divergence",
+  Array.isArray(importResult.skipped) && importResult.skipped.length === 0,
+  JSON.stringify(importResult.skipped));
+
+const categoriesAfterImport = await (await fetch(`${base}/api/categories`)).json();
+const matchingIstanbul = categoriesAfterImport
+  .filter((c) => c.name === 'Istanbul' || c.name === 'İstanbul');
+ck('THE assertion: still exactly ONE category named either spelling — today ' +
+  "this edition's NOCASE backstop lets the import's İstanbul spelling create " +
+  'a second row',
+  matchingIstanbul.length === 1, JSON.stringify(categoriesAfterImport.map((c) => c.name)));
+
+const importedHabits = await (await fetch(`${base}/api/habits`)).json();
+const importedHabit = importedHabits.find((h) => h.name === 'issue-256 imported habit');
+ck("THE assertion: the imported habit's category_id is the PRE-EXISTING " +
+  "'Istanbul' row's id — asserting the ID and not merely the count, since a " +
+  "second row could otherwise absorb the habit and still leave a count of one " +
+  'if the pre-existing row were the one left duplicated instead',
+  importedHabit?.category_id === istanbul.id,
+  `${importedHabit?.category_id} vs ${istanbul.id} (categories named either spelling: ` +
+    `${JSON.stringify(categoriesAfterImport.map((c) => ({ id: c.id, name: c.name })))})`);
+
+const istanbulAfterImport = categoriesAfterImport.find((c) => c.id === istanbul.id);
+ck('resolve-or-create must never recolour a category it found: the import\'s ' +
+  "own colour (#abcdef, not DEFAULT_COLOR) must not have overwritten the " +
+  "pre-existing row's #111111",
+  istanbulAfterImport?.color === '#111111', JSON.stringify(istanbulAfterImport));
+
+// Clean up everything this block created, by id — 'İstanbul' only exists as a
+// row here when the fold is broken, so this is unconditional rather than
+// assuming which rows are present.
+if (importedHabit) await fetch(`${base}/api/habits/${importedHabit.id}`, { method: 'DELETE' });
+for (const c of categoriesAfterImport) {
+  if (c.name === 'Istanbul' || c.name === 'İstanbul') {
+    await fetch(`${base}/api/categories/${c.id}`, { method: 'DELETE' });
+  }
+}
+
+/* ---- issue #256 (review round): a replace-mode restore silently merges two
+ * of the FILE's own categories, and nothing said so ----
+ *
+ * The block above is a MERGE importing one declared category that resolves
+ * onto an account's pre-existing row — the headline case, and it must keep
+ * recording NO skip; that is the whole point of this PR. This block is the
+ * other shape: a SINGLE file declaring TWO categories, `Istanbul` and
+ * `İstanbul`, that fold to the same name. The second one is not created —
+ * `resolveOrCreateCategory` resolves it onto the first — and unlike the
+ * headline case, this loss is information only the FILE has: two categories
+ * the file itself declared came back as one, and before this fix nothing in
+ * `result.skipped` said so.
+ *
+ * Different colours and a habit each, so a fixture carrying DEFAULT_COLOR or
+ * no habits could not pass with the collapse-reporting rule deleted.
+ */
+const dupBackup = Buffer.from(JSON.stringify({
+  categories: [
+    { name: 'Istanbul', color: '#101010' },
+    { name: 'İstanbul', color: '#202020' },
+  ],
+  habits: [
+    { name: 'issue-256 dup habit A', type: 'boolean', category: 'Istanbul', entries: [] },
+    { name: 'issue-256 dup habit B', type: 'boolean', category: 'İstanbul', entries: [] },
+  ],
+}));
+const dupImportRes = await fetch(`${base}/api/import?mode=merge`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: dupBackup,
+});
+ck('the dup-category import itself succeeds',
+  dupImportRes.status === 200, String(dupImportRes.status));
+const dupImportResult = await dupImportRes.json();
+ck(
+  'THE assertion: the SECOND declared category (İstanbul, folding to the ' +
+  "same name as the FIRST declared category, Istanbul) IS reported in " +
+  "skipped — two categories the file itself declared collapsing to one is " +
+  'information only the file has, unlike the headline merge-onto-existing case',
+  Array.isArray(dupImportResult.skipped) &&
+    dupImportResult.skipped.some((s) => s.includes('İstanbul')),
+  JSON.stringify(dupImportResult.skipped));
+
+const dupCategories = await (await fetch(`${base}/api/categories`)).json();
+const dupMatching = dupCategories.filter((c) => c.name === 'Istanbul' || c.name === 'İstanbul');
+ck('still exactly ONE category named either spelling after the dup import',
+  dupMatching.length === 1, JSON.stringify(dupCategories.map((c) => c.name)));
+
+const dupHabits = await (await fetch(`${base}/api/habits`)).json();
+const dupHabitA = dupHabits.find((h) => h.name === 'issue-256 dup habit A');
+const dupHabitB = dupHabits.find((h) => h.name === 'issue-256 dup habit B');
+ck(
+  "THE assertion: both habits' category_id is the SAME id — the FIRST " +
+  "declared category's (Istanbul), never a second row",
+  dupHabitA?.category_id != null &&
+    dupHabitA.category_id === dupHabitB?.category_id &&
+    dupHabitA.category_id === dupMatching[0]?.id,
+  `A=${dupHabitA?.category_id} B=${dupHabitB?.category_id} ` +
+    `kept=${JSON.stringify(dupMatching)}`);
+
+// Clean up everything this block created.
+for (const h of [dupHabitA, dupHabitB]) {
+  if (h) await fetch(`${base}/api/habits/${h.id}`, { method: 'DELETE' });
+}
+for (const c of dupCategories) {
+  if (c.name === 'Istanbul' || c.name === 'İstanbul') {
+    await fetch(`${base}/api/categories/${c.id}`, { method: 'DELETE' });
+  }
+}
+
 /* ---- fix round item 2(b): a unique-constraint violation the route's own
  * check misses is a 409, not a 500 ----
  *
@@ -817,6 +973,84 @@ ck(`this account can be filled to LIMITS.categories (${LIMITS.categories})`, fil
 const overCeiling = await postJson('/api/categories', { name: 'One too many' });
 ck('a category past LIMITS.categories gives 400',
   overCeiling.status === 400, String(overCeiling.status));
+
+/* ---- issue #256 (round 2, FIX 3): the same collapse, under mode=replace ----
+ *
+ * Every block above is a MERGE. `mode=replace` wipes the account's
+ * categories, habits and entries FIRST and only then re-applies the file's
+ * own declared list, so there is no pre-existing row for a second declared
+ * category to "attach to" the way a merge does — the account genuinely
+ * loses a row a restore of the same file used to bring back, and before this
+ * fix nothing said so.
+ *
+ * Run LAST, deliberately, and for the same reason as the LIMITS.categories
+ * block just above it needs to be: this account is single-user, so there is
+ * no second account to isolate a destructive `replace` against, and by this
+ * point in the suite it is filled to LIMITS.categories with rows several
+ * earlier blocks depend on staying put. Asserted against that pre-seeded
+ * account rather than a fresh one — the category count is capped at
+ * LIMITS.categories and there are many habits from every block above — or a
+ * replace that quietly behaved like a merge (kept the seed, added the file's
+ * rows beside it) would still pass every assertion below about the file's
+ * own two categories.
+ */
+const seededCategoryCount = (await (await fetch(`${base}/api/categories`)).json()).length;
+const seededHabitCount = (await (await fetch(`${base}/api/habits`)).json()).length;
+ck('sanity: the account is seeded with more than the two rows this file ' +
+  'declares, before the replace',
+  seededCategoryCount > 2 && seededHabitCount > 2,
+  JSON.stringify({ seededCategoryCount, seededHabitCount }));
+
+const replaceBackup = Buffer.from(JSON.stringify({
+  categories: [
+    { name: 'Istanbul', color: '#101010' },
+    { name: 'İstanbul', color: '#202020' },
+  ],
+  habits: [
+    { name: 'issue-256 replace habit A', type: 'boolean', category: 'Istanbul', entries: [] },
+    { name: 'issue-256 replace habit B', type: 'boolean', category: 'İstanbul', entries: [] },
+  ],
+}));
+const replaceImportRes = await fetch(`${base}/api/import?mode=replace`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: replaceBackup,
+});
+ck('the replace-mode import itself succeeds',
+  replaceImportRes.status === 200, String(replaceImportRes.status));
+const replaceImportResult = await replaceImportRes.json();
+ck(
+  'THE assertion: the SECOND declared category (İstanbul) is reported in ' +
+  'skipped under mode=replace too — the same collision-reporting rule the ' +
+  'merge blocks above pin, now exercised on the path that wipes first',
+  Array.isArray(replaceImportResult.skipped) &&
+    replaceImportResult.skipped.some((s) => s.includes('İstanbul')),
+  JSON.stringify(replaceImportResult.skipped));
+
+const replaceCategories = await (await fetch(`${base}/api/categories`)).json();
+ck('every pre-seeded category is GONE — proving this actually replaced ' +
+  'rather than merged (a merge would have kept all ' +
+  `${seededCategoryCount} of them beside the file's own)`,
+  replaceCategories.length === 1, JSON.stringify(replaceCategories.map((c) => c.name)));
+ck('THE assertion: exactly ONE category named either spelling survives the ' +
+  'replace, carrying both habits',
+  replaceCategories.length === 1 &&
+    (replaceCategories[0].name === 'Istanbul' || replaceCategories[0].name === 'İstanbul'),
+  JSON.stringify(replaceCategories));
+
+const replaceHabits = await (await fetch(`${base}/api/habits`)).json();
+ck('every pre-seeded habit is GONE too',
+  replaceHabits.length === 2, JSON.stringify(replaceHabits.map((h) => h.name)));
+const replaceHabitA = replaceHabits.find((h) => h.name === 'issue-256 replace habit A');
+const replaceHabitB = replaceHabits.find((h) => h.name === 'issue-256 replace habit B');
+ck(
+  "THE assertion: both habits' category_id is the SAME id — the surviving " +
+  'category, never a second row that was silently dropped',
+  replaceHabitA?.category_id != null &&
+    replaceHabitA.category_id === replaceHabitB?.category_id &&
+    replaceHabitA.category_id === replaceCategories[0]?.id,
+  `A=${replaceHabitA?.category_id} B=${replaceHabitB?.category_id} ` +
+    `kept=${JSON.stringify(replaceCategories)}`);
 
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
