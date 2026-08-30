@@ -839,13 +839,39 @@ const FRESH_HEADER = 'X-Habiterall-Fresh';
  * 100 is the backstop and not the working bound. The bound is the TTL sweep in
  * `createMemo`: entries live `OVERVIEW_TTL_MS`, a computation holds one of
  * `PG_POOL_MAX` = 10 connections while it runs, so the live set is what ten
- * connections can produce in two seconds. This number is what that has to stay
- * under, and it is chosen so that the arithmetic if the sweep ever stops
- * working — 100 × 499 KB ≈ 50 MB — is a number a container survives. It was
- * 500, which is ≈ 250 MB, and neither compose file sets a memory limit: the
- * backstop was sized so that reaching it killed the process it was protecting.
+ * connections can produce in two seconds. It was 500, which is ≈ 250 MB, and
+ * neither compose file sets a memory limit: the backstop was sized so that
+ * reaching it killed the process it was protecting.
+ *
+ * **How many entries "ten connections in two seconds" is depends on how long
+ * one takes, and this number has no latency term in it.** At 40 ms per
+ * `buildOverview` it is 100 for every 0.4 s of traffic; at 10 ms the live set
+ * wants four times that and `remember` starts evicting entries that are still
+ * fresh. That is the direction this fails in now, and it fails toward a memo
+ * that costs the sweep and returns no hits rather than toward an OOM —
+ * `memo.gauge` on the runtime line is what tells the two apart, and
+ * `MAX_OVERVIEW_BYTES` is what keeps the other direction bounded whatever this
+ * number is set to.
  */
 const MAX_OVERVIEW_CACHED = 100;
+
+/**
+ * ...and the same bound expressed in the unit that actually matters.
+ *
+ * A COUNT converts to a memory bound only through the entry cost, and this
+ * cache's entries vary by ~70x: 18 KB for a typical 8-habit dashboard, 499 KB
+ * at 20 habits × 365 days, 1.2 MB at 50 × 365. So `MAX_OVERVIEW_CACHED` = 100
+ * is ~50 MB against the middle measurement and ~120 MB against the top one,
+ * and the comment above used to claim the first as though it were the bound.
+ * This is what makes it true: 48 MB, enforced, whatever mix of dashboard sizes
+ * an instance happens to hold.
+ *
+ * Measured in UTF-16 code units doubled, because the entries are STRINGS (see
+ * the memo below) and V8 stores one as Latin-1 or as UTF-16 — so two bytes per
+ * unit is the ceiling rather than a guess, and this bound cannot be under-read
+ * by an account whose habit names are not ASCII.
+ */
+const MAX_OVERVIEW_BYTES = 48 * 1024 * 1024;
 
 /**
  * How many of those one account may hold.
@@ -894,12 +920,26 @@ const MAX_OVERVIEW_PER_ACCOUNT = 8;
  *
  * Read the hit-rate metric knowing it is 1/N.
  */
-const overviewMemo = createMemo((arg) => buildOverview(arg), {
+const overviewMemo = createMemo(async (arg) => JSON.stringify(await buildOverview(arg)), {
   ttlMs: OVERVIEW_TTL_MS,
   max: MAX_OVERVIEW_CACHED,
+  maxBytes: MAX_OVERVIEW_BYTES,
+  // UTF-16 code units doubled: V8 stores a string as Latin-1 or UTF-16, so
+  // this is the ceiling on what one entry retains rather than an estimate.
+  sizeOf: (json) => json.length * 2,
   maxPerAccount: MAX_OVERVIEW_PER_ACCOUNT,
   perAccount: true,
 });
+
+/** What the memo is holding, for the runtime log in `server.js`. */
+export const overviewMemoGauge = () => {
+  const g = overviewMemo.gauge();
+  return {
+    overview_memo_entries: g.entries,
+    overview_memo_bytes: g.bytes,
+    overview_memo_inflight: g.inflight,
+  };
+};
 
 api.get('/overview', route(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
@@ -937,7 +977,19 @@ api.get('/overview', route(async (req, res) => {
   res.vary(FRESH_HEADER);
   const fresh = req.get(FRESH_HEADER) === '1';
 
-  res.json(fresh ? await overviewMemo.fresh(key, arg) : await overviewMemo(key, arg));
+  // The memo holds the SERIALISED payload, so a hit skips a `JSON.stringify` of
+  // up to 1.2 MB as well as the five queries — on a single-threaded server that
+  // is everyone's latency, which is what `runtime.loop_blocked` is watched for.
+  // It is also what makes `sizeOf` exact rather than an estimate, and it means
+  // no two callers can ever be handed the same mutable object.
+  //
+  // `type` before `send`: `res.send` of a STRING defaults the content type to
+  // text/html, where `res.json` would have set it. With it set first the two
+  // are byte-identical — no `json replacer` or `json spaces` is configured on
+  // this app, and `overview-memo.integration.mjs` asserts a hit and a miss
+  // agree on status, content type and body.
+  res.type('application/json')
+    .send(fresh ? await overviewMemo.fresh(key, arg) : await overviewMemo(key, arg));
 }));
 
 /**

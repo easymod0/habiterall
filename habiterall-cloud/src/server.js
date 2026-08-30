@@ -10,7 +10,7 @@ import { pool, closePool, poolGauge, poolTimeouts } from './db/pool.js';
 import { LOCAL_IPS, createHealthProbe, sendHealth } from './health.js';
 import { throttleTouch } from './session-touch.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
-import { api } from './api.js';
+import { api, overviewMemoGauge } from './api.js';
 import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
@@ -381,7 +381,12 @@ const notifier = startNotifier();
 // dashboard into everybody's latency, and pool exhaustion is what a replica
 // count that outgrew Postgres looks like.
 const runtime = watchRuntime(log, {
-  extra: () => ({ ...poolGauge(), ...sessionStore.touchStats() }),
+  // The memo's own two numbers ride here rather than on a new surface: both
+  // ways of getting its bounds wrong are silent, and they fail in opposite
+  // directions — thrashing (evicting fresh entries, no hits, all of the sweep)
+  // versus a heap that grows until the container is killed. One line a minute
+  // is what tells them apart.
+  extra: () => ({ ...poolGauge(), ...overviewMemoGauge(), ...sessionStore.touchStats() }),
 });
 
 async function start() {

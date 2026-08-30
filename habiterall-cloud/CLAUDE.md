@@ -331,6 +331,40 @@ the bound was sized such that hitting it killed the process it was protecting.
 100 × 499 KB ≈ 50 MB is the same backstop at a size that leaves something to
 recover with.
 
+**But a COUNT is only ever as good as the entry cost written beside it, and
+these vary by ~70×** — 18 KB for a typical 8-habit dashboard, 499 KB at 20 ×
+365, 1.2 MB at 50 × 365. "100 × 499 KB ≈ 50 MB" picks the middle measurement;
+against the top one the same 100 entries is ~120 MB. `MAX_OVERVIEW_BYTES` (48
+MB, `capBytes` in `src/cache.js`) is what makes that sentence true rather than
+approximately true, and it is the bound that holds whatever mix of dashboard
+sizes an instance is actually serving. `createMemo` THROWS for a `maxBytes`
+with no `sizeOf`, because a byte bound with nothing to measure with is a
+comment claiming a bound — which is the shape this whole module exists because
+of.
+
+**Which is affordable because the memo holds the SERIALISED payload.** The
+compute is `JSON.stringify(await buildOverview(arg))` and the route is
+`res.type('application/json').send(...)`, so `sizeOf` is exact rather than an
+estimate, a hit skips a `JSON.stringify` of up to 1.2 MB as well as the five
+queries, and no two callers are ever handed the same mutable object. `res.type`
+BEFORE `send` is the one way that swap goes wrong — `res.send` of a string
+defaults the content type to `text/html` where `res.json` would have set it —
+so `overview-memo.integration.mjs` asserts a hit and a miss agree on the body
+byte for byte and on the content type.
+
+**And the two ways of getting the bounds wrong are silent, in opposite
+directions.** Too small and the memo thrashes: `remember` evicts entries that
+are still fresh, the hit rate collapses toward zero, and every tenant pays the
+sweep for no hits — the only symptom is that the dashboard is slow again. Too
+large and the heap grows until the container is killed. `MAX_OVERVIEW_CACHED`
+has no latency term in it (the live set is `PG_POOL_MAX ÷ buildOverview latency
+× TTL`, so 100 is right at ~40 ms and four times too small at ~10 ms), so
+`overviewMemoGauge` rides on the runtime line beside `pg_pool_max` —
+`overview_memo_entries`, `overview_memo_bytes`, `overview_memo_inflight`. One
+line a minute is what tells the two apart. `memo.size()` existed from the start
+and was read by nothing but tests, which is that question answered with
+"nobody".
+
 **And a SHARED bound is one an account can spend alone.** Per-account keys do
 not stop one account taking every slot: paging back through a few years is
 thousands of distinct windows, no write is involved, and the account doing it

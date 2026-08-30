@@ -169,17 +169,39 @@ function evict(map, excess) {
  * being active at once. Needs `perAccount`, which is what declares that a key
  * begins with `<account id>:`.
  *
+ * **`maxBytes` is the same bound in the unit that actually matters, and it
+ * needs `sizeOf`.** `max` is a COUNT, so it converts to a memory bound only
+ * through the entry cost — fine for a cache whose entries are all one size and
+ * useless for one whose entries vary by ~70x, which is the `/overview` memo.
+ * A `maxBytes` with no way to measure an entry would be a bound in name only,
+ * so it throws rather than accepting one.
+ *
  * @param {(arg: any) => Promise<any>} compute
  * @param {{ttlMs: number, max?: number, now?: () => number,
- *   perAccount?: boolean, maxPerAccount?: number}} opts
+ *   perAccount?: boolean, maxPerAccount?: number, maxBytes?: number,
+ *   sizeOf?: ((value: any) => number) | null}} opts
  */
 export function createMemo(compute, {
   ttlMs, max = MAX_CACHED, now = Date.now, perAccount = false,
-  maxPerAccount = Infinity,
+  maxPerAccount = Infinity, maxBytes = Infinity, sizeOf = null,
 }) {
+  // A COUNT bound converts to a memory bound only through the entry cost, and
+  // an entry here is whatever `compute` returns — so a memo whose entries are
+  // not all one size has to say how big one is or `maxBytes` measures nothing
+  // and silently bounds nothing. Refused at construction rather than at load.
+  if (maxBytes < Infinity && typeof sizeOf !== 'function') {
+    throw new TypeError('createMemo: maxBytes needs a sizeOf to measure with');
+  }
   /**
-   * key -> `{at, value}` once settled, `{at, inflight}` while computing.
-   * @type {Map<string, {at: number, value?: any, inflight?: Promise<any>}>}
+   * key -> `{at, value, bytes}` once settled, `{at, inflight}` while computing.
+   *
+   * `bytes` is on the settled shape only, and its absence on a placeholder is
+   * load bearing rather than incidental: a computation's size is genuinely not
+   * known until it has produced something, so every pass that reads it treats
+   * a missing one as 0 and steps over the entry itself.
+   *
+   * @type {Map<string, {at: number, value?: any, bytes?: number,
+   *   inflight?: Promise<any>}>}
    */
   const entries = new Map();
 
@@ -226,7 +248,12 @@ export function createMemo(compute, {
         // which is correct — it is a read that raced a write, and it started
         // first. What must not happen is a LATER reader inheriting it.
         if (entries.get(key)?.inflight === inflight) {
-          remember(entries, key, { value }, { ttlMs, max, now });
+          remember(entries, key, { value, bytes: sizeOf ? sizeOf(value) : 0 },
+            { ttlMs, max, now });
+          // Here rather than on the miss path, because this is the moment the
+          // cost actually enters the map — a placeholder's size is not known
+          // until the thing it stands for has been computed.
+          if (maxBytes < Infinity) capBytes(entries, maxBytes);
         }
         return value;
       },
@@ -291,6 +318,30 @@ export function createMemo(compute, {
 
   /** For tests and for a gauge; nothing in a route should need it. */
   memo.size = () => entries.size;
+
+  /**
+   * What this memo is holding, for the runtime log.
+   *
+   * `memo.size()` existed from the start and was read by nothing but tests,
+   * which is the "who finds out, and how?" question answered with "nobody":
+   * both ways of getting the bounds wrong are silent. Too small and the memo
+   * thrashes — `remember` evicts entries that are still fresh, the hit rate
+   * collapses, and the only symptom is that the dashboard is slow again. Too
+   * large and the process grows until it is killed. One line a minute beside
+   * `pg_pool_max` costs nothing and tells the two apart.
+   *
+   * `bytes` is 0 for a memo that passes no `sizeOf`, which is honest: it is
+   * not measuring, rather than measuring zero.
+   */
+  memo.gauge = () => {
+    let bytes = 0;
+    let inflight = 0;
+    for (const [, v] of entries) {
+      bytes += v.bytes ?? 0;
+      if (v.inflight) inflight++;
+    }
+    return { entries: entries.size, bytes, inflight };
+  };
 
   if (perAccount) perAccountMemos.add(memo);
 
@@ -367,6 +418,40 @@ const accountPrefix = (key) => key.slice(0, key.indexOf(ACCOUNT_SEP) + 1);
  * @param {string} prefix
  * @param {number} limit
  */
+/**
+ * Hold the whole memo to `limit` bytes, dropping its oldest to get there.
+ *
+ * **The count bound and this one answer different questions, and only this one
+ * is about memory.** `max` converts to a memory bound through the entry cost,
+ * so it is only ever as good as the number written beside it — and this cache's
+ * entries vary by ~70x, measured: 18 KB for a typical 8-habit dashboard, 499 KB
+ * at 20 habits x 365 days, 1.2 MB at 50 x 365. A count of 100 was chosen
+ * against the middle of those and is ~120 MB against the top of them, which is
+ * the arithmetic the count alone cannot see. This is what makes the number in
+ * that comment true rather than approximately true.
+ *
+ * Same preference as `evict` and `capAccount` and for the same reasons: settled
+ * before in-flight, least recently written first. A placeholder counts as 0
+ * because its size is genuinely not known yet — which is the honest reading and
+ * also the safe one, since taking it would waste the computation and lose its
+ * answer to the store-identity guard.
+ *
+ * @param {Map<string, any>} entries
+ * @param {number} limit
+ */
+function capBytes(entries, limit) {
+  let total = 0;
+  for (const [, v] of entries) total += v.bytes ?? 0;
+  if (total <= limit) return;
+
+  for (const [k, v] of entries) {
+    if (v.inflight) continue;
+    entries.delete(k);
+    total -= v.bytes ?? 0;
+    if (total <= limit) return;
+  }
+}
+
 function capAccount(entries, prefix, limit) {
   const mine = [];
   for (const [k, v] of entries) if (k.startsWith(prefix)) mine.push([k, v]);

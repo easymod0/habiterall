@@ -206,10 +206,16 @@ try {
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    // Read ONCE, as text, and parse from that: the memo holds the serialised
+    // payload now, so what a hit and a miss send byte for byte is a thing this
+    // suite has to be able to compare and not merely deep-equal.
+    const text = res.status === 204 ? '' : await res.text();
     return {
       status: res.status,
       vary: res.headers.get('vary') ?? '',
-      body: res.status === 204 ? null : await res.json(),
+      contentType: res.headers.get('content-type') ?? '',
+      text,
+      body: text === '' ? null : JSON.parse(text),
     };
   };
 
@@ -234,6 +240,20 @@ try {
   ck('a change made behind the route is not visible inside the TTL',
     cached.body.habits[0]?.name === 'Memo probe',
     cached.body.habits[0]?.name);
+
+  // A MISS and a HIT are the same answer, byte for byte. The memo holds the
+  // serialised payload, so the route is `res.type('application/json').send(str)`
+  // where it used to be `res.json(obj)` — and `res.send` of a string defaults
+  // the content type to text/html, which is the one way that swap goes wrong.
+  // `first` is the miss and `cached` is the hit; nothing between them changed
+  // the account except the rename the memo is currently hiding.
+  ck('a hit and a miss agree on the body, byte for byte',
+    first.text === cached.text,
+    `${first.text.length} vs ${cached.text.length} chars`);
+  ck('...and both are served as JSON',
+    /^application\/json/.test(first.contentType)
+      && first.contentType === cached.contentType,
+    `${first.contentType} vs ${cached.contentType}`);
 
   // A settle rather than a poll: this is waiting to see that something HAS
   // happened at a known time, and the TTL is the clock.

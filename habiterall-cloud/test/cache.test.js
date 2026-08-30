@@ -601,3 +601,129 @@ test('the /overview route honours the freshness header', () => {
   assert.match(route, /res\.vary\(FRESH_HEADER\)/,
     'and say so to caches, since the answer genuinely differs by it');
 });
+
+/* ---------- the bound in the unit that actually matters ---------- */
+
+test('maxBytes without a sizeOf is refused at construction', () => {
+  // A COUNT bound converts to a memory bound only through the entry cost, so a
+  // byte bound with nothing to measure with would silently bound nothing —
+  // which is precisely the shape (`a comment claiming a bound`) this whole
+  // module exists because of. Loud at construction, not quiet under load.
+  assert.throws(
+    () => createMemo(async (a) => a, { ttlMs: 2_000, maxBytes: 1_000 }),
+    /sizeOf/
+  );
+});
+
+test('the memo is bounded by BYTES as well as by count', async () => {
+  // `max` is deliberately far above what this reaches: the point is that the
+  // count bound is not what stops it. Ten entries of 100 units (= 200 bytes at
+  // two bytes a unit) is 2,000 bytes against a 1,000-byte budget, so half of
+  // them have to go however many entries `max` would have allowed.
+  const memo = createMemo(async (arg) => arg, {
+    ttlMs: 2_000, max: 1_000, maxBytes: 1_000, sizeOf: (s) => s.length * 2,
+  });
+
+  for (let i = 0; i < 10; i++) await memo(`b${i}:w`, 'x'.repeat(100));
+
+  const g = memo.gauge();
+  assert.ok(g.bytes <= 1_000, `held ${g.bytes} bytes, over the 1000-byte budget`);
+  assert.equal(g.entries, 5, 'five 200-byte entries is exactly the budget');
+  // ...and it is the OLDEST that went, the same preference the other two
+  // passes apply. A capBytes that evicted the newest would be bounded and
+  // useless in the same way an evict that did would be.
+  assert.equal(await memo('b0:w', 'rebuilt'), 'rebuilt', 'the oldest was dropped');
+  assert.equal(await memo('b9:w', 'ignored'), 'x'.repeat(100), 'the newest was kept');
+});
+
+test('one huge entry does not evict everything behind it forever', async () => {
+  // The budget is a total, so a single entry larger than the whole budget can
+  // only ever be evicted by the pass that runs after IT is stored — which is
+  // the ordering that keeps this from being a cache that holds nothing.
+  const memo = createMemo(async (arg) => arg, {
+    ttlMs: 2_000, maxBytes: 1_000, sizeOf: (s) => s.length * 2,
+  });
+
+  await memo('big:w', 'x'.repeat(5_000));
+  assert.equal(memo.gauge().entries, 0, 'an entry over the whole budget is not kept');
+
+  await memo('small:w', 'y'.repeat(10));
+  assert.equal(memo.gauge().entries, 1, 'and it did not poison the cache behind it');
+});
+
+test('the sweep leaves an in-flight placeholder out of the byte total', async () => {
+  const held = gate();
+  const memo = createMemo(async (arg) => (arg === 'slow' ? held.opened : arg), {
+    ttlMs: 2_000, maxBytes: 1_000, sizeOf: (s) => s.length * 2,
+  });
+
+  const inflight = memo('slow:w', 'slow');
+  const g = memo.gauge();
+  // Its size is genuinely not known yet, so counting it as anything would be
+  // inventing a number — and counting it as large would evict settled entries
+  // to make room for a cost nobody has measured.
+  assert.equal(g.bytes, 0, 'a placeholder contributes no bytes');
+  assert.equal(g.inflight, 1, 'but it is reported, so the gauge is not silent about it');
+
+  held.release('z'.repeat(10));
+  await inflight;
+  assert.equal(memo.gauge().bytes, 20, 'and it is measured once it settles');
+});
+
+test('the /overview memo bounds itself in bytes and reports what it holds', () => {
+  // Source text, blind the documented way. The behavioural halves are above;
+  // what none of them can see is whether THIS memo asks for either, and no
+  // test can drive 48 MB of real dashboards through a Postgres to find out.
+  const text = src('api.js');
+
+  assert.match(text, /const MAX_OVERVIEW_BYTES = 48 \* 1024 \* 1024;/,
+    'the byte bound must be its own stated number');
+
+  const call = region(text, 'const overviewMemo = createMemo(', '});');
+  assert.ok(call.includes('maxBytes: MAX_OVERVIEW_BYTES'),
+    'a count bound alone cannot see a 70x spread in entry cost');
+  assert.ok(call.includes('sizeOf:'),
+    'and maxBytes without sizeOf measures nothing');
+  assert.ok(call.includes('JSON.stringify'),
+    'the memo must hold the serialised payload, or sizeOf is an estimate and every hit re-stringifies');
+
+  assert.match(text, /export const overviewMemoGauge/,
+    'the memo must be readable from outside, or reaching either bound is silent');
+
+  // The wiring half: a gauge nothing logs is `memo.size()` again.
+  const server = readFileSync(
+    fileURLToPath(new URL('../src/server.js', import.meta.url)), 'utf8');
+  assert.match(server, /extra: \(\) => \(\{[^}]*overviewMemoGauge\(\)/,
+    'the gauge must be on the runtime line beside pg_pool_max');
+});
+
+test('capBytes steps over an in-flight placeholder rather than freeing nothing', async () => {
+  const held = gate();
+  let slowCalls = 0;
+  const memo = createMemo(async (arg) => {
+    if (arg !== 'slow') return arg;
+    slowCalls++;
+    return held.opened;
+  }, { ttlMs: 60_000, maxBytes: 1_000, sizeOf: (s) => s.length * 2 });
+
+  // Registered FIRST, so it is the oldest thing in the map and therefore the
+  // first candidate the eviction walk meets.
+  const inflight = memo('slow:w', 'slow');
+
+  // Six 200-byte entries against a 1,000-byte budget, so the last settle has
+  // to evict something.
+  for (let i = 0; i < 6; i++) await memo(`fill${i}:w`, 'x'.repeat(100));
+
+  held.release('z'.repeat(10));
+  assert.equal(await inflight, 'z'.repeat(10),
+    'control: the caller awaiting it is answered either way');
+
+  // Taking the placeholder frees NOTHING — its size is not known yet, so it
+  // counts as 0 — and costs three things: the computation is wasted, its
+  // answer fails the store-identity guard and is never cached, and the burst
+  // it was collapsing re-forms. All to make no room at all. This is the same
+  // exemption `remember` and the TTL sweep already make, in the third pass
+  // that also has to make it.
+  assert.equal(await memo('slow:w', 'slow'), 'z'.repeat(10));
+  assert.equal(slowCalls, 1, 'the settled answer was stored, not recomputed');
+});
