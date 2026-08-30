@@ -424,31 +424,50 @@ local removes the failure mode entirely for the habit you paged: every press
 now draws what it stored, online or off, so there is no longer a `redraw`
 that can commit a position and draw nothing.
 
-**What it does not touch: opening a DIFFERENT habit inherits the paged
-position.** Page habit A's calendar back to 2024, return to the dashboard,
-open habit B — `state.calEnd` is still 2024, and B's calendar opens there.
-This is real and it is a neighbouring issue, not this one, for three reasons
-worth keeping written down here rather than re-argued later:
+**Opening a DIFFERENT habit inheriting the paged position was scoped OUT of
+this fix, in the first round — described just above as a neighbouring issue
+left for Mark to settle. He has since decided it belongs in this same PR, so
+what follows is the decision as SHIPPED, reversing that scoping rather than
+leaving it stand.** `state.calEnd = null` is added to `open()`'s `!redraw`
+block, beside `state.chartOffsets = {}` — the identical reset, for the
+identical reason, and it fires on a same-habit reopen too, not the
+cross-habit case alone: reopening a habit, the SAME one or a different one,
+starts the calendar at today. Five reasons, weighed in this order:
 
-- #274's own headline symptom — the card later rendering a window the user
-  never saw it move to — is closed by this change alone, because after it
-  every press draws what it stored. The cross-habit carry-over is a different
-  claim: the window WAS seen moving, on a different habit's page.
-- Answering it needs a decision this change is not entitled to make on its
-  own: should reopening the SAME habit from the dashboard also snap its
-  calendar back to today? Clearing `state.calEnd` at `detail.js:74` alongside
-  `state.chartOffsets` says yes for both cards on both habits at once. The
-  `chartOffsets` comment already argues yes for an OFFSET; the `forget`
-  entry's own comment records that the calendar is "the one card anybody
-  pages by a DATE rather than a window", which is exactly the ground on which
-  a date position might be worth keeping across a reopen where an offset is
-  not. That is a real disagreement and it is Mark's to settle, not a worker's.
-- Folding it into this change would also have blurred the mutation story:
-  two unrelated defects, one of which no offline test can see (the carry-over
-  needs a second habit and no network condition at all).
-
-`state.calEnd = null` at `detail.js:74` is therefore NOT added here. It is a
-one-line change either way, and it is being raised with Mark separately.
+1. **The two cases cannot be separated at `:74`, and separating them costs
+   new state.** `redraw` is `state.openHabitId === id`, and `dashboard.paint()`
+   nulls `state.openHabitId` (`dashboard.js:235`; `categories.js:160` does
+   too), so returning to the list and reopening the SAME habit is already
+   `!redraw` — there is no cheaper hook a per-habit rule could hang off.
+   Keeping a per-habit position would need `calEnd` keyed by habit — a
+   `calEndHabitId`, or a map — which is a sixth thing for `Today`, the
+   `forget` entry and the settings dialog to keep in step with. The one-line
+   reset needs none of it.
+2. **Consistency.** Nine other cards reset their paging position on
+   `!redraw` (the same nine ids `CARDS`' `forget` entries name). A calendar
+   that alone survives "go back to the list and reopen" makes that one
+   gesture mean two different things on one page — the "two surfaces over one
+   dataset disagree" shape this repo names most often.
+3. **The `:74` comment's own principle already covers it.** "Opening a
+   different habit starts at 'now'" is a statement about opening a PAGE, not
+   about which habit it happens to repeat, and `calcheck.mjs` already asserts
+   the scroll analogue beside it — "opening a habit starts at the top" makes
+   no exception for the same habit either.
+4. **What is preserved is the part that matters.** `redraw` is TRUE for every
+   in-page action — a cell tap, a settings change, a zoom press, a
+   granularity change, the `'change'` broadcast — so the paged position
+   survives everything except leaving the page. The cost is one re-page after
+   a dashboard round trip; the benefit is never landing on a detail page
+   showing October 2024 with no memory of having asked for it.
+5. **The `forget` entry's own ground — the calendar being "the one card
+   anybody pages by a DATE rather than a window" — is real, and it argues for
+   keeping the position WITHIN a viewing, which this still does.** Across a
+   NAVIGATION the disorientation argument wins instead. And the option being
+   replaced was never "keep it per habit" — nobody designed that; it was
+   "keep it globally and leak it across habits", purely as a side effect of
+   `calEnd` living outside `chartOffsets`. Both the kept option and the
+   discarded one are changes from that starting point; this is the smaller
+   one.
 
 **#230 is not closed by this, and must not be read as closed.** #230 is the
 strip and the calendar disagreeing about a day's VALUE offline — `writeDay`

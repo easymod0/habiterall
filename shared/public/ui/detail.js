@@ -70,8 +70,18 @@ export async function open(id) {
   const scroll = redraw ? window.scrollY : 0;
 
   // Opening a different habit starts at "now". Carrying the offsets over
-  // would drop you into 2024 on a habit you have only just opened.
-  if (!redraw) state.chartOffsets = {};
+  // would drop you into 2024 on a habit you have only just opened. `calEnd`
+  // is the calendar's own equivalent position and resets here for the same
+  // reason (#274) — and `!redraw` already covers reopening the SAME habit
+  // too, since `dashboard.paint()` nulls `state.openHabitId` on the way back
+  // to the list, deliberately: every in-page redraw (a tap, a zoom press, a
+  // granularity change, the settings dialog, the `'change'` broadcast) is
+  // `redraw === true` and so keeps both positions, which is what makes
+  // resetting them here affordable.
+  if (!redraw) {
+    state.chartOffsets = {};
+    state.calEnd = null;
+  }
 
   try {
     const stats = await api(`/habits/${id}/stats?granularity=${historyGranularity()}`);
@@ -718,13 +728,16 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
  * cache under it, a `401`/`429`, a hung server; see
  * `docs/decisions/dashboard-and-detail.md`'s `#274` section for the full
  * list, and for the two plausible-sounding cases that are NOT on it) it
- * committed `state.calEnd` and drew nothing. That was this card's own defect (#274), the calendar being the
- * second live instance of the "Recent days" one (#245) fixed. It outlasted
- * the strip's:
- * `open()` clears `state.chartOffsets` when a different habit is opened
- * (`:74`) but clears nothing for `calEnd`, so paging back and returning to
- * the dashboard left the window you never saw the calendar move to waiting
- * for you on reopen, where the strip's own offset had already been reset.
+ * committed `state.calEnd` and drew nothing. That was this card's own defect
+ * (#274), the calendar being the second live instance of the "Recent days"
+ * one (#245) fixed. It USED to
+ * outlast the strip's: `open()` cleared `state.chartOffsets` when a
+ * different habit was opened (`:74`) but cleared nothing for `calEnd`, so
+ * paging back and returning to the dashboard left the window you never saw
+ * the calendar move to waiting for you on reopen, where the strip's own
+ * offset had already been reset — which is exactly why this card's defect was
+ * never mostly latent the way the strip's was. Both now reset together at
+ * `:74`.
  *
  * `zoom`, `CAL_WEEKS` and `chartWidth` stay hoisted and frozen for the life of
  * the card, unlike `calEnd` — `changeZoom` still ends in `open(habit.id)`

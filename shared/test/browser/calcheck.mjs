@@ -594,6 +594,135 @@ try {
   ck('today is visible after a reload',
     afterReload.last >= cal.todayISO, `last=${afterReload.last}`);
 
+  /* ---------- reopening a habit resets the paged position (#274) ---------- */
+
+  // Placed here rather than beside the "paging redraws the card" block above:
+  // it must not disturb the persistence checks just run (which assert the
+  // zoom was left at 'wide' and reload to prove it) or the restoring PUT
+  // below. It runs at whatever zoom the persistence block left the page on —
+  // 'wide', per the check just above — which the in-page-redraw check further
+  // down verifies rather than assumes.
+  console.log('\n--- reopening a habit resets calEnd ---');
+
+  // `.detail-head button` (as used at `:385`) plus a fresh row click — the
+  // in-app path, not `openFirstHabit`'s `Page.navigate`, because a full
+  // navigation would reset `state.calEnd` for a reason that has nothing to do
+  // with `!redraw` and prove nothing about it.
+  const backToDashboard = async () => {
+    await ev(`document.querySelector('.detail-head button')?.click()`);
+    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
+      { what: 'the dashboard grid' });
+    await sleep(400);
+  };
+  // Opens by INDEX rather than by name: the fixtures give four habits
+  // (Meditate, Gym, Read, No late-night snacks — fixtures.mjs), and index 1
+  // (Gym) only has to be "a different habit from index 0", not any specific
+  // one.
+  const openHabitByIndex = async (i) => {
+    await ev(`[...document.querySelectorAll('.habit-row .habit-name, .habit-row .name')]
+      [${i}]?.click()`);
+    await waitUntil(ev, `!!document.querySelector('[aria-label="Completion calendar"]')`,
+      { what: 'the calendar card' });
+    await sleep(400);
+  };
+
+  // The reload just above left habit 1 open on a brand new document, so
+  // `state.calEnd` is null there and this is the at-now readout every check
+  // below compares against — captured once rather than re-derived per check,
+  // which is what keeps a local-midnight crossing from producing three
+  // different "at-now" strings that quietly still agree with each other.
+  const atNowReadout = await calRange();
+  ck('the calendar has a range readout to compare against',
+    atNowReadout !== '', atNowReadout);
+  const freshCalEnd = await calEndState();
+  ck('...and calEnd is null on this freshly reloaded page',
+    freshCalEnd === null, String(freshCalEnd));
+
+  /* ----- 1: opening a DIFFERENT habit resets calEnd — the case Mark called not in question ----- */
+
+  const pagedHabit1 = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(atNowReadout)}`);
+  const habit1PagedEnd = await calEndState();
+  const habit1PagedRange = await calRange();
+  ck('paging habit 1 sets a non-null calEnd',
+    pagedHabit1 === true && habit1PagedEnd !== null,
+    `pressed=${pagedHabit1} calEnd=${habit1PagedEnd}`);
+  ck('...and moves the range off the at-now readout',
+    habit1PagedRange !== atNowReadout, `${atNowReadout} -> ${habit1PagedRange}`);
+
+  await backToDashboard();
+  await openHabitByIndex(1); // a different habit (Gym)
+  const crossHabitCalEnd = await calEndState();
+  const crossHabitRange = await calRange();
+  ck('opening a DIFFERENT habit resets calEnd to null',
+    crossHabitCalEnd === null, String(crossHabitCalEnd));
+  ck("...and habit 2 opens at the at-now readout, not habit 1's paged window",
+    crossHabitRange === atNowReadout,
+    `${crossHabitRange} (expected ${atNowReadout}; habit 1 was showing ${habit1PagedRange})`);
+
+  /* ----- 2: reopening the SAME habit ALSO resets calEnd — the decision, not the bug ----- */
+
+  await backToDashboard();
+  await openHabitByIndex(0); // habit 1 again
+  const pagedAgain = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(atNowReadout)}`);
+  const habit1PagedEnd2 = await calEndState();
+  ck('paging habit 1 (again) sets a non-null calEnd',
+    pagedAgain === true && habit1PagedEnd2 !== null,
+    `pressed=${pagedAgain} calEnd=${habit1PagedEnd2}`);
+
+  await backToDashboard();
+  // Reopen the SAME habit: `dashboard.paint()` nulls `state.openHabitId` on
+  // the way back, so `open()`'s `redraw` reads false here exactly as it does
+  // for a different habit — this is the half the "cross-habit" check above
+  // cannot exercise, and it must be its own named check.
+  await openHabitByIndex(0);
+  const sameHabitCalEnd = await calEndState();
+  const sameHabitRange = await calRange();
+  ck('reopening the SAME habit resets calEnd to null too',
+    sameHabitCalEnd === null, String(sameHabitCalEnd));
+  ck('...and it opens at the at-now readout',
+    sameHabitRange === atNowReadout, `${sameHabitRange} (expected ${atNowReadout})`);
+
+  /* ----- 3: an in-page redraw (a zoom press) KEEPS the position ----- */
+
+  const pagedForZoom = await calNav('Earlier');
+  await settled(
+    `(${calCardSel})?.querySelector('.cal-range')?.textContent !== ${JSON.stringify(atNowReadout)}`);
+  const beforeZoomCalEnd = await calEndState();
+  ck('paging before the redraw check sets a non-null calEnd',
+    pagedForZoom === true && beforeZoomCalEnd !== null,
+    `pressed=${pagedForZoom} calEnd=${beforeZoomCalEnd}`);
+
+  // Verify which zoom direction is live rather than assume '+': the suite
+  // leaves the calendar at 'wide' by the time this block runs (the
+  // persistence check just above confirms it), where zooming further OUT is
+  // already disabled.
+  const zoomBefore = await measure();
+  ck('exactly one zoom direction is live before the redraw check',
+    zoomBefore.zoomIn !== zoomBefore.zoomOut, JSON.stringify(zoomBefore));
+  const liveZoomLabel = zoomBefore.zoomIn ? '−' : '+';
+
+  const zoomPressed = await calNav(liveZoomLabel);
+  // A zoom press is `redraw === true` (same habit) and legitimately changes
+  // `CAL_WEEKS`, so settle on the cell size moving rather than on the range
+  // readout — asserting the readout stayed put would be asserting the zoom
+  // did nothing, not that the position survived it.
+  await settled(`(()=>{
+    const svg=document.querySelector('[aria-label="Completion calendar"]');
+    const r=[...svg.querySelectorAll('rect')].find(x=>x.dataset.date) ?? svg.querySelector('rect');
+    return Math.round(r.getBoundingClientRect().width) !== ${zoomBefore.cell};})()`);
+  const afterZoomCalEnd = await calEndState();
+  ck('an in-page redraw (a zoom press) keeps the paged position instead of resetting it',
+    zoomPressed === true && afterZoomCalEnd === beforeZoomCalEnd && afterZoomCalEnd !== null,
+    `calEnd ${beforeZoomCalEnd} -> ${afterZoomCalEnd}`);
+
+  // This press moves the stored zoom off 'wide'; the restoring PUT just below
+  // sets `calendarZoom` back to 'default' regardless, so nothing here needs
+  // its own cleanup.
+
   // Leave the account as it was found.
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
     headers:{'Content-Type':'application/json'},

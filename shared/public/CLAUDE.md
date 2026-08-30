@@ -215,14 +215,14 @@ about it are not obvious:
   pure client arithmetic — nothing in its window needs the server either, so its
   ‹ Earlier no longer moves `state.calEnd` and then calls `open()`. Both cards
   now redraw from data already in hand rather than refetching.
-  `state.calEnd`'s offset still OUTLIVES `state.chartOffsets`'s, and that fact
-  did not stop mattering with the fix: `open()` clears `state.chartOffsets`
-  only when a different habit is opened (`detail.js:74`), so opening a
-  DIFFERENT habit from the dashboard after paging this one back leaves the new
-  habit's calendar showing the old habit's window — a real, separate defect,
-  **unfiled as of this change**, not touched by this change and not what it
-  fixed. See `docs/decisions/dashboard-and-detail.md`'s `#274` section for the
-  full reasoning and why it is Mark's to settle rather than a worker's.
+  `open()` also resets `state.calEnd` alongside `state.chartOffsets`, both at
+  `detail.js:74`, so reopening a habit — the SAME one or a different one —
+  starts the calendar at today rather than carrying a paged position across the
+  navigation; every in-page redraw (a tap, a zoom press, a granularity change,
+  the settings dialog, the `'change'` broadcast) is `redraw === true` and keeps
+  it. See `docs/decisions/dashboard-and-detail.md`'s `#274` section for the
+  argument, including why a same-habit reopen is folded into the same reset
+  rather than kept as a per-habit position.
 - **Its host repaints CELLS IN PLACE (`repaintCells`), not the page.** The
   dashboard's `repaint` is a full `paint()`, which is cheap there; here a
   rebuild is two round trips and up to ten cards of SVG. Touching no nodes is
