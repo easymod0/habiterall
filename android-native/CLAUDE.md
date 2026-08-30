@@ -156,25 +156,20 @@ with no replacement assertion is a hole; that pairing is the decision.
 
 **`Freshness` is not a sixth mirror either, and it is the one that most looks
 like one.** `Api.kt` sends `X-Habiterall-Fresh: 1` on reads for three seconds
-after any write that got an answer, which is `freshnessHeader` in
+after any write that got an answer — `freshnessHeader` in
 `shared/public/offline.js` written a second time in Kotlin. What makes it the
 same kind of thing as `DEVICE_ZONE_HEADER` rather than a mirror: it decides
 nothing about what a tap MEANS, nothing reaches storage through it, a phone
 with no network never gets there, and the server treats it as a hint it is free
 to ignore. Being wrong about it costs one recomputation.
 
-Why the phone has it at all: cloud memoises `/overview` **per process** and a
-write clears only the memo of the process that took it, so on two replicas a
-Done pressed on a notification can be taken by A while the overview fetch
-behind it is answered from B's pre-tap copy. The browser has a dashboard on
-screen with an optimistic paint still on it; a notification answered with the
-app closed has no surface at all to disagree with the stale list it opens to.
-The window is 3s because cloud's TTL is 2s — past it every entry predating the
-write has expired anyway — and it is measured on `SystemClock.elapsedRealtime()`
-rather than `System.nanoTime()`, which stops during deep sleep. Two tests, not
-one: `FreshnessTest` for the window's arithmetic and `AppSettingsDefaultsTest`
-for the spelling and the interceptor wiring, because either passes with the
-other deleted. `habiterall-cloud/CLAUDE.md` has the server's half.
+The clock is `SystemClock.elapsedRealtime()`, which keeps counting through deep
+sleep where `System.nanoTime()` stops. Two tests, not one: `FreshnessTest` for
+the window's arithmetic and `AppSettingsDefaultsTest` for the spelling and the
+interceptor wiring, because either passes with the other deleted — the whole
+decision lives in `Freshness` rather than in the interceptor for exactly that
+reason. `habiterall-cloud/CLAUDE.md` has the server's half and
+`docs/decisions/caching.md` has why the phone has it at all.
 
 **`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two

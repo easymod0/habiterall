@@ -35,6 +35,7 @@ and the freshness hint rides on exactly one read per write. A header asking the
 server to REBUILD is not a representation a cache could pick between anyway, so
 there is nothing to trade. If a route ever genuinely does need one, the worker
 has to opt out of it (`{ignoreVary: true}`) in the same change.
+`docs/decisions/caching.md` has the measurement in full.
 
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both habit

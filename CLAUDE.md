@@ -79,10 +79,10 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 | working in | read | archive |
 |---|---|---|
 | `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md` |
-| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md` |
-| `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md` |
+| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md`, `caching.md` |
+| `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md` |
-| `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md` |
+| `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md`, `caching.md` |
 | reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md` |
 | `site/`, habiterall.ca | `site/CLAUDE.md` | `site.md` |
 | `examples/`, compose, env | `examples/CLAUDE.md` | `compose-and-env.md` |
