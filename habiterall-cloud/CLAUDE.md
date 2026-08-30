@@ -378,6 +378,17 @@ header this replaced could not do at any pool depth, since the writer carried it
 An operator watching `pg_waiting` go non-zero should raise `PG_POOL_MAX`; the
 knob already exists, and correctness is not the thing to buy latency with.
 
+**There is a third regime past that cliff and it is a 5xx, not a slow answer.**
+`connectionTimeoutMillis` is 5 s, so a pool held saturated for longer makes
+`pool.connect()` reject and `/overview` answer 500 — on requests whose answer
+was already memoised and which cost nothing before this change. The worker does
+not soften it: `networkFirst` reaches its cached copy only when `fetch` throws,
+so a 500 that arrives is shown. Raise `PG_POOL_MAX` well before this, and note
+that a checkout failure is currently unnamed — `pool.connect()` is outside
+`withUser`'s `try`, so `noteTimeout` never sees it. The archive says what to
+build if it is ever actually reached, and why a bail-out on the hit path is not
+it.
+
 `docs/decisions/caching.md` has the measurements, the cliff table and the
 deletion inventory. **The rule the deleted header found still stands and is not
 about it**: a route the worker caches may not `res.vary` on a header the page

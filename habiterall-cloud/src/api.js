@@ -1043,6 +1043,17 @@ api.get('/overview', route(async (req, res) => {
   // answered from B's pre-tap entry — the user's own tap painted away, which
   // the deleted `X-Habiterall-Fresh` header could not do at any pool depth.
   //
+  // **What that costs is a latency cliff up to `PG_POOL_MAX` and a 5xx past
+  // it**, and the second half is worth knowing before it is met. A hit used to
+  // touch Postgres zero times, so it was answered however saturated the pool
+  // was; now it queues, and `connectionTimeoutMillis` (5 s, `db/pool.js`) is
+  // what ends the queue — with a rejection, not a slow answer. `networkFirst`
+  // in `sw.js` only falls back to the saved dashboard from the `catch` around
+  // its `fetch`, so a 500 that arrives is shown as an error. That is the
+  // accepted price of the read being unconditional rather than a case to
+  // special-case here: `docs/decisions/caching.md` has the three regimes, why
+  // a bail-out is the wrong shape, and what to build if it is ever reached.
+  //
   // One transaction for the version and, if it comes to it, the data.
   const held = await withUser(user, async (db) => {
     // **The version is read BEFORE the data, and never after.** `withUser` is

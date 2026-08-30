@@ -24,18 +24,25 @@ SOMETIMES.** `networkFirst` stores with `cache.put(request, …)` and reads back
 with `caches.match(request)`, and the Cache API selects an entry using the
 stored RESPONSE's `Vary` — so a conditionally-sent header turns one URL into
 two keys, and the key an offline boot presents is the one without it. That is
-not a stale answer, it is no answer: measured in Chrome against cloud's
-`X-Habiterall-Fresh`, the `put` made from the post-write refetch REPLACED the
-entry stored from the cold-boot read (one entry, not two), after which nothing
-an ordinary request could ask for matched it at all — `networkFirst` fell
-through to its synthetic 503 and the installed PWA opened offline to no
-dashboard. `Vary: X-Habiterall-Timezone` sits on the same responses and is
-safe, which is the whole distinction: a device sends one zone on every request
-and the freshness hint rides on exactly one read per write. A header asking the
-server to REBUILD is not a representation a cache could pick between anyway, so
-there is nothing to trade. If a route ever genuinely does need one, the worker
-has to opt out of it (`{ignoreVary: true}`) in the same change.
-`docs/decisions/caching.md` has the measurement in full.
+not a stale answer, it is no answer.
+
+**The measurement is historical and the rule is not.** It was taken in Chrome
+against cloud's `X-Habiterall-Fresh`, a header #192 has since deleted — no
+client sends it and no route reads it, so nothing below is a description of
+what the app does today. It is why the rule exists: the `put` made from the
+post-write refetch REPLACED the entry stored from the cold-boot read (one
+entry, not two), after which nothing an ordinary request could ask for matched
+it at all — `networkFirst` fell through to its synthetic 503 and the installed
+PWA opened offline to no dashboard. `Vary: X-Habiterall-Timezone` sat on the
+same responses and was safe, which was the whole distinction: a device sends
+one zone on every request, where that header rode on exactly one read per
+write.
+
+A header asking the server to REBUILD is not a representation a cache could
+pick between anyway, so there is nothing to trade. If a route ever genuinely
+does need one, the worker has to opt out of it (`{ignoreVary: true}`) in the
+same change. `docs/decisions/caching.md` has the measurement in full, and its
+deletion inventory records that this rule was kept on purpose.
 
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both habit

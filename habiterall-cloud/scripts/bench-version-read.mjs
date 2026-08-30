@@ -34,6 +34,19 @@
  *      `PG_POOL_MAX` connections. That is the "the memo stops being a load
  *      shedder" objection, and it is the one that could kill the idea.
  *
+ * ...and a fourth that has nothing to do with the read and everything to do
+ * with what #192 does to the TTL:
+ *
+ *   4. how big ONE memo entry is, in the unit `sizeOf` returns. A 60 s TTL
+ *      makes `MAX_OVERVIEW_CACHED` a number derived from `MAX_OVERVIEW_BYTES`
+ *      and a measured entry, rather than from the residency argument a 2 s TTL
+ *      supported — so the entry size is now load bearing for a CONSTANT, and
+ *      `cache.test.js` restates all four figures as literals. They were left as
+ *      a claim in a comment when this file first shipped, which is the shape
+ *      this file exists to refuse; the previous generation of exactly these
+ *      numbers was wrong, so a size measured nowhere is one that goes stale
+ *      again in silence.
+ *
  * Measured through the real route, over HTTP, against a real Postgres, as
  * `habiterall_app` inside `withUser` — never as the owner, for the reason
  * `bench-queries.mjs` gives: a plan taken as a superuser bypasses RLS and is a
@@ -319,7 +332,28 @@ try {
     const bump = () =>
       admin.query('UPDATE users SET data_version = data_version + 1 WHERE id = $1', [id]);
 
-    return { id, overview, bump };
+    /**
+     * The response BODY for a given grid window, for section 4.
+     *
+     * Separate from `overview` above rather than folded into it, because that
+     * one is on a timed path and must not be measured drinking its own body
+     * twice — and because the window is a parameter here where everything
+     * timed uses `DAYS`. The default 30 is the dashboard's own, and the entry
+     * it produces is the SMALLEST real one, which is the one that decides
+     * whether the count bound binds before the byte bound.
+     *
+     * @param {number} days
+     */
+    const body = async (days) => {
+      const res = await fetch(`${base}/api/overview?days=${days}`, {
+        headers: { cookie, 'X-Habiterall-Timezone': 'UTC' },
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`/overview answered ${res.status} for ${tag}`);
+      return text;
+    };
+
+    return { id, overview, bump, body };
   }
 
   /**
@@ -549,6 +583,51 @@ try {
   await contention(20, [10, 19, 20, 40]);
   console.log('');
   await contention(40, [20, 39, 40]);
+
+  /* ---------- 4. what one memo entry costs, in bytes ---------- */
+
+  /**
+   * `MAX_OVERVIEW_BYTES`, restated rather than imported — the same treatment
+   * `POOL_MAX` above gets, and for the reason the root `CLAUDE.md` gives about
+   * tests that import the constant they check. If the two ever disagree, the
+   * "fits" column below is what says so.
+   */
+  const MAX_BYTES = 48 * 1024 * 1024;
+
+  /**
+   * Measured as `sizeOf` measures it — `json.length * 2`, UTF-16 code units
+   * doubled — because that is the number `capBytes` sums and therefore the
+   * only one `MAX_OVERVIEW_BYTES` is a bound on. It is a CEILING on what V8
+   * retains, not an estimate of it: a Latin-1 string costs one byte per unit,
+   * so the true residency of an ASCII payload is about half this. That is the
+   * safe direction for a bound and the wrong direction for a boast, which is
+   * why it is stated here rather than left for someone to rediscover.
+   *
+   * The archive's older 18 KB / 499 KB / 1.2 MB are a different quantity
+   * entirely — the retained OBJECT, measured with `--expose-gc`, from before
+   * the memo held the serialised payload. Roughly twice the string, because
+   * 365 dated grid keys per habit cost far more as object properties than as
+   * JSON text. Do not compare the two columns.
+   */
+  console.log('\n4. One memo entry, in the unit `sizeOf` returns');
+  console.log(`  ${'shape'.padEnd(30)} ${'one entry'.padStart(12)} `
+    + `${'fits in 48 MB'.padStart(14)}`);
+  for (const [habits, days, label] of [
+    [8, 30, '8 habits x 30 days (typical)'],
+    [8, DAYS, `8 habits x ${DAYS} days`],
+    [20, DAYS, `20 habits x ${DAYS} days`],
+    [50, DAYS, `50 habits x ${DAYS} days`],
+  ]) {
+    const acct = shaped.find(([n]) => n === habits)?.[1];
+    if (!acct) continue;
+    const bytes = (await acct.body(days)).length * 2;
+    console.log(`  ${label.padEnd(30)} ${(bytes / 1024).toFixed(1).padStart(9)} KB `
+      + `${String(Math.floor(MAX_BYTES / bytes)).padStart(14)}`);
+  }
+  console.log('\n  The SMALLEST entry is the one that decides MAX_OVERVIEW_CACHED:');
+  console.log('  a big dashboard reaches 48 MB in a few dozen entries and any count');
+  console.log('  at all is a backstop for it, while a typical one has to be able to');
+  console.log('  fill 48 MB before the count evicts anything still fresh.');
 
   console.log('');
 } finally {

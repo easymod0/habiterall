@@ -335,10 +335,49 @@ rebuilds, which hold their connection through per-habit CPU on a single thread,
 so a bigger pool moves that queue from the pool to the event loop. It is free for
 this read, which is ~0.3 ms of socket wait and almost no CPU.)
 
+**Past the table it stops being a latency cliff and becomes an availability
+one, and that is the sentence the measurements above do not contain.**
+`connectionTimeoutMillis` is 5 s (`db/pool.js`). The rows stop at 20 holders on
+a pool of 10 because that is where the queue is still being served; hold the
+pool saturated for five seconds and `pool.connect()` REJECTS, so `/overview`
+answers **500** — on a request whose answer was already in the map and which
+master answered instantly. The client has no softer landing for it either:
+`networkFirst` (`shared/public/sw.js`) reaches `caches.match` only from the
+`catch` around `fetch`, so a 500 that *arrives* is handed to the page and the
+installed PWA shows an error rather than its saved dashboard. A rolling deploy
+or a mass foreground putting ~30 tabs on one replica is enough.
+
+So the cost of the unconditional read is: free below `PG_POOL_MAX`, a full
+transaction hold above it, and a 5xx above THAT. The first two are what the
+bail-out below was deleted over; the third is not an argument for bringing it
+back, and it is not a reason to hold the change — but an operator sizing the
+pool for the second number and getting the third has been told the wrong thing.
+
 **That table is the whole of what survives, and what survives is a note for an
 operator, not a mechanism in the code.** `PG_POOL_MAX` is already a knob; the
 answer to `pg_waiting` being non-zero is to raise it, not to make the dashboard
 answer from a cache the pool depth has excused from checking itself.
+
+**If the third regime is ever actually reached, the fix is a second pool, not a
+bail-out.** The failure is that two workloads with very different profiles
+share one queue — a ~0.3 ms version read behind rebuilds that hold a connection
+through per-habit CPU. Giving the version read its own tiny pool (2–3
+connections, a transaction that is always four trivial round trips) means a
+herd of misses can no longer starve the hit path, and it costs no correctness
+at all: every request still reads a real version before it decides anything.
+The price is a second pool to drain on SIGTERM, three more connections per
+replica, and a miss paying two checkouts instead of one — the design point
+`cache.test.js` currently pins as `the version read and the rebuild share ONE
+transaction`, which was chosen against a SHARED pool where the second checkout
+came out of the same ten. **Do not reach for "serve the resident entry when the
+checkout fails" instead.** It is the smaller diff and it buys availability with
+exactly the stale-serve the section below deletes, in exactly the regime that
+section says the staleness is most likely.
+
+Neither is worth building yet. `pool.connect()` throwing is not currently
+countable — it happens before the `try` in `withUser`, so `noteTimeout` never
+sees it and a checkout failure lands in generic 500s with no name. Name it
+first, watch whether it ever fires, and let that decide.
 
 ### The bail-out that was written first, and why it was deleted
 
@@ -569,9 +608,15 @@ No file was added or removed, so `SHELL` itself is unchanged.
 
 Three things **survived** the deletion, because they are not about the header:
 
-- the `Vary` rule in `shared/public/CLAUDE.md`. It is a rule about the service
-  worker and any conditionally-sent header, and the freshness header was only the
-  example that found it.
+- the `Vary` rule in `shared/public/CLAUDE.md`, and its restatement in
+  `sw.js`'s `networkFirst`. It is a rule about the service worker and any
+  conditionally-sent header, and the freshness header was only the example that
+  found it. **Both were re-tensed rather than left alone**, which is the half
+  that was nearly missed: the rule survived, but it was written in the present
+  tense about a header that no longer exists ("the freshness hint rides on
+  exactly one read per write"), in two files a reader is expected to trust as a
+  description of the app. A kept rule whose only worked example is fiction is
+  how the next person concludes the mechanism is still there.
 - `res.vary(DEVICE_ZONE_HEADER)` and the integration suite's control assertion
   that the answer still names the zone header.
 - everything about the bounds, the sweep and the gauge. #192 changed what

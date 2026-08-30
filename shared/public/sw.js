@@ -459,7 +459,9 @@ async function networkFirst(request, url) {
     // The REQUEST is the key, here and in the `caches.match` below, and both
     // select using the stored response's `Vary`. So a route this list covers
     // may not vary on a header the page sends only SOMETIMES — see
-    // `CLAUDE.md`. Measured in Chrome with cloud's `X-Habiterall-Fresh`: the
+    // `CLAUDE.md`. Measured in Chrome with cloud's `X-Habiterall-Fresh`, which
+    // #192 has since deleted — the rule outlived the header that found it, and
+    // this is the measurement rather than a description of a live request: the
     // put made from a request carrying it replaced the entry stored from one
     // without, and the survivor then matched neither `cache.match` nor
     // `caches.match` for any ordinary request, so the fallback below fell
