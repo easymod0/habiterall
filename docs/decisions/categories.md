@@ -177,12 +177,20 @@ second, genuinely distinct category.
 
 124 codepoints diverge the OTHER way on this server's libc provider (JS
 lowercases circled Latin capitals like U+24B6 that libc's `lower()` leaves
-alone); that direction is harmless, the route merely stricter than the index,
-the same asymmetry personal's own `NOCASE` backstop already has, and is not
-something to "fix" by folding those back to themselves. That exact count is
-an observation about this one provider, not a rule to pin — what does not
-move is containment, which was measured under both providers rather than
-argued from either alone.
+alone); the route is merely stricter than the index there, the same
+asymmetry personal's own `NOCASE` backstop already has, and is not something
+to "fix" by folding those back to themselves. That exact count is an
+observation about this one provider, not a rule to pin — what does not move
+is containment, which was measured under both providers rather than argued
+from either alone. Calling that direction "harmless" used to stop there,
+which was true only for the case measured — those 124 codepoints are ones
+the OLD whole-string fold already collapsed too, so nothing about them is
+NEW — and false in general: a review round (below) found that this fold
+also collapses at least two pairs that neither provider's `lower()` and
+neither the OLD fold collapses, which is a genuinely new coexistence rule
+for an account, not a harmless stricter-than-the-index asymmetry. See the
+round 3 section below for both pairs, why they are FORCED rather than
+sloppy, and what that means for an account that already holds one.
 
 The issue also proposed normalising first — NFC, NFD, NFKC and NFKD were all
 tried against this server and every one of the four still folds `İstanbul`
@@ -292,6 +300,52 @@ fold that "matches Postgres" — that framing is what went stale twice, in the
 two bullets corrected above, because Postgres's own `lower()` does not answer
 one way.
 
+**Round 3: "harmless regardless" was itself one more stale sentence, and the
+test gap behind it is the real defect.** A fresh review with no shared
+context found this, the coordinator reproduced it, and it was reproduced a
+third time before being written down here. Every test on this branch up to
+this point drove ONE direction: if `lower()` collapses two strings, so does
+the fold. Nothing asked the reverse — whether the fold collapses a pair that
+`lower()`, under EITHER provider, leaves apart — and `toLowerCase()` is a
+no-op on an already-lowercase codepoint wherever it sits, so the OLD
+whole-string fold never merged such a pair either. Two statements this
+document and the JSDoc both made were therefore false in general, true only
+for the one case measured (the 124 circled-Latin codepoints, which the OLD
+fold already collapsed, so nothing about them was new): "that direction is
+harmless regardless" here, and the PR body's "the index already forbade
+both spellings of any pair it collapses from coexisting, so no account can
+hold a pair the new fold newly collapses" (corrected below, in "what this
+changes for a row that already exists").
+
+**The better answer is not an apology — it is a proof that the over-collapse
+is FORCED.** Measured on this branch's own Postgres:
+
+| | libc merges | ICU merges | either merges X~Z? |
+|---|---|---|---|
+| `I` / `İ` / `i` + U+0307 (decomposed) | `I` ~ `İ` | `İ` ~ `i` + U+0307 | **no** |
+| `Οδοσ` / `ΟΔΟΣ` / a lowercase spelling ending U+03C2 (final sigma) | `Οδοσ` ~ `ΟΔΟΣ` | `ΟΔΟΣ` ~ that U+03C2 spelling | **no** |
+
+The two providers merge DIFFERENT pairs of each triple. Any fold contained
+under both must merge both pairs, and therefore — by transitivity — must
+merge the THIRD pair, which NEITHER provider merges on its own.
+Over-collapse is not sloppiness in this fold; it is a theorem about any fold
+contained under two providers that disagree with each other, checked against
+the database rather than argued (`habiterall-cloud/test/api.integration.mjs`
+pins exactly these two triples, both directions, against a real Postgres).
+
+**The exact blast radius, and it is complete.** Enumerating every string of
+length <= 3 over the alphabet `i I İ U+0307 σ ς Σ a` (584 strings), and
+comparing `foldCategoryName(s)` against the OLD fold's own answer with
+exactly two rewrites applied on top — `ς` (U+03C2, final sigma) -> `σ`
+(U+03C3, ordinary sigma), and `i` followed by a RUN of one or more U+0307 ->
+plain `i` — finds 0 violations: every string this fold collapses that the
+OLD fold did not is explained by one of those two rewrites, and nothing
+else. That equation IS the blast radius, complete and checkable, and
+`shared/test/validate.test.js`'s `NEWLY_COLLAPSED` table is where it is
+checked: a completeness assertion over the full 584-string enumeration,
+which fails if the fold ever collapses something the table does not list,
+and fails if a row is ever quietly dropped from it.
+
 That is plain `toLowerCase()`, deliberately never `toLocaleLowerCase()`. A
 first version of this reasoned the other way round — "`toLocaleLowerCase()`
 for the same Unicode-aware folding Postgres's `lower()` already does" — and
@@ -337,11 +391,39 @@ request, are both 409'd by the route now. What is left for cloud's
 constraint, same as personal's, is the race the fold cannot be asked to
 prevent by itself.
 
-**What this changes for a row that already exists.** In cloud, nothing: the
-`lower(name)` index already forbade both spellings of any pair it collapses
-from coexisting, so no account can hold a pair the new fold newly collapses,
-no stored row changes, and no reindex is needed — the index expression is
-untouched. In personal, an account created before this fix CAN hold both
+**What this changes for a row that already exists. Cloud is not immune, and
+three drafts of this paragraph claimed it was.** The first said flatly that
+"no account can hold a pair the new fold newly collapses"; the second scoped
+that to the pairs round 1 measured; both were wrong, and the second was wrong
+in a way that reads like care, which is worse. The claim rested on cloud's
+`lower(name)` index refusing to store two rows the fold would later merge, and
+that is a claim about a UNIQUE INDEX whose expression is provider-dependent —
+so it has to be asked of every provider, not of the one the sweep ran on.
+
+Asked of both, on a real server, the answer is that **no newly-collapsed pair
+is refused by that index under both providers**, so on any given deployment at
+least one of them can already be sitting in the table as two rows:
+
+| pair | libc index refuses? | ICU index refuses? |
+|---|---|---|
+| `Istanbul` / `İstanbul` | yes | **no** |
+| `istanbul` / `i` + U+0307 + `stanbul` | **no** | **no** |
+| `λογοσ` / `λογος` | **no** | **no** |
+
+The first row is the one that kept the illusion alive: on the libc provider
+this project ships and CI runs, that pair really is unstorable, so every
+measurement taken here agreed with the claim. On a managed Postgres with the
+ICU provider it is perfectly storable, and the other two are storable
+everywhere. `categories_user_name_key` is untouched by this change and needs no
+reindex — but "the index expression did not move" was never the same statement
+as "no account holds such a pair", and conflating them is what went wrong three
+times.
+
+So everything below describes BOTH editions. In personal it arrives by a
+different road — `NOCASE` is ASCII-only and never saw any of these pairs — but
+the consequences are identical, and there is no longer a cloud paragraph and a
+personal paragraph. In personal, an account created before this fix CAN
+hold both
 `Istanbul` and `İstanbul` (or `ΟΔΟΣ` and `Οδοσ`), because `NOCASE` saw
 neither pair. After the fix the route treats them as one name: renaming one
 onto the other now answers 409 — and so does a COLOUR-ONLY edit on either
@@ -363,6 +445,29 @@ matters. In that MERGE case no row is deleted and no habit loses its category
 this fix working rather than a side effect to paper over, the same thing the
 root `CLAUDE.md` asks to be said out loud about a stored lapse moving a
 window.
+
+**And the same four consequences reach a cloud account, for any of the three
+pairs its own index does not refuse.** A cloud account holding `λογος` and
+`λογοσ` as two rows — legitimate, because neither provider's `lower()` ever
+asked them to merge — or holding `Istanbul` and `İstanbul` on an ICU
+deployment, gets exactly what personal does: a rename of either onto the other
+now answers
+409 from the route's own duplicate check (never reaching the constraint,
+which would not have fired for this pair either); a COLOUR-ONLY edit through
+`PUT /categories/:id` 409s the same way, for the same reason
+(`categoryNameTaken` runs over whatever name arrives, changed or not); an
+import's `categoryIdByFold` map collapses both spellings to one key, so a
+MERGE naming either attaches its habits to whichever row `position` decided;
+and no row is deleted in that MERGE case, which is this fix working rather
+than a side effect. **No migration is included for cloud's copy of this
+either, and the reason is the same one personal's absence already gives**:
+merging a pre-existing duplicate pair ahead of any particular import would
+have to choose a colour, a position and a winner for whichever account holds
+one, and that is a decision for whoever owns the account, not a silent one
+this fix can make on their behalf. What changed is only that the
+consequence — a 409, a line in `result.skipped` on a REPLACE (below) — is
+now a stated one instead of a false "cloud cannot hold such a pair" hiding
+that there was ever a decision to make.
 
 **A REPLACE-mode restore of that same account is a different case, and "no
 row is deleted" is not true of it — a review round after this fix was first

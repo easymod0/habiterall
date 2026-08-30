@@ -922,6 +922,150 @@ if (!hasIcuCollation) {
   console.log('--- contextual-pair table under ICU: SKIPPED — no ICU collations on this server ---');
 }
 
+/* ---- issue #256 (review round 3): the REVERSE direction, against a real
+ * Postgres — and the forcing chain that makes it unavoidable ----
+ *
+ * Every assertion above drives ONE direction: if Postgres's `lower()`
+ * collapses two strings, so must `foldCategoryName`. That direction alone
+ * cannot see an OVER-collapse — a pair `foldCategoryName` merges that
+ * `lower()` keeps apart under BOTH providers — and `toLowerCase()` is a
+ * no-op on an already-lowercase codepoint wherever it sits, so the OLD fold
+ * never merged these either: nothing has ever stopped an account holding
+ * both spellings, in EITHER edition. `shared/test/validate.test.js`'s
+ * `NEWLY_COLLAPSED` table pins the same two pairs purely in JS; this block
+ * is what makes "and Postgres's `lower()` genuinely does not collapse them
+ * either" a fact measured against THIS database rather than an assumption
+ * about one this suite is not actually running against. Every Greek letter
+ * and combining mark below is an explicit \uXXXX escape, named in a
+ * comment, matching the rest of this file.
+ */
+const logosOrdinarySigma = '\u03bb\u03bf\u03b3\u03bf\u03c3';   // 'logos' ending ordinary sigma, U+03C3
+const logosFinalSigma = '\u03bb\u03bf\u03b3\u03bf\u03c2';   // 'logos' ending final sigma, U+03C2
+const reversePairs = [
+  ['sigma: two already-lowercase spellings of one Greek word', logosOrdinarySigma, logosFinalSigma],
+  ['dot: a combining dot above (U+0307) typed after a plain i', 'i' + '\u0307' + 'stanbul', 'istanbul'],
+];
+
+for (const [label, a, b] of reversePairs) {
+  for (const [providerLabel, collateSql] of [
+    ['libc / database default', ''],
+    ...(hasIcuCollation ? [['ICU (und-x-icu)', 'collate "und-x-icu"']] : []),
+  ]) {
+    const { rows: [{ la, lb }] } = await admin.query(
+      `SELECT lower($1::text ${collateSql}) AS la, lower($2::text ${collateSql}) AS lb`,
+      [a, b]
+    );
+    const postgresCollapses = la === lb;
+    const foldCollapses = foldCategoryName(a) === foldCategoryName(b);
+    ck(
+      `[${providerLabel}] ${label}: lower() does NOT collapse this pair but ` +
+      'foldCategoryName does — the over-collapse this fold is forced into, ' +
+      'measured against the database rather than assumed',
+      !postgresCollapses && foldCollapses,
+      `lower(): ${JSON.stringify(la)} vs ${JSON.stringify(lb)} ` +
+      `(collapses=${postgresCollapses}); fold(): ` +
+      `${JSON.stringify(foldCategoryName(a))} vs ${JSON.stringify(foldCategoryName(b))}`);
+  }
+}
+if (!hasIcuCollation) {
+  console.log('--- reverse-direction pairs under ICU: SKIPPED — no ICU collations on this server ---');
+}
+
+/* ---- cloud is NOT immune: what `categories_user_name_key` actually refuses ----
+ *
+ * Three drafts of this change claimed a cloud account could not be holding a
+ * pair the new fold now merges, because the `lower(name)` unique index would
+ * already have refused the second row. That claim is about an index whose
+ * EXPRESSION is provider-dependent, so it has to be asked of every provider
+ * rather than of the one a sweep happened to run on — and asked of both, it
+ * is false for every newly-collapsed pair.
+ *
+ * The `Istanbul`/`İstanbul` row is the one that kept the illusion alive: on
+ * the libc provider this project ships and CI runs, that pair really is
+ * unstorable, so every measurement taken here agreed. On ICU it is perfectly
+ * storable. This block pins the whole table so the next person to write "no
+ * account can hold such a pair" has to delete a passing assertion to do it.
+ */
+const dottedCapitalI = 'İ';           // İ  LATIN CAPITAL LETTER I WITH DOT ABOVE
+const combiningDotAbove = '̇';        //    COMBINING DOT ABOVE
+const immunityTable = [
+  // [label, a, b, refused by libc?, refused by ICU?]
+  ['U+0130 vs plain I', 'Istanbul', `${dottedCapitalI}stanbul`, true, false],
+  ['decomposed i + dot vs plain i', 'istanbul', `i${combiningDotAbove}stanbul`, false, false],
+  ['two lowercase sigma spellings', logosOrdinarySigma, logosFinalSigma, false, false],
+];
+
+if (hasIcuCollation) {
+  for (const [label, a, b, wantLibc, wantIcu] of immunityTable) {
+    const refuses = {};
+    for (const [key, collateSql] of [['libc', ''], ['icu', 'collate "und-x-icu"']]) {
+      const { rows: [{ same }] } = await admin.query(
+        `SELECT lower($1::text ${collateSql}) = lower($2::text ${collateSql}) AS same`, [a, b]);
+      refuses[key] = same;
+    }
+    ck(`[index immunity] ${label}: the unique index refuses this pair on ` +
+      `libc=${wantLibc}, ICU=${wantIcu} — provider-dependent, which is why ` +
+      '"cloud cannot hold such a pair" was false',
+      refuses.libc === wantLibc && refuses.icu === wantIcu,
+      `measured libc=${refuses.libc} ICU=${refuses.icu}`);
+    // The claim that actually matters, derived rather than restated: the fold
+    // merges this pair, and at least one provider's index would have let both
+    // rows be stored — so a cloud account CAN be holding them today.
+    ck(`[index immunity] ${label}: foldCategoryName merges it AND at least one ` +
+      'provider would have stored both rows — cloud is not immune',
+      foldCategoryName(a) === foldCategoryName(b) && !(refuses.libc && refuses.icu),
+      `fold merges=${foldCategoryName(a) === foldCategoryName(b)}, ` +
+      `refused libc=${refuses.libc} ICU=${refuses.icu}`);
+  }
+} else {
+  console.log('--- index-immunity table: SKIPPED — no ICU collations on this server ---');
+}
+
+/* ---- the forcing chain: over-collapse is a theorem, not a choice ----
+ *
+ * Two providers merging DIFFERENT pairs of one triple X/Y/Z means containment
+ * under BOTH requires merging X~Z too — a pair NEITHER provider merges on its
+ * own — by transitivity. That is a theorem about any fold contained under two
+ * providers that disagree with each other, not a choice this fold made, and
+ * it is checked against the database rather than argued. Two triples:
+ *
+ * - X='I', Y='\u0130' (dotted capital I, U+0130), Z=decomposed 'i'+U+0307.
+ *   libc merges X~Y ('I' and '\u0130' both fold to plain 'i'); ICU merges
+ *   Y~Z ('\u0130' folds to 'i'+U+0307, which IS Z); neither merges X~Z.
+ * - X='\u039f\u03b4\u03bf\u03c3', Y='\u039f\u0394\u039f\u03a3', Z='\u03bf\u03b4\u03bf\u03c2' (a lowercase
+ *   spelling ending FINAL sigma, U+03C2). libc merges X~Y (no Final_Sigma,
+ *   both end ordinary sigma); ICU merges Y~Z (Final_Sigma applies to both,
+ *   both end U+03C2); neither merges X~Z.
+ */
+const forcingTriples = [
+  ['I / dotted capital I (U+0130) / decomposed i + U+0307', 'I', '\u0130', 'i' + '\u0307'],
+  ['\u039f\u03b4\u03bf\u03c3 / \u039f\u0394\u039f\u03a3 / \u03bf\u03b4\u03bf\u03c2 (final sigma)',
+    '\u039f\u03b4\u03bf\u03c3', '\u039f\u0394\u039f\u03a3', '\u03bf\u03b4\u03bf\u03c2'],
+];
+
+if (hasIcuCollation) {
+  const lowerCollapses = async (collateSql, s1, s2) => {
+    const { rows: [{ l1, l2 }] } = await admin.query(
+      `SELECT lower($1::text ${collateSql}) AS l1, lower($2::text ${collateSql}) AS l2`,
+      [s1, s2]
+    );
+    return l1 === l2;
+  };
+  for (const [label, x, y, z] of forcingTriples) {
+    const libcMergesXY = await lowerCollapses('', x, y);
+    const icuMergesYZ = await lowerCollapses('collate "und-x-icu"', y, z);
+    const libcMergesXZ = await lowerCollapses('', x, z);
+    const icuMergesXZ = await lowerCollapses('collate "und-x-icu"', x, z);
+    ck(`[forcing chain] ${label}: libc merges X~Y`, libcMergesXY, '');
+    ck(`[forcing chain] ${label}: ICU merges Y~Z`, icuMergesYZ, '');
+    ck(`[forcing chain] ${label}: NEITHER provider merges X~Z — the over-collapse is forced, not chosen`,
+      !libcMergesXZ && !icuMergesXZ,
+      `libc merges X~Z=${libcMergesXZ}, ICU merges X~Z=${icuMergesXZ}`);
+  }
+} else {
+  console.log('--- forcing-chain triples: SKIPPED — no ICU collations on this server ---');
+}
+
 /* ---------- an entry in a reorder list that merely COERCES to an id ----------
  *
  * `Number.isInteger(Number(n))` — what both editions asked — says YES to

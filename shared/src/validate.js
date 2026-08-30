@@ -282,14 +282,42 @@ export function parseIcon(value) {
  * lowercases circled Latin capitals (e.g. U+24B6) that the libc collation
  * provider's `lower()` leaves untouched. That exact count is an observation
  * about `postgres:17-alpine`'s libc provider, not a thing to pin: a
- * database on ICU or the C locale can draw the line elsewhere. What does
- * not move is the RULE — containment, never looser than a backstop — which
- * holds under libc, ICU and a C-locale database alike. That direction is
- * harmless regardless: the route is *stricter* than the index, never
- * looser, which is the same asymmetry personal's ASCII-only `NOCASE`
- * backstop already has. Do not try to fold those back to themselves to
- * chase equality with `lower()` — the rule this function owes its callers
- * is containment, not equality with one of them.
+ * database on ICU or the C locale can draw the line elsewhere. What makes
+ * THOSE 124 harmless is narrower than it first reads, and does not
+ * generalise: the OLD whole-string fold already collapsed every one of them
+ * too (`toLowerCase()` is what produced the divergence from `lower()` in the
+ * first place), so nothing about them is NEW — no account could ever have
+ * held both spellings, in either edition, before or after this fold.
+ *
+ * **This fold collapses at least two pairs that neither provider's
+ * `lower()` and neither the OLD fold collapses**, and both are FORCED, not
+ * sloppy. `Οδοσ` spelled with an ordinary lowercase final letter (U+03C3,
+ * σ) and the same word spelled with the FINAL form instead (U+03C2, ς) —
+ * two already-lowercase spellings differing only in which sigma ends
+ * them — are folded onto one string by the U+03C2 -> σ clause, though
+ * `lower()` leaves them apart under BOTH providers: an already-lowercase
+ * codepoint is a no-op for `toLowerCase()` wherever it sits, so the OLD
+ * fold never merged them either, and nothing has ever stopped an account
+ * holding both, in EITHER edition. The same is true of `i` + U+0307 +
+ * `stanbul` against plain `istanbul`: the dot-stripping clause merges them
+ * though `lower()` again leaves them apart under both providers.
+ *
+ * That is forced by TRANSITIVITY, not a choice. libc merges `{I, İ}` and
+ * ICU merges `{İ, i + U+0307}` — two DIFFERENT pairs of the same triple —
+ * so any fold contained under both must merge both, and therefore must
+ * merge `{I, i + U+0307}` too, which NEITHER provider merges on its own.
+ * The same argument runs on `{Οδοσ, ΟΔΟΣ}` (libc merges this pair, no
+ * Final_Sigma) and `{ΟΔΟΣ, a lowercase spelling ending U+03C2}` (ICU merges
+ * this one, Final_Sigma applied to both): contained under both means
+ * merging `{Οδοσ, that same U+03C2-ending lowercase spelling}` too, which
+ * neither provider merges either. Over-collapse is not a cost of
+ * carelessness in this fold; it is a theorem about any fold contained under
+ * two providers that disagree with each other. What does not move is the
+ * RULE — containment, never looser than a backstop — which holds under
+ * libc, ICU and a C-locale database alike. Do not try to fold the 124
+ * harmless codepoints back to themselves to chase equality with `lower()`
+ * — the rule this function owes its callers is containment, not equality
+ * with one of them.
  *
  * NFC/NFD/NFKC/NFKD normalisation on their own do NOT fix either
  * divergence — all four forms still fold `İstanbul` and `Istanbul` to

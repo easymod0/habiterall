@@ -359,6 +359,112 @@ test('foldCategoryName folds BOTH lowercase spellings of sigma — final ' +
   assert.equal(foldCategoryName('ΟΔΟΣ'), foldCategoryName(odosEndingFinalSigma));
 });
 
+test('foldCategoryName newly collapses exactly two things relative to the ' +
+  'OLD whole-string fold, and enumerating the blast radius is what makes ' +
+  'that a checked fact rather than a claim (issue #256, review round 3)', () => {
+  // `toLowerCase()` is a no-op on a codepoint that is already lowercase,
+  // WHEREVER it sits — so the OLD fold (`String(s).trim().toLowerCase()`,
+  // spelled out here rather than imported, because the point is to compare
+  // `foldCategoryName` against the rule it REPLACED) never merged two
+  // already-lowercase spellings differing only in which sigma ends them, and
+  // never merged a plain 'i' against 'i' + the caller's own combining dot
+  // above (U+0307). Nothing has ever stopped an account holding both, in
+  // EITHER edition, and every earlier test in this file only ever drove the
+  // other direction: if `lower()` collapses two strings, so does the fold.
+  // This is the reverse question.
+  const oldFold = (s) => String(s ?? '').trim().toLowerCase();
+
+  // The test's own claim about the fold — it does NOT import anything from
+  // `foldCategoryName` to build this table, because the table is what gets
+  // checked AGAINST the fold below. Every Greek letter and combining mark is
+  // an explicit \uXXXX escape: a reviewer cannot tell U+03C2 (final sigma)
+  // from U+03C3 (ordinary sigma) by eye and must not have to.
+  const NEWLY_COLLAPSED = [
+    {
+      rewrite: 'U+03C2 (final sigma) -> U+03C3 (ordinary sigma)',
+      apply: (s) => s.replace(/\u03c2/gu, '\u03c3'),
+      // 'logos' (a Greek word), spelled two ways, both ALREADY lowercase,
+      // differing only in which sigma ends them.
+      pair: [
+        '\u03bb\u03bf\u03b3\u03bf\u03c3',   // 'logos' ending ordinary sigma, U+03C3
+        '\u03bb\u03bf\u03b3\u03bf\u03c2',   // 'logos' ending final sigma, U+03C2
+      ],
+      folded: '\u03bb\u03bf\u03b3\u03bf\u03c3',
+    },
+    {
+      rewrite: 'i + a RUN of one or more U+0307 (combining dot above) -> i',
+      apply: (s) => s.replace(/i\u0307+/gu, 'i'),
+      // 'istanbul' with a combining dot above (U+0307) typed directly after
+      // a plain i, against the plain spelling with none.
+      pair: [
+        'i' + '\u0307' + 'stanbul',
+        'istanbul',
+      ],
+      folded: 'istanbul',
+    },
+  ];
+
+  // ---- assertion 1: each row is genuinely NEWLY collapsed ----
+  // The NEW fold gives both members of the pair the same literal `folded`
+  // value, and the OLD fold gives them DIFFERENT values — asserted against
+  // the literal on both sides, not only against each other, the same
+  // discipline every other test in this file already uses: a fold that
+  // returned a constant would satisfy a bare equality between its own two
+  // answers and nothing else.
+  for (const row of NEWLY_COLLAPSED) {
+    const [a, b] = row.pair;
+    assert.equal(foldCategoryName(a), row.folded,
+      `${row.rewrite}: foldCategoryName(pair[0]) must equal the stated literal`);
+    assert.equal(foldCategoryName(b), row.folded,
+      `${row.rewrite}: foldCategoryName(pair[1]) must equal the stated literal too`);
+    assert.notEqual(oldFold(a), oldFold(b),
+      `${row.rewrite}: the OLD fold must keep this pair apart, or it was not NEW`);
+  }
+
+  // ---- assertion 2: COMPLETENESS — the single most important assertion in
+  // this test. Enumerate every string of length <= 3 over the alphabet
+  // below (584 strings) and assert, for every one, that
+  // `foldCategoryName(s) === NEWLY_COLLAPSED.reduce((acc, r) => r.apply(acc), oldFold(s))`.
+  // This is what turns the table above into a FACT about the fold's whole
+  // blast radius rather than a prose claim about two examples: it fails if
+  // the fold collapses something the table does not list (an undocumented
+  // third rewrite), and it fails if a row is quietly DROPPED from the table
+  // (the collapse keeps happening but nothing here explains it any more).
+  const ALPHABET = ['i', 'I', '\u0130', '\u0307', '\u03c3', '\u03c2', '\u03a3', 'a'];
+  const enumerated = [];
+  const build = (prefix, depth) => {
+    if (depth > 0) enumerated.push(prefix);
+    if (depth < 3) {
+      for (const ch of ALPHABET) build(prefix + ch, depth + 1);
+    }
+  };
+  build('', 0);
+  assert.equal(enumerated.length, 584,
+    'the enumerated alphabet no longer produces 584 strings of length <= 3 — ' +
+    'recompute before trusting the completeness sweep below');
+
+  for (const s of enumerated) {
+    const expected = NEWLY_COLLAPSED.reduce((acc, row) => row.apply(acc), oldFold(s));
+    assert.equal(foldCategoryName(s), expected,
+      `foldCategoryName(${JSON.stringify(s)}) diverges from oldFold + every ` +
+      'listed rewrite — the table no longer explains the whole blast radius');
+  }
+
+  // ---- assertion 3: each row is NECESSARY ----
+  // Removing just that row from the reduction must break the equation above
+  // for at least one enumerated string, so a spurious or redundant row
+  // cannot be added to the table without this test noticing.
+  for (let i = 0; i < NEWLY_COLLAPSED.length; i++) {
+    const withoutRow = NEWLY_COLLAPSED.filter((_, idx) => idx !== i);
+    const stillHoldsEverywhere = enumerated.every((s) =>
+      foldCategoryName(s) === withoutRow.reduce((acc, row) => row.apply(acc), oldFold(s)));
+    assert.ok(!stillHoldsEverywhere,
+      `removing row ${i} (${NEWLY_COLLAPSED[i].rewrite}) left the equation ` +
+      'holding for every enumerated string — this row does no work and ' +
+      'should not be in the table');
+  }
+});
+
 test('foldCategoryName folds an astral character by CODE POINT, not by ' +
   'UTF-16 unit', () => {
   // U+10400 (DESERET CAPITAL LETTER LONG I) is outside the BMP and encoded as
