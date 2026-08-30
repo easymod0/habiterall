@@ -12,7 +12,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9295);
 const profile = mkdtempSync(join(tmpdir(), 'habunknown-'));
@@ -56,11 +56,10 @@ try {
     { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
 
   const boot = async () => {
-    await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-      await sleep(250);
-    }
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard',
+    });
     await sleep(600);
   };
 

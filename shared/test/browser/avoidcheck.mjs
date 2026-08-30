@@ -15,7 +15,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitForRow, waitUntil,
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome,
+  reloadAndWaitFor, reloadAndWaitForRow,
 } from './chrome.mjs';
 
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9237);
@@ -53,15 +54,16 @@ try {
     return r.result.value;
   };
   await send('Page.enable', {}, sessionId);
-  await send('Page.navigate', { url: BASE }, sessionId);
   // The first wait is the only one that legitimately takes any row: nothing of
   // this suite's own exists yet, and what it is waiting for is the dashboard
-  // having painted at all. The predicate is weak on purpose; the wait is still
-  // `waitUntil`, so a dashboard that never paints says so here rather than
+  // having painted at all. The predicate is weak on purpose; the wait still
+  // THROWS, so a dashboard that never paints says so here rather than
   // falling through into a `fetch` that succeeds regardless and surfacing as a
   // confusing `reloadAndWaitForRow` timeout naming Smoking, twenty lines down.
-  await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
-    { what: 'the dashboard to paint at all' });
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+    what: 'the dashboard to paint at all',
+  });
 
   // A habit of the shape the feature is for: stored as a measurable at-most
   // habit with a target of 0, and asked to be SHOWN as something to avoid.

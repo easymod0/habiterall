@@ -157,3 +157,184 @@ than on a reproduction here. That is not resolved by asserting harder: the
 change is strictly stronger either way — it can only close a window, never
 open one — and it costs nothing to hold a predicate that cannot be answered
 by a document that is going away, whether or not this build ever lands in it.
+
+**#269 is the same defect through a different door.** `snackcheck.mjs` reloads
+over CDP (`send('Page.reload', …, sessionId)`), and each reload was followed
+by its own hand-rolled poll on `detailReady`, checking three selectors — the
+calendar cell, the History bars, the strip cell — that the detail view had
+already drawn BEFORE the reload. Naming the content does not help here either,
+for the same reason #153 found: the page being reloaded already had all three,
+so the strengthened predicate is exactly as satisfiable in the doomed document
+as the weak one was.
+
+The join still has to be one call, but a CDP reload cannot literally be one
+evaluation with the marker the way `location.reload()` is — it is a separate
+round trip over the DevTools socket, not an expression the page can run.
+`reloadAndWaitFor` is the factored-out join: the marker is set in its own
+evaluation, and the caller's reload (in-page by default, or a `reload:`
+callback for CDP) runs immediately after it, with nothing else able to
+navigate the page in between. That keeps it sound despite the split.
+`reloadAndWaitForRow` becomes the row-shaped wrapper over it, unchanged in
+behaviour, and `snackcheck.mjs`'s own poll loops are gone in favour of one
+`reloadAndWaitFor` call per reload site.
+
+The guard (`browser-runner.test.js`) is widened to see a free-standing
+`Page.reload` and forbid it exactly as it already forbade a bare
+`location.reload(` — with one exemption, for `Page.reload` appearing as
+`reloadAndWaitFor`'s own `reload:` argument, which is the sanctioned form now
+that one exists. `location.reload(` gets no matching exemption: it offends
+even inside a `reload:` callback, because the whole reason the CDP door needs
+one is that the in-page reload's soundness depends on being one evaluation
+with the marker, which a callback would undo.
+
+**`Page.navigate` is the same defect through a third door, and the sweep of it
+is the rest of #269.** `send('Page.navigate', …)` resolves before the new
+document commits, exactly as `location.reload()` and `Page.reload` do, so a
+wait written as a separate statement after it can be answered by the document
+the navigation is destroying. There are **79 such sends across 29 suite
+files**, of which **68 in 28 files** now join theirs through
+`reloadAndWaitFor(ev, PRED, { reload: () => send('Page.navigate', …), what })`
+and **11 in 9 files** are deliberately unjoined and registered below.
+
+Those figures are on one stated population, because three plausible ones give
+three different numbers and an unqualified count here has already gone stale
+once. The population is **a literal `send('Page.navigate', …)` call in
+`shared/test/browser/*.mjs`** — so it excludes `browser-runner.test.js`, which
+is a unit test in `shared/test/` rather than a suite in `shared/test/browser/`,
+and it counts nothing in `chrome.mjs`, which is inside that directory but
+contains no send at all (only prose naming the method, and the guard does not
+scan it). It also counts *sends*, not text matches: a bare `grep` for
+`Page.navigate` over the same files answers **90** here, because comments and
+JSDoc mention the method too — it answered 84 before this sweep, and that 84
+is how the scope of #269 was first mis-stated.
+
+Those numbers moved during the work rather than being miscounted, which is the
+more useful warning. The sweep itself **added** a send (`themecheck`'s
+same-document branch, so 76 before and 77 after) and **added** prose (84 text
+matches before, 86 after). Then the branch was rebased onto a master that had
+gained two more navigations while it sat open — `hangcheck`'s new
+`AbortSignal.timeout` guard block (#87) and `calcheck`'s `openFirstHabit`
+(#274) — each a fresh instance of the very defect this sweep exists to close,
+written after the sweep had already passed over those files. Both were joined
+during the conflict resolution, taking the tree to **79 sends, 68 of them
+joined**, and the guard is what caught them: it fails on a free-standing
+`Page.navigate`, so the rebase could not have quietly reintroduced the race.
+
+Every count in this section is therefore of the tree as it stands *after* that
+rebase. A figure measured before a change and quoted after it reads exactly
+like a correct one, and that is the drift this file exists to prevent — it is
+also, three times now, the drift it failed to prevent. The lesson is not to
+count more carefully; it is that **a sweep over a shared directory goes stale
+the moment another branch touches one of those files**, so the count and the
+guard both have to be re-run at merge time rather than at review time.
+
+**The rule for deciding soundness is checkable from the call site alone, and
+it is about the TARGET url.** A marker is sound only where the navigation is
+cross-document: on a same-document (fragment) navigation the window is never
+replaced, `window.__doomed` survives, `!window.__doomed` is never true, and
+the wait hangs to its full 20s — trading a sub-10ms race for a guaranteed
+20-second one, which is the wrong direction.
+
+- **A target with NO `#` fragment is always cross-document.** HTML's fragment
+  fast-path requires the *target* url's fragment to be non-null, so
+  `Page.navigate({url: APP})` is a real document load even from
+  `APP/#/habit/3`. `APP` and `BASE` are `process.env.BASE ?? 'http://localhost:3000'`
+  in every suite — fragment-less — which is why this one clause covers the
+  overwhelming majority of the 79.
+
+**That premise is measured, not only read out of the spec.** Chrome for
+Testing 152.0.7977.42, personal edition on a throwaway SQLite instance, 20
+trials each. Per trial: settle the document, evaluate `window.__doomed = 1`,
+confirm it took, `Page.navigate`, settle again, read the marker back —
+`undefined` means the window was replaced, `1` means it survived.
+
+    target                                        replaced   survived
+    http://…/            (fragment-less, and      20 / 20     0 / 20
+                          identical to the url
+                          it was issued FROM)
+    http://…/#/habit/1   (identical, fragment)     0 / 20     20 / 20
+
+The control is the half worth having. A probe that only ever saw one outcome
+would prove nothing about its own sensitivity, and this one produces both,
+cleanly separated, from the same code path a suite uses — so 20/20 on the
+main case is a statement about `Page.navigate` and not about the probe. Note
+what the first row rules out: a navigation to the *same* fragment-less url,
+which is the case a reader is most likely to suspect of being optimised into
+a no-op, still replaces the document every time.
+- **A target WITH a fragment is cross-document only if something other than
+  the fragment differs** — a path or a query. Two sites are in that shape and
+  both are already deliberate: `stripcheck.mjs`'s `openHabit` carries an
+  incrementing `?open=N` precisely so the navigation is a real load (its
+  comment says so), and `themecheck.mjs`'s deep link is cross-document only
+  because it is the first navigation in the file and the page is still
+  `about:blank`.
+
+**Why the race bit so widely is `shared/public/ui/views.js:26`:**
+`for (const el of all) el.hidden = el !== view;` — a view is HIDDEN, never
+emptied. So once the dashboard has painted, `#grid .habit-row` keeps matching
+from the detail view and from `#/categories`; once a habit has been opened,
+`#view-detail .day-strip .check` keeps matching from the dashboard. Almost
+every "wait for the dashboard" predicate in the tree is therefore satisfiable
+by the outgoing document, and naming the content closes nothing — the same
+finding #153 made about naming the row.
+
+**`themecheck.mjs`'s `boot` is the one site where cross-document had to be
+decided at RUNTIME rather than statically**, because it has two callers: a
+bare `boot()` on the fragment-less default, and the deep link
+``boot(`${APP}/#/habit/${id}`)``. An unconditional marker inside the helper
+would be sound today and one line-move from a 20s hang. So `boot` asks the
+question of the two urls in the page — does the target carry a fragment, and
+does its pre-fragment part equal `location.href`'s — and takes the joined
+`reloadAndWaitFor` path only where the answer is "cross-document". The
+same-document branch is a free-standing `Page.navigate` plus a `waitUntil`.
+
+**Be exact about what that branch is, because it is easy to over-claim.** It
+is a TRIPWIRE, not a working same-document path. It is dead today — both
+callers are cross-document — and if it ever did fire it would not be a fix
+either: it falls back to `waitUntil(ev, until)`, and `until` is already true
+in the document a fragment change leaves in place, so ``boot(`${APP}/#/habit/4`)``
+issued from `…#/habit/3` would return instantly and go on to measure habit 3.
+That is exactly the weak-predicate failure #269 exists to close, preserved
+rather than replaced. What the branch buys is only that a line-move cannot
+silently hand a fragment caller a marker that never clears — a wrong
+measurement traded for a guaranteed 20s hang, which is the better of two bad
+outcomes and neither of them correct. A fragment caller that genuinely needed
+joining would need a different PREDICATE, not this branch.
+
+**Eleven sends stay unjoined, and each is annotated at the call site**
+(`// navigate-unjoined: <reason>`) and counted per file in `NAVIGATE_UNJOINED`
+in `shared/test/browser-runner.test.js`. Seven are followed by a bare `sleep`
+and no predicate at all — `calcheck.mjs`, `responsive.mjs`, `feat4.mjs`,
+`notifycheck.mjs`, `timepicker.mjs` and `settingscheck.mjs` twice — where
+inventing a predicate is a different change from joining an existing one. The
+other four each have a reason of their own:
+
+- `timepicker.mjs`'s `about:blank` teardown exists to escape a renderer that
+  may be unresponsive to `Runtime.evaluate`, so a poll evaluated *in the page*
+  is the wrong instrument, and `about:blank` satisfies no predicate anyway.
+- `hangcheck.mjs` navigates off `about:blank` (safe either way) and uses a
+  bounded poll on purpose, so a hang is REPORTED rather than thrown — its own
+  comment explains that its `try` has no `catch`, and a throw would skip the
+  checks that make the diagnosis.
+- `pwatest.mjs`'s one `goto` helper is called twice — online at boot (`:59`)
+  and again with the network cut (`:117`) — and it stays unjoined for the
+  shape rather than for the offline half: `sleep` plus
+  `check('app shell loads with no network', …)` yields a NAMED failure, where
+  a `waitUntil` would turn that into a silent 20s throw with no check output.
+  The offline call is where it matters; the reason holds at both.
+- `themecheck.mjs`'s same-document tripwire, above.
+
+The guard (`browser-runner.test.js`) forbids a free-standing `Page.navigate`
+on the same terms as `Page.reload`, exempting it as `reloadAndWaitFor`'s own
+`reload:` argument or where the line carries a `navigate-unjoined:` marker
+with a **non-empty** reason — an empty one buys nothing, or the marker
+degenerates into a token to paste in. It matches `Page.navigate` as a QUOTED
+method name rather than by substring, unlike `Page.reload`: the string is
+written in prose all over these suites, and `categorycheck.mjs` writes it
+inside a `/* … */` block whose continuation lines carry no leading `*` and so
+are invisible to a line-based comment skip. A CDP call always spells the
+method as a string literal and prose never does. The registry is a per-file
+COUNT rather than a `file:line` pin, in the spirit of `notMirrored`: a line
+pin goes stale on the next edit above it and gets updated mechanically, which
+is how a registry stops being read, while a count changes only when an
+exemption is added or removed.

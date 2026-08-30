@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9227);
 
@@ -42,11 +44,10 @@ try {
   await send('Page.enable', {}, sessionId);
 
   const reload = async () => {
-    await send('Page.navigate', { url: BASE }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-      await sleep(200);
-    }
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: BASE }, sessionId),
+      what: 'the dashboard',
+    });
   };
 
   // State is seeded over HTTP by the caller before this script runs.
@@ -254,11 +255,10 @@ try {
         body: JSON.stringify({...h, archived:false})});
     }
   })()`);
-  await send('Page.navigate', { url: BASE }, sessionId);
-  for (let i = 0; i < 60; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0)) break;
-    await sleep(200);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+    what: 'the dashboard',
+  });
   await ev(`(()=>{
     const rows=[...document.querySelectorAll('#grid .habit-row')];
     const names=rows.map(r=>r.querySelector('.habit-name').textContent);

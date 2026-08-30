@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9230);
 const profile=mkdtempSync(join(tmpdir(),'habdrag-'));
 const chrome=launchChrome(PORT, profile);
@@ -20,8 +20,8 @@ try{
   const ev=async e=>{const r=await send('Runtime.evaluate',{expression:e,awaitPromise:true,returnByValue:true},sessionId);
     if(r.exceptionDetails)throw new Error(r.exceptionDetails.exception?.description);return r.result.value;};
   await send('Page.enable',{},sessionId);
-  await send('Page.navigate',{url:BASE},sessionId);
-  for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(200);}
+  await reloadAndWaitFor(ev,`!!document.querySelector('#grid .habit-row')`,
+    {reload:()=>send('Page.navigate',{url:BASE},sessionId),what:'the dashboard'});
 
   const names=()=>ev(`[...document.querySelectorAll('#grid .habit-row .habit-name')].map(n=>n.textContent.trim())`);
   const before=await names();

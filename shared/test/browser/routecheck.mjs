@@ -23,7 +23,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 import { seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
@@ -84,8 +86,11 @@ try {
 
   /* ---------- the dashboard has no fragment ---------- */
 
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitFor('#grid .habit-row');
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
+  await sleep(400);   // `waitFor`'s own post-action settle, kept
 
   const start = await where();
   ck('the dashboard is showing', start.list && !start.detail, JSON.stringify(start));
@@ -395,11 +400,12 @@ try {
       }).observe(document, { childList: true, subtree: true, attributes: true });
     `,
   }, flashSession);
-  await send('Page.navigate', { url: `${APP}/#/habit/${habit.id}` }, flashSession);
-  for (let i = 0; i < 80; i++) {
-    if (await flashEv(`!!document.querySelector('#view-detail h2')`).catch(() => 0)) break;
-    await sleep(200);
-  }
+  // `flashEv`, not `ev` — the marker and the predicate have to be evaluated in
+  // the tab being navigated, and this one is the flash tab's.
+  await reloadAndWaitFor(flashEv, `!!document.querySelector('#view-detail h2')`, {
+    reload: () => send('Page.navigate', { url: `${APP}/#/habit/${habit.id}` }, flashSession),
+    what: 'the deep-linked habit view',
+  });
   await sleep(400);
 
   const flashed = await flashEv(`window.__listFlash`);

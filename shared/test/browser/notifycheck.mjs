@@ -12,7 +12,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 import { CHANNEL_IDS } from '@habiterall/shared/notify.js';
 const APP=process.env.BASE??'http://localhost:3000', PORT = devtoolsPort(9297);
 const profile=mkdtempSync(join(tmpdir(),'habnotify-'));
@@ -37,14 +37,14 @@ try{
   await send('Page.enable',{},sessionId);
   await send('Network.enable',{},sessionId);
   await send('Network.setCacheDisabled',{cacheDisabled:true},sessionId);
-  await send('Page.navigate',{url:APP},sessionId); await sleep(1200);
+  await send('Page.navigate',{url:APP},sessionId); await sleep(1200); // navigate-unjoined: a bare sleep, with no predicate to join
   await ev(`(async()=>{
     for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
     for (const k of await caches.keys()) await caches.delete(k);
   })()`).catch(()=>{});
 
-  const load=async()=>{await send('Page.navigate',{url:APP},sessionId);
-    for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+  const load=async()=>{await reloadAndWaitFor(ev,`!!document.querySelector('#grid .habit-row')`,
+    {reload:()=>send('Page.navigate',{url:APP},sessionId),what:'the dashboard'});
     await sleep(500);};
   const open=async()=>{await ev(`document.getElementById('btn-settings').click()`);await sleep(400);};
   // Nothing the dialog does reaches the server until Done. On a value the

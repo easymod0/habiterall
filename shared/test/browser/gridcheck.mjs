@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT = devtoolsPort(9290);
 const profile=mkdtempSync(join(tmpdir(),'habgrid-'));
 const chrome=launchChrome(PORT, profile);
@@ -23,8 +23,10 @@ try{
 
   for (const [label,w,h] of [['desktop',1440,900],['phone',390,844]]) {
     await send('Emulation.setDeviceMetricsOverride',{width:w,height:h,deviceScaleFactor:1,mobile:w<500},sessionId);
-    await send('Page.navigate',{url:APP},sessionId);
-    for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate',{url:APP},sessionId),
+      what: 'the dashboard',
+    });
     await sleep(600);
     console.log(`\n--- ${label} (${w}px) ---`);
 
@@ -85,8 +87,10 @@ try{
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({dayOrder:'newest-left'})})`);
   await sleep(400);
-  await send('Page.navigate',{url:APP},sessionId);
-  for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(200);}
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:APP},sessionId),
+    what: 'the dashboard',
+  });
   await sleep(600);
   const rev = await ev(`(()=>{const cx=el=>{const b=el.getBoundingClientRect();return b.left+b.width/2;};
     const d=[...document.querySelectorAll('.grid-date')].map(cx);
@@ -188,8 +192,10 @@ try{
     return { read: read.id, yesno: yesno.id, amount: d(1), skip: d(2), clearMe: d(3) };
   })()`);
 
-  await send('Page.navigate',{url:APP},sessionId);
-  for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:APP},sessionId),
+    what: 'the dashboard',
+  });
   await sleep(600);
 
   const painted = await ev(`(() => {
