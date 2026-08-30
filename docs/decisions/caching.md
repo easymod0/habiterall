@@ -362,7 +362,7 @@ answer from a cache the pool depth has excused from checking itself.
 bail-out.** The failure is that two workloads with very different profiles
 share one queue — a ~0.3 ms version read behind rebuilds that hold a connection
 through per-habit CPU. Giving the version read its own tiny pool (2–3
-connections, a transaction that is always four trivial round trips) means a
+connections, a transaction that is always three trivial round trips) means a
 herd of misses can no longer starve the hit path, and it costs no correctness
 at all: every request still reads a real version before it decides anything.
 The price is a second pool to drain on SIGTERM, three more connections per

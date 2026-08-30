@@ -309,3 +309,78 @@ test('withUser rejects every invalid id at the guard, and never runs fn', async 
     else process.env.DATABASE_URL = before;
   }
 });
+
+/* ---------- the fold itself is pinned, not just the guard (#188) ---------- */
+
+/**
+ * A fake `PoolClient` that RECORDS every `query()` call rather than running
+ * one, so the shape of the calls `withUser` / `withNotifierScope` issue can be
+ * counted without a database anywhere.
+ */
+function recordingClient() {
+  /** @type {any[]} */
+  const calls = [];
+  return {
+    calls,
+    client: {
+      query: async (sql) => { calls.push(sql); return { rows: [] }; },
+      release: () => {},
+    },
+  };
+}
+
+/**
+ * #188 folds `BEGIN` (or `BEGIN READ ONLY`) and `set_config(...)` into ONE
+ * multi-statement `query()` call — four round trips around the transaction
+ * down to three — and that is the entire performance claim the commit is
+ * named for. Nothing above this pins the SHAPE of it: the guard tests above
+ * only pin that a bad `userId` is rejected, and a correct-but-unfolded revert
+ *
+ *   await client.query('BEGIN');
+ *   await client.query(`SELECT set_config('app.user_id', '${userId}', true)`);
+ *
+ * would stay just as correct and just as safe, and would pass every one of
+ * them — silently giving back the round trip #188 removed. So `pool.connect`
+ * is stubbed to hand `withUser` a fake client instead of a real checkout, and
+ * the calls it is given are counted directly.
+ *
+ * The count is asserted as the LITERAL `3`, not a constant read back out of
+ * the module: importing the number under test would pin its name and nothing
+ * about whether the module still folds the two statements together.
+ */
+test('withUser folds BEGIN and set_config into one query() call', async () => {
+  const pool = await import(`../src/db/pool.js?v=${++stamp}`);
+  const { calls, client } = recordingClient();
+  pool.pool.connect = async () => client;
+
+  await pool.withUser(7, async (c) => {
+    await c.query('SELECT 1'); // the body's own round trip, between the fold and COMMIT
+    return 'ok';
+  });
+
+  assert.equal(calls.length, 3,
+    'expected [fold, the callback\'s own query, COMMIT] — a revert to two '
+    + 'separate statements for BEGIN and set_config would make this 4');
+  assert.match(calls[0], /BEGIN/, 'the FIRST call must open the transaction');
+  assert.match(calls[0], /set_config\(\s*'app\.user_id',\s*'7',\s*true\s*\)/,
+    'the FIRST call must also carry set_config, folded into the same string');
+});
+
+/** Same shape, for the read-only notifier scope. */
+test('withNotifierScope folds BEGIN READ ONLY and set_config into one query() call', async () => {
+  const pool = await import(`../src/db/pool.js?v=${++stamp}`);
+  const { calls, client } = recordingClient();
+  pool.pool.connect = async () => client;
+
+  await pool.withNotifierScope(async (c) => {
+    await c.query('SELECT 1');
+    return 'ok';
+  });
+
+  assert.equal(calls.length, 3,
+    'expected [fold, the callback\'s own query, COMMIT] — a revert to two '
+    + 'separate statements for BEGIN READ ONLY and set_config would make this 4');
+  assert.match(calls[0], /BEGIN READ ONLY/, 'the FIRST call must open the read-only transaction');
+  assert.match(calls[0], /set_config\(\s*'app\.scope',\s*'notifier',\s*true\s*\)/,
+    'the FIRST call must also carry set_config, folded into the same string');
+});

@@ -235,6 +235,13 @@ const { srv, base: issuer } = await fakeIssuer();
 const port = 3700 + (process.pid % 200);
 const { child, base } = await boot(issuer, port);
 
+// The real helper, not a hand-copy of its body — see `versionRead` below.
+// Dynamic, as `bench-queries.mjs` imports it: a static `import` runs before
+// ANY of this file's own code, including the `DATABASE_URL` default above, so
+// `db/pool.js` would read the variable before this file has had a chance to
+// supply one.
+const { withUser, closePool } = await import('../src/db/pool.js');
+
 /** The app role's own pool, configured exactly as `db/pool.js` configures its. */
 const appPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -357,21 +364,16 @@ try {
   }
 
   /**
-   * The version read, exactly as a route would issue it: through the app role,
-   * inside `withUser`'s transaction, with the same transaction-local
-   * `set_config` the RLS policies read.
+   * The version read, exactly as a route would issue it: THROUGH `withUser`
+   * itself rather than a restatement of its body. An earlier version of this
+   * function hand-copied `withUser`'s four round trips (`BEGIN`, `set_config`,
+   * the `SELECT`, `COMMIT`) under this same claim, and #188 is what proved the
+   * claim false without anything here noticing: production folded `BEGIN` and
+   * `set_config` into one round trip, three total, and the hand-copy kept
+   * measuring four. Calling the helper is what makes that impossible to repeat.
    */
-  const versionRead = async (user) => {
-    const c = await appPool.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query('SELECT set_config($1, $2, true)', ['app.user_id', String(user)]);
-      await c.query('SELECT data_version FROM users WHERE id = $1', [user]);
-      await c.query('COMMIT');
-    } finally {
-      c.release();
-    }
-  };
+  const versionRead = async (user) =>
+    withUser(user, (c) => c.query('SELECT data_version FROM users WHERE id = $1', [user]));
 
   /**
    * The same read with no transaction around it — what `withoutUser` would
@@ -403,7 +405,7 @@ try {
   console.log('1. The version read, pool idle');
   header();
   await versionRead(probe.id); // warm, so connection setup is not in the sample
-  row('withUser (BEGIN/set_config/SELECT/COMMIT)',
+  row('withUser (BEGIN+set_config/SELECT/COMMIT)',
     await sample(N_DB, () => versionRead(probe.id)));
   await versionReadBare(probe.id);
   row('bare SELECT (no transaction; RLS bypass)',
@@ -642,5 +644,6 @@ try {
   child.kill('SIGTERM');
   srv.close();
   await appPool.end().catch(() => {});
+  await closePool().catch(() => {});
   await admin.end().catch(() => {});
 }

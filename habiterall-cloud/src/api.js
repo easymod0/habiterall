@@ -138,7 +138,7 @@ api.use(route(async (req, res, next) => {
     try {
       // `IS DISTINCT FROM` still does the real work: this writes no row, no
       // WAL and no transaction id when the value already matches. What the
-      // memo saves is the TRANSACTION — a pool checkout and four round trips —
+      // memo saves is the TRANSACTION — a pool checkout and three round trips —
       // on the requests in between.
       await withUser(user, (db) => db.query(
         `UPDATE users SET device_time_zone = $1

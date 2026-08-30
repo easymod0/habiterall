@@ -265,8 +265,13 @@ async function checkout(scope) {
  * injection guard for this interpolation, and it is `Number.isInteger`'s
  * type test that is doing the guarding, not the arithmetic.** A template
  * literal calls `ToString` on `userId`, and a genuine JS number always
- * stringifies to plain digits (plus `-`, `.`, `e`) — nothing a SQL parser
- * reads as a second statement. Swap the type test for something coercive —
+ * stringifies to plain digits (plus `-`, `.`, `e`, `+`) — nothing a SQL parser
+ * reads as a second statement. (An id at or above `1e21` is the case that
+ * needs `+`: `Number.isInteger(1e21)` is `true`, and `` `${1e21}` `` is
+ * `"1e+21"`. That still cannot reach Postgres as anything but a loud failure —
+ * the `::bigint` cast in `app_current_user_id()` rejects exponential notation
+ * outright — and no real `users.id` gets anywhere near `1e21` regardless.)
+ * Swap the type test for something coercive —
  * `Number.isFinite(Number(userId))`, say — and the two checks stop looking
  * at the same conversion: `Number(x)` calls `x.valueOf()`, `${x}` calls
  * `x.toString()`, and an object with a `valueOf` returning `1` and a
