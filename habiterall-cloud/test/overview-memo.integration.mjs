@@ -9,32 +9,84 @@
  * and drives it over HTTP, the way `healthz.integration.mjs` does and for the
  * same reason.
  *
- * The five things only this file can see:
+ * The six things only this file can see:
  *
  *  1. The memo is LIVE on the route — a change made out of band, behind the
- *     route's back, is not visible until the TTL has passed.
- *  2. A client that says it has just WRITTEN is not served the memo. That is
- *     the cross-replica case: `forget` is one process clearing its own map, so
- *     a tap taken by replica A leaves B holding a pre-tap dashboard nothing on
- *     B will clear, and B answers the refetch. An out-of-band `admin` write is
- *     what stands in for a write this process never saw.
- *  3. A WRITE invalidates — the tap-then-refetch case, which is the one that
+ *     route's back, is not visible while the entry it is hiding stays
+ *     reachable.
+ *  2. **A write this process never saw is visible on the NEXT request** (#192).
+ *     The memo is per process and so is `forget`, so a tap taken by replica A
+ *     leaves B holding a pre-tap dashboard that nothing on B will clear, and B
+ *     answers the refetch. `users.data_version` in the key is what makes B's
+ *     entry unreachable instead — with no client cooperation, which is the half
+ *     the deleted freshness header could never reach: a tab that did not itself
+ *     write had nothing to say. The `admin` connection stands in for the other
+ *     replica, because one process cannot host two memos.
+ *  3. The answer still names the device zone in its `Vary` — the control that
+ *     outlived the freshness header, and a rule about the service worker rather
+ *     than about that header. See the comment at the check.
+ *  4. A WRITE invalidates — the tap-then-refetch case, which is the one that
  *     can actually regress and the one that would paint a user's own tap away.
- *  4. A write that never touches the `/api` ROUTER invalidates as well. The
+ *  5. A write that never touches the `/api` ROUTER invalidates as well. The
  *     first version of this invalidation was `api.use(...)` and nothing else,
  *     which is a rule about a router rather than about a write — and the ntfy
  *     button posts above that router while Discord's never reaches Express at
  *     all. Both are the same missing dashboard refresh.
- *  5. The CALLER'S DAY is in the key — two devices on one account either side
+ *  6. The CALLER'S DAY is in the key — two devices on one account either side
  *     of a date boundary send the same URL and must not share an answer.
  *
- * What it does NOT see, stated rather than left to be discovered: whether the
- * invalidation runs on the way OUT or on the way IN. Every check here is
- * sequential, so a `forget` called before the handler passes all of them — the
- * case it gets wrong needs a read still computing when the write commits, and
- * nothing over HTTP can hold `buildOverview` open on demand. That half is
- * `cache.test.js`'s "an answer computed before a write is never stored after
- * it", which can hold the computation open because it injects it.
+ * Three things it does NOT see, stated rather than left to be discovered.
+ *
+ * Whether the invalidation runs on the way OUT or on the way IN: every check
+ * here is sequential, so a `forget` called before the handler passes all of
+ * them — the case it gets wrong needs a read still computing when the write
+ * commits, and nothing over HTTP can hold `buildOverview` open on demand. That
+ * half is `cache.test.js`'s "an answer computed before a write is never stored
+ * after it", which can hold the computation open because it injects it.
+ *
+ * And whether the version is read BEFORE the data rather than after. Same
+ * limit, one level in: the case that separates them needs a write committing
+ * between the two statements of one transaction. `cache.test.js` guards the
+ * ordering on source text and `api.js` argues it at the read; neither is a
+ * behavioural check and both say so.
+ *
+ * And whether a BURST IS JOINED — which this file used to claim, in a check
+ * that could not fail. It fired six simultaneous `/overview`s on their own
+ * sockets and asserted every one was answered 200 and that all six carried the
+ * same bytes. Neither assertion can tell joined from not-joined, and the reason
+ * is structural rather than a matter of timing: nothing writes during the
+ * burst, so six INDEPENDENTLY computed dashboards over the same committed data
+ * are byte-identical anyway, and six concurrent rebuilds are well inside
+ * `PG_POOL_MAX` = 10, so nothing 500s either. Measured rather than argued: with
+ * the join taken out at BOTH levels — the route's `return {pending:
+ * hit.inflight}` branch deleted, and `memo()` made to step over a placeholder
+ * instead of joining it, which takes the `hit?.inflight` return AND the settled
+ * branch below it, or the joiners read the placeholder as an answer of
+ * `undefined` and the mutation fails for the wrong reason — a counter in
+ * `buildOverview` reported six builds where one was claimed, with both
+ * assertions green, three runs in a row.
+ *
+ * The deleted comment stated it had been mutation-tested against exactly that
+ * route, which is why this is a deletion and not a tightening. A timing
+ * assertion is not the rescue — this repo waits on predicates, never on
+ * durations — and a build counter is production code carried for a test to
+ * read.
+ *
+ * Where it IS pinned: `cache.test.js`, deterministically and with no server at
+ * all. `a burst on a cold memo costs one computation, not one each` counts the
+ * computations over an injected one, and `peek answers hit, join or nothing,
+ * and computes none of them` pins the three cases the route chooses between.
+ * The route's own half — that the join branch returns `{pending}` and is
+ * awaited OUTSIDE the `withUser` transaction, so a waiter does not hold a pool
+ * connection for the length of somebody else's rebuild — is the source-text
+ * guard beside them, `a joiner hands its connection back BEFORE waiting, not
+ * after`.
+ *
+ * **It also no longer waits out the TTL, and could not.** The TTL is 60 s now
+ * — it stopped being the correctness mechanism when the version went into the
+ * key — so "visible once it expires" would be a minute of sleep proving what
+ * `cache.test.js` already proves with an injected clock. What replaces it is
+ * the check that matters more: visible once the VERSION moves.
  *
  *   DATABASE_URL=... ADMIN_URL=... node test/overview-memo.integration.mjs
  */
@@ -53,7 +105,7 @@ const SECRET = 'overview-memo-integration-secret';
 const SID = 'overviewmemointegrationsid01';
 
 /** Must match `OVERVIEW_TTL_MS` in src/api.js — asserted below, not assumed. */
-const TTL_MS = 2_000;
+const TTL_MS = 60_000;
 
 const admin = new pg.Client({ connectionString: process.env.ADMIN_URL });
 
@@ -191,17 +243,14 @@ try {
 
   /**
    * @param {string} path
-   * @param {{zone?: string, method?: string, body?: any, fresh?: boolean}} [o]
+   * @param {{zone?: string, method?: string, body?: any}} [o]
    */
-  const call = async (path, { zone = 'UTC', method = 'GET', body, fresh } = {}) => {
+  const call = async (path, { zone = 'UTC', method = 'GET', body } = {}) => {
     const res = await fetch(`${base}/api${path}`, {
       method,
       headers: {
         cookie,
         'X-Habiterall-Timezone': zone,
-        // What `freshnessHeader` (shared/public/offline.js) sends for the few
-        // seconds after this client wrote something.
-        ...(fresh ? { 'X-Habiterall-Fresh': '1' } : {}),
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -228,8 +277,9 @@ try {
   const habitId = created.body.id;
 
   console.log('\n--- the memo is live on the route ---');
-  // Out of band on purpose: `admin` is not the app, so nothing invalidates and
-  // the only thing that can hide this change is the memo itself.
+  // Out of band on purpose: `admin` is not the app, so nothing invalidates, it
+  // bumps no version, and the only thing that can hide this change is the memo
+  // itself.
   const first = await call('/overview');
   ck('control: /overview answers', first.status === 200, `-> ${first.status}`);
 
@@ -237,7 +287,7 @@ try {
     [habitId]);
 
   const cached = await call('/overview');
-  ck('a change made behind the route is not visible inside the TTL',
+  ck('a change that bumped no version is not visible',
     cached.body.habits[0]?.name === 'Memo probe',
     cached.body.habits[0]?.name);
 
@@ -255,79 +305,113 @@ try {
       && first.contentType === cached.contentType,
     `${first.contentType} vs ${cached.contentType}`);
 
-  // A settle rather than a poll: this is waiting to see that something HAS
-  // happened at a known time, and the TTL is the clock.
-  await idle(TTL_MS + 200);
-  const expired = await call('/overview');
-  ck('...and is visible once the TTL has passed',
-    expired.body.habits[0]?.name === 'Renamed behind the route',
-    expired.body.habits[0]?.name);
+  console.log('\n--- a write this process never saw, visible on the NEXT request ---');
+  // **The cross-replica case, and the whole point of #192.** The memo is per
+  // process and so is `forget`: a tap taken by replica A leaves B holding a
+  // pre-tap dashboard that nothing on B will ever clear, and the load balancer
+  // hands B the refetch. `admin` is what stands in for "a write this process
+  // never saw" — it is not the app, so no middleware runs and nothing here is
+  // invalidated, which is exactly B's position after A took the write.
+  //
+  // What A's transaction commits is the row AND the bump, together
+  // (`withUserWrite`). The rename above is already sitting there uncommunicated;
+  // this is the bump that announces it. The very next request must see it, with
+  // no header, no wait and no cooperation from the client at all — which is the
+  // half the freshness header could never close, since a tab that did not write
+  // has nothing to say.
+  //
+  // Mutation: take `${version}` out of the key in `api.js` and this check fails
+  // while every invalidation check below it still passes.
+  await admin.query(`UPDATE users SET data_version = data_version + 1 WHERE id = $1`,
+    [user]);
+
+  const bumped = await call('/overview');
+  ck('a bumped version makes the entry unreachable on the very next request',
+    bumped.body.habits[0]?.name === 'Renamed behind the route',
+    bumped.body.habits[0]?.name);
+
   ck(`control: the TTL under test is ${TTL_MS}ms`,
-    /OVERVIEW_TTL_MS = 2_000/.test(
+    /OVERVIEW_TTL_MS = 60_000/.test(
       await (await import('node:fs/promises'))
         .readFile(new URL('../src/api.js', import.meta.url), 'utf8')));
 
-  console.log('\n--- a client that just wrote is not served the memo ---');
-  // The CROSS-REPLICA case, and this is the only shape that can stand in for
-  // it with one process. The memo is per process and so is `forget`, so a tap
-  // taken by replica A leaves replica B holding a pre-tap dashboard that
-  // nothing on B will clear — and B answers the refetch. `admin` is what
-  // stands in for "a write this process never saw": it is not the app, so no
-  // middleware runs and nothing here is invalidated, which is exactly B's
-  // position after A took the write.
-  //
-  // So: warm the memo, change the account behind the route, and read twice —
-  // once as an ordinary client (still stale, which is the control and is
-  // CORRECT behaviour for the TTL) and once as a client saying it has just
-  // written (must rebuild). Against a route that ignores the header the second
-  // check fails while the first still passes.
-  await admin.query(`UPDATE habits SET name = 'Renamed for the fresh read' WHERE id = $1`,
-    [habitId]);
-
-  const stillCached = await call('/overview');
-  ck('control: an ordinary read is still served the memo',
-    stillCached.body.habits[0]?.name === 'Renamed behind the route',
-    stillCached.body.habits[0]?.name);
-
-  const freshRead = await call('/overview', { fresh: true });
-  ck('a read that says it has just written is rebuilt',
-    freshRead.body.habits[0]?.name === 'Renamed for the fresh read',
-    freshRead.body.habits[0]?.name);
-
-  // The rebuild is STORED, not merely bypassed: whoever pays for it warms the
-  // memo for everything behind it. A `fresh` that read past the map without
-  // writing to it would pass the check above and fail this one.
-  const afterFresh = await call('/overview');
-  ck('...and the rebuilt answer is what the next ordinary read gets',
-    afterFresh.body.habits[0]?.name === 'Renamed for the fresh read',
-    afterFresh.body.habits[0]?.name);
-
-  // ...and the answer does NOT say it varies by the header, which is the half
-  // that looks backwards. `shared/public/sw.js` caches `/api/overview` with
+  // ...and the answer names the device zone in its `Vary`. This is what is left
+  // of the freshness header's own block here (#192 step 3), and it is kept
+  // rather than deleted with the rest for a reason that has nothing to do with
+  // that header: `shared/public/sw.js` stores `/api/overview` with
   // `cache.put(request, …)` and reads it back with `caches.match(request)`,
-  // both of which select on the stored response's `Vary` — and this header is
-  // on exactly one read per write and on no other. Measured in Chrome: the
-  // post-write `put` REPLACES the cold-boot entry, and the survivor matches
-  // only a request carrying the header, so the next offline boot gets
-  // `networkFirst`'s synthetic 503 and the installed PWA opens to no dashboard
-  // at all. A cache cannot honour "rebuild this" anyway, so the `Vary` bought
-  // nothing to trade against that.
-  //
-  // The zone header is the control and is deliberately not a literal `''`
-  // check: a route that stopped calling `res.vary` altogether would pass the
-  // first half of this and is a different bug.
-  ck('the answer does NOT vary by the freshness header',
-    !/x-habiterall-fresh/i.test(freshRead.vary), freshRead.vary || '(no Vary)');
-  ck('control: it still varies by the device zone, so `Vary` is reached at all',
-    /x-habiterall-timezone/i.test(freshRead.vary), freshRead.vary || '(no Vary)');
+  // both of which select on the STORED RESPONSE's `Vary` — so a route the
+  // worker caches may not vary on a header the page sends only SOMETIMES. The
+  // zone is safe there precisely because a device sends one on every request,
+  // and this asserts `res.vary` is reached at all, which is the half a route
+  // that stopped calling it altogether would fail. `shared/public/CLAUDE.md`
+  // states the rule; the freshness header was only the example that found it.
+  ck('control: the answer varies by the device zone, so `res.vary` is reached',
+    /x-habiterall-timezone/i.test(bumped.vary), bumped.vary || '(no Vary)');
 
+  // **What went with the header and has no version-shaped equivalent**, stated
+  // rather than left as a gap somebody rediscovers. The deleted block also
+  // pinned that a rebuild is STORED and not merely read past — `memo.fresh`
+  // deleted the entry and re-entered the memo, and a version of it that read
+  // past the map without writing back would have served every later reader a
+  // recomputation. That was worth its own check because `memo.fresh` was a
+  // SECOND path to an answer, beside the ordinary miss. It is gone: a bumped
+  // version is a new KEY, so a rebuild after one is an ordinary miss on the
+  // ordinary path, and "a miss stores" is already what the first section here
+  // asserts — `a change that bumped no version is not visible` and `a hit and a
+  // miss agree on the body, byte for byte` both fail against a route that does
+  // not store. Mutation-tested: replacing the miss path with a bare
+  // `buildOverview` that never writes back fails those two and the rename check
+  // above, so a fourth check re-expressing the same thing would have been a
+  // duplicate rather than coverage.
+
+  const today = dayIn('UTC');
+
+  console.log("\n--- a second device's write is visible immediately ---");
+  // **The half an ECHO shape could not close, and the reason #192 departs from
+  // what `docs/decisions/caching.md` specified.** With an echoed version the
+  // client sends back the newest version IT has seen; a device that never wrote
+  // has nothing newer to echo, so its own check is satisfied and it is served
+  // the same stale dashboard it would have been served with no version at all.
+  //
+  // So: another device on this account writes — the entry row AND the bump, in
+  // ONE transaction, which is exactly what `withUserWrite` commits — and this
+  // device reads with no freshness header, no wait, and nothing it could have
+  // known. The rename above rides along on the same bump as a second signal.
+  //
+  // `admin` is the other device here for the same reason it is the other
+  // replica above: a write made through this process's own router would be
+  // caught by the invalidation middleware, which is not what is being asked.
+  //
+  // Mutation: take `${version}` out of the key and this fails while everything
+  // below it still passes.
   await admin.query(`UPDATE habits SET name = 'Memo probe' WHERE id = $1`, [habitId]);
-  await idle(TTL_MS + 200);
+  await admin.query('BEGIN');
+  await admin.query(
+    `INSERT INTO entries (habit_id, user_id, date, value, status)
+     VALUES ($1, $2, $3, 2, '')
+     ON CONFLICT (habit_id, date) DO UPDATE SET value = EXCLUDED.value`,
+    [habitId, user, today]);
+  await admin.query(`UPDATE users SET data_version = data_version + 1 WHERE id = $1`, [user]);
+  await admin.query('COMMIT');
+
+  const otherDevice = await call('/overview');
+  ck("a second device's tap is on this device's very next /overview",
+    otherDevice.body.habits[0]?.entries?.[today] === 2,
+    JSON.stringify(otherDevice.body.habits[0]?.entries));
+  ck('...and so is everything else that write announced',
+    otherDevice.body.habits[0]?.name === 'Memo probe',
+    otherDevice.body.habits[0]?.name);
 
   console.log('\n--- a write invalidates: tap, then refetch ---');
   // The regression that matters. Warm the memo, tap a day through the API, and
   // refetch with no wait at all — which is exactly what the client does.
-  const today = dayIn('UTC');
+  //
+  // Through the API, so the day is blank again and the invalidation middleware
+  // has cleared what the section above warmed.
+  const cleared = await call(`/habits/${habitId}/entries/${today}`, { method: 'DELETE' });
+  ck('control: the second device\'s entry was cleared', cleared.status < 300,
+    `-> ${cleared.status}`);
   await call('/overview');
   const tap = await call(`/habits/${habitId}/entries/${today}`,
     { method: 'PUT', body: { value: 2 } });

@@ -154,22 +154,18 @@ with its reason, paired with a positive assertion that `category_id` itself
 reaches the wire from the habit's own value through BOTH bridges. An exemption
 with no replacement assertion is a hole; that pairing is the decision.
 
-**`Freshness` is not a sixth mirror either, and it is the one that most looks
-like one.** `Api.kt` sends `X-Habiterall-Fresh: 1` on reads for three seconds
-after any write that got an answer — `freshnessHeader` in
-`shared/public/offline.js` written a second time in Kotlin. What makes it the
-same kind of thing as `DEVICE_ZONE_HEADER` rather than a mirror: it decides
-nothing about what a tap MEANS, nothing reaches storage through it, a phone
-with no network never gets there, and the server treats it as a hint it is free
-to ignore. Being wrong about it costs one recomputation.
-
-The clock is `SystemClock.elapsedRealtime()`, which keeps counting through deep
-sleep where `System.nanoTime()` stops. Two tests, not one: `FreshnessTest` for
-the window's arithmetic and `AppSettingsDefaultsTest` for the spelling and the
-interceptor wiring, because either passes with the other deleted — the whole
-decision lives in `Freshness` rather than in the interceptor for exactly that
-reason. `habiterall-cloud/CLAUDE.md` has the server's half and
-`docs/decisions/caching.md` has why the phone has it at all.
+**There is no `Freshness` here any more, and it is not a thing to re-add.**
+`Api.kt` used to send `X-Habiterall-Fresh: 1` on reads for three seconds after
+any write that got an answer, so that cloud's per-process `/overview` memo would
+rebuild rather than serve a replica's pre-tap dashboard. #192 replaced the whole
+mechanism with `users.data_version` in the memo key, which makes an entry built
+before a write unreachable on EVERY replica with no client cooperation at all —
+strictly more than the header bought, and it closes the half the header never
+could: a phone that did not itself write had nothing to say, so answering a
+reminder on the laptop still left this client a stale list. The interceptor, the
+constant, `FreshnessTest` and its half of `AppSettingsDefaultsTest` are all gone
+with it. `habiterall-cloud/CLAUDE.md` has the server's half and
+`docs/decisions/caching.md` has the argument.
 
 **`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two

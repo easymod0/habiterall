@@ -433,6 +433,21 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/overview-memo.integration.mjs
 
+      # A version that fails to bump makes a cache serve stale data forever, and
+      # every test that reads THROUGH the cache still passes — so this is pinned
+      # at the write paths instead: every mutating route, the ntfy answer, the
+      # Discord button, and a control that four reads move it not at all. Only a
+      # booted server can see that, because what it is asserting is that a route
+      # reached `withUserWrite` rather than bare `withUser`, which is one
+      # identifier's difference at the call site and no difference at all to any
+      # answer the route sends.
+      - name: Every write moves the account's version, and no read does
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/data-version.integration.mjs
+
   roundtrip:
     name: Backup round-trip (personal)
     runs-on: ubuntu-latest

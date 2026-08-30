@@ -21,7 +21,7 @@
  */
 
 import { forgetAccount } from './cache.js';
-import { withNotifierScope, withUser } from './db/pool.js';
+import { withNotifierScope, withUser, withUserWrite } from './db/pool.js';
 import {
   answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
   serverChannels, resolveTimeZone,
@@ -339,6 +339,12 @@ export function interactionAdapter() {
      * middleware calls — without it, pressing Done on a reminder while the PWA
      * is open in a tab served that tab a dashboard computed before the press,
      * with the day still blank, for the length of the TTL.
+     *
+     * `withUserWrite` for the same reason and one step further: `forgetAccount`
+     * clears THIS process's map, and a press taken here is answered by whatever
+     * replica the refetch lands on. The version bump is what that other replica
+     * can see, and it is a bump this router-shaped rule would have missed
+     * exactly as the invalidation did.
      */
     async record(account, { habitId, date, action, value }) {
       // `finally`, and OUTSIDE `withUser`, and both halves are the same rule
@@ -360,7 +366,7 @@ export function interactionAdapter() {
       // costs a user their press. Unconditional, exactly as the middleware is
       // unconditional on status.
       try {
-        return await withUser(account.id, async (db) => {
+        return await withUserWrite(account.id, async (db) => {
           const { rows } = await db.query(`SELECT * FROM habits WHERE id = $1`, [habitId]);
           const habit = rows[0];
           if (!habit) return { ok: false, error: 'That habit no longer exists.' };

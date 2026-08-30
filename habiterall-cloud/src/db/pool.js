@@ -5,6 +5,9 @@
  * `app.user_id` on the connection for the life of a transaction. The
  * Row-Level Security policies read that setting, so a query that forgets its
  * WHERE clause returns nothing instead of another user's rows.
+ *
+ * A query that WRITES goes through `withUserWrite` instead, which is `withUser`
+ * plus the account's `data_version` bump in the same transaction.
  */
 
 import pg from 'pg';
@@ -194,6 +197,58 @@ function noteTimeout(err, context) {
 }
 
 /**
+ * Take a connection, and NAME the failure when one cannot be had.
+ *
+ * **A checkout failure is the one pool event with nothing to recognise it by.**
+ * All three helpers below call `pool.connect()` BEFORE their `try`, deliberately
+ * — there is no client to roll back or release yet — so the rejection escapes
+ * past `noteTimeout` entirely. And `noteTimeout` could not have named it in any
+ * case: it matches SQLSTATEs, and this error never reached Postgres to be given
+ * one. What an operator saw was a 500 with nothing in the log but the request.
+ *
+ * That was survivable while it was rare. Since #192 it is not: `/overview` used
+ * to answer a memo hit without touching Postgres at all, and now every request
+ * reads `users.data_version` first, so a saturated pool produces this failure on
+ * the busiest route in the app rather than only on the expensive one.
+ * `docs/decisions/caching.md` asks for exactly that to be countable before
+ * anyone decides whether the version read wants a pool of its own — a decision
+ * nothing could inform while the event had no name.
+ *
+ * **The gauge is what tells the two causes apart, which is why it is logged
+ * rather than a message match.** `pg` signals its own `connectionTimeoutMillis`
+ * with a plain `Error` carrying no SQLSTATE and no code, so the alternative is
+ * pattern-matching a library's prose — and the numbers are the better answer
+ * anyway, since they say which knob moved rather than which branch fired.
+ *
+ * **`pg_total` against `pg_max` is the discriminator, and `pg_waiting` is not
+ * part of it.** A pool too small reads `pg_total` at `pg_max`; a database that
+ * is not there reads `pg_total` 0. The obvious third clause — "and somebody was
+ * queued" — is the one that must NOT be written, because it is false in exactly
+ * the case it describes: `pg` removes a request from its `_pendingQueue` inside
+ * the `connectionTimeoutMillis` callback, BEFORE handing the error back, so the
+ * waiter that timed out never counts itself. A lone waiter behind a full pool
+ * therefore logs `pg_waiting: 0` at the moment it IS the saturation. It reads
+ * non-zero only when several waiters are timing out together, which makes it a
+ * corroborator of scale and never the thing that decides. `api.integration.mjs`
+ * drives a real pool held at `max` and pins both halves.
+ *
+ * Logged and rethrown UNTOUCHED, the same rule `noteTimeout` states: a 503 here
+ * would tell the offline outbox this write is retryable, and a pool that cannot
+ * hand out a connection will not hand one out for the replay either.
+ *
+ * @param {string} scope which helper wanted it, so the log says what was refused
+ * @returns {Promise<pg.PoolClient>}
+ */
+async function checkout(scope) {
+  try {
+    return await pool.connect();
+  } catch (err) {
+    log.error('pg.checkout_failed', { scope, ...poolGauge() }, err);
+    throw err;
+  }
+}
+
+/**
  * Run `fn` inside a transaction scoped to one user.
  *
  * `set_config(..., true)` is transaction-local, so the setting cannot leak to
@@ -209,7 +264,7 @@ export async function withUser(userId, fn) {
     throw new Error('withUser requires a valid user id');
   }
 
-  const client = await pool.connect();
+  const client = await checkout('withUser');
   try {
     await client.query('BEGIN');
     await client.query('SELECT set_config($1, $2, true)', ['app.user_id', String(userId)]);
@@ -223,6 +278,48 @@ export async function withUser(userId, fn) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * `withUser`, plus the account's `data_version` bump, in the SAME transaction.
+ *
+ * Every write path opts into this by name. It is deliberately NOT a line inside
+ * `withUser`, and the issue that asked for it got this wrong in a way worth
+ * writing down: "every write already runs inside `withUser`, so there is
+ * exactly one place to put it" is true of the writes and false of the function
+ * — **`withUser` wraps the READS too**. A bump there would fire on every
+ * `/overview`, every `/stats` and every `GET /habits`, which turns each of them
+ * into a write, takes a row lock on `users` per read, and leaves a counter that
+ * moves constantly while meaning nothing. The version's whole value is that it
+ * changes when the DATA changes.
+ *
+ * So this is the same discipline as `forgetAccount`: a named thing a write path
+ * calls, rather than a router or a wrapper it happens to be inside of.
+ *
+ * **The bump shares the write's COMMIT, and that is the correctness property.**
+ * Outside the transaction it could be observed without the write it announces
+ * (a reader tags a rebuild with the new version and fills it from pre-write
+ * data) or the write could be observed without it (a reader is served a stale
+ * entry that is still reachable). Inside, no reader can see one without the
+ * other.
+ *
+ * Issued AFTER `fn` rather than before, which is a lock-hold argument and not a
+ * correctness one: the UPDATE takes a row lock on `users` that every concurrent
+ * write by the same account then queues behind, so it is held for the tail of
+ * the transaction rather than for all of it. Either order commits atomically.
+ *
+ * @param {number} userId
+ * @param {(client: pg.PoolClient) => Promise<T>} fn
+ * @returns {Promise<T>}
+ * @template T
+ */
+export async function withUserWrite(userId, fn) {
+  return withUser(userId, async (client) => {
+    const result = await fn(client);
+    await client.query(
+      'UPDATE users SET data_version = data_version + 1 WHERE id = $1', [userId]);
+    return result;
+  });
 }
 
 /**
@@ -245,7 +342,7 @@ export async function withUser(userId, fn) {
  * @template T
  */
 export async function withNotifierScope(fn) {
-  const client = await pool.connect();
+  const client = await checkout('withNotifierScope');
   try {
     await client.query('BEGIN READ ONLY');
     await client.query('SELECT set_config($1, $2, true)', ['app.scope', 'notifier']);
@@ -269,7 +366,7 @@ export async function withNotifierScope(fn) {
  * Keep the surface of this function small — it bypasses the RLS boundary.
  */
 export async function withoutUser(fn) {
-  const client = await pool.connect();
+  const client = await checkout('withoutUser');
   try {
     return await fn(client);
   } catch (err) {

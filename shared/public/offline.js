@@ -119,84 +119,6 @@ export function deviceClockHeader() {
   }
 }
 
-/* ---------- reading your own writes ---------- */
-
-/**
- * How long after a write this client asks a read to skip a server-side cache.
- *
- * Cloud memoises `/overview` per PROCESS and clears that memo when a write
- * arrives — which is one process's memo, cleared by the process that took the
- * write. On two replicas a tap balanced to A and the refetch behind it balanced
- * to B is served B's own pre-tap answer, and the invalidation A ran cannot
- * reach it. This header is what makes the refetch say so, and it costs a
- * recomputation rather than a round trip: no version to fetch, no shared cache
- * to coordinate, nothing for the server to remember.
- *
- * Longer than cloud's `OVERVIEW_TTL_MS` (2s) ON PURPOSE, and that is the whole
- * argument for the number. Any entry a replica holds that predates this write
- * has expired by the time the window closes, so "bypass while the window is
- * open" and "no stale entry can exist after it" meet with a second to spare.
- * A shorter window than the TTL would leave a gap that reads as the original
- * bug; a much longer one would only cost this client hits it could have had.
- *
- * A DURATION, so it is measured on `performance.now()` rather than the wall
- * clock: a device that resyncs its clock mid-window would otherwise either
- * bypass the cache for hours or close the window early, and the second of
- * those is the one that loses a tap.
- */
-const FRESH_AFTER_WRITE_MS = 3_000;
-
-/**
- * The header itself, spelled once here rather than inline at the return below.
- *
- * Three copies exist — this one, `FRESH_HEADER` in `habiterall-cloud/src/api.js`
- * and the Kotlin one in `Api.kt` — because the browser cannot import the
- * server's module and the phone cannot import either, exactly as
- * `DEVICE_ZONE_HEADER` already is. A NAMED constant on all three sides is what
- * lets both drift guards (`habiterall-cloud/test/cache.test.js` and
- * `AppSettingsDefaultsTest`) read a declaration rather than pattern-match the
- * place it happens to be used.
- */
-const FRESH_HEADER = 'X-Habiterall-Fresh';
-
-/** Monotonic where there is one; the wall clock is the fallback, not the rule. */
-const monotonic = () =>
-  (typeof performance !== 'undefined' && typeof performance.now === 'function')
-    ? performance.now()
-    : Date.now();
-
-let lastWriteAt = -Infinity;
-
-/**
- * Note that this client has written something the server may not have shown it.
- *
- * Called for every write that gets an ANSWER, whatever the status, for the same
- * reason cloud's invalidation middleware is unconditional on status: a write
- * that failed halfway through still changed what it may have changed. Called
- * from both write paths — `api()` and `flush()`'s replay below — because a
- * replayed check-off is a write the dashboard has to show as much as a live one
- * is, and the outbox drains straight into a refresh.
- */
-export function noteWrite() {
-  lastWriteAt = monotonic();
-}
-
-/**
- * The "do not serve me a cached answer" header, while this client has a write
- * the server may not have caught up with.
- *
- * A HINT and not a rule: a server is free to ignore it, and the worst a client
- * that sent it on every request could do to itself is get the behaviour every
- * client had before the memo existed, under the same read limiter that bounded
- * it then. That is why it needs no signature and is not a mirror of anything —
- * nothing offline depends on it, and a wrong answer here costs a recomputation.
- */
-export function freshnessHeader() {
-  return monotonic() - lastWriteAt < FRESH_AFTER_WRITE_MS
-    ? { [FRESH_HEADER]: '1' }
-    : {};
-}
-
 /* ---------- replay ---------- */
 
 let flushing = false;
@@ -248,14 +170,6 @@ export async function flush() {
       } catch {
         break; // still offline; keep this and everything after it
       }
-
-      // An answer arrived, so this account may have changed on the server —
-      // noted before the status is looked at, exactly as `api()` does it and
-      // for the same reason cloud's invalidation is unconditional on status.
-      // The drain is usually followed straight away by a refresh, and that
-      // refresh is the one that must not be served a replica's pre-replay
-      // dashboard.
-      noteWrite();
 
       if (res.ok) {
         await remove(item.seq);

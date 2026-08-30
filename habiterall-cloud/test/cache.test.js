@@ -485,7 +485,8 @@ test('forgetAccount forgets one account, not every account it prefixes', async (
 });
 
 test('the notifier forgets AFTER its transaction commits, not inside it', () => {
-  // `withUser` COMMITs after its callback returns (`db/pool.js`), so a
+  // `withUserWrite` COMMITs after its callback returns (`db/pool.js`, through
+  // the `withUser` it wraps — the version bump goes in ahead of it), so a
   // `forgetAccount` inside the callback forgets before the write is visible to
   // anything else — and leaves exactly the window the invalidation exists to
   // close: a concurrent /overview clears the memo, opens its own transaction,
@@ -506,7 +507,7 @@ test('the notifier forgets AFTER its transaction commits, not inside it', () => 
   assert.match(record, /\}\s*finally\s*\{\s*forgetAccount\(account\.id\);\s*\}/,
     'forgetAccount must run in a finally OUTSIDE withUser, so it follows the COMMIT');
 
-  const inside = region(record, 'withUser(account.id', '} finally {');
+  const inside = region(record, 'withUserWrite(account.id', '} finally {');
   assert.ok(!inside.includes('forgetAccount'),
     'forgetAccount inside the withUser callback forgets before the write commits');
 });
@@ -527,9 +528,10 @@ test('the /overview memo does not inherit a bound sized for 100-byte entries', (
   const text = src('api.js');
 
   // The literals, so this fails if either number is widened back toward
-  // MAX_CACHED. 100 x the measured 499 KB is ~50 MB; 500 was ~250 MB, and
-  // neither compose file sets a memory limit for that to be survivable in.
-  assert.match(text, /const MAX_OVERVIEW_CACHED = 100;/,
+  // MAX_CACHED. Why 3,300 rather than the 100 that was here is the subject of
+  // the bounds test further down; what this one asks is only that the memo has
+  // a number of its OWN.
+  assert.match(text, /const MAX_OVERVIEW_CACHED = 3_300;/,
     'MAX_OVERVIEW_CACHED must be its own number, stated here');
   assert.match(text, /const MAX_OVERVIEW_PER_ACCOUNT = 8;/,
     'one account must not be able to spend the whole shared bound');
@@ -544,109 +546,6 @@ test('the /overview memo does not inherit a bound sized for 100-byte entries', (
     'without a per-account cap, one account paging history evicts every other account');
   assert.ok(call.includes('perAccount: true'),
     'the overview memo must be reachable by forgetAccount, or a button press cannot clear it');
-});
-
-/* ---------- reading your own writes, on more than one replica ---------- */
-
-test('a fresh read is not served the memo, and its answer is stored', async () => {
-  let calls = 0;
-  const memo = createMemo(async () => `v${++calls}`, { ttlMs: 2_000 });
-
-  assert.equal(await memo('5:w'), 'v1');
-  assert.equal(await memo('5:w'), 'v1', 'control: an ordinary read inside the TTL is a hit');
-
-  // The cross-replica case in miniature. This process never saw the write, so
-  // `forget` never ran here and the entry above is still fresh by the clock —
-  // the CLIENT is the only party that knows, and this is it saying so.
-  assert.equal(await memo.fresh('5:w'), 'v2');
-  assert.equal(calls, 2, 'the fresh read rebuilt rather than being served the entry');
-
-  // ...and STORED, not merely bypassed: the refetch that paid for the rebuild
-  // warms the memo for everything behind it. A `fresh` that read past the map
-  // without writing to it would pass every assertion above this one.
-  assert.equal(await memo('5:w'), 'v2', 'the next ordinary reader gets the rebuilt answer');
-  assert.equal(calls, 2, 'and did not recompute to get it');
-});
-
-test('a fresh read does not join a computation that may predate the write', async () => {
-  let calls = 0;
-  const held = gate();
-  const memo = createMemo(async () => { calls++; return held.opened; }, { ttlMs: 2_000 });
-
-  // Started before this caller's write, and on a replica that never saw that
-  // write there is nothing here that can tell — so joining it would hand back
-  // exactly the pre-write answer being refused. `inflight` collapsing is the
-  // right thing to lose here, and losing it is a choice rather than an
-  // oversight.
-  const early = memo('6:w');
-  const fresh = memo.fresh('6:w');
-  held.release('computed before the write');
-
-  assert.equal(await early, 'computed before the write',
-    'the caller that started first still gets the answer it started for');
-  assert.equal(await fresh, 'computed before the write', 'and the fresh caller is answered too');
-
-  // After the awaits, not before: `compute` is reached through
-  // `Promise.resolve().then(...)`, so nothing has been called yet at the point
-  // `memo.fresh` returns and a count taken there is 0 whatever the code does.
-  assert.equal(calls, 2, 'the fresh read ran its own computation');
-});
-
-test('the client and the route spell the freshness header the same', () => {
-  // `shared/public/offline.js` is browser code with no build step and does not
-  // import this module, so the string is written twice on purpose — the same
-  // shape `deviceClockHeader` next to it already has for `DEVICE_ZONE_HEADER`.
-  // This is what stops the second copy drifting, and it is the whole reason
-  // spelling it as a literal there is safe.
-  const header = src('api.js').match(/const FRESH_HEADER = '([^']+)';/)?.[1];
-  assert.ok(header, 'control: FRESH_HEADER is declared in api.js');
-
-  const client = readFileSync(
-    fileURLToPath(new URL('../../shared/public/offline.js', import.meta.url)), 'utf8');
-  assert.match(
-    client, new RegExp(`FRESH_HEADER = '${header}'`),
-    `shared/public/offline.js must declare ${header}; a renamed header is a silently dead hint`
-  );
-  // The declaration alone is not the sending — a constant nothing reads is the
-  // same silence with an extra line in it.
-  assert.match(client, /\[FRESH_HEADER\]: '1'/,
-    'and freshnessHeader must actually send it');
-
-  // The PHONE is the third copy and the one that cannot import either of the
-  // other two. It is guarded on its own side (`AppSettingsDefaultsTest`, which
-  // reads both files), because Gradle is where a Kotlin file can be compiled;
-  // named here so this test is not read as covering all three.
-});
-
-test('the /overview route honours the freshness header', () => {
-  // Pinning the DECISION is not pinning the WIRING. Everything above proves
-  // `memo.fresh` refuses a stale entry; none of it proves the route ever calls
-  // it, and "the route reads no header at all" is exactly what this looked
-  // like before. Source text, blind in the documented way, narrowed to the
-  // route so a comment elsewhere cannot satisfy it.
-  const route = code(region(src('api.js'), "api.get('/overview'", '}));'));
-  assert.match(route, /req\.get\(FRESH_HEADER\)/, 'the route must read the header');
-  assert.match(route, /overviewMemo\.fresh\(/, 'and reach the bypass with it');
-
-  // ...and must NOT say so to caches, which is the counter-intuitive half and
-  // the reason it is pinned here rather than left to a comment. `sw.js` stores
-  // `/api/overview` with `cache.put(request, …)` and reads it back with
-  // `caches.match(request)`, both of which select on the stored response's
-  // `Vary`. This header rides on exactly one read — the refetch in the three
-  // seconds after a write — so varying on it makes that read a different key
-  // from every other. Measured in Chrome: the post-write `put` REPLACES the
-  // cold-boot entry and the survivor matches only a request carrying the
-  // header, so an offline boot gets `networkFirst`'s synthetic 503 and the
-  // installed PWA opens to no dashboard at all.
-  //
-  // Nothing is lost: a `Vary` picks between stored representations and this
-  // header is a demand to REBUILD, which a cache holding an entry cannot
-  // satisfy. `overview-memo.integration.mjs` asserts the same thing about the
-  // response's actual header, which is what makes this pair mutation-checkable
-  // from both ends.
-  assert.doesNotMatch(route, /res\.vary\(FRESH_HEADER\)/,
-    'the route must not Vary on the freshness header — it splits the service ' +
-    "worker's data cache and costs the offline dashboard entirely");
 });
 
 /* ---------- the bound in the unit that actually matters ---------- */
@@ -742,6 +641,313 @@ test('the /overview memo bounds itself in bytes and reports what it holds', () =
     fileURLToPath(new URL('../src/server.js', import.meta.url)), 'utf8');
   assert.match(server, /extra: \(\) => \(\{[^}]*overviewMemoGauge\(\)/,
     'the gauge must be on the runtime line beside pg_pool_max');
+});
+
+/* ---------- the version in the key, and the window it is served in spite of ---------- */
+
+test('the account prefix survives the version being spliced into the key', async () => {
+  // #192 puts `data_version` SECOND, between the account id and the window, and
+  // both of the things that match on a prefix take everything up to the FIRST
+  // separator (`accountPrefix`, cache.js). So this is asking that the change
+  // the route made is invisible to them — not by reading the code, which is
+  // where "the prefix is unchanged" would be an assumption, but by forgetting
+  // one account and watching the other keep its answer.
+  const memo = createMemo(async (arg) => arg, { ttlMs: 2_000, perAccount: true });
+  await memo('1:7:2026-08-01:2026-08-30:2026-08-30:false', 'one at v7');
+  await memo('12:7:2026-08-01:2026-08-30:2026-08-30:false', 'twelve at v7');
+
+  forgetAccount(1);
+
+  assert.equal(await memo('1:7:2026-08-01:2026-08-30:2026-08-30:false', 'rebuilt'), 'rebuilt');
+  assert.equal(await memo('12:7:2026-08-01:2026-08-30:2026-08-30:false', 'ignored'), 'twelve at v7',
+    'forgetting account 1 must not forget account 12, version in the key or not');
+});
+
+test("an account's superseded versions are charged to its own share, not to another's", async () => {
+  // The other prefix reader. Every write bumps the version, so one account's
+  // keys now differ in the middle as well as at the end — and the entries at
+  // versions nobody will ask for again have to be evicted from ITS allowance.
+  const time = clock();
+  const memo = createMemo(async (arg) => arg,
+    { ttlMs: 60_000, max: 50, maxPerAccount: 2, perAccount: true, now: time.now });
+
+  await memo('4:1:w', 'v1');
+  await memo('4:2:w', 'v2');
+  await memo('9:1:w', 'the neighbour');
+  await memo('4:3:w', 'v3');          // account 4 is now over its share
+
+  assert.equal(await memo('4:1:w', 'recomputed'), 'recomputed',
+    'the account over its cap gives up its own oldest version');
+  assert.equal(await memo('9:1:w', 'ignored'), 'the neighbour',
+    'and the neighbour keeps its answer');
+});
+
+test('peek answers hit, join or nothing, and computes none of them', async () => {
+  // The route needs the three cases APART, because it is holding a pool
+  // connection when it asks and only one of the three wants it. `memo()` itself
+  // cannot answer that: it acts on the case as well as deciding it.
+  const time = clock();
+  const held = gate();
+  let calls = 0;
+  const memo = createMemo(async (arg) => {
+    calls++;
+    return arg === 'slow' ? held.opened : arg;
+  }, { ttlMs: 2_000, now: time.now });
+
+  assert.equal(memo.peek('1:9:w'), undefined, 'nothing here yet');
+  assert.equal(calls, 0, 'and a peek does not start a computation');
+
+  const inflight = memo('1:9:slow', 'slow');
+  assert.deepEqual(Object.keys(memo.peek('1:9:slow')), ['inflight'],
+    'a running computation is offered to be joined, not repeated');
+  held.release('answer');
+  await inflight;
+
+  assert.deepEqual(memo.peek('1:9:slow'), { value: 'answer' }, 'and settles into a value');
+  assert.equal(calls, 1, 'still one computation for all of that');
+
+  // The TTL is the memo's own, so a peek can never hand back something `memo()`
+  // would have refused — which is the only way the split could be wrong.
+  time.advance(2_001);
+  assert.equal(memo.peek('1:9:slow'), undefined, 'an expired entry is not offered');
+});
+
+/* ---------- the route's half of all of that ---------- */
+
+test('the /overview key carries the version, and the version is read BEFORE the data', () => {
+  // Source text, blind in the documented way — and the ORDERING is the half no
+  // behavioural test in this repo can reach, because the case that separates
+  // the two needs a write committing between the version read and the queries
+  // after it, which nothing over HTTP can arrange. Stated here and argued in
+  // full at the read itself.
+  //
+  // Which way it is wrong is why it is worth a guard at all: version-first tags
+  // an entry OLDER than its data, and that entry is simply unreachable and gets
+  // rebuilt. Version-last tags one NEWER than its data, every later reader asks
+  // for exactly that key, and all of them are served the stale payload for the
+  // whole 60 s TTL.
+  const route = code(region(src('api.js'), "api.get('/overview'", '}));'));
+
+  assert.match(route, /keyAt = \(version\) => `\$\{user\}:\$\{version\}:\$\{windowKey\}`/,
+    'the version must be in the key, and second — first is the account prefix');
+
+  const read = route.indexOf('SELECT data_version');
+  const build = route.indexOf('overviewMemo(key');
+  assert.notEqual(read, -1, 'control: the route must read the version at all');
+  assert.notEqual(build, -1, 'control: the route must reach the memo at all');
+  assert.ok(read < build, 'the version is read before the rebuild, never after');
+});
+
+test('a miss pays ONE checkout on the main pool, not two', () => {
+  // **What this protects is the CHECKOUT COUNT, not the transaction count**, and
+  // the distinction is worth the longer name. A miss is already taking a
+  // connection to run five queries, so the version read is free there — and a
+  // second `withUser` beside it would make every miss queue twice for the same
+  // ten connections to save nothing. `PG_POOL_MAX` is 10; doubling what a miss
+  // spends of it halves how many can be in flight.
+  //
+  // It used to be spelled `the version read and the rebuild share ONE
+  // transaction`, which is how it is satisfied TODAY and not what is at stake.
+  // #280 proposes giving the version read a pool of its own — a tiny one
+  // nothing else draws from, so a herd of misses cannot starve the hit path —
+  // and under that shape the two are deliberately separate transactions while
+  // the property here is untouched: still one checkout of the MAIN pool per
+  // miss. A guard that pins the current spelling of a decision is one the next
+  // change has to argue with rather than satisfy.
+  //
+  // The version read's own ORDERING is not here. `the /overview key carries the
+  // version, and the version is read BEFORE the data` is that, and it is the
+  // one guard in this block #280 does still have to move: it anchors on the
+  // literal `SELECT data_version`, which under a second pool lives in
+  // `db/pool.js` rather than in the route.
+  const text = src('api.js');
+  const route = code(region(text, "api.get('/overview'", '}));'));
+
+  // `withUserWrite(` does not match this — the paren is what separates them,
+  // the same distinction the mutating-route guard above relies on. And this is
+  // a COUNT rather than a presence check, because a second one added beside
+  // the first is exactly the regression and every presence check passes on it.
+  const opens = route.match(/withUser\(/g) ?? [];
+  assert.equal(opens.length, 1,
+    `the /overview route opens ${opens.length} transactions on the main pool; `
+    + 'one request must cost it one checkout, however the version is read');
+
+  // ...and the rebuild runs inside that one, on the connection already in hand.
+  assert.match(route, /overviewMemo\(key, \{ db, \.\.\.arg \}\)/,
+    'the rebuild must run on the connection the route already holds');
+
+  const build = code(region(text, 'async function buildOverview(', '\n}\n'));
+  assert.ok(!build.includes('withUser('),
+    'buildOverview must use the transaction it is handed, not open a second one');
+});
+
+test('a joiner hands its connection back BEFORE waiting, not after', () => {
+  // **This reads SOURCE TEXT, so it cannot see a renamed binding or an
+  // inverted comparison** — the blindness every guard in this block shares, and
+  // the reason the root CLAUDE.md asks for a behavioural test beside one. Here
+  // the behavioural halves are next door and injected: `peek answers hit, join
+  // or nothing, and computes none of them` pins the three cases apart, and `a
+  // burst on a cold memo costs one computation, not one each` pins that a join
+  // is a join. What neither can see is the ROUTE choosing between them, which
+  // is the whole reason `memo.peek` exists at all — a caller that had nothing
+  // else to spend would just call `memo()`.
+  //
+  // And nothing over HTTP can see it either, which is why this guard is here
+  // rather than in `overview-memo.integration.mjs`. That suite had a
+  // six-request burst check asserting every caller was answered 200 with the
+  // same bytes; both are true of six INDEPENDENT rebuilds over data nothing is
+  // writing to, and it passed with the join disabled at the route AND in
+  // `memo()`. It is deleted, and its header records why.
+  //
+  // What is at stake is the pool rather than a recomputation. A waiter that
+  // blocks inside `withUser` holds one of `PG_POOL_MAX` = 10 connections for
+  // the length of SOMEBODY ELSE's rebuild — four tabs foregrounding at once is
+  // four connections spent waiting to be handed one answer, which is the burst
+  // this memo exists to collapse spending the pool it exists to protect.
+  const route = code(region(src('api.js'), "api.get('/overview'", '}));'));
+  const tx = region(route, 'await withUser(user,', '  });');
+
+  assert.match(tx, /overviewMemo\.peek\(/,
+    'the three cases must be told apart while the connection is still in hand');
+  assert.match(tx, /return \{ pending:/,
+    'a joiner hands the promise back out rather than settling it in here');
+  assert.ok(!/await\s+[\w.]*inflight/.test(tx),
+    'the joined computation must never be awaited inside the transaction: '
+    + 'that is one held connection per waiter, for the length of one rebuild');
+
+  // ...and it IS awaited once out there. A `pending` nobody waits on is an
+  // empty body, so the negative above needs this to be worth anything.
+  const txEnd = route.indexOf(tx) + tx.length;
+  const joined = route.search(/await\s+[\w.]*\.pending/);
+  assert.notEqual(joined, -1, 'control: something must await the joined computation');
+  assert.ok(joined > txEnd,
+    'and it must happen after the transaction has closed, holding nothing');
+});
+
+test('no mutating route in api.js writes through bare withUser', () => {
+  // The bump lives in `withUserWrite` (`db/pool.js`), so a route that writes
+  // through bare `withUser` changes the account's data and announces nothing:
+  // every `/overview` entry built before it stays reachable on every replica
+  // for the whole 60 s TTL, and the only thing that catches it is
+  // `forgetAccount` clearing the one process the write happened to land on.
+  // That cost used to be ≤ 2 s of cross-replica staleness and is now ≤ 60 s.
+  //
+  // **This reads SOURCE TEXT, so it cannot see a renamed binding, a wrapper
+  // that forwards to bare `withUser`, or a write issued through the `pool`
+  // directly.** The behavioural suite underneath it is
+  // `test/data-version.integration.mjs` (`npm run test:dataversion -w
+  // habiterall-cloud`), which reads `data_version` out of band with the ADMIN
+  // connection before and after a request and requires it to have strictly
+  // increased. What that suite cannot do is notice a route it was never told
+  // about — it enumerates the write paths by hand, one case each — which is
+  // exactly what this covers and why the two are worth having together.
+  //
+  // **The rule is general; its BLINDNESS is what has to be listed.** Two
+  // deliberate things sit outside the enumeration below, and neither is
+  // weakened away:
+  //
+  //  - `api.use(...)` middleware is not enumerated at all. The device-zone
+  //    middleware writes `users.device_time_zone` through bare `withUser` on
+  //    GETs and must NOT bump — bumping on a read would invalidate an
+  //    account's dashboards on its own reads. So a rule that reached the
+  //    middleware would have to exempt it by name, and a `api.use` write path
+  //    added later is not seen here. `docs/decisions/caching.md`'s "One write
+  //    deliberately does not bump" is where that exception is argued.
+  //  - `getHabit(req)` reads through bare `withUser` and IS called from
+  //    mutating handlers. It is a top-level helper, so it falls outside every
+  //    handler region below and the negative assertion never meets it. That is
+  //    why the negative half is written against the handler's own text rather
+  //    than against everything it transitively calls.
+  //
+  // The negative half is therefore stricter than the correctness property: a
+  // read-only `withUser` inline in a mutating handler would be perfectly
+  // sound and would still fail here. No handler does one today, and making
+  // the first one a reviewed act is the point — the alternative is a positive
+  // assertion alone, which passes on a handler that writes twice and bumps
+  // once.
+  const text = src('api.js');
+
+  const handlers = [...text.matchAll(
+    /^api\.(post|put|patch|delete)\('([^']+)'[\s\S]*?^\}\)\);$/gm)];
+
+  // Control: an anchor reworded or a route written some other way turns the
+  // walk below into a loop over nothing, which is the "test that cannot fail"
+  // shape this file's `region` helper exists because of.
+  assert.ok(handlers.length >= 14,
+    `only ${handlers.length} mutating handlers found — the enumeration has `
+    + 'stopped matching, so this guard tested nothing');
+  const found = handlers.map(([, method, path]) => `${method.toUpperCase()} ${path}`);
+  for (const named of ['PUT /habits/:id/entries/:date',
+    'DELETE /habits/:id/entries/:date', 'POST /import', 'PUT /settings']) {
+    assert.ok(found.includes(named), `control: ${named} must be among ${found.join(', ')}`);
+  }
+
+  for (const [whole, method, path] of handlers) {
+    // Comments only, in both directions: a positive source guard can be
+    // satisfied by a comment and a negative one can be failed by one — and
+    // `POST /notify/test` carries a paragraph about `withUserWrite` for
+    // exactly the reason this guard exists.
+    const body = code(whole);
+    const name = `${method.toUpperCase()} ${path}`;
+
+    assert.ok(body.includes('withUserWrite('),
+      `${name} reaches no withUserWrite: whatever it changes, nothing bumps `
+      + 'data_version and every replica keeps serving its pre-write dashboard');
+    // `withUserWrite(` does not match this — the paren is what separates them.
+    assert.ok(!/withUser\(/.test(body),
+      `${name} calls bare withUser: that transaction does not bump `
+      + 'data_version, so anything it writes is invisible to the /overview key');
+  }
+});
+
+test('at the new TTL the byte bound still binds before the count', () => {
+  // The count was 100, sized against "the live set is PG_POOL_MAX x TTL" — an
+  // argument that only holds while the TTL is short. At 60 s it is gone, and a
+  // count of 100 would evict entries that are still fresh: all of the sweep,
+  // none of the hits. So `MAX_OVERVIEW_BYTES` has to be what actually bounds
+  // this cache, and that is only true if the count is above the number of
+  // entries 48 MB holds — at the SMALLEST real entry, which is the one that
+  // reaches a count bound first.
+  //
+  // The sizes are measured over the real route (`MAX_OVERVIEW_CACHED`'s comment
+  // has the table) and restated here as literals rather than imported, so this
+  // pins the arithmetic and not a pair of names.
+  const text = src('api.js');
+  assert.match(text, /const MAX_OVERVIEW_CACHED = 3_300;/);
+  assert.match(text, /const MAX_OVERVIEW_BYTES = 48 \* 1024 \* 1024;/);
+
+  // The TTL is pinned HERE because the count above is derived from it: 3,300 is
+  // only the right number while the residency argument the 60 s replaced —
+  // "the live set is `PG_POOL_MAX` x TTL" — is the dead one. Drop the TTL back
+  // to seconds and the count is three orders of magnitude too large; raise it
+  // again and 48 MB is doing even more of the work alone. A literal, per the
+  // root `CLAUDE.md`: importing the constant would pin its name and nothing
+  // else, and the `fresh` window it replaced passed for months with 7 widened
+  // to 30 while its own comment claimed the boundary was covered.
+  //
+  // It is asserted in this suite rather than only in
+  // `overview-memo.integration.mjs` because that one needs Postgres, so a drift
+  // would be invisible to `npm test` — which is the run that gates a commit.
+  assert.match(text, /const OVERVIEW_TTL_MS = 60_000;/,
+    'the TTL the count above is derived from');
+
+  // ...and then read back out of the source, so changing the literal in one
+  // place and the assertion above in the other still fails here.
+  const maxCached = Number(
+    text.match(/const MAX_OVERVIEW_CACHED = ([\d_]+);/)[1].replace(/_/g, ''));
+  const maxBytes = 48 * 1024 * 1024;
+
+  for (const [shape, kb] of [
+    ['8 habits x 30 days (typical)', 15.1],
+    ['8 habits x 365 days', 93.6],
+    ['20 habits x 365 days', 233.4],
+    ['50 habits x 365 days', 582.9],
+  ]) {
+    const fits = Math.floor(maxBytes / (kb * 1024));
+    assert.ok(fits <= maxCached,
+      `${shape}: ${fits} entries of ${kb} KB fit in 48 MB, so the COUNT (${maxCached}) `
+      + 'binds first and the memo evicts entries that are still fresh');
+  }
 });
 
 test('capBytes steps over an in-flight placeholder rather than freeing nothing', async () => {

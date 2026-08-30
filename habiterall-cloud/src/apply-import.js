@@ -5,8 +5,9 @@
  * dangerous place for a tenancy mistake. Three independent defences apply:
  *
  *   1. Every INSERT sets user_id explicitly from the authenticated session.
- *   2. All work happens inside `withUser`, so Row-Level Security rejects any
- *      row whose user_id does not match `app.user_id` (the WITH CHECK clause).
+ *   2. All work happens inside `withUserWrite`, so Row-Level Security rejects
+ *      any row whose user_id does not match `app.user_id` (the WITH CHECK
+ *      clause), and the account's `data_version` moves with the same COMMIT.
  *   3. Ids that arrive inside the uploaded file are IGNORED. A backup taken
  *      from another account — or a hand-edited one naming someone else's
  *      habit id — cannot address rows outside the importer's own data,
@@ -17,7 +18,7 @@
  * single-user and multi-user editions.
  */
 
-import { withUser, isCategoryNameConflict } from './db/pool.js';
+import { withUserWrite, isCategoryNameConflict } from './db/pool.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import { entryValue, normaliseImportedHabit } from '@habiterall/shared/import.js';
 import { assertDate, foldCategoryName, DEFAULT_COLOR, LIMITS } from '@habiterall/shared/validate.js';
@@ -110,8 +111,10 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
   const cleaned = habits.map((h) => normaliseImportedHabit(h));
 
   // One transaction: a failure part-way leaves the account untouched rather
-  // than half-imported.
-  await withUser(userId, async (db) => {
+  // than half-imported — and `withUserWrite`, so the account's `data_version`
+  // moves once for the whole import, inside that same transaction, however many
+  // habits and entries it wrote.
+  await withUserWrite(userId, async (db) => {
     if (mode === 'replace') {
       // RLS scopes these to the caller, so "delete everything" can only ever
       // mean "everything of mine".

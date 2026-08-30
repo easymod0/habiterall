@@ -274,7 +274,16 @@ const sw = self;
 // No new FILE, so `SHELL` is unchanged — `/index.html`, `/shared/ui/amount.js`,
 // `/shared/ui/count-field.js` and `/shared/ui/habit-dialog.js` are all already
 // in it.
-const CACHE_VERSION = 'v28';
+// v29 REMOVES two exports rather than adding any, and that is the same event
+// for the same reason (#192): `offline.js` no longer exports `noteWrite` or
+// `freshnessHeader`, the freshness header having been replaced by
+// `users.data_version` in cloud's `/overview` memo key. The dangerous pairing
+// is the reverse of v20's and just as loud — a shell holding a cached v28
+// `ui/api.js`, which imports both by name, against the new `offline.js` that
+// declares neither: "does not provide an export named 'freshnessHeader'" at
+// module LINK time, before `start()` runs and so outside `#view-error`.
+// No file is added or removed, so `SHELL` is unchanged.
+const CACHE_VERSION = 'v29';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -450,7 +459,9 @@ async function networkFirst(request, url) {
     // The REQUEST is the key, here and in the `caches.match` below, and both
     // select using the stored response's `Vary`. So a route this list covers
     // may not vary on a header the page sends only SOMETIMES — see
-    // `CLAUDE.md`. Measured in Chrome with cloud's `X-Habiterall-Fresh`: the
+    // `CLAUDE.md`. Measured in Chrome with cloud's `X-Habiterall-Fresh`, which
+    // #192 has since deleted — the rule outlived the header that found it, and
+    // this is the measurement rather than a description of a live request: the
     // put made from a request carrying it replaced the entry stored from one
     // without, and the survivor then matched neither `cache.match` nor
     // `caches.match` for any ordinary request, so the fallback below fell

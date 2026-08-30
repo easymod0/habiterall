@@ -148,14 +148,23 @@ function evict(map, excess) {
  * **Residency tracks the TTL here, and `max` is a backstop rather than the
  * bound.** `remember` sweeps only when the map is FULL, which is right for a
  * cache of ~100-byte entries and wrong for one holding whole dashboards: an
- * expired entry would sit there until entry `max` arrived, so a 2 s TTL would
+ * expired entry would sit there until entry `max` arrived, so a short TTL would
  * cap how long an answer is TRUSTED and not how long it is KEPT, and the map
  * would fill to `max` and stay there. So a miss sweeps its own expired entries
  * first. That pass costs one iteration per live key on the path that is about
  * to run five queries and per-habit CPU, and what it buys is a live set of
- * "what was asked for in the last `ttlMs`" — which, since a computation holds a
- * pool connection, is bounded by `PG_POOL_MAX` × the TTL and not by `max` at
- * all.
+ * "what was asked for in the last `ttlMs`".
+ *
+ * **How big that live set is, though, is an argument that expires with the
+ * TTL it was written against.** It used to read "since a computation holds a
+ * pool connection, the live set is bounded by `PG_POOL_MAX` × the TTL and not
+ * by `max` at all" — true of a 2 s TTL, where ten connections cannot produce
+ * many answers, and false of the 60 s one #192 moved the `/overview` memo to.
+ * A caller that passes a long TTL has to size `max` against `maxBytes` instead,
+ * because past that point `max` stops being a backstop and starts evicting
+ * entries that are still fresh: all of the sweep, none of the hits. See
+ * `MAX_OVERVIEW_CACHED` in `api.js`, which is now derived from `maxBytes` and a
+ * measured entry rather than from a residency argument.
  *
  * **`max` alone is a shared bound, and a shared bound is one an account can
  * spend on its own.** Nothing about a per-account key stops ONE account
@@ -285,35 +294,35 @@ export function createMemo(compute, {
   };
 
   /**
-   * Answer `key` without being allowed to reuse what is already here.
+   * What this memo could answer `key` with right now, computing nothing.
    *
-   * **This is what makes the memo correct on more than one replica.** The
-   * invalidation above is one process clearing its own map: a write handled by
-   * replica A cannot reach the memo in replica B, so a client that writes to A
-   * and reads from B is served B's own pre-write answer for the length of the
-   * TTL — the exact regression `forget` exists to prevent, arriving through the
-   * load balancer instead of through a race. The client is the only party that
-   * knows it just wrote, so the client is what says so: see `freshnessHeader`
-   * in `shared/public/offline.js`.
+   * The memo call above decides "hit, join, or compute" and then acts on it in
+   * one go, which is the right shape for a caller that has nothing else to
+   * spend. `/overview` does: since #192 it reads the account's `data_version`
+   * to build its key, and that read is a transaction, so it is holding a pool
+   * connection at the moment it finds out which of the three cases it is in.
+   * Only one of them wants that connection — a real miss, whose rebuild then
+   * costs no second checkout. A hit wants to give it straight back, and a
+   * caller JOINING somebody else's computation wants to give it back most of
+   * all: waiting inside the transaction would turn the burst this memo exists
+   * to collapse into one held connection per waiter, which is `PG_POOL_MAX`
+   * gone to four tabs foregrounding at once.
    *
-   * Deleting rather than reading past means the answer is also STORED, so the
-   * refetch that pays for the rebuild warms the memo for everything behind it.
+   * So the decision is separated from the act. It is safe to split only
+   * because both halves are synchronous: nothing can settle, expire or be
+   * forgotten between this and the `memo(key)` that follows it.
    *
-   * An in-flight placeholder goes too, and that costs the burst collapsing for
-   * these callers: two simultaneous fresh reads run two computations rather
-   * than sharing one. That is the right way round. A computation already
-   * running here may have opened its transaction before the write committed,
-   * and on a replica that never saw the write there is nothing that can tell —
-   * so joining it would hand back exactly the answer being refused. The caller
-   * already awaiting it still gets it; only INHERITANCE is refused, which is
-   * the same rule as the store-identity guard above.
+   * The TTL is applied here exactly as it is above, so a peek can never hand
+   * back an entry the memo itself would refuse.
    *
    * @param {string} key
-   * @param {any} [arg]
+   * @returns {{value: any}|{inflight: Promise<any>}|undefined}
    */
-  memo.fresh = (key, arg) => {
-    entries.delete(key);
-    return memo(key, arg);
+  memo.peek = (key) => {
+    const hit = entries.get(key);
+    if (hit?.inflight) return { inflight: hit.inflight };
+    if (hit && now() - hit.at < ttlMs) return { value: hit.value };
+    return undefined;
   };
 
   /** For tests and for a gauge; nothing in a route should need it. */
@@ -374,6 +383,28 @@ const perAccountMemos = new Set();
  * added tomorrow still has to call it — but it is now a named thing to call,
  * rather than a router it has to be inside of.
  *
+ * **Since #192 this is no longer what makes the memo correct, and both of them
+ * staying is deliberate.** `users.data_version` is in the `/overview` key, so a
+ * write makes every entry built before it UNREACHABLE — on every replica at
+ * once, which is more than any amount of forgetting inside one process could
+ * do. What this is now for is two things worth keeping:
+ *
+ * - **Eager reclamation.** An unreachable entry is still resident until the TTL
+ *   sweep meets it, and the TTL is 60 s. Forgetting on the write frees it at
+ *   the write, so a bumped account does not hold a minute of dead dashboards
+ *   against `MAX_OVERVIEW_BYTES` and its own `maxPerAccount` share.
+ * - **Cover for a missed bump.** A route added tomorrow that writes through
+ *   bare `withUser` announces nothing, and the version would then be a
+ *   correctness mechanism that silently is not one. This still clears that
+ *   account's answers on the way out, so the failure is a stale entry for
+ *   ≤ 60 s rather than for as long as the process lives. `cache.test.js` fails
+ *   on such a route in `api.js` before it ships, which is where that belongs;
+ *   this is the runtime half, and it covers the write paths that guard cannot
+ *   see — `api.use` middleware, and anything outside the router.
+ *
+ * Two mechanisms, one rule each, rather than two things that look like one
+ * question with no answer written down.
+ *
  * @param {number|string} userId
  */
 export function forgetAccount(userId) {
@@ -424,11 +455,18 @@ const accountPrefix = (key) => key.slice(0, key.indexOf(ACCOUNT_SEP) + 1);
  * **The count bound and this one answer different questions, and only this one
  * is about memory.** `max` converts to a memory bound through the entry cost,
  * so it is only ever as good as the number written beside it — and this cache's
- * entries vary by ~70x, measured: 18 KB for a typical 8-habit dashboard, 499 KB
- * at 20 habits x 365 days, 1.2 MB at 50 x 365. A count of 100 was chosen
- * against the middle of those and is ~120 MB against the top of them, which is
- * the arithmetic the count alone cannot see. This is what makes the number in
- * that comment true rather than approximately true.
+ * entries vary by ~39x, which is the arithmetic a count alone cannot see.
+ *
+ * The sizes are re-measured for #192, over the real route, and they are not the
+ * ones this comment used to carry: **15 KB** for a typical 8-habit dashboard on
+ * its default 30-day window, 93 KB at 8 habits x 365 days, 234 KB at 20 x 365,
+ * 583 KB at 50 x 365. The numbers here before — 18 KB / 499 KB / 1.2 MB — are
+ * the RETAINED OBJECT measured with `--expose-gc`, which is roughly twice the
+ * string and was the honest figure until the memo started holding the
+ * SERIALISED payload. What this pass sums is `sizeOf`, and `sizeOf` measures
+ * the string, so the string is what has to be written down beside it. The two
+ * differ because 365 dated grid keys per habit cost far more as object
+ * properties than as JSON text.
  *
  * Same preference as `evict` and `capAccount` and for the same reasons: settled
  * before in-flight, least recently written first. A placeholder counts as 0

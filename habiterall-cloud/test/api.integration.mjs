@@ -154,6 +154,89 @@ console.log(`  alice=${alice}  bob=${bob}\n`);
     lines.join('') === '', lines.join('').slice(0, 200));
 }
 
+// ...and a checkout refused by a pool that is FULL, which is the shape the
+// wrapper was added for and the one nothing could reach before.
+//
+// `pool-timeouts.test.js` pins the other cause — a database that is not there —
+// and can do it with no Postgres, which is why it lives there. This one needs a
+// healthy server with every connection already spoken for, so it needs this
+// suite.
+//
+// **The assertion that earns its keep is `pg_waiting: 0`.** The obvious reading
+// of a saturated pool is "somebody is queued", and the log does not say that:
+// `pg` removes a request from `_pendingQueue` inside its own
+// `connectionTimeoutMillis` callback, before handing the error back, so the
+// waiter being logged about has already stopped counting itself. Pinning the 0
+// is what stops `pg_waiting` being written back into the discriminator in
+// `pool.js`, `CLAUDE.md` and `caching.md`, where it was on the first attempt.
+//
+// A freshly imported module rather than this suite's pool, so `max` can be 1
+// and a single held connection is a full pool. `connectionTimeoutMillis` is
+// shortened on the way in for the same reason the block above uses
+// `SET LOCAL statement_timeout = '50ms'`: the code path is identical and the
+// wait is 250 ms rather than five seconds.
+{
+  const before = process.env.PG_POOL_MAX;
+  process.env.PG_POOL_MAX = '1';
+  const tiny = await import('../src/db/pool.js?v=saturated');
+  if (before === undefined) delete process.env.PG_POOL_MAX; else process.env.PG_POOL_MAX = before;
+  tiny.pool.options.connectionTimeoutMillis = 250;
+
+  const lines = [];
+  const realWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => {
+    lines.push(String(chunk));
+    return realWrite(chunk, ...rest);
+  };
+
+  let caught;
+  let release = () => {};
+  let started = () => {};
+  const inHand = new Promise((r) => { started = r; });
+  // Hold the one connection there is, and wait until it is actually in hand
+  // before asking for a second.
+  //
+  // **That await does not currently bite** — measured, three runs green with it
+  // spliced out — because the first `pool.connect()` is already in flight when
+  // the second is attempted, so `totalCount` has reached `max` either way. But
+  // that is an ordering inside `pg`, not a property this test establishes, and
+  // every assertion below is worthless if the pool was never full. Confirmed
+  // rather than assumed, for the cost of one promise.
+  const held = tiny.withUser(alice, () => new Promise((r) => { release = r; started(); }));
+  try {
+    await inHand;
+    await tiny.withUser(alice, async () => 'unreachable').catch((e) => { caught = e; });
+  } finally {
+    release();
+    await held.catch(() => {});
+    process.stdout.write = realWrite;
+    await tiny.pool.end();
+  }
+
+  const refused = lines.flatMap((c) => c.split('\n')).flatMap((l) => {
+    try {
+      const r = JSON.parse(l);
+      return r && r.msg === 'pg.checkout_failed' ? [r] : [];
+    } catch { return []; }
+  });
+
+  ck('a checkout refused by a FULL pool is named, not just one refused by a dead one',
+    refused.length === 1 && refused[0].scope === 'withUser',
+    `${refused.length} logged :: ${JSON.stringify(refused[0] ?? null)}`);
+  const gauge = refused[0] ?? {};
+  // The discriminator, and the whole of it. `pg_total` reaching `pg_max` is
+  // what says "raise PG_POOL_MAX" rather than "the database is gone" — and it
+  // is the condition #280 is gated on.
+  ck('...saying the pool is full, which is what separates it from an absent database',
+    gauge.pg_total === 1 && gauge.pg_max === 1 && gauge.pg_total === gauge.pg_max,
+    JSON.stringify(gauge));
+  ck('...and pg_waiting reads 0, because a timed-out waiter has already been dequeued',
+    gauge.pg_waiting === 0, `pg_waiting=${JSON.stringify(gauge.pg_waiting)}`);
+  // Rethrown untouched, the same rule as every other failure in this section.
+  ck('...and the caller still gets the rejection itself',
+    caught instanceof Error, String(caught));
+}
+
 /* ---------- habits and entries ---------- */
 
 console.log('--- habits ---');
