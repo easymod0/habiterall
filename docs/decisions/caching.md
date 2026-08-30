@@ -261,12 +261,22 @@ real route, through `withUser` as `habiterall_app` — `scripts/bench-version-re
 
 | shape | rebuild (miss) | hit, with the read | the read alone | break-even |
 |---|---|---|---|---|
-| 8 habits × 365 days | 18.0 ms | 2.42 ms | 0.34 ms | 2.14% |
-| 20 × 365 | 31.6 ms | 2.40 ms | 0.29 ms | 0.97% |
-| 50 × 365 | 76.2 ms | 2.58 ms | 0.32 ms | 0.43% |
+| 8 habits × 365 days | 17.8 ms | 2.40 ms | 0.26 ms | 1.64% |
+| 20 × 365 | 31.2 ms | 2.33 ms | 0.25 ms | 0.87% |
+| 50 × 365 | 76.1 ms | 2.58 ms | 0.24 ms | 0.32% |
 
 Break-even is the fraction of requests the read must convert from a miss into a
-hit to pay for itself, and it is under 2% everywhere. The TTL going from 2 s to
+hit to pay for itself, and it is under 2% everywhere.
+
+**Re-measured after #188**, which folded `BEGIN` and the `set_config` into one
+round trip. The figures above are the new ones; the previous row read 0.34 /
+0.29 / 0.32 ms for the read and 2.14% / 0.97% / 0.43% at break-even. Note what
+that re-run was worth beyond the numbers: until #188 the bench did not call
+`withUser` at all — it restated the body, so it went on issuing four round trips
+after production had gone to three, under a label naming the helper. It calls
+the helper now, so the table cannot drift from the code again without the code
+moving too. The read is ~0.39 ms against a bare RLS-bypassing `SELECT` at
+~0.14 ms, so the transaction wrapper is still most of what a version read costs. The TTL going from 2 s to
 60 s converts far more than that. So the read shipped and the echo did not, and
 no client carries anything at all — which is also why nothing about this change
 needed a client release, an Android version check or a wire contract to keep the
