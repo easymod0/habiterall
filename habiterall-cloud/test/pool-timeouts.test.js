@@ -228,10 +228,16 @@ test('a checkout that cannot be had is named, and says which helper wanted it', 
 
   // **The gauge is the half that makes the line worth reading.** Saturation and
   // an unreachable database are the same rejection with the same message, and
-  // the numbers are what separate them: `pg_waiting` non-zero with `pg_total`
-  // at `pg_max` is a pool too small, `pg_total` 0 is a database that is not
-  // there. That is why this is logged rather than matched on `pg`'s own prose,
-  // which carries no code to match on anyway.
+  // the numbers are what separate them: `pg_total` at `pg_max` is a pool too
+  // small, `pg_total` 0 is a database that is not there. That is why this is
+  // logged rather than matched on `pg`'s own prose, which carries no code to
+  // match on anyway.
+  //
+  // `pg_waiting` is not part of that test, and the saturated half of it is not
+  // in this file: `api.integration.mjs` holds a real pool at `max` and pins
+  // both `pg_total === pg_max` and `pg_waiting === 0`, the second because a
+  // waiter that times out has already been removed from `pg`'s queue and so
+  // does not count itself. Only the presence of the four keys is asserted here.
   for (const e of named) {
     for (const key of ['pg_total', 'pg_idle', 'pg_waiting', 'pg_max']) {
       assert.ok(key in e, `${e.scope} must carry ${key}, or the line cannot say WHY`);

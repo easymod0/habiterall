@@ -215,12 +215,22 @@ function noteTimeout(err, context) {
  * nothing could inform while the event had no name.
  *
  * **The gauge is what tells the two causes apart, which is why it is logged
- * rather than a message match.** Saturation reads `pg_waiting` non-zero with
- * `pg_total` at `pg_max`; an unreachable database reads `pg_total` 0. `pg`
- * signals its own `connectionTimeoutMillis` with a plain `Error` carrying no
- * SQLSTATE and no code, so the alternative is pattern-matching a library's
- * prose — and the numbers are the better answer anyway, since they say which
- * knob moved rather than which branch fired.
+ * rather than a message match.** `pg` signals its own `connectionTimeoutMillis`
+ * with a plain `Error` carrying no SQLSTATE and no code, so the alternative is
+ * pattern-matching a library's prose — and the numbers are the better answer
+ * anyway, since they say which knob moved rather than which branch fired.
+ *
+ * **`pg_total` against `pg_max` is the discriminator, and `pg_waiting` is not
+ * part of it.** A pool too small reads `pg_total` at `pg_max`; a database that
+ * is not there reads `pg_total` 0. The obvious third clause — "and somebody was
+ * queued" — is the one that must NOT be written, because it is false in exactly
+ * the case it describes: `pg` removes a request from its `_pendingQueue` inside
+ * the `connectionTimeoutMillis` callback, BEFORE handing the error back, so the
+ * waiter that timed out never counts itself. A lone waiter behind a full pool
+ * therefore logs `pg_waiting: 0` at the moment it IS the saturation. It reads
+ * non-zero only when several waiters are timing out together, which makes it a
+ * corroborator of scale and never the thing that decides. `api.integration.mjs`
+ * drives a real pool held at `max` and pins both halves.
  *
  * Logged and rethrown UNTOUCHED, the same rule `noteTimeout` states: a 503 here
  * would tell the offline outbox this write is retryable, and a pool that cannot

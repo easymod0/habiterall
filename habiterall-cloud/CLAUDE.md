@@ -390,8 +390,12 @@ had a name.** All three helpers take their connection before their `try`, so
 the rejection escapes `noteTimeout` — which matches SQLSTATEs, and an error
 that never reached Postgres has none. `checkout()` wraps them and logs
 `pg.checkout_failed` with the scope and the whole gauge; the gauge is what
-separates a pool too small (`pg_waiting` non-zero, `pg_total` at `pg_max`) from
-a database that is not there (`pg_total` 0). That event is the TRIGGER for the
+separates a pool too small (`pg_total` at `pg_max`) from a database that is not
+there (`pg_total` 0). **`pg_waiting` is not part of that test and must not be
+added to it** — `pg` dequeues a request inside its own connection-timeout
+callback, so the waiter that timed out is already gone from the count and a lone
+one logs `pg_waiting: 0` while being the saturation itself. That event is the
+TRIGGER for the
 second pool the archive describes — a tiny one the version read owns, so a herd
 of misses cannot starve the hit path — and the archive also says why the
 smaller-looking fix, serving a resident entry when the checkout fails, is the

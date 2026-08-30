@@ -384,13 +384,26 @@ So it is named now. `checkout()` in `db/pool.js` wraps all three call sites and
 logs **`pg.checkout_failed`** with the scope that wanted the connection and the
 whole of `poolGauge()`. The gauge is the load-bearing half, because saturation
 and an unreachable database are the same rejection with the same message and
-only the numbers separate them: `pg_waiting` non-zero with `pg_total` at
-`pg_max` is a pool too small, `pg_total` 0 is a database that is not there.
-Logged and rethrown untouched, the rule `noteTimeout` already states — a 503
-would tell the offline outbox to replay a write the pool cannot accept either.
+only the numbers separate them: `pg_total` at `pg_max` is a pool too small,
+`pg_total` 0 is a database that is not there. Logged and rethrown untouched, the
+rule `noteTimeout` already states — a 503 would tell the offline outbox to
+replay a write the pool cannot accept either.
+
+**`pg_waiting` is deliberately not in that test, and the first version of this
+section had it there.** "A pool too small reads `pg_waiting` non-zero" is the
+obvious sentence and it is false in the case it names. `pg` removes a pending
+request from `_pendingQueue` inside the `connectionTimeoutMillis` callback,
+before it hands the error back (`pg-pool/index.js`, the `removeWhere` in the
+timeout), and `waitingCount` is that queue's length — so the request being
+logged about has already stopped counting itself. Ten rebuilds holding a pool of
+ten with one `/overview` queued behind them logs `pg_total: 10, pg_max: 10,
+pg_waiting: 0`: a pool too small, wearing neither documented signature. It is
+also always the shape of the LAST waiter of any burst to time out. So the
+number is a corroborator of how wide the queue was, and `pg_total` against
+`pg_max` is the only half that reads true at the moment it is sampled.
 
 **That event firing is the trigger for the second pool.** If it never appears,
-none of this section needs building; if it appears with `pg_waiting` non-zero,
+none of this section needs building; if it appears with `pg_total` at `pg_max`,
 the version read is starving behind rebuilds and the pool is the answer. Either
 way the decision is now one a log can make rather than one an argument has to.
 
