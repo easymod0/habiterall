@@ -374,10 +374,25 @@ checkout fails" instead.** It is the smaller diff and it buys availability with
 exactly the stale-serve the section below deletes, in exactly the regime that
 section says the staleness is most likely.
 
-Neither is worth building yet. `pool.connect()` throwing is not currently
-countable — it happens before the `try` in `withUser`, so `noteTimeout` never
-sees it and a checkout failure lands in generic 500s with no name. Name it
-first, watch whether it ever fires, and let that decide.
+Neither is worth building until the third regime is known to be reachable, and
+until this change it could not be known: `pool.connect()` throws before the
+`try` in all three helpers, so `noteTimeout` never saw it — and could not have
+named it anyway, since an error that never reached Postgres carries no
+SQLSTATE. A refused checkout arrived as a bare 500.
+
+So it is named now. `checkout()` in `db/pool.js` wraps all three call sites and
+logs **`pg.checkout_failed`** with the scope that wanted the connection and the
+whole of `poolGauge()`. The gauge is the load-bearing half, because saturation
+and an unreachable database are the same rejection with the same message and
+only the numbers separate them: `pg_waiting` non-zero with `pg_total` at
+`pg_max` is a pool too small, `pg_total` 0 is a database that is not there.
+Logged and rethrown untouched, the rule `noteTimeout` already states — a 503
+would tell the offline outbox to replay a write the pool cannot accept either.
+
+**That event firing is the trigger for the second pool.** If it never appears,
+none of this section needs building; if it appears with `pg_waiting` non-zero,
+the version read is starving behind rebuilds and the pool is the answer. Either
+way the decision is now one a log can make rather than one an argument has to.
 
 ### The bail-out that was written first, and why it was deleted
 

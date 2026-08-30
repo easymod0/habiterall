@@ -383,11 +383,19 @@ knob already exists, and correctness is not the thing to buy latency with.
 `pool.connect()` reject and `/overview` answer 500 — on requests whose answer
 was already memoised and which cost nothing before this change. The worker does
 not soften it: `networkFirst` reaches its cached copy only when `fetch` throws,
-so a 500 that arrives is shown. Raise `PG_POOL_MAX` well before this, and note
-that a checkout failure is currently unnamed — `pool.connect()` is outside
-`withUser`'s `try`, so `noteTimeout` never sees it. The archive says what to
-build if it is ever actually reached, and why a bail-out on the hit path is not
-it.
+so a 500 that arrives is shown. Raise `PG_POOL_MAX` well before this.
+
+**A refused checkout is named, because it is the one pool failure that never
+had a name.** All three helpers take their connection before their `try`, so
+the rejection escapes `noteTimeout` — which matches SQLSTATEs, and an error
+that never reached Postgres has none. `checkout()` wraps them and logs
+`pg.checkout_failed` with the scope and the whole gauge; the gauge is what
+separates a pool too small (`pg_waiting` non-zero, `pg_total` at `pg_max`) from
+a database that is not there (`pg_total` 0). That event is the TRIGGER for the
+second pool the archive describes — a tiny one the version read owns, so a herd
+of misses cannot starve the hit path — and the archive also says why the
+smaller-looking fix, serving a resident entry when the checkout fails, is the
+wrong one: it buys availability with exactly the staleness #192 deletes.
 
 `docs/decisions/caching.md` has the measurements, the cliff table and the
 deletion inventory. **The rule the deleted header found still stands and is not

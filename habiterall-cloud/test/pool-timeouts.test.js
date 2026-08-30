@@ -1,11 +1,17 @@
 /**
- * How the two Postgres timeouts read their environment.
+ * How the two Postgres timeouts read their environment, and how a checkout
+ * that cannot be had is named.
  *
  * A unit test rather than a line in `api.integration.mjs`, because the value
  * that matters most is the one no running pool can demonstrate: `0`. Postgres
  * spells "no timeout" as 0, and the module has to be imported afresh for each
- * setting, which is what the `?v=` cache-buster below is for. No connection is
- * ever opened — `new Pool` is lazy — so this needs no database.
+ * setting, which is what the `?v=` cache-buster below is for.
+ *
+ * **None of this needs a database, and the last test needs there to be no
+ * database**, which is the same fact from the other side. `new Pool` is lazy,
+ * so the timeout tests open nothing; the checkout test points `DATABASE_URL` at
+ * a port with nothing behind it and asserts the failure is named rather than
+ * anonymous. Both run under `npm test` with no Postgres anywhere.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,6 +39,56 @@ async function poolWith(env) {
       if (k in before) process.env[k] = before[k]; else delete process.env[k];
     }
   }
+}
+
+/**
+ * Run `fn` with the default logger's sink captured — and FORWARDED.
+ *
+ * `shared/src/log.js` takes an injectable `write`, but the `log` that
+ * `db/pool.js` imports is the shared DEFAULT one, so its sink is
+ * `process.stdout` and standing in front of it is the only way to read what a
+ * module logged without changing the module to be readable.
+ *
+ * **Forwarded rather than swallowed, and that is not tidiness.** `node --test`
+ * runs a single file in process and its reporter is a stream piped to stdout,
+ * so results for tests that have ALREADY finished can be flushed on a later
+ * tick — inside this window. Measured while writing the checkout test below: a
+ * version of this helper that dropped what it captured made the four tests
+ * above it disappear from the run entirely, reported as `# tests 1` with no
+ * error anywhere. A stub that can delete another test's RESULT can delete its
+ * FAILURE, which is this file quietly becoming one that cannot fail.
+ *
+ * Only the logger's own records are returned — a line is one if it parses as
+ * JSON carrying a string `msg`, which is `log.js`'s shape and nothing the
+ * reporter emits. So an assertion over `text` cannot accidentally be satisfied
+ * by a test NAME that happened to contain the string it was looking for.
+ *
+ * @param {() => Promise<any>} fn
+ */
+async function logged(fn) {
+  const raw = [];
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => {
+    raw.push(String(chunk));
+    return write(chunk, ...rest);
+  };
+  try {
+    await fn();
+  } finally {
+    process.stdout.write = write;
+  }
+  // Per CHUNK, never `raw.join('')`. Each `log` call is one `write` of one
+  // complete line, but the reporter's writes do not always end in a newline —
+  // so joining first glues a reporter chunk onto the FRONT of the next record
+  // and that record stops parsing. Measured: it silently dropped the first of
+  // the three below, and the test then read as "one call site does not log".
+  const records = raw.flatMap((chunk) => chunk.split('\n')).flatMap((line) => {
+    try {
+      const r = JSON.parse(line);
+      return r && typeof r.msg === 'string' ? [r] : [];
+    } catch { return []; }
+  });
+  return { records, text: records.map((r) => JSON.stringify(r)).join('\n') };
 }
 
 // The prototype-key half of `noteTimeout` is in `api.integration.mjs`, not
@@ -79,23 +135,16 @@ test('a typo falls back to the default rather than removing the bound', async ()
   // The direction matters: an unparseable value must not be read as "off". A
   // compose file with `PG_STATEMENT_TIMEOUT_MS: 15s` is the realistic way to
   // get here, and silently unbounding every query is the wrong way to answer it.
-  const lines = [];
-  const realWrite = process.stdout.write.bind(process.stdout);
-  process.stdout.write = (chunk, ...rest) => { lines.push(String(chunk)); return true; };
-
   let t;
-  try {
+  const { text: warned } = await logged(async () => {
     t = await poolWith({ PG_STATEMENT_TIMEOUT_MS: '15s', PG_IDLE_TX_TIMEOUT_MS: '-1' });
-  } finally {
-    process.stdout.write = realWrite;
-  }
+  });
 
   assert.equal(t.pg_statement_timeout_ms, 15_000);
   assert.equal(t.pg_idle_tx_timeout_ms, 30_000);
 
   // ...and it SAYS so. Falling back silently is how a typo survives to
   // production looking like a deliberate setting.
-  const warned = lines.join('');
   assert.match(warned, /pg\.timeout_env_ignored/);
   // The logger redacts `name` and `value` as PII, so the fields are called
   // something else — a warning that names neither the setting nor what was
@@ -103,4 +152,91 @@ test('a typo falls back to the default rather than removing the bound', async ()
   assert.match(warned, /PG_STATEMENT_TIMEOUT_MS/, 'the warning must name the setting');
   assert.match(warned, /15s/, 'the warning must quote what was actually written');
   assert.doesNotMatch(warned, /redacted/, 'redaction here would empty the warning');
+});
+
+/* ---------- the failure that had no name ---------- */
+
+/**
+ * A `DATABASE_URL` with nothing behind it.
+ *
+ * Port 1 rather than a high one nothing happens to be using: it is refused
+ * immediately and deterministically, so this test measures a connection that
+ * cannot be made rather than one that has not been made YET. Waiting out
+ * `connectionTimeoutMillis` would take five seconds and assert the same thing.
+ */
+const DEAD_URL = 'postgres://nobody:nothing@127.0.0.1:1/nowhere';
+
+test('a checkout that cannot be had is named, and says which helper wanted it', async () => {
+  // **The failure this repo had no name for.** All three helpers take their
+  // connection BEFORE their `try`, so the rejection escapes `noteTimeout`
+  // entirely — and `noteTimeout` matches SQLSTATEs, which an error that never
+  // reached Postgres does not have. What an operator saw was a 500 and nothing
+  // else. Since #192 `/overview` reads `data_version` on every request, so this
+  // is now the first thing a saturated pool produces on the busiest route.
+  //
+  // All THREE call sites, one case each, because the wrapper is only worth
+  // having if nothing kept its own `pool.connect()` — and a test naming one of
+  // them passes with the other two reverted.
+  const before = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = DEAD_URL;
+
+  /** @type {any[]} */
+  let events = [];
+  let refused = 0;
+  try {
+    const pool = await import(`../src/db/pool.js?v=${++stamp}`);
+    ({ records: events } = await logged(async () => {
+      for (const call of [
+        () => pool.withUser(1, async () => 'unreachable'),
+        () => pool.withNotifierScope(async () => 'unreachable'),
+        () => pool.withoutUser(async () => 'unreachable'),
+      ]) {
+        // Rejecting is the control: if one of these ever RESOLVED there would
+        // be a database on port 1 and the whole test would be measuring it.
+        await call().then(() => {}, () => { refused++; });
+      }
+    }));
+  } finally {
+    if (before === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = before;
+  }
+
+  assert.equal(refused, 3, 'control: all three must fail to take a connection');
+
+  // `msg` rather than `event`: that is what `shared/src/log.js` calls the name
+  // of a record, and asserting the wrong key is a filter that matches nothing
+  // and an empty list that agrees with every mutation.
+  const named = events.filter((e) => e.msg === 'pg.checkout_failed');
+  // One, not three. This control answers "did the stub capture anything at
+  // all?", so that an empty `named` below is read as a missing LOG rather than
+  // as a broken helper — and it must not be the assertion that fires when a
+  // call site is reverted, or the mutation reports itself as a test bug.
+  assert.ok(events.length >= 1,
+    'control: the stub must capture the logger at all, or `named` is empty for '
+    + 'the wrong reason');
+  assert.deepEqual(
+    named.map((e) => e.scope).sort(),
+    ['withNotifierScope', 'withUser', 'withoutUser'],
+    'each helper must name ITSELF, or the log says a checkout failed somewhere'
+  );
+
+  // The literal, not the constant — the event name is what an operator greps
+  // for and what an alert is written against, so renaming it is a thing to do
+  // on purpose. And `error`, because every one of these is a request that
+  // failed; a warn would be filtered out of exactly the incident it describes.
+  assert.ok(named.every((e) => e.level === 'error'), 'a refused checkout is an error');
+
+  // **The gauge is the half that makes the line worth reading.** Saturation and
+  // an unreachable database are the same rejection with the same message, and
+  // the numbers are what separate them: `pg_waiting` non-zero with `pg_total`
+  // at `pg_max` is a pool too small, `pg_total` 0 is a database that is not
+  // there. That is why this is logged rather than matched on `pg`'s own prose,
+  // which carries no code to match on anyway.
+  for (const e of named) {
+    for (const key of ['pg_total', 'pg_idle', 'pg_waiting', 'pg_max']) {
+      assert.ok(key in e, `${e.scope} must carry ${key}, or the line cannot say WHY`);
+    }
+  }
+  assert.ok(named.every((e) => e.pg_total === 0),
+    'control: nothing is connected here, which is what a dead database looks like');
 });

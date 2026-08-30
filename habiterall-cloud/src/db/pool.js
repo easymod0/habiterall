@@ -197,6 +197,48 @@ function noteTimeout(err, context) {
 }
 
 /**
+ * Take a connection, and NAME the failure when one cannot be had.
+ *
+ * **A checkout failure is the one pool event with nothing to recognise it by.**
+ * All three helpers below call `pool.connect()` BEFORE their `try`, deliberately
+ * — there is no client to roll back or release yet — so the rejection escapes
+ * past `noteTimeout` entirely. And `noteTimeout` could not have named it in any
+ * case: it matches SQLSTATEs, and this error never reached Postgres to be given
+ * one. What an operator saw was a 500 with nothing in the log but the request.
+ *
+ * That was survivable while it was rare. Since #192 it is not: `/overview` used
+ * to answer a memo hit without touching Postgres at all, and now every request
+ * reads `users.data_version` first, so a saturated pool produces this failure on
+ * the busiest route in the app rather than only on the expensive one.
+ * `docs/decisions/caching.md` asks for exactly that to be countable before
+ * anyone decides whether the version read wants a pool of its own — a decision
+ * nothing could inform while the event had no name.
+ *
+ * **The gauge is what tells the two causes apart, which is why it is logged
+ * rather than a message match.** Saturation reads `pg_waiting` non-zero with
+ * `pg_total` at `pg_max`; an unreachable database reads `pg_total` 0. `pg`
+ * signals its own `connectionTimeoutMillis` with a plain `Error` carrying no
+ * SQLSTATE and no code, so the alternative is pattern-matching a library's
+ * prose — and the numbers are the better answer anyway, since they say which
+ * knob moved rather than which branch fired.
+ *
+ * Logged and rethrown UNTOUCHED, the same rule `noteTimeout` states: a 503 here
+ * would tell the offline outbox this write is retryable, and a pool that cannot
+ * hand out a connection will not hand one out for the replay either.
+ *
+ * @param {string} scope which helper wanted it, so the log says what was refused
+ * @returns {Promise<pg.PoolClient>}
+ */
+async function checkout(scope) {
+  try {
+    return await pool.connect();
+  } catch (err) {
+    log.error('pg.checkout_failed', { scope, ...poolGauge() }, err);
+    throw err;
+  }
+}
+
+/**
  * Run `fn` inside a transaction scoped to one user.
  *
  * `set_config(..., true)` is transaction-local, so the setting cannot leak to
@@ -212,7 +254,7 @@ export async function withUser(userId, fn) {
     throw new Error('withUser requires a valid user id');
   }
 
-  const client = await pool.connect();
+  const client = await checkout('withUser');
   try {
     await client.query('BEGIN');
     await client.query('SELECT set_config($1, $2, true)', ['app.user_id', String(userId)]);
@@ -290,7 +332,7 @@ export async function withUserWrite(userId, fn) {
  * @template T
  */
 export async function withNotifierScope(fn) {
-  const client = await pool.connect();
+  const client = await checkout('withNotifierScope');
   try {
     await client.query('BEGIN READ ONLY');
     await client.query('SELECT set_config($1, $2, true)', ['app.scope', 'notifier']);
@@ -314,7 +356,7 @@ export async function withNotifierScope(fn) {
  * Keep the surface of this function small — it bypasses the RLS boundary.
  */
 export async function withoutUser(fn) {
-  const client = await pool.connect();
+  const client = await checkout('withoutUser');
   try {
     return await fn(client);
   } catch (err) {
