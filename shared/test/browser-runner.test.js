@@ -13,8 +13,9 @@
  * test of the helper itself, over a fake `ev` that models a window/document/
  * location well enough to reproduce the doomed-document window it exists to
  * close (see the harness's own comment for why a real browser cannot be the
- * witness here), and a source guard that keeps a bare `location.reload()`
- * from creeping back into a suite.
+ * witness here), and a source guard that keeps a bare `location.reload()` —
+ * or a free-standing `Page.reload` / `Page.navigate` — from creeping back
+ * into a suite.
  */
 
 import { test } from 'node:test';
@@ -306,7 +307,75 @@ const isReloadCallSite = (line) => {
   // as a `reload:` callback would break the property this whole guard is for.
   if (line.includes('location.reload(')) return true;
   // A CDP reload is sanctioned ONLY as `reloadAndWaitFor`'s own argument.
-  return line.includes('Page.reload') && !/\breload:.*Page\.reload/.test(line);
+  if (line.includes('Page.reload') && !/\breload:.*Page\.reload/.test(line)) return true;
+  // A CDP NAVIGATION is the same race through the same door, so it is
+  // sanctioned the same way — plus one thing `Page.reload` has no need of: an
+  // annotated opt-out, for the handful of sites where the join is unsound or
+  // unwanted. The reason has to be non-empty (`\S`), or `// navigate-unjoined:`
+  // becomes a bare token anyone can paste in to silence this.
+  //
+  // Matched as a QUOTED method name rather than by `includes`, unlike
+  // `Page.reload` above, and that is not tidiness: `Page.navigate` is written
+  // in PROSE all over these suites, and `categorycheck.mjs` says it inside a
+  // `/* … */` block whose continuation lines carry no leading `*` — invisible
+  // to a line-based comment skip, and reported as a call site by an `includes`.
+  // A CDP call always spells the method as a string literal and prose never
+  // does, so the quotes are the one signal that separates them without this
+  // guard having to parse across lines. Both quote characters, since either is
+  // a legal way to write the call.
+  return /['"]Page\.navigate['"]/.test(line)
+    && !/\breload:.*Page\.navigate/.test(line)
+    && !/navigate-unjoined:\s*\S/.test(line);
+};
+
+/**
+ * A line whose `Page.navigate` is excused by an annotated reason, which is
+ * what `NAVIGATE_UNJOINED` below counts.
+ *
+ * The structural conditions are re-asked here rather than inferred from
+ * `!isReloadCallSite(line)`, and that is the whole care in this predicate.
+ * `isReloadCallSite` is false for SEVERAL different reasons — the comment
+ * skip, the `reload:` clause, and the marker — so negating it reads as "the
+ * guard would have reported this line but for the marker" while actually
+ * meaning "the guard did not report this line, for any reason at all". A
+ * marker pasted onto a `reload:` argument or into a comment would then be
+ * BANKED as an exemption: the count for that file goes up, the `deepEqual`
+ * below fails, and the mechanical repair is to register a phantom entry for a
+ * line that is not a call site and exempts nothing. The registry is the entire
+ * review surface this guard adds, so it must not be able to acquire one.
+ *
+ * `!isReloadCallSite` is still ANDed in, and now means only what it says: a
+ * line that offends for an unrelated reason (a `location.reload(` or a
+ * free-standing `Page.reload` sharing it) is reported rather than counted.
+ */
+const isSanctionedNavigate = (line) =>
+  /['"]Page\.navigate['"]/.test(line)
+  && /navigate-unjoined:\s*\S/.test(line)
+  && !/^\s*(\*|\/\/)/.test(line)
+  && !/\breload:.*Page\.navigate/.test(line)
+  && !isReloadCallSite(line);
+
+/**
+ * Every sanctioned unjoined `Page.navigate` in the tree, per file, with the
+ * reason — a map rather than a set for the same reason `notMirrored` is one:
+ * an exemption that carries no reason is an exemption nobody can review.
+ *
+ * The value is a COUNT and not a line number on purpose. A file:line pin goes
+ * stale on the next edit above it and gets updated mechanically, which is how a
+ * registry stops being read; a count survives a line move and changes only when
+ * an exemption is added or removed, which is exactly the reviewed act this
+ * table exists to force.
+ */
+const NAVIGATE_UNJOINED = {
+  'calcheck.mjs':      { count: 1, why: 'followed by a bare sleep, with no predicate to join' },
+  'feat4.mjs':         { count: 1, why: 'followed by a bare sleep, with no predicate to join' },
+  'hangcheck.mjs':     { count: 1, why: 'a bounded poll, so a hang is REPORTED rather than thrown' },
+  'notifycheck.mjs':   { count: 1, why: 'followed by a bare sleep, with no predicate to join' },
+  'pwatest.mjs':       { count: 1, why: 'one `goto` helper called both online at boot and with the network cut; a sleep plus a check names the failure either way, where a throw would not' },
+  'responsive.mjs':    { count: 1, why: 'followed by a bare sleep, with no predicate to join' },
+  'settingscheck.mjs': { count: 2, why: 'both followed by a bare sleep, with no predicate to join' },
+  'themecheck.mjs':    { count: 1, why: "a TRIPWIRE, not a working path: the same-document branch of `boot`'s conditional is dead today (both callers are cross-document) and would not be a fix if it fired, since its `waitUntil` predicate is already true in the document a fragment change leaves in place — it exists so a line-move cannot silently hand a fragment caller a marker that never clears" },
+  'timepicker.mjs':    { count: 2, why: 'one bare sleep, and one about:blank teardown a poll evaluated in the page cannot see' },
 };
 
 /**
@@ -322,23 +391,27 @@ const isReloadCallSite = (line) => {
  * `reloadAndWaitFor`'s own `reload:` argument, which is the join `chrome.mjs`
  * now provides for that case.
  *
+ * It forbids a free-standing `Page.navigate` on the same terms — the widened
+ * half of #269, and the same race: `Page.navigate` resolves before the new
+ * document commits, so a wait written as a separate statement can be answered
+ * by the document the navigation is destroying. A fragment-less target is
+ * always a cross-document load (HTML's fragment fast-path requires the TARGET
+ * url's fragment to be non-null), which is what makes the marker sound at
+ * essentially every site in the tree. The sites where it is NOT are in
+ * `NAVIGATE_UNJOINED` above, each carrying a `// navigate-unjoined: <reason>`
+ * marker at the call site so a reader THERE sees why.
+ *
  * That exemption is a SINGLE-LINE match, because this is a line-based guard
  * and stays one: it does not parse across a wrap. Splitting the callback —
  * `reload: () =>` on one line and `send('Page.reload', …)` on the next — makes
  * the guard misread it as a free-standing CDP reload, and drops the
  * "exemption is exercised" floor below to zero at the same time. Keep
- * `reload: () => send('Page.reload', …)` on one physical line.
- *
- * What it still does not see: a same-URL `Page.navigate`. It is the same race
- * in principle — a navigation to a fragment-less URL is a cross-document load
- * even from a fragment route, so the marker would work there too — and a
- * FRAGMENT-only navigate would be same-document, where the marker would
- * survive it and the wait would never return. Telling which of the 76
- * `Page.navigate` sends across 29 suites are which is a per-site audit, not a
- * text guard, and it is not this change — see `docs/decisions/testing.md`.
+ * `reload: () => send('Page.reload', …)` — and the `Page.navigate` form of it —
+ * on one physical line.
  */
-test('no suite issues a free-standing reload, in-page or CDP, outside reloadAndWaitFor', () => {
+test('no suite issues a free-standing reload or navigation outside reloadAndWaitFor', () => {
   const offenders = [];
+  const unjoined = {};
   let scanned = 0;
   let sanctioned = 0;
   for (const file of readdirSync(browserDir).filter((f) => f.endsWith('.mjs') && f !== 'chrome.mjs')) {
@@ -347,9 +420,23 @@ test('no suite issues a free-standing reload, in-page or CDP, outside reloadAndW
     src.split('\n').forEach((line, i) => {
       if (isReloadCallSite(line)) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
       if (line.includes('Page.reload') && /\breload:.*Page\.reload/.test(line)) sanctioned++;
+      if (isSanctionedNavigate(line)) unjoined[file] = (unjoined[file] ?? 0) + 1;
     });
   }
   assert.deepEqual(offenders, []);
+
+  // The registry. Adding an exemption has to be a reviewed act rather than a
+  // marker quietly appearing in a diff, and removing one has to update the
+  // table — so the counts found by the scan must equal the counts declared,
+  // in both directions.
+  assert.deepEqual(
+    unjoined,
+    Object.fromEntries(Object.entries(NAVIGATE_UNJOINED).map(([f, e]) => [f, e.count])),
+    'the sanctioned `navigate-unjoined:` sites no longer match NAVIGATE_UNJOINED',
+  );
+  for (const [file, { why }] of Object.entries(NAVIGATE_UNJOINED)) {
+    assert.ok(why && why.length > 20, `NAVIGATE_UNJOINED['${file}'] carries no usable reason`);
+  }
 
   // `deepEqual(offenders, [])` is satisfied by an EMPTY SCAN as readily as by a
   // clean tree, which is the shape of dead test this repo ships most — the same
@@ -388,9 +475,24 @@ test('no suite issues a free-standing reload, in-page or CDP, outside reloadAndW
     ["  await send('Page.reload',{},sessionId);", true, 'a free-standing CDP reload'],
     ["    reload: () => send('Page.reload', {}, sessionId),", false, "the helper's own argument"],
     ['  // a note mentioning Page.reload', false, 'a comment naming Page.reload'],
-    // This one pins the guard's SCOPE: a same-URL `Page.navigate` is the
-    // widened half of #269 and is deliberately not claimed here.
-    ["  await send('Page.navigate', { url: BASE }, sessionId);", false, 'a same-URL Page.navigate — out of scope'],
+    // The `Page.navigate` half, in BOTH directions. A table listing only the
+    // exemptions would be satisfied by a predicate that returned `false` for
+    // every navigation, which is the whole widening silently undone.
+    ["  await send('Page.navigate', { url: BASE }, sessionId);", true, 'a free-standing Page.navigate'],
+    ["    reload: () => send('Page.navigate', { url: BASE }, sessionId),", false, "the helper's own navigate argument"],
+    ["  await send('Page.navigate', { url: APP }, sessionId); // navigate-unjoined: a bare sleep follows",
+      false, 'an annotated opt-out'],
+    // An EMPTY reason must buy nothing, or the marker degenerates into a token
+    // to paste in — which is precisely the reviewed act the registry exists to
+    // force.
+    ["  await send('Page.navigate', { url: APP }, sessionId); // navigate-unjoined:",
+      true, 'an opt-out with no reason after it'],
+    ["  // a note mentioning send('Page.navigate', …)", false, 'a comment naming Page.navigate'],
+    // The shape that made the quoted-method match necessary, from
+    // `categorycheck.mjs`: prose inside a `/* … */` block, on a continuation
+    // line with no leading `*`, so the comment skip above cannot see it.
+    ['     block earlier in this suite is preceded by a `Page.navigate` that throws',
+      false, 'prose naming Page.navigate inside a block comment'],
     // And this one pins the asymmetry above: `location.reload(` offends even
     // inside a `reload:` callback, where `Page.reload` alone would not.
     ["  reload: () => ev('location.reload()')", true, 'location.reload( inside a reload: callback'],
@@ -399,6 +501,33 @@ test('no suite issues a free-standing reload, in-page or CDP, outside reloadAndW
     assert.equal(
       isReloadCallSite(line), offends,
       `the scan misreads ${what}, so it can no longer see what it exists to see: ${line.trim()}`,
+    );
+  }
+
+  // The registry's OWN predicate, which the table above does not exercise at
+  // all — every case there runs through `isReloadCallSite`, and one function
+  // proved cannot justify two. What these pin is that a marker only counts
+  // where it is doing work: pasted onto a `reload:` argument or into a
+  // comment it must buy nothing, or the count for that file rises, the
+  // `deepEqual` above fails, and the repair that suggests itself is to
+  // register a PHANTOM entry for a line that is not a call site and exempts
+  // nothing. The registry is this guard's whole review surface.
+  const sanctionedCases = [
+    ["  await send('Page.navigate', { url: APP }, sessionId); // navigate-unjoined: a bare sleep follows",
+      true, 'a real annotated call site'],
+    ["    reload: () => send('Page.navigate', { url: APP }, sessionId), // navigate-unjoined: bogus",
+      false, "a marker pasted onto reloadAndWaitFor's own argument"],
+    ["  // a note about send('Page.navigate', …) navigate-unjoined: bogus",
+      false, 'a marker pasted into a comment'],
+    ["  await send('Page.navigate', { url: APP }, sessionId); // navigate-unjoined:",
+      false, 'a marker with no reason after it'],
+    ["  await send('Page.navigate', { url: APP }, sessionId);",
+      false, 'an unmarked free-standing navigate — an offender, not an exemption'],
+  ];
+  for (const [line, sanctioned, what] of sanctionedCases) {
+    assert.equal(
+      isSanctionedNavigate(line), sanctioned,
+      `the registry miscounts ${what}, so it can acquire an entry that exempts nothing: ${line.trim()}`,
     );
   }
 

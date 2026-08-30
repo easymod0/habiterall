@@ -20,7 +20,9 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9256);
@@ -120,9 +122,10 @@ try {
   // goes through the same `api()`: the block would die at the boot wait
   // instead of proving anything about the write, which is what an earlier
   // version of this block did.
-  await send('Page.navigate', { url: APP }, sessionId);
-  await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
-    { what: 'the dashboard to load, before the guard tap' });
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard to load, before the guard tap',
+  });
 
   await ev(`(()=>{ delete AbortSignal.timeout; return true; })()`);
 
@@ -268,7 +271,7 @@ try {
   // on which of `AbortSignal.timeout` or the `AbortController` fallback is
   // bounding the request — both bound at the same 10s — so nothing past this
   // point would have cared even if the deletion had somehow persisted.
-  await send('Page.navigate', { url: APP }, sessionId);
+  await send('Page.navigate', { url: APP }, sessionId); // navigate-unjoined: a bounded poll, so a hang is REPORTED rather than thrown
   for (let i = 0; i < 80; i++) {
     if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
     await sleep(250);

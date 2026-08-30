@@ -13,7 +13,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9226);
 const profile=mkdtempSync(join(tmpdir(),'habaudit-'));
 const chrome=launchChrome(PORT, profile);
@@ -38,8 +38,10 @@ try{
 
   for(const [label,w,h] of [['phone 390x844',390,844],['desktop 1440x900',1440,900]]){
     await send('Emulation.setDeviceMetricsOverride',{width:w,height:h,deviceScaleFactor:1,mobile:w<500},sessionId);
-    await send('Page.navigate',{url:BASE},sessionId);
-    for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate',{url:BASE},sessionId),
+      what: 'the dashboard',
+    });
     const r=await ev(`(()=>{
       const de=document.documentElement;
       const checks=[...document.querySelectorAll('.check')];
@@ -70,8 +72,10 @@ try{
 
   // a11y + empty state
   await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false},sessionId);
-  await send('Page.navigate',{url:BASE},sessionId);
-  for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:BASE},sessionId),
+    what: 'the dashboard',
+  });
   const a=await ev(`(()=>({
     toastLive: document.getElementById('toast').getAttribute('aria-live'),
     imgsNoAlt: [...document.querySelectorAll('img')].filter(i=>!i.alt).length,
@@ -93,8 +97,10 @@ try{
     typeof a.docTitle === 'string' && a.docTitle.length > 0, String(a.docTitle));
 
   // --- new features ---
-  await send('Page.navigate',{url:BASE},sessionId);
-  for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:BASE},sessionId),
+    what: 'the dashboard',
+  });
   const f=await ev(`(()=>({
     toastLive: document.getElementById('toast').getAttribute('aria-live'),
     notesField: !!document.getElementById('day-notes'),

@@ -19,7 +19,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitForRow, waitUntil,
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome,
+  reloadAndWaitFor, reloadAndWaitForRow, waitUntil,
 } from './chrome.mjs';
 
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9236);
@@ -57,11 +58,10 @@ try {
     return r.result.value;
   };
   await send('Page.enable', {}, sessionId);
-  await send('Page.navigate', { url: BASE }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+    what: 'the dashboard',
+  });
 
   /** The measurable habit's id and today's date, from the API itself. */
   const target = await ev(`(async()=>{
@@ -395,7 +395,9 @@ try {
   // page on whatever they last touched, and the Target box is reached by a
   // real keystroke, which goes to the topmost modal rather than to whichever
   // element a script focused underneath one.
-  await send('Page.navigate', { url: BASE }, sessionId);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
 
   await openHabitEdit(target.name, String(target.target));
   await typeTarget('8,5');
@@ -504,7 +506,9 @@ try {
     await fetch('/api/habits/' + ${target.id}, { method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...h, target_value: 0.0000001 }) });})()`);
-  await send('Page.navigate', { url: BASE }, sessionId);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
 
   // 1e-7 is under what `formatAmount` can show, and it renders as its raw self
   // rather than as "0" precisely so this rule has something true to preserve.
@@ -527,7 +531,9 @@ try {
     await fetch('/api/habits/' + ${target.id}, { method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...h, target_value: ${target.target} }) });})()`);
-  await send('Page.navigate', { url: BASE }, sessionId);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
 
   /* ---------- a refusal nobody can see is not a refusal ----------
 
@@ -579,8 +585,9 @@ try {
     await fetch('/api/habits/' + ${target.id}, { method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...h, type: 'numerical' }) });})()`);
-  await send('Page.navigate', { url: BASE }, sessionId);
-  await rowReady(target.name);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
 
   /* ---------- the gate is VISIBILITY, and this is the only check that can
      tell the two readings apart ----------
@@ -626,8 +633,9 @@ try {
 
   // A clean page for the section below — the dialog above hid a container by
   // hand, and a reload is the cheapest way to put the DOM back.
-  await send('Page.navigate', { url: BASE }, sessionId);
-  await rowReady(target.name);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
 
   console.log('\n--- a comma account reads and writes the other way round ---');
   // #108's remaining half, followed to the row for the reason the rest of this
@@ -673,7 +681,9 @@ try {
     await fetch('/api/habits/' + ${target.id}, { method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...h, target_value: 8.5 }) });})()`);
-  await send('Page.navigate', { url: BASE }, sessionId);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
   await openHabitEdit(target.name);
   const shownTarget = await ev(`${targetBox}.value`);
   check('a comma account is shown the stored TARGET in its own spelling too',

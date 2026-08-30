@@ -13,7 +13,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT = devtoolsPort(9298);
 const profile=mkdtempSync(join(tmpdir(),'habtime-'));
 const chrome=launchChrome(PORT, profile);
@@ -37,14 +37,14 @@ try{
   await send('Page.enable',{},sessionId);
   await send('Network.enable',{},sessionId);
   await send('Network.setCacheDisabled',{cacheDisabled:true},sessionId);
-  await send('Page.navigate',{url:APP},sessionId); await sleep(1200);
+  await send('Page.navigate',{url:APP},sessionId); await sleep(1200); // navigate-unjoined: a bare sleep, with no predicate to join
   await ev(`(async()=>{
     for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
     for (const k of await caches.keys()) await caches.delete(k);
   })()`).catch(()=>{});
 
-  const load=async()=>{await send('Page.navigate',{url:APP},sessionId);
-    for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+  const load=async()=>{await reloadAndWaitFor(ev,`!!document.querySelector('#grid .habit-row')`,
+    {reload:()=>send('Page.navigate',{url:APP},sessionId),what:'the dashboard'});
     await sleep(500);};
 
   // Typing, as the field sees it: `input` while typing, `change` on leaving.
@@ -166,7 +166,7 @@ try{
   // dialog and a form submit, headless Chromium here can leave the renderer
   // unresponsive to the next evaluate, which reads as a hang with no failure.
   // A new document sidesteps it and costs one navigation.
-  await send('Page.navigate',{url:'about:blank'},sessionId); await sleep(400);
+  await send('Page.navigate',{url:'about:blank'},sessionId); await sleep(400); // navigate-unjoined: an about:blank teardown, so a poll evaluated in the page is the wrong instrument
   await load();
   await ev(`[...document.querySelectorAll('.habit-row .habit-name, .habit-row .name')]
     .find(e=>e.textContent.trim()===${JSON.stringify(NAME)})?.click()`);

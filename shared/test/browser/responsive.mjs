@@ -10,7 +10,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
+} from './chrome.mjs';
 import { seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
@@ -122,11 +124,10 @@ try {
       { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
 
     /* ---- dashboard ---- */
-    await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-      await sleep(200);
-    }
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard',
+    });
     await sleep(500);
 
     let probe = await ev(LAYOUT_PROBE);
@@ -281,7 +282,7 @@ try {
     .filter((v) => v !== 'auto')
     .reduce((max, v) => (Number(v) > Number(max) ? v : max));
 
-  await send('Page.navigate', { url: APP }, sessionId);
+  await send('Page.navigate', { url: APP }, sessionId); // navigate-unjoined: a bare sleep follows, with no predicate to join
   await sleep(800);
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
     headers:{'Content-Type':'application/json'},
@@ -302,11 +303,10 @@ try {
   for (const vp of VIEWPORTS) {
     await send('Emulation.setDeviceMetricsOverride',
       { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
-    await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-      await sleep(200);
-    }
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard',
+    });
     await sleep(500);
 
     const probe = await ev(LAYOUT_PROBE);
@@ -403,11 +403,11 @@ try {
   for (const vp of VIEWPORTS) {
     await send('Emulation.setDeviceMetricsOverride',
       { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
-    await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 80; i++) {
-      if (await ev(`document.querySelectorAll('#grid .category-section-header').length >= 3`).catch(() => 0)) break;
-      await sleep(200);
-    }
+    await reloadAndWaitFor(ev,
+      `document.querySelectorAll('#grid .category-section-header').length >= 3`, {
+        reload: () => send('Page.navigate', { url: APP }, sessionId),
+        what: 'the grouped dashboard',
+      });
     await sleep(400);
 
     const probe = await ev(LAYOUT_PROBE);
@@ -445,7 +445,6 @@ try {
   for (const vp of VIEWPORTS) {
     await send('Emulation.setDeviceMetricsOverride',
       { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile }, sessionId);
-    await send('Page.navigate', { url: APP }, sessionId);
     // The DASHBOARD having painted, not `#btn-new` merely being visible.
     // `auth-session.js` unhides that button the moment `/api/me` answers,
     // which is well before `dashboard.load()` has put anything in
@@ -461,8 +460,10 @@ try {
     // above waits on `#grid .category-section-header` and the detail block on
     // `#view-detail svg`, each being the narrower predicate for what IT then
     // measures. Pick the predicate for the block, not the file.
-    await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
-      { what: 'the dashboard to paint before the habit dialog is opened' });
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard to paint before the habit dialog is opened',
+    });
     await ev(`document.getElementById('btn-new').click()`);
     // `waitUntil` THROWS naming what it wanted. The hand-rolled loop this
     // replaces fell out of its `for` and measured regardless, so a timeout
@@ -546,13 +547,11 @@ try {
     // read as scaled down inside a 1440px desktop's narrower two-column card.
     // A spurious failure that looked exactly like the real defect the
     // `downscaled` check below is for.
-    await send('Page.navigate', { url: APP }, sessionId);
-    for (let i = 0; i < 100; i++) {
-      const ready = await ev(`!!document.querySelector('#grid .habit-row')
-        && document.getElementById('btn-compare').hidden === false`).catch(() => 0);
-      if (ready) break;
-      await sleep(200);
-    }
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')
+        && document.getElementById('btn-compare').hidden === false`, {
+          reload: () => send('Page.navigate', { url: APP }, sessionId),
+          what: 'the dashboard with the Compare button shown',
+        });
     await ev(`document.getElementById('btn-compare').click()`);
 
     // **The view unhidden AND the first card laid out**, not a card count.

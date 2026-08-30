@@ -203,10 +203,19 @@ export async function reloadAndWaitFor(ev, expression, opts = {}) {
  *
  * @param {(expression: string) => Promise<any>} ev  the caller's evaluator
  * @param {string} name the habit's name, as it appears in the row
- * @param {{timeoutMs?: number, intervalMs?: number, what?: string}} [opts] passed
- *   through to `waitUntil`. `what` OVERRIDES the sentence built from `name`,
- *   which is what every call site here uses it for — do not add a second
- *   `label` parameter for that.
+ * @param {{reload?: () => Promise<any>, timeoutMs?: number, intervalMs?: number,
+ *   what?: string}} [opts] forwarded to `reloadAndWaitFor`, which passes all
+ *   but `reload` on to `waitUntil`. `reload` is the exception and is named
+ *   here for that reason: it replaces the in-page `location.reload()` with a
+ *   caller-supplied navigation (`countcheck.mjs` hands in a CDP
+ *   `Page.navigate` at six sites) and is destructured out before `waitUntil`
+ *   ever sees it. `what` OVERRIDES the sentence built from `name`, which is
+ *   what every call site here uses it for — do not add a second `label`
+ *   parameter for that.
+ *
+ *   These suites are outside both tsconfigs, so this block is the only
+ *   contract there is; an option omitted from it is an option nobody can
+ *   discover without reading the implementation.
  */
 export async function reloadAndWaitForRow(ev, name, opts) {
   await reloadAndWaitFor(ev,

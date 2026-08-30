@@ -34,8 +34,9 @@ try{
   const{sessionId}=await send('Target.attachToTarget',{targetId,flatten:true});
   const ev=async e=>{const r=await send('Runtime.evaluate',{expression:e,awaitPromise:true,returnByValue:true},sessionId);
     if(r.exceptionDetails)throw new Error(r.exceptionDetails.exception?.description);return r.result.value;};
-  await send('Page.enable',{},sessionId);await send('Page.navigate',{url:BASE},sessionId);
-  for(let i=0;i<80;i++){if(await ev(`!!document.querySelector('#grid .habit-row')`).catch(()=>0))break;await sleep(250);}
+  await send('Page.enable',{},sessionId);
+  await reloadAndWaitFor(ev,`!!document.querySelector('#grid .habit-row')`,
+    {reload:()=>send('Page.navigate',{url:BASE},sessionId),what:'the dashboard'});
 
   // open the at_most habit
   const name=await ev(`(async()=>{const d=await (await fetch('/api/overview?days=7')).json();

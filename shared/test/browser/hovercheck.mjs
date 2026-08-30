@@ -8,7 +8,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9302);
 const profile = mkdtempSync(join(tmpdir(), 'habhover-'));
@@ -47,11 +47,10 @@ try {
 
   await send('Emulation.setDeviceMetricsOverride',
     { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
-  await send('Page.navigate', { url: APP }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
   await sleep(300);
   await ev(`navigator.serviceWorker?.getRegistrations?.().then(rs=>Promise.all(rs.map(r=>r.unregister()))).catch(()=>0)`);
   await ev(`caches?.keys?.().then(k=>Promise.all(k.map(x=>caches.delete(x)))).catch(()=>0)`);
@@ -62,11 +61,10 @@ try {
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({calendarZoom:'default'})}).then(r=>r.ok)`);
   await ev(`localStorage.removeItem('habiterall-settings')`).catch(() => {});
-  await send('Page.navigate', { url: APP }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(250);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
   await sleep(400);
 
   await ev(`document.querySelector('.habit-row .habit-name, .habit-row .name')?.click()`);

@@ -8,7 +8,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import {
+  closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor,
+} from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9306);
@@ -41,11 +43,10 @@ try {
     return r.result.value;
   };
   await send('Page.enable', {}, sessionId);
-  await send('Page.navigate', { url: APP }, sessionId);
-  for (let i = 0; i < 80; i++) {
-    if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
-    await sleep(200);
-  }
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard',
+  });
   await sleep(600);
 
   /** How many day cells across all rows show a recorded value. */

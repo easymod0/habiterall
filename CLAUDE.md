@@ -354,6 +354,16 @@ through the same join via a `reload:` callback, since the marker and a CDP
 call cannot be one evaluation. No suite issues either kind of reload on its
 own.
 
+**A `Page.navigate` is the same race and joins the same way** — it too resolves
+before the new document commits. The marker is sound only where the navigation
+is CROSS-document, and a target with no `#` fragment always is, which is every
+suite's `APP` / `BASE`; on a fragment-only navigation `window.__doomed` would
+survive and the wait would hang for its full 20s. The eleven sends left
+unjoined each carry a `// navigate-unjoined: <reason>` at the call site and a
+per-file count in `NAVIGATE_UNJOINED` (`shared/test/browser-runner.test.js`),
+which is what makes adding a twelfth a reviewed act. `docs/decisions/testing.md`
+has the sweep, the reasons and why `themecheck`'s `boot` decides at runtime.
+
 **The browser suites run in parallel, and a worker OWNS the instance it points
 at.** `fixtures.reset()` deletes every habit on its server, so the parallelism is
 the number of `--bases` and no flag can put two workers on one instance. The
