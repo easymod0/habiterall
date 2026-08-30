@@ -246,3 +246,66 @@ test('a checkout that cannot be had is named, and says which helper wanted it', 
   assert.ok(named.every((e) => e.pg_total === 0),
     'control: nothing is connected here, which is what a dead database looks like');
 });
+
+/* ---------- the guard that is now the injection guard too (#188) ---------- */
+
+/**
+ * `withUser` folds `BEGIN` and `set_config('app.user_id', ...)` into one
+ * multi-statement `query()` call, which only works with `userId`
+ * INTERPOLATED into the string rather than bound — so this guard is now the
+ * only thing standing between a crafted id and a second SQL statement, not
+ * merely a correctness check. This pins that it still does the job, for
+ * every shape of value that must not reach the template literal.
+ *
+ * `DEAD_URL`, not the module's default `DATABASE_URL` — deliberately. If the
+ * guard were ever loosened enough to let a value past it, the very next thing
+ * `withUser` does is take a real connection and run the interpolated string,
+ * and that must never be a thing this suite can do against a real Postgres.
+ * `checkout` fails fast and the same way against `DEAD_URL` regardless, which
+ * is what makes the MESSAGE the discriminator rather than "did it reject":
+ * the guard's own throw always reads `requires a valid user id`; a failed
+ * checkout never does. So a case that only rejects because the connection
+ * failed — the guard having waved it through — is caught by the message
+ * assertion, not by "it threw".
+ */
+test('withUser rejects every invalid id at the guard, and never runs fn', async () => {
+  const before = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = DEAD_URL;
+
+  const cases = [
+    ['a string that looks like SQL', '1; DROP TABLE users'],
+    ['a non-integer number', 1.5],
+    ['a numeric string', '1'],
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['a negative integer', -1],
+    ['zero', 0],
+    ['null', null],
+    ['undefined', undefined],
+    // The shape a coercive guard cannot catch: `Number(x)` reads `valueOf`,
+    // `${x}` reads `toString`, and here they disagree — `Number.isInteger`
+    // rejects this before either conversion runs, because it demands the JS
+    // type `number` and this is an object.
+    ['an object with mismatched valueOf/toString', {
+      valueOf: () => 1,
+      toString: () => "1'; DROP TABLE users; --",
+    }],
+    ['true', true],
+  ];
+
+  try {
+    const pool = await import(`../src/db/pool.js?v=${++stamp}`);
+    for (const [label, userId] of cases) {
+      let called = false;
+      await assert.rejects(
+        () => pool.withUser(userId, async () => { called = true; return 'unreachable'; }),
+        /requires a valid user id/,
+        `${label}: must be rejected by the guard itself, not by a failed checkout`
+      );
+      assert.equal(called, false, `${label}: fn must never run`);
+    }
+  } finally {
+    if (before === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = before;
+  }
+});
