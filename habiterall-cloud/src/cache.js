@@ -257,6 +257,38 @@ export function createMemo(compute, {
     for (const k of entries.keys()) if (k.startsWith(prefix)) entries.delete(k);
   };
 
+  /**
+   * Answer `key` without being allowed to reuse what is already here.
+   *
+   * **This is what makes the memo correct on more than one replica.** The
+   * invalidation above is one process clearing its own map: a write handled by
+   * replica A cannot reach the memo in replica B, so a client that writes to A
+   * and reads from B is served B's own pre-write answer for the length of the
+   * TTL — the exact regression `forget` exists to prevent, arriving through the
+   * load balancer instead of through a race. The client is the only party that
+   * knows it just wrote, so the client is what says so: see `freshnessHeader`
+   * in `shared/public/offline.js`.
+   *
+   * Deleting rather than reading past means the answer is also STORED, so the
+   * refetch that pays for the rebuild warms the memo for everything behind it.
+   *
+   * An in-flight placeholder goes too, and that costs the burst collapsing for
+   * these callers: two simultaneous fresh reads run two computations rather
+   * than sharing one. That is the right way round. A computation already
+   * running here may have opened its transaction before the write committed,
+   * and on a replica that never saw the write there is nothing that can tell —
+   * so joining it would hand back exactly the answer being refused. The caller
+   * already awaiting it still gets it; only INHERITANCE is refused, which is
+   * the same rule as the store-identity guard above.
+   *
+   * @param {string} key
+   * @param {any} [arg]
+   */
+  memo.fresh = (key, arg) => {
+    entries.delete(key);
+    return memo(key, arg);
+  };
+
   /** For tests and for a gauge; nothing in a route should need it. */
   memo.size = () => entries.size;
 

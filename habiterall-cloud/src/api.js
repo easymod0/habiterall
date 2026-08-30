@@ -804,6 +804,21 @@ api.get('/habits/:id/stats', route(async (req, res) => {
 const OVERVIEW_TTL_MS = 2_000;
 
 /**
+ * The header a client sends to say "I have just written; do not memo me."
+ *
+ * Sent by `freshnessHeader` in `shared/public/offline.js`, which spells this
+ * string as a literal exactly the way `deviceClockHeader` beside it spells
+ * `DEVICE_ZONE_HEADER` — the browser cannot import this module, and
+ * `test/cache.test.js` is what stops the two drifting.
+ *
+ * A hint, deliberately: unsigned, unvalidated, and safe to ignore. A client
+ * that sent it on every request would get, for itself alone, the behaviour
+ * every client had before this memo existed — under the same read limiter that
+ * bounded it then. That is why honouring it needs no argument about trust.
+ */
+const FRESH_HEADER = 'X-Habiterall-Fresh';
+
+/**
  * How many dashboards the memo may hold — its OWN number, not `MAX_CACHED`.
  *
  * `MAX_CACHED` is 10,000 and is justified by an entry costing ~100 bytes,
@@ -863,11 +878,21 @@ const MAX_OVERVIEW_PER_ACCOUNT = 8;
  *
  * Per process, and that is a statement about CORRECTNESS and not only about a
  * hit rate. "A write invalidates" is true inside one process: on two replicas,
- * a tap handled by A and a refetch balanced to B can be served B's own pre-tap
- * answer, which is the very regression the invalidation exists to prevent,
- * arriving through the load balancer. The TTL is what bounds it — two seconds,
- * once — and #192's version check is what removes it. Read the hit-rate metric
- * knowing it is 1/N; read this knowing the staleness window is per replica.
+ * a tap handled by A and a refetch balanced to B would be served B's own
+ * pre-tap answer, which is the very regression the invalidation exists to
+ * prevent, arriving through the load balancer.
+ *
+ * **`FRESH_HEADER` is what closes that, and it closes the half that matters:
+ * reading your own writes.** The client is the only party that knows it just
+ * wrote — no replica can be told cheaply, and asking a shared store on every
+ * read would cost a round trip on the path this memo exists to make cheaper —
+ * so the client says so and the route rebuilds. What is left is one account's
+ * OTHER devices: a tab that did not itself write can still be served a
+ * ≤ 2 s-old dashboard after a button press elsewhere, which is the staleness
+ * the TTL already advertises rather than a hole underneath it. #192's version
+ * check is what removes even that.
+ *
+ * Read the hit-rate metric knowing it is 1/N.
  */
 const overviewMemo = createMemo((arg) => buildOverview(arg), {
   ttlMs: OVERVIEW_TTL_MS,
@@ -902,7 +927,17 @@ api.get('/overview', route(async (req, res) => {
   // window; `summaryEnd` IS, even though it equals `end` on an unpaged
   // dashboard, because paging back separates them.
   const key = `${user}:${start}:${end}:${summaryEnd}:${archived}`;
-  res.json(await overviewMemo(key, { user, start, end, summaryEnd, archived }));
+  const arg = { user, start, end, summaryEnd, archived };
+
+  // The caller says it has just written, so it must not be handed an answer
+  // built before that write. Inside one process the invalidation middleware
+  // already guarantees this; on N it cannot, because the write may have been
+  // taken by a different replica. Stated to caches as well as acted on — the
+  // answer genuinely differs by this header.
+  res.vary(FRESH_HEADER);
+  const fresh = req.get(FRESH_HEADER) === '1';
+
+  res.json(fresh ? await overviewMemo.fresh(key, arg) : await overviewMemo(key, arg));
 }));
 
 /**

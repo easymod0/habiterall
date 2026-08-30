@@ -274,7 +274,7 @@ const sw = self;
 // No new FILE, so `SHELL` is unchanged — `/index.html`, `/shared/ui/amount.js`,
 // `/shared/ui/count-field.js` and `/shared/ui/habit-dialog.js` are all already
 // in it.
-const CACHE_VERSION = 'v27';
+const CACHE_VERSION = 'v28';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

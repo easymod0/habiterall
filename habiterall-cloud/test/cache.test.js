@@ -525,3 +525,79 @@ test('the /overview memo does not inherit a bound sized for 100-byte entries', (
   assert.ok(call.includes('perAccount: true'),
     'the overview memo must be reachable by forgetAccount, or a button press cannot clear it');
 });
+
+/* ---------- reading your own writes, on more than one replica ---------- */
+
+test('a fresh read is not served the memo, and its answer is stored', async () => {
+  let calls = 0;
+  const memo = createMemo(async () => `v${++calls}`, { ttlMs: 2_000 });
+
+  assert.equal(await memo('5:w'), 'v1');
+  assert.equal(await memo('5:w'), 'v1', 'control: an ordinary read inside the TTL is a hit');
+
+  // The cross-replica case in miniature. This process never saw the write, so
+  // `forget` never ran here and the entry above is still fresh by the clock —
+  // the CLIENT is the only party that knows, and this is it saying so.
+  assert.equal(await memo.fresh('5:w'), 'v2');
+  assert.equal(calls, 2, 'the fresh read rebuilt rather than being served the entry');
+
+  // ...and STORED, not merely bypassed: the refetch that paid for the rebuild
+  // warms the memo for everything behind it. A `fresh` that read past the map
+  // without writing to it would pass every assertion above this one.
+  assert.equal(await memo('5:w'), 'v2', 'the next ordinary reader gets the rebuilt answer');
+  assert.equal(calls, 2, 'and did not recompute to get it');
+});
+
+test('a fresh read does not join a computation that may predate the write', async () => {
+  let calls = 0;
+  const held = gate();
+  const memo = createMemo(async () => { calls++; return held.opened; }, { ttlMs: 2_000 });
+
+  // Started before this caller's write, and on a replica that never saw that
+  // write there is nothing here that can tell — so joining it would hand back
+  // exactly the pre-write answer being refused. `inflight` collapsing is the
+  // right thing to lose here, and losing it is a choice rather than an
+  // oversight.
+  const early = memo('6:w');
+  const fresh = memo.fresh('6:w');
+  held.release('computed before the write');
+
+  assert.equal(await early, 'computed before the write',
+    'the caller that started first still gets the answer it started for');
+  assert.equal(await fresh, 'computed before the write', 'and the fresh caller is answered too');
+
+  // After the awaits, not before: `compute` is reached through
+  // `Promise.resolve().then(...)`, so nothing has been called yet at the point
+  // `memo.fresh` returns and a count taken there is 0 whatever the code does.
+  assert.equal(calls, 2, 'the fresh read ran its own computation');
+});
+
+test('the client and the route spell the freshness header the same', () => {
+  // `shared/public/offline.js` is browser code with no build step and does not
+  // import this module, so the string is written twice on purpose — the same
+  // shape `deviceClockHeader` next to it already has for `DEVICE_ZONE_HEADER`.
+  // This is what stops the second copy drifting, and it is the whole reason
+  // spelling it as a literal there is safe.
+  const header = src('api.js').match(/const FRESH_HEADER = '([^']+)';/)?.[1];
+  assert.ok(header, 'control: FRESH_HEADER is declared in api.js');
+
+  const client = readFileSync(
+    fileURLToPath(new URL('../../shared/public/offline.js', import.meta.url)), 'utf8');
+  assert.ok(
+    client.includes(`'${header}': '1'`),
+    `shared/public/offline.js must send ${header}; a renamed header is a silently dead hint`
+  );
+});
+
+test('the /overview route honours the freshness header', () => {
+  // Pinning the DECISION is not pinning the WIRING. Everything above proves
+  // `memo.fresh` refuses a stale entry; none of it proves the route ever calls
+  // it, and "the route reads no header at all" is exactly what this looked
+  // like before. Source text, blind in the documented way, narrowed to the
+  // route so a comment elsewhere cannot satisfy it.
+  const route = region(src('api.js'), "api.get('/overview'", '}));');
+  assert.match(route, /req\.get\(FRESH_HEADER\)/, 'the route must read the header');
+  assert.match(route, /overviewMemo\.fresh\(/, 'and reach the bypass with it');
+  assert.match(route, /res\.vary\(FRESH_HEADER\)/,
+    'and say so to caches, since the answer genuinely differs by it');
+});

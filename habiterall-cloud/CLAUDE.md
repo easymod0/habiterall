@@ -351,11 +351,41 @@ presses a real signed ntfy button — and that the caller's day is in the key.
 
 **The TTL is two seconds, and per PROCESS is a statement about correctness and
 not only about a hit rate.** "A write invalidates" is true inside one process;
-on two replicas a tap handled by A and a refetch balanced to B can be served
+on two replicas a tap handled by A and a refetch balanced to B would be served
 B's own pre-tap answer — the very regression the invalidation exists to
-prevent, arriving through the load balancer. The TTL is what bounds it, and
-#192's version check is what removes it. So read a hit-rate metric knowing it
-is 1/N, and read this knowing the staleness window is per replica.
+prevent, arriving through the load balancer. Every piece of ordering care above
+(`res.end` over `finish`, the `finally` after the COMMIT, the store-identity
+guard) closes a window of microseconds inside one process, and none of it
+reaches a second one. So read a hit-rate metric knowing it is 1/N.
+
+**`X-Habiterall-Fresh` is what closes it, and the client is what sends it.**
+The client is the only party that knows it has just written: no replica can be
+told cheaply, and asking a shared store on every read would cost a round trip on
+the path the memo exists to remove five of. So `freshnessHeader`
+(`shared/public/offline.js`) sends the header on reads for three seconds after
+any write that got an ANSWER — status-unconditionally, exactly as the
+invalidation middleware is — and `/overview` answers it through
+`overviewMemo.fresh`, which deletes the entry and rebuilds. Three seconds
+because it must exceed the 2 s TTL: past the window, any entry predating that
+write has expired anyway, so "bypass while open" and "nothing stale can remain
+after" meet with a second to spare.
+
+It is a **hint, not a rule** — unsigned, unvalidated, safe to ignore. The worst
+a client sending it on every request achieves is the behaviour every client had
+before the memo existed, for itself alone, under the same read limiter. So it
+is not a mirror of anything: nothing offline depends on it, and being wrong
+about it costs a recomputation. `noteWrite` is called from both write paths,
+`api()` and `flush()`'s replay, because a replayed check-off is a write the
+dashboard must show and the outbox drains straight into a refresh.
+
+**What is left is one account's OTHER devices**, and that is the staleness the
+TTL already advertises rather than a hole under it: a tab that did not itself
+write can be served a ≤ 2 s-old dashboard after a button press elsewhere.
+#192's version check is what removes even that. It should be the version-ECHO
+shape — the write response carries the account's new version, the client sends
+it back, the memo entry records the version it was built at — and **not** a
+version read per request, which would put back the round trip this header
+exists to avoid.
 
 ## Which claim names the account
 

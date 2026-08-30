@@ -9,18 +9,23 @@
  * and drives it over HTTP, the way `healthz.integration.mjs` does and for the
  * same reason.
  *
- * The four things only this file can see:
+ * The five things only this file can see:
  *
  *  1. The memo is LIVE on the route — a change made out of band, behind the
  *     route's back, is not visible until the TTL has passed.
- *  2. A WRITE invalidates — the tap-then-refetch case, which is the one that
+ *  2. A client that says it has just WRITTEN is not served the memo. That is
+ *     the cross-replica case: `forget` is one process clearing its own map, so
+ *     a tap taken by replica A leaves B holding a pre-tap dashboard nothing on
+ *     B will clear, and B answers the refetch. An out-of-band `admin` write is
+ *     what stands in for a write this process never saw.
+ *  3. A WRITE invalidates — the tap-then-refetch case, which is the one that
  *     can actually regress and the one that would paint a user's own tap away.
- *  3. A write that never touches the `/api` ROUTER invalidates as well. The
+ *  4. A write that never touches the `/api` ROUTER invalidates as well. The
  *     first version of this invalidation was `api.use(...)` and nothing else,
  *     which is a rule about a router rather than about a write — and the ntfy
  *     button posts above that router while Discord's never reaches Express at
  *     all. Both are the same missing dashboard refresh.
- *  4. The CALLER'S DAY is in the key — two devices on one account either side
+ *  5. The CALLER'S DAY is in the key — two devices on one account either side
  *     of a date boundary send the same URL and must not share an answer.
  *
  * What it does NOT see, stated rather than left to be discovered: whether the
@@ -184,18 +189,28 @@ try {
   );
   const cookie = `habiterall.sid=${signed(SID, SECRET)}`;
 
-  /** @param {string} path @param {{zone?: string, method?: string, body?: any}} [o] */
-  const call = async (path, { zone = 'UTC', method = 'GET', body } = {}) => {
+  /**
+   * @param {string} path
+   * @param {{zone?: string, method?: string, body?: any, fresh?: boolean}} [o]
+   */
+  const call = async (path, { zone = 'UTC', method = 'GET', body, fresh } = {}) => {
     const res = await fetch(`${base}/api${path}`, {
       method,
       headers: {
         cookie,
         'X-Habiterall-Timezone': zone,
+        // What `freshnessHeader` (shared/public/offline.js) sends for the few
+        // seconds after this client wrote something.
+        ...(fresh ? { 'X-Habiterall-Fresh': '1' } : {}),
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    return { status: res.status, body: res.status === 204 ? null : await res.json() };
+    return {
+      status: res.status,
+      vary: res.headers.get('vary') ?? '',
+      body: res.status === 204 ? null : await res.json(),
+    };
   };
 
   const created = await call('/habits', {
@@ -231,6 +246,47 @@ try {
     /OVERVIEW_TTL_MS = 2_000/.test(
       await (await import('node:fs/promises'))
         .readFile(new URL('../src/api.js', import.meta.url), 'utf8')));
+
+  console.log('\n--- a client that just wrote is not served the memo ---');
+  // The CROSS-REPLICA case, and this is the only shape that can stand in for
+  // it with one process. The memo is per process and so is `forget`, so a tap
+  // taken by replica A leaves replica B holding a pre-tap dashboard that
+  // nothing on B will clear — and B answers the refetch. `admin` is what
+  // stands in for "a write this process never saw": it is not the app, so no
+  // middleware runs and nothing here is invalidated, which is exactly B's
+  // position after A took the write.
+  //
+  // So: warm the memo, change the account behind the route, and read twice —
+  // once as an ordinary client (still stale, which is the control and is
+  // CORRECT behaviour for the TTL) and once as a client saying it has just
+  // written (must rebuild). Against a route that ignores the header the second
+  // check fails while the first still passes.
+  await admin.query(`UPDATE habits SET name = 'Renamed for the fresh read' WHERE id = $1`,
+    [habitId]);
+
+  const stillCached = await call('/overview');
+  ck('control: an ordinary read is still served the memo',
+    stillCached.body.habits[0]?.name === 'Renamed behind the route',
+    stillCached.body.habits[0]?.name);
+
+  const freshRead = await call('/overview', { fresh: true });
+  ck('a read that says it has just written is rebuilt',
+    freshRead.body.habits[0]?.name === 'Renamed for the fresh read',
+    freshRead.body.habits[0]?.name);
+
+  // The rebuild is STORED, not merely bypassed: whoever pays for it warms the
+  // memo for everything behind it. A `fresh` that read past the map without
+  // writing to it would pass the check above and fail this one.
+  const afterFresh = await call('/overview');
+  ck('...and the rebuilt answer is what the next ordinary read gets',
+    afterFresh.body.habits[0]?.name === 'Renamed for the fresh read',
+    afterFresh.body.habits[0]?.name);
+
+  ck('the answer says it varies by the header',
+    /x-habiterall-fresh/i.test(freshRead.vary), freshRead.vary);
+
+  await admin.query(`UPDATE habits SET name = 'Memo probe' WHERE id = $1`, [habitId]);
+  await idle(TTL_MS + 200);
 
   console.log('\n--- a write invalidates: tap, then refetch ---');
   // The regression that matters. Warm the memo, tap a day through the API, and
