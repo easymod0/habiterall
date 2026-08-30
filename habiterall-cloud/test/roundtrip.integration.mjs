@@ -32,7 +32,7 @@ const { unzip } = await import('@habiterall/shared/unzip.js');
 const { parseSettings, portableSettings, LIMITS } =
   await import('@habiterall/shared/validate.js');
 const {
-  FIXTURE, snapshot, diff, checkAgainstFixture,
+  FIXTURE, FIXTURE_CATEGORIES, snapshot, diff, checkAgainstFixture,
   LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS, JSON_HABIT_FIELDS,
 } = await import('@habiterall/shared/test/roundtrip-fixture.mjs');
 
@@ -78,15 +78,20 @@ async function seed(userId) {
     // before any habit so the INSERT below has an id to write. Writing the
     // columns by hand is the cost of not going through a route, same as
     // every other field in this function's own header comment.
+    //
+    // `FIXTURE_CATEGORIES` carries each one's own colour and declared
+    // position now — see its own comment for why neither is a value a naive
+    // re-creation would produce, which is what made this section's earlier
+    // `'#3b82f6'` plus an auto-incrementing position unable to catch the CSV
+    // archive losing either on the way through Categories.csv.
     const categoryIds = new Map();
-    for (const name of new Set(FIXTURE.map((h) => h.category).filter(Boolean))) {
+    for (const cat of FIXTURE_CATEGORIES) {
       const { rows } = await db.query(
         `INSERT INTO categories (user_id, name, color, position)
-         VALUES ($1, $2, $3, COALESCE((SELECT MAX(position) + 1 FROM categories), 0))
-         RETURNING id`,
-        [userId, name, '#3b82f6']
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [userId, cat.name, cat.color, cat.position]
       );
-      categoryIds.set(name, rows[0].id);
+      categoryIds.set(cat.name, rows[0].id);
     }
 
     for (const [i, h] of FIXTURE.entries()) {
@@ -172,6 +177,12 @@ async function wipe(userId) {
     await db.query('DELETE FROM habits');
   });
 }
+
+// Hoisted so both the CSV section and the category-resolution section below
+// can use one definition.
+const categoriesOf = async (u) => withUser(u, (db) =>
+  db.query(`SELECT id, name, color, position FROM categories ORDER BY position, id`)
+    .then((r) => r.rows));
 
 /** The JSON backup payload the /export route builds. */
 const toJsonBackup = (habits) => ({
@@ -511,9 +522,6 @@ console.log('\n--- category resolution on import ---');
 
 await wipe(alice);
 await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
-const categoriesOf = async (u) => withUser(u, (db) =>
-  db.query(`SELECT id, name, color, position FROM categories ORDER BY position, id`)
-    .then((r) => r.rows));
 
 // Give the account's own "Health" a colour the file below does not have, the
 // same way a user would through the picker's manage list.
@@ -774,18 +782,27 @@ ck('Loop: every restored habit has icon === \'\', the format has nowhere to put 
 
 console.log('\n--- CSV archive (Habits.csv + Checkmarks.csv) ---');
 
+// `seeded` is the snapshot taken right after `seed(alice)`, before any of the
+// sections above overwrote the account's categories through their own
+// replace-mode restores — so `FIXTURE_CATEGORIES` (what `seed` actually wrote
+// into `categories`) is what this archive's own colours and positions have to
+// be built from, the same way `seeded` itself stands in for what `/export.csv`
+// would have served at that moment.
 const csvZip = buildCsvArchive(seeded, (id) =>
-  seeded.find((h) => h.id === id)?.entries ?? []);
+  seeded.find((h) => h.id === id)?.entries ?? [], FIXTURE_CATEGORIES);
 const members = unzip(csvZip);
 ck('the archive contains both CSVs',
   members.has('Habits.csv') && members.has('Checkmarks.csv'),
   [...members.keys()].join(', '));
+ck('and now Categories.csv too, since this account has categories',
+  members.has('Categories.csv'), [...members.keys()].join(', '));
 
 const meta = parseLoopHabitsCSV(members.get('Habits.csv').toString('utf8'));
 const csvHabits = parseLoopCheckmarksCSV(members.get('Checkmarks.csv').toString('utf8'), meta);
 
 await wipe(alice);
-const csvResult = await applyImport(alice, csvHabits, 'replace');
+const csvResult = await applyImport(
+  alice, csvHabits, 'replace', backupCategories(csvZip) ?? []);
 const afterCsv = snapshot(await read(alice), { fields: CSV_HABIT_FIELDS, notes: false });
 
 ck('CSV round-trip preserves habits and entries',
@@ -828,6 +845,64 @@ ck('CSV: the restored habits carry an icon KEY at all',
 ck('CSV: every restored habit has icon === \'\', the format has nowhere to put one',
   csvFull.every((h) => h.icon === ''),
   csvFull.map((h) => `${h.name}:${JSON.stringify(h.icon)}`).join(' '));
+
+// The property this step exists to add: `CSV_HABIT_FIELDS` only ever pinned
+// the per-habit ASSIGNMENT (which habit belongs to which named category); a
+// category's own colour and declared position ride on Categories.csv now, and
+// are checked here against `FIXTURE_CATEGORIES` — whose own comment says why
+// neither value is one a naive re-creation could produce by accident.
+const csvCategories = await categoriesOf(alice);
+for (const cat of FIXTURE_CATEGORIES) {
+  const restored = csvCategories.find((c) => c.name === cat.name);
+  ck(`CSV: "${cat.name}"'s colour survives the zip round trip`,
+    restored?.color === cat.color,
+    `expected ${cat.color} got ${JSON.stringify(restored)}`);
+  ck(`CSV: "${cat.name}"'s declared position survives the zip round trip`,
+    restored?.position === cat.position,
+    `expected ${cat.position} got ${JSON.stringify(restored)}`);
+}
+
+/* ---------- a zip merge never renames or recolours a category ---------- */
+
+console.log('\n--- category resolution on a zip import ---');
+
+await wipe(alice);
+await applyImport(alice, parseHabiterallJSON(jsonBackup), 'replace');
+
+// Give the account's own "Health" a colour a Categories.csv below does not
+// carry — same setup as the JSON version of this test above, now proving
+// decision 5 (docs/decisions/categories.md) holds through the zip path too,
+// not only the JSON one. `resolveOrCreateCategory` is the premise this whole
+// step's plan rests on: it must return the existing id rather than recolour
+// it, whichever format asked.
+const zipHealthBefore = (await categoriesOf(alice)).find((c) => c.name === 'Health');
+await withUser(alice, (db) => db.query(
+  `UPDATE categories SET color = $1 WHERE id = $2`, ['#654321', zipHealthBefore.id]));
+
+// A zip naming the same category, by the same folded name, in a different
+// colour, and adding a new habit under it.
+const healthMergeZip = buildCsvArchive(
+  [{ id: 1, name: 'Yoga', category: 'health' }], () => [],
+  [{ name: 'health', color: '#ff00ff', position: 0 }],
+);
+const zipMergeMembers = unzip(healthMergeZip);
+const zipMergeMeta = parseLoopHabitsCSV(zipMergeMembers.get('Habits.csv').toString('utf8'));
+const zipMergeHabits = parseLoopCheckmarksCSV(
+  zipMergeMembers.get('Checkmarks.csv').toString('utf8'), zipMergeMeta);
+const zipMergeResult = await applyImport(
+  alice, zipMergeHabits, 'merge', backupCategories(healthMergeZip) ?? []);
+const afterZipMerge = await categoriesOf(alice);
+
+ck('a zip merge does not recolour a category that already exists',
+  afterZipMerge.filter((c) => c.name === 'Health').length === 1 &&
+  afterZipMerge.find((c) => c.name === 'Health').color === '#654321',
+  JSON.stringify(afterZipMerge));
+ck('and the merge created the new habit',
+  zipMergeResult.habitsCreated === 1, JSON.stringify(zipMergeResult));
+
+const zipYoga = (await read(alice)).find((h) => h.name === 'Yoga');
+ck('and the new habit still resolves to the existing category, by folded name',
+  zipYoga.category_id === zipHealthBefore.id, JSON.stringify(zipYoga));
 
 /* ---------- tenancy: a restore stays in its own account ---------- */
 

@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { zip } from '../src/zip.js';
 import { unzip } from '../src/unzip.js';
 import {
-  buildHabitsCsv, buildCheckmarksCsv, buildCsvArchive, esc, uniqueNames, csvNumber,
+  buildHabitsCsv, buildCheckmarksCsv, buildCsvArchive, buildCategoriesCsv,
+  esc, uniqueNames, csvNumber,
 } from '../src/export-csv.js';
 import { parseLoopHabitsCSV, parseLoopCheckmarksCSV } from '../src/import.js';
 
@@ -264,6 +265,43 @@ test('buildCsvArchive contains both files', () => {
   assert.deepEqual([...members.keys()].sort(), ['Checkmarks.csv', 'Habits.csv']);
   assert.match(members.get('Habits.csv').toString(), /^Position,Name,/);
   assert.match(members.get('Checkmarks.csv').toString(), /^Date,Water,/);
+});
+
+/* ---------- Categories.csv ---------- */
+
+test('buildCsvArchive writes a Categories.csv carrying colour and position', () => {
+  // Neither the default colour (#3b82f6) nor sequential positions (0,1) —
+  // a fixture that happened to match what a category defaults to would pass
+  // even against code writing no file at all.
+  const categories = [
+    { name: 'Health', color: '#10b981', position: 5 },
+    { name: 'Work', color: '#f43f5e', position: 1 },
+  ];
+  const members = unzip(buildCsvArchive(HABITS, entriesFor, categories));
+  assert.deepEqual(
+    [...members.keys()].sort(), ['Categories.csv', 'Checkmarks.csv', 'Habits.csv']
+  );
+
+  const rows = members.get('Categories.csv').toString('utf8').trim().split('\n');
+  assert.equal(rows[0], 'Name,Color,Position');
+  assert.equal(rows[1], 'Health,#10b981,5');
+  assert.equal(rows[2], 'Work,#f43f5e,1');
+});
+
+test('an account with no categories produces the archive it produces today', () => {
+  const members = unzip(buildCsvArchive(HABITS, entriesFor, []));
+  assert.deepEqual([...members.keys()].sort(), ['Checkmarks.csv', 'Habits.csv']);
+});
+
+test('buildCategoriesCsv quotes a name needing it and writes an absent colour blank', () => {
+  // Repairing a missing/invalid colour is the READER's job (`backupCategories`,
+  // step 2) — the writer states exactly what it was given.
+  const csv = buildCategoriesCsv([
+    { name: 'Health, fitness', color: undefined, position: 0 },
+  ]);
+  const rows = csv.trim().split('\n');
+  assert.equal(rows[0], 'Name,Color,Position');
+  assert.equal(rows[1], '"Health, fitness",,0');
 });
 
 /* ---------- duplicate habit names ---------- */

@@ -264,7 +264,72 @@ export function backupSettings(buf) {
 }
 
 /**
- * The categories a habiterall JSON backup carries, if it is one.
+ * The repair tail every raw category list gets before it is handed back,
+ * regardless of which format supplied it: a nameless entry dropped (the same
+ * rule `parseCategory` throws on for a typed-in one — a backup that repairs
+ * everything else still has no honest name to give an empty entry, so it is
+ * dropped rather than invented), a name trimmed to `LIMITS.name`, a colour
+ * failing `COLOR_RE` replaced with the default, a non-integer position
+ * replaced by the index, and the list capped at `LIMITS.categories`.
+ *
+ * Both of `backupCategories`'s branches — the JSON backup and a zip's
+ * `Categories.csv` — call this rather than repeating it, so the two formats
+ * cannot repair one field differently from the other.
+ *
+ * @param {Array<{name?: any, color?: any, position?: any}>} raw
+ * @returns {Array<{name: string, color: string, position: number}>}
+ */
+function normalizeCategories(raw) {
+  return raw
+    .map((c) => ({
+      name: String(c.name ?? '').trim().slice(0, LIMITS.name),
+      // The same regex `normalizeColor` below already validates a habit's own
+      // colour with — a category's is never a Loop palette index, so
+      // `normalizeColor` itself is the wrong tool despite being right there.
+      color: COLOR_RE.test(c.color ?? '') ? c.color : '#3b82f6',
+      position: c.position,
+    }))
+    .filter((c) => c.name)
+    .slice(0, LIMITS.categories)
+    .map((c, i) => ({ ...c, position: Number.isInteger(c.position) ? c.position : i }));
+}
+
+/**
+ * `Categories.csv`'s own header — `Name,Color,Position`, exactly what
+ * `buildCategoriesCsv` (export-csv.js) writes — read into the same raw shape
+ * `backupCategories`'s JSON branch produces before `normalizeCategories`
+ * repairs either. Matched case-insensitively by column NAME rather than
+ * position, the way `parseLoopHabitsCSV` reads its own header, so a reordered
+ * or partially-absent column degrades rather than misreads.
+ *
+ * @param {string} text
+ * @returns {Array<{name: string, color: string, position: number}>}
+ */
+function parseCategoriesCsvRows(text) {
+  const rows = parseCSV(text);
+  if (rows.length < 1) return [];
+
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const cName = header.indexOf('name');
+  if (cName === -1) return [];
+  const cColor = header.indexOf('color');
+  const cPosition = header.indexOf('position');
+
+  return rows.slice(1).map((row) => ({
+    name: row[cName] ?? '',
+    color: cColor === -1 ? '' : (row[cColor] ?? ''),
+    // A blank or junk cell becomes NaN, which `normalizeCategories`'s own
+    // `Number.isInteger` check already treats as "no position" — the same
+    // outcome an absent field gets in the JSON branch.
+    position: cPosition === -1 ? undefined : Number(row[cPosition] ?? ''),
+  }));
+}
+
+/**
+ * The categories a habiterall backup carries, if it names any — from the
+ * JSON format's own `categories` array, or from a zip's `Categories.csv`
+ * (`buildCsvArchive`, export-csv.js) alongside `Habits.csv` and
+ * `Checkmarks.csv`.
  *
  * Same shape and guards as `backupSettings` beside it, and the same reason to
  * be separate from `parseHabiterallJSON`'s result rather than a field on it:
@@ -273,8 +338,11 @@ export function backupSettings(buf) {
  * single habit is written, so a habit naming a category by NAME (see
  * `normaliseImportedHabit` below) has something to resolve against.
  *
- * Returns `null` for every other format. Neither Loop format has anywhere to
- * put a category — habiterall's own is the only backup that carries one.
+ * Returns `null` for every other format, and for a zip carrying no
+ * `Categories.csv` — a Loop-produced zip never has one, and that member is
+ * optional on our own (`buildCsvArchive` omits it for an account with no
+ * categories), so this must stay exactly as inert on either as it always was.
+ * Neither Loop `.db` nor Loop's own CSV pair has anywhere to put a category.
  *
  * Capped at `LIMITS.categories`, the same ceiling `POST /categories` enforces,
  * and non-objects are dropped the way `parseHabiterallJSON` filters its own
@@ -285,6 +353,31 @@ export function backupSettings(buf) {
  */
 export function backupCategories(buf) {
   if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
+
+  if (buf.length >= 4 && buf.toString('latin1', 0, 4) === 'PK\x03\x04') {
+    // Sniffed the same 4 bytes `parseUpload` sniffs. Any failure to actually
+    // read it as a zip is reported by `parseUpload` itself when the real
+    // import runs — this reader only ever answers `null` on a doubt, never
+    // throws.
+    let files;
+    try {
+      files = unzip(buf);
+    } catch {
+      return null;
+    }
+
+    const find = (suffix) => {
+      for (const [name, contents] of files) {
+        if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
+      }
+      return null;
+    };
+
+    const categoriesCsv = find('categories.csv');
+    if (categoriesCsv === null) return null;   // a Loop zip, or one of ours with none
+
+    return normalizeCategories(parseCategoriesCsvRows(categoriesCsv));
+  }
 
   const head = buf.toString('utf8').replace(/^﻿/, '').trimStart();
   if (!head.startsWith('{')) return null;      // a bare habits array, or not JSON
@@ -299,23 +392,9 @@ export function backupCategories(buf) {
   const categories = data?.categories;
   if (!Array.isArray(categories)) return null;
 
-  // A nameless category is nothing at all, the same rule `parseCategory`
-  // throws on for a typed-in one — a backup that repairs everything else
-  // still has no honest name to give an empty entry, so it is dropped rather
-  // than invented.
-  return categories
-    .filter((c) => c && typeof c === 'object' && !Array.isArray(c))
-    .map((c) => ({
-      name: String(c.name ?? '').trim().slice(0, LIMITS.name),
-      // The same regex `normalizeColor` below already validates a habit's own
-      // colour with — a category's is never a Loop palette index, so
-      // `normalizeColor` itself is the wrong tool despite being right there.
-      color: COLOR_RE.test(c.color ?? '') ? c.color : '#3b82f6',
-      position: c.position,
-    }))
-    .filter((c) => c.name)
-    .slice(0, LIMITS.categories)
-    .map((c, i) => ({ ...c, position: Number.isInteger(c.position) ? c.position : i }));
+  return normalizeCategories(
+    categories.filter((c) => c && typeof c === 'object' && !Array.isArray(c))
+  );
 }
 
 /* ---------- Loop .db backup ---------- */

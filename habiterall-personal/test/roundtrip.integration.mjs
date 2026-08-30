@@ -16,12 +16,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  FIXTURE, snapshot, diff, checkAgainstFixture,
+  FIXTURE, FIXTURE_CATEGORIES, snapshot, diff, checkAgainstFixture,
   LOOP_HABIT_FIELDS, LOOP_DB_HABIT_FIELDS, CSV_HABIT_FIELDS,
 } from '@habiterall/shared/test/roundtrip-fixture.mjs';
 // The clamp import must honour is the one the API enforces, so the test asks
 // the same table rather than restating a number that could drift from it.
 import { LIMITS } from '@habiterall/shared/validate.js';
+// Used only to hand-build a zip carrying a `Categories.csv` for the merge-rule
+// test below — the real export route is what's under test everywhere else.
+import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 
 let fails = 0;
 const ck = (label, cond, extra = '') => {
@@ -63,15 +66,29 @@ async function seed() {
   // API takes `category_id` — the same shape `applyImport` resolves against a
   // file's categories. Created here, once per distinct name, before any habit
   // so `POST /api/habits` below has an id to send.
+  //
+  // `FIXTURE_CATEGORIES` carries each one's own colour and a declared
+  // position — see its own comment for why neither is the default. `POST
+  // /categories` only ever appends, so the declared order is applied
+  // afterwards through `/categories/reorder`, the same route the picker's
+  // own manage list uses.
   const categoryIds = new Map();
-  for (const name of new Set(FIXTURE.map((h) => h.category).filter(Boolean))) {
+  for (const cat of FIXTURE_CATEGORIES) {
     const created = await (await api('/api/categories', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name: cat.name, color: cat.color }),
     })).json();
-    categoryIds.set(name, created.id);
+    categoryIds.set(cat.name, created.id);
   }
+  const declaredOrder = [...FIXTURE_CATEGORIES]
+    .sort((a, b) => a.position - b.position)
+    .map((cat) => categoryIds.get(cat.name));
+  await api('/api/categories/reorder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order: declaredOrder }),
+  });
 
   // The database is a fresh temp file, so there is nothing to clear first.
   for (const h of FIXTURE) {
@@ -124,6 +141,10 @@ async function restore(buffer, mode = 'replace') {
   if (!res.ok) throw new Error(`import -> ${res.status} ${text}`);
   return JSON.parse(text);
 }
+
+// Hoisted so both the CSV section and the category-resolution section below
+// can use one definition.
+const getCategories = async () => (await (await api('/api/categories')).json());
 
 await seed();
 
@@ -344,6 +365,8 @@ const members = unzip(csvZip);
 ck('the archive contains both CSVs',
   members.has('Habits.csv') && members.has('Checkmarks.csv'),
   [...members.keys()].join(', '));
+ck('and now Categories.csv too, since this account has categories',
+  members.has('Categories.csv'), [...members.keys()].join(', '));
 
 const csvResult = await restore(csvZip);
 const afterCsv = await current({ fields: CSV_HABIT_FIELDS, notes: false });
@@ -407,6 +430,61 @@ ck('CSV: the restored habits carry an icon KEY at all',
 ck('CSV: every restored habit has icon === \'\', the format has nowhere to put one',
   afterCsvIcons.every((h) => h.icon === ''),
   afterCsvIcons.map((h) => `${h.name}:${JSON.stringify(h.icon)}`).join(' '));
+
+// The property this step exists to add: `CSV_HABIT_FIELDS` only ever pinned
+// the per-habit ASSIGNMENT (which habit belongs to which named category); a
+// category's own colour and declared position ride on Categories.csv now, and
+// are checked here against FIXTURE_CATEGORIES — whose own comment says why
+// neither value is one a naive re-creation could produce by accident.
+const csvCategories = await getCategories();
+for (const cat of FIXTURE_CATEGORIES) {
+  const restored = csvCategories.find((c) => c.name === cat.name);
+  ck(`CSV: "${cat.name}"'s colour survives the zip round trip`,
+    restored?.color === cat.color,
+    `expected ${cat.color} got ${JSON.stringify(restored)}`);
+  ck(`CSV: "${cat.name}"'s declared position survives the zip round trip`,
+    restored?.position === cat.position,
+    `expected ${cat.position} got ${JSON.stringify(restored)}`);
+}
+
+/* ---------- a zip merge never renames or recolours a category ---------- */
+
+console.log('\n--- category resolution on a zip import ---');
+
+await restore(jsonBackup, 'replace');
+
+// Give the account's own "Health" a colour a Categories.csv below does not
+// carry — same setup as the JSON version of this test further down, now
+// proving decision 5 (docs/decisions/categories.md) holds through the zip
+// path too, not only the JSON one. `resolveOrCreateCategory` is the premise
+// this whole step's plan rests on: it must return the existing id rather
+// than recolour it, whichever format asked.
+const zipHealthBefore = (await getCategories()).find((c) => c.name === 'Health');
+await api(`/api/categories/${zipHealthBefore.id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Health', color: '#654321' }),
+});
+
+// A zip naming the same category, by the same folded name, in a different
+// colour, and adding a new habit under it.
+const healthMergeZip = buildCsvArchive(
+  [{ id: 1, name: 'Yoga', category: 'health' }], () => [],
+  [{ name: 'health', color: '#ff00ff', position: 0 }]
+);
+await restore(healthMergeZip, 'merge');
+const afterZipMerge = await getCategories();
+
+ck('a zip merge does not recolour a category that already exists',
+  afterZipMerge.filter((c) => c.name === 'Health').length === 1 &&
+  afterZipMerge.find((c) => c.name === 'Health').color === '#654321',
+  JSON.stringify(afterZipMerge));
+
+const yogaFromZip = (await (await api('/api/habits')).json()).find((h) => h.name === 'Yoga');
+ck('and the new habit still resolves to the existing category, by folded name',
+  yogaFromZip.category_id === zipHealthBefore.id, JSON.stringify(yogaFromZip));
+
+await restore(jsonBackup, 'replace');
 
 /* ---------- a merge adds, and never deletes an answer ---------- */
 
@@ -846,7 +924,6 @@ ck('a name past the clamp is created once and merged into thereafter',
 console.log('\n--- category resolution on import ---');
 
 await restore(jsonBackup, 'replace');
-const getCategories = async () => (await (await api('/api/categories')).json());
 
 // Give the account's own "Health" a colour the file below does not have, the
 // same way a user would through the picker's manage list.

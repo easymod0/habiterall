@@ -1162,6 +1162,52 @@ test('backupCategories is capped at LIMITS.categories, the same ceiling POST /ca
   assert.equal(backupCategories(buf).length, LIMITS.categories);
 });
 
+/* ---------- categories in a zip's Categories.csv ---------- */
+
+test('backupCategories reads Categories.csv out of a zip', () => {
+  // Non-default colours and non-sequential positions — a fixture matching
+  // what a category defaults to would pass even against code that read
+  // nothing at all.
+  const categories = [
+    { name: 'Health', color: '#10b981', position: 5 },
+    { name: 'Work', color: '#f43f5e', position: 1 },
+  ];
+  const habits = [{ id: 1, name: 'Meditate', category: '' }];
+  const buf = buildCsvArchive(habits, () => [], categories);
+  assert.deepEqual(backupCategories(buf), categories);
+});
+
+test('a zip without a Categories.csv reads null, exactly as today', () => {
+  const habits = [{ id: 1, name: 'Meditate', category: '' }];
+  const buf = buildCsvArchive(habits, () => [], []);
+  assert.equal(backupCategories(buf), null);
+});
+
+test('a Categories.csv row is repaired the same way a JSON one is', () => {
+  // A nameless row, a junk colour and a non-integer position, in one file —
+  // the mutation for this test is making the zip branch skip the repair tail
+  // and return the raw rows, which fails every assertion below.
+  const csv = 'Name,Color,Position\n,#ffffff,0\nHealth,not-a-colour,oops\n';
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: csv },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, 1, JSON.stringify(cats));               // the nameless row is dropped
+  assert.equal(cats[0].name, 'Health');
+  assert.match(cats[0].color, /^#[0-9a-f]{6}$/i, 'an invalid colour repairs to the default');
+  assert.equal(cats[0].position, 0, 'a non-integer position is replaced by its index');
+});
+
+test('a zip with only PK\'s magic bytes reads null rather than throwing', () => {
+  // Not a complete zip at all — no end-of-central-directory record — so
+  // `unzip` itself throws. `backupCategories` only ever answers a doubt with
+  // `null`; the real upload is still rejected, by `parseUpload`.
+  const truncated = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]);
+  assert.equal(backupCategories(truncated), null);
+});
+
 /* ---------- repairing an imported habit ---------- */
 
 const { normaliseImportedHabit } = await import('../src/import.js');

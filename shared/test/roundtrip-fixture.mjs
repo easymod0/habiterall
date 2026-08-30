@@ -184,6 +184,27 @@ export const FIXTURE = [
   },
 ];
 
+/**
+ * The categories the fixture's habits belong to, with their own colour and
+ * declared position — a zip's `Categories.csv` (export-csv.js) now carries
+ * both, so this is what gives the CSV round trip something to lose.
+ *
+ * Neither the default colour (`DEFAULT_COLOR`, `#3b82f6`) nor the order a
+ * naive re-creation would produce by accident: `resolveOrCreateCategory`
+ * meets Health first (Meditate is declared before Gym above) and Fitness
+ * second, so code with nowhere to read a position back from — or code that
+ * silently stopped reading `Categories.csv` at all — would still recreate
+ * them in THAT order, at positions 0 and 1. Declaring Fitness at 0 and
+ * Health at 1 is what an assertion built on these values cannot pass by
+ * accident; per the root CLAUDE.md, setting both back to `#3b82f6` at
+ * positions 0 and 1 is the mutation that proves it — the fidelity assertion
+ * must stop being able to fail, on ITS OWN, with nothing else changed.
+ */
+export const FIXTURE_CATEGORIES = [
+  { name: 'Health', color: '#10b981', position: 1 },
+  { name: 'Fitness', color: '#f43f5e', position: 0 },
+];
+
 /** Normalized comparison key for one habit's entries. */
 export function entryKey(e) {
   const status = e.status === 'skip' ? 'skip' : '';
@@ -257,19 +278,22 @@ export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
  * `category` in this list, and in `JSON_HABIT_FIELDS` below, pins only the
  * ASSIGNMENT — which habit belongs to which NAMED category — because a
  * `Category` column is a string, not a foreign key, and a habit's own row is
- * the only place the CSV pair carries one. The archive has no second file for
- * categories themselves, so a CSV round trip cannot see either of a
- * category's other two properties: every restored category is invented fresh
- * at `DEFAULT_COLOR` (a colour the file never wrote down), in whatever order
- * `resolveOrCreateCategory` first meets its name (a position the file never
- * wrote down either) — so exporting an account with Health `#10b981` and
- * Fitness `#f59e0b` and restoring that CSV in replace mode brings both back
- * `#3b82f6`, in a different order, still correctly grouping the same habits
- * under Health and Fitness. `'category'` pinning the assignment says nothing
- * about that loss, because colour and position are not FIELDS on a habit for
- * this list to watch — see `docs/decisions/categories.md`'s per-format
- * fidelity rule for the full statement, and the JSON backup below for the one
- * format that carries a category's colour and declared position too.
+ * the only place the CSV pair carries one. A category's own colour and
+ * position are not fields ON a habit, so this list was never where they
+ * belonged, and for a while there was nowhere else to watch them either: the
+ * archive had no second file for categories themselves, so every restored
+ * category was invented fresh at `DEFAULT_COLOR`, in whatever order
+ * `resolveOrCreateCategory` first met its name.
+ *
+ * `Categories.csv` (export-csv.js, issue #257) closed that: the archive now
+ * carries a category's colour and declared position beside `Habits.csv` and
+ * `Checkmarks.csv`, and a CSV round trip preserves both. `FIXTURE_CATEGORIES`
+ * above, not this list, is what the round-trip suites check it against — a
+ * colour off the default and a position order a naive re-creation would not
+ * produce by accident, per its own comment. See
+ * `docs/decisions/categories.md`'s per-format fidelity rule for the full
+ * statement, and the JSON backup below for the other format that has always
+ * carried a category's colour and declared position.
  */
 export const CSV_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'color', 'category'];
 

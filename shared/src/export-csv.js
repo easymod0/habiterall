@@ -194,20 +194,50 @@ export function buildCheckmarksCsv(habits, entriesFor) {
 }
 
 /**
+ * A category's colour and position, alongside the JSON backup — see
+ * `backupCategories` in `import.js`, which reads this back into the same
+ * `{name, color, position}` shape. Not one of Loop's own files: Loop has
+ * nowhere to put a category, which is why this stays a third, optional
+ * member rather than a column on `Habits.csv` (that file already carries the
+ * category a habit wears, by name; this is the categories themselves).
+ *
+ * @param {Array} categories
+ */
+export function buildCategoriesCsv(categories) {
+  const header = ['Name', 'Color', 'Position'];
+  const lines = [header.join(',')];
+  categories.forEach((c) => {
+    lines.push([esc(c.name), esc(c.color ?? ''), csvNumber(c.position ?? 0)].join(','));
+  });
+  return lines.join('\n') + '\n';
+}
+
+/**
  * The full archive.
+ *
+ * `Categories.csv` is written only when there is at least one category, so an
+ * account with none produces the exact two-member archive it always has —
+ * that is what keeps a Loop-produced zip, which never has this file, inert on
+ * the way back in (`backupCategories` returns `null` for a zip with no
+ * member of that name).
  *
  * @param {Array} habits
  * @param {(habitId: any) => Array} entriesFor
+ * @param {Array} [categories]
  * @param {Date} [modified]
  * @returns {Buffer}
  */
-export function buildCsvArchive(habits, entriesFor, modified = new Date()) {
+export function buildCsvArchive(habits, entriesFor, categories = [], modified = new Date()) {
   // Disambiguate ONCE, here, so both files agree on the same names. Doing it
   // inside each builder separately would be enough for Habits.csv and
   // Checkmarks.csv to disagree about which "Run" is which.
   const named = uniqueNames(habits);
-  return zip([
+  const files = [
     { name: 'Habits.csv', data: buildHabitsCsv(named) },
     { name: 'Checkmarks.csv', data: buildCheckmarksCsv(named, entriesFor) },
-  ], modified);
+  ];
+  if (categories.length > 0) {
+    files.push({ name: 'Categories.csv', data: buildCategoriesCsv(categories) });
+  }
+  return zip(files, modified);
 }

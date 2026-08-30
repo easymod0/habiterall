@@ -991,13 +991,12 @@ api.get('/export.csv', (req, res) => {
   // `buildHabitsCsv` reads `h.category` by NAME, the same as `/export`
   // above — a raw habit row only carries `category_id`, which means nothing
   // once restored elsewhere (or nowhere, on a Loop round trip).
-  const categoryNames = new Map(
-    /** @type {any[]} */ (q.allCategories.all()).map((c) => [c.id, c.name])
-  );
+  const categories = /** @type {any[]} */ (q.allCategories.all());
+  const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
   const withCategory = habits.map((h) => ({
     ...h, category: categoryNames.get(h.category_id) ?? '',
   }));
-  const body = buildCsvArchive(withCategory, (id) => q.entriesFor.all(id));
+  const body = buildCsvArchive(withCategory, (id) => q.entriesFor.all(id), categories);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',

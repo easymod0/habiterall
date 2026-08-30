@@ -53,42 +53,54 @@ freshly grouped dashboard is not six identical-looking headers, and a chip
 only creates its category the moment it is tapped.
 
 **A category's own colour and declared position are carried faithfully by
-exactly one backup format, and that is a per-format fidelity gap like every
-other one this project already keeps a list for — not a bug in the other
-two.** A habit's `category` field is a NAME, and the three formats disagree
-about whether there is anywhere else to put the rest of what a category is:
+two of the three backup formats (issue #257), and Loop's `.db` staying at
+❌ is a per-format fidelity gap like every other one this project already
+keeps a list for — not a bug.** A habit's `category` field is a NAME, and the
+three formats still disagree about whether there is anywhere else to put the
+rest of what a category is:
 
 - **Loop's `.db` carries no concept of a category at all.** There is no
   column and no table for one, so a `.db` round trip correctly returns every
   habit to uncategorised — the same asymmetry `icon` and `at_most_unlogged`
   already have against this format, for the same reason (nowhere to write
   it down).
-- **The CSV pair carries the ASSIGNMENT only.** `buildHabitsCsv` writes a
-  `Category` column of names, and `parseLoopHabitsCSV` reads it back — so a
-  habit's grouping survives — but the archive has no second file for
-  categories themselves, so `backupCategories` answers `null` for a zip and
-  neither colour nor position travels with it. Both import routes pass `[]`
-  in that case, and `resolveOrCreateCategory` invents each restored category
-  fresh: `DEFAULT_COLOR`, and whatever position it happens to be met in while
-  habits are being restored. Export an account with Health `#10b981` and
-  Fitness `#f59e0b`, restore that zip in replace mode, and both come back
-  `#3b82f6` in a different order — the section headers survive as headers,
-  correctly grouping the same habits, but distinguishable no longer.
-- **The JSON backup is the only format that carries a category's colour and
-  its declared `position`,** as a `categories` array alongside `habits` — so
-  "a replace applies the file's own list, including each category's declared
-  position" is a claim about THIS format and not the other two. A replace
-  restore of a JSON backup is the one round trip where Health and Fitness
-  come back the colours and the order they were exported with.
+- **The CSV pair's `Habits.csv` still carries the ASSIGNMENT only** —
+  `buildHabitsCsv` writes a `Category` column of names, and
+  `parseLoopHabitsCSV` reads it back, so a habit's grouping survives — but the
+  zip archive now carries a category's colour and declared `position` too, in
+  a third, OPTIONAL member: `Categories.csv` (`buildCategoriesCsv`,
+  `export-csv.js`), written only when the account has at least one category.
+  `backupCategories` (`import.js`) reads it back through the same
+  `normalizeCategories` repair tail the JSON branch already used, so the two
+  formats cannot repair a nameless entry, a bad colour or a non-integer
+  position differently from each other. A zip with no `Categories.csv` — a
+  Loop-produced one, or one of our own from an account with no categories —
+  still answers `null`, exactly as before #257, so `resolveOrCreateCategory`
+  still invents each restored category fresh at `DEFAULT_COLOR` and
+  meeting-order position in that case, and a Loop zip imports exactly as it
+  always has. Export an account with Health `#10b981` and Fitness `#f59e0b`
+  and restore that zip in replace mode: both now come back the colours and
+  the positions they were exported with, the same as the JSON backup below.
+- **The JSON backup carries a category's colour and its declared `position`
+  too,** as a `categories` array alongside `habits` — the format this
+  capability first shipped on, and still the one with no OPTIONAL member to
+  reason about: a JSON backup either has a `categories` array or it does not.
 
-This is a documentation gap, not a behaviour one — `Habits.csv` is Loop-shaped
-on purpose (see the `.db`/CSV split above and `shared/CLAUDE.md`'s import
-rules), and widening it with a colour column is a bigger cost than the loss.
-What was wrong is that the CSV gap went unwritten while the code shipped
-claiming a category "restores" without saying which of its three properties
-that verb covers for which format. `shared/test/roundtrip-fixture.mjs`'s
-`CSV_HABIT_FIELDS` comment states the same rule where the round-trip suites
-that would otherwise let it drift can see it.
+**`Habits.csv` itself was not widened with a colour or position column, and
+that is not an oversight.** It is Loop-shaped on purpose (see the `.db`/CSV
+split above and `shared/CLAUDE.md`'s import rules) — the `Category` column
+already in it is exactly what Loop's own CSV export carries for a habit, and
+every column added past that is one Loop's own importer has no use for.
+Adding two more there would have made our CSV progressively less something
+Loop could read, for a property that belongs to the category, not to each of
+its habits' rows. `Categories.csv` is a new, separate file for that reason,
+and it stays OPTIONAL rather than a second required member for the same
+reason `Checkmarks.csv` is the only file the zip reader has ever required: a
+Loop zip has no such file and must stay inert, so the archive's fidelity gap
+closes without moving what a "valid" archive is allowed to omit.
+`shared/test/roundtrip-fixture.mjs`'s `CSV_HABIT_FIELDS` comment and
+`FIXTURE_CATEGORIES` beside it state the same rule where the round-trip
+suites that would otherwise let it drift can see it.
 
 **The duplicate-name check is a route-level `foldCategoryName`, with the DB
 constraints kept only as backstops.** SQLite's `NOCASE` collation folds ASCII

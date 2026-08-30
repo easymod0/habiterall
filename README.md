@@ -1648,7 +1648,7 @@ name, `?mode=replace` clears first.
 | What | Where |
 |---|---|
 | Full JSON backup (round-trippable) | ⚙ → Backup & Restore, or `GET /api/export` |
-| CSV archive — `Habits.csv` + `Checkmarks.csv`, zipped | `GET /api/export.csv` |
+| CSV archive — `Habits.csv` + `Checkmarks.csv`, zipped (plus `Categories.csv` when you have any categories, carrying each one's colour and order) | `GET /api/export.csv` |
 | Loop-compatible `.db` | `GET /api/export-loop.db` |
 
 The JSON backup carries your **settings** as well as your habits, and only a

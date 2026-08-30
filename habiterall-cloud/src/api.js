@@ -1450,7 +1450,8 @@ api.get('/export.csv', route(async (req, res) => {
     const { rows: entries } = await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
        FROM entries ORDER BY date`);
-    const { rows: categoryRows } = await db.query(`SELECT id, name FROM categories`);
+    const { rows: categoryRows } = await db.query(
+      `SELECT id, name, color, position FROM categories`);
     return { habits, entries, categoryRows };
   });
 
@@ -1465,7 +1466,7 @@ api.get('/export.csv', route(async (req, res) => {
     ...h, category: categoryNames.get(h.category_id) ?? '',
   }));
 
-  const body = buildCsvArchive(withCategory, (id) => byHabit.get(id) ?? []);
+  const body = buildCsvArchive(withCategory, (id) => byHabit.get(id) ?? [], categoryRows);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
