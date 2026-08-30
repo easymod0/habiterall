@@ -1095,10 +1095,16 @@ whole burden of gating who can *answer*. `docs/decisions/ntfy-answers.md` has
 the long form.
 
 **The two server-sent channels are not alike about rate limits, and delivery
-now fans out across accounts.** Discord limits per webhook, so a 429 is one
-account's own doing and the inline `Retry-After` sleep is paid by whoever
-caused it — Discord sends from different accounts run at once with nothing
-guarding between them. ntfy.sh limits per **visitor IP**, which for a
+now fans out across accounts.** Discord limits per webhook **in webhook
+mode** — there a 429 is one account's own doing and the inline `Retry-After`
+sleep is paid by whoever caused it, so Discord sends from different accounts
+run at once with nothing guarding between them. In **bot** mode the bucket is
+per bot token and per route, instance-wide (`botToken` is one credential
+for the whole instance, and `sendToChannel` prefers it whenever one is
+configured) — a 429 there is not one account's own doing, and this is known
+and deliberately not gated: no measurement suggests eight concurrent posts
+trip Discord's global limit, and gating on a guess would cost more than the
+risk it guards against. ntfy.sh limits per **visitor IP**, which for a
 server-sent reminder is the instance — one bucket for every tenant on it — so
 letting the fan-out send ntfy in parallel would make that shared bucket worse,
 not just unprotected. `gatedByHost` (`shared/src/notify-send.js`) is the fix: a

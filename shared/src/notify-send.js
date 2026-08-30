@@ -183,6 +183,9 @@ function stateKey(o) {
  *   which is what both editions pass by not passing it.
  * @property {{debug?: Function, info?: Function, warn?: Function, error?: Function}} [log]
  * @property {number} [intervalMs]
+ * @property {number} [deliveryConcurrency] how many accounts `runTick` delivers
+ *   to at once — see the comment on `DELIVERY_CONCURRENCY`, below, for why this
+ *   is edition business and not a literal in this file. Unset means 8.
  */
 
 /**
@@ -489,7 +492,12 @@ export async function sendToChannel(channel, args, deps = {}) {
 export async function mapWithLimit(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
-  const workerCount = Math.min(limit, items.length);
+  // `Math.max(1, ...)` because `limit` can be 0 or NaN — both callers derive
+  // theirs from a pool size, and a misconfigured or absent one must not turn
+  // into zero workers: with none spawned, `Promise.all([])` resolves at once
+  // and this returns a full-length array of holes with no error at all, which
+  // a caller's `.filter(Boolean)` quietly turns into "nothing was due".
+  const workerCount = Math.max(1, Math.min(limit, items.length));
   const workers = [];
   for (let w = 0; w < workerCount; w++) {
     workers.push((async () => {
@@ -509,9 +517,15 @@ export async function mapWithLimit(items, limit, fn) {
 
 /**
  * At most one ntfy send in flight per destination HOST at a time. Discord
- * bypasses this entirely — it rate-limits per WEBHOOK, so a 429 there is one
- * account's own doing and the inline `Retry-After` wait below already pays
- * for it without touching anyone else. ntfy.sh rate-limits per VISITOR IP,
+ * bypasses this entirely — in WEBHOOK mode it rate-limits per webhook, so a
+ * 429 there is one account's own doing and the inline `Retry-After` wait below
+ * already pays for it without touching anyone else. In BOT mode that is not
+ * true: `DISCORD_BOT_TOKEN` is one credential for the whole instance and the
+ * buckets are per token, so the shared-bucket argument below applies to it as
+ * well. Left ungated deliberately — see `sendToChannel`'s note and
+ * `docs/decisions/reminders.md`; nothing measured suggests the delivery limit
+ * reaches Discord's global ceiling, and a gate added on a guess costs real
+ * serialisation. ntfy.sh rate-limits per VISITOR IP,
  * which for a server-sent reminder is the whole instance's IP: one bucket
  * shared by every account whose topic lives there. Now that delivery fans out
  * across accounts (`runTick`, below) instead of going one at a time, that
@@ -728,18 +742,28 @@ export async function deliverAccount(account, ctx) {
       // only — a second 429 means something else is wrong.
       //
       // The two channels are NOT alike here, and delivery now fans out across
-      // accounts (`runTick`, below) instead of going one at a time. Discord
-      // rate-limits per webhook, so a 429 is one account's own doing, the wait
-      // is paid only by the account that caused it, and Discord sends from
-      // different accounts are free to run at once. ntfy.sh limits per
-      // VISITOR IP, which for a server-sent reminder is the whole instance —
-      // one bucket for every tenant on it — so letting the fan-out send ntfy
-      // in parallel would make the shared bucket strictly worse, not just
-      // unprotected. `gatedByHost`, above, is the fix: an ntfy send (and its
-      // Retry-After wait, if it gets one) queues behind whatever else is
-      // already sending to that same host, so at most one is ever in flight
-      // per host — and a self-hosted ntfy on a host of its own never queues
-      // behind ntfy.sh's traffic, or anyone else's.
+      // accounts (`runTick`, below) instead of going one at a time. In WEBHOOK
+      // mode Discord rate-limits per webhook, so there a 429 is one account's
+      // own doing, the wait is paid only by the account that caused it, and
+      // Discord sends from different accounts are free to run at once. In BOT
+      // mode — `sendToChannel` prefers the bot when one is configured, and
+      // personal's own notifier comment calls channel-id-plus-bot "the
+      // recommended setup" — the bucket is per BOT TOKEN and per route, and
+      // the token is one credential for the whole instance: a 429 there is NOT
+      // one account's own doing, and while the account that tripped it honours
+      // its inline `Retry-After`, the other seven workers can go on firing at
+      // the same shared bucket. This is known and deliberately UNTREATED
+      // rather than gated the way ntfy is below: eight concurrent posts are
+      // unlikely to trip Discord's global limit and no measurement here
+      // suggests it binds. ntfy.sh limits per VISITOR IP, which for a
+      // server-sent reminder is the whole instance — one bucket for every
+      // tenant on it — so letting the fan-out send ntfy in parallel would make
+      // the shared bucket strictly worse, not just unprotected. `gatedByHost`,
+      // above, is the fix: an ntfy send (and its Retry-After wait, if it gets
+      // one) queues behind whatever else is already sending to that same host,
+      // so at most one is ever in flight per host — and a self-hosted ntfy on
+      // a host of its own never queues behind ntfy.sh's traffic, or anyone
+      // else's.
       const send = async () => {
         let result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
         if (result.retryAfterMs) {
@@ -826,15 +850,27 @@ export async function runTick(ctx) {
 
   // Bounded fan-out, never `Promise.all` over the whole set — the same reason
   // `collect`'s own concurrency is derived rather than unlimited (see
-  // `COLLECT_CONCURRENCY` in each edition's `notifier.js`), though delivery
-  // has no connection pool to protect: this is just how many outbound HTTP
-  // requests are ever open at once. The number is a literal, unlike
-  // `COLLECT_CONCURRENCY`, because nothing about it should scale with the
-  // pool an account's collect happens to share; the actual protection for the
-  // one channel that needs it is the per-host ntfy gate inside
-  // `deliverAccount`, not this limit. On personal, `accounts` holds exactly
-  // one entry, so this reduces to a single call either way.
-  const DELIVERY_CONCURRENCY = 8;
+  // `COLLECT_CONCURRENCY` in each edition's `notifier.js`). Delivery is NOT
+  // exempt from that reasoning, whatever the comment here used to claim:
+  // `deliverAccount` calls `ctx.mark` and `ctx.recordOutcome` after every send,
+  // and on cloud both run as the account's own `withUser` transaction — a pool
+  // checkout each. Eight workers each holding one is up to eight concurrent
+  // checkouts against the same pool a live request is also drawing from, and a
+  // refused checkout is not merely slow: it fails `mark`, and with no
+  // watermark written the next tick re-sends the same reminder for the whole
+  // catch-up window — the exact duplicate this fan-out was supposed to stay
+  // safe against.
+  //
+  // This file cannot know whether an edition's `mark` costs a connection at
+  // all, so the limit comes from `ctx` and only defaults to the literal 8
+  // here — which is what personal, whose `mark` is one connection-free SQLite
+  // call and whose `accounts` holds exactly one entry regardless, leaves
+  // unset. Cloud supplies its own, derived from `pool.options.max` the same
+  // way `COLLECT_CONCURRENCY` is; see that constant for the arithmetic. The
+  // per-host ntfy gate inside `deliverAccount` is still the whole protection
+  // for THAT channel's shared bucket — this limit is only about how many pool
+  // checkouts delivery itself may hold open at once.
+  const DELIVERY_CONCURRENCY = ctx.deliveryConcurrency ?? 8;
 
   // The per-account `try` moves INSIDE the mapped function, per `mapWithLimit`'s
   // own contract: its backstop catch exists for a worker function that lets a

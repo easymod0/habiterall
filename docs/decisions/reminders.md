@@ -149,15 +149,24 @@ shared loop to sleep on every other tenant's behalf. `mapWithLimit`
 the whole set — the pool has ten connections and Discord rate-limits, so an
 unbounded fan-out of 500 replaces one problem with two — but the two server
 channels do not want the same NUMBER, and that is the actual point of the
-change, not an implementation detail of it. Discord rate-limits per webhook, so
-a 429 is one account's own doing and its wait is paid only by the account that
-caused it: Discord sends from different accounts can run at once with nothing
-between them. ntfy.sh rate-limits per **visitor IP**, which for a server-sent
-reminder is the whole instance — one bucket shared by every tenant on it — so
-sending ntfy in parallel across accounts does not just leave that bucket
-unprotected, it is strictly worse than the sequential loop it replaces. A
-single global concurrency limit is wrong for one of these two channels
-whichever number is picked, which is why delivery fans out at the account
+change, not an implementation detail of it. Discord rate-limits per webhook
+**in webhook mode**, so there a 429 is one account's own doing and its wait is
+paid only by the account that caused it: Discord sends from different accounts
+can run at once with nothing between them. In **bot** mode — one bot token
+shared by every account on the instance, and the setup this project's own
+notifier comment calls "recommended" — Discord's buckets are per bot token
+and per route instead, so a 429 there is NOT one account's own doing: the
+other seven workers keep firing at the same shared bucket while the one that
+tripped it waits out its own `Retry-After`. That is known and deliberately
+left ungated: eight concurrent posts are unlikely to trip Discord's global
+limit, no measurement here suggests it binds, and adding a second gate on
+that guess would cost more than the inaccuracy it corrects. ntfy.sh
+rate-limits per **visitor IP**, which for a server-sent reminder is the whole
+instance — one bucket shared by every tenant on it — so sending ntfy in
+parallel across accounts does not just leave that bucket unprotected, it is
+strictly worse than the sequential loop it replaces. A single global
+concurrency limit is wrong for one of these two channels whichever number is
+picked, which is why delivery fans out at the account
 level and then gates ntfy again, per destination host, with `gatedByHost`: at
 most one ntfy send in flight per host, so accounts on different self-hosted
 ntfy servers still run in parallel and only a shared bucket ever queues.

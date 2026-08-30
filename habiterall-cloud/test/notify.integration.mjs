@@ -514,6 +514,104 @@ try {
       && survived.every((a) => a.id !== undefined && a.habits.length > 0),
     JSON.stringify((survived ?? []).map((a) => ({ id: a.id, habits: a.habits.length }))));
 
+  /* ---------- a throw ahead of `withUser` is caught, logged, and cannot leak an Error into the result ---------- */
+  //
+  // Hardening, not a live bug — see the comment above the `try` in `collect`.
+  // Nobody has named an input that makes `warnUnreachable`, `needsServerDelivery`,
+  // `resolveTimeZone` or `zonedClock` throw (`formatterFor` swallows a bad zone
+  // rather than throwing one), so both throws below are INJECTED — through
+  // `log`, which is a plain mutable object and the one seam here that is not a
+  // frozen ES module binding. Nothing about this proves either call site is
+  // reachable this way today; it proves the two guards hold if one ever is.
+  console.log('--- a throw ahead of withUser is caught and logged; an Error that still escapes is filtered anyway ---');
+
+  const { log } = await import('@habiterall/shared/log.js');
+  const realWarn = log.warn;
+  const realError = log.error;
+
+  // First half: the widened `try` catches a throw from `warnUnreachable` (the
+  // first of the four pre-`withUser` calls) and logs it as
+  // `notify.account_failed`, exactly as a `withUser` rejection already did.
+  const caught = await mkUser('sub-throw-caught', { notifyChannels: ['discord'] }); // unreachable: no webhook
+  await mkHabit(caught, 'Caught habit', '08:00');
+
+  const errors = [];
+  log.error = (...args) => { errors.push(args); return realError(...args); };
+  log.warn = (...args) => {
+    const [event, detail] = args;
+    if (event === 'notify.unreachable' && detail?.user === caught) {
+      throw new Error('synthetic: a throw ahead of withUser');
+    }
+    return realWarn(...args);
+  };
+
+  let caughtResult = null;
+  let caughtThrew = null;
+  try {
+    caughtResult = await notifier.collect(AT_0800_UTC);
+  } catch (err) {
+    caughtThrew = err;
+  } finally {
+    log.warn = realWarn;
+    log.error = realError;
+  }
+
+  check('collect() does not reject over one account\'s pre-withUser throw',
+    !caughtThrew, caughtThrew ? caughtThrew.message : '');
+  check('the account that threw ahead of withUser is dropped, not carried forward',
+    !!caughtResult && !caughtResult.some((a) => a?.id === caught),
+    JSON.stringify((caughtResult ?? []).map((a) => a?.id)));
+  check('every OTHER account collected is still whole',
+    !!caughtResult && caughtResult.length > 0
+      && caughtResult.every((a) => a?.id !== undefined && Array.isArray(a?.habits) && a.habits.length > 0),
+    JSON.stringify((caughtResult ?? []).map((a) => a?.id)));
+  check('that failure is LOGGED as notify.account_failed, not silent',
+    errors.some(([event, fields]) => event === 'notify.account_failed' && fields?.user === caught),
+    JSON.stringify(errors));
+
+  // Second half: the structural filter — `results.filter((a) => a && !(a
+  // instanceof Error))` — has to hold even when something escapes the widened
+  // catch too, which is forced here by making the catch's OWN `log.error` call
+  // throw a second time. That is exactly the shape `mapWithLimit`'s own
+  // backstop exists for (a worker function that lets a rejection escape), and
+  // it is what distinguishes the structural filter from `.filter(Boolean)`:
+  // an escaped `Error` is truthy, so only the `instanceof Error` half drops it.
+  const escaped = await mkUser('sub-throw-escaped', { notifyChannels: ['discord'] }); // unreachable: no webhook
+  await mkHabit(escaped, 'Escaped habit', '08:00');
+
+  log.warn = (...args) => {
+    const [event, detail] = args;
+    if (event === 'notify.unreachable' && detail?.user === escaped) {
+      log.error = () => { throw new Error('synthetic: escapes the catch too'); };
+      throw new Error('synthetic: a throw ahead of withUser');
+    }
+    return realWarn(...args);
+  };
+
+  let escapedResult = null;
+  let escapedThrew = null;
+  try {
+    escapedResult = await notifier.collect(AT_0800_UTC);
+  } catch (err) {
+    escapedThrew = err;
+  } finally {
+    log.warn = realWarn;
+    log.error = realError;
+  }
+
+  check('collect() does not reject even when the catch\'s own logging throws',
+    !escapedThrew, escapedThrew ? escapedThrew.message : '');
+  check('no Error instance reaches the caller, however it escaped',
+    !!escapedResult && escapedResult.every((a) => a && !(a instanceof Error)),
+    JSON.stringify((escapedResult ?? []).map((a) => (a instanceof Error ? `Error:${a.message}` : a?.id))));
+  check('the account behind the double failure is absent rather than a fake account',
+    !!escapedResult && !escapedResult.some((a) => a?.id === escaped),
+    JSON.stringify((escapedResult ?? []).map((a) => a?.id)));
+  check('every OTHER account collected is still whole, structural filter or not',
+    !!escapedResult && escapedResult.length > 0
+      && escapedResult.every((a) => a?.id !== undefined && Array.isArray(a?.habits) && a.habits.length > 0),
+    JSON.stringify((escapedResult ?? []).map((a) => a?.id)));
+
   /* ---------- collect fans out past the concurrency limit ---------- */
   //
   // The section above proves isolation with whatever accounts earlier

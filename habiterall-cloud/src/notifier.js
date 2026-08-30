@@ -73,6 +73,31 @@ const MAX_ACCOUNTS_PER_TICK = Number(process.env.NOTIFY_MAX_ACCOUNTS) || 500;
 const COLLECT_CONCURRENCY = Math.max(1, Math.min(6, Math.floor((pool.options?.max ?? 10) / 2)));
 
 /**
+ * How many accounts `runTick` (`@habiterall/shared/notify-send.js`) delivers
+ * to at once, on this edition.
+ *
+ * `deliverAccount` calls `mark` and `recordOutcome`, above, after every send,
+ * and both run as the account's own `withUser` transaction — a pool checkout
+ * each. `notify-send.js`'s own `DELIVERY_CONCURRENCY` comment is where that is
+ * explained at length; what belongs here is only the arithmetic, derived from
+ * `pool.options.max` the same way `COLLECT_CONCURRENCY` is, for the same
+ * reason: a hardcoded number silently starves the API the moment an operator
+ * lowers `PG_POOL_MAX` below what it assumed.
+ *
+ * Not summed with `COLLECT_CONCURRENCY` — `collect()` runs to completion
+ * before any delivery starts (see `start()`, below), so a tick never holds
+ * checkouts for both at once, and each only has to fit the pool ON ITS OWN.
+ * Same floor and the same half-of-the-pool fraction as `COLLECT_CONCURRENCY`,
+ * but capped at 8 rather than 6: a delivery worker holds its checkout for the
+ * length of one `mark`/`recordOutcome` write, not for a whole four-query read
+ * held across the account's collect, so it costs the pool less per worker for
+ * the same concurrency — and 8 is the number this replaces, so an operator on
+ * the default pool sees the derivation only shrink the number when the pool
+ * itself is the constraint, never raise it past what always ran.
+ */
+const DELIVERY_CONCURRENCY = Math.max(1, Math.min(8, Math.floor((pool.options?.max ?? 10) / 2)));
+
+/**
  * The accounts with something for this server to deliver.
  *
  * `?|` asks whether the JSONB array holds any of these ids. An account that
@@ -118,25 +143,6 @@ export async function collect(instant) {
   // full before any webhook goes out (`start()`, below) — concurrency INSIDE
   // this read is the whole change; interleaving it with delivery is not.
   const results = await mapWithLimit(await candidates(), COLLECT_CONCURRENCY, async (row) => {
-    const settings = row.settings ?? {};
-    // The scan's SQL predicate is deliberately loose (it cannot tell whether a
-    // webhook URL or a channel id is actually filled in); this is the real test,
-    // and it needs to know whether this instance has a bot at all.
-    //
-    // A user who fails it is skipped in silence, which is why the warning comes
-    // first — on a shared instance the operator is the only one who can see the
-    // log, and the only one who can add a bot token.
-    warnUnreachable({ id: row.id, settings }, { botToken, log });
-    if (!needsServerDelivery(settings, { bot: !!botToken })) {
-      return null;
-    }
-
-    // Whose clock: the zone the account NAMED, else the one its last client
-    // reported, else this server's. `resolveTimeZone` is the only place that
-    // precedence exists, so the tick and the Discord handler cannot drift.
-    const timeZone = resolveTimeZone(settings, String(row.device_time_zone ?? ''));
-    const clock = zonedClock(instant, timeZone);
-
     // Per account, because one account's read must not abandon the tick — a
     // pool timeout on account 3 of 400 used to throw out of the old for-loop
     // and discard every account already collected along with every one behind
@@ -148,57 +154,99 @@ export async function collect(instant) {
     // per item, and not be moved to wrap the `mapWithLimit(...)` call itself.
     // `mapWithLimit` has its own catch, but that one is only a backstop for a
     // worker function that lets a rejection escape — it records the error
-    // itself at `results[index]` rather than a logged, named `null`, which is
-    // not the shape `.filter(Boolean)` below or a caller of `collect` expects.
-    return await withUser(row.id, async (db) => {
-      const { rows: habits } = await db.query(
-        `SELECT * FROM habits
-          WHERE archived = false AND reminder_time <> ''
-          ORDER BY position, id`
-      );
-      if (!habits.length) return null;
+    // itself at `results[index]` rather than a logged, named `null`, and an
+    // `Error` there is truthy: `.filter(Boolean)` used to keep it and hand
+    // `runTick` a fake account, where `account.settings ?? {}` reads as no
+    // channels configured — healthy, with nothing due, and no log line at
+    // all. `results.filter((a) => a && !(a instanceof Error))`, below, is the
+    // other half of that guarantee, so it holds whichever way this function
+    // exits.
+    //
+    // It wraps the WHOLE body below, not only the `withUser` call — this is
+    // hardening rather than a known defect. Nobody has named an input that
+    // makes `warnUnreachable`, `needsServerDelivery`, `resolveTimeZone` or
+    // `zonedClock` throw (`formatterFor` swallows a bad zone rather than
+    // throwing one), but the guarantee this catch makes should be about the
+    // FUNCTION, not about which line in it happens to touch the database
+    // today, and the four calls ahead of `withUser` cost nothing extra to
+    // cover.
+    try {
+      const settings = row.settings ?? {};
+      // The scan's SQL predicate is deliberately loose (it cannot tell whether a
+      // webhook URL or a channel id is actually filled in); this is the real test,
+      // and it needs to know whether this instance has a bot at all.
+      //
+      // A user who fails it is skipped in silence, which is why the warning comes
+      // first — on a shared instance the operator is the only one who can see the
+      // log, and the only one who can add a bot token.
+      warnUnreachable({ id: row.id, settings }, { botToken, log });
+      if (!needsServerDelivery(settings, { bot: !!botToken })) {
+        return null;
+      }
 
-      const { rows: entries } = await db.query(
-        `SELECT habit_id, value, status FROM entries WHERE date = $1`,
-        [clock.date]
-      );
-      const { rows: sent } = await db.query(
-        `SELECT habit_id, channel FROM notify_log WHERE date = $1`,
-        [clock.date]
-      );
-      const { rows: status } = await db.query(
-        `SELECT channel, ok, status, error, permanent FROM notify_status`
-      );
+      // Whose clock: the zone the account NAMED, else the one its last client
+      // reported, else this server's. `resolveTimeZone` is the only place that
+      // precedence exists, so the tick and the Discord handler cannot drift.
+      const timeZone = resolveTimeZone(settings, String(row.device_time_zone ?? ''));
+      const clock = zonedClock(instant, timeZone);
 
-      const already = new Set(sent.map((s) => `${s.habit_id}:${s.channel}`));
-      return {
-        id: row.id,
-        settings,
-        // Resolved once and carried, so `deliverAccount` cannot decide it again.
-        timeZone,
-        habits,
-        doneToday: answeredIds(habits, entries),
-        alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
-        // Read here rather than at write time so `recordOutcome` is only called
-        // when the news is new — see `noteOutcome` in notify-send.js, which
-        // needs the stored REASON and not merely whether it worked.
-        delivered: Object.fromEntries(status.map((s) => [s.channel, {
-          ok: s.ok === true,
-          status: s.status ?? undefined,
-          error: String(s.error ?? ''),
-          permanent: s.permanent === true,
-        }])),
-      };
-    }).catch((err) => {
+      return await withUser(row.id, async (db) => {
+        const { rows: habits } = await db.query(
+          `SELECT * FROM habits
+            WHERE archived = false AND reminder_time <> ''
+            ORDER BY position, id`
+        );
+        if (!habits.length) return null;
+
+        const { rows: entries } = await db.query(
+          `SELECT habit_id, value, status FROM entries WHERE date = $1`,
+          [clock.date]
+        );
+        const { rows: sent } = await db.query(
+          `SELECT habit_id, channel FROM notify_log WHERE date = $1`,
+          [clock.date]
+        );
+        const { rows: status } = await db.query(
+          `SELECT channel, ok, status, error, permanent FROM notify_status`
+        );
+
+        const already = new Set(sent.map((s) => `${s.habit_id}:${s.channel}`));
+        return {
+          id: row.id,
+          settings,
+          // Resolved once and carried, so `deliverAccount` cannot decide it again.
+          timeZone,
+          habits,
+          doneToday: answeredIds(habits, entries),
+          alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
+          // Read here rather than at write time so `recordOutcome` is only called
+          // when the news is new — see `noteOutcome` in notify-send.js, which
+          // needs the stored REASON and not merely whether it worked.
+          delivered: Object.fromEntries(status.map((s) => [s.channel, {
+            ok: s.ok === true,
+            status: s.status ?? undefined,
+            error: String(s.error ?? ''),
+            permanent: s.permanent === true,
+          }])),
+        };
+      });
+    } catch (err) {
       // Named and counted rather than fatal. `notify.account_failed` is what
       // `runTick` logs for the delivery half of the same problem, so the two
       // read alike in a log.
       log.error?.('notify.account_failed', { user: row.id, phase: 'collect' }, err);
       return null;
-    });
+    }
   });
 
-  return results.filter(Boolean);
+  // Structural, not merely truthy: `mapWithLimit`'s own backstop stores an
+  // `Error` for any worker function that lets a rejection escape, and an
+  // `Error` is truthy — `.filter(Boolean)` kept it and handed `runTick` a fake
+  // account. The cast is for `tsc`, which cannot see `instanceof Error` as
+  // narrowing an inline predicate the way it does the `Boolean` special case.
+  return /** @type {import('@habiterall/shared/notify-send.js').NotifyAccount[]} */ (
+    results.filter((a) => a && !(a instanceof Error))
+  );
 }
 
 /**
@@ -597,6 +645,7 @@ export function start(env = process.env) {
     intervalMs: config.intervalMs,
     appUrl: config.appUrl,
     botToken: config.botToken,
+    deliveryConcurrency: DELIVERY_CONCURRENCY,
     // Travels the same route `botToken` and `appUrl` already do: no reaching
     // into `process.env` from inside `shared/src` for it.
     signAnswer,

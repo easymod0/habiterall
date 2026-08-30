@@ -2177,6 +2177,18 @@ test('mapWithLimit: a limit past the item count does not hang or spawn idle work
   assert.equal(max, items.length, 'a limit bigger than the set spawns one worker per item, not per limit');
 });
 
+test('mapWithLimit: a limit of 0 still processes every item, rather than silently doing nothing', async () => {
+  // Neither caller can reach this today, but both callers' limits are now
+  // edition-derived (#187) rather than hand-picked literals — exactly the
+  // shape that starts making a 0 or a NaN reachable. Ungated, `Math.min(0, n)`
+  // spawns zero workers, `Promise.all([])` resolves at once, and this returns
+  // a full-length array of holes with no error — which a caller's
+  // `.filter(Boolean)` turns into "nothing was due" forever.
+  const items = [1, 2, 3];
+  const out = await mapWithLimit(items, 0, async (item) => item * 2);
+  assert.deepEqual(out, [2, 4, 6]);
+});
+
 // The per-host ntfy gate. Delivery now fans out across accounts (`runTick`),
 // and this is the guard that stops that fan-out from turning into ten
 // requests at once against ntfy.sh's one shared bucket. The ordinary
@@ -2305,6 +2317,71 @@ test('two Discord accounts DO overlap — Discord has no per-host gate', async (
 
   assert.equal(fetch.calls.length, 2);
   assert.ok(overlapped(fetch.calls[0], fetch.calls[1]));
+});
+
+// `ctx.deliveryConcurrency` — #187's fix 1. `deliverAccount` costs cloud a
+// pool checkout per `mark`/`recordOutcome`, so the fan-out width has to be an
+// edition's business rather than a literal `notify-send.js` picks for itself.
+// These two accounts are on DIFFERENT Discord webhooks so the per-webhook
+// limit above never enters into it — the only thing that can serialise them
+// is `DELIVERY_CONCURRENCY` itself.
+
+test('a delivery limit of 1 serialises two accounts, honouring `ctx`', async () => {
+  const fetch = timedFetch(30);
+  const accounts = [
+    account({
+      id: 1,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/1/a',
+        notifyTimezone: 'UTC',
+      },
+    }),
+    account({
+      id: 2,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/2/b',
+        notifyTimezone: 'UTC',
+      },
+    }),
+  ];
+
+  await runTick({
+    collect: () => accounts, mark: () => {}, instant: utc(2026, 8, 13, 8, 0), fetch,
+    deliveryConcurrency: 1,
+  });
+
+  assert.equal(fetch.calls.length, 2);
+  assert.ok(!overlapped(fetch.calls[0], fetch.calls[1]),
+    'a limit of 1 must serialise delivery across accounts, not merely across a shared destination');
+});
+
+test('a delivery limit of 2 lets those same two accounts overlap', async () => {
+  const fetch = timedFetch(30);
+  const accounts = [
+    account({
+      id: 1,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/1/a',
+        notifyTimezone: 'UTC',
+      },
+    }),
+    account({
+      id: 2,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/2/b',
+        notifyTimezone: 'UTC',
+      },
+    }),
+  ];
+
+  await runTick({
+    collect: () => accounts, mark: () => {}, instant: utc(2026, 8, 13, 8, 0), fetch,
+    deliveryConcurrency: 2,
+  });
+
+  assert.equal(fetch.calls.length, 2);
+  assert.ok(overlapped(fetch.calls[0], fetch.calls[1]),
+    'a limit of 2 must let both of two accounts run at once');
 });
 
 test('a tick with one ntfy account behaves exactly as before — the gate is a no-op alone', async () => {
