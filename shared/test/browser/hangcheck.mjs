@@ -20,7 +20,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, waitUntil } from './chrome.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9256);
@@ -96,6 +96,178 @@ try {
     };
   })()`);
 
+  /* ---- 0. ui/api.js's own guard, against a healthy and untampered server ---- */
+  console.log('--- a write with no AbortSignal.timeout on the page (#87 round 3) ---');
+
+  // #276 bounded the worker's two fetch sites (`shellFirst`, `networkFirst`)
+  // with a feature detect; review found `ui/api.js`'s own call to
+  // `AbortSignal.timeout` still unguarded. This block is the opposite shape
+  // from every other one below: nothing is HELD here, the server answers
+  // normally, and the only thing wrong with the world is that the page has no
+  // `AbortSignal.timeout`. A Node unit test cannot reach this — `ui/api.js`
+  // imports absolute `/shared/...` paths and the assertion is about what the
+  // PLATFORM did with a real fetch — so it has to live here, before the first
+  // `Fetch.enable` below, while the server is still healthy and nothing is
+  // intercepted.
+  //
+  // The deletion happens AFTER the app has booted, not before. Both the
+  // guarded `boundedSignal` and the unguarded call it replaces look
+  // `AbortSignal.timeout` up on the global at CALL TIME — a property read,
+  // not a reference captured at module load — so deleting it once the page
+  // has already booted still reaches every `api()` call made from here on,
+  // including the tap below, and isolates the WRITE path. Deleting it before
+  // boot also kills the dashboard's own `/overview` fetch, since that GET
+  // goes through the same `api()`: the block would die at the boot wait
+  // instead of proving anything about the write, which is what an earlier
+  // version of this block did.
+  await send('Page.navigate', { url: APP }, sessionId);
+  await waitUntil(ev, `!!document.querySelector('#grid .habit-row')`,
+    { what: 'the dashboard to load, before the guard tap' });
+
+  await ev(`(()=>{ delete AbortSignal.timeout; return true; })()`);
+
+  // The control assertion. Without it a Chrome that reasserts the static, or
+  // a typo in the deletion above, would make every check below pass
+  // vacuously, having tested nothing.
+  const timeoutType = await ev(`typeof AbortSignal.timeout`);
+  check('the control: AbortSignal.timeout is actually absent from the page',
+    timeoutType === 'undefined', `typeof AbortSignal.timeout is "${timeoutType}"`);
+
+  const guardBefore = await look();
+  check('nothing queued and no strip before the guard tap',
+    guardBefore.outbox.length === 0 && !guardBefore.bar, JSON.stringify(guardBefore));
+
+  // The first habit row's SECOND-TO-LAST cell: a date neither block 1 nor 1b
+  // below ever taps (they use the LAST cell of rows one and two), so nothing
+  // here can be confused with what follows, whichever way this block comes
+  // out. Read-only — the tap itself happens below, after the server's PRIOR
+  // value for this date is known, because `reset()` seeds ~60 days of history
+  // and this date already carries a fixture value: "a row exists" is true
+  // whether or not the tap's own write ever reaches the server, so presence
+  // alone cannot be the load-bearing check.
+  const guardKey = await ev(`(()=>{
+    const cells = [...document.querySelectorAll('.habit-row:first-child .check')];
+    return cells[cells.length - 2].dataset.focusKey;
+  })()`);
+  const [, guardHabitId, guardDate] = guardKey?.split(':') ?? [];
+  check('a habit and date were found to tap',
+    /^\d+$/.test(guardHabitId ?? '') && /^\d{4}-\d{2}-\d{2}$/.test(guardDate ?? ''),
+    String(guardKey));
+
+  const guardValueBefore = await fetch(`${APP}/api/habits/${guardHabitId}/entries`)
+    .then((r) => r.json()).catch(() => [])
+    .then((rows) => rows.find?.((e) => e.date === guardDate)?.value);
+
+  // A sticky recorder, installed BEFORE the tap, of the one thing that tells
+  // "sent directly" apart from "queued, and healed by a mechanism that has
+  // nothing to do with whether this bug is fixed" — see the note below the
+  // tap for what that second mechanism is. The direct and the queued paths
+  // diverge the instant `api()` decides which one it is on, not at whatever
+  // moment a poll happens to sample afterwards: on the broken path
+  // `announceQueued` (ui/api.js) calls `reportUnreachable` IMMEDIATELY, which
+  // raises `#offline-bar` and fires the "Saved offline" toast synchronously
+  // with the failed attempt. A `MutationObserver` latches the first time
+  // either happens and keeps it latched, so nothing about how long the write
+  // then takes — a fast direct send, a slow one, or a queued one healed
+  // seconds later — can make the sample miss it. Selectors confirmed against
+  // `index.html`/`connectivity.js`/`toast.js`: `#offline-bar` and `#toast`
+  // both carry a plain boolean `hidden` attribute, toggled via the `.hidden`
+  // IDL property, which is what `attributeFilter` below is watching for.
+  await ev(`(()=>{
+    window.__guardSaw = { announced: false, bar: false };
+    window.__guardObs = new MutationObserver(() => {
+      const bar = document.getElementById('offline-bar');
+      if (bar && !bar.hidden) window.__guardSaw.bar = true;
+      const t = document.getElementById('toast');
+      if (t && /Saved offline/.test(t.textContent || '')) window.__guardSaw.announced = true;
+    });
+    window.__guardObs.observe(document.body, {
+      subtree: true, childList: true, characterData: true,
+      attributes: true, attributeFilter: ['hidden'],
+    });
+    return true;
+  })()`);
+
+  // The same selector and index used to read the key above, re-run rather
+  // than a saved element reference — nothing between the two `ev` calls
+  // touches the DOM, so this is the same cell.
+  await ev(`(()=>{
+    const cells = [...document.querySelectorAll('.habit-row:first-child .check')];
+    cells[cells.length - 2].click();
+    return true;
+  })()`);
+
+  // The row changing on the server is still the load-bearing evidence that
+  // the write actually landed — but the ceiling here can be as generous as
+  // the write's own 10s bound, and no longer has to race anything, because
+  // the recorder above is what tells the two paths apart now. A queued write
+  // does not stay queued forever even with the bug fully in place:
+  // `announceQueued` calls `reportUnreachable`, which arms `offline.js`'s
+  // connectivity watcher, and that watcher's own recovery poll
+  // (`initialDelayMs`, 2000ms by default) calls `isReachable()` and then
+  // `flush()` — BOTH of which build their own `AbortController` directly and
+  // never touch `AbortSignal.timeout` at all. So a couple of seconds after
+  // the tap, completely independently of whether `ui/api.js`'s bug is fixed,
+  // the watcher notices the server is healthy and resends the queued PUT
+  // through `flush()`'s plain, unbounded `fetch()` — and the row changes
+  // anyway. A bare "did the value change" check racing that timer is exactly
+  // how this masking was first found: it passed with the bug fully in place,
+  // just a couple of seconds slower. The recorder is what actually
+  // distinguishes them now; this poll only has to confirm the write landed
+  // at all, eventually, so it can wait as long as the write itself may.
+  const guardDeadline = Date.now() + BOUND_MS;
+  let guardValueAfter;
+  for (;;) {
+    guardValueAfter = await fetch(`${APP}/api/habits/${guardHabitId}/entries`)
+      .then((r) => r.json()).catch(() => [])
+      .then((rows) => rows.find?.((e) => e.date === guardDate)?.value);
+    if (guardValueAfter !== guardValueBefore) break;
+    if (Date.now() > guardDeadline) {
+      throw new Error(
+        `the tapped check-off never reached the server at all within ${BOUND_MS}ms ` +
+        `(still ${JSON.stringify(guardValueBefore)}): ui/api.js threw building its abort ` +
+        'signal and queued the write instead of sending it, and nothing ever flushed it'
+      );
+    }
+    await sleep(100);
+  }
+  check('the check-off that was tapped changed the server row',
+    true, `${guardHabitId} ${guardDate}: ${JSON.stringify(guardValueBefore)} -> ${JSON.stringify(guardValueAfter)}`);
+
+  // The load-bearing checks: what the recorder latched from the instant of
+  // the tap, immune to when this line happens to run.
+  const guardSaw = await ev(`window.__guardSaw`);
+  await ev(`window.__guardObs.disconnect(); delete window.__guardObs; true`);
+  check('the write was never announced as queued, from the instant of the tap',
+    guardSaw?.announced === false, JSON.stringify(guardSaw));
+  check('the offline strip never went up, from the instant of the tap',
+    guardSaw?.bar === false, JSON.stringify(guardSaw));
+
+  // A settle, and a legitimate one this time — waiting to see something did
+  // NOT happen (the bookkeeping below) has no predicate to poll for. `unstage`
+  // runs on the client a beat AFTER the server has already answered, which the
+  // predicate above just confirmed it did, so this covers only that lag and
+  // not the request itself. This is supplementary to the latched checks
+  // above, not a replacement: it is the CURRENT state rather than "was it
+  // ever true", and reads naturally alongside them in the log.
+  await sleep(250);
+  const guardAfter = await look();
+  const guardToast = await ev(`(document.getElementById('toast')?.textContent || '')`);
+  check('the write reached the server directly: nothing queued',
+    guardAfter.outbox.length === 0, JSON.stringify(guardAfter.outbox));
+  check('the offline strip never appeared',
+    !guardAfter.bar && !guardAfter.message, JSON.stringify(guardAfter));
+  check('no "Saved offline" toast appeared',
+    !/Saved offline/.test(guardToast), JSON.stringify(guardToast));
+
+  // No explicit restore call is needed: deleting a property on THIS
+  // document's `AbortSignal` cannot outlive the document, and the navigate
+  // immediately below — which boots the app fresh for block 1 onward — hands
+  // back the native static along with everything else a fresh load resets.
+  // The rest of this file never drives an interception whose TIMING depends
+  // on which of `AbortSignal.timeout` or the `AbortController` fallback is
+  // bounding the request — both bound at the same 10s — so nothing past this
+  // point would have cared even if the deletion had somehow persisted.
   await send('Page.navigate', { url: APP }, sessionId);
   for (let i = 0; i < 80; i++) {
     if (await ev(`!!document.querySelector('#grid .habit-row')`).catch(() => 0)) break;
