@@ -384,4 +384,91 @@ class AppSettingsDefaultsTest {
             Regex("""TimeZone\.getDefault\(\)\.id""").containsMatchIn(kotlin),
         )
     }
+
+    /**
+     * The other one-string mirror on this client, and it has THREE copies:
+     * `shared/public/offline.js` (the browser), `habiterall-cloud/src/api.js`
+     * (the server, which reads it) and `Api.kt` (this phone). None of the three
+     * can import either of the others.
+     *
+     * What a rename costs is a silence: cloud memoises `/overview` per process,
+     * so on more than one replica a Done pressed on a notification can be taken
+     * by A while the overview fetch behind it is answered from B's own pre-tap
+     * copy. This header is the only thing that tells B to rebuild, so a
+     * misspelled one puts the phone back to showing a tap it just made as
+     * undone, with nothing anywhere reporting it.
+     *
+     * `FreshnessTest` pins the window's arithmetic; this pins that the phone
+     * asks at all. Both halves, because either alone passes with the other
+     * deleted — the same split `DEVICE_ZONE_HEADER` above learned the hard way.
+     *
+     * The `shared/` caveat on that test applies here too, twice over: neither
+     * `shared/public/offline.js` nor `habiterall-cloud/src/` is a declared
+     * Gradle input, so a rename THERE alone leaves `testDebugUnitTest`
+     * UP-TO-DATE. Use `--rerun-tasks` locally.
+     */
+    @Test
+    fun `the freshness header is spelled the same on all three sides`() {
+        fun find(relative: String): String {
+            var dir: java.io.File? = java.io.File("").absoluteFile
+            while (dir != null) {
+                val candidate = java.io.File(dir, relative)
+                if (candidate.isFile) return candidate.readText()
+                dir = dir.parentFile
+            }
+            throw AssertionError("$relative not found above ${java.io.File("").absolutePath}")
+        }
+
+        val web = Regex("""FRESH_HEADER = '([^']+)'""")
+            .find(find("shared/public/offline.js"))?.groupValues?.get(1)
+        assertTrue("FRESH_HEADER is not declared in shared/public/offline.js", web != null)
+
+        val server = Regex("""FRESH_HEADER = '([^']+)'""")
+            .find(find("habiterall-cloud/src/api.js"))?.groupValues?.get(1)
+        assertEquals("the browser and the server must agree", web, server)
+
+        val kotlin = find("android-native/app/src/main/java/com/habiterall/app/data/Api.kt")
+        val mine = Regex("""FRESH_HEADER = "([^"]+)"""")
+            .find(kotlin)?.groupValues?.get(1)
+        assertEquals("...and so must the phone", server, mine)
+
+        // ...and that it is actually SENT, from inside the client's own
+        // interceptor chain rather than from anywhere in the file. The
+        // constant alone passing is the gap `DEVICE_ZONE_HEADER` found: delete
+        // the interceptor and the phone silently stops asking, which on two
+        // replicas is a notification answer that does not appear in the app.
+        //
+        // Bounded by the declaration AFTER the client rather than by the
+        // chain's own `.build()`, which is not the end of it: the zone
+        // interceptor two lines in calls `req.newBuilder()…build()`, so
+        // `substringBefore(".build()")` cuts the region before this half of
+        // the chain exists. The anchors are asserted for the reason
+        // `cache.test.js`'s `region` gives — a missing one makes the guard
+        // silently ask about the whole file instead.
+        val chain = kotlin.substringAfter("OkHttpClient.Builder()", "")
+        assertTrue("anchor not found, so this guard tested nothing", chain.isNotEmpty())
+        val builder = chain.substringBefore("private fun url(", "")
+        assertTrue("anchor not found, so this guard tested nothing", builder.isNotEmpty())
+        assertTrue(
+            "no interceptor sends FRESH_HEADER",
+            Regex("""header\(FRESH_HEADER, value\)""").containsMatchIn(builder),
+        )
+        assertTrue(
+            "the header must come from Freshness rather than be sent always",
+            Regex("""Freshness\.headerFor\(req\.method""").containsMatchIn(builder),
+        )
+        assertTrue(
+            "a write must open the window, or nothing ever sends the header",
+            Regex("""Freshness\.noteAnswer\(req\.method""").containsMatchIn(builder),
+        )
+
+        // What this deliberately does NOT pin, because it cannot: which method
+        // carries the header, which one opens the window, and how long it
+        // stays open. All three are one `!=` away from silently inverted, and
+        // a regex over source text sees a binding rather than a comparison —
+        // measured, with an earlier version of this file passing against an
+        // interceptor that had begun sending the header on every write. They
+        // live in `Freshness` and are pinned behaviourally by `FreshnessTest`.
+        // Both halves, because either passes with the other deleted.
+    }
 }

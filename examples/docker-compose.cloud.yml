@@ -85,6 +85,8 @@ services:
       MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
       MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
       PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if a long export is cancelled; 0 disables
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug; 0 disables
       PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
       LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
       LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY

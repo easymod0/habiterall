@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { withUser, isCategoryNameConflict } from './db/pool.js';
+import { createMemo, forgetAccount, remember } from './cache.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
@@ -111,7 +112,14 @@ const route = (fn) => (req, res, next) => fn(req, res, next).catch(next);
  */
 const ZONE_CHECK_MS = 60_000;
 
-/** userId -> {zone, at}. Bounded by the accounts seen this process lifetime. */
+/**
+ * userId -> `{zone, at}`, bounded by `remember` rather than by its own comment.
+ *
+ * "Bounded by the accounts seen this process lifetime" is what this used to
+ * say, and that is a restatement of the leak rather than a bound. See
+ * `cache.js`, which is one policy for this, `blockCache` next door and the
+ * `/overview` memo below.
+ */
 const lastReportedZone = new Map();
 
 api.use(route(async (req, res, next) => {
@@ -137,13 +145,56 @@ api.use(route(async (req, res, next) => {
       ));
       // After the write, so a failure is retried on the next request rather
       // than remembered as done.
-      lastReportedZone.set(user, { zone, at: Date.now() });
+      remember(lastReportedZone, user, { zone }, { ttlMs: ZONE_CHECK_MS });
     } catch (err) {
       log.warn('settings.device_clock_not_stored', { user }, err);
     }
   }
   next();
 }));
+
+/**
+ * Forget an account's memoised dashboards when it writes anything.
+ *
+ * One rule for every non-safe method rather than a call in each of the nine
+ * mutating routes, because a list of routes is a list that drifts — and the
+ * cost of forgetting too much is one recomputation, where the cost of
+ * forgetting too little is a user's tap painted away. `POST /notify/test`
+ * writes nothing `/overview` reads and is invalidated anyway, on purpose.
+ *
+ * It is registered HERE, above every route, and not beside the memo it clears:
+ * Express runs middleware in registration order, so mounted below `/habits` it
+ * would never see a request those routes had already answered.
+ *
+ * It runs on the way OUT, wrapped around `res.end`, and both halves of that are
+ * deliberate. Invalidating before the handler would leave the window this
+ * exists to close — a concurrent read repopulating the memo from pre-write data
+ * between the invalidation and the COMMIT. Invalidating from the `finish` event
+ * would be a scheduling argument instead of an ordering one: `finish` fires
+ * from a later turn of the loop than the write it follows, so "the client
+ * cannot have refetched yet" would be a claim about timing rather than
+ * something the code makes true. Wrapping `res.end` makes it true — the memo is
+ * clear before the first byte of the answer leaves, which is before the client
+ * can know the write happened at all.
+ *
+ * Unconditional on status, so a write that failed halfway through still drops
+ * what it may have changed.
+ *
+ * Through `forgetAccount` rather than `overviewMemo.forget`, because this
+ * router is NOT every write path — `NTFY_ANSWER_PATH` is mounted above it and
+ * the Discord button never reaches Express. Those call the same function; see
+ * its comment in `cache.js`.
+ */
+api.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  const user = uid(req);
+  const end = res.end.bind(res);
+  res.end = (...args) => {
+    forgetAccount(user);
+    return end(...args);
+  };
+  next();
+});
 
 /**
  * What day it is for the client making this request.
@@ -734,6 +785,166 @@ api.get('/habits/:id/stats', route(async (req, res) => {
   });
 }));
 
+/**
+ * How long an `/overview` answer is served from memory before it is rebuilt.
+ *
+ * The dashboard is not requested once per user action. It is requested on every
+ * app open, on every `visibilitychange` — the PWA refetches on foreground —
+ * once per open tab, and again on reconnect after the offline banner clears. So
+ * three tabs plus a focus event is four identical computations within a few
+ * seconds, for an account whose data last changed hours ago, on the most
+ * expensive route the app has.
+ *
+ * Two seconds because a write INVALIDATES (see the middleware below), so this
+ * is not the window in which a user's own change can be missed — it is only how
+ * long two requests have to arrive within to share one answer. The intended end
+ * state is a version check rather than a timer, which turns the remaining
+ * staleness into none at all; that needs #192 and this needs nothing.
+ */
+const OVERVIEW_TTL_MS = 2_000;
+
+/**
+ * The header a client sends to say "I have just written; do not memo me."
+ *
+ * Sent by `freshnessHeader` in `shared/public/offline.js` and by the second
+ * interceptor in the phone's `Api.kt`, each spelling this string themselves
+ * exactly the way `deviceClockHeader` and `DEVICE_ZONE_HEADER` already are —
+ * neither client can import this module. `test/cache.test.js` stops the web
+ * copy drifting and `AppSettingsDefaultsTest` stops the Kotlin one.
+ *
+ * A hint, deliberately: unsigned, unvalidated, and safe to ignore. A client
+ * that sent it on every request would get, for itself alone, the behaviour
+ * every client had before this memo existed — under the same read limiter that
+ * bounded it then. That is why honouring it needs no argument about trust.
+ */
+const FRESH_HEADER = 'X-Habiterall-Fresh';
+
+/**
+ * How many dashboards the memo may hold — its OWN number, not `MAX_CACHED`.
+ *
+ * `MAX_CACHED` is 10,000 and is justified by an entry costing ~100 bytes,
+ * which is true of the two caches it was written for and false of this one. An
+ * entry here is a whole `/overview` payload — every habit row spread, plus an
+ * `entries` grid of up to 365 dated keys per habit, plus `skips`. Measured with
+ * `--expose-gc`, retained after a collection: **499 KB** at 20 habits × 365
+ * days and **1.2 MB** at 50 × 365. Ten thousand of those is ~4.9 GB, and this
+ * edition's container dies with every tenant on it.
+ *
+ * Nothing stops an account reaching that count either: `end` is any date up to
+ * the caller's today and `days` is 1–365, so every distinct window is a
+ * distinct key and there are far more than ten thousand of them. Paging back
+ * through a few years of history is the honest way to do it; the read
+ * limiter's 300 req/min is the dishonest one, and neither involves a write, so
+ * `forget` never fires.
+ *
+ * 100 is the backstop and not the working bound. The bound is the TTL sweep in
+ * `createMemo`: entries live `OVERVIEW_TTL_MS`, a computation holds one of
+ * `PG_POOL_MAX` = 10 connections while it runs, so the live set is what ten
+ * connections can produce in two seconds. It was 500, which is ≈ 250 MB, and
+ * neither compose file sets a memory limit: the backstop was sized so that
+ * reaching it killed the process it was protecting.
+ *
+ * **How many entries "ten connections in two seconds" is depends on how long
+ * one takes, and this number has no latency term in it.** At 40 ms per
+ * `buildOverview` it is 100 for every 0.4 s of traffic; at 10 ms the live set
+ * wants four times that and `remember` starts evicting entries that are still
+ * fresh. That is the direction this fails in now, and it fails toward a memo
+ * that costs the sweep and returns no hits rather than toward an OOM —
+ * `memo.gauge` on the runtime line is what tells the two apart, and
+ * `MAX_OVERVIEW_BYTES` is what keeps the other direction bounded whatever this
+ * number is set to.
+ */
+const MAX_OVERVIEW_CACHED = 100;
+
+/**
+ * ...and the same bound expressed in the unit that actually matters.
+ *
+ * A COUNT converts to a memory bound only through the entry cost, and this
+ * cache's entries vary by ~70x: 18 KB for a typical 8-habit dashboard, 499 KB
+ * at 20 habits × 365 days, 1.2 MB at 50 × 365. So `MAX_OVERVIEW_CACHED` = 100
+ * is ~50 MB against the middle measurement and ~120 MB against the top one,
+ * and the comment above used to claim the first as though it were the bound.
+ * This is what makes it true: 48 MB, enforced, whatever mix of dashboard sizes
+ * an instance happens to hold.
+ *
+ * Measured in UTF-16 code units doubled, because the entries are STRINGS (see
+ * the memo below) and V8 stores one as Latin-1 or as UTF-16 — so two bytes per
+ * unit is the ceiling rather than a guess, and this bound cannot be under-read
+ * by an account whose habit names are not ASCII.
+ */
+const MAX_OVERVIEW_BYTES = 48 * 1024 * 1024;
+
+/**
+ * How many of those one account may hold.
+ *
+ * `MAX_OVERVIEW_CACHED` on its own is a bound an account can spend alone —
+ * every distinct `end`/`days` pair is a key, so paging back through a few
+ * years fills it, and the account doing that evicts everybody else's answers.
+ * The memo then costs every other tenant the sweep and returns them no hits,
+ * which is worse than not having it.
+ *
+ * Eight, because that is roughly what one account can legitimately have live:
+ * the read limiter allows 300 req/min = 5/s, entries live 2 s, so a client
+ * hammering distinct windows as fast as it is allowed to holds ~10 — and a
+ * real dashboard holds one or two, since the grid window only changes when the
+ * user pages. So this is a cap on the abusive shape and not on the ordinary
+ * one, and `MAX_OVERVIEW_CACHED` is now only reachable by genuinely many
+ * accounts being active at once, which is what a backstop should mean.
+ */
+const MAX_OVERVIEW_PER_ACCOUNT = 8;
+
+/**
+ * `/overview`, memoised per account, per window and per CALLER DAY.
+ *
+ * The last of those three is the subtle one and it is why the key is built by
+ * hand rather than from the query string. `summaryEnd` is the caller's own
+ * today, resolved from `X-Habiterall-Timezone` — so two devices on an account
+ * either side of a date boundary send the SAME URL and must not share an
+ * answer. `res.vary(DEVICE_ZONE_HEADER)` says exactly this to HTTP caches;
+ * a server-side memo has to say it in its key.
+ *
+ * Per process, and that is a statement about CORRECTNESS and not only about a
+ * hit rate. "A write invalidates" is true inside one process: on two replicas,
+ * a tap handled by A and a refetch balanced to B would be served B's own
+ * pre-tap answer, which is the very regression the invalidation exists to
+ * prevent, arriving through the load balancer.
+ *
+ * **`FRESH_HEADER` is what closes that, and it closes the half that matters:
+ * reading your own writes.** The client is the only party that knows it just
+ * wrote — no replica can be told cheaply, and asking a shared store on every
+ * read would cost a round trip on the path this memo exists to make cheaper —
+ * so the client says so and the route rebuilds. BOTH clients: the browser
+ * through `freshnessHeader`, the phone through `Api.kt`'s own interceptor,
+ * because a Done pressed on a notification is a write followed straight away
+ * by an overview fetch and the phone is where nothing on screen would correct
+ * it. What is left is one account's OTHER devices: a tab that did not itself
+ * write can still be served a ≤ 2 s-old dashboard after a button press
+ * elsewhere, which is the staleness the TTL already advertises rather than a
+ * hole underneath it. #192's version check is what removes even that.
+ *
+ * Read the hit-rate metric knowing it is 1/N.
+ */
+const overviewMemo = createMemo(async (arg) => JSON.stringify(await buildOverview(arg)), {
+  ttlMs: OVERVIEW_TTL_MS,
+  max: MAX_OVERVIEW_CACHED,
+  maxBytes: MAX_OVERVIEW_BYTES,
+  // UTF-16 code units doubled: V8 stores a string as Latin-1 or UTF-16, so
+  // this is the ceiling on what one entry retains rather than an estimate.
+  sizeOf: (json) => json.length * 2,
+  maxPerAccount: MAX_OVERVIEW_PER_ACCOUNT,
+  perAccount: true,
+});
+
+/** What the memo is holding, for the runtime log in `server.js`. */
+export const overviewMemoGauge = () => {
+  const g = overviewMemo.gauge();
+  return {
+    overview_memo_entries: g.entries,
+    overview_memo_bytes: g.bytes,
+    overview_memo_inflight: g.inflight,
+  };
+};
+
 api.get('/overview', route(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
 
@@ -754,7 +965,75 @@ api.get('/overview', route(async (req, res) => {
   // surface that answers "as of when", and it has its own range controls.
   const summaryEnd = now;
 
-  const payload = await withUser(uid(req), async (db) => {
+  const user = uid(req);
+  // Every input `buildOverview` reads, spelled out. `days` is not in it because
+  // `start` is derived from it and two windows with the same ends are the same
+  // window; `summaryEnd` IS, even though it equals `end` on an unpaged
+  // dashboard, because paging back separates them.
+  const key = `${user}:${start}:${end}:${summaryEnd}:${archived}`;
+  const arg = { user, start, end, summaryEnd, archived };
+
+  // The caller says it has just written, so it must not be handed an answer
+  // built before that write. Inside one process the invalidation middleware
+  // already guarantees this; on N it cannot, because the write may have been
+  // taken by a different replica.
+  //
+  // **And there is deliberately no `res.vary(FRESH_HEADER)` beside it**, which
+  // is the opposite of what this looks like it wants. Saying it to caches is
+  // free everywhere except the one cache this app actually ships: `sw.js`
+  // stores `/api/overview` with `cache.put(request, …)` and retrieves it with
+  // `caches.match(request)`, and the Cache API selects an entry using the
+  // STORED RESPONSE's `Vary`. This header is present on exactly one read — the
+  // refetch inside the three seconds after a write — and absent on every
+  // other, so varying on it makes those two requests different keys.
+  //
+  // Measured in Chrome rather than reasoned about, because the standard and
+  // the implementation disagree about the interesting half. Put the cold-boot
+  // answer, then put the post-write one: the second `put` REPLACES the first
+  // (one entry, not the two the spec's Vary-aware query implies), and the
+  // survivor answers `match` only for a request carrying the header. A cold
+  // boot never carries it — the window is three seconds — so `caches.match`
+  // returns nothing, `networkFirst` falls through to its synthetic 503, and an
+  // installed PWA opens offline to no dashboard at all rather than to the
+  // saved one. `Vary: X-Habiterall-Timezone` is safe in the same place for the
+  // reason this is not: a device sends the same zone on every request.
+  //
+  // Nothing is lost by omitting it. A `Vary` lets a cache pick between stored
+  // representations, and this header is not a representation — it is a demand
+  // to REBUILD, which no cache holding an entry can satisfy at all. The worker
+  // is network-first, so while there is a network the demand always reaches
+  // this route; with no network it is unsatisfiable and the saved dashboard is
+  // the right answer. See `shared/public/CLAUDE.md`, which states this as a
+  // rule about any route the worker caches rather than about this one.
+  const fresh = req.get(FRESH_HEADER) === '1';
+
+  // The memo holds the SERIALISED payload, so a hit skips a `JSON.stringify` of
+  // up to 1.2 MB as well as the five queries — on a single-threaded server that
+  // is everyone's latency, which is what `runtime.loop_blocked` is watched for.
+  // It is also what makes `sizeOf` exact rather than an estimate, and it means
+  // no two callers can ever be handed the same mutable object.
+  //
+  // `type` before `send`: `res.send` of a STRING defaults the content type to
+  // text/html, where `res.json` would have set it. With it set first the two
+  // are byte-identical — no `json replacer` or `json spaces` is configured on
+  // this app, and `overview-memo.integration.mjs` asserts a hit and a miss
+  // agree on status, content type and body.
+  res.type('application/json')
+    .send(fresh ? await overviewMemo.fresh(key, arg) : await overviewMemo(key, arg));
+}));
+
+/**
+ * The whole of what `/overview` returns, as a function of its inputs alone.
+ *
+ * Split out of the route so the memo above has something to memoise, and so
+ * nothing in here can reach for `req` — a payload that depended on a header the
+ * key does not carry is the one way this cache can be wrong.
+ *
+ * @param {{user: number, start: string, end: string, summaryEnd: string,
+ *   archived: boolean}} arg
+ */
+async function buildOverview({ user, start, end, summaryEnd, archived }) {
+  return withUser(user, async (db) => {
     const { rows: habits } = await db.query(
       `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
       [archived]
@@ -782,7 +1061,7 @@ api.get('/overview', route(async (req, res) => {
     // below runs per habit and this is not a per-habit question.
     const { rows: [prefs] } = await db.query(
       `SELECT settings ->> 'atMostUnlogged' AS unlogged FROM users WHERE id = $1`,
-      [uid(req)]
+      [user]
     );
     const unlogged = unloggedFrom(prefs);
 
@@ -910,9 +1189,7 @@ api.get('/overview', route(async (req, res) => {
       ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
     };
   });
-
-  res.json(payload);
-}));
+}
 
 /**
  * What a day with no row counts as on an at-most habit, from a `users` row.

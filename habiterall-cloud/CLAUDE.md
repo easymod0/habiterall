@@ -230,6 +230,19 @@ nothing declared in it can be unit tested — and the failure mode here is silen
 in the worst direction, an `inflight` left set reporting the last good answer
 forever while Postgres is down.
 
+**Both pool timeouts are settable, `0` means OFF, and a cancellation is named.**
+`statement_timeout` (15 s) and `idle_in_transaction_session_timeout` (30 s) go
+in as connection parameters, so `SHOW` against a real session is the only thing
+that can confirm them — `test/api.integration.mjs` does exactly that. They are
+parsed by `timeoutFromEnv` and never by `Number(env) || default`, which is the
+idiom next door at `PG_POOL_MAX` and is wrong here: **0 is a value Postgres has
+a meaning for** — it disables the timeout — and `||` swallows exactly that
+spelling. An unparseable value falls back *and warns*. `noteTimeout` logs
+`pg.statement_timeout` / `pg.idle_tx_timeout` and rethrows untouched, rather
+than converting to a 503 that would tell the offline outbox to replay a write
+that cannot finish in the time allowed. `docs/decisions/caching.md` has the
+rest, including why 15 s is the open judgement call here.
+
 **The route is mounted ABOVE `app.use(session(...))`, and that is a rule rather
 than a tidy-up.** It reads no session and never has, but below the middleware it
 paid for one anyway: connect-pg-simple runs a `SELECT` on `session` for the
@@ -247,6 +260,82 @@ controls are the load-bearing half — one asserts `/api/me` returns **exactly**
 table intact, and one asserts a request below the middleware does write the row,
 because otherwise "the column did not move" is also what a server with no
 session handling at all would say.
+
+## The dashboard is memoised, and a write is what clears it
+
+`/overview` is the most expensive route here — five queries, one of them an
+unbounded aggregate, plus per-habit synchronous CPU — and three tabs plus a
+focus event is four identical computations within a few seconds. `overviewMemo`
+(`src/api.js`, over `createMemo` in `src/cache.js`) is the health probe's shape
+generalised to more than one key. **`docs/decisions/caching.md` is the whole
+reasoning: the measurements behind every bound, the eviction policy, the
+`Vary` that cost the offline dashboard, and what #192 should replace this
+with.** What follows is only what you can get wrong from here.
+
+**The key carries the caller's own DAY.** `summaryEnd` is `callerToday(req)`, so
+two devices on one account either side of a date boundary send the *same URL*
+and must get different answers. It is the same "whose day it is has two answers"
+trap the root `CLAUDE.md` names, arriving through a cache instead of a route.
+`buildOverview` is split out of the route so nothing in it can reach for `req` —
+a payload depending on an input the key does not carry is the one way this is
+wrong.
+
+**Invalidation is one rule for every non-safe method, not a call per route.** A
+list of the nine mutating routes is a list that drifts, and the errors are not
+symmetrical: forgetting too much costs a recomputation, forgetting too little
+paints a user's own tap away. It wraps `res.end` rather than listening for
+`finish`, so the memo is clear before the first byte of the answer leaves.
+
+**But `api.use(...)` is a rule about a ROUTER, and this edition writes from
+outside it — twice.** The signed ntfy answer route is mounted above the `/api`
+mount, and a Discord button press never touches Express at all. Both write a
+real entry through `interactionAdapter().record`, and neither is reached by the
+middleware. **`forgetAccount` (`src/cache.js`) is what a write path outside the
+router calls**, with its `finally` OUTSIDE `withUser` so the forget follows the
+COMMIT.
+
+**Three per-user caches share one eviction policy** (`src/cache.js`): this memo,
+`blockCache` and `lastReportedZone`. `session-touch.js`'s map is deliberately
+not one of them — it bounds by clearing, because forgetting a session there
+costs one extra `UPDATE`.
+
+**Sharing a policy is not sharing a NUMBER: a cache whose entries cost something
+else must pass its own bound.** `MAX_CACHED` (10,000) is justified by a ~100-byte
+entry, and an `/overview` entry is a whole dashboard — 18 KB to 1.2 MB, a ~70×
+spread. So the memo passes `MAX_OVERVIEW_CACHED` (100), `MAX_OVERVIEW_BYTES`
+(48 MB) and `MAX_OVERVIEW_PER_ACCOUNT` (8), the last because a shared bound is
+one an account paging through its own history can spend alone. `createMemo`
+THROWS for a `maxBytes` with no `sizeOf`, at construction: a byte bound with
+nothing to measure with is a comment claiming a bound, which is the shape this
+module exists because of.
+
+**The memo holds the SERIALISED payload**, which is what makes `sizeOf` exact
+and lets a hit skip a `JSON.stringify` of up to 1.2 MB. `res.type` BEFORE `send`
+is the one way that goes wrong — `res.send` of a string defaults the content
+type to `text/html`.
+
+**Both ways of getting the bound wrong are silent**, in opposite directions —
+thrash and no hits, or a killed container — and the count has no latency term in
+it. So `overviewMemoGauge` rides on the runtime line beside `pg_pool_max`. A
+`size()` read by nothing but tests is "who finds out?" answered with *nobody*.
+
+**The TTL is two seconds, and per PROCESS is a statement about CORRECTNESS.** On
+two replicas a tap handled by A and a refetch balanced to B is served B's own
+pre-tap answer — the regression the invalidation exists to prevent, arriving
+through the load balancer. All the ordering care above closes windows inside one
+process and none of it reaches a second. Read a hit-rate metric knowing it is
+1/N.
+
+**`X-Habiterall-Fresh` is what closes that, and BOTH clients send it** — the
+web's `freshnessHeader` (`shared/public/offline.js`) and the phone's `Freshness`
+interceptor (`Api.kt`) — for three seconds after any write that got an answer,
+because the client is the only party that knows it just wrote. It is a **hint**:
+unsigned, unvalidated, safe to ignore, and being wrong about it costs a
+recomputation, so it is not a mirror of the kind the root `CLAUDE.md` warns
+about. **It is deliberately not a `res.vary`** — see `shared/public/CLAUDE.md`
+for the rule and `docs/decisions/caching.md` for what it cost. What is left is
+one account's OTHER devices, which is the staleness the TTL already advertises;
+#192 removes even that.
 
 ## Which claim names the account
 

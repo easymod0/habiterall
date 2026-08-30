@@ -154,6 +154,23 @@ with its reason, paired with a positive assertion that `category_id` itself
 reaches the wire from the habit's own value through BOTH bridges. An exemption
 with no replacement assertion is a hole; that pairing is the decision.
 
+**`Freshness` is not a sixth mirror either, and it is the one that most looks
+like one.** `Api.kt` sends `X-Habiterall-Fresh: 1` on reads for three seconds
+after any write that got an answer — `freshnessHeader` in
+`shared/public/offline.js` written a second time in Kotlin. What makes it the
+same kind of thing as `DEVICE_ZONE_HEADER` rather than a mirror: it decides
+nothing about what a tap MEANS, nothing reaches storage through it, a phone
+with no network never gets there, and the server treats it as a hint it is free
+to ignore. Being wrong about it costs one recomputation.
+
+The clock is `SystemClock.elapsedRealtime()`, which keeps counting through deep
+sleep where `System.nanoTime()` stops. Two tests, not one: `FreshnessTest` for
+the window's arithmetic and `AppSettingsDefaultsTest` for the spelling and the
+interceptor wiring, because either passes with the other deleted — the whole
+decision lives in `Freshness` rather than in the interceptor for exactly that
+reason. `habiterall-cloud/CLAUDE.md` has the server's half and
+`docs/decisions/caching.md` has why the phone has it at all.
+
 **`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two
 clients disagreeing about diacritic folding costs a search result, not a wrong

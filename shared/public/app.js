@@ -56,7 +56,17 @@ function showBootError(message) {
 function initTopBar() {
   // The app title doubles as "home". Reloads rather than just switching views,
   // so returning from a detail page shows current data.
-  $('#btn-home').addEventListener('click', () => emit('reload'));
+  //
+  // ...and the archive is not home. Its tooltip has always said "Back to your
+  // habits" and it has never been able to do that: the archive is
+  // `state.showArchived`, a session boolean rather than a route, so 'reload'
+  // alone lands back in it. `load()` clears the flag when the archive has
+  // EMPTIED, which is the trap; this is the ordinary way out of an archive that
+  // still has something in it, and it makes the tooltip true.
+  $('#btn-home').addEventListener('click', () => {
+    state.showArchived = false;
+    emit('reload');
+  });
 
   // Nothing follows the switch. It used to refetch and redraw the detail view,
   // because the charts had resolved the old palette into their attributes —

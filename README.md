@@ -728,6 +728,8 @@ services:
       MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
       MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
       PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if a long export is cancelled; 0 disables
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug; 0 disables
       PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
       LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
       LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY
@@ -1000,6 +1002,8 @@ MAX_UPLOAD_MB=16
 #LOG_RUNTIME_MS=60000
 #LOG_LAG_WARN_MS=200
 #PG_POOL_MAX=10                 # what the /healthz memo is sized against
+#PG_STATEMENT_TIMEOUT_MS=15000  # a query past this is cancelled; raise for a very long export, 0 to disable
+#PG_IDLE_TX_TIMEOUT_MS=30000    # idle-in-transaction for this long is a bug, not a slow query; 0 disables
 #PGSSL=                         # `require` for a managed Postgres reached over TLS
 ```
 <!-- /generated -->
@@ -1144,6 +1148,8 @@ services:
       MAX_PARSE_HABITS: ${MAX_PARSE_HABITS:-}              # 10000
       MAX_PARSE_ENTRIES: ${MAX_PARSE_ENTRIES:-}            # 250000
       PG_POOL_MAX: ${PG_POOL_MAX:-}                        # 10 — the /healthz memo is sized on it
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}    # 15000 — raise it if a long export is cancelled; 0 disables
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}      # 30000 — anything this kills is a bug; 0 disables
       PGSSL: ${PGSSL:-}                                    # `require` for a managed Postgres
       LOG_LEVEL: ${LOG_LEVEL:-}                            # info; debug for reminders
       LOG_FORMAT: ${LOG_FORMAT:-}                          # json, or pretty on a TTY

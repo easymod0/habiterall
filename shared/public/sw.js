@@ -274,7 +274,7 @@ const sw = self;
 // No new FILE, so `SHELL` is unchanged — `/index.html`, `/shared/ui/amount.js`,
 // `/shared/ui/count-field.js` and `/shared/ui/habit-dialog.js` are all already
 // in it.
-const CACHE_VERSION = 'v27';
+const CACHE_VERSION = 'v28';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -447,6 +447,16 @@ async function networkFirst(request, url) {
     const response = await fetch(request, {
       cache: 'no-store', signal: boundedSignal(10_000),
     });
+    // The REQUEST is the key, here and in the `caches.match` below, and both
+    // select using the stored response's `Vary`. So a route this list covers
+    // may not vary on a header the page sends only SOMETIMES — see
+    // `CLAUDE.md`. Measured in Chrome with cloud's `X-Habiterall-Fresh`: the
+    // put made from a request carrying it replaced the entry stored from one
+    // without, and the survivor then matched neither `cache.match` nor
+    // `caches.match` for any ordinary request, so the fallback below fell
+    // through to the synthetic 503 and the installed app opened offline to
+    // nothing. `Vary: X-Habiterall-Timezone` is safe in the same place because
+    // a device sends one zone on every request.
     if (response.ok && CACHEABLE_API.some((re) => re.test(url.pathname))) {
       const cache = await caches.open(DATA_CACHE);
       cache.put(request, response.clone());

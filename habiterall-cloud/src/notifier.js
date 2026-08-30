@@ -20,6 +20,7 @@
  * from `habits.reminder_time` and needs no server at all.
  */
 
+import { forgetAccount } from './cache.js';
 import { withNotifierScope, withUser } from './db/pool.js';
 import {
   answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
@@ -329,41 +330,72 @@ export function interactionAdapter() {
      * storage rule as the HTTP API — `parseEntry` then `entryWrite`. A second
      * definition of "not done" living here is exactly the drift those two
      * functions exist to prevent.
+     *
+     * This is the one write path in this edition that is NOT on the `/api`
+     * router, and it is two of them: ntfy's button posts to a route mounted
+     * above that router, and Discord's arrives on the gateway socket without
+     * touching Express at all. Both land here. So the dashboard memo is
+     * invalidated here too, through the same `forgetAccount` the router's
+     * middleware calls — without it, pressing Done on a reminder while the PWA
+     * is open in a tab served that tab a dashboard computed before the press,
+     * with the day still blank, for the length of the TTL.
      */
     async record(account, { habitId, date, action, value }) {
-      return withUser(account.id, async (db) => {
-        const { rows } = await db.query(`SELECT * FROM habits WHERE id = $1`, [habitId]);
-        const habit = rows[0];
-        if (!habit) return { ok: false, error: 'That habit no longer exists.' };
+      // `finally`, and OUTSIDE `withUser`, and both halves are the same rule
+      // the router middleware states at its own registration.
+      //
+      // Outside, because `withUser` COMMITs after its callback returns
+      // (`db/pool.js`) — so forgetting from inside forgets before the write is
+      // visible to anyone else, and leaves exactly the window the invalidation
+      // exists to close: a concurrent `/overview` clears the memo, opens its
+      // own transaction, cannot see the uncommitted row, and stores the
+      // pre-press dashboard. The commit then lands behind it and the press is
+      // painted away for the length of the TTL — the same regression arriving
+      // from the other side, and the reason the router wraps `res.end` rather
+      // than invalidating on the way in.
+      //
+      // `finally` rather than on success, because the two errors are not
+      // symmetrical: forgetting after a rolled-back write costs one
+      // recomputation, and not forgetting after a write that partly landed
+      // costs a user their press. Unconditional, exactly as the middleware is
+      // unconditional on status.
+      try {
+        return await withUser(account.id, async (db) => {
+          const { rows } = await db.query(`SELECT * FROM habits WHERE id = $1`, [habitId]);
+          const habit = rows[0];
+          if (!habit) return { ok: false, error: 'That habit no longer exists.' };
 
-        const body = answerBody(habit, { action, value });
+          const body = answerBody(habit, { action, value });
 
-        let parsed;
-        try {
-          parsed = parseEntry(habit, body, { UNSET, YES, SKIP });
-        } catch (err) {
-          return { ok: false, error: err.message };
-        }
+          let parsed;
+          try {
+            parsed = parseEntry(habit, body, { UNSET, YES, SKIP });
+          } catch (err) {
+            return { ok: false, error: err.message };
+          }
 
-        const write = entryWrite(habit, parsed, { UNSET, SKIP });
+          const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
-        if (write.op === 'delete') {
-          await db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
-            [habitId, date]);
-        } else {
-          await db.query(
-            `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
-             VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (habit_id, date) DO UPDATE
-               SET value = EXCLUDED.value,
-                   status = EXCLUDED.status,
-                   notes = EXCLUDED.notes`,
-            [habitId, account.id, date, write.value, write.status, write.notes]
-          );
-        }
+          if (write.op === 'delete') {
+            await db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
+              [habitId, date]);
+          } else {
+            await db.query(
+              `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+               VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT (habit_id, date) DO UPDATE
+                 SET value = EXCLUDED.value,
+                     status = EXCLUDED.status,
+                     notes = EXCLUDED.notes`,
+              [habitId, account.id, date, write.value, write.status, write.notes]
+            );
+          }
 
-        return { ok: true, habit, text: answerText(habit, { action, value }) };
-      });
+          return { ok: true, habit, text: answerText(habit, { action, value }) };
+        });
+      } finally {
+        forgetAccount(account.id);
+      }
     },
   };
 }

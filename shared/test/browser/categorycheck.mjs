@@ -993,34 +993,58 @@ try {
     noMatchGrouped.headers === 0 && noMatchGrouped.sentenceVisible,
     JSON.stringify(noMatchGrouped));
 
-  // An empty ACCOUNT, without touching any fixture: switching to the archived
-  // list is an account with zero habits on it, since nothing here is
-  // archived, and it is still `groupByCategory: true`.
+  // An empty ACCOUNT, and it has to be a real one now. This used to set
+  // `showArchived` and call `load()` on an account with nothing archived —
+  // which was a cheap empty list right up until #177, whose whole fix is that
+  // `load()` CLEARS the flag when the archive has emptied. There is no longer
+  // any way to stand on an empty archive, deliberately, so the old vehicle
+  // silently became "the active list, with all three headers on it".
+  //
+  // So: archive every habit through the API and look at the active list. Same
+  // claim — no section headers over an empty grid — reached by the one route
+  // still open to it, and `groupByCategory` is still on from the block above.
   await ev(`(async()=>{
+    const habits = await (await fetch('/api/habits')).json();
+    for (const h of habits) {
+      await fetch('/api/habits/' + h.id, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...h, archived: true }),
+      });
+    }
     const { state } = await import('/shared/ui/store.js');
     const dash = await import('/shared/ui/dashboard.js');
     state.query = '';
-    state.showArchived = true;
+    state.showArchived = false;
     await dash.load();
     return true;
   })()`);
   const emptyGrouped = await ev(`(()=>({
+    rows: document.querySelectorAll('#grid .habit-row').length,
     headers: document.querySelectorAll('#grid .category-section-header').length,
-    archivedEmptyVisible: !document.getElementById('empty-archived').hidden,
+    onboardingVisible: !document.getElementById('empty').hidden,
   }))()`);
-  ck('grouped, and the account (the archived list) is empty: no section headers either',
-    emptyGrouped.headers === 0 && emptyGrouped.archivedEmptyVisible,
+  ck('grouped, and the account is empty: no section headers either',
+    emptyGrouped.rows === 0 && emptyGrouped.headers === 0 && emptyGrouped.onboardingVisible,
     JSON.stringify(emptyGrouped));
 
-  // Back to the active list — the next block's own navigation would reset
-  // this anyway, but leaving it set is not this test's to risk.
+  // Everything back, because the fixtures are this suite's and the blocks
+  // below count on all five habits being active.
   await ev(`(async()=>{
+    const arch = await (await fetch('/api/habits?archived=true')).json();
+    for (const h of arch) {
+      await fetch('/api/habits/' + h.id, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...h, archived: false }),
+      });
+    }
     const { state } = await import('/shared/ui/store.js');
     const dash = await import('/shared/ui/dashboard.js');
     state.showArchived = false;
     await dash.load();
     return true;
   })()`);
+  await waitUntil(ev, `document.querySelectorAll('#grid .habit-row').length === 5`,
+    { what: 'the five fixture habits back on the active list' });
 
   /* ---------- turning the setting back off restores the flat list ---------- */
 

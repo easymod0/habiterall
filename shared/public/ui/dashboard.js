@@ -154,6 +154,26 @@ const listHost = {
 };
 
 export async function load() {
+  // The archive toggle is pointless until something has been archived, and this
+  // is asked FIRST because the answer can decide which list to fetch below.
+  const archived = await api('/habits?archived=true');
+  state.hasArchived = archived.length > 0;
+
+  // Unarchiving the last archived habit empties the view you are standing in —
+  // and `paint()` hides `#list-head` when nothing is archived, which is where
+  // the only control back to the active list lives. So the archive became a
+  // room with no door: "No archived habits.", one sentence and zero controls,
+  // and the three roads out (`#btn-home`, the detail view's Back, `popstate`)
+  // all emit 'reload', which lands here and reads `showArchived` again.
+  //
+  // Cleared HERE rather than by widening the `hidden` test, because leaving
+  // someone on an empty archive with a working toggle answers the trap and not
+  // the question: there is nothing left to show, so the active list is where
+  // they were going. Ordered before the fetch so the request asks for the list
+  // that is about to be painted — clearing it afterwards would draw the
+  // onboarding panel over an account that has habits.
+  if (state.showArchived && !state.hasArchived) state.showArchived = false;
+
   // Always request the widest column count so a rotation to landscape needs
   // no refetch, and the window the user is actually looking at — paging back
   // must bring its entries with it.
@@ -199,10 +219,6 @@ export async function load() {
   // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
   // the caller's own today, so asking is not knowing.
   state.gridLoaded = { start: data.start, end: data.end };
-
-  // The archive toggle is pointless until something has been archived.
-  const archived = await api('/habits?archived=true');
-  state.hasArchived = archived.length > 0;
 
   paint();
 }

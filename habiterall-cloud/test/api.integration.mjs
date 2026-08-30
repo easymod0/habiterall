@@ -13,7 +13,7 @@ process.env.DATABASE_URL ??=
 const ADMIN_URL = process.env.ADMIN_URL ??
   'postgres://owner:testpw@localhost:5432/habiterall';
 
-const { withUser, pool } = await import('../src/db/pool.js');
+const { withUser, withoutUser, pool } = await import('../src/db/pool.js');
 const { applyImport } = await import('../src/apply-import.js');
 const { parseSettings, foldCategoryName } = await import('@habiterall/shared/validate.js');
 const { writeLoopDatabase } = await import('@habiterall/shared/export-loop.js');
@@ -55,6 +55,104 @@ const mkUser = async (sub) => {
 const alice = await mkUser('ci-alice');
 const bob = await mkUser('ci-bob');
 console.log(`  alice=${alice}  bob=${bob}\n`);
+
+/* ---------- the pool's timeouts ---------- */
+
+// A configuration assertion, and it has to be made against a real session:
+// `pg` passes these through as connection PARAMETERS, so the only thing that
+// can say whether they arrived is Postgres. Reading `pool.options` back would
+// pin that the object was built and nothing about whether it took.
+{
+  const c = await pool.connect();
+  const shown = async (name) => (await c.query(`SHOW ${name}`)).rows[0][name];
+  // The literals, not the constants from pool.js: a test importing those would
+  // compare each with itself and pass with both parameters dropped.
+  ck('statement_timeout reaches the session', await shown('statement_timeout') === '15s',
+    await shown('statement_timeout'));
+  ck('idle_in_transaction_session_timeout reaches the session',
+    await shown('idle_in_transaction_session_timeout') === '30s',
+    await shown('idle_in_transaction_session_timeout'));
+  c.release();
+}
+
+// ...and a cancellation is NAMED, which is the other half of why the timeouts
+// are worth having. The problem they were added for was that a pathological
+// statement reached the operator as OTHER requests failing their checkout,
+// "naming nothing about the query responsible" — and a bare 500 out of `57014`
+// names nothing either. So `withUser` logs `pg.statement_timeout` on the way
+// past and rethrows untouched.
+//
+// Driven, not read: the log line is the WIRING and the SQLSTATE table is only
+// the decision. `SET LOCAL` is what makes this cost 50ms instead of 15s, and
+// it is a real cancellation by the real server either way.
+{
+  const lines = [];
+  const realWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => {
+    lines.push(String(chunk));
+    return realWrite(chunk, ...rest);
+  };
+
+  let caught;
+  try {
+    await withUser(alice, async (db) => {
+      await db.query(`SET LOCAL statement_timeout = '50ms'`);
+      await db.query('SELECT pg_sleep(1)');
+    });
+  } catch (err) {
+    caught = err;
+  } finally {
+    process.stdout.write = realWrite;
+  }
+
+  // Rethrown unchanged: a 503 would tell the offline outbox to replay a write
+  // that cannot finish in the time allowed, so the caller still gets its 500.
+  ck('a cancelled statement still reaches the caller as itself',
+    caught?.code === '57014', `code=${caught?.code}`);
+  ck('...and the cancellation is logged by name',
+    lines.some((l) => l.includes('pg.statement_timeout')),
+    lines.filter((l) => l.includes('pg.')).join('').slice(0, 200) || '(nothing logged)');
+  // The pool's own setting, which is the number an operator would change.
+  // `SET LOCAL` above is why it reads 15000 and not 50 — and why the field is
+  // called `pool_limit_ms` rather than something claiming to be the limit that
+  // actually fired.
+  ck('...carrying the pool setting, so the fix is to raise it or go looking',
+    lines.some((l) => l.includes('"pool_limit_ms":15000')));
+}
+
+// ...and an error that is not a cancellation is not logged as one. `withUser`
+// and `withoutUser` wrap arbitrary callbacks — the session store, the
+// IdP-subject lookup — so `err.code` reaching `noteTimeout` is not always a
+// SQLSTATE. A plain `TIMEOUT_CODES[err.code]` resolves `constructor` and
+// `toString` to functions and `__proto__` to an object, every one of them
+// truthy, and an unrelated failure would be logged as a cancelled query under
+// an event name that is not a string. The root CLAUDE.md's `Object.hasOwn`
+// rule, at the one lookup in this file that takes its key from outside.
+//
+// Here rather than in `pool-timeouts.test.js` because `withoutUser` takes its
+// connection BEFORE its `try`: with no database reachable it rejects with an
+// AggregateError and never reaches the lookup at all.
+{
+  const lines = [];
+  const realWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => { lines.push(String(chunk)); return true; };
+
+  let rejected = 0;
+  try {
+    for (const code of ['__proto__', 'constructor', 'toString', 'ENOENT']) {
+      const err = Object.assign(new Error('not a timeout'), { code });
+      await withoutUser(() => { throw err; }).catch((e) => {
+        if (e === err) rejected++;
+      });
+    }
+  } finally {
+    process.stdout.write = realWrite;
+  }
+
+  ck('control: each error came back untouched', rejected === 4, `${rejected}/4`);
+  ck('an error whose code names a prototype member is not logged as a timeout',
+    lines.join('') === '', lines.join('').slice(0, 200));
+}
 
 /* ---------- habits and entries ---------- */
 

@@ -19,6 +19,24 @@ all read the stored value, and `shellFirst`'s stale-while-revalidate can serve
 one of those three a new module over a cached old one. See `sw.js`'s own
 comment at `v18` for what that looks like in practice.
 
+**A route the worker caches may not `Vary` on a header the page sends only
+SOMETIMES.** `networkFirst` stores with `cache.put(request, …)` and reads back
+with `caches.match(request)`, and the Cache API selects an entry using the
+stored RESPONSE's `Vary` — so a conditionally-sent header turns one URL into
+two keys, and the key an offline boot presents is the one without it. That is
+not a stale answer, it is no answer: measured in Chrome against cloud's
+`X-Habiterall-Fresh`, the `put` made from the post-write refetch REPLACED the
+entry stored from the cold-boot read (one entry, not two), after which nothing
+an ordinary request could ask for matched it at all — `networkFirst` fell
+through to its synthetic 503 and the installed PWA opened offline to no
+dashboard. `Vary: X-Habiterall-Timezone` sits on the same responses and is
+safe, which is the whole distinction: a device sends one zone on every request
+and the freshness hint rides on exactly one read per write. A header asking the
+server to REBUILD is not a representation a cache could pick between anyway, so
+there is nothing to trade. If a route ever genuinely does need one, the worker
+has to opt out of it (`{ignoreVary: true}`) in the same change.
+`docs/decisions/caching.md` has the measurement in full.
+
 **`[hidden]` needs `display: none !important`** in the stylesheet. A `display`
 rule silently beats the attribute, which once made the day editor show both habit
 types' controls at once. Only a real browser catches this class of bug — that is
