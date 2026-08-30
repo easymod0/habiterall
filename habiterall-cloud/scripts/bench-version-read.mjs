@@ -619,7 +619,15 @@ try {
     [50, DAYS, `50 habits x ${DAYS} days`],
   ]) {
     const acct = shaped.find(([n]) => n === habits)?.[1];
-    if (!acct) continue;
+    // The four rows name their shapes independently of `SHAPES`, so a change
+    // there drops rows from here. SAY so rather than printing a shorter table:
+    // `MAX_OVERVIEW_CACHED` is derived from the smallest row, and a table
+    // missing it reads exactly like a complete one.
+    if (!acct) {
+      console.log(`  ${label.padEnd(30)} ${'not measured'.padStart(9)}    `
+        + `(no ${habits}-habit account; SHAPES is [${SHAPES}])`);
+      continue;
+    }
     const bytes = (await acct.body(days)).length * 2;
     console.log(`  ${label.padEnd(30)} ${(bytes / 1024).toFixed(1).padStart(9)} KB `
       + `${String(Math.floor(MAX_BYTES / bytes)).padStart(14)}`);
