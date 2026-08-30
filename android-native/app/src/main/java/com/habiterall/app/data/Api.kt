@@ -1,5 +1,6 @@
 package com.habiterall.app.data
 
+import android.os.SystemClock
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -521,6 +522,101 @@ class ApiException(val status: Int, message: String) : Exception(message) {
  */
 private const val DEVICE_ZONE_HEADER = "X-Habiterall-Timezone"
 
+/**
+ * Mirrors `FRESH_HEADER` in `habiterall-cloud/src/api.js` and the constant of
+ * the same name in `shared/public/offline.js`. A header name again, not a rule.
+ */
+internal const val FRESH_HEADER = "X-Habiterall-Fresh"
+
+/**
+ * "This client has just written; do not serve it a memoised dashboard."
+ *
+ * Cloud memoises `/overview` per PROCESS and clears that memo when a write
+ * arrives, which is one process's map cleared by the process that took the
+ * write. Behind a load balancer with two replicas, a Done pressed on a
+ * notification can be taken by A while the overview fetch behind it is
+ * answered by B out of B's own pre-tap copy — and nothing on B will clear it.
+ * The client is the only party that knows it just wrote, so the client is what
+ * says so. [FRESH_HEADER] is the whole protocol, and the server treats it as a
+ * hint: unsigned, ignorable, and worth a recomputation when it is wrong.
+ *
+ * The phone needs this more than the browser does, not less. A web tap leaves
+ * the dashboard on screen with the optimistic paint still on it; a
+ * notification answered with the app closed has no surface at all to disagree
+ * with a stale list when it next opens.
+ *
+ * **Not one of the five offline mirrors** (`android-native/CLAUDE.md`): nothing
+ * here decides what a tap MEANS or when a reminder is due, and a phone with no
+ * network never reaches it. It is the same kind of thing as
+ * [DEVICE_ZONE_HEADER] beside it — a fact this client reports about itself.
+ *
+ * The clock is passed in rather than read here so this is testable without
+ * Android, and the caller passes `SystemClock.elapsedRealtime()`: it is the
+ * monotonic one that keeps counting through deep sleep, where
+ * `System.nanoTime()` stops. A phone that wrote and then slept for an hour
+ * would wake inside its own three-second window under `nanoTime`, which costs
+ * nothing worse than one recomputation but is a clock lying about a duration.
+ * `lastWriteAt` is null rather than a sentinel, because `now - Long.MIN_VALUE`
+ * overflows to a negative and would report the window OPEN before any write.
+ */
+internal object Freshness {
+
+    /**
+     * Longer than cloud's `OVERVIEW_TTL_MS` (2s) on purpose, and the same 3s
+     * `FRESH_AFTER_WRITE_MS` in `shared/public/offline.js` uses: past the
+     * window any entry predating the write has expired anyway, so "bypass
+     * while open" and "nothing stale can remain after" meet with a second to
+     * spare. Shorter than the TTL would leave a gap that reads as the original
+     * bug.
+     */
+    const val WINDOW_MS = 3_000L
+
+    @Volatile
+    private var lastWriteAt: Long? = null
+
+    /**
+     * The value [FRESH_HEADER] should carry on this request, or null for a
+     * request that must not carry it at all.
+     *
+     * **The whole rule lives here rather than in the interceptor, and that is
+     * deliberate.** A guard that reads SOURCE TEXT cannot see an inverted
+     * comparison or a renamed binding — measured: with the method gate moved
+     * out of the interceptor's condition and the binding left behind, the
+     * wiring guard in `AppSettingsDefaultsTest` still passed while the phone
+     * had started asking for a rebuild on every write it made. So the decision
+     * is a pure function `FreshnessTest` drives directly, and the guard is
+     * left with the one thing text CAN answer: that the interceptor calls it.
+     *
+     * Reads only. A write has no memoised answer to be refused, so asking for
+     * one rebuilds a dashboard nobody is about to read.
+     */
+    fun headerFor(method: String, now: Long): String? {
+        if (method != READ_METHOD) return null
+        val last = lastWriteAt ?: return null
+        return if (now - last < WINDOW_MS) "1" else null
+    }
+
+    /**
+     * A request got an ANSWER, so note it if it was a write.
+     *
+     * Whatever its status, exactly as the web client and cloud's own
+     * invalidation middleware are unconditional on status, because a write
+     * that failed halfway through still changed what it may have changed. A
+     * request that never answered at all never reaches here: `chain.proceed`
+     * throws, and the outbox replays it through this same interceptor later.
+     */
+    fun noteAnswer(method: String, now: Long) {
+        if (method != READ_METHOD) lastWriteAt = now
+    }
+
+    /** For tests: no process ever wants to forget this. */
+    internal fun reset() {
+        lastWriteAt = null
+    }
+
+    private const val READ_METHOD = "GET"
+}
+
 class Api(
     private val baseUrl: String,
     private val onUnauthorized: (() -> Unit)? = null,
@@ -566,6 +662,29 @@ class Api(
                 if (zone.isNullOrBlank()) req
                 else req.newBuilder().header(DEVICE_ZONE_HEADER, zone).build()
             )
+        }
+        // ...and read-your-own-writes across replicas. See [Freshness]: a read
+        // made inside the window after a write asks cloud's `/overview` memo to
+        // rebuild rather than answer, because the replica taking the read may
+        // not be the one that took the write.
+        //
+        // One chokepoint for the same reason the zone is: every call this
+        // client makes goes through here, live or replayed from the outbox, so
+        // a request added later cannot forget either half.
+        //
+        // Wiring only — which method carries the header and how long the window
+        // lasts are both [Freshness]'s, so they can be tested without standing
+        // an HTTP server up in a unit test. What is left here is small enough
+        // that a source-text guard can honestly cover it.
+        .addInterceptor { chain ->
+            val req = chain.request()
+            val value = Freshness.headerFor(req.method, SystemClock.elapsedRealtime())
+            val res = chain.proceed(
+                if (value == null) req
+                else req.newBuilder().header(FRESH_HEADER, value).build()
+            )
+            Freshness.noteAnswer(req.method, SystemClock.elapsedRealtime())
+            res
         }
         .build()
 

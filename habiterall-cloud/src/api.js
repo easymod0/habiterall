@@ -806,10 +806,11 @@ const OVERVIEW_TTL_MS = 2_000;
 /**
  * The header a client sends to say "I have just written; do not memo me."
  *
- * Sent by `freshnessHeader` in `shared/public/offline.js`, which spells this
- * string as a literal exactly the way `deviceClockHeader` beside it spells
- * `DEVICE_ZONE_HEADER` — the browser cannot import this module, and
- * `test/cache.test.js` is what stops the two drifting.
+ * Sent by `freshnessHeader` in `shared/public/offline.js` and by the second
+ * interceptor in the phone's `Api.kt`, each spelling this string themselves
+ * exactly the way `deviceClockHeader` and `DEVICE_ZONE_HEADER` already are —
+ * neither client can import this module. `test/cache.test.js` stops the web
+ * copy drifting and `AppSettingsDefaultsTest` stops the Kotlin one.
  *
  * A hint, deliberately: unsigned, unvalidated, and safe to ignore. A client
  * that sent it on every request would get, for itself alone, the behaviour
@@ -912,11 +913,14 @@ const MAX_OVERVIEW_PER_ACCOUNT = 8;
  * reading your own writes.** The client is the only party that knows it just
  * wrote — no replica can be told cheaply, and asking a shared store on every
  * read would cost a round trip on the path this memo exists to make cheaper —
- * so the client says so and the route rebuilds. What is left is one account's
- * OTHER devices: a tab that did not itself write can still be served a
- * ≤ 2 s-old dashboard after a button press elsewhere, which is the staleness
- * the TTL already advertises rather than a hole underneath it. #192's version
- * check is what removes even that.
+ * so the client says so and the route rebuilds. BOTH clients: the browser
+ * through `freshnessHeader`, the phone through `Api.kt`'s own interceptor,
+ * because a Done pressed on a notification is a write followed straight away
+ * by an overview fetch and the phone is where nothing on screen would correct
+ * it. What is left is one account's OTHER devices: a tab that did not itself
+ * write can still be served a ≤ 2 s-old dashboard after a button press
+ * elsewhere, which is the staleness the TTL already advertises rather than a
+ * hole underneath it. #192's version check is what removes even that.
  *
  * Read the hit-rate metric knowing it is 1/N.
  */
@@ -972,9 +976,35 @@ api.get('/overview', route(async (req, res) => {
   // The caller says it has just written, so it must not be handed an answer
   // built before that write. Inside one process the invalidation middleware
   // already guarantees this; on N it cannot, because the write may have been
-  // taken by a different replica. Stated to caches as well as acted on — the
-  // answer genuinely differs by this header.
-  res.vary(FRESH_HEADER);
+  // taken by a different replica.
+  //
+  // **And there is deliberately no `res.vary(FRESH_HEADER)` beside it**, which
+  // is the opposite of what this looks like it wants. Saying it to caches is
+  // free everywhere except the one cache this app actually ships: `sw.js`
+  // stores `/api/overview` with `cache.put(request, …)` and retrieves it with
+  // `caches.match(request)`, and the Cache API selects an entry using the
+  // STORED RESPONSE's `Vary`. This header is present on exactly one read — the
+  // refetch inside the three seconds after a write — and absent on every
+  // other, so varying on it makes those two requests different keys.
+  //
+  // Measured in Chrome rather than reasoned about, because the standard and
+  // the implementation disagree about the interesting half. Put the cold-boot
+  // answer, then put the post-write one: the second `put` REPLACES the first
+  // (one entry, not the two the spec's Vary-aware query implies), and the
+  // survivor answers `match` only for a request carrying the header. A cold
+  // boot never carries it — the window is three seconds — so `caches.match`
+  // returns nothing, `networkFirst` falls through to its synthetic 503, and an
+  // installed PWA opens offline to no dashboard at all rather than to the
+  // saved one. `Vary: X-Habiterall-Timezone` is safe in the same place for the
+  // reason this is not: a device sends the same zone on every request.
+  //
+  // Nothing is lost by omitting it. A `Vary` lets a cache pick between stored
+  // representations, and this header is not a representation — it is a demand
+  // to REBUILD, which no cache holding an entry can satisfy at all. The worker
+  // is network-first, so while there is a network the demand always reaches
+  // this route; with no network it is unsatisfiable and the saved dashboard is
+  // the right answer. See `shared/public/CLAUDE.md`, which states this as a
+  // rule about any route the worker caches rather than about this one.
   const fresh = req.get(FRESH_HEADER) === '1';
 
   // The memo holds the SERIALISED payload, so a hit skips a `JSON.stringify` of

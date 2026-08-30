@@ -28,6 +28,26 @@ function region(text, from, to) {
   return text.slice(start, end);
 }
 
+/**
+ * The same text with its comments taken out, for a guard about what the code
+ * does NOT do.
+ *
+ * A positive source-text guard can be satisfied by a comment, which the note
+ * above already says. A NEGATIVE one is worse: it can be FAILED by one, and it
+ * was — the first version of the `Vary` guard below tripped over the paragraph
+ * in `api.js` explaining why that call is deliberately absent, which is the
+ * one comment anybody re-reading this would write. So both directions read
+ * code only, and the region above is what keeps that honest.
+ *
+ * Line comments are matched at the start of a line rather than anywhere, so a
+ * `'https://…'` inside a string survives. Nothing here needs to parse JS.
+ */
+const code = (text) => text
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .split('\n')
+  .filter((line) => !line.trimStart().startsWith('//'))
+  .join('\n');
+
 /** A clock the test moves by hand, so a 60s TTL costs no seconds. */
 const clock = (start = 1_000) => {
   let t = start;
@@ -583,10 +603,19 @@ test('the client and the route spell the freshness header the same', () => {
 
   const client = readFileSync(
     fileURLToPath(new URL('../../shared/public/offline.js', import.meta.url)), 'utf8');
-  assert.ok(
-    client.includes(`'${header}': '1'`),
-    `shared/public/offline.js must send ${header}; a renamed header is a silently dead hint`
+  assert.match(
+    client, new RegExp(`FRESH_HEADER = '${header}'`),
+    `shared/public/offline.js must declare ${header}; a renamed header is a silently dead hint`
   );
+  // The declaration alone is not the sending — a constant nothing reads is the
+  // same silence with an extra line in it.
+  assert.match(client, /\[FRESH_HEADER\]: '1'/,
+    'and freshnessHeader must actually send it');
+
+  // The PHONE is the third copy and the one that cannot import either of the
+  // other two. It is guarded on its own side (`AppSettingsDefaultsTest`, which
+  // reads both files), because Gradle is where a Kotlin file can be compiled;
+  // named here so this test is not read as covering all three.
 });
 
 test('the /overview route honours the freshness header', () => {
@@ -595,11 +624,29 @@ test('the /overview route honours the freshness header', () => {
   // it, and "the route reads no header at all" is exactly what this looked
   // like before. Source text, blind in the documented way, narrowed to the
   // route so a comment elsewhere cannot satisfy it.
-  const route = region(src('api.js'), "api.get('/overview'", '}));');
+  const route = code(region(src('api.js'), "api.get('/overview'", '}));'));
   assert.match(route, /req\.get\(FRESH_HEADER\)/, 'the route must read the header');
   assert.match(route, /overviewMemo\.fresh\(/, 'and reach the bypass with it');
-  assert.match(route, /res\.vary\(FRESH_HEADER\)/,
-    'and say so to caches, since the answer genuinely differs by it');
+
+  // ...and must NOT say so to caches, which is the counter-intuitive half and
+  // the reason it is pinned here rather than left to a comment. `sw.js` stores
+  // `/api/overview` with `cache.put(request, …)` and reads it back with
+  // `caches.match(request)`, both of which select on the stored response's
+  // `Vary`. This header rides on exactly one read — the refetch in the three
+  // seconds after a write — so varying on it makes that read a different key
+  // from every other. Measured in Chrome: the post-write `put` REPLACES the
+  // cold-boot entry and the survivor matches only a request carrying the
+  // header, so an offline boot gets `networkFirst`'s synthetic 503 and the
+  // installed PWA opens to no dashboard at all.
+  //
+  // Nothing is lost: a `Vary` picks between stored representations and this
+  // header is a demand to REBUILD, which a cache holding an entry cannot
+  // satisfy. `overview-memo.integration.mjs` asserts the same thing about the
+  // response's actual header, which is what makes this pair mutation-checkable
+  // from both ends.
+  assert.doesNotMatch(route, /res\.vary\(FRESH_HEADER\)/,
+    'the route must not Vary on the freshness header — it splits the service ' +
+    "worker's data cache and costs the offline dashboard entirely");
 });
 
 /* ---------- the bound in the unit that actually matters ---------- */

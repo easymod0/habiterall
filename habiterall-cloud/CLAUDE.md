@@ -404,13 +404,38 @@ because it must exceed the 2 s TTL: past the window, any entry predating that
 write has expired anyway, so "bypass while open" and "nothing stale can remain
 after" meet with a second to spare.
 
+**BOTH clients send it, because both write and then refetch.** The web's copy
+is `freshnessHeader`; the phone's is the second interceptor in `Api.kt` over
+`Freshness`, beside the one that already spells `DEVICE_ZONE_HEADER` — and it
+is the phone that most needs it, since a Done pressed on a notification is a
+write followed immediately by an overview fetch with nothing on screen to
+correct it. A web-only version of this would have been a fix whose own
+documentation named "the client" and meant one of the two, which is the shape
+the repo keeps paying for. `AppSettingsDefaultsTest` pins the spelling and the
+wiring the way it already does for the zone header.
+
 It is a **hint, not a rule** — unsigned, unvalidated, safe to ignore. The worst
 a client sending it on every request achieves is the behaviour every client had
 before the memo existed, for itself alone, under the same read limiter. So it
-is not a mirror of anything: nothing offline depends on it, and being wrong
-about it costs a recomputation. `noteWrite` is called from both write paths,
-`api()` and `flush()`'s replay, because a replayed check-off is a write the
-dashboard must show and the outbox drains straight into a refresh.
+is not a mirror of the kind the root `CLAUDE.md` warns about: nothing offline
+depends on it, and being wrong about it costs a recomputation. `noteWrite` is
+called from both of the web's write paths, `api()` and `flush()`'s replay,
+because a replayed check-off is a write the dashboard must show and the outbox
+drains straight into a refresh; on the phone the interceptor sees every write
+there is, replayed or live, because that is the one chokepoint they share.
+
+**It is sent to caches as a request header and to nothing as a `Vary`**, which
+looks like an omission and is the fix for a defect this shipped with. `sw.js`
+caches `/api/overview` keyed on the REQUEST and matches on the stored
+response's `Vary`, so varying on a header carried by one read per write splits
+that URL — and, measured in Chrome, does worse than split it: the post-write
+`put` replaces the cold-boot entry and the survivor matches no ordinary
+request, so the installed PWA opens offline to no dashboard at all rather than
+to the saved one. A cache holding an entry cannot honour "rebuild this"
+anyway. The rule in general form is in `shared/public/CLAUDE.md`; here it is
+pinned from both ends, in `cache.test.js` (the route does not call
+`res.vary(FRESH_HEADER)`) and in `overview-memo.integration.mjs` (the answer's
+own `Vary` does not name it, and still names the zone header).
 
 **What is left is one account's OTHER devices**, and that is the staleness the
 TTL already advertises rather than a hole under it: a tab that did not itself

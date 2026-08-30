@@ -146,6 +146,19 @@ export function deviceClockHeader() {
  */
 const FRESH_AFTER_WRITE_MS = 3_000;
 
+/**
+ * The header itself, spelled once here rather than inline at the return below.
+ *
+ * Three copies exist — this one, `FRESH_HEADER` in `habiterall-cloud/src/api.js`
+ * and the Kotlin one in `Api.kt` — because the browser cannot import the
+ * server's module and the phone cannot import either, exactly as
+ * `DEVICE_ZONE_HEADER` already is. A NAMED constant on all three sides is what
+ * lets both drift guards (`habiterall-cloud/test/cache.test.js` and
+ * `AppSettingsDefaultsTest`) read a declaration rather than pattern-match the
+ * place it happens to be used.
+ */
+const FRESH_HEADER = 'X-Habiterall-Fresh';
+
 /** Monotonic where there is one; the wall clock is the fallback, not the rule. */
 const monotonic = () =>
   (typeof performance !== 'undefined' && typeof performance.now === 'function')
@@ -180,7 +193,7 @@ export function noteWrite() {
  */
 export function freshnessHeader() {
   return monotonic() - lastWriteAt < FRESH_AFTER_WRITE_MS
-    ? { 'X-Habiterall-Fresh': '1' }
+    ? { [FRESH_HEADER]: '1' }
     : {};
 }
 

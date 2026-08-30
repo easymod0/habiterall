@@ -302,8 +302,24 @@ try {
     afterFresh.body.habits[0]?.name === 'Renamed for the fresh read',
     afterFresh.body.habits[0]?.name);
 
-  ck('the answer says it varies by the header',
-    /x-habiterall-fresh/i.test(freshRead.vary), freshRead.vary);
+  // ...and the answer does NOT say it varies by the header, which is the half
+  // that looks backwards. `shared/public/sw.js` caches `/api/overview` with
+  // `cache.put(request, …)` and reads it back with `caches.match(request)`,
+  // both of which select on the stored response's `Vary` — and this header is
+  // on exactly one read per write and on no other. Measured in Chrome: the
+  // post-write `put` REPLACES the cold-boot entry, and the survivor matches
+  // only a request carrying the header, so the next offline boot gets
+  // `networkFirst`'s synthetic 503 and the installed PWA opens to no dashboard
+  // at all. A cache cannot honour "rebuild this" anyway, so the `Vary` bought
+  // nothing to trade against that.
+  //
+  // The zone header is the control and is deliberately not a literal `''`
+  // check: a route that stopped calling `res.vary` altogether would pass the
+  // first half of this and is a different bug.
+  ck('the answer does NOT vary by the freshness header',
+    !/x-habiterall-fresh/i.test(freshRead.vary), freshRead.vary || '(no Vary)');
+  ck('control: it still varies by the device zone, so `Vary` is reached at all',
+    /x-habiterall-timezone/i.test(freshRead.vary), freshRead.vary || '(no Vary)');
 
   await admin.query(`UPDATE habits SET name = 'Memo probe' WHERE id = $1`, [habitId]);
   await idle(TTL_MS + 200);
