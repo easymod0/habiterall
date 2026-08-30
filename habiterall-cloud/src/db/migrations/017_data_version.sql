@@ -1,0 +1,35 @@
+-- A monotonic counter of how many times this account's data has been written.
+--
+-- Nothing in this schema was monotonic before, so nothing could ask "has this
+-- account changed since I last looked?" without reading the data and comparing
+-- it. The `/overview` memo is the first consumer: it is per process, so on two
+-- replicas a tap taken by A and a refetch balanced to B was served B's own
+-- pre-tap dashboard. A version in the memo key makes an entry built before a
+-- write simply unreachable, on every replica at once and with no cooperation
+-- from any client.
+--
+-- A column on `users` rather than a table, for the reason `device_time_zone`
+-- (migration 013) is one: exactly one value per account, updated in place, no
+-- lifecycle of its own.
+--
+-- NOT in the `settings` JSONB, and that is the same distinction 013 draws. This
+-- is an OBSERVATION the SERVER makes about writes, where everything in
+-- `settings` is a DECISION the user sent through `PUT /api/settings`. Nothing
+-- here is the user's to choose, nothing here is portable, and it has no
+-- business in `/api/export` — a restored backup describes an account's habits,
+-- not how many times some other deployment wrote to it.
+--
+-- BIGINT, incremented once per write. At one write a second without pause it
+-- would take an account roughly 292 billion years to reach the limit, so the
+-- wraparound this deliberately has no handling for is not a case.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS data_version BIGINT NOT NULL DEFAULT 0;
+
+-- Covered by the existing users_select_self / users_update_self policies, like
+-- `settings` and `device_time_zone` before it — no new policy is needed, and
+-- deliberately no new one is added.
+--
+-- The app role has column-level UPDATE on `users` and cannot touch
+-- `idp_subject` or `blocked`; this adds exactly one more column to that list.
+-- An account can therefore only ever bump its OWN counter, and the whole cost
+-- of doing so is its own cache misses.
+GRANT UPDATE (data_version) ON users TO habiterall_app;

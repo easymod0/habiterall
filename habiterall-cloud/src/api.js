@@ -1,8 +1,10 @@
 /**
  * REST API. Every handler runs inside `withUser`, so Row-Level Security
- * scopes each query to the session's user. Note that the queries below still
- * carry explicit `user_id` predicates where it aids the planner — RLS is the
- * guarantee, not the only line of defence.
+ * scopes each query to the session's user — and every MUTATING one inside
+ * `withUserWrite`, which is the same transaction plus the account's
+ * `data_version` bump. Note that the queries below still carry explicit
+ * `user_id` predicates where it aids the planner — RLS is the guarantee, not
+ * the only line of defence.
  */
 
 import express from 'express';
@@ -10,7 +12,7 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { withUser, isCategoryNameConflict } from './db/pool.js';
+import { withUser, withUserWrite, isCategoryNameConflict } from './db/pool.js';
 import { createMemo, forgetAccount, remember } from './cache.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
@@ -184,6 +186,15 @@ api.use(route(async (req, res, next) => {
  * router is NOT every write path — `NTFY_ANSWER_PATH` is mounted above it and
  * the Discord button never reaches Express. Those call the same function; see
  * its comment in `cache.js`.
+ *
+ * **Since #192 this is not what makes the memo correct, and it stays anyway.**
+ * The account's `data_version` is in the `/overview` key, so a write already
+ * makes every entry built before it unreachable — on every replica, which is
+ * something no amount of forgetting inside one process could do. What this
+ * still buys is eager reclamation (an unreachable entry is resident until the
+ * 60 s TTL sweep meets it) and cover for a write path that forgot to bump. Both
+ * reasons are written out at `forgetAccount`; the ordering care below is
+ * unchanged and is still what makes the second of them worth having.
  */
 api.use((req, res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD') return next();
@@ -261,7 +272,7 @@ api.get('/habits', route(async (req, res) => {
 api.post('/habits', route(async (req, res) => {
   const h = parseHabit(req.body);
 
-  const created = await withUser(uid(req), async (db) => {
+  const created = await withUserWrite(uid(req), async (db) => {
     const categoryId = await resolveCategoryId(db, h);
 
     const { rows: [{ count }] } = await db.query(
@@ -299,7 +310,7 @@ api.put('/habits/:id', route(async (req, res) => {
   const h = parseHabit(req.body);
   const id = habitId(req);
 
-  const updated = await withUser(uid(req), async (db) => {
+  const updated = await withUserWrite(uid(req), async (db) => {
     const categoryId = await resolveCategoryId(db, h);
 
     const { rows } = await db.query(
@@ -323,7 +334,7 @@ api.put('/habits/:id', route(async (req, res) => {
 
 api.delete('/habits/:id', route(async (req, res) => {
   const id = habitId(req);
-  const gone = await withUser(uid(req), (db) =>
+  const gone = await withUserWrite(uid(req), (db) =>
     db.query(`DELETE FROM habits WHERE id = $1 RETURNING id`, [id])
       .then((r) => r.rowCount > 0)
   );
@@ -344,7 +355,7 @@ api.post('/habits/reorder', route(async (req, res) => {
     throw httpError(400, `order may not exceed ${MAX_HABITS_PER_USER} ids`);
   }
 
-  const rows = await withUser(uid(req), async (db) => {
+  const rows = await withUserWrite(uid(req), async (db) => {
     // One statement instead of a round trip per id. RLS still confines the
     // update to the caller's own habits, so an id belonging to someone else
     // simply matches nothing.
@@ -541,7 +552,7 @@ api.get('/categories/stats', route(async (req, res) => {
 api.post('/categories', route(async (req, res) => {
   const c = parseCategory(req.body);
 
-  const created = await withUser(uid(req), async (db) => {
+  const created = await withUserWrite(uid(req), async (db) => {
     if (await categoryNameTaken(db, c.name, null)) {
       throw httpError(409, 'category already exists');
     }
@@ -575,7 +586,7 @@ api.post('/categories', route(async (req, res) => {
 api.put('/categories/:id', route(async (req, res) => {
   const id = categoryId(req);
 
-  const updated = await withUser(uid(req), async (db) => {
+  const updated = await withUserWrite(uid(req), async (db) => {
     // Existence checked BEFORE the body is parsed, matching the personal
     // edition's ordering — see the comment above `POST /categories`. A
     // request naming a category that is not (or no longer) the caller's own
@@ -607,7 +618,7 @@ api.delete('/categories/:id', route(async (req, res) => {
   // ON DELETE SET NULL, never CASCADE (migration 015): this is tidying up a
   // label, not a request to destroy every habit that wore it. Its habits,
   // and every entry on them, survive — uncategorised.
-  const gone = await withUser(uid(req), (db) =>
+  const gone = await withUserWrite(uid(req), (db) =>
     db.query(`DELETE FROM categories WHERE id = $1 RETURNING id`, [id])
       .then((r) => r.rowCount > 0)
   );
@@ -633,7 +644,7 @@ api.post('/categories/reorder', route(async (req, res) => {
     throw httpError(400, 'order must contain only category ids');
   }
 
-  const rows = await withUser(uid(req), async (db) => {
+  const rows = await withUserWrite(uid(req), async (db) => {
     if (ids.length) {
       await db.query(
         `UPDATE categories SET position = v.position
@@ -677,7 +688,7 @@ api.put('/habits/:id/entries/:date', route(async (req, res) => {
   // same one. Clearing a day is the DELETE route below, not a PUT of zero.
   const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
-  await withUser(uid(req), async (db) => {
+  await withUserWrite(uid(req), async (db) => {
     if (write.op === 'delete') {
       await db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
         [habit.id, date]);
@@ -693,7 +704,7 @@ api.delete('/habits/:id/entries/:date', route(async (req, res) => {
   await getHabit(req);
   if (!DATE_RE.test(req.params.date)) throw httpError(400, 'date must be YYYY-MM-DD');
 
-  await withUser(uid(req), (db) =>
+  await withUserWrite(uid(req), (db) =>
     db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
       [habitId(req), req.params.date])
   );
@@ -795,29 +806,22 @@ api.get('/habits/:id/stats', route(async (req, res) => {
  * seconds, for an account whose data last changed hours ago, on the most
  * expensive route the app has.
  *
- * Two seconds because a write INVALIDATES (see the middleware below), so this
- * is not the window in which a user's own change can be missed — it is only how
- * long two requests have to arrive within to share one answer. The intended end
- * state is a version check rather than a timer, which turns the remaining
- * staleness into none at all; that needs #192 and this needs nothing.
- */
-const OVERVIEW_TTL_MS = 2_000;
-
-/**
- * The header a client sends to say "I have just written; do not memo me."
+ * **Sixty seconds, because this stopped being the correctness mechanism.** It
+ * was two, and two was as long as it was safe to serve an answer nothing could
+ * prove was current: a write invalidated inside one process, and on a second
+ * replica the timer was all there was. #192 put the account's `data_version`
+ * in the key, so an entry built before ANY write — on any replica, by any
+ * device — is unreachable rather than merely old. What is left for a timer to
+ * do is bound how long an unreachable entry stays resident and cap the damage
+ * from a write path that forgot to bump, so it is a backstop and can be long.
  *
- * Sent by `freshnessHeader` in `shared/public/offline.js` and by the second
- * interceptor in the phone's `Api.kt`, each spelling this string themselves
- * exactly the way `deviceClockHeader` and `DEVICE_ZONE_HEADER` already are —
- * neither client can import this module. `test/cache.test.js` stops the web
- * copy drifting and `AppSettingsDefaultsTest` stops the Kotlin one.
- *
- * A hint, deliberately: unsigned, unvalidated, and safe to ignore. A client
- * that sent it on every request would get, for itself alone, the behaviour
- * every client had before this memo existed — under the same read limiter that
- * bounded it then. That is why honouring it needs no argument about trust.
+ * Sixty rather than longer because it is still the floor under a missed bump
+ * (see `forgetAccount` in `cache.js`), and because residency has to be paid
+ * for: everything asked for in the last minute is held, which is why
+ * `MAX_OVERVIEW_CACHED` had to be re-derived from `MAX_OVERVIEW_BYTES` at the
+ * same time rather than left where a 2 s live set had put it.
  */
-const FRESH_HEADER = 'X-Habiterall-Fresh';
+const OVERVIEW_TTL_MS = 60_000;
 
 /**
  * How many dashboards the memo may hold — its OWN number, not `MAX_CACHED`.
@@ -837,35 +841,55 @@ const FRESH_HEADER = 'X-Habiterall-Fresh';
  * limiter's 300 req/min is the dishonest one, and neither involves a write, so
  * `forget` never fires.
  *
- * 100 is the backstop and not the working bound. The bound is the TTL sweep in
- * `createMemo`: entries live `OVERVIEW_TTL_MS`, a computation holds one of
- * `PG_POOL_MAX` = 10 connections while it runs, so the live set is what ten
- * connections can produce in two seconds. It was 500, which is ≈ 250 MB, and
- * neither compose file sets a memory limit: the backstop was sized so that
- * reaching it killed the process it was protecting.
+ * **It was 100, and 100 was sized against a residency argument the 60 s TTL
+ * destroys.** The reasoning was "entries live `OVERVIEW_TTL_MS`, a computation
+ * holds one of `PG_POOL_MAX` = 10 connections while it runs, so the live set is
+ * what ten connections can produce in two seconds" — which was true at two
+ * seconds and is nonsense at sixty. At 100 entries and a minute-long TTL,
+ * `remember` would spend its time evicting entries that are still fresh: all of
+ * the sweep, none of the hits, which is the failure that shows up only as "the
+ * dashboard is slow again".
  *
- * **How many entries "ten connections in two seconds" is depends on how long
- * one takes, and this number has no latency term in it.** At 40 ms per
- * `buildOverview` it is 100 for every 0.4 s of traffic; at 10 ms the live set
- * wants four times that and `remember` starts evicting entries that are still
- * fresh. That is the direction this fails in now, and it fails toward a memo
- * that costs the sweep and returns no hits rather than toward an OOM —
- * `memo.gauge` on the runtime line is what tells the two apart, and
- * `MAX_OVERVIEW_BYTES` is what keeps the other direction bounded whatever this
- * number is set to.
+ * So `MAX_OVERVIEW_BYTES` is now the operative bound and this is what makes it
+ * one: the count has to be high enough that 48 MB is reached FIRST at every
+ * entry size a real account produces. Re-measured over the real route for
+ * #192, in the unit `sizeOf` actually returns:
+ *
+ *   |  shape                        | one entry | fits in 48 MB |
+ *   |-------------------------------|-----------|---------------|
+ *   |  8 habits x 30 days (typical) |   15.1 KB |         3,254 |
+ *   |  8 habits x 365 days          |   93.6 KB |           525 |
+ *   | 20 habits x 365 days          |  233.4 KB |           210 |
+ *   | 50 habits x 365 days          |  582.9 KB |            84 |
+ *
+ * 3,300 clears the largest of those counts, which is the SMALLEST entry's —
+ * 3,254 — because that is the one that decides it: a big dashboard reaches
+ * 48 MB in 84 entries and any count at all is a backstop for it. (The archive's
+ * 18 KB / 499 KB / 1.2 MB are the RETAINED OBJECT and roughly twice the string;
+ * `capBytes` sums the string. See its comment in `cache.js`.)
+ *
+ * Below ~15 KB an entry this bound DOES bind first — an account with two habits
+ * and a week of history is far smaller — and that is the backstop doing its
+ * job: 3,300 of anything that small is a few megabytes, and what is bounded
+ * there is the map itself rather than the dashboards in it.
+ *
+ * The failure directions are unchanged and both are silent: too small and the
+ * memo thrashes, too large and the process grows until it is killed.
+ * `MAX_OVERVIEW_BYTES` is what stops the second whatever this is set to, and
+ * `memo.gauge` on the runtime line is what tells the two apart.
  */
-const MAX_OVERVIEW_CACHED = 100;
+const MAX_OVERVIEW_CACHED = 3_300;
 
 /**
  * ...and the same bound expressed in the unit that actually matters.
  *
  * A COUNT converts to a memory bound only through the entry cost, and this
- * cache's entries vary by ~70x: 18 KB for a typical 8-habit dashboard, 499 KB
- * at 20 habits × 365 days, 1.2 MB at 50 × 365. So `MAX_OVERVIEW_CACHED` = 100
- * is ~50 MB against the middle measurement and ~120 MB against the top one,
- * and the comment above used to claim the first as though it were the bound.
- * This is what makes it true: 48 MB, enforced, whatever mix of dashboard sizes
- * an instance happens to hold.
+ * cache's entries vary by ~39x: 15.1 KB for a typical 8-habit dashboard on its
+ * default window, 233.4 KB at 20 habits × 365 days, 582.9 KB at 50 × 365
+ * (re-measured for #192 — see `MAX_OVERVIEW_CACHED` above). Since that TTL
+ * change the count is derived from THIS number rather than the other way round,
+ * so this is the bound and not a check on one: 48 MB, enforced, whatever mix of
+ * dashboard sizes an instance happens to hold.
  *
  * Measured in UTF-16 code units doubled, because the entries are STRINGS (see
  * the memo below) and V8 stores one as Latin-1 or as UTF-16 — so two bytes per
@@ -883,48 +907,65 @@ const MAX_OVERVIEW_BYTES = 48 * 1024 * 1024;
  * The memo then costs every other tenant the sweep and returns them no hits,
  * which is worse than not having it.
  *
- * Eight, because that is roughly what one account can legitimately have live:
- * the read limiter allows 300 req/min = 5/s, entries live 2 s, so a client
- * hammering distinct windows as fast as it is allowed to holds ~10 — and a
+ * Eight, because that is roughly what one account can legitimately have live: a
  * real dashboard holds one or two, since the grid window only changes when the
- * user pages. So this is a cap on the abusive shape and not on the ordinary
- * one, and `MAX_OVERVIEW_CACHED` is now only reachable by genuinely many
- * accounts being active at once, which is what a backstop should mean.
+ * user pages, and a couple more for a second device and the archived view. So
+ * this is a cap on the abusive shape and not on the ordinary one, and
+ * `MAX_OVERVIEW_CACHED` is only reachable by genuinely many accounts being
+ * active at once, which is what a backstop should mean.
+ *
+ * **The 60 s TTL made this matter more, not less.** The arithmetic here used to
+ * be "the read limiter allows 300 req/min = 5/s, entries live 2 s, so a client
+ * hammering distinct windows as fast as it is allowed holds ~10" — at sixty
+ * seconds that same client holds ~300, and eight accounts doing it would be the
+ * whole shared count. The number does not move, because it was never sized
+ * against the hammering; it is what makes the hammering cost the account doing
+ * it and nobody else.
+ *
+ * Since #192 the version is in the key too, so an account's entries at
+ * SUPERSEDED versions count against this share as well as its windows do.
+ * That is the right way round — they are unreachable, so its own cap is
+ * exactly who should give them up — and the invalidation usually gets there
+ * first, which is one of the two reasons `forgetAccount` is kept.
  */
 const MAX_OVERVIEW_PER_ACCOUNT = 8;
 
 /**
- * `/overview`, memoised per account, per window and per CALLER DAY.
+ * `/overview`, memoised per account, per DATA VERSION, per window and per
+ * CALLER DAY.
  *
- * The last of those three is the subtle one and it is why the key is built by
- * hand rather than from the query string. `summaryEnd` is the caller's own
- * today, resolved from `X-Habiterall-Timezone` — so two devices on an account
- * either side of a date boundary send the SAME URL and must not share an
- * answer. `res.vary(DEVICE_ZONE_HEADER)` says exactly this to HTTP caches;
- * a server-side memo has to say it in its key.
+ * The caller's day is the subtle one and it is why the key is built by hand
+ * rather than from the query string. `summaryEnd` is the caller's own today,
+ * resolved from `X-Habiterall-Timezone` — so two devices on an account either
+ * side of a date boundary send the SAME URL and must not share an answer.
+ * `res.vary(DEVICE_ZONE_HEADER)` says exactly this to HTTP caches; a
+ * server-side memo has to say it in its key.
  *
- * Per process, and that is a statement about CORRECTNESS and not only about a
- * hit rate. "A write invalidates" is true inside one process: on two replicas,
- * a tap handled by A and a refetch balanced to B would be served B's own
- * pre-tap answer, which is the very regression the invalidation exists to
- * prevent, arriving through the load balancer.
+ * **The version is what makes this correct on more than one replica** (#192).
+ * The memo is per process and so is the invalidation, so a tap handled by A and
+ * a refetch balanced to B was served B's own pre-tap answer — the very
+ * regression the invalidation exists to prevent, arriving through the load
+ * balancer. `users.data_version` is bumped in the same transaction as every
+ * write (`withUserWrite`, `db/pool.js`), so every entry built before that write
+ * is now keyed at a version no reader will ever ask for again. Unreachable
+ * everywhere, at once, with no cooperation from any client — which is strictly
+ * more than the `X-Habiterall-Fresh` header this replaces ever bought — that
+ * header could only speak for the device that WROTE, so a second tab or a phone
+ * that had not itself written was served the stale dashboard anyway — and is
+ * why #192 deleted it outright rather than converting it.
  *
- * **`FRESH_HEADER` is what closes that, and it closes the half that matters:
- * reading your own writes.** The client is the only party that knows it just
- * wrote — no replica can be told cheaply, and asking a shared store on every
- * read would cost a round trip on the path this memo exists to make cheaper —
- * so the client says so and the route rebuilds. BOTH clients: the browser
- * through `freshnessHeader`, the phone through `Api.kt`'s own interceptor,
- * because a Done pressed on a notification is a write followed straight away
- * by an overview fetch and the phone is where nothing on screen would correct
- * it. What is left is one account's OTHER devices: a tab that did not itself
- * write can still be served a ≤ 2 s-old dashboard after a button press
- * elsewhere, which is the staleness the TTL already advertises rather than a
- * hole underneath it. #192's version check is what removes even that.
+ * It costs one primary-key lookup on `users` per request, and the read is
+ * folded into the rebuild's own transaction on a miss so it is only ever a
+ * SEPARATE round trip on the path that would otherwise touch Postgres not at
+ * all. Measured against the rebuild it lets the memo keep: 0.3 ms against
+ * 16-75 ms, break-even at 0.37-1.87% of requests converted from miss to hit.
+ * `scripts/bench-version-read.mjs` is where those numbers come from and
+ * `docs/decisions/caching.md` is where they are argued.
  *
- * Read the hit-rate metric knowing it is 1/N.
+ * Read the hit-rate metric knowing it is 1/N. The ANSWERS are no longer 1/N.
  */
-const overviewMemo = createMemo(async (arg) => JSON.stringify(await buildOverview(arg)), {
+const overviewMemo = createMemo(async ({ db, ...arg }) =>
+  JSON.stringify(await buildOverview(db, arg)), {
   ttlMs: OVERVIEW_TTL_MS,
   max: MAX_OVERVIEW_CACHED,
   maxBytes: MAX_OVERVIEW_BYTES,
@@ -970,45 +1011,18 @@ api.get('/overview', route(async (req, res) => {
   // `start` is derived from it and two windows with the same ends are the same
   // window; `summaryEnd` IS, even though it equals `end` on an unpaged
   // dashboard, because paging back separates them.
-  const key = `${user}:${start}:${end}:${summaryEnd}:${archived}`;
+  //
+  // The account's `data_version` goes in FRONT of all of it (#192), and it is
+  // second rather than first: `<account id>:` has to stay the whole of what
+  // `forgetAccount` and `capAccount` match on — that prefix is
+  // `key.slice(0, key.indexOf(':') + 1)` in `cache.js`, and a version holds no
+  // colon, so neither of them can see the difference.
+  const windowKey = `${start}:${end}:${summaryEnd}:${archived}`;
+  const keyAt = (version) => `${user}:${version}:${windowKey}`;
   const arg = { user, start, end, summaryEnd, archived };
 
-  // The caller says it has just written, so it must not be handed an answer
-  // built before that write. Inside one process the invalidation middleware
-  // already guarantees this; on N it cannot, because the write may have been
-  // taken by a different replica.
-  //
-  // **And there is deliberately no `res.vary(FRESH_HEADER)` beside it**, which
-  // is the opposite of what this looks like it wants. Saying it to caches is
-  // free everywhere except the one cache this app actually ships: `sw.js`
-  // stores `/api/overview` with `cache.put(request, …)` and retrieves it with
-  // `caches.match(request)`, and the Cache API selects an entry using the
-  // STORED RESPONSE's `Vary`. This header is present on exactly one read — the
-  // refetch inside the three seconds after a write — and absent on every
-  // other, so varying on it makes those two requests different keys.
-  //
-  // Measured in Chrome rather than reasoned about, because the standard and
-  // the implementation disagree about the interesting half. Put the cold-boot
-  // answer, then put the post-write one: the second `put` REPLACES the first
-  // (one entry, not the two the spec's Vary-aware query implies), and the
-  // survivor answers `match` only for a request carrying the header. A cold
-  // boot never carries it — the window is three seconds — so `caches.match`
-  // returns nothing, `networkFirst` falls through to its synthetic 503, and an
-  // installed PWA opens offline to no dashboard at all rather than to the
-  // saved one. `Vary: X-Habiterall-Timezone` is safe in the same place for the
-  // reason this is not: a device sends the same zone on every request.
-  //
-  // Nothing is lost by omitting it. A `Vary` lets a cache pick between stored
-  // representations, and this header is not a representation — it is a demand
-  // to REBUILD, which no cache holding an entry can satisfy at all. The worker
-  // is network-first, so while there is a network the demand always reaches
-  // this route; with no network it is unsatisfiable and the saved dashboard is
-  // the right answer. See `shared/public/CLAUDE.md`, which states this as a
-  // rule about any route the worker caches rather than about this one.
-  const fresh = req.get(FRESH_HEADER) === '1';
-
   // The memo holds the SERIALISED payload, so a hit skips a `JSON.stringify` of
-  // up to 1.2 MB as well as the five queries — on a single-threaded server that
+  // up to ~580 KB as well as the five queries — on a single-threaded server that
   // is everyone's latency, which is what `runtime.loop_blocked` is watched for.
   // It is also what makes `sizeOf` exact rather than an estimate, and it means
   // no two callers can ever be handed the same mutable object.
@@ -1018,8 +1032,60 @@ api.get('/overview', route(async (req, res) => {
   // are byte-identical — no `json replacer` or `json spaces` is configured on
   // this app, and `overview-memo.integration.mjs` asserts a hit and a miss
   // agree on status, content type and body.
-  res.type('application/json')
-    .send(fresh ? await overviewMemo.fresh(key, arg) : await overviewMemo(key, arg));
+  res.type('application/json');
+
+  // **The version read is unconditional, and there is no path around it.** An
+  // earlier draft skipped it while `pool.waitingCount > 0` and served a recent
+  // entry unchecked, to keep a memo hit free on the far side of the pool cliff
+  // (`docs/decisions/caching.md` still has the measurements, as an operator
+  // note). It bought that latency with the one property this route exists to
+  // have: a tap taken on replica A, whose refetch lands on a busy B, is
+  // answered from B's pre-tap entry — the user's own tap painted away, which
+  // the deleted `X-Habiterall-Fresh` header could not do at any pool depth.
+  //
+  // One transaction for the version and, if it comes to it, the data.
+  const held = await withUser(user, async (db) => {
+    // **The version is read BEFORE the data, and never after.** `withUser` is
+    // READ COMMITTED, so these are separate snapshots and the order decides
+    // which way an interleaved write can be wrong.
+    //
+    // Version FIRST: a write committing after this line and before the queries
+    // below leaves an entry tagged with the OLD version holding the NEW data.
+    // Nobody will ever ask for that key again — the next reader reads the bumped
+    // version and misses — so the entry is unreachable and the answer is rebuilt.
+    //
+    // Version LAST would be the mirror image and is the reason this comment is
+    // here rather than in a commit message: the entry would be tagged with the
+    // NEW version holding data read before the write, every later reader would
+    // ask for exactly that key, and all of them would be served the stale
+    // payload for the whole 60 s TTL. One line of ordering, silent in the worse
+    // direction, which is the failure #192 exists to remove rather than move.
+    const { rows: [row] } = await db.query(
+      `SELECT data_version FROM users WHERE id = $1`, [user]);
+    // A missing row is an account deleted mid-request; RLS answers the queries
+    // below with nothing anyway, so 0 keeps the key well formed rather than
+    // spelling `undefined` into it.
+    const key = keyAt(row?.data_version ?? 0);
+
+    // Which of the three cases this is decides whether the connection now in
+    // hand is wanted — see `memo.peek` in `cache.js`. Synchronous, so nothing
+    // can change between asking and acting.
+    const hit = overviewMemo.peek(key);
+    // Somebody else is already building this exact key. Join it OUTSIDE the
+    // transaction: waiting in here would hold one connection per waiter for the
+    // length of one rebuild, which is the burst this memo exists to collapse
+    // spending the pool it exists to protect.
+    if (hit && 'inflight' in hit) return { pending: hit.inflight };
+    // A hit. This transaction did one primary-key lookup and is done with the
+    // connection — which is the cost the bench prices at 0.3 ms.
+    if (hit && 'value' in hit) return { json: hit.value };
+    // A miss, so the rebuild runs on THIS connection and the version read above
+    // was free: it shared the checkout the five queries were going to make
+    // anyway. Awaited in here, because `db` is only alive until this returns.
+    return { json: await overviewMemo(key, { db, ...arg }) };
+  });
+
+  res.send('json' in held ? held.json : await held.pending);
 }));
 
 /**
@@ -1029,166 +1095,172 @@ api.get('/overview', route(async (req, res) => {
  * nothing in here can reach for `req` — a payload that depended on a header the
  * key does not carry is the one way this cache can be wrong.
  *
+ * **It is HANDED a transaction rather than opening one** (#192). The route has
+ * already checked out a connection to read `data_version` — that read has to
+ * come first and it has to be a real one — so opening a second here would make
+ * every miss cost two checkouts to save nothing. The caller's `withUser` is
+ * what scopes these queries; `user` is still passed because two of them name it
+ * for the planner, not because RLS needs telling twice.
+ *
+ * @param {import('pg').PoolClient} db a transaction already scoped to `user`
  * @param {{user: number, start: string, end: string, summaryEnd: string,
  *   archived: boolean}} arg
  */
-async function buildOverview({ user, start, end, summaryEnd, archived }) {
-  return withUser(user, async (db) => {
-    const { rows: habits } = await db.query(
-      `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
-      [archived]
-    );
-    // One extra SELECT, read once for the whole payload for the same reason
-    // `unlogged` is below: the dashboard groups by category behind
-    // `groupByCategory`, and every habit on the page needs the same list. Read
-    // even with no habits — a category with none yet still draws its header.
-    const { rows: categories } = await db.query(
-      `SELECT * FROM categories ORDER BY position, id`
-    );
-    if (!habits.length) {
-      // Same key shape as the full path below: `categorySummaries` is absent
-      // only in archived mode, never merely because there is nothing to
-      // summarise yet — an empty category still draws its header.
-      return {
-        start, end, categories, habits: [],
-        ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
-      };
-    }
-
-    const ids = habits.map((h) => h.id);
-
-    // One answer for the account, read once for the whole payload — the map
-    // below runs per habit and this is not a per-habit question.
-    const { rows: [prefs] } = await db.query(
-      `SELECT settings ->> 'atMostUnlogged' AS unlogged FROM users WHERE id = $1`,
-      [user]
-    );
-    const unlogged = unloggedFrom(prefs);
-
-    // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
-    // (same shape, line 453 there), reused here so a section header can tell
-    // "never logged" from "scored zero" — the bounded windows below cannot
-    // answer that, and `first_date` is used for a null check only, never
-    // `addDays` or `dateRange` (root CLAUDE.md). Skipped entirely in archived
-    // mode: that fetch has nothing active to average, so `categorySummaries`
-    // is omitted below rather than computed and discarded.
-    const { rows: firstRows } = archived ? { rows: [] } : await db.query(
-      `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
-       FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
-      [ids]
-    );
-    const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
-
-    // One query for the grid window, one for the lifetime figures, rather
-    // than two per habit.
-    const { rows: windowRows } = await db.query(
-      `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
-       FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
-       ORDER BY date`,
-      [ids, start, end]
-    );
-    // Bounded, NOT lifetime. This query had no date predicate, so an account
-    // with years of history shipped every row to Node and then spent ~850ms
-    // of SYNCHRONOUS CPU per request in computeStreaks — blocking the event
-    // loop for every other tenant. `boundedRange` caps the date SPAN, not the
-    // row count, so it was no help here.
-    //
-    // STREAK_HISTORY_DAYS bounds what the streak scan reads. A streak longer
-    // than this reports as capped rather than reading the whole table; the
-    // count below is done in SQL instead of in JS.
-    const streakFrom = addDays(summaryEnd, -STREAK_HISTORY_DAYS);
-    const { rows: allRows } = await db.query(
-      `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
-       FROM entries WHERE habit_id = ANY($1) AND date >= $2 ORDER BY date`,
-      [ids, streakFrom]
-    );
-
-    // Lifetime totals in the database, where counting is what it is for.
-    // Postgres applies the same completion rule the shared code does; the
-    // status check keeps skips out, matching isCompleted returning null.
-    const { rows: totalRows } = await db.query(
-      `SELECT e.habit_id,
-              COUNT(*) FILTER (
-                WHERE COALESCE(e.status, '') <> 'skip'
-                  AND CASE
-                        WHEN h.type = 'boolean' THEN e.value = 2
-                        WHEN h.target_type = 'at_most' THEN e.value <= h.target_value
-                        ELSE e.value >= h.target_value
-                      END
-              )::int AS completed
-         FROM entries e JOIN habits h ON h.id = e.habit_id
-        WHERE e.habit_id = ANY($1)
-        GROUP BY e.habit_id`,
-      [ids]
-    );
-    const totals = new Map(totalRows.map((r) => [r.habit_id, r.completed]));
-
-    const grid = new Map(ids.map((id) => [id, {}]));
-    const skips = new Map(ids.map((id) => [id, []]));
-    for (const r of windowRows) {
-      if (r.status === 'skip') {
-        grid.get(r.habit_id)[r.date] = SKIP;
-        skips.get(r.habit_id).push(r.date);
-      } else {
-        grid.get(r.habit_id)[r.date] = r.value;
-      }
-    }
-
-    const byHabit = new Map(ids.map((id) => [id, []]));
-    for (const r of allRows) byHabit.get(r.habit_id).push(r);
-
-    const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
-
-    const habitPayloads = habits.map((h) => {
-      const all = byHabit.get(h.id) ?? [];
-      const recent = all.filter((e) => e.date >= cutoff);
-      // Two numbers are read below — `score` and `currentStreak` — so this
-      // calls `summaryStats` rather than `computeStats`: the same window and
-      // the same two passes (`computeScores`, `computeStreaks`), with the
-      // five passes `computeStats` also runs — `computeHistory`,
-      // `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
-      // `computeResilience` — never started, once per habit, on the
-      // dashboard's hot path. Awards are out of this route for the same
-      // reason, stated at the `/stats` call site above.
-      const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
-
-      const totalCompleted = totals.get(h.id) ?? 0;
-
-      const streaks = computeStreaks(
-        h,
-        new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
-        all.length ? all[0].date : summaryEnd,
-        summaryEnd,
-        unlogged
-      );
-
-      return {
-        ...h,
-        entries: grid.get(h.id) ?? {},
-        skips: skips.get(h.id) ?? [],
-        score: stats.score,
-        currentStreak: stats.currentStreak,
-        bestStreak: bestStreak(streaks),
-        totalCompleted,
-        // Same field, same reason as the `/stats` call site above: resolved
-        // server-side because no renderer can import `unansweredCounts`, and
-        // derived rather than stored.
-        unlogged_is_success: unansweredCounts(h, unlogged),
-      };
-    });
-
-    // The mean is over `habitPayloads`' own `score` — the same number drawn
-    // on the row beneath each header — never a second scoring pass. See
-    // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
-    // rule.
+async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
+  const { rows: habits } = await db.query(
+    `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
+    [archived]
+  );
+  // One extra SELECT, read once for the whole payload for the same reason
+  // `unlogged` is below: the dashboard groups by category behind
+  // `groupByCategory`, and every habit on the page needs the same list. Read
+  // even with no habits — a category with none yet still draws its header.
+  const { rows: categories } = await db.query(
+    `SELECT * FROM categories ORDER BY position, id`
+  );
+  if (!habits.length) {
+    // Same key shape as the full path below: `categorySummaries` is absent
+    // only in archived mode, never merely because there is nothing to
+    // summarise yet — an empty category still draws its header.
     return {
-      start,
-      end,
-      categories,
-      habits: habitPayloads,
-      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
+      start, end, categories, habits: [],
+      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
+    };
+  }
+
+  const ids = habits.map((h) => h.id);
+
+  // One answer for the account, read once for the whole payload — the map
+  // below runs per habit and this is not a per-habit question.
+  const { rows: [prefs] } = await db.query(
+    `SELECT settings ->> 'atMostUnlogged' AS unlogged FROM users WHERE id = $1`,
+    [user]
+  );
+  const unlogged = unloggedFrom(prefs);
+
+  // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
+  // (same shape, line 453 there), reused here so a section header can tell
+  // "never logged" from "scored zero" — the bounded windows below cannot
+  // answer that, and `first_date` is used for a null check only, never
+  // `addDays` or `dateRange` (root CLAUDE.md). Skipped entirely in archived
+  // mode: that fetch has nothing active to average, so `categorySummaries`
+  // is omitted below rather than computed and discarded.
+  const { rows: firstRows } = archived ? { rows: [] } : await db.query(
+    `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
+     FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
+    [ids]
+  );
+  const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
+
+  // One query for the grid window, one for the lifetime figures, rather
+  // than two per habit.
+  const { rows: windowRows } = await db.query(
+    `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+     FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
+     ORDER BY date`,
+    [ids, start, end]
+  );
+  // Bounded, NOT lifetime. This query had no date predicate, so an account
+  // with years of history shipped every row to Node and then spent ~850ms
+  // of SYNCHRONOUS CPU per request in computeStreaks — blocking the event
+  // loop for every other tenant. `boundedRange` caps the date SPAN, not the
+  // row count, so it was no help here.
+  //
+  // STREAK_HISTORY_DAYS bounds what the streak scan reads. A streak longer
+  // than this reports as capped rather than reading the whole table; the
+  // count below is done in SQL instead of in JS.
+  const streakFrom = addDays(summaryEnd, -STREAK_HISTORY_DAYS);
+  const { rows: allRows } = await db.query(
+    `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+     FROM entries WHERE habit_id = ANY($1) AND date >= $2 ORDER BY date`,
+    [ids, streakFrom]
+  );
+
+  // Lifetime totals in the database, where counting is what it is for.
+  // Postgres applies the same completion rule the shared code does; the
+  // status check keeps skips out, matching isCompleted returning null.
+  const { rows: totalRows } = await db.query(
+    `SELECT e.habit_id,
+            COUNT(*) FILTER (
+              WHERE COALESCE(e.status, '') <> 'skip'
+                AND CASE
+                      WHEN h.type = 'boolean' THEN e.value = 2
+                      WHEN h.target_type = 'at_most' THEN e.value <= h.target_value
+                      ELSE e.value >= h.target_value
+                    END
+            )::int AS completed
+       FROM entries e JOIN habits h ON h.id = e.habit_id
+      WHERE e.habit_id = ANY($1)
+      GROUP BY e.habit_id`,
+    [ids]
+  );
+  const totals = new Map(totalRows.map((r) => [r.habit_id, r.completed]));
+
+  const grid = new Map(ids.map((id) => [id, {}]));
+  const skips = new Map(ids.map((id) => [id, []]));
+  for (const r of windowRows) {
+    if (r.status === 'skip') {
+      grid.get(r.habit_id)[r.date] = SKIP;
+      skips.get(r.habit_id).push(r.date);
+    } else {
+      grid.get(r.habit_id)[r.date] = r.value;
+    }
+  }
+
+  const byHabit = new Map(ids.map((id) => [id, []]));
+  for (const r of allRows) byHabit.get(r.habit_id).push(r);
+
+  const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
+
+  const habitPayloads = habits.map((h) => {
+    const all = byHabit.get(h.id) ?? [];
+    const recent = all.filter((e) => e.date >= cutoff);
+    // Two numbers are read below — `score` and `currentStreak` — so this
+    // calls `summaryStats` rather than `computeStats`: the same window and
+    // the same two passes (`computeScores`, `computeStreaks`), with the
+    // five passes `computeStats` also runs — `computeHistory`,
+    // `computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency`,
+    // `computeResilience` — never started, once per habit, on the
+    // dashboard's hot path. Awards are out of this route for the same
+    // reason, stated at the `/stats` call site above.
+    const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
+
+    const totalCompleted = totals.get(h.id) ?? 0;
+
+    const streaks = computeStreaks(
+      h,
+      new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
+      all.length ? all[0].date : summaryEnd,
+      summaryEnd,
+      unlogged
+    );
+
+    return {
+      ...h,
+      entries: grid.get(h.id) ?? {},
+      skips: skips.get(h.id) ?? [],
+      score: stats.score,
+      currentStreak: stats.currentStreak,
+      bestStreak: bestStreak(streaks),
+      totalCompleted,
+      // Same field, same reason as the `/stats` call site above: resolved
+      // server-side because no renderer can import `unansweredCounts`, and
+      // derived rather than stored.
+      unlogged_is_success: unansweredCounts(h, unlogged),
     };
   });
+
+  // The mean is over `habitPayloads`' own `score` — the same number drawn
+  // on the row beneath each header — never a second scoring pass. See
+  // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
+  // rule.
+  return {
+    start,
+    end,
+    categories,
+    habits: habitPayloads,
+    ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
+  };
 }
 
 /**
@@ -1224,7 +1296,7 @@ api.get('/settings', route(async (req, res) => {
 api.put('/settings', route(async (req, res) => {
   const { accepted, rejected } = parseSettings(req.body);
 
-  const merged = await withUser(uid(req), (db) =>
+  const merged = await withUserWrite(uid(req), (db) =>
     // Merge server-side so two devices racing cannot clobber each other's
     // unrelated keys.
     db.query(
@@ -1238,7 +1310,7 @@ api.put('/settings', route(async (req, res) => {
 }));
 
 api.delete('/settings', route(async (req, res) => {
-  await withUser(uid(req), (db) =>
+  await withUserWrite(uid(req), (db) =>
     db.query(`UPDATE users SET settings = '{}'::jsonb WHERE id = $1`, [uid(req)])
   );
   res.json({});
@@ -1258,7 +1330,15 @@ api.delete('/settings', route(async (req, res) => {
  * endpoint would be a way to make the server fetch an arbitrary body.
  */
 api.post('/notify/test', route(async (req, res) => {
-  const settings = await withUser(uid(req), (db) =>
+  // `withUserWrite` over a SELECT, deliberately. This route writes nothing
+  // `/overview` reads — its own storage write is `notify_status`, through
+  // `recordOutcome` — so the bump buys nothing here and costs one dashboard
+  // rebuild. It is uniformity that is being bought: the invalidation middleware
+  // above already forgets on this route for exactly the same reason, and the
+  // property worth keeping is "a non-safe route bumps", which survives the next
+  // route being added. Over-bumping costs a recomputation; under-bumping serves
+  // stale data for the whole TTL and nothing reports it.
+  const settings = await withUserWrite(uid(req), (db) =>
     db.query(`SELECT settings FROM users WHERE id = $1`, [uid(req)])
       .then((r) => r.rows[0]?.settings ?? {})
   );
@@ -1455,8 +1535,12 @@ api.post('/import', route(async (req, res) => {
   // Replace mode only — "make this account look like the file". A merge adds
   // habits to what is already here and must not rewrite the rest of the
   // account's preferences. Through parseSettings, so an uploaded file cannot
-  // store a value the API itself would refuse; and through withUser, so it is
-  // the caller's own row and no one else's that RLS will let it reach.
+  // store a value the API itself would refuse; and through withUserWrite, so it
+  // is the caller's own row and no one else's that RLS will let it reach. A
+  // replace-mode import therefore bumps twice — once in `applyImport`'s own
+  // transaction and once here — which is a recomputation nobody notices, where
+  // sharing one bump between two transactions would mean choosing which of them
+  // announces the other's write.
   let settings = 0;
   if (mode === 'replace') {
     const raw = backupSettings(buf);
@@ -1464,7 +1548,7 @@ api.post('/import', route(async (req, res) => {
     // an unfiltered file could do to a reader's notification settings.
     const { accepted } = raw ? parseSettings(portableSettings(raw)) : { accepted: {} };
     if (Object.keys(accepted).length) {
-      await withUser(uid(req), (db) => db.query(
+      await withUserWrite(uid(req), (db) => db.query(
         `UPDATE users SET settings = settings || $1::jsonb WHERE id = $2`,
         [JSON.stringify(accepted), uid(req)]
       ));

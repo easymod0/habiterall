@@ -5,9 +5,7 @@
  * than touching the banner themselves.
  */
 
-import {
-  deviceClockHeader, enqueue, freshnessHeader, noteWrite, unstage,
-} from '/shared/offline.js';
+import { deviceClockHeader, enqueue, unstage } from '/shared/offline.js';
 import {
   refreshOfflineBadge, reportUnreachable, setOffline,
 } from '/shared/ui/connectivity.js';
@@ -196,9 +194,6 @@ export async function api(path, options = {}) {
       headers: {
         'Content-Type': 'application/json',
         ...deviceClockHeader(),
-        // Reads only: a write has no cached answer to refuse, and sending it on
-        // one would only widen what a proxy has to think about.
-        ...(method === 'GET' ? freshnessHeader() : {}),
       },
       credentials: 'same-origin',
       ...options,
@@ -241,13 +236,6 @@ export async function api(path, options = {}) {
   // retry, which is a larger change than this one and not obviously wanted:
   // the caller is told, and the caller decides.
   if (staged !== null) await unstage(staged);
-
-  // ...and for the same reason, a write that got an answer is one the next read
-  // must not be served a cached answer for. Before the status is looked at:
-  // cloud's invalidation middleware is unconditional on status too, because a
-  // write that failed halfway through still changed what it may have changed.
-  // See `freshnessHeader` — this is the half that opens the window.
-  if (method !== 'GET') noteWrite();
 
   // The service worker marks responses it served from its cache.
   if (res.headers.get('X-Habiterall-Offline') === '1') setOffline(true);

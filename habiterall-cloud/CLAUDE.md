@@ -11,16 +11,22 @@ in `src/db/` or `src/auth.js`.
 - Every table is `FORCE ROW LEVEL SECURITY` with a policy on
   `app_current_user_id()`.
 - `withUser(userId, fn)` sets `app.user_id` transaction-locally, so it cannot
-  leak between pooled connections.
+  leak between pooled connections. A path that WRITES calls `withUserWrite`
+  instead — the same transaction, plus the account's `data_version` bump in it.
+  Not a line inside `withUser`, because `withUser` wraps the reads too.
 - A query that forgets its `WHERE` clause therefore returns **nothing**. The
   isolation fails closed.
 - The app connects as `habiterall_app`: not the table owner, `NOBYPASSRLS`,
   no DDL, no `INSERT`/`DELETE` on `users`, and column-level `UPDATE` on
-  `email`, `display_name`, `last_seen_at`, `settings` and `device_time_zone`
-  — and nothing else. Keep that list exact: it is the one place the boundary is
-  written down in prose, and it had already gone stale for `settings` once.
-  `idp_subject`, `idp_issuer`, `blocked` and `id` are SELECT-only, which is
-  what stops an account editing its own identity or unblocking itself.
+  `email`, `display_name`, `last_seen_at`, `settings`, `device_time_zone` and
+  `data_version` — and nothing else. Keep that list exact: it is the one place
+  the boundary is written down in prose, and it had already gone stale for
+  `settings` once. `idp_subject`, `idp_issuer`, `blocked` and `id` are
+  SELECT-only, which is what stops an account editing its own identity or
+  unblocking itself. `data_version` (migration 017) widens that boundary by
+  nothing an attacker wants: `users_update_self` still scopes the UPDATE to the
+  caller's own row, so an account can only bump its OWN counter, and the whole
+  effect of doing so is that it stops being served its own memoised dashboards.
 
 **`withoutUser` bypasses that boundary.** It exists for migrations, the
 session store, and user provisioning. Keep its call sites countable on one
@@ -301,41 +307,83 @@ costs one extra `UPDATE`.
 
 **Sharing a policy is not sharing a NUMBER: a cache whose entries cost something
 else must pass its own bound.** `MAX_CACHED` (10,000) is justified by a ~100-byte
-entry, and an `/overview` entry is a whole dashboard — 18 KB to 1.2 MB, a ~70×
-spread. So the memo passes `MAX_OVERVIEW_CACHED` (100), `MAX_OVERVIEW_BYTES`
-(48 MB) and `MAX_OVERVIEW_PER_ACCOUNT` (8), the last because a shared bound is
-one an account paging through its own history can spend alone. `createMemo`
-THROWS for a `maxBytes` with no `sizeOf`, at construction: a byte bound with
-nothing to measure with is a comment claiming a bound, which is the shape this
-module exists because of.
+entry, and an `/overview` entry is a whole dashboard — 15 KB to 583 KB, a ~39×
+spread, measured as the SERIALISED string because that is what `capBytes` sums.
+So the memo passes `MAX_OVERVIEW_CACHED` (3,300), `MAX_OVERVIEW_BYTES` (48 MB)
+and `MAX_OVERVIEW_PER_ACCOUNT` (8), the last because a shared bound is one an
+account paging through its own history can spend alone. **The byte bound is the
+operative one and the count is derived from it**, not the other way round: 3,300
+is what makes 48 MB the limit reached first even at the SMALLEST entry size, and
+a count sized against a residency argument is what the 60 s TTL invalidated (see
+below). `createMemo` THROWS for a `maxBytes` with no `sizeOf`, at construction: a
+byte bound with nothing to measure with is a comment claiming a bound, which is
+the shape this module exists because of.
 
 **The memo holds the SERIALISED payload**, which is what makes `sizeOf` exact
-and lets a hit skip a `JSON.stringify` of up to 1.2 MB. `res.type` BEFORE `send`
-is the one way that goes wrong — `res.send` of a string defaults the content
-type to `text/html`.
+and lets a hit skip a `JSON.stringify` of up to ~580 KB. It is also why the
+sizes above are the STRING and not the retained object — the archive records
+both, and they differ by about 2×. `res.type` BEFORE `send` is the one way that
+goes wrong — `res.send` of a string defaults the content type to `text/html`.
 
 **Both ways of getting the bound wrong are silent**, in opposite directions —
 thrash and no hits, or a killed container — and the count has no latency term in
 it. So `overviewMemoGauge` rides on the runtime line beside `pg_pool_max`. A
 `size()` read by nothing but tests is "who finds out?" answered with *nobody*.
 
-**The TTL is two seconds, and per PROCESS is a statement about CORRECTNESS.** On
-two replicas a tap handled by A and a refetch balanced to B is served B's own
+**The memo is per PROCESS, and that used to be a statement about CORRECTNESS.**
+On two replicas a tap handled by A and a refetch balanced to B was served B's own
 pre-tap answer — the regression the invalidation exists to prevent, arriving
 through the load balancer. All the ordering care above closes windows inside one
 process and none of it reaches a second. Read a hit-rate metric knowing it is
-1/N.
+1/N; the ANSWERS are no longer 1/N.
 
-**`X-Habiterall-Fresh` is what closes that, and BOTH clients send it** — the
-web's `freshnessHeader` (`shared/public/offline.js`) and the phone's `Freshness`
-interceptor (`Api.kt`) — for three seconds after any write that got an answer,
-because the client is the only party that knows it just wrote. It is a **hint**:
-unsigned, unvalidated, safe to ignore, and being wrong about it costs a
-recomputation, so it is not a mirror of the kind the root `CLAUDE.md` warns
-about. **It is deliberately not a `res.vary`** — see `shared/public/CLAUDE.md`
-for the rule and `docs/decisions/caching.md` for what it cost. What is left is
-one account's OTHER devices, which is the staleness the TTL already advertises;
-#192 removes even that.
+**`users.data_version` in the key is what closes that, and no client carries
+anything** (#192). The account's counter is bumped in the same transaction as
+every write (`withUserWrite`, `db/pool.js`) and read per request in front of the
+memo, so an entry built before a write is unreachable on EVERY replica at once.
+The `X-Habiterall-Fresh` header this used to be — a three-second hint both
+clients sent after their own writes — is deleted rather than converted: it could
+only ever speak for the device that WROTE, so a tab or a phone that had not
+itself written was served the stale dashboard anyway.
+
+**Read the version BEFORE the data, never after.** `withUser` is READ COMMITTED,
+so the two statements see two snapshots, and the order decides which way an
+interleaved write goes wrong. Version first tags an entry with the OLD version
+holding NEW data — nobody asks for that key again, so it is simply unreachable
+and the answer is rebuilt. Version last tags an entry with the NEW version
+holding data read before the write, and every later reader asks for exactly that
+key and is served it for the whole TTL. Silent, and in the worse direction.
+
+**"Every write bumps" has one deliberate exception**: the device-zone middleware
+above writes `users.device_time_zone` through bare `withUser`, on GETs, and does
+not bump. It is an observation the server makes rather than a change to anything
+`/overview` reads, and bumping there would invalidate an account's dashboards on
+its own reads.
+
+**The TTL is sixty seconds and is now a BACKSTOP.** It was two, which was as long
+as it was safe to serve an answer nothing could prove was current. What a timer
+is left to do is bound how long an unreachable entry stays resident and cap the
+damage from a write path that forgot to bump, so it can be long — and
+`MAX_OVERVIEW_CACHED` had to be re-derived at the same time, because it had been
+sized against a live set of "what ten connections can produce in two seconds".
+
+**The version read has no bail-out, and the pool cliff is an operator's problem
+rather than the cache's.** The read costs ~0.3 ms with the pool idle and a full
+transaction hold once it is not — measured, a cliff at exactly `PG_POOL_MAX`,
+which moves with it. #192 first shipped a window that skipped the read entirely
+while `pool.waitingCount > 0`; it was deleted, because "the pool is busy" is the
+regime in which a tap on replica A and a refetch on B is *most* likely, and
+serving B's pre-tap entry unchecked paints the user's own tap away — which the
+header this replaced could not do at any pool depth, since the writer carried it.
+An operator watching `pg_waiting` go non-zero should raise `PG_POOL_MAX`; the
+knob already exists, and correctness is not the thing to buy latency with.
+
+`docs/decisions/caching.md` has the measurements, the cliff table and the
+deletion inventory. **The rule the deleted header found still stands and is not
+about it**: a route the worker caches may not `res.vary` on a header the page
+sends only sometimes — see `shared/public/CLAUDE.md`, and note
+`res.vary(DEVICE_ZONE_HEADER)` is safe there because a device sends one zone on
+every request.
 
 ## Which claim names the account
 

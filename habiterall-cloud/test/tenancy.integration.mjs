@@ -256,6 +256,44 @@ try { await withoutUser((db) => db.query('ALTER TABLE habits DISABLE ROW LEVEL S
 catch (e) { policyBlocked = true; }
 check('app role cannot disable RLS', policyBlocked);
 
+/**
+ * The column-level UPDATE grant on `users`, enumerated EXACTLY.
+ *
+ * This is the boundary that stops an account editing its own identity or
+ * unblocking itself: `idp_subject`, `idp_issuer`, `blocked` and `id` are
+ * SELECT-only, and which columns are writable is decided by a `GRANT` in a
+ * migration rather than by anything in the application. Until now the only
+ * place the list was written down was the prose in `habiterall-cloud/CLAUDE.md`
+ * — and prose is not a check. That list had already gone stale once for
+ * `settings`, and migration 017 has just added a seventh column to the table
+ * and a sixth to this list, which is exactly the event that makes the drift.
+ *
+ * Read out of `information_schema.column_privileges` rather than compared
+ * against a migration's text, so a `GRANT` issued from anywhere — a later
+ * migration, a hand-run statement on a live database, an operator being
+ * helpful — is what this sees. Asked as the app role itself (`withoutUser`,
+ * like the `rolbypassrls` check above), because what is being asserted is what
+ * that role can do and not what the owner believes it was given.
+ *
+ * Set equality, both directions, so it fails by NAME: a grant added is named
+ * as unexpected and a grant lost is named as missing. A count would pass an
+ * exchange of one column for another, which is the shape a mistaken revoke and
+ * re-grant takes.
+ */
+const UPDATABLE_USER_COLUMNS = [
+  'data_version', 'device_time_zone', 'display_name', 'email', 'last_seen_at', 'settings',
+];
+const updatable = await withoutUser((db) => db.query(
+  `SELECT column_name FROM information_schema.column_privileges
+    WHERE grantee = current_user AND table_schema = 'public'
+      AND table_name = 'users' AND privilege_type = 'UPDATE'
+    ORDER BY column_name`).then(r => r.rows.map(x => x.column_name)));
+const unexpected = updatable.filter(c => !UPDATABLE_USER_COLUMNS.includes(c));
+const missing = UPDATABLE_USER_COLUMNS.filter(c => !updatable.includes(c));
+check('app role may UPDATE exactly six columns of users',
+  unexpected.length === 0 && missing.length === 0,
+  `unexpected=[${unexpected}] missing=[${missing}] actual=[${updatable}]`);
+
 /* ---------- attack: squat on another user's habit/date slot ---------- */
 
 console.log("--- attack: plant a row on someone else's habit id ---");

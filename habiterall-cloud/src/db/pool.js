@@ -5,6 +5,9 @@
  * `app.user_id` on the connection for the life of a transaction. The
  * Row-Level Security policies read that setting, so a query that forgets its
  * WHERE clause returns nothing instead of another user's rows.
+ *
+ * A query that WRITES goes through `withUserWrite` instead, which is `withUser`
+ * plus the account's `data_version` bump in the same transaction.
  */
 
 import pg from 'pg';
@@ -223,6 +226,48 @@ export async function withUser(userId, fn) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * `withUser`, plus the account's `data_version` bump, in the SAME transaction.
+ *
+ * Every write path opts into this by name. It is deliberately NOT a line inside
+ * `withUser`, and the issue that asked for it got this wrong in a way worth
+ * writing down: "every write already runs inside `withUser`, so there is
+ * exactly one place to put it" is true of the writes and false of the function
+ * — **`withUser` wraps the READS too**. A bump there would fire on every
+ * `/overview`, every `/stats` and every `GET /habits`, which turns each of them
+ * into a write, takes a row lock on `users` per read, and leaves a counter that
+ * moves constantly while meaning nothing. The version's whole value is that it
+ * changes when the DATA changes.
+ *
+ * So this is the same discipline as `forgetAccount`: a named thing a write path
+ * calls, rather than a router or a wrapper it happens to be inside of.
+ *
+ * **The bump shares the write's COMMIT, and that is the correctness property.**
+ * Outside the transaction it could be observed without the write it announces
+ * (a reader tags a rebuild with the new version and fills it from pre-write
+ * data) or the write could be observed without it (a reader is served a stale
+ * entry that is still reachable). Inside, no reader can see one without the
+ * other.
+ *
+ * Issued AFTER `fn` rather than before, which is a lock-hold argument and not a
+ * correctness one: the UPDATE takes a row lock on `users` that every concurrent
+ * write by the same account then queues behind, so it is held for the tail of
+ * the transaction rather than for all of it. Either order commits atomically.
+ *
+ * @param {number} userId
+ * @param {(client: pg.PoolClient) => Promise<T>} fn
+ * @returns {Promise<T>}
+ * @template T
+ */
+export async function withUserWrite(userId, fn) {
+  return withUser(userId, async (client) => {
+    const result = await fn(client);
+    await client.query(
+      'UPDATE users SET data_version = data_version + 1 WHERE id = $1', [userId]);
+    return result;
+  });
 }
 
 /**

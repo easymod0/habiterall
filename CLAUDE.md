@@ -280,6 +280,7 @@ Several layers, and they catch different things:
 | Cloud reminders | `npm run test:notify -w habiterall-cloud` | Postgres |
 | ntfy button answers, over the real route | `npm run test:ntfyanswer -w habiterall-cloud` | Postgres |
 | The dashboard memo, and what invalidates it | `npm run test:memo -w habiterall-cloud` | Postgres |
+| Every write bumps `data_version`, and no read does | `npm run test:dataversion -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |

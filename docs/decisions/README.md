@@ -32,7 +32,7 @@ are already answered here, usually because they were the first thing tried.
 | `testing.md` | the browser fleet: worker counts, the sleep audit, the theme split |
 | `site.md` | habiterall.ca: why the wiki is generated from the README, the link check, the changelog source |
 | `categories.md` | one category per habit, `ON DELETE SET NULL`, uncategorised as a state, the case-fold divergence |
-| `caching.md` | the `/overview` memo and every bound in it, the shared eviction policy, the pool timeouts, `X-Habiterall-Fresh` and the `Vary` that cost the offline dashboard |
+| `caching.md` | the `/overview` memo and every bound in it, the shared eviction policy, the pool timeouts, `users.data_version` and the pool cliff, and the `Vary` that cost the offline dashboard |
 
 The first sixteen files are the original prose verbatim, sliced by topic and
 checked line-for-line against the pre-split `CLAUDE.md`; that split lost nothing.
