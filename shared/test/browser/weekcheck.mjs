@@ -741,26 +741,6 @@ for (const width of [328, 358, 700, 1100]) {
     check(`month captions at ${width}px over ${what}: none overlaps its neighbour`,
       overlaps.length === 0, overlaps.map((n) => n.text).join(','));
 
-    // #132: the gap between two drawn captions must be the SAME number of
-    // columns everywhere except the one deliberate exception — the last
-    // column keeps its caption regardless of where the stride lands, which
-    // can pull the FINAL gap in from the rest. A greedy walk that drops
-    // whichever caption collides with the last one DRAWN sizes each gap from
-    // that pair's own widths, so it can differ column to column; #131's own
-    // argument against a weekday axis with three of seven labelled — "one
-    // you have to count along" — applies here exactly the same. `twelve`'s
-    // own months, in order, are the oracle for where each drawn caption
-    // SITS, so this does not depend on knowing the chart's internal indices.
-    const monthTexts = twelve.map((m) => {
-      const [yy, mm] = m.month.split('-').map(Number);
-      return formatMonthShort(new Date(yy, mm - 1, 15));
-    });
-    const drawnIdx = caps.map((c) => monthTexts.indexOf(c));
-    const gaps = drawnIdx.slice(1).map((idx, i) => idx - drawnIdx[i]);
-    const interior = gaps.slice(0, -1);
-    check(`month captions at ${width}px over ${what}: the stride is constant apart from the last column`,
-      interior.every((g) => g === interior[0]), gaps.join(','));
-
     // A year with no month above it labels nothing — it reads as a caption for
     // the column rather than for the run of them.
     const years = collect(svg)

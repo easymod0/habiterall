@@ -31,32 +31,12 @@ export const MIN_SLOT = {
 /**
  * How many columns fit in `width` at the given density.
  *
- * `reserved` defaults from `width` rather than a flat number. 46 was
- * `historyChart`'s and `scoreChart`'s own fixed gutter (`pad.left: 34` +
- * `pad.right: 12`), which is what this was calibrated against before
- * `weekdayMonthChart` and `frequencyChart` started sharing this default too —
- * and #132 gave both of THEM a row-label gutter sized from the real labels
- * (`gutterFor`), with a ceiling of `width * 0.32` for a script `estimateTextWidth`
- * over-bills badly (Arabic, Hebrew). A flat 46 stayed correct for the first
- * two and silently wrong for the other two: at a 328px card with a wide-gutter
- * locale, the true left pad can reach ~105px, so `columnsForWidth` handed
- * `weekdayMonthChart` more months than the remaining space allows at
- * `MIN_SLOT.circle` — the exact cramming that constant exists to prevent,
- * just moved one call away from where it looks like it is being enforced.
- * Deriving from `width` keeps the bound correct at every width these charts
- * render at, at the cost of `historyChart`/`scoreChart` occasionally paging
- * one column sooner than their OWN fixed 46px gutter strictly needs — a
- * smaller page is a paging-frequency cost, not a dropped or cramped label,
- * so it is the safe side to be wrong on. `Math.max(46, …)` keeps their exact
- * old figure at any width where the derived one would be smaller.
- *
  * @param {number} width      usable pixels for the plot area
  * @param {keyof typeof MIN_SLOT|number} density  a MIN_SLOT key, or a pixel figure
  * @param {number} [reserved] axis labels and padding to subtract
  * @returns {number} at least 1
  */
-export function columnsForWidth(width, density = 'bar',
-  reserved = Math.max(46, Math.ceil((Number.isFinite(width) ? width : 0) * 0.32) + 12)) {
+export function columnsForWidth(width, density = 'bar', reserved = 46) {
   const min = typeof density === 'number'
     ? density
     : (Object.hasOwn(MIN_SLOT, density) ? MIN_SLOT[density] : MIN_SLOT.bar);

@@ -39,35 +39,6 @@ test('an unknown density name falls back rather than throwing', () => {
   assert.equal(columnsForWidth(500, '__proto__'), columnsForWidth(500, 'bar'));
 });
 
-test('a width that would make a flat default negative or NaN still falls back to 46', () => {
-  // The derived default reads `width` before the body's own `Number.isFinite`
-  // guard runs — a non-finite or negative width must not turn `reserved`
-  // itself into NaN or something below the historyChart/scoreChart floor.
-  assert.equal(columnsForWidth(NaN, 'bar'), columnsForWidth(0, 'bar'));
-  assert.equal(columnsForWidth(undefined, 'bar'), columnsForWidth(0, 'bar'));
-  assert.equal(columnsForWidth(-100, 'bar'), columnsForWidth(0, 'bar'));
-});
-
-test('the default reservation leaves room for a row-label gutter at its measured ceiling', () => {
-  // #132: `weekdayMonthChart` and `frequencyChart` size their row-label
-  // gutter with `gutterFor`, whose ceiling is `width * 0.32` — up to ~105px
-  // of a 328px card for a script `estimateTextWidth` bills generously
-  // (Arabic, Hebrew). `columnsForWidth`'s old flat 46px default assumed far
-  // less room was already spent, so a wide-gutter locale got a CAPACITY
-  // computed as if 259px were free when only ~211 actually were, and ended
-  // up with columns narrower than `MIN_SLOT` promises — the exact cramming
-  // that constant exists to prevent, one call removed from where it looks
-  // like it is enforced.
-  const width = 328;
-  const capacity = columnsForWidth(width, 'circle');
-  const worstCaseGutter = Math.ceil(width * 0.32) + 12; // gutterFor's own ceiling + pad.right
-  const trueUsable = width - worstCaseGutter;
-  const perColumn = trueUsable / capacity;
-  assert.ok(perColumn >= MIN_SLOT.circle - 1,
-    `only ${perColumn.toFixed(1)}px per column at capacity ${capacity}, ` +
-    `worst-case gutter ${worstCaseGutter}`);
-});
-
 /* ---------- windowing ---------- */
 
 const items = Array.from({ length: 100 }, (_, i) => i);

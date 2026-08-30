@@ -866,7 +866,7 @@ export function weekdayMonthChart(months, color,
     }, SHORT[d]));
   }
 
-  // A caption is drawn only where thinning leaves room for it. "Every column
+  // A caption is drawn only where it clears the last one drawn. "Every column
   // gets its month" was the rule here and its justification — "the columns are
   // paged rather than squeezed, so there is always room" — is false in any
   // locale whose month names are not three Latin characters: measured at the
@@ -897,36 +897,26 @@ export function weekdayMonthChart(months, color,
              x: Math.min(Math.max(cx, half), width - half) };
   });
 
-  // A CONSTANT stride, not a greedy left-to-right walk. The walk this
-  // replaces dropped whichever caption collided with the last one DRAWN, so
-  // the gap between two shown columns tracked each pair's own widths — which
-  // vary within one axis, so the gap does too. Measured at a 328px card with
-  // 12 columns: even en-US, three Latin characters wide in every month but
-  // one, drew `Jan Mar May Jul Sep Dec` — two months apart four times and
-  // then three, from the SAME axis. #131's own argument against a weekday
-  // axis with three of seven labelled — "one you have to count along" —
-  // applies here exactly the same: a reader scans a constant gap and counts
-  // an inconsistent one. So the stride is sized once, from the WIDEST
-  // caption on the whole axis, and used for every column alike — no `WIDTH_
-  // SAFETY` here either, for the reason already stated above: the raw
-  // estimate is already the safe side, and this is a DEGRADATION decision,
-  // not a reservation.
-  const widestCaption = Math.max(0, ...captions.map((c) => c.half * 2));
-  const every = Math.max(1, Math.ceil((widestCaption + CAPTION_GAP) / colW));
+  // The LAST column is captioned first, then the rest fill in to its left.
+  //
+  // A single greedy left-to-right pass is what the comment above says it does
+  // not do: it drops whichever caption collides, and at the right-hand edge
+  // that is always the newest month — the one a reader is actually looking at.
+  // Measured at 328px with 12 columns, en-US drew `Jan Mar May Jul Sep Nov`
+  // and no December. Reserving the last one costs at most one caption further
+  // left, which is the older half of the axis.
   const drawn = new Set();
-  for (let c = 0; c < captions.length; c += every) drawn.add(c);
-
-  // The LAST column keeps its caption regardless of where the stride lands —
-  // the one a reader is actually looking at, and the one exception to
-  // "constant" this makes on purpose. Forcing it in can leave it closer than
-  // `every` columns to whichever caption the stride drew last, so that one
-  // (and only that one) is dropped in its favour rather than re-walking the
-  // whole axis; every OTHER gap stays exactly `every` columns wide.
-  const lastIdx = captions.length - 1;
-  if (lastIdx >= 0 && !drawn.has(lastIdx)) {
-    const prevIdx = every * Math.floor(lastIdx / every);
-    if ((lastIdx - prevIdx) * colW < widestCaption + CAPTION_GAP) drawn.delete(prevIdx);
-    drawn.add(lastIdx);
+  if (captions.length) drawn.add(captions.length - 1);
+  const last = captions[captions.length - 1];
+  let lastRight = -Infinity;
+  for (let c = 0; c < captions.length - 1; c++) {
+    const cap = captions[c];
+    const clearsLeft = cap.x - cap.half >= lastRight;
+    const clearsLast = cap.x + cap.half + CAPTION_GAP <= last.x - last.half;
+    if (clearsLeft && clearsLast) {
+      drawn.add(c);
+      lastRight = cap.x + cap.half + CAPTION_GAP;
+    }
   }
 
   shown.forEach((m, c) => {

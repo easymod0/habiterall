@@ -894,33 +894,13 @@ safe only because #131 had already raised `LONE.indic` from a rate near 1.0 to
 for a property of marks. `docs/decisions/dashboard-and-detail.md` has the
 numbers and why the two changes are coupled.
 
-**A caption that is thinned away must not be the newest one, and the gap
-between two shown captions must be CONSTANT.** The first rule survives from
-#131: reserve the last column first, because at the right-hand edge whatever
-collides is always the month a reader is actually looking at — en-US drew
-`Jan Mar May Jul Sep Nov` and no December under the greedy walk that first
-shipped. The second is #132's: that same greedy walk (drop whichever caption
-collides with the last one DRAWN) sizes each gap from that PAIR's own widths,
-so the gap itself can vary along one axis — measured, `Jan Mar May Jul Sep
-Dec` in en-US at a 328px card, two months apart four times and then three from
-the same twelve. #131's own argument against a weekday axis with three of
-seven labelled — "one you have to count along" — applies here just as much:
-`weekdayMonthChart` now sizes ONE stride from the widest caption on the whole
-axis and applies it everywhere, with the reserved last column as the one
-named exception (it can land closer than a full stride to its predecessor,
-which is the one gap allowed to differ). The year caption still follows the
-month it sits under, for the same reason as before: with no month name above
-it there is nothing for a year to disambiguate.
-
-**`columnsForWidth`'s `reserved` default has to know a row-label gutter can
-now reach `width * 0.32`.** 46 was `historyChart`'s and `scoreChart`'s own
-fixed gutter (`pad.left: 34` + `pad.right: 12`) before `weekdayMonthChart` and
-`frequencyChart` started sharing the same default with a `gutterFor`-sized
-gutter of their own — so a wide-gutter locale got handed more columns than
-the true remaining width supports at `MIN_SLOT`, the exact cramming that
-constant exists to prevent, one call away from where it looks like it is
-enforced. The default is derived from `width` now (`Math.max(46, …)`, so
-`historyChart`/`scoreChart` never get LESS than their own fixed figure).
+**A caption that is thinned away must not be the newest one.** The drop is a
+left-to-right walk, and at the right-hand edge the collision is always with the
+month a reader is actually looking at — en-US drew `Jan Mar May Jul Sep Nov` and
+no December, under a comment saying the first and last are what orient a reader.
+The last column is reserved first and the rest fill in to its left. The year
+caption follows the month it sits under, for the same reason: with no month name
+above it there is nothing for a year to disambiguate.
 
 **The date rules are invisible in en-US, so `npm run test:locales` runs them
 somewhere else.** Every defect above passes the whole unit suite in the locale

@@ -518,13 +518,27 @@ issue, and the reason Step 1 of it was a measurement harness built BEFORE any
 behaviour changed. `shared/test/label-widths.mjs` renders every label
 `charts.js` draws, at the six font sizes it uses, in a real Chrome, and
 compares `estimateTextWidth` against `getComputedTextLength()`. Re-run after
-the fix, across the ten `locales.mjs` locales plus six added specifically for
-scripts that stack a combining vowel sign on a base consonant (`ml-IN`,
-`ta-IN`, `te-IN`, `kn-IN`, `gu-IN`, `he-IL` — none of the original ten's
-weekday/month/range labels carries a mark at all, so that sweep alone could
-not have seen the case the fix is about), the worst under-estimate was
-unchanged at 1.19x (Arabic `أغسطس`, which has no mark in it either) —
-`WIDTH_SAFETY` stayed at 1.25, re-verified rather than carried over unchecked.
+the fix, across the ten `locales.mjs` locales plus six added for #132: five
+for scripts that stack a combining vowel sign on a base consonant (`ml-IN`,
+`ta-IN`, `te-IN`, `kn-IN`, `gu-IN`), since none of the original ten's
+weekday/month/range labels carries a mark at all and that sweep alone could
+not have seen the case the fix is about, and `he-IL` for breadth — its CLDR
+weekday/month names carry no niqqud either, so it exercises right-to-left and
+a distinct script rather than a mark. The worst under-estimate **across those
+sixteen** was unchanged at 1.19x (Arabic `أغسطس`, which has no mark in it
+either) — `WIDTH_SAFETY` stayed at 1.25, re-verified rather than carried over
+unchecked.
+
+Read that 1.19x as a fact about the sixteen and not about the estimator.
+Review extended the same harness further and found **el-GR `Μαρ` at 1.23x**,
+which is the real worst case and leaves 1.6% of headroom rather than 4.8%. It
+has nothing to do with marks — Greek has no class in `classOf` at all, so it
+falls through to the generic `other` rate — and it is pre-existing, but it is
+what the sixteen could not see, exactly as the original ten could not see
+Malayalam. Filed as #286. The lesson is the one this section is already about:
+a sweep answers for the locales in it, and the number it produces is only ever
+a lower bound on the worst case.
+
 The current figures live in the comment above `WIDTH_SAFETY` itself, which is
 the one that must be updated (with a fresh harness run) if the rates or the
 sum ever change again.
@@ -563,15 +577,3 @@ the two calls ask different questions. Overriding one to match the other means
 hand-picking a format for languages neither of us reads, which is exactly the
 kind of hardcoded table `formatDayRange` exists to avoid needing. See the
 comment at `formatDayRange` in `dates.js` for the specific strings compared.
-
-**What #132 changed nothing about, worth stating because it would be easy to
-assume otherwise: the call sites that DECIDE what to drop or shrink.**
-`weekdayMonthChart`'s caption thinning, `historyChart`'s axis-label thinning
-and `ui/window.js`'s `columnsForWidth` all consume `estimateTextWidth`'s
-output, and a smaller estimate changes what they compute — but none of them
-were touched for the mark-billing fix itself. They needed their own,
-independent fix (a non-constant caption stride in `weekdayMonthChart`, and a
-stale flat default in `columnsForWidth` that predates the row-label gutters
-several charts now compute per-locale) — see the comments at both. Re-running
-`label-widths.mjs` after the estimator changed is what confirmed those two
-were real defects and not compensating for one another.

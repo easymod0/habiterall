@@ -110,19 +110,22 @@ const LOCALES = [
   ['ja-JP', 'square glyphs and year-first field order', true],
   ['pt-PT', 'long weekday names — the fixed-gutter clipping case', false],
   ['lv-LV', 'the longest date range measured', false],
-  // Added for #132 Step 3's own case: every script below stacks a combining
+  // Added for #132 Step 3's own case: the first five below stack a combining
   // vowel sign on a base consonant the way Malayalam does, and none of the
   // original ten does. The deleted test this issue restores cited Malayalam
   // by name (`ബു`, U+0D2C U+0D41) as the worst under-estimate in an earlier
   // corpus, and that corpus is not this one — see the brief. Without these,
   // "worst under-estimate unchanged" is a claim about a sweep that could not
-  // have seen the exact case the mark-billing fix reasons about.
+  // have seen the exact case the mark-billing fix reasons about. The sixth,
+  // `he-IL`, is legitimate breadth rather than a mark-bearing case — CLDR's
+  // Hebrew weekday and month names carry no niqqud, so it exercises
+  // right-to-left and a distinct script instead of a combining mark.
   ['ml-IN', 'Malayalam — the deleted test’s own case, abugida with vowel signs', true],
   ['ta-IN', 'Tamil — an abugida with vowel signs, minimal consonant clusters', true],
   ['te-IN', 'Telugu — an abugida with vowel signs, rounder glyphs than Tamil', true],
   ['kn-IN', 'Kannada — an abugida with vowel signs', true],
   ['gu-IN', 'Gujarati — an abugida with vowel signs, no headline stroke', true],
-  ['he-IL', 'Hebrew — combining niqqud marks over consonants, right-to-left', true],
+  ['he-IL', 'Hebrew — right-to-left breadth; CLDR weekday/month names carry no niqqud', true],
 ];
 
 /**

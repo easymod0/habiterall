@@ -513,34 +513,46 @@ export function estimateTextWidth(text, fontSize) {
  * dangerous direction, since under-reserving clips a word — so the margin
  * needed re-deriving rather than inheriting. `shared/test/label-widths.mjs`
  * measures the fixed estimator against `getComputedTextLength()` in a real
- * Chrome, over the **16** locales `locales.mjs`'s 10 plus six added for this
- * mark-billing change specifically (`ml-IN`, `ta-IN`, `te-IN`, `kn-IN`,
- * `gu-IN`, `he-IL`) — the original ten's weekday/month/range labels carry no
- * combining mark at all, so a sweep of them alone could not have seen the
- * exact case (Malayalam `ബু`, the deleted test's own string) the mark-sum
- * change is about. Of those 16, 15 have CLDR data in this Chrome build
- * (`ne-NP` resolves but falls back to ASCII names), at the six font sizes the
- * charts use, across every weekday/month/year/range label this app draws —
- * 4,050 renderings, not the 20,100-over-67-locales figure an earlier comment
- * here cited, which this file makes no claim to reproduce or supersede.
+ * Chrome, over the **16** locales `locales.mjs`'s 10 plus six added for
+ * #132: five for this mark-billing change specifically (`ml-IN`, `ta-IN`,
+ * `te-IN`, `kn-IN`, `gu-IN`) — the original ten's weekday/month/range labels
+ * carry no combining mark at all, so a sweep of them alone could not have
+ * seen the exact case (Malayalam `ബু`, the deleted test's own string) the
+ * mark-sum change is about — and `he-IL` for breadth, since its own CLDR
+ * weekday/month names carry no niqqud either. Of those 16, 15 have CLDR data
+ * in this Chrome build (`ne-NP` resolves but falls back to ASCII names), at
+ * the six font sizes the charts use, across every weekday/month/year/range
+ * label this app draws — 4,050 renderings, not the 20,100-over-67-locales
+ * figure an earlier comment here cited, which this file makes no claim to
+ * reproduce or supersede.
  *
- * The worst under-estimate found, before and after the mark-billing fix
- * alike, is 1.19x — Arabic `أغسطس` at 8px (real 29.4px, estimate 24.8px),
- * whose letters join more tightly than the per-character rate can express.
- * The fix does not move this case (no combining mark in it), so 1.25 keeps
- * the same 0.06 of headroom it always reserved for it — verified fresh
- * rather than carried over unchecked. The worst case among the six mark-heavy
- * additions is `he-IL`'s `שבת` at 1.11x; Malayalam's own worst (`ബুধൻ`,
- * 1.05x) is comfortably inside the margin too, and `ബু` alone (the deleted
- * test's exact string) is not an under-estimate at all — 18.7px estimated
- * against 18.03px real at font-size 11, a raw 3.7% margin before this 1.25 is
- * even applied. That margin is thin only because `#131` already re-measured
- * `LONE.indic` up to 1.7 (from a rate the deleted test's own numbers imply
- * was closer to 1.0); freeing the mark on TOP of the old, lower rate is what
- * the deleted test's under-estimate came from, and re-billing it was a
- * workaround for that rate rather than a property of marks. Re-run the
- * harness and update this comment again if a future change to the rates or
- * the sum moves that number.
+ * The worst under-estimate found is 1.23x — Greek `Μαρ` at 9.5px (real
+ * 20.3px, estimate 16.5px) — found by extending the harness's own locale list
+ * to `el-GR`, which #132's original sweep did not include. This is
+ * PRE-EXISTING and not caused by the mark-billing fix: `Μαρ` carries no
+ * combining mark, and the cause is not a rate that needs re-measuring but a
+ * script `classOf` has no class for at all — Greek (`Ͱ`-`Ͽ`) sits
+ * below `SEMITIC`'s `֐`-`ࣿ` and above every other script test, so it
+ * falls through all of them to the generic `other` rate (0.58 joined) against
+ * a real per-glyph rate measured around 0.71. Against `WIDTH_SAFETY = 1.25`
+ * that leaves 1.6% of headroom, not the 4.8% an earlier version of this
+ * comment claimed from a since-superseded worst case (Arabic `أغسطس` at 8px,
+ * 1.19x, whose letters join more tightly than the per-character rate can
+ * express — still true, just no longer the worst). The worst case among the
+ * five mark-heavy additions is Malayalam's `ബুধൻ` at 1.05x, comfortably
+ * inside the margin; `he-IL` is the sixth addition and, having no niqqud on
+ * its CLDR weekday/month names, contributes breadth rather than a mark case.
+ * `ബু` alone (the deleted test's exact string) is not an under-estimate at
+ * all — 18.7px estimated against 18.03px real at font-size 11, a raw 3.7%
+ * margin before this 1.25 is even applied. That margin is thin only because
+ * `#131` already re-measured `LONE.indic` up to 1.7 (from a rate the deleted
+ * test's own numbers imply was closer to 1.0); freeing the mark on TOP of the
+ * old, lower rate is what the deleted test's under-estimate came from, and
+ * re-billing it was a workaround for that rate rather than a property of
+ * marks. Do not widen this margin to cover Greek — issue #286 is the missing
+ * script class, which is where the fix belongs. Re-run the harness and update
+ * this comment again if a future change to the rates, the classes, or the sum
+ * moves this number.
  *
  * Deliberately separate from `estimateTextWidth`, which answers "how wide is
  * this, roughly". Folding the margin in made the estimate wrong in the other
