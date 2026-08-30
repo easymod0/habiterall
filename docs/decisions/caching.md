@@ -259,28 +259,37 @@ not five, and what it is worth is arithmetic nobody had done. Measured over the
 real route, through `withUser` as `habiterall_app` — `scripts/bench-version-read.mjs`,
 `npm run bench:version-read -w habiterall-cloud`:
 
-| shape | rebuild (miss) | hit, with the read | the read alone | break-even |
-|---|---|---|---|---|
-| 8 habits × 365 days | 17.8 ms | 2.40 ms | 0.26 ms | 1.64% |
-| 20 × 365 | 31.2 ms | 2.33 ms | 0.25 ms | 0.87% |
-| 50 × 365 | 76.1 ms | 2.58 ms | 0.24 ms | 0.32% |
+| shape | rebuild (miss) | hit, with the read | the read alone | no transaction | break-even |
+|---|---|---|---|---|---|
+| 8 habits × 365 days | 18.7 ms | 2.64 ms | 0.29 ms | 0.14 ms | 1.80% |
+| 20 × 365 | 36.9 ms | 2.64 ms | 0.31 ms | 0.16 ms | 0.91% |
+| 50 × 365 | 76.0 ms | 2.87 ms | 0.30 ms | 0.17 ms | 0.40% |
 
 Break-even is the fraction of requests the read must convert from a miss into a
-hit to pay for itself, and it is under 2% everywhere.
+hit to pay for itself, and it is under 2% everywhere. The TTL going from 2 s to
+60 s converts far more than that.
 
-**Re-measured after #188**, which folded `BEGIN` and the `set_config` into one
-round trip. The figures above are the new ones; the previous row read 0.34 /
-0.29 / 0.32 ms for the read and 2.14% / 0.97% / 0.43% at break-even. Note what
-that re-run was worth beyond the numbers: until #188 the bench did not call
+**Every figure in that table is one run of the current instrument**, which is
+not a detail: the row before it read 0.34 / 0.29 / 0.32 ms and 2.14 / 0.97 /
+0.43%, and the row before *that* was measured by a bench that did not call
 `withUser` at all — it restated the body, so it went on issuing four round trips
-after production had gone to three, under a label naming the helper. It calls
-the helper now, so the table cannot drift from the code again without the code
-moving too. The read is ~0.39 ms against a bare RLS-bypassing `SELECT` at
-~0.14 ms, so the transaction wrapper is still most of what a version read costs. The TTL going from 2 s to
-60 s converts far more than that. So the read shipped and the echo did not, and
-no client carries anything at all — which is also why nothing about this change
-needed a client release, an Android version check or a wire contract to keep the
-two editions honest about.
+after production had gone to three, under a label naming the helper. #188 is
+what caught that, and the fix was to call the helper, so the table cannot drift
+from the code again without the code moving too.
+
+**The transaction wrapper is about half of what a version read costs — not most
+of it.** The `no transaction` column is the same `SELECT` issued straight at the
+pool, so wrapper is the difference: 0.15 / 0.15 / 0.12 ms, between 42% and 52%
+of the read. Take those two columns from the same section of the same run or the
+answer changes: this document briefly quoted 0.39 ms against 0.14 ms and
+concluded 64%, which straddled both the process's warm-up and — until the bench
+was corrected — two different pools, in the direction that inflates the wrapper.
+That figure is retired. It matters because #280 asks whether the version read
+wants a pool of its own, and it is the wrapper's share that sizes that.
+
+So the read shipped and the echo did not, and no client carries anything at all
+— which is also why nothing about this change needed a client release, an
+Android version check or a wire contract to keep the two editions honest about.
 
 **A hit is no longer free, and the bench says so where it used to say "no
 database touch".** ~2.4 ms of that hit is this edition's floor for any
@@ -328,13 +337,24 @@ queue":
 
 | pool | concurrent holders | mean | p95 |
 |---|---|---|---|
-| 10 | 9 | 0.35 ms | 0.43 ms |
-| 10 | 10 | 9.9 ms | 30.3 ms |
-| 10 | 20 | 38.8 ms | 60.2 ms |
-| 20 | 19 | 0.37 ms | 0.44 ms |
-| 20 | 20 | 7.9 ms | 28.6 ms |
-| 40 | 39 | 0.38 ms | 0.43 ms |
-| 40 | 40 | 5.9 ms | 26.4 ms |
+| 10 | 9 | 0.46 ms | 0.69 ms |
+| 10 | 10 | 7.4 ms | 28.4 ms |
+| 10 | 20 | 42.1 ms | 61.7 ms |
+| 20 | 19 | 0.47 ms | 0.52 ms |
+| 20 | 20 | 9.0 ms | 29.5 ms |
+| 40 | 39 | 0.37 ms | 0.56 ms |
+| 40 | 40 | 5.3 ms | 25.6 ms |
+
+**Re-measured after #188 as well, and for a reason worth naming.** This section
+is the one place in the bench that cannot call `withUser` — `contention()` opens
+its own pool per `max` under test, which is the mechanism — so it hand-copies the
+transaction's opening round trip. That copy went on issuing `BEGIN` and the
+`set_config` separately after production folded them, which held a connection one
+round trip longer than production does, under saturation, where holding a
+connection longer is the entire quantity being measured. It biased toward a
+sharper cliff. The copy is folded now and the rows above are from the corrected
+instrument; the cliff sat at exactly `PG_POOL_MAX` under both, so nothing this
+section concludes changed.
 
 **The cliff is at exactly `PG_POOL_MAX` and it moves with it** — free at 9 on a
 pool of 10, at 19 on a pool of 20, at 39 on a pool of 40. That is the sentence

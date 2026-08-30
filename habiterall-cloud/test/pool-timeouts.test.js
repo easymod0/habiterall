@@ -364,6 +364,11 @@ test('withUser folds BEGIN and set_config into one query() call', async () => {
   assert.match(calls[0], /BEGIN/, 'the FIRST call must open the transaction');
   assert.match(calls[0], /set_config\(\s*'app\.user_id',\s*'7',\s*true\s*\)/,
     'the FIRST call must also carry set_config, folded into the same string');
+  // The count and `calls[0]` together still admit a shape the message denies:
+  // drop the explicit COMMIT, add any other single call, and this is three
+  // calls with BEGIN first. Naming the LAST one closes the ends of the list.
+  assert.match(calls[2], /^COMMIT$/, 'the LAST call must be the COMMIT');
+  assert.equal(calls[1], 'SELECT 1', 'the callback\'s own query must sit between them');
 });
 
 /** Same shape, for the read-only notifier scope. */
@@ -383,4 +388,6 @@ test('withNotifierScope folds BEGIN READ ONLY and set_config into one query() ca
   assert.match(calls[0], /BEGIN READ ONLY/, 'the FIRST call must open the read-only transaction');
   assert.match(calls[0], /set_config\(\s*'app\.scope',\s*'notifier',\s*true\s*\)/,
     'the FIRST call must also carry set_config, folded into the same string');
+  assert.match(calls[2], /^COMMIT$/, 'the LAST call must be the COMMIT');
+  assert.equal(calls[1], 'SELECT 1', 'the callback\'s own query must sit between them');
 });
