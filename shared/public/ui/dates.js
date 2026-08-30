@@ -242,6 +242,23 @@ export const formatYear = (d) => yearOnly().format(d);
  * worse than writing the same dates in digits. Which one a caller wants is a
  * question about ITS layout, so it is a parameter rather than a rule here.
  *
+ * #132: this can disagree with `formatDateLong` on the SAME day, in ja-JP and
+ * zh-CN — the dashboard's range reads `2026/08/10～2026/08/16` while the day
+ * dialog's long date for the 10th reads `2026年8月10日月曜日`. Decided to leave
+ * as is: both are `Intl`'s own correct answer to two DIFFERENT questions (a
+ * two-ended range, at whatever granularity the two ends share, versus one
+ * long date), asked at each surface's own formatter — unlike the
+ * Gregorian-field bugs this file exists to avoid, where two readings answered
+ * the SAME question and one of them was simply wrong. Overriding one to match
+ * the other means hand-picking a format for languages neither of us reads,
+ * which is exactly what asking `Intl` here is meant to avoid needing.
+ *
+ * Two things NOT reachable through this app, so not guarded here: an invalid
+ * `Date` makes `formatRange`/`format` throw a `RangeError` rather than
+ * returning a string, and every caller builds `a`/`b` from `fromISOLocal` on a
+ * string that already passed `assertDate` (or from the device clock), so
+ * there is no path that hands this an invalid `Date`.
+ *
  * @param {Date} a  the earlier end
  * @param {Date} b  the later end
  * @param {'medium'|'short'} [style]
@@ -293,6 +310,12 @@ export const formatDateShort = (d) => mediumDate().format(d);
  * A quarter has no `Intl` form and is already readable, so it is passed
  * through; so is anything unrecognised, because inventing a format for a key
  * this does not know is how a label starts lying.
+ *
+ * Not reachable through this app, so not guarded here: `formatStamp('2026-13')`
+ * matches the `YYYY-MM` branch and formats as January 2027 — `new Date`'s own
+ * month rollover, since month index `13 - 1 = 12` is the 13th month of 2026,
+ * which is the 1st of 2027. `BUCKETERS` (stats.js) never emits a month outside
+ * `01`–`12`, so no bucket key this function is actually called with can hit it.
  *
  * @param {string} stamp
  */
@@ -463,11 +486,18 @@ function classOf(ch) {
 export function estimateTextWidth(text, fontSize) {
   const chars = [...String(text)];
   // Marks do not count toward the length: `ബു` is one letter wearing a vowel
-  // sign, and reads as a lone glyph however many code points it takes.
-  const solid = chars.filter((ch) => !COMBINING.test(ch)).length;
-  const rate = solid <= 2 ? LONE : JOINED;
+  // sign, and reads as a lone glyph however many code points it takes. That
+  // used to be true only of the RATE choice below — `solid` excluded marks
+  // when picking LONE vs JOINED, but the sum still walked every code point
+  // and billed each mark its own rate on top of the base glyph it rides on,
+  // so a 3-code-point, 2-cluster word like `बुध` billed as if it were three
+  // separate letters (39px at font 10) rather than the two glyphs a reader
+  // sees. Summing over `solid` — the same filter, once — bills one rendered
+  // cluster per non-mark code point and nothing extra for what rides on it.
+  const solid = chars.filter((ch) => !COMBINING.test(ch));
+  const rate = solid.length <= 2 ? LONE : JOINED;
   let ems = 0;
-  for (const ch of chars) ems += rate[classOf(ch)];
+  for (const ch of solid) ems += rate[classOf(ch)];
   return ems * fontSize;
 }
 
@@ -477,11 +507,40 @@ export function estimateTextWidth(text, fontSize) {
  * A margin rather than a per-script table three levels deep: the remaining
  * error is one script's average against another's widest glyph.
  *
- * 1.25 is measured, not chosen. Across the 20,100 real label renderings behind
- * `estimateTextWidth`'s rates, **18** come out wider than the estimate and the
- * worst of those is 1.23x — Arabic `أغسطس`, whose letters join more tightly
- * than the per-character rate can express. It was 1.15, which the same data
- * says is short for those eighteen.
+ * 1.25 is measured, not chosen, and re-measured for #132: that issue changed
+ * how `estimateTextWidth` sums a mark-bearing word (by rendered cluster
+ * rather than by code point), which makes some estimates SMALLER — the
+ * dangerous direction, since under-reserving clips a word — so the margin
+ * needed re-deriving rather than inheriting. `shared/test/label-widths.mjs`
+ * measures the fixed estimator against `getComputedTextLength()` in a real
+ * Chrome, over the **16** locales `locales.mjs`'s 10 plus six added for this
+ * mark-billing change specifically (`ml-IN`, `ta-IN`, `te-IN`, `kn-IN`,
+ * `gu-IN`, `he-IL`) — the original ten's weekday/month/range labels carry no
+ * combining mark at all, so a sweep of them alone could not have seen the
+ * exact case (Malayalam `ബু`, the deleted test's own string) the mark-sum
+ * change is about. Of those 16, 15 have CLDR data in this Chrome build
+ * (`ne-NP` resolves but falls back to ASCII names), at the six font sizes the
+ * charts use, across every weekday/month/year/range label this app draws —
+ * 4,050 renderings, not the 20,100-over-67-locales figure an earlier comment
+ * here cited, which this file makes no claim to reproduce or supersede.
+ *
+ * The worst under-estimate found, before and after the mark-billing fix
+ * alike, is 1.19x — Arabic `أغسطس` at 8px (real 29.4px, estimate 24.8px),
+ * whose letters join more tightly than the per-character rate can express.
+ * The fix does not move this case (no combining mark in it), so 1.25 keeps
+ * the same 0.06 of headroom it always reserved for it — verified fresh
+ * rather than carried over unchecked. The worst case among the six mark-heavy
+ * additions is `he-IL`'s `שבת` at 1.11x; Malayalam's own worst (`ബুধൻ`,
+ * 1.05x) is comfortably inside the margin too, and `ബু` alone (the deleted
+ * test's exact string) is not an under-estimate at all — 18.7px estimated
+ * against 18.03px real at font-size 11, a raw 3.7% margin before this 1.25 is
+ * even applied. That margin is thin only because `#131` already re-measured
+ * `LONE.indic` up to 1.7 (from a rate the deleted test's own numbers imply
+ * was closer to 1.0); freeing the mark on TOP of the old, lower rate is what
+ * the deleted test's under-estimate came from, and re-billing it was a
+ * workaround for that rate rather than a property of marks. Re-run the
+ * harness and update this comment again if a future change to the rates or
+ * the sum moves that number.
  *
  * Deliberately separate from `estimateTextWidth`, which answers "how wide is
  * this, roughly". Folding the margin in made the estimate wrong in the other

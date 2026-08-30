@@ -522,6 +522,63 @@ for (const width of [328, 358, 700, 1100]) {
     tight.length === 7, `${tight.length} captions`);
 }
 
+// The fit decision and the paint size are ONE number, not two that happen to
+// agree today. `weekdayChart`'s shrink loop (charts.js ~1250-1280) decides
+// whether a label fits at the size it is about to draw IN THE SAME CALL —
+// `fits(SHORT, labelSize)` — and the comment on `AXIS_SIZE` names the bug that
+// shape closes: "measure at 10 and paint at 11" chose a label for text smaller
+// than what actually gets drawn, which fits in English regardless and clips
+// elsewhere. Importing `AXIS_SIZE` and comparing it to itself would pass with
+// the two calls split back onto different literals, because nothing forces a
+// caller to use what it imports — so this reaches for the failure itself: a
+// slot is picked to sit exactly at the narrow names' width AT FONT-SIZE 10 (it
+// fits there, and not at 11), so a build that ever checks fit at a smaller
+// size than the one about to be painted draws a caption past the edge of its
+// own slot, measurably, in the DOM this produces.
+//
+// `10` and `11` are `charts.js`'s own literals, mirrored here rather than
+// imported — `AXIS_SIZE` is not exported, and the point is to know what the
+// chart is SUPPOSED to paint at independent of whatever it actually reads
+// internally.
+{
+  const AXIS_SIZE = 11;
+  const narrowNames = weekdayNames('narrow');
+  const shortNames = weekdayNames('short');
+  const narrowAt10 = Math.max(...narrowNames.map((t) => estimateTextWidth(t, 10)));
+  const shortAtAxis = Math.max(...shortNames.map((t) => estimateTextWidth(t, AXIS_SIZE)));
+
+  if (!(shortAtAxis > narrowAt10) || narrowAt10 <= 0) {
+    // Not a vacuous pass: say plainly that this locale could not build the
+    // boundary, rather than silently skipping it.
+    check('a fit-at-10/paint-at-11 boundary could be constructed for this locale',
+      false, `short@${AXIS_SIZE}=${shortAtAxis.toFixed(2)} vs narrow@10=${narrowAt10.toFixed(2)}`);
+  } else {
+    // Just past the narrow names' width at 10 — fits there, not at 11 (10%
+    // more, since `estimateTextWidth` is linear in font size).
+    const targetSlot = narrowAt10 + 0.01;
+    // `weekdayChart`'s own padding (`left: 34, right: 12`) turned into a width
+    // that lands this slot — verified below from the chart's OWN gridlines
+    // rather than trusted, since a pad change elsewhere would silently move
+    // the boundary this test relies on.
+    const guessWidth = targetSlot * 7 + 34 + 12;
+    const probe = weekdayChart(days, '#3b82f6', { width: guessWidth, weekStart: 'monday' });
+    const rules = collect(probe).filter((n) => n.name === 'line');
+    const plot = Math.max(...rules.map((n) => Number(n.attrs.x2) - Number(n.attrs.x1)));
+    const slot = plot / 7;
+
+    check('the probe width lands the slot at the intended fit/paint boundary',
+      Math.abs(slot - targetSlot) < 0.1, `slot=${slot.toFixed(3)} want ${targetSlot.toFixed(3)}`);
+
+    const drawn = axisTexts(probe).filter((t) => t.anchor === 'middle');
+    const overflow = drawn.filter((t) => estimateTextWidth(t.text, t.size) > slot + 0.02);
+    check('weekday axis: a label is measured at the size it is actually painted',
+      drawn.length === 7 && overflow.length === 0,
+      overflow.map((t) =>
+        `"${t.text}"@${t.size} needs ${estimateTextWidth(t.text, t.size).toFixed(2)}, slot ${slot.toFixed(2)}`
+      ).join(' | '));
+  }
+}
+
 // A long axis label, without needing a locale that has one. `formatStamp`
 // passes an unrecognised key through verbatim, so this exercises the branch
 // where the history axis's old fixed 62px budget overlapped — measured in
@@ -683,6 +740,26 @@ for (const width of [328, 358, 700, 1100]) {
     });
     check(`month captions at ${width}px over ${what}: none overlaps its neighbour`,
       overlaps.length === 0, overlaps.map((n) => n.text).join(','));
+
+    // #132: the gap between two drawn captions must be the SAME number of
+    // columns everywhere except the one deliberate exception — the last
+    // column keeps its caption regardless of where the stride lands, which
+    // can pull the FINAL gap in from the rest. A greedy walk that drops
+    // whichever caption collides with the last one DRAWN sizes each gap from
+    // that pair's own widths, so it can differ column to column; #131's own
+    // argument against a weekday axis with three of seven labelled — "one
+    // you have to count along" — applies here exactly the same. `twelve`'s
+    // own months, in order, are the oracle for where each drawn caption
+    // SITS, so this does not depend on knowing the chart's internal indices.
+    const monthTexts = twelve.map((m) => {
+      const [yy, mm] = m.month.split('-').map(Number);
+      return formatMonthShort(new Date(yy, mm - 1, 15));
+    });
+    const drawnIdx = caps.map((c) => monthTexts.indexOf(c));
+    const gaps = drawnIdx.slice(1).map((idx, i) => idx - drawnIdx[i]);
+    const interior = gaps.slice(0, -1);
+    check(`month captions at ${width}px over ${what}: the stride is constant apart from the last column`,
+      interior.every((g) => g === interior[0]), gaps.join(','));
 
     // A year with no month above it labels nothing — it reads as a caption for
     // the column rather than for the run of them.

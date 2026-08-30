@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 const {
   addDaysISO, estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
   formatDayNumber, formatDayRange, formatMonthShort, formatYear, gutterFor, iso, weekdayLetters,
-  weekdayNames,
+  weekdayNames, WIDTH_SAFETY,
 } = await import('../public/ui/dates.js');
 
 /**
@@ -201,17 +201,110 @@ test('a gutter reserves more than the label needs, in any script', () => {
   assert.equal(gutterFor([], FONT, 58, 8), 58);
 });
 
-test('a combining mark is not free, because Chrome advances for it', () => {
-  // This asserted the opposite, on the reasoning that a mark sits ON the
-  // character before it. Measured with `getComputedTextLength()`: Malayalam
-  // `\u0D2C\u0D41` renders 18.0px at font-size 11 against an estimate of 11.0 — the worst
-  // under-estimate in the whole corpus, and it came from billing the mark at
-  // nothing. It is billed at 0.4em now, which is still well under a base
-  // character, so the Indic gutters the old comment worried about stay sane.
+test('WIDTH_SAFETY is 1.25, calibrated against the estimator as it stands', () => {
+  // The literal, not the constant compared to itself: `assert.equal(WIDTH_SAFETY,
+  // WIDTH_SAFETY)` passes with the export deleted entirely. This is issue #132's
+  // Step 2 pin, written BEFORE the estimator changes, so re-deriving the margin
+  // in Step 3 has to update this literal too — and finding this test still red
+  // at that point is how Step 3 confirms it changed the number this pins.
+  assert.equal(WIDTH_SAFETY, 1.25);
+});
+
+test("gutterFor's ceiling caps a label far too long for the width, rather than returning its full estimate", () => {
+  // The floor is pinned above; the ceiling is the other half and had nothing
+  // asserting it before this. `estimateTextWidth` over-bills some scripts
+  // badly on purpose (the comment above `gutterFor` cites `الثلاثاء` at 84px
+  // against a real 26.3px), so an unbounded gutter for a long enough label
+  // reserves most of the card rather than clipping a word — which is a
+  // different failure than the one WIDTH_SAFETY exists for, and needs its own
+  // cap. A label many characters long guarantees the raw estimate blows past
+  // any ceiling worth naming here.
+  const FONT = 10.5;
+  const hugeLabel = 'M'.repeat(50);
+  const rawWant = Math.ceil(estimateTextWidth(hugeLabel, FONT) * WIDTH_SAFETY) + 8 + 4;
+  assert.ok(rawWant > 100, `fixture is not actually long enough to exceed the ceiling (${rawWant})`);
+
+  assert.equal(gutterFor([hugeLabel], FONT, 42, 8, 100), 100);
+  // The floor still wins over a ceiling set below it — the ceiling narrows the
+  // gutter, it never forces it below what `floor` already guarantees.
+  assert.equal(gutterFor([hugeLabel], FONT, 42, 8, 10), 42);
+});
+
+test('a combining mark costs nothing beyond the cluster it rides on', () => {
+  // This asserted the opposite until #132: billing a mark its own rate
+  // (0.5em LONE / 0.35em JOINED, ON TOP of the base glyph) fixed the
+  // under-estimate this test used to cite — Malayalam `\u0D2C\u0D41` at
+  // 18.0px real against an 11.0px estimate — but it did so by making the SUM
+  // walk every code point while the RATE selection (`solid`) already
+  // excluded marks, so a word with a mark was billed as if it had more
+  // letters than it renders as clusters. `\u092C\u0941\u0927` (3 code
+  // points, 1 mark, 2 clusters) came out at 39px at font-size 10 — more than
+  // `Wed` at 21px, for two rendered glyphs against three. `estimateTextWidth`
+  // now sums over `solid` (the same non-mark filter) instead of over every
+  // code point, so a mark adds nothing beyond the base glyph's rate —
+  // matching what the doc comment above the function has always said:
+  // "reads as a lone glyph however many code points it takes."
   const base = estimateTextWidth('\u0938', 10.5);            // \u0938
   const withMark = estimateTextWidth('\u0938\u0941', 10.5);  // \u0938\u0941
-  assert.ok(withMark > base, 'a combining vowel sign must cost something');
-  assert.ok(withMark < base * 2, 'but less than a base character');
+  assert.equal(withMark, base, 'a combining vowel sign costs nothing beyond its base glyph');
+});
+
+test('a word with a combining mark bills by rendered cluster, not by code point', () => {
+  // \u092C\u0941\u0927 ("Wednesday", Devanagari): 3 code points
+  // (\u092C, \u0941, \u0927), 1 combining mark, 2 rendered clusters
+  // (\u092C\u0941, \u0927). Proportional to 2 clusters of the LONE `indic`
+  // rate (1.7em each), not to 3 code points (which was 3.9em before this
+  // fix) and not to `Wed`'s 3 separate-script glyphs (2.11em).
+  assert.equal(estimateTextWidth('\u092C\u0941\u0927', 10), 34);
+  // \u0D2C\u0D41 (Malayalam "bu"): 2 code points, 1 mark, 1 rendered
+  // cluster — the same width as the base consonant alone.
+  assert.equal(estimateTextWidth('\u0D2C\u0D41', 10), 17);
+  assert.equal(estimateTextWidth('\u0D2C', 10), 17);
+});
+
+test('a mark-bearing cluster is still estimated at or above what Chrome actually renders it as', () => {
+  // This is the deleted test's REGRESSION COVERAGE, restored in the
+  // direction that matters rather than the direction that was there: the two
+  // tests above pin `estimateTextWidth`'s own internal arithmetic (cluster
+  // count times a rate), which is self-consistent bookkeeping and would
+  // happily "pass" with a lower literal if `LONE.indic` were ever cut back
+  // down — nothing there is anchored to what a browser actually draws. This
+  // test IS, against `getComputedTextLength()` measured directly in Chrome
+  // for Testing (`shared/test/label-widths.mjs`'s `ml-IN` row, added for
+  // #132's re-check of Step 3, since none of the original ten locales that
+  // harness swept carries a combining mark in any weekday/month/range label
+  // at all).
+  //
+  // The mark billing this replaces existed because, at the rates that
+  // shipped alongside it, freeing the mark under-estimated Malayalam
+  // ബু — 18.0px real at font-size 11 against an 11.0px estimate,
+  // the worst under-estimate in that era's whole corpus. #131 has since
+  // re-measured `LONE.indic` from a rate near 1.0 up to 1.7, which alone
+  // clears that same real width (18.7px estimated, no mark billing needed) —
+  // so the mark billing was compensating for an under-calibrated BASE rate,
+  // not for a property of marks, and #132's Step 3 removing it is safe only
+  // because #131 already fixed the rate it was covering for. If that base
+  // rate is ever lowered again — restoring the exact condition the deleted
+  // test was protecting against — this assertion is what catches it; the two
+  // tests above would not, since their own literals would simply be
+  // recomputed to match.
+  const REAL_ML_BU_AT_11 = 18.03; // getComputedTextLength(), Chrome for Testing 152
+  const mlEstimate = estimateTextWidth('ബു', 11);
+  assert.ok(mlEstimate >= REAL_ML_BU_AT_11,
+    `estimate ${mlEstimate} must cover the real ${REAL_ML_BU_AT_11}px Malayalam render`);
+
+  // A second mark-bearing cluster, from a script at the OTHER end of the
+  // range: Devanagari's vowel sign attaches below the consonant with no
+  // measured advance at all — बु and ब alone both render
+  // 6.28px at font-size 11 in Chrome — so this case has far more headroom
+  // than Malayalam's. Included so this test is not a single sample, and so a
+  // rate cut affecting `indic` generally (rather than something
+  // Malayalam-specific) is still caught here even though Malayalam is the
+  // tight case.
+  const REAL_DEVA_BU_AT_11 = 6.28; // getComputedTextLength(), Chrome for Testing 152
+  const devaEstimate = estimateTextWidth('बु', 11);
+  assert.ok(devaEstimate >= REAL_DEVA_BU_AT_11,
+    `estimate ${devaEstimate} must cover the real ${REAL_DEVA_BU_AT_11}px Devanagari render`);
 });
 
 test('every weekday width is indexed the same way, and narrow is one character', () => {
