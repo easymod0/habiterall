@@ -1094,12 +1094,21 @@ reminder — ntfy.sh has no per-topic ACL, so on it the HMAC alone carries the
 whole burden of gating who can *answer*. `docs/decisions/ntfy-answers.md` has
 the long form.
 
-**The two server-sent channels are not alike about rate limits, and the tick is
-shared.** Discord limits per webhook, so a 429 is one account's own doing and the
-inline `Retry-After` sleep is paid by whoever caused it. ntfy.sh limits per
-**visitor IP**, which for a server-sent reminder is the instance — so on cloud one
-account can put that sequential loop to sleep on everybody else's behalf. Noted
-at the sleep rather than fixed there.
+**The two server-sent channels are not alike about rate limits, and delivery
+now fans out across accounts.** Discord limits per webhook, so a 429 is one
+account's own doing and the inline `Retry-After` sleep is paid by whoever
+caused it — Discord sends from different accounts run at once with nothing
+guarding between them. ntfy.sh limits per **visitor IP**, which for a
+server-sent reminder is the instance — one bucket for every tenant on it — so
+letting the fan-out send ntfy in parallel would make that shared bucket worse,
+not just unprotected. `gatedByHost` (`shared/src/notify-send.js`) is the fix: a
+module-level map from host to its tail promise, and an ntfy send (its
+`Retry-After` retry included) queues behind whatever else is already sending to
+that same host before it starts, so at most one is ever in flight per host.
+Keyed on the host rather than one instance-wide gate, because two accounts on
+different self-hosted ntfy servers share no bucket and queuing one behind the
+other would slow a healthy destination to punish a busy one it has nothing to
+do with.
 
 ## Traps
 

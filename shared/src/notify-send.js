@@ -460,6 +460,113 @@ export async function sendToChannel(channel, args, deps = {}) {
 }
 
 /**
+ * Runs `fn` over `items` with at most `limit` calls in flight at once — a
+ * fixed number of workers pulling from one shared index, rather than
+ * `Promise.all` over the whole set, which is exactly the "fan-out of 500"
+ * this exists to avoid (see the tick-cost comment on `runTick` and the
+ * collect loop in each edition's `notifier.js`).
+ *
+ * Results land at `out[index]`, not push order, so two items finishing out of
+ * order never reorders the caller's array — the tests, and every caller that
+ * sums or logs per position, depend on that.
+ *
+ * A rejection from `fn` is caught HERE, per item, and never left to escape a
+ * worker's loop: an uncaught one would reject that worker's `Promise.all`
+ * branch, which loses every result already collected AND every item still in
+ * flight on every OTHER worker too — the exact bug the per-account `try` in
+ * the cloud collect loop and the per-account `try` in `runTick` already guard
+ * against sequentially. `out[index]` holds the error itself in that case, so
+ * a caller that wants to tell success from failure can still do so — the
+ * point of this catch is only that one item's failure costs nothing but its
+ * own slot.
+ *
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<R>} fn
+ * @returns {Promise<(R|Error)[]>}
+ */
+export async function mapWithLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workerCount = Math.min(limit, items.length);
+  const workers = [];
+  for (let w = 0; w < workerCount; w++) {
+    workers.push((async () => {
+      while (next < items.length) {
+        const index = next++;
+        try {
+          out[index] = await fn(items[index], index);
+        } catch (err) {
+          out[index] = err instanceof Error ? err : new Error(String(err));
+        }
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * At most one ntfy send in flight per destination HOST at a time. Discord
+ * bypasses this entirely — it rate-limits per WEBHOOK, so a 429 there is one
+ * account's own doing and the inline `Retry-After` wait below already pays
+ * for it without touching anyone else. ntfy.sh rate-limits per VISITOR IP,
+ * which for a server-sent reminder is the whole instance's IP: one bucket
+ * shared by every account whose topic lives there. Now that delivery fans out
+ * across accounts (`runTick`, below) instead of going one at a time, that
+ * bucket is the one place the fan-out would make things WORSE rather than
+ * faster — ten accounts on ntfy.sh due in the same minute would otherwise
+ * fire ten requests at once into a bucket sized for one.
+ *
+ * Keyed by host, not a single instance-wide gate: two accounts pointed at
+ * different self-hosted ntfy servers share no bucket, and queuing one behind
+ * the other would slow a healthy destination to punish a busy one it has
+ * nothing to do with.
+ *
+ * The map holds, per host, the tail promise of whatever is already queued for
+ * it — a chain rather than a counting semaphore because the only depth this
+ * ever needs is one.
+ */
+const ntfyHostGates = new Map();
+
+/**
+ * Run `fn` only after everything already queued for `host` has settled
+ * (whether it succeeded or not), and leave the NEXT thing queued for `host`
+ * waiting on this call in turn.
+ *
+ * @param {string} host
+ * @param {() => Promise<SendResult>} fn
+ * @returns {Promise<SendResult>}
+ */
+async function gatedByHost(host, fn) {
+  const previous = ntfyHostGates.get(host) ?? Promise.resolve();
+  let release;
+  ntfyHostGates.set(host, new Promise((resolve) => { release = resolve; }));
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+/**
+ * The host `gatedByHost` keys on, resolved the same way `postNtfy` resolves
+ * its own send target — so the host this gates is the host a send would
+ * actually reach, base path and all differences in spelling collapsed the
+ * same way. `null` for a setting `ntfyTarget` refuses (unset, or a URL
+ * `NTFY_ALLOWED_HOSTS` no longer allows): there is no request to gate.
+ *
+ * @param {string} rawUrl
+ * @returns {string|null}
+ */
+function ntfyHost(rawUrl) {
+  const target = ntfyTarget(rawUrl);
+  return target ? new URL(target.endpoint).host : null;
+}
+
+/**
  * Deliver everything due for one account.
  *
  * The watermark is written only on success, so a webhook that was down for a
@@ -595,6 +702,11 @@ export async function deliverAccount(account, ctx) {
       },
     });
 
+    // Resolved once per channel, not per item: every item on this loop shares
+    // the account's one ntfy setting, and `ntfyHost` is a `new URL` parse
+    // that has no reason to run once per habit due this minute.
+    const ntfyGateHost = channel === 'ntfy' ? ntfyHost(settings.ntfyTopicUrl) : null;
+
     for (const item of due) {
       const payload = {
         habit: item.habit, settings, date: item.date,
@@ -607,7 +719,7 @@ export async function deliverAccount(account, ctx) {
         signAnswer: ctx.signAnswer && ((fields) => ctx.signAnswer(account, fields)),
       };
       const startedAt = Date.now();
-      let result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
+      let throttled = false;
 
       // Discord's limit is a handful of posts every couple of seconds, so a
       // morning where five habits come due at once can trip it. Honouring the
@@ -615,24 +727,33 @@ export async function deliverAccount(account, ctx) {
       // the next tick would trip the same limit again a minute later. Once
       // only — a second 429 means something else is wrong.
       //
-      // The two channels are NOT alike here, and this sleep is in the tick that
-      // every account shares. Discord rate-limits per webhook, so a 429 is one
-      // account's own doing and the wait is paid by the account that caused it.
-      // ntfy.sh limits per VISITOR IP, which for a server-sent reminder is the
-      // instance — one bucket for every tenant on it — so on the cloud edition
-      // one account can put this sequential loop to sleep on everybody else's
-      // behalf. Written down rather than fixed here: the tick's shape is
-      // pre-existing and restructuring it is its own change.
-      let throttled = false;
-      if (result.retryAfterMs) {
-        throttled = true;
-        log.warn?.('notify.throttled', {
-          channel, habit: item.habit.id, user: account.id,
-          retry_after_ms: result.retryAfterMs,
-        });
-        await new Promise((r) => setTimeout(r, result.retryAfterMs));
-        result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
-      }
+      // The two channels are NOT alike here, and delivery now fans out across
+      // accounts (`runTick`, below) instead of going one at a time. Discord
+      // rate-limits per webhook, so a 429 is one account's own doing, the wait
+      // is paid only by the account that caused it, and Discord sends from
+      // different accounts are free to run at once. ntfy.sh limits per
+      // VISITOR IP, which for a server-sent reminder is the whole instance —
+      // one bucket for every tenant on it — so letting the fan-out send ntfy
+      // in parallel would make the shared bucket strictly worse, not just
+      // unprotected. `gatedByHost`, above, is the fix: an ntfy send (and its
+      // Retry-After wait, if it gets one) queues behind whatever else is
+      // already sending to that same host, so at most one is ever in flight
+      // per host — and a self-hosted ntfy on a host of its own never queues
+      // behind ntfy.sh's traffic, or anyone else's.
+      const send = async () => {
+        let result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
+        if (result.retryAfterMs) {
+          throttled = true;
+          log.warn?.('notify.throttled', {
+            channel, habit: item.habit.id, user: account.id,
+            retry_after_ms: result.retryAfterMs,
+          });
+          await new Promise((r) => setTimeout(r, result.retryAfterMs));
+          result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
+        }
+        return result;
+      };
+      const result = ntfyGateHost ? await gatedByHost(ntfyGateHost, send) : await send();
 
       if (result.ok) {
         await mark(item.habit.id, channel, item.date);
@@ -703,22 +824,55 @@ export async function runTick(ctx) {
     return { accounts: 0, sent: 0, failed: 0, skipped: {} };
   }
 
+  // Bounded fan-out, never `Promise.all` over the whole set — the same reason
+  // `collect`'s own concurrency is derived rather than unlimited (see
+  // `COLLECT_CONCURRENCY` in each edition's `notifier.js`), though delivery
+  // has no connection pool to protect: this is just how many outbound HTTP
+  // requests are ever open at once. The number is a literal, unlike
+  // `COLLECT_CONCURRENCY`, because nothing about it should scale with the
+  // pool an account's collect happens to share; the actual protection for the
+  // one channel that needs it is the per-host ntfy gate inside
+  // `deliverAccount`, not this limit. On personal, `accounts` holds exactly
+  // one entry, so this reduces to a single call either way.
+  const DELIVERY_CONCURRENCY = 8;
+
+  // The per-account `try` moves INSIDE the mapped function, per `mapWithLimit`'s
+  // own contract: its backstop catch exists for a worker function that lets a
+  // rejection escape, not to replace this one, because that backstop reports
+  // the error at `results[index]` rather than logging `notify.account_failed`
+  // and continuing the account count the way the sequential loop always did.
+  const results = await mapWithLimit(accounts, DELIVERY_CONCURRENCY, async (account) => {
+    try {
+      return await deliverAccount(account, { ...ctx, instant, log });
+    } catch (err) {
+      // One account's storage error must not stop the others'.
+      log.error?.('notify.account_failed', { user: account?.id }, err);
+      return null;
+    }
+  });
+
+  // Accumulated HERE, from the results `mapWithLimit` already collected, and
+  // not inside the concurrent workers above: several of those can finish in
+  // the same tick, and `skipped[reason] = (skipped[reason] ?? 0) + n` run from
+  // N of them at once is a lost-update bug on this object, not a per-account
+  // side effect like the log line above.
   let sent = 0;
   let failed = 0;
   let errored = 0;
   const skipped = {};
-  for (const account of accounts) {
-    try {
-      const result = await deliverAccount(account, { ...ctx, instant, log });
-      sent += result.sent;
-      failed += result.failed;
-      for (const [reason, n] of Object.entries(result.skipped ?? {})) {
-        skipped[reason] = (skipped[reason] ?? 0) + n;
-      }
-    } catch (err) {
-      // One account's storage error must not stop the others'.
+  for (const result of results) {
+    // `null` is an account whose own try/catch above already logged it;
+    // an `Error` is `mapWithLimit`'s backstop, for a worker that let one
+    // escape regardless — neither should happen, but both are one more
+    // errored account rather than a result to add in.
+    if (!result || result instanceof Error) {
       errored++;
-      log.error?.('notify.account_failed', { user: account?.id }, err);
+      continue;
+    }
+    sent += result.sent;
+    failed += result.failed;
+    for (const [reason, n] of Object.entries(result.skipped ?? {})) {
+      skipped[reason] = (skipped[reason] ?? 0) + n;
     }
   }
 

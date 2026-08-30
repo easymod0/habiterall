@@ -139,4 +139,43 @@ the recommended setup, missing the one credential a user cannot supply
 themselves, silent forever, and the settings dialog's test button says nothing
 either because it only reports on channels that are ready.
 
+**A tick used to cost the SUM of its accounts, and the two channels do not want
+the same fix.** `collect` and delivery both went one item at a time, so an
+instance with 400 accounts paid for 400 sequential round trips even though
+nothing forced them to be sequential, and the sharpest symptom of that shape was
+the `Retry-After` sleep in `deliverAccount`: a single ntfy 429 put the whole
+shared loop to sleep on every other tenant's behalf. `mapWithLimit`
+(`shared/src/notify-send.js`) is bounded fan-out rather than `Promise.all` over
+the whole set — the pool has ten connections and Discord rate-limits, so an
+unbounded fan-out of 500 replaces one problem with two — but the two server
+channels do not want the same NUMBER, and that is the actual point of the
+change, not an implementation detail of it. Discord rate-limits per webhook, so
+a 429 is one account's own doing and its wait is paid only by the account that
+caused it: Discord sends from different accounts can run at once with nothing
+between them. ntfy.sh rate-limits per **visitor IP**, which for a server-sent
+reminder is the whole instance — one bucket shared by every tenant on it — so
+sending ntfy in parallel across accounts does not just leave that bucket
+unprotected, it is strictly worse than the sequential loop it replaces. A
+single global concurrency limit is wrong for one of these two channels
+whichever number is picked, which is why delivery fans out at the account
+level and then gates ntfy again, per destination host, with `gatedByHost`: at
+most one ntfy send in flight per host, so accounts on different self-hosted
+ntfy servers still run in parallel and only a shared bucket ever queues.
+
+**`collect`'s own concurrency is derived from the pool, not written as a
+literal.** Each account's read is a transaction of four queries inside
+`withUser`, and a busy tick still has to leave connections for whatever live
+request is running at the same moment — a literal high enough to help a large
+instance is exactly the number that starves `/overview` on a small one.
+`COLLECT_CONCURRENCY` (`habiterall-cloud/src/notifier.js`) reads the pool's own
+configured max (`PG_POOL_MAX`, the same number `poolGauge()` reports as
+`pg_max`) and takes roughly half of it, floored at 1 so an operator who pinned
+the pool down to serve one thing still gets a tick that completes, and capped
+at 6 so raising the pool to serve more API traffic does not hand the notifier a
+proportionally larger share of it. A `NOTIFY_CONCURRENCY` env var was the
+obvious alternative and was rejected on purpose: it is one more number an
+operator has to remember to keep under the pool size they set, and getting that
+relationship right is the one thing this constant exists to do without being
+told.
+
 

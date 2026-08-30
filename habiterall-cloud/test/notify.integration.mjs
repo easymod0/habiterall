@@ -465,16 +465,23 @@ try {
 
   /* ---------- one account's read is not the whole tick ---------- */
   //
-  // `collect` runs one `withUser` transaction per account, and the loop sits
-  // OUTSIDE `runTick`'s per-account try because `collect` is awaited before it.
-  // So a pool timeout on account 3 of 400 used to throw out of here and discard
+  // `collect` runs one `withUser` transaction per account, fanned out through
+  // `mapWithLimit` rather than awaited one at a time, and that whole fan-out
+  // is awaited in full before `runTick`'s own per-account try even starts. So
+  // a pool timeout on account 3 of 400 used to throw out of here and discard
   // every account already collected along with every one behind it, for the
-  // whole minute.
+  // whole minute — the isolating `.catch` inside `collect`'s mapped function
+  // is what stops that now, per account, exactly as it did in the old
+  // sequential loop.
   //
   // The seam is `pool.connect`, which is a prototype method — assigning to the
   // instance shadows it, and the suite already imports `pool` to close it.
-  // `collect` opens one connection for the notifier-scope scan and then one per
-  // account, sequentially, so #2 is the first account.
+  // `collect` opens one connection for the notifier-scope scan; the fan-out's
+  // workers then each call `withUser` — and, crucially, do nothing async
+  // before that call — so their first `pool.connect()` calls land in item
+  // order, back to back, before any of them can resolve. #2 is therefore
+  // still deterministically the first account, whatever the derived
+  // concurrency limit turns out to be.
   console.log('--- one account\'s read failure ---');
   // Relative to a clean pass, not a hardcoded count: this suite grows accounts
   // as it goes, and an absolute number here breaks whenever a section above
@@ -506,6 +513,80 @@ try {
     (survived ?? []).length > 0
       && survived.every((a) => a.id !== undefined && a.habits.length > 0),
     JSON.stringify((survived ?? []).map((a) => ({ id: a.id, habits: a.habits.length }))));
+
+  /* ---------- collect fans out past the concurrency limit ---------- */
+  //
+  // The section above proves isolation with whatever accounts earlier
+  // sections happened to leave configured, which has never been more than a
+  // handful — fewer than `COLLECT_CONCURRENCY` can ever be. That cannot tell
+  // a bounded fan-out from an accident: with N <= the limit, `mapWithLimit`
+  // starts one worker per item and the loop below would pass even if the fan
+  // out were, say, unlimited. So this blocks every account created so far and
+  // creates more than the limit's own ceiling of 6, forcing at least one
+  // worker to loop back for a second item.
+  console.log('--- collect fans out across accounts, and isolation holds past the limit ---');
+  await admin.query('UPDATE users SET blocked = true');
+
+  const CONCURRENCY_ACCOUNTS = 8; // > 6, the highest COLLECT_CONCURRENCY can ever be
+  const concurrencyIds = [];
+  for (let i = 0; i < CONCURRENCY_ACCOUNTS; i++) {
+    const id = await mkUser(`sub-conc-${i}`, {
+      notifyChannels: ['discord'], discordWebhook: WEBHOOK, notifyTimezone: 'UTC',
+    });
+    await mkHabit(id, `Concurrency habit ${i}`, '08:00');
+    concurrencyIds.push(id);
+  }
+  concurrencyIds.sort((a, b) => a - b);
+
+  const wholeSet = await notifier.collect(AT_0800_UTC);
+  check('every account due is collected, not merely as many as fit in one wave',
+    wholeSet.length === CONCURRENCY_ACCOUNTS
+      && concurrencyIds.every((id) => wholeSet.some((a) => a.id === id)),
+    JSON.stringify(wholeSet.map((a) => a.id)));
+
+  // As above: the scan is connect #1, and — because nothing async happens
+  // before a worker's own `withUser` call — the first two workers' connects
+  // land at #2 and #3 in that order however many workers `COLLECT_CONCURRENCY`
+  // starts. Failing #3 fails the SECOND smallest id, well inside the first
+  // wave whether the derived limit is 1 or 6, so this does not depend on how
+  // the remaining accounts get divided up once real query latency is in play.
+  const realConnect2 = pool.connect.bind(pool);
+  let concurrencyConnects = 0;
+  pool.connect = (...args) => (++concurrencyConnects === 3
+    ? Promise.reject(Object.assign(
+      new Error('timeout exceeded when trying to connect'), { code: 'ETIMEDOUT' }))
+    : realConnect2(...args));
+
+  let concurrencySurvived = null;
+  let concurrencyThrew = null;
+  try {
+    concurrencySurvived = await notifier.collect(AT_0800_UTC);
+  } catch (err) {
+    concurrencyThrew = err;
+  } finally {
+    pool.connect = realConnect2;
+  }
+
+  // Every other account was blocked above, so `concurrencySurvived` is not
+  // filtered down to `concurrencyIds` here — an escaped Error object has no
+  // `.id`, and filtering it out by "is this one of ours" would silently drop
+  // exactly the leak this is meant to catch, leaving the count and the
+  // "whole account" check both looking correct on a build that lets one
+  // through.
+  const failedId = concurrencyIds[1];
+  const concurrencySurvivors = concurrencySurvived ?? [];
+  check('one account failing to read past the concurrency limit does not shrink the rest',
+    !concurrencyThrew && concurrencySurvivors.length === CONCURRENCY_ACCOUNTS - 1,
+    concurrencyThrew ? `collect threw: ${concurrencyThrew.message}`
+      : JSON.stringify({ survivorIds: concurrencySurvivors.map((a) => a?.id), failedId }));
+  check('the missing one is the account that actually failed, not an arbitrary one',
+    !concurrencySurvivors.some((a) => a?.id === failedId),
+    JSON.stringify(concurrencySurvivors.map((a) => a?.id)));
+  check('and every survivor is a whole account rather than an escaped Error object',
+    concurrencySurvivors.length > 0
+      && concurrencySurvivors.every((a) =>
+        a?.id !== undefined && Array.isArray(a?.habits) && a.habits.length > 0),
+    JSON.stringify(concurrencySurvivors.map((a) => ({ id: a?.id, habits: a?.habits?.length }))));
 
   console.log(fails === 0 ? '\nALL CLOUD NOTIFY CHECKS PASSED' : `\n${fails} CHECK(S) FAILED`);
 } finally {

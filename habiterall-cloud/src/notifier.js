@@ -21,14 +21,14 @@
  */
 
 import { forgetAccount } from './cache.js';
-import { withNotifierScope, withUser, withUserWrite } from './db/pool.js';
+import { pool, withNotifierScope, withUser, withUserWrite } from './db/pool.js';
 import {
   answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
   serverChannels, resolveTimeZone,
   zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
-  notifierConfig, sendToChannel, startNotifier, warnUnreachable,
+  mapWithLimit, notifierConfig, sendToChannel, startNotifier, warnUnreachable,
 } from '@habiterall/shared/notify-send.js';
 import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
@@ -55,6 +55,22 @@ const KEEP_LOG_DAYS = 45;
  * plausible self-hosted deployment.
  */
 const MAX_ACCOUNTS_PER_TICK = Number(process.env.NOTIFY_MAX_ACCOUNTS) || 500;
+
+/**
+ * How many accounts `collect` reads concurrently.
+ *
+ * Derived from the pool's own configured max (`pool.options.max` — the same
+ * number `poolGauge()` reports as `pg_max`) rather than a literal: a busy
+ * tick still has to leave connections for live requests, so this takes
+ * roughly half of it, floored at 1 (an operator who set the pool down to 1
+ * still gets a tick that completes) and capped at 6 (an operator who raised
+ * the pool to serve more traffic should not hand the notifier proportionally
+ * more of it — each account here is a transaction of four queries, and past
+ * a point that competes with `/overview` rather than shortening a slow tick).
+ * A hardcoded number would silently starve the API the moment an operator set
+ * `PG_POOL_MAX` below what it assumed.
+ */
+const COLLECT_CONCURRENCY = Math.max(1, Math.min(6, Math.floor((pool.options?.max ?? 10) / 2)));
 
 /**
  * The accounts with something for this server to deliver.
@@ -94,10 +110,14 @@ async function candidates() {
  * @param {Date|number} instant
  */
 export async function collect(instant) {
-  const accounts = [];
   const { botToken } = notifierConfig(process.env);
 
-  for (const row of await candidates()) {
+  // `mapWithLimit` rather than the plain for-loop this used to be: the scan
+  // above already returned every candidate, so nothing here decides who is
+  // visited, only how many are read at once. `collect` is still awaited in
+  // full before any webhook goes out (`start()`, below) — concurrency INSIDE
+  // this read is the whole change; interleaving it with delivery is not.
+  const results = await mapWithLimit(await candidates(), COLLECT_CONCURRENCY, async (row) => {
     const settings = row.settings ?? {};
     // The scan's SQL predicate is deliberately loose (it cannot tell whether a
     // webhook URL or a channel id is actually filled in); this is the real test,
@@ -108,7 +128,7 @@ export async function collect(instant) {
     // log, and the only one who can add a bot token.
     warnUnreachable({ id: row.id, settings }, { botToken, log });
     if (!needsServerDelivery(settings, { bot: !!botToken })) {
-      continue;
+      return null;
     }
 
     // Whose clock: the zone the account NAMED, else the one its last client
@@ -117,14 +137,20 @@ export async function collect(instant) {
     const timeZone = resolveTimeZone(settings, String(row.device_time_zone ?? ''));
     const clock = zonedClock(instant, timeZone);
 
-    // Per account, because one account's read must not abandon the tick. This
-    // whole loop sits OUTSIDE `runTick`'s per-account try — `collect` is
-    // awaited before it — so a pool timeout on account 3 of 400 threw out of
-    // here and discarded every account already collected along with every one
-    // behind it, for the whole minute. It is the same shape as the watermark
-    // failure inside `deliverAccount`, one level up and with a wider blast
-    // radius, and it surfaced only as `startNotifier`'s printf line.
-    const account = await withUser(row.id, async (db) => {
+    // Per account, because one account's read must not abandon the tick — a
+    // pool timeout on account 3 of 400 used to throw out of the old for-loop
+    // and discard every account already collected along with every one behind
+    // it, for the whole minute. It is the same shape as the watermark failure
+    // inside `deliverAccount`, one level up and with a wider blast radius, and
+    // it surfaced only as `startNotifier`'s printf line.
+    //
+    // This catch has to stay HERE, inside the function `mapWithLimit` calls
+    // per item, and not be moved to wrap the `mapWithLimit(...)` call itself.
+    // `mapWithLimit` has its own catch, but that one is only a backstop for a
+    // worker function that lets a rejection escape — it records the error
+    // itself at `results[index]` rather than a logged, named `null`, which is
+    // not the shape `.filter(Boolean)` below or a caller of `collect` expects.
+    return await withUser(row.id, async (db) => {
       const { rows: habits } = await db.query(
         `SELECT * FROM habits
           WHERE archived = false AND reminder_time <> ''
@@ -170,11 +196,9 @@ export async function collect(instant) {
       log.error?.('notify.account_failed', { user: row.id, phase: 'collect' }, err);
       return null;
     });
+  });
 
-    if (account) accounts.push(account);
-  }
-
-  return accounts;
+  return results.filter(Boolean);
 }
 
 /**
