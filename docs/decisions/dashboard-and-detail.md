@@ -257,7 +257,8 @@ figures the SERVER computed, which could not move offline whatever their redraw
 did.
 
 **And the calendar is not one of those — it is a second instance of the same
-defect, left out of scope and filed as #274.** An earlier draft of this section
+defect, left out of scope and filed as #274.** (#274 landed — see "The
+calendar pages the same way (#274)" below.) An earlier draft of this section
 said "and nothing else on the page could", and shipped that reason into
 `shared/public/CLAUDE.md` and into `detail.js`'s own comment beside it. It was
 simply false, and it is worth recording as false rather than quietly narrowing:
@@ -290,7 +291,9 @@ card paged by a date. Press ‹ Earlier offline, go back to the dashboard, come
 back online and reopen the habit — and the calendar renders a window you never
 saw it move to, which is #245's own headline symptom surviving a navigation the
 strip's did not. It is scoped out here for the reason #230 is, not because the
-rule above stops at this card's edge.
+rule above stops at this card's edge. (This headline symptom is what #274
+fixed; the cross-habit carry-over below is a narrower, separate question that
+#274 left open — see "The calendar pages the same way (#274)".)
 
 **The rejected shape was rolling the offset back when the redraw fails**, in
 `page()`. It loses twice: it keeps a request this card never needed, and it
@@ -348,3 +351,143 @@ refetch that never runs with no network, so the strip's optimistic paint stands
 while the calendar keeps the value it was drawn with. It lives in the same
 files, and it is a different question: this change is about which WINDOW is
 drawn, that one about which VALUES are in it.
+
+### The calendar pages the same way (#274)
+
+`buildCalendarCard`'s ‹ Earlier / Later › / Today had exactly the shape the
+section above already named and left open: `shift` moved `state.calEnd`,
+clamped it to today, and then called `open(habit.id)` — position committed,
+card not drawn, because `open()`'s one `catch` is `toast(e.message); return
+false`. Everything the calendar draws was already in memory for the same
+reason the strip's was: `entriesByDate` / `skipSet` / `notesByDate` come off
+`render()`'s unwindowed `GET /habits/:id/entries`, `stats.streaks` is already
+on the payload the builder was handed, and `calendarWindow(...)` is pure
+client arithmetic over an end date and a week count. Nothing in the window
+needed the server, so `draw` — the same local closure `buildRecentDaysCard`
+already has — is what `shift` and `Today` call now, and `open()`'s refetch is
+gone from both.
+
+**"Offline" is the wrong name for what `open()` actually fails against here,
+and this is where that gets corrected — the `#245` section above states the
+strip's own symptom the same way ("offline, ‹ Earlier did nothing at all")
+and carries the same qualification, left as written rather than rewritten.**
+With a service worker installed and its data cache warm — true from the
+second visit on — both of `open()`'s GETs, `/habits/:id/stats` and
+`/habits/:id/entries`, are inside `CACHEABLE_API` (`sw.js`), so
+`networkFirst`'s `catch` serves them out of `DATA_CACHE` and the redraw
+SUCCEEDS: the position moves and the card draws it. What `open()` genuinely
+fails against — and what this fix is actually for — is: no service worker at
+all (a self-hoster on a plain-`http` LAN address, where `isSecureContext` is
+false and nothing is installed); a NEW worker claiming an already-open page,
+since `sw.js` calls `skipWaiting()` on install and `clients.claim()` on
+activate and that activate deletes the old `habiterall-data-*` cache, so a
+card rendered before the takeover meets an empty `DATA_CACHE` after it; a
+`401` once the session cookie has aged out, or a `429` from the read limiter,
+neither of which the data cache stands in for — `networkFirst` falls back to
+the cache only when the `fetch` THROWS, and a 4xx returns normally and is not
+even cached; and a hung-but-not-dead server.
+
+Two of those were stated wrongly in the first version of this paragraph and
+are worth the correction, because both are the kind of detail a reader would
+otherwise take on trust. **The first offline boot after a `CACHE_VERSION`
+bump is NOT one of these cases**, though it looks like the obvious one and
+the `#245` section above uses it as an illustration: on that boot nothing
+renders at all — `start()` awaits `adapter.load()` inside the boot `try` and
+a throw ends at `showBootError` (`app.js`), which is the `#view-error` case
+`shared/public/CLAUDE.md` already records — so there is no calendar card in
+existence to press ‹ Earlier on. The claiming-worker sequence above is the
+reachable version of the same idea. And the timer the hung server spends is
+**`ui/api.js`'s own 10s `AbortSignal.timeout`, not `networkFirst`'s**, and it
+is ONE of them rather than two: `open()` awaits its two GETs sequentially, so
+the stats request throws and the entries request is never issued. The
+distinction is not pedantry — the page's bound is armed before the request is
+dispatched to the worker, so it always wins, and if the WORKER's bound fired
+instead its `catch` would serve the warm cache and `open()` would merely
+succeed ten seconds late. The right conclusion by the wrong mechanism is how
+the paragraph above this one came to be wrong in the first place.
+None of that makes the defect less real or less worth fixing: one press
+making two round trips to redraw a slice already sitting in memory is a cost
+on every one of those paths, the happy one included. "Offline" is what the
+TEST reaches for, with `Network.setBypassServiceWorker`, to isolate `open()`'s
+failure without needing a real `401` or a real bump — see "The service-worker
+measurement…" further down, which is this same fact read from the test's
+side, not a second, disagreeing reason.
+
+**`state.calEnd` outlives `state.chartOffsets`, and that is still true after
+the fix, not something it resolved.** `open()` clears `state.chartOffsets`
+only when a DIFFERENT habit is opened (`detail.js:74`); it clears nothing for
+`state.calEnd`. That is why the calendar's version of this defect was never
+mostly latent the way the strip's was — the window a `redraw` failed to draw
+stuck around across a reopen of the SAME habit, where the strip's own offset
+had already been reset by the time you came back to it. Fixing `draw` to be
+local removes the failure mode entirely for the habit you paged: every press
+now draws what it stored, online or off, so there is no longer a `redraw`
+that can commit a position and draw nothing.
+
+**Opening a DIFFERENT habit inheriting the paged position was scoped OUT of
+this fix, in the first round — described just above as a neighbouring issue
+left for Mark to settle. He has since decided it belongs in this same PR, so
+what follows is the decision as SHIPPED, reversing that scoping rather than
+leaving it stand.** `state.calEnd = null` is added to `open()`'s `!redraw`
+block, beside `state.chartOffsets = {}` — the identical reset, for the
+identical reason, and it fires on a same-habit reopen too, not the
+cross-habit case alone: reopening a habit, the SAME one or a different one,
+starts the calendar at today. Five reasons, weighed in this order:
+
+1. **The two cases cannot be separated at `:74`, and separating them costs
+   new state.** `redraw` is `state.openHabitId === id`, and `dashboard.paint()`
+   nulls `state.openHabitId` (`dashboard.js:235`; `categories.js:160` does
+   too), so returning to the list and reopening the SAME habit is already
+   `!redraw` — there is no cheaper hook a per-habit rule could hang off.
+   Keeping a per-habit position would need `calEnd` keyed by habit — a
+   `calEndHabitId`, or a map — which is a sixth thing for `Today`, the
+   `forget` entry and the settings dialog to keep in step with. The one-line
+   reset needs none of it.
+2. **Consistency.** Nine other cards reset their paging position on
+   `!redraw` (the same nine ids `CARDS`' `forget` entries name). A calendar
+   that alone survives "go back to the list and reopen" makes that one
+   gesture mean two different things on one page — the "two surfaces over one
+   dataset disagree" shape this repo names most often.
+3. **The `:74` comment's own principle already covers it.** "Opening a
+   different habit starts at 'now'" is a statement about opening a PAGE, not
+   about which habit it happens to repeat, and `calcheck.mjs` already asserts
+   the scroll analogue beside it — "opening a habit starts at the top" makes
+   no exception for the same habit either.
+4. **What is preserved is the part that matters.** `redraw` is TRUE for every
+   in-page action — a cell tap, a settings change, a zoom press, a
+   granularity change, the `'change'` broadcast — so the paged position
+   survives everything except leaving the page. The cost is one re-page after
+   a dashboard round trip; the benefit is never landing on a detail page
+   showing October 2024 with no memory of having asked for it.
+5. **The `forget` entry's own ground — the calendar being "the one card
+   anybody pages by a DATE rather than a window" — is real, and it argues for
+   keeping the position WITHIN a viewing, which this still does.** Across a
+   NAVIGATION the disorientation argument wins instead. And the option being
+   replaced was never "keep it per habit" — nobody designed that; it was
+   "keep it globally and leak it across habits", purely as a side effect of
+   `calEnd` living outside `chartOffsets`. Both the kept option and the
+   discarded one are changes from that starting point; this is the smaller
+   one.
+
+**#230 is not closed by this, and must not be read as closed.** #230 is the
+strip and the calendar disagreeing about a day's VALUE offline — `writeDay`
+ends in a refetch that never runs with no network, so an offline tap's
+optimistic paint can sit ahead of what the calendar last drew. This change is
+about which WINDOW is drawn, not which values are in it, and it does have one
+true side effect worth stating narrowly and not overclaiming: `draw()` closes
+over the same `entriesByDate` object `detailHost.edit` mutates optimistically,
+so a page press made AFTER an offline tap now draws the tapped value where
+before it would have redrawn nothing at all. Nothing redraws the calendar ON
+the tap itself, so the disagreement #230 names survives exactly as before
+until something pages or reopens — this narrows one path by which a stale
+value could be SEEN, it does not touch the disagreement #230 names.
+
+**The service-worker measurement that makes the offline half of this real is
+the same one already recorded above, for the strip.** Devtools' network
+emulation does not reach the service worker's own fetches — `open()`'s GETs
+answer out of `DATA_CACHE` under `Network.emulateNetworkConditions` alone,
+because `CACHEABLE_API` matches `/^\/api\/habits/`, so `open()` SUCCEEDS and
+every check written against the unfixed calendar would have passed for the
+same reason the strip's did. `Network.setBypassServiceWorker` is what makes
+the offline calendar checks in `calcheck.mjs` mean anything, for the reasons
+`stripcheck.mjs`'s own comment gives in full.

@@ -209,18 +209,20 @@ about it are not obvious:
   Most of the other cards draw figures the server computed, so they have
   nothing local to redraw from and keep the refetch.
 
-  **The calendar is NOT one of those, and it is a second live instance of this
-  same defect.** `buildCalendarCard` draws from the same unwindowed
-  `entriesByDate` / `skipSet`, from `stats.streaks` already in memory, and from
-  `calendarWindow(...)`, which is pure client arithmetic — nothing in its window
-  needs the server either. Its ‹ Earlier moves `state.calEnd` and then calls
-  `open()`: position committed, card not drawn. And that offset OUTLIVES the
-  strip's, which is why it is the worse of the two. `open()` clears
-  `state.chartOffsets` only when a different habit is opened (`detail.js:74`),
-  so going back to the dashboard and reopening did clear the strip's; nothing on
-  that path clears `state.calEnd`, so the window you never saw the calendar move
-  to is still there when you come back. It is left out of scope here on purpose
-  rather than because the rule above does not reach it: **#274**.
+  **The calendar redraws locally too, the same way (#274).** `buildCalendarCard`
+  draws from the same unwindowed `entriesByDate` / `skipSet`, from
+  `stats.streaks` already in memory, and from `calendarWindow(...)`, which is
+  pure client arithmetic — nothing in its window needs the server either, so its
+  ‹ Earlier no longer moves `state.calEnd` and then calls `open()`. Both cards
+  now redraw from data already in hand rather than refetching.
+  `open()` also resets `state.calEnd` alongside `state.chartOffsets`, both at
+  `detail.js:74`, so reopening a habit — the SAME one or a different one —
+  starts the calendar at today rather than carrying a paged position across the
+  navigation; every in-page redraw (a tap, a zoom press, a granularity change,
+  the settings dialog, the `'change'` broadcast) is `redraw === true` and keeps
+  it. See `docs/decisions/dashboard-and-detail.md`'s `#274` section for the
+  argument, including why a same-habit reopen is folded into the same reset
+  rather than kept as a per-habit position.
 - **Its host repaints CELLS IN PLACE (`repaintCells`), not the page.** The
   dashboard's `repaint` is a full `paint()`, which is cheap there; here a
   rebuild is two round trips and up to ten cards of SVG. Touching no nodes is
