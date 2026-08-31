@@ -235,13 +235,14 @@ const { srv, base: issuer } = await fakeIssuer();
 const port = 3700 + (process.pid % 200);
 const { child, base } = await boot(issuer, port);
 
-/** The app role's own pool, configured exactly as `db/pool.js` configures its. */
-const appPool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: POOL_MAX,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
-});
+// The real helper, not a hand-copy of its body — see `versionRead` below.
+// Dynamic, as `bench-queries.mjs` imports it: a static `import` runs before
+// ANY of this file's own code, including the `DATABASE_URL` default above, so
+// `db/pool.js` would read the variable before this file has had a chance to
+// supply one.
+// `pool` comes with them because the bare read below must go through THE SAME
+// pool `withUser` does — see `versionReadBare`.
+const { withUser, pool: appPool, closePool } = await import('../src/db/pool.js');
 
 try {
   await admin.connect();
@@ -357,21 +358,16 @@ try {
   }
 
   /**
-   * The version read, exactly as a route would issue it: through the app role,
-   * inside `withUser`'s transaction, with the same transaction-local
-   * `set_config` the RLS policies read.
+   * The version read, exactly as a route would issue it: THROUGH `withUser`
+   * itself rather than a restatement of its body. An earlier version of this
+   * function hand-copied `withUser`'s four round trips (`BEGIN`, `set_config`,
+   * the `SELECT`, `COMMIT`) under this same claim, and #188 is what proved the
+   * claim false without anything here noticing: production folded `BEGIN` and
+   * `set_config` into one round trip, three total, and the hand-copy kept
+   * measuring four. Calling the helper is what makes that impossible to repeat.
    */
-  const versionRead = async (user) => {
-    const c = await appPool.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query('SELECT set_config($1, $2, true)', ['app.user_id', String(user)]);
-      await c.query('SELECT data_version FROM users WHERE id = $1', [user]);
-      await c.query('COMMIT');
-    } finally {
-      c.release();
-    }
-  };
+  const versionRead = async (user) =>
+    withUser(user, (c) => c.query('SELECT data_version FROM users WHERE id = $1', [user]));
 
   /**
    * The same read with no transaction around it — what `withoutUser` would
@@ -380,6 +376,15 @@ try {
    * one hand. It is here to separate the cost of the QUERY from the cost of
    * the transaction wrapper, which is the part that could be made cheaper
    * without touching the security boundary.
+   *
+   * **It goes through `db/pool.js`'s pool, not one of this file's own, and the
+   * difference is the whole point of the row.** It used to open a second
+   * `pg.Pool` here "configured exactly as `db/pool.js` configures its" — which
+   * was not exactly, since the module pool also passes `statement_timeout` and
+   * `idle_in_transaction_session_timeout` as connection parameters, and in any
+   * case was a different set of backends at a different warmth. Subtracting one
+   * pool's number from another pool's is not a wrapper cost, and the subtraction
+   * is precisely what the row exists to support.
    */
   const versionReadBare = async (user) =>
     appPool.query('SELECT data_version FROM users WHERE id = $1', [user]);
@@ -403,7 +408,7 @@ try {
   console.log('1. The version read, pool idle');
   header();
   await versionRead(probe.id); // warm, so connection setup is not in the sample
-  row('withUser (BEGIN/set_config/SELECT/COMMIT)',
+  row('withUser (BEGIN+set_config/SELECT/COMMIT)',
     await sample(N_DB, () => versionRead(probe.id)));
   await versionReadBare(probe.id);
   row('bare SELECT (no transaction; RLS bypass)',
@@ -445,6 +450,19 @@ try {
     // this is the part of the HIT above that #192 added, and the only part.
     const v = await sample(N_DB, () => versionRead(acct.id));
     row('  the version read inside it, alone', v);
+
+    // ...and the bare read beside it: same section, same pool, same warmth.
+    // Section 1 reports this pair too, but at cold JIT before the process has
+    // issued a single HTTP request, so section 1's two numbers are comparable
+    // to each other and NOT to section 2's. The transaction wrapper's cost is
+    // THIS subtraction and no other — a draft of `caching.md` quoted section
+    // 2's transactional read against section 1's bare read, which straddles
+    // both the warmth and (until this commit) the pool, and reported a wrapper
+    // that was most of the read where the same-section pair does not.
+    const vb = await sample(N_DB, () => versionReadBare(acct.id));
+    row('  ...the same read with no transaction', vb);
+    console.log(`     so the transaction wrapper is: ${(v.mean - vb.mean).toFixed(2)}ms`
+      + ` mean, ${((1 - vb.mean / v.mean) * 100).toFixed(0)}% of the read`);
 
     // What a hit cost BEFORE #192, on THIS machine: the hit above minus the
     // read it now carries. Stated as a mean and nothing else, deliberately —
@@ -494,9 +512,12 @@ try {
    * connection", which is the entire objection. It looked decisive and was
    * answering a question nobody had asked.
    *
-   * So the load is synthetic and runs through `appPool`, whose `max` is
-   * `POOL_MAX`: each loader holds one connection inside a `withUser`-shaped
-   * transaction for `HOLD_MS`, which is what a rebuild does to a connection.
+   * So the load is synthetic and both halves run through ONE pool that
+   * `contention()` opens per `max` under test — that per-`max` pool is why this
+   * section cannot use `withUser`, and why it is the only place in the file
+   * that still hand-copies the transaction's opening round trip. Each loader
+   * holds one connection inside a `withUser`-shaped transaction for `HOLD_MS`,
+   * which is what a rebuild does to a connection.
    * `buildOverview` runs its per-habit CPU INSIDE the `withUser` callback, so a
    * 20-habit rebuild holds its connection for the whole ~29 ms, most of that
    * Node CPU rather than Postgres work.
@@ -533,13 +554,33 @@ try {
       connectionString: process.env.DATABASE_URL,
       max, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000,
     });
+    /**
+     * `withUser`'s opening round trip, verbatim — `BEGIN` and the `set_config`
+     * folded into one simple-query message (#188).
+     *
+     * This section cannot call `withUser` itself: `contention()` builds its own
+     * `pg.Pool` per `max`, which is the entire mechanism it measures, and
+     * `withUser` is bound to `db/pool.js`'s module pool with no way to point it
+     * elsewhere. So the fold is hand-copied here, deliberately, and this is the
+     * one place in the file where that is true. Keeping it identical to
+     * production is load bearing rather than tidy: the quantity under test is
+     * HOW LONG A CONNECTION IS HELD under saturation, so an extra round trip
+     * inside the read is not a rounding error, it is a systematic bias toward a
+     * sharper cliff — and `caching.md`'s "three trivial round trips" line is
+     * sized from these rows. The unfolded version survived here through #188
+     * and did exactly that.
+     *
+     * `probe.id` is interpolated for the same reason `withUser` interpolates:
+     * the simple query protocol carries no bind parameters across the `;`. It
+     * is a row id this file just inserted, not user input.
+     */
+    const begin = `BEGIN; SELECT set_config('app.user_id', '${probe.id}', true)`;
+
     /** Hold one pool connection for `HOLD_MS`, the way a rebuild does. */
     const holder = async () => {
       const c = await p.connect();
       try {
-        await c.query('BEGIN');
-        await c.query('SELECT set_config($1, $2, true)',
-          ['app.user_id', String(probe.id)]);
+        await c.query(begin);
         await c.query(`SELECT pg_sleep($1)`, [HOLD_MS / 1000]);
         await c.query('COMMIT');
       } finally {
@@ -549,9 +590,7 @@ try {
     const read = async () => {
       const c = await p.connect();
       try {
-        await c.query('BEGIN');
-        await c.query('SELECT set_config($1, $2, true)',
-          ['app.user_id', String(probe.id)]);
+        await c.query(begin);
         await c.query('SELECT data_version FROM users WHERE id = $1', [probe.id]);
         await c.query('COMMIT');
       } finally {
@@ -641,6 +680,8 @@ try {
 } finally {
   child.kill('SIGTERM');
   srv.close();
-  await appPool.end().catch(() => {});
+  // One call, not two: `appPool` IS `db/pool.js`'s pool now, and `closePool`
+  // ends it. Calling `.end()` on an already-ended pool throws.
+  await closePool().catch(() => {});
   await admin.end().catch(() => {});
 }

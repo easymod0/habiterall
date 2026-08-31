@@ -246,3 +246,148 @@ test('a checkout that cannot be had is named, and says which helper wanted it', 
   assert.ok(named.every((e) => e.pg_total === 0),
     'control: nothing is connected here, which is what a dead database looks like');
 });
+
+/* ---------- the guard that is now the injection guard too (#188) ---------- */
+
+/**
+ * `withUser` folds `BEGIN` and `set_config('app.user_id', ...)` into one
+ * multi-statement `query()` call, which only works with `userId`
+ * INTERPOLATED into the string rather than bound — so this guard is now the
+ * only thing standing between a crafted id and a second SQL statement, not
+ * merely a correctness check. This pins that it still does the job, for
+ * every shape of value that must not reach the template literal.
+ *
+ * `DEAD_URL`, not the module's default `DATABASE_URL` — deliberately. If the
+ * guard were ever loosened enough to let a value past it, the very next thing
+ * `withUser` does is take a real connection and run the interpolated string,
+ * and that must never be a thing this suite can do against a real Postgres.
+ * `checkout` fails fast and the same way against `DEAD_URL` regardless, which
+ * is what makes the MESSAGE the discriminator rather than "did it reject":
+ * the guard's own throw always reads `requires a valid user id`; a failed
+ * checkout never does. So a case that only rejects because the connection
+ * failed — the guard having waved it through — is caught by the message
+ * assertion, not by "it threw".
+ */
+test('withUser rejects every invalid id at the guard, and never runs fn', async () => {
+  const before = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = DEAD_URL;
+
+  const cases = [
+    ['a string that looks like SQL', '1; DROP TABLE users'],
+    ['a non-integer number', 1.5],
+    ['a numeric string', '1'],
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['a negative integer', -1],
+    ['zero', 0],
+    ['null', null],
+    ['undefined', undefined],
+    // The shape a coercive guard cannot catch: `Number(x)` reads `valueOf`,
+    // `${x}` reads `toString`, and here they disagree — `Number.isInteger`
+    // rejects this before either conversion runs, because it demands the JS
+    // type `number` and this is an object.
+    ['an object with mismatched valueOf/toString', {
+      valueOf: () => 1,
+      toString: () => "1'; DROP TABLE users; --",
+    }],
+    ['true', true],
+  ];
+
+  try {
+    const pool = await import(`../src/db/pool.js?v=${++stamp}`);
+    for (const [label, userId] of cases) {
+      let called = false;
+      await assert.rejects(
+        () => pool.withUser(userId, async () => { called = true; return 'unreachable'; }),
+        /requires a valid user id/,
+        `${label}: must be rejected by the guard itself, not by a failed checkout`
+      );
+      assert.equal(called, false, `${label}: fn must never run`);
+    }
+  } finally {
+    if (before === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = before;
+  }
+});
+
+/* ---------- the fold itself is pinned, not just the guard (#188) ---------- */
+
+/**
+ * A fake `PoolClient` that RECORDS every `query()` call rather than running
+ * one, so the shape of the calls `withUser` / `withNotifierScope` issue can be
+ * counted without a database anywhere.
+ */
+function recordingClient() {
+  /** @type {any[]} */
+  const calls = [];
+  return {
+    calls,
+    client: {
+      query: async (sql) => { calls.push(sql); return { rows: [] }; },
+      release: () => {},
+    },
+  };
+}
+
+/**
+ * #188 folds `BEGIN` (or `BEGIN READ ONLY`) and `set_config(...)` into ONE
+ * multi-statement `query()` call — four round trips around the transaction
+ * down to three — and that is the entire performance claim the commit is
+ * named for. Nothing above this pins the SHAPE of it: the guard tests above
+ * only pin that a bad `userId` is rejected, and a correct-but-unfolded revert
+ *
+ *   await client.query('BEGIN');
+ *   await client.query(`SELECT set_config('app.user_id', '${userId}', true)`);
+ *
+ * would stay just as correct and just as safe, and would pass every one of
+ * them — silently giving back the round trip #188 removed. So `pool.connect`
+ * is stubbed to hand `withUser` a fake client instead of a real checkout, and
+ * the calls it is given are counted directly.
+ *
+ * The count is asserted as the LITERAL `3`, not a constant read back out of
+ * the module: importing the number under test would pin its name and nothing
+ * about whether the module still folds the two statements together.
+ */
+test('withUser folds BEGIN and set_config into one query() call', async () => {
+  const pool = await import(`../src/db/pool.js?v=${++stamp}`);
+  const { calls, client } = recordingClient();
+  pool.pool.connect = async () => client;
+
+  await pool.withUser(7, async (c) => {
+    await c.query('SELECT 1'); // the body's own round trip, between the fold and COMMIT
+    return 'ok';
+  });
+
+  assert.equal(calls.length, 3,
+    'expected [fold, the callback\'s own query, COMMIT] — a revert to two '
+    + 'separate statements for BEGIN and set_config would make this 4');
+  assert.match(calls[0], /BEGIN/, 'the FIRST call must open the transaction');
+  assert.match(calls[0], /set_config\(\s*'app\.user_id',\s*'7',\s*true\s*\)/,
+    'the FIRST call must also carry set_config, folded into the same string');
+  // The count and `calls[0]` together still admit a shape the message denies:
+  // drop the explicit COMMIT, add any other single call, and this is three
+  // calls with BEGIN first. Naming the LAST one closes the ends of the list.
+  assert.match(calls[2], /^COMMIT$/, 'the LAST call must be the COMMIT');
+  assert.equal(calls[1], 'SELECT 1', 'the callback\'s own query must sit between them');
+});
+
+/** Same shape, for the read-only notifier scope. */
+test('withNotifierScope folds BEGIN READ ONLY and set_config into one query() call', async () => {
+  const pool = await import(`../src/db/pool.js?v=${++stamp}`);
+  const { calls, client } = recordingClient();
+  pool.pool.connect = async () => client;
+
+  await pool.withNotifierScope(async (c) => {
+    await c.query('SELECT 1');
+    return 'ok';
+  });
+
+  assert.equal(calls.length, 3,
+    'expected [fold, the callback\'s own query, COMMIT] — a revert to two '
+    + 'separate statements for BEGIN READ ONLY and set_config would make this 4');
+  assert.match(calls[0], /BEGIN READ ONLY/, 'the FIRST call must open the read-only transaction');
+  assert.match(calls[0], /set_config\(\s*'app\.scope',\s*'notifier',\s*true\s*\)/,
+    'the FIRST call must also carry set_config, folded into the same string');
+  assert.match(calls[2], /^COMMIT$/, 'the LAST call must be the COMMIT');
+  assert.equal(calls[1], 'SELECT 1', 'the callback\'s own query must sit between them');
+});

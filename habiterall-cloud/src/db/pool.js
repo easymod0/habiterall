@@ -254,20 +254,52 @@ async function checkout(scope) {
  * `set_config(..., true)` is transaction-local, so the setting cannot leak to
  * the next borrower of this pooled connection.
  *
+ * `BEGIN` and the `set_config` are issued as one multi-statement `query()`
+ * call, folding what was four round trips around the body (`BEGIN`,
+ * `set_config`, `fn`, `COMMIT`) into three. That relies on `userId` being
+ * interpolated rather than bound — `pg`'s extended query protocol cannot
+ * carry a bind parameter across a `;`-separated multi-statement string, only
+ * the simple query protocol can — which is safe here ONLY because the guard
+ * above requires the JS type `number`, not merely a value that LOOKS
+ * numeric. **That guard is therefore both the correctness check and the
+ * injection guard for this interpolation, and it is `Number.isInteger`'s
+ * type test that is doing the guarding, not the arithmetic.** A template
+ * literal calls `ToString` on `userId`, and a genuine JS number always
+ * stringifies to plain digits (plus `-`, `.`, `e`, `+`) — nothing a SQL parser
+ * reads as a second statement. (An id at or above `1e21` is the case that
+ * needs `+`: `Number.isInteger(1e21)` is `true`, and `` `${1e21}` `` is
+ * `"1e+21"`. That still cannot reach Postgres as anything but a loud failure —
+ * the `::bigint` cast in `app_current_user_id()` rejects exponential notation
+ * outright — and no real `users.id` gets anywhere near `1e21` regardless.)
+ * Swap the type test for something coercive —
+ * `Number.isFinite(Number(userId))`, say — and the two checks stop looking
+ * at the same conversion: `Number(x)` calls `x.valueOf()`, `${x}` calls
+ * `x.toString()`, and an object with a `valueOf` returning `1` and a
+ * `toString` returning `"1'; DROP TABLE users; --"` sails through the
+ * coercive check while the template embeds the second, malicious string
+ * verbatim — confirmed in Node. `Number.isInteger` closes this because it
+ * returns `false` for anything not already of type `number`, before either
+ * conversion runs. Do not loosen this guard without re-deriving this
+ * paragraph.
+ *
  * @param {number} userId
  * @param {(client: pg.PoolClient) => Promise<T>} fn
  * @returns {Promise<T>}
  * @template T
  */
 export async function withUser(userId, fn) {
+  // Both the correctness check AND the injection guard for the interpolation
+  // below: `Number.isInteger` demands the JS type `number`, so a crafted
+  // value can never reach the multi-statement query string below. Swapping
+  // in a coercive check (e.g. `Number.isFinite(Number(userId))`) would not
+  // reintroduce the same guarantee — see the doc comment above.
   if (!Number.isInteger(userId) || userId <= 0) {
     throw new Error('withUser requires a valid user id');
   }
 
   const client = await checkout('withUser');
   try {
-    await client.query('BEGIN');
-    await client.query('SELECT set_config($1, $2, true)', ['app.user_id', String(userId)]);
+    await client.query(`BEGIN; SELECT set_config('app.user_id', '${userId}', true)`);
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
@@ -344,8 +376,7 @@ export async function withUserWrite(userId, fn) {
 export async function withNotifierScope(fn) {
   const client = await checkout('withNotifierScope');
   try {
-    await client.query('BEGIN READ ONLY');
-    await client.query('SELECT set_config($1, $2, true)', ['app.scope', 'notifier']);
+    await client.query(`BEGIN READ ONLY; SELECT set_config('app.scope', 'notifier', true)`);
     const result = await fn(client);
     await client.query('COMMIT');
     return result;

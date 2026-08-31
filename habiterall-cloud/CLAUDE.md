@@ -14,6 +14,18 @@ in `src/db/` or `src/auth.js`.
   leak between pooled connections. A path that WRITES calls `withUserWrite`
   instead — the same transaction, plus the account's `data_version` bump in it.
   Not a line inside `withUser`, because `withUser` wraps the reads too.
+- `withUser` and `withNotifierScope` open their transaction and set that
+  scoping in ONE round trip — `BEGIN; SELECT set_config(...)` as a single
+  multi-statement `query()` call (#188) — but the `set_config` third argument
+  stays `true` (transaction-local) in both, whether folded or not. This is not
+  a detail the fold gets to simplify away: a session-level `SET` would still
+  be visible to the NEXT borrower of the pooled connection, which is a silent
+  cross-tenant read, not merely a leftover setting. It is also what keeps this
+  edition compatible with a transaction-mode connection pooler (#201, which
+  names #188 as the change that must not undo it) — a pooler that hands a
+  session to a different backend per transaction has nowhere for a session-level
+  setting to survive to anyway, but a transaction-local one is exactly the unit
+  such a pooler preserves.
 - A query that forgets its `WHERE` clause therefore returns **nothing**. The
   isolation fails closed.
 - The app connects as `habiterall_app`: not the table owner, `NOBYPASSRLS`,
