@@ -465,16 +465,23 @@ try {
 
   /* ---------- one account's read is not the whole tick ---------- */
   //
-  // `collect` runs one `withUser` transaction per account, and the loop sits
-  // OUTSIDE `runTick`'s per-account try because `collect` is awaited before it.
-  // So a pool timeout on account 3 of 400 used to throw out of here and discard
+  // `collect` runs one `withUser` transaction per account, fanned out through
+  // `mapWithLimit` rather than awaited one at a time, and that whole fan-out
+  // is awaited in full before `runTick`'s own per-account try even starts. So
+  // a pool timeout on account 3 of 400 used to throw out of here and discard
   // every account already collected along with every one behind it, for the
-  // whole minute.
+  // whole minute — the isolating `.catch` inside `collect`'s mapped function
+  // is what stops that now, per account, exactly as it did in the old
+  // sequential loop.
   //
   // The seam is `pool.connect`, which is a prototype method — assigning to the
   // instance shadows it, and the suite already imports `pool` to close it.
-  // `collect` opens one connection for the notifier-scope scan and then one per
-  // account, sequentially, so #2 is the first account.
+  // `collect` opens one connection for the notifier-scope scan; the fan-out's
+  // workers then each call `withUser` — and, crucially, do nothing async
+  // before that call — so their first `pool.connect()` calls land in item
+  // order, back to back, before any of them can resolve. #2 is therefore
+  // still deterministically the first account, whatever the derived
+  // concurrency limit turns out to be.
   console.log('--- one account\'s read failure ---');
   // Relative to a clean pass, not a hardcoded count: this suite grows accounts
   // as it goes, and an absolute number here breaks whenever a section above
@@ -506,6 +513,233 @@ try {
     (survived ?? []).length > 0
       && survived.every((a) => a.id !== undefined && a.habits.length > 0),
     JSON.stringify((survived ?? []).map((a) => ({ id: a.id, habits: a.habits.length }))));
+
+  /* ---------- a throw ahead of `withUser` is caught, logged, and cannot leak an Error into the result ---------- */
+  //
+  // Hardening, not a live bug — see the comment above the `try` in `collect`.
+  // Nobody has named an input that makes `warnUnreachable`, `needsServerDelivery`,
+  // `resolveTimeZone` or `zonedClock` throw (`formatterFor` swallows a bad zone
+  // rather than throwing one), so both throws below are INJECTED — through
+  // `log`, which is a plain mutable object and the one seam here that is not a
+  // frozen ES module binding. Nothing about this proves either call site is
+  // reachable this way today; it proves the two guards hold if one ever is.
+  console.log('--- a throw ahead of withUser is caught and logged; an Error that still escapes is filtered anyway ---');
+
+  const { log } = await import('@habiterall/shared/log.js');
+  const realWarn = log.warn;
+  const realError = log.error;
+
+  // First half: the widened `try` catches a throw from `warnUnreachable` (the
+  // first of the four pre-`withUser` calls) and logs it as
+  // `notify.account_failed`, exactly as a `withUser` rejection already did.
+  const caught = await mkUser('sub-throw-caught', { notifyChannels: ['discord'] }); // unreachable: no webhook
+  await mkHabit(caught, 'Caught habit', '08:00');
+
+  const errors = [];
+  log.error = (...args) => { errors.push(args); return realError(...args); };
+  log.warn = (...args) => {
+    const [event, detail] = args;
+    if (event === 'notify.unreachable' && detail?.user === caught) {
+      throw new Error('synthetic: a throw ahead of withUser');
+    }
+    return realWarn(...args);
+  };
+
+  let caughtResult = null;
+  let caughtThrew = null;
+  try {
+    caughtResult = await notifier.collect(AT_0800_UTC);
+  } catch (err) {
+    caughtThrew = err;
+  } finally {
+    log.warn = realWarn;
+    log.error = realError;
+  }
+
+  check('collect() does not reject over one account\'s pre-withUser throw',
+    !caughtThrew, caughtThrew ? caughtThrew.message : '');
+  check('the account that threw ahead of withUser is dropped, not carried forward',
+    !!caughtResult && !caughtResult.some((a) => a?.id === caught),
+    JSON.stringify((caughtResult ?? []).map((a) => a?.id)));
+  check('every OTHER account collected is still whole',
+    !!caughtResult && caughtResult.length > 0
+      && caughtResult.every((a) => a?.id !== undefined && Array.isArray(a?.habits) && a.habits.length > 0),
+    JSON.stringify((caughtResult ?? []).map((a) => a?.id)));
+  check('that failure is LOGGED as notify.account_failed, not silent',
+    errors.some(([event, fields]) => event === 'notify.account_failed' && fields?.user === caught),
+    JSON.stringify(errors));
+
+  // Second half: the structural filter — `results.filter((a) => a && !(a
+  // instanceof Error))` — has to hold even when something escapes the widened
+  // catch too, which is forced here by making the catch's OWN `log.error` call
+  // throw a second time. That is exactly the shape `mapWithLimit`'s own
+  // backstop exists for (a worker function that lets a rejection escape), and
+  // it is what distinguishes the structural filter from `.filter(Boolean)`:
+  // an escaped `Error` is truthy, so only the `instanceof Error` half drops it.
+  const escaped = await mkUser('sub-throw-escaped', { notifyChannels: ['discord'] }); // unreachable: no webhook
+  await mkHabit(escaped, 'Escaped habit', '08:00');
+
+  log.warn = (...args) => {
+    const [event, detail] = args;
+    if (event === 'notify.unreachable' && detail?.user === escaped) {
+      log.error = () => { throw new Error('synthetic: escapes the catch too'); };
+      throw new Error('synthetic: a throw ahead of withUser');
+    }
+    return realWarn(...args);
+  };
+
+  let escapedResult = null;
+  let escapedThrew = null;
+  try {
+    escapedResult = await notifier.collect(AT_0800_UTC);
+  } catch (err) {
+    escapedThrew = err;
+  } finally {
+    log.warn = realWarn;
+    log.error = realError;
+  }
+
+  check('collect() does not reject even when the catch\'s own logging throws',
+    !escapedThrew, escapedThrew ? escapedThrew.message : '');
+  check('no Error instance reaches the caller, however it escaped',
+    !!escapedResult && escapedResult.every((a) => a && !(a instanceof Error)),
+    JSON.stringify((escapedResult ?? []).map((a) => (a instanceof Error ? `Error:${a.message}` : a?.id))));
+  check('the account behind the double failure is absent rather than a fake account',
+    !!escapedResult && !escapedResult.some((a) => a?.id === escaped),
+    JSON.stringify((escapedResult ?? []).map((a) => a?.id)));
+  check('every OTHER account collected is still whole, structural filter or not',
+    !!escapedResult && escapedResult.length > 0
+      && escapedResult.every((a) => a?.id !== undefined && Array.isArray(a?.habits) && a.habits.length > 0),
+    JSON.stringify((escapedResult ?? []).map((a) => a?.id)));
+
+  /* ---------- collect fans out past the concurrency limit ---------- */
+  //
+  // The section above proves isolation with whatever accounts earlier
+  // sections happened to leave configured, which has never been more than a
+  // handful — fewer than `COLLECT_CONCURRENCY` can ever be. That cannot tell
+  // a bounded fan-out from an accident: with N <= the limit, `mapWithLimit`
+  // starts one worker per item and the loop below would pass even if the fan
+  // out were, say, unlimited. So this blocks every account created so far and
+  // creates more than the limit's own ceiling of 6, forcing at least one
+  // worker to loop back for a second item.
+  console.log('--- collect fans out across accounts, and isolation holds past the limit ---');
+  await admin.query('UPDATE users SET blocked = true');
+
+  const CONCURRENCY_ACCOUNTS = 8; // > 6, the highest COLLECT_CONCURRENCY can ever be
+  const concurrencyIds = [];
+  for (let i = 0; i < CONCURRENCY_ACCOUNTS; i++) {
+    const id = await mkUser(`sub-conc-${i}`, {
+      notifyChannels: ['discord'], discordWebhook: WEBHOOK, notifyTimezone: 'UTC',
+    });
+    await mkHabit(id, `Concurrency habit ${i}`, '08:00');
+    concurrencyIds.push(id);
+  }
+  concurrencyIds.sort((a, b) => a - b);
+
+  const wholeSet = await notifier.collect(AT_0800_UTC);
+  check('every account due is collected, not merely as many as fit in one wave',
+    wholeSet.length === CONCURRENCY_ACCOUNTS
+      && concurrencyIds.every((id) => wholeSet.some((a) => a.id === id)),
+    JSON.stringify(wholeSet.map((a) => a.id)));
+
+  // As above: the scan is connect #1, and — because nothing async happens
+  // before a worker's own `withUser` call — the first two workers' connects
+  // land at #2 and #3 in that order however many workers `COLLECT_CONCURRENCY`
+  // starts. Failing #3 fails the SECOND smallest id, well inside the first
+  // wave whether the derived limit is 1 or 6, so this does not depend on how
+  // the remaining accounts get divided up once real query latency is in play.
+  const realConnect2 = pool.connect.bind(pool);
+  let concurrencyConnects = 0;
+  pool.connect = (...args) => (++concurrencyConnects === 3
+    ? Promise.reject(Object.assign(
+      new Error('timeout exceeded when trying to connect'), { code: 'ETIMEDOUT' }))
+    : realConnect2(...args));
+
+  let concurrencySurvived = null;
+  let concurrencyThrew = null;
+  try {
+    concurrencySurvived = await notifier.collect(AT_0800_UTC);
+  } catch (err) {
+    concurrencyThrew = err;
+  } finally {
+    pool.connect = realConnect2;
+  }
+
+  // Every other account was blocked above, so `concurrencySurvived` is not
+  // filtered down to `concurrencyIds` here — an escaped Error object has no
+  // `.id`, and filtering it out by "is this one of ours" would silently drop
+  // exactly the leak this is meant to catch, leaving the count and the
+  // "whole account" check both looking correct on a build that lets one
+  // through.
+  const failedId = concurrencyIds[1];
+  const concurrencySurvivors = concurrencySurvived ?? [];
+  check('one account failing to read past the concurrency limit does not shrink the rest',
+    !concurrencyThrew && concurrencySurvivors.length === CONCURRENCY_ACCOUNTS - 1,
+    concurrencyThrew ? `collect threw: ${concurrencyThrew.message}`
+      : JSON.stringify({ survivorIds: concurrencySurvivors.map((a) => a?.id), failedId }));
+  check('the missing one is the account that actually failed, not an arbitrary one',
+    !concurrencySurvivors.some((a) => a?.id === failedId),
+    JSON.stringify(concurrencySurvivors.map((a) => a?.id)));
+  check('and every survivor is a whole account rather than an escaped Error object',
+    concurrencySurvivors.length > 0
+      && concurrencySurvivors.every((a) =>
+        a?.id !== undefined && Array.isArray(a?.habits) && a.habits.length > 0),
+    JSON.stringify(concurrencySurvivors.map((a) => ({ id: a?.id, habits: a?.habits?.length }))));
+
+  /* ---------- the two derived limits, and that start() hands one over ---------- */
+
+  // Everything above pins DECISIONS. The shared suite pins them harder — a
+  // `deliveryConcurrency` of 1 serialises two different-webhook Discord
+  // accounts and 2 lets them overlap, and both would fail if `runTick` ignored
+  // `ctx`. None of it says this edition derives the number or passes it on:
+  // deleting `deliveryConcurrency: DELIVERY_CONCURRENCY` from `start()`
+  // restored the literal 8 the fix-round commit was written to remove, and
+  // left unit, cloud, tenancy and typecheck all green.
+  console.log('\n--- the derived concurrency limits, and the wiring ---');
+
+  const poolMax = pool.options?.max ?? 10;
+  // The arithmetic as literals, not as a second copy of the expression: a test
+  // that restates `Math.max(1, Math.min(6, ...))` passes against any edit that
+  // changes both it and the source together. The caps differ on purpose — a
+  // collect worker holds its checkout across a whole four-query read, a
+  // delivery worker only for one `mark`/`recordOutcome` write.
+  check('COLLECT_CONCURRENCY is half the pool, floored at 1 and capped at 6',
+    notifier.COLLECT_CONCURRENCY === Math.min(6, Math.max(1, Math.floor(poolMax / 2))),
+    `pool max ${poolMax} -> ${notifier.COLLECT_CONCURRENCY}`);
+  check('DELIVERY_CONCURRENCY is the same fraction, capped at 8 instead',
+    notifier.DELIVERY_CONCURRENCY === Math.min(8, Math.max(1, Math.floor(poolMax / 2))),
+    `pool max ${poolMax} -> ${notifier.DELIVERY_CONCURRENCY}`);
+  // Never zero, whatever an operator sets: `mapWithLimit`'s floor is the last
+  // line of defence and this is the first.
+  check('neither can be 0, which mapWithLimit would have to rescue',
+    notifier.COLLECT_CONCURRENCY >= 1 && notifier.DELIVERY_CONCURRENCY >= 1,
+    `${notifier.COLLECT_CONCURRENCY} / ${notifier.DELIVERY_CONCURRENCY}`);
+
+  // The wiring itself: the object `start()` hands `startNotifier`.
+  //
+  // Through the injection seam rather than by calling the real thing and
+  // watching. `startNotifier` ticks IMMEDIATELY and synchronously on
+  // construction — against this suite's own database, with a real `fetch`, and
+  // the fixtures here carry a Discord webhook URL — so letting it run would
+  // put a live request on the network and race the pool teardown below.
+  let handedOver = null;
+  const started = notifier.start(
+    { ...process.env, HABITERALL_NOTIFY: 'on' },
+    { startNotifier: (ctx) => { handedOver = ctx; return { stop: () => {} }; } }
+  );
+  started?.stop();
+
+  check('start() hands startNotifier the DERIVED delivery limit, not a literal',
+    handedOver?.deliveryConcurrency === notifier.DELIVERY_CONCURRENCY,
+    `ctx carried ${JSON.stringify(handedOver?.deliveryConcurrency)}, `
+    + `constant is ${notifier.DELIVERY_CONCURRENCY}`);
+  // Guards the guard. If `DELIVERY_CONCURRENCY` ever equalled the 8 it
+  // replaces, the check above would pass against the literal the commit was
+  // written to remove. On the default pool of 10 it is 5, so the two differ,
+  // and saying so is what makes the check above mean anything.
+  check('...and on this pool that number is not the 8 it replaced',
+    notifier.DELIVERY_CONCURRENCY !== 8,
+    `pool max ${poolMax} -> ${notifier.DELIVERY_CONCURRENCY}`);
 
   console.log(fails === 0 ? '\nALL CLOUD NOTIFY CHECKS PASSED' : `\n${fails} CHECK(S) FAILED`);
 } finally {

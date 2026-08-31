@@ -15,7 +15,7 @@ const {
   zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
 } = await import('../src/notify.js');
 
-const { deliverAccount, postWebhook, resetSaid, runTick, sendToChannel, warnUnreachable } =
+const { deliverAccount, mapWithLimit, postWebhook, resetSaid, runTick, sendToChannel, warnUnreachable } =
   await import('../src/notify-send.js');
 
 const { parseSettings } = await import('../src/validate.js');
@@ -2113,4 +2113,325 @@ test('test: true carries the icon on both title (no prompt) and subtitle', () =>
   );
   assert.equal(withPrompt.title, 'Did you exercise today?');
   assert.equal(withPrompt.subtitle, '🧘 Meditate');
+});
+
+// mapWithLimit — both the collect loop (cloud's notifier.js) and the delivery
+// loop (runTick, below) fan out through this, so its own contract is pinned
+// here rather than only through its two callers.
+
+test('mapWithLimit: results land in input order, not completion order', async () => {
+  // Item 0 is the slowest and item 1 the fastest, so completion order is the
+  // reverse of input order — a test where they happened to match would prove
+  // nothing about which order is actually used.
+  const delaysMs = [30, 5, 15];
+  const out = await mapWithLimit([0, 1, 2], 3, async (item) => {
+    await new Promise((r) => setTimeout(r, delaysMs[item]));
+    return `done-${item}`;
+  });
+  assert.deepEqual(out, ['done-0', 'done-1', 'done-2']);
+});
+
+test('mapWithLimit: never more than `limit` calls are in flight at once', async () => {
+  const items = Array.from({ length: 10 }, (_, i) => i);
+  const limit = 3;
+  let live = 0;
+  let max = 0;
+  await mapWithLimit(items, limit, async (item) => {
+    live++;
+    max = Math.max(max, live);
+    // Long enough that, with ten items and a limit of three, a broken cap
+    // (every item launched at once) reliably overlaps within this window —
+    // a 0ms body could finish before the next one starts even with no cap.
+    await new Promise((r) => setTimeout(r, 10));
+    live--;
+    return item;
+  });
+  assert.equal(max, limit, 'ten items over a limit of three must peak at exactly three in flight');
+});
+
+test('mapWithLimit: one item rejecting does not lose the others', async () => {
+  const items = [1, 2, 3, 4];
+  const out = await mapWithLimit(items, 2, async (item) => {
+    if (item === 2) throw new Error('boom');
+    return item * 10;
+  });
+  assert.equal(out[0], 10);
+  assert.ok(out[1] instanceof Error, 'the rejecting item is reported, not silently dropped');
+  assert.equal(out[1].message, 'boom');
+  assert.equal(out[2], 30, 'the item after the rejection is still there');
+  assert.equal(out[3], 40, 'so is the one after that, run by the other worker');
+});
+
+test('mapWithLimit: a limit past the item count does not hang or spawn idle workers', async () => {
+  const items = [1, 2, 3];
+  let live = 0;
+  let max = 0;
+  const out = await mapWithLimit(items, 100, async (item) => {
+    live++;
+    max = Math.max(max, live);
+    await new Promise((r) => setTimeout(r, 5));
+    live--;
+    return item * 2;
+  });
+  assert.deepEqual(out, [2, 4, 6]);
+  assert.equal(max, items.length, 'a limit bigger than the set spawns one worker per item, not per limit');
+});
+
+test('mapWithLimit: a limit of 0 still processes every item, rather than silently doing nothing', async () => {
+  // Neither caller can reach this today, but both callers' limits are now
+  // edition-derived (#187) rather than hand-picked literals — exactly the
+  // shape that starts making a 0 or a NaN reachable. Ungated, `Math.min(0, n)`
+  // spawns zero workers, `Promise.all([])` resolves at once, and this returns
+  // a full-length array of holes with no error — which a caller's
+  // `.filter(Boolean)` turns into "nothing was due" forever.
+  const items = [1, 2, 3];
+  const out = await mapWithLimit(items, 0, async (item) => item * 2);
+  assert.deepEqual(out, [2, 4, 6]);
+});
+
+test('mapWithLimit: a NaN limit does too, which Math.max alone did NOT give', async () => {
+  // The half the test above cited in its own comment and did not cover.
+  // `Math.max` PROPAGATES NaN rather than ignoring it, so the original
+  // `Math.max(1, Math.min(NaN, 3))` was NaN, `w < NaN` is false, zero workers
+  // were spawned, and this returned `[undefined, undefined, undefined]` — the
+  // exact silent shape both comments say is prevented. Asserted as the mapped
+  // values rather than as a length, because the holes ARE full length.
+  const out = await mapWithLimit([1, 2, 3], NaN, async (item) => item * 2);
+  assert.deepEqual(out, [2, 4, 6]);
+
+  // The two spellings a misconfigured pool size actually arrives as. `??` does
+  // not catch NaN and neither does a truthiness test on `undefined` once a
+  // default has been applied, so both reach the guard rather than a fallback.
+  assert.deepEqual(await mapWithLimit([1, 2], Number('nope'), async (i) => i), [1, 2]);
+  assert.deepEqual(await mapWithLimit([1, 2], undefined, async (i) => i), [1, 2]);
+
+  // Infinity is finite-adjacent and must NOT be floored to one worker: it is
+  // "no bound", and `Math.min(Infinity, n)` is already the right answer.
+  assert.deepEqual(await mapWithLimit([1, 2, 3], Infinity, async (i) => i), [1, 2, 3]);
+});
+
+// The per-host ntfy gate. Delivery now fans out across accounts (`runTick`),
+// and this is the guard that stops that fan-out from turning into ten
+// requests at once against ntfy.sh's one shared bucket. The ordinary
+// `fakeFetch` above resolves instantly, which would make every test below
+// pass whether the gate exists or not — a real delay is what makes "did these
+// two overlap" a question with a meaningful answer.
+
+/**
+ * Records `{host, startedAt, endedAt}` per call and holds each one open for
+ * `delayMs`, purely so two sends can be told apart as sequential or
+ * overlapping afterwards.
+ */
+function timedFetch(delayMs) {
+  const calls = [];
+  const doFetch = async (url) => {
+    const host = new URL(url).host;
+    const startedAt = Date.now();
+    await new Promise((r) => setTimeout(r, delayMs));
+    const endedAt = Date.now();
+    calls.push({ host, startedAt, endedAt });
+    return { status: 204, headers: { get: () => null } };
+  };
+  doFetch.calls = calls;
+  return doFetch;
+}
+
+/** Two recorded calls overlap when each started before the other ended. */
+function overlapped(a, b) {
+  return a.startedAt < b.endedAt && b.startedAt < a.endedAt;
+}
+
+test('two accounts on the same ntfy host never overlap', async () => {
+  const before = process.env.NTFY_ALLOWED_HOSTS;
+  process.env.NTFY_ALLOWED_HOSTS = 'ntfy.sh';
+  try {
+    const fetch = timedFetch(30);
+    const accounts = [
+      account({
+        id: 1,
+        settings: {
+          notifyChannels: ['ntfy'], ntfyTopicUrl: 'https://ntfy.sh/topic-a', notifyTimezone: 'UTC',
+        },
+      }),
+      account({
+        id: 2,
+        settings: {
+          notifyChannels: ['ntfy'], ntfyTopicUrl: 'https://ntfy.sh/topic-b', notifyTimezone: 'UTC',
+        },
+      }),
+    ];
+
+    await runTick({
+      collect: () => accounts, mark: () => {}, instant: utc(2026, 8, 13, 8, 0), fetch,
+    });
+
+    assert.equal(fetch.calls.length, 2);
+    assert.ok(!overlapped(fetch.calls[0], fetch.calls[1]),
+      'both topics are on ntfy.sh, so the second send must wait for the first to finish');
+  } finally {
+    if (before === undefined) delete process.env.NTFY_ALLOWED_HOSTS;
+    else process.env.NTFY_ALLOWED_HOSTS = before;
+  }
+});
+
+test('two accounts on different ntfy hosts DO overlap', async () => {
+  const before = process.env.NTFY_ALLOWED_HOSTS;
+  // Two distinct self-hosted destinations: they share no rate-limit bucket
+  // and must not share a gate either, or a busy tenant on one host would slow
+  // every account on the other.
+  process.env.NTFY_ALLOWED_HOSTS = 'http://ntfy-a.lan,http://ntfy-b.lan';
+  try {
+    const fetch = timedFetch(30);
+    const accounts = [
+      account({
+        id: 1,
+        settings: {
+          notifyChannels: ['ntfy'], ntfyTopicUrl: 'http://ntfy-a.lan/topic', notifyTimezone: 'UTC',
+        },
+      }),
+      account({
+        id: 2,
+        settings: {
+          notifyChannels: ['ntfy'], ntfyTopicUrl: 'http://ntfy-b.lan/topic', notifyTimezone: 'UTC',
+        },
+      }),
+    ];
+
+    await runTick({
+      collect: () => accounts, mark: () => {}, instant: utc(2026, 8, 13, 8, 0), fetch,
+    });
+
+    assert.equal(fetch.calls.length, 2);
+    assert.ok(overlapped(fetch.calls[0], fetch.calls[1]),
+      'different ntfy hosts must not queue behind one another');
+  } finally {
+    if (before === undefined) delete process.env.NTFY_ALLOWED_HOSTS;
+    else process.env.NTFY_ALLOWED_HOSTS = before;
+  }
+});
+
+test('two Discord accounts DO overlap — Discord has no per-host gate', async () => {
+  // Discord rate-limits per WEBHOOK, so a 429 is one account's own doing —
+  // gating it the way ntfy is gated would slow every account for no tenant's
+  // benefit.
+  const fetch = timedFetch(30);
+  const accounts = [
+    account({
+      id: 1,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/1/a',
+        notifyTimezone: 'UTC',
+      },
+    }),
+    account({
+      id: 2,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/2/b',
+        notifyTimezone: 'UTC',
+      },
+    }),
+  ];
+
+  await runTick({
+    collect: () => accounts, mark: () => {}, instant: utc(2026, 8, 13, 8, 0), fetch,
+  });
+
+  assert.equal(fetch.calls.length, 2);
+  assert.ok(overlapped(fetch.calls[0], fetch.calls[1]));
+});
+
+// `ctx.deliveryConcurrency` — #187's fix 1. `deliverAccount` costs cloud a
+// pool checkout per `mark`/`recordOutcome`, so the fan-out width has to be an
+// edition's business rather than a literal `notify-send.js` picks for itself.
+// These two accounts are on DIFFERENT Discord webhooks so the per-webhook
+// limit above never enters into it — the only thing that can serialise them
+// is `DELIVERY_CONCURRENCY` itself.
+
+test('a delivery limit of 1 serialises two accounts, honouring `ctx`', async () => {
+  const fetch = timedFetch(30);
+  const accounts = [
+    account({
+      id: 1,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/1/a',
+        notifyTimezone: 'UTC',
+      },
+    }),
+    account({
+      id: 2,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/2/b',
+        notifyTimezone: 'UTC',
+      },
+    }),
+  ];
+
+  await runTick({
+    collect: () => accounts, mark: () => {}, instant: utc(2026, 8, 13, 8, 0), fetch,
+    deliveryConcurrency: 1,
+  });
+
+  assert.equal(fetch.calls.length, 2);
+  assert.ok(!overlapped(fetch.calls[0], fetch.calls[1]),
+    'a limit of 1 must serialise delivery across accounts, not merely across a shared destination');
+});
+
+test('a delivery limit of 2 lets those same two accounts overlap', async () => {
+  const fetch = timedFetch(30);
+  const accounts = [
+    account({
+      id: 1,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/1/a',
+        notifyTimezone: 'UTC',
+      },
+    }),
+    account({
+      id: 2,
+      settings: {
+        notifyChannels: ['discord'], discordWebhook: 'https://discord.com/api/webhooks/2/b',
+        notifyTimezone: 'UTC',
+      },
+    }),
+  ];
+
+  await runTick({
+    collect: () => accounts, mark: () => {}, instant: utc(2026, 8, 13, 8, 0), fetch,
+    deliveryConcurrency: 2,
+  });
+
+  assert.equal(fetch.calls.length, 2);
+  assert.ok(overlapped(fetch.calls[0], fetch.calls[1]),
+    'a limit of 2 must let both of two accounts run at once');
+});
+
+test('a tick with one ntfy account behaves exactly as before — the gate is a no-op alone', async () => {
+  // Personal's case: `collect` always returns exactly one account, so this is
+  // what has to stay unaffected by both the fan-out in `runTick` and the
+  // per-host gate — no second account ever queues behind this one.
+  const before = process.env.NTFY_ALLOWED_HOSTS;
+  process.env.NTFY_ALLOWED_HOSTS = 'ntfy.sh';
+  try {
+    const marked = [];
+    const fetch = fakeFetch([{ status: 204 }]);
+    const solo = account({
+      settings: {
+        notifyChannels: ['ntfy'], ntfyTopicUrl: 'https://ntfy.sh/my-habits', notifyTimezone: 'UTC',
+      },
+    });
+
+    const result = await runTick({
+      collect: () => [solo],
+      mark: (acc, habitId, channel, date) => marked.push([acc.id, habitId, channel, date]),
+      instant: utc(2026, 8, 13, 8, 0),
+      fetch,
+    });
+
+    assert.deepEqual(result, { accounts: 1, sent: 1, failed: 0, skipped: {} });
+    assert.deepEqual(marked, [[7, 1, 'ntfy', '2026-08-13']]);
+    assert.equal(fetch.calls.length, 1);
+  } finally {
+    if (before === undefined) delete process.env.NTFY_ALLOWED_HOSTS;
+    else process.env.NTFY_ALLOWED_HOSTS = before;
+  }
 });

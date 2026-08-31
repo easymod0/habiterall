@@ -1094,12 +1094,36 @@ reminder — ntfy.sh has no per-topic ACL, so on it the HMAC alone carries the
 whole burden of gating who can *answer*. `docs/decisions/ntfy-answers.md` has
 the long form.
 
-**The two server-sent channels are not alike about rate limits, and the tick is
-shared.** Discord limits per webhook, so a 429 is one account's own doing and the
-inline `Retry-After` sleep is paid by whoever caused it. ntfy.sh limits per
-**visitor IP**, which for a server-sent reminder is the instance — so on cloud one
-account can put that sequential loop to sleep on everybody else's behalf. Noted
-at the sleep rather than fixed there.
+**The two server-sent channels are not alike about rate limits, and delivery
+now fans out across accounts.** Discord limits per webhook **in webhook
+mode** — there a 429 is one account's own doing and the inline `Retry-After`
+sleep is paid by whoever caused it, so Discord sends from different accounts
+run at once with nothing guarding between them. In **bot** mode the bucket is
+per bot token and per route, instance-wide (`botToken` is one credential
+for the whole instance, and `sendToChannel` prefers it whenever one is
+configured) — a 429 there is not one account's own doing, and this is known
+and deliberately not gated: no measurement suggests eight concurrent posts
+trip Discord's global limit, and gating on a guess would cost more than the
+risk it guards against. ntfy.sh limits per **visitor IP**, which for a
+server-sent reminder is the instance — one bucket for every tenant on it — so
+letting the fan-out send ntfy in parallel would make that shared bucket worse,
+not just unprotected. `gatedByHost` (`shared/src/notify-send.js`) is the fix: a
+module-level map from host to its tail promise, and an ntfy send (its
+`Retry-After` retry included) queues behind whatever else is already sending to
+that same host before it starts, so at most one is ever in flight per host
+**in the tick**. Not instance-wide, and the difference is one path: `sendTest`
+calls `sendToChannel` directly and never touches `gatedByHost`, so a press of
+the settings dialog's test button is an ntfy send in flight outside the gate.
+Small blast radius — it is one deliberate press — but do not size the delivery
+limit against the sentence without the qualifier. Keyed on the host rather than
+one instance-wide gate, because two accounts on different self-hosted ntfy
+servers share no bucket and queuing one behind the other would slow a healthy
+destination to punish a busy one it has nothing to do with.
+
+The wait it imposes is reported as `queued_ms` on `notify.sent` /
+`notify.failed`, apart from `ms`: folding it in made the tenth account of ten
+report a multi-second send with `throttled: false`, which reads as a failing
+destination rather than as the gate working.
 
 ## Traps
 

@@ -128,13 +128,27 @@ that string is what the settings dialog shows, under the rule that the wording
 is the sender's own.
 
 **The two server-sent channels are not alike about rate limits, and the tick is
-shared.** Discord limits per webhook, so a 429 is one account's own doing and
-the inline `Retry-After` sleep in `deliverAccount` is paid by whoever caused it.
-ntfy.sh limits per **visitor IP**, which for a server-sent reminder is the
-instance — one bucket for every tenant on it — so on the cloud edition one
-account can put that sequential loop to sleep on everybody else's behalf. Noted
-at the sleep rather than fixed there: the tick's shape predates this and
-restructuring it is its own change.
+shared.** Discord limits per webhook **in webhook mode**, so there a 429 is
+one account's own doing and the inline `Retry-After` sleep in `deliverAccount`
+is paid by whoever caused it. In **bot** mode — one bot token shared by every
+account on the instance — the limit is per bot token and per route instead,
+so a 429 there is not one account's own doing; that is known and deliberately
+left ungated (see `docs/decisions/reminders.md`), because no measurement
+suggests eight concurrent posts trip it. ntfy.sh limits per **visitor IP**,
+which for a server-sent reminder is the instance — one bucket for every tenant
+on it — so one account's sleep used to be paid by everybody behind it in a
+sequential loop.
+
+Fixed in #187, and the asymmetry is why the fix is not one number. Delivery now
+fans out across accounts, but an ntfy send goes through `gatedByHost`
+(`shared/src/notify-send.js`) — a map of destination host to tail promise, so
+sends to one ntfy server still queue behind each other while two accounts on
+DIFFERENT ntfy servers, which share no bucket, do not. Discord bypasses the gate
+entirely in webhook mode: its limit is per webhook there, so parallelising
+across accounts is free; in bot mode it bypasses the gate too, untreated rather
+than proven safe. A single global limit would have been wrong for one of the
+two whichever number was picked. See `docs/decisions/reminders.md` for the
+concurrency figures.
 
 **A reminder is published as JSON to the ntfy SERVER, not as headers to the
 topic.** The two are equally documented and only one is safe: publishing to the

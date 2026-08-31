@@ -21,14 +21,14 @@
  */
 
 import { forgetAccount } from './cache.js';
-import { withNotifierScope, withUser, withUserWrite } from './db/pool.js';
+import { pool, withNotifierScope, withUser, withUserWrite } from './db/pool.js';
 import {
   answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
   serverChannels, resolveTimeZone,
   zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
-  notifierConfig, sendToChannel, startNotifier, warnUnreachable,
+  mapWithLimit, notifierConfig, sendToChannel, startNotifier, warnUnreachable,
 } from '@habiterall/shared/notify-send.js';
 import { handleInteraction } from '@habiterall/shared/discord.js';
 import { connectGateway } from '@habiterall/shared/discord-gateway.js';
@@ -55,6 +55,49 @@ const KEEP_LOG_DAYS = 45;
  * plausible self-hosted deployment.
  */
 const MAX_ACCOUNTS_PER_TICK = Number(process.env.NOTIFY_MAX_ACCOUNTS) || 500;
+
+/**
+ * How many accounts `collect` reads concurrently.
+ *
+ * Derived from the pool's own configured max (`pool.options.max` — the same
+ * number `poolGauge()` reports as `pg_max`) rather than a literal: a busy
+ * tick still has to leave connections for live requests, so this takes
+ * roughly half of it, floored at 1 (an operator who set the pool down to 1
+ * still gets a tick that completes) and capped at 6 (an operator who raised
+ * the pool to serve more traffic should not hand the notifier proportionally
+ * more of it — each account here is a transaction of four queries, and past
+ * a point that competes with `/overview` rather than shortening a slow tick).
+ * A hardcoded number would silently starve the API the moment an operator set
+ * `PG_POOL_MAX` below what it assumed.
+ */
+export const COLLECT_CONCURRENCY =
+  Math.max(1, Math.min(6, Math.floor((pool.options?.max ?? 10) / 2)));
+
+/**
+ * How many accounts `runTick` (`@habiterall/shared/notify-send.js`) delivers
+ * to at once, on this edition.
+ *
+ * `deliverAccount` calls `mark` and `recordOutcome`, above, after every send,
+ * and both run as the account's own `withUser` transaction — a pool checkout
+ * each. `notify-send.js`'s own `DELIVERY_CONCURRENCY` comment is where that is
+ * explained at length; what belongs here is only the arithmetic, derived from
+ * `pool.options.max` the same way `COLLECT_CONCURRENCY` is, for the same
+ * reason: a hardcoded number silently starves the API the moment an operator
+ * lowers `PG_POOL_MAX` below what it assumed.
+ *
+ * Not summed with `COLLECT_CONCURRENCY` — `collect()` runs to completion
+ * before any delivery starts (see `start()`, below), so a tick never holds
+ * checkouts for both at once, and each only has to fit the pool ON ITS OWN.
+ * Same floor and the same half-of-the-pool fraction as `COLLECT_CONCURRENCY`,
+ * but capped at 8 rather than 6: a delivery worker holds its checkout for the
+ * length of one `mark`/`recordOutcome` write, not for a whole four-query read
+ * held across the account's collect, so it costs the pool less per worker for
+ * the same concurrency — and 8 is the number this replaces, so an operator on
+ * the default pool sees the derivation only shrink the number when the pool
+ * itself is the constraint, never raise it past what always ran.
+ */
+export const DELIVERY_CONCURRENCY =
+  Math.max(1, Math.min(8, Math.floor((pool.options?.max ?? 10) / 2)));
 
 /**
  * The accounts with something for this server to deliver.
@@ -94,87 +137,118 @@ async function candidates() {
  * @param {Date|number} instant
  */
 export async function collect(instant) {
-  const accounts = [];
   const { botToken } = notifierConfig(process.env);
 
-  for (const row of await candidates()) {
-    const settings = row.settings ?? {};
-    // The scan's SQL predicate is deliberately loose (it cannot tell whether a
-    // webhook URL or a channel id is actually filled in); this is the real test,
-    // and it needs to know whether this instance has a bot at all.
+  // `mapWithLimit` rather than the plain for-loop this used to be: the scan
+  // above already returned every candidate, so nothing here decides who is
+  // visited, only how many are read at once. `collect` is still awaited in
+  // full before any webhook goes out (`start()`, below) — concurrency INSIDE
+  // this read is the whole change; interleaving it with delivery is not.
+  const results = await mapWithLimit(await candidates(), COLLECT_CONCURRENCY, async (row) => {
+    // Per account, because one account's read must not abandon the tick — a
+    // pool timeout on account 3 of 400 used to throw out of the old for-loop
+    // and discard every account already collected along with every one behind
+    // it, for the whole minute. It is the same shape as the watermark failure
+    // inside `deliverAccount`, one level up and with a wider blast radius, and
+    // it surfaced only as `startNotifier`'s printf line.
     //
-    // A user who fails it is skipped in silence, which is why the warning comes
-    // first — on a shared instance the operator is the only one who can see the
-    // log, and the only one who can add a bot token.
-    warnUnreachable({ id: row.id, settings }, { botToken, log });
-    if (!needsServerDelivery(settings, { bot: !!botToken })) {
-      continue;
-    }
+    // This catch has to stay HERE, inside the function `mapWithLimit` calls
+    // per item, and not be moved to wrap the `mapWithLimit(...)` call itself.
+    // `mapWithLimit` has its own catch, but that one is only a backstop for a
+    // worker function that lets a rejection escape — it records the error
+    // itself at `results[index]` rather than a logged, named `null`, and an
+    // `Error` there is truthy: `.filter(Boolean)` used to keep it and hand
+    // `runTick` a fake account, where `account.settings ?? {}` reads as no
+    // channels configured — healthy, with nothing due, and no log line at
+    // all. `results.filter((a) => a && !(a instanceof Error))`, below, is the
+    // other half of that guarantee, so it holds whichever way this function
+    // exits.
+    //
+    // It wraps the WHOLE body below, not only the `withUser` call — this is
+    // hardening rather than a known defect. Nobody has named an input that
+    // makes `warnUnreachable`, `needsServerDelivery`, `resolveTimeZone` or
+    // `zonedClock` throw (`formatterFor` swallows a bad zone rather than
+    // throwing one), but the guarantee this catch makes should be about the
+    // FUNCTION, not about which line in it happens to touch the database
+    // today, and the four calls ahead of `withUser` cost nothing extra to
+    // cover.
+    try {
+      const settings = row.settings ?? {};
+      // The scan's SQL predicate is deliberately loose (it cannot tell whether a
+      // webhook URL or a channel id is actually filled in); this is the real test,
+      // and it needs to know whether this instance has a bot at all.
+      //
+      // A user who fails it is skipped in silence, which is why the warning comes
+      // first — on a shared instance the operator is the only one who can see the
+      // log, and the only one who can add a bot token.
+      warnUnreachable({ id: row.id, settings }, { botToken, log });
+      if (!needsServerDelivery(settings, { bot: !!botToken })) {
+        return null;
+      }
 
-    // Whose clock: the zone the account NAMED, else the one its last client
-    // reported, else this server's. `resolveTimeZone` is the only place that
-    // precedence exists, so the tick and the Discord handler cannot drift.
-    const timeZone = resolveTimeZone(settings, String(row.device_time_zone ?? ''));
-    const clock = zonedClock(instant, timeZone);
+      // Whose clock: the zone the account NAMED, else the one its last client
+      // reported, else this server's. `resolveTimeZone` is the only place that
+      // precedence exists, so the tick and the Discord handler cannot drift.
+      const timeZone = resolveTimeZone(settings, String(row.device_time_zone ?? ''));
+      const clock = zonedClock(instant, timeZone);
 
-    // Per account, because one account's read must not abandon the tick. This
-    // whole loop sits OUTSIDE `runTick`'s per-account try — `collect` is
-    // awaited before it — so a pool timeout on account 3 of 400 threw out of
-    // here and discarded every account already collected along with every one
-    // behind it, for the whole minute. It is the same shape as the watermark
-    // failure inside `deliverAccount`, one level up and with a wider blast
-    // radius, and it surfaced only as `startNotifier`'s printf line.
-    const account = await withUser(row.id, async (db) => {
-      const { rows: habits } = await db.query(
-        `SELECT * FROM habits
-          WHERE archived = false AND reminder_time <> ''
-          ORDER BY position, id`
-      );
-      if (!habits.length) return null;
+      return await withUser(row.id, async (db) => {
+        const { rows: habits } = await db.query(
+          `SELECT * FROM habits
+            WHERE archived = false AND reminder_time <> ''
+            ORDER BY position, id`
+        );
+        if (!habits.length) return null;
 
-      const { rows: entries } = await db.query(
-        `SELECT habit_id, value, status FROM entries WHERE date = $1`,
-        [clock.date]
-      );
-      const { rows: sent } = await db.query(
-        `SELECT habit_id, channel FROM notify_log WHERE date = $1`,
-        [clock.date]
-      );
-      const { rows: status } = await db.query(
-        `SELECT channel, ok, status, error, permanent FROM notify_status`
-      );
+        const { rows: entries } = await db.query(
+          `SELECT habit_id, value, status FROM entries WHERE date = $1`,
+          [clock.date]
+        );
+        const { rows: sent } = await db.query(
+          `SELECT habit_id, channel FROM notify_log WHERE date = $1`,
+          [clock.date]
+        );
+        const { rows: status } = await db.query(
+          `SELECT channel, ok, status, error, permanent FROM notify_status`
+        );
 
-      const already = new Set(sent.map((s) => `${s.habit_id}:${s.channel}`));
-      return {
-        id: row.id,
-        settings,
-        // Resolved once and carried, so `deliverAccount` cannot decide it again.
-        timeZone,
-        habits,
-        doneToday: answeredIds(habits, entries),
-        alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
-        // Read here rather than at write time so `recordOutcome` is only called
-        // when the news is new — see `noteOutcome` in notify-send.js, which
-        // needs the stored REASON and not merely whether it worked.
-        delivered: Object.fromEntries(status.map((s) => [s.channel, {
-          ok: s.ok === true,
-          status: s.status ?? undefined,
-          error: String(s.error ?? ''),
-          permanent: s.permanent === true,
-        }])),
-      };
-    }).catch((err) => {
+        const already = new Set(sent.map((s) => `${s.habit_id}:${s.channel}`));
+        return {
+          id: row.id,
+          settings,
+          // Resolved once and carried, so `deliverAccount` cannot decide it again.
+          timeZone,
+          habits,
+          doneToday: answeredIds(habits, entries),
+          alreadySent: (habitId, channel) => already.has(`${habitId}:${channel}`),
+          // Read here rather than at write time so `recordOutcome` is only called
+          // when the news is new — see `noteOutcome` in notify-send.js, which
+          // needs the stored REASON and not merely whether it worked.
+          delivered: Object.fromEntries(status.map((s) => [s.channel, {
+            ok: s.ok === true,
+            status: s.status ?? undefined,
+            error: String(s.error ?? ''),
+            permanent: s.permanent === true,
+          }])),
+        };
+      });
+    } catch (err) {
       // Named and counted rather than fatal. `notify.account_failed` is what
       // `runTick` logs for the delivery half of the same problem, so the two
       // read alike in a log.
       log.error?.('notify.account_failed', { user: row.id, phase: 'collect' }, err);
       return null;
-    });
+    }
+  });
 
-    if (account) accounts.push(account);
-  }
-
-  return accounts;
+  // Structural, not merely truthy: `mapWithLimit`'s own backstop stores an
+  // `Error` for any worker function that lets a rejection escape, and an
+  // `Error` is truthy — `.filter(Boolean)` kept it and handed `runTick` a fake
+  // account. The cast is for `tsc`, which cannot see `instanceof Error` as
+  // narrowing an inline predicate the way it does the `Boolean` special case.
+  return /** @type {import('@habiterall/shared/notify-send.js').NotifyAccount[]} */ (
+    results.filter((a) => a && !(a instanceof Error))
+  );
 }
 
 /**
@@ -533,9 +607,23 @@ export async function sendTest(userId, settings, deps = {}) {
 /**
  * Start the reminder loop. Entry points only.
  *
+ * `deps.startNotifier` exists for one test and is the only way to write it.
+ * The delivery limit this edition derives is read by `runTick` several layers
+ * inside the shared module, and `startNotifier` hands back only `{stop}` — so
+ * nothing observes whether `start()` passed the number along. It did not need
+ * to: deleting `deliveryConcurrency: DELIVERY_CONCURRENCY` below restores the
+ * literal 8 this replaced and leaves unit, cloud, tenancy and typecheck green.
+ * The alternative — call the real `startNotifier` in a test and inspect what it
+ * received — is not available, because it ticks IMMEDIATELY and synchronously
+ * on construction, against whatever the suite's database holds, with a real
+ * `fetch`. So the seam is here rather than a spy.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @param {{startNotifier?: typeof startNotifier}} [deps]
  * @returns {{stop: () => void} | null} null when disabled
  */
-export function start(env = process.env) {
+export function start(env = process.env, deps = {}) {
+  const begin = deps.startNotifier ?? startNotifier;
   const config = notifierConfig(env);
   if (!config.enabled) {
     log.warn('notify.disabled', { reason: 'HABITERALL_NOTIFY=off' });
@@ -551,6 +639,13 @@ export function start(env = process.env) {
     interval_ms: config.intervalMs,
     app_url: config.appUrl || '(unset)',
     max_accounts_per_tick: MAX_ACCOUNTS_PER_TICK,
+    // Both are DERIVED from `PG_POOL_MAX` and had no surface at all. An
+    // operator who sets the pool to 2 to fit a small managed Postgres silently
+    // gets a tick one account wide; one who raises it to 40 expecting a faster
+    // tick silently gets the 6/8 caps. Both are correct, and neither was
+    // discoverable from anywhere but the source.
+    collect_concurrency: COLLECT_CONCURRENCY,
+    delivery_concurrency: DELIVERY_CONCURRENCY,
     ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
   });
 
@@ -568,11 +663,19 @@ export function start(env = process.env) {
     })
     : null;
 
-  const notifier = startNotifier({
+  // Named rather than passed inline, so the wiring is observable. Everything
+  // below is a DECISION the shared suite already pins — `deliveryConcurrency:
+  // 1` serialises two Discord accounts, `2` lets them overlap — and none of
+  // that says this edition actually HANDS its derived limit over. Deleting the
+  // line below restores the literal 8 this commit was written to remove and
+  // left every suite green, which is the defect class the root `CLAUDE.md`
+  // names by hand: pinning the decision is not pinning the wiring.
+  const ctx = {
     log,
     intervalMs: config.intervalMs,
     appUrl: config.appUrl,
     botToken: config.botToken,
+    deliveryConcurrency: DELIVERY_CONCURRENCY,
     // Travels the same route `botToken` and `appUrl` already do: no reaching
     // into `process.env` from inside `shared/src` for it.
     signAnswer,
@@ -594,7 +697,9 @@ export function start(env = process.env) {
     },
     mark,
     recordOutcome,
-  });
+  };
+
+  const notifier = begin(ctx);
 
   return {
     stop() {
