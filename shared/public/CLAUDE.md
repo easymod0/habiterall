@@ -859,6 +859,17 @@ does not start on the Gregorian first.
 The tell is a header that disagrees with itself: `۱۹ تا ۲۵ مرداد ۱۴۰۵` over
 columns numbered `10 11 12`, one localised half and one not, in one row.
 
+**#132: `formatDayRange`'s ja-JP/zh-CN mismatch against the day dialog's long
+date stays as it is — a decision, not an oversight left open.** The dashboard's
+range and the day dialog's single long date legitimately format the same day
+differently in those two locales, because both are `Intl`'s own correct answer
+to two DIFFERENT questions (a two-ended range versus one long date) asked at
+each surface's own granularity — unlike the Gregorian-field bugs above, where
+both readings were answering the SAME question and one of them was simply
+wrong. Overriding one to match the other means hand-picking a format for
+languages neither of us reads, which is exactly what `formatDayRange` exists to
+avoid needing. See the comment at `formatDayRange` in `dates.js`.
+
 **`WIDTH_SAFETY` reserves; it never decides to degrade.** `estimateTextWidth`
 answers "about how wide is this", and the 1.25 margin exists so a RESERVATION is
 never short — a gutter that is short clips a word. Applied instead to a decision
@@ -869,6 +880,19 @@ fitted: measured, `weekdayChart` gave up `segunda` for a `S T Q Q S S D` axis at
 month captions in 11 of 14 non-English locales with room to spare. Over-
 reserving costs pixels; over-degrading costs the label. Both call sites now name
 which they are doing.
+
+**#132: `estimateTextWidth` no longer bills a combining mark twice.** `solid`
+(the code points that are not marks) already chose between the `LONE` and
+`JOINED` rate tables; the sum still walked every code point, so a mark was
+billed its own rate on top of the base glyph it rides on. The sum now walks
+`solid` too — one filter, used once — so a mark costs nothing beyond its
+cluster, which is what the function's doc comment always claimed. This makes
+some estimates SMALLER, the dangerous direction, so `WIDTH_SAFETY` was
+re-measured rather than carried over (`shared/test/label-widths.mjs`) and is
+safe only because #131 had already raised `LONE.indic` from a rate near 1.0 to
+1.7 — the mark-billing this removes was covering for that OLD, lower rate, not
+for a property of marks. `docs/decisions/dashboard-and-detail.md` has the
+numbers and why the two changes are coupled.
 
 **A caption that is thinned away must not be the newest one.** The drop is a
 left-to-right walk, and at the right-hand edge the collision is always with the

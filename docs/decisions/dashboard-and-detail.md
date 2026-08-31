@@ -491,3 +491,109 @@ every check written against the unfixed calendar would have passed for the
 same reason the strip's did. `Network.setBypassServiceWorker` is what makes
 the offline calendar checks in `calcheck.mjs` mean anything, for the reasons
 `stripcheck.mjs`'s own comment gives in full.
+
+## The label-width estimator's mark-billing fix, and what it forced (#132)
+
+`estimateTextWidth` and `WIDTH_SAFETY` (`shared/public/ui/dates.js`) are #131's
+own work: a per-character rate table plus a measured safety margin, so a chart
+can reserve a gutter for a label it has no DOM to measure. #132 found one more
+way that estimator was wrong, fixed it, and had to re-derive the margin because
+of it — recorded here so the dependency between the two is not re-found by
+someone reading only one of the two files.
+
+**The bug was a double penalty on a combining mark, not the rate choice.**
+`solid` (the code points that are not marks) was already used to CHOOSE
+between the `LONE` and `JOINED` rate tables — that part was right — but the
+summing loop still walked every code point, so a mark was billed at its own
+rate ON TOP of the base glyph it rides on. A 3-code-point, 2-rendered-cluster
+Devanagari word (`बुध`, "Wednesday") came out wider than a 3-glyph English one
+(`Wed`) for two glyphs against three. The fix sums over `solid` — the same
+filter, used once — so a mark costs nothing beyond the cluster it rides on,
+matching what the function's own doc comment already claimed ("reads as a lone
+glyph however many code points it takes").
+
+**This made some estimates SMALLER, which is the dangerous direction**, so
+`WIDTH_SAFETY` needed re-measuring rather than inheriting — decision 2 in the
+issue, and the reason Step 1 of it was a measurement harness built BEFORE any
+behaviour changed. `shared/test/label-widths.mjs` renders every label
+`charts.js` draws, at the six font sizes it uses, in a real Chrome, and
+compares `estimateTextWidth` against `getComputedTextLength()`. Re-run after
+the fix, across the ten `locales.mjs` locales plus **seven** added for #132:
+five for scripts that stack a combining vowel sign on a base consonant
+(`ml-IN`, `ta-IN`, `te-IN`, `kn-IN`, `gu-IN`), since none of the original ten's
+weekday/month/range labels carries a mark at all and that sweep alone could
+not have seen the case the fix is about; `he-IL` for breadth — its CLDR
+weekday/month names carry no niqqud either, so it exercises right-to-left and
+a distinct script rather than a mark; and `el-GR`, added after review, below.
+
+Review found **el-GR `Μαρ` at 1.23x**, which is the worst case and leaves 1.6%
+of headroom. It has nothing to do with marks — Greek has no class in `classOf`
+at all, so it falls through to the generic `other` rate — and it is
+pre-existing, but it is what the sixteen could not see, exactly as the original
+ten could not see Malayalam. Filed as **#286**. The lesson is the one this
+section is already about: a sweep answers for the locales in it, and the number
+it produces is only ever a lower bound on the worst case.
+
+It was found by extending the harness's locale list by hand and NOT committing
+the extension, which made the governing figure the one thing the committed
+instrument could not reproduce — `el-GR` is in `LOCALES` now, and re-running
+the harness reproduces 1.23x.
+
+**On Arabic, because two records disagree and only one can be current.**
+Master's `WIDTH_SAFETY` comment names 1.23x — Arabic `أغسطس` — as its worst
+case. This harness measures the same string at **1.19x**, and the estimate for
+it is byte-identical before and after this change (`أغسطس` carries no
+combining mark, so nothing here could have moved it). So the two figures are
+two INSTRUMENTS, not two states of the code, and master's is the one retired:
+it came from a 67-locale corpus that no longer exists in the tree and cannot be
+re-run. Every ratio recorded now is this harness's — including the 1.23x above,
+which is Greek and not Arabic. If the older sweep read systematically high, it
+read high for Greek too.
+
+**Review also found the sweep was not measuring the labels `formatStamp`
+produces**, which are the widest strings the estimator is ever handed
+(`26 de dez. de 2026`, `أغسطس ٢٠٢٦`, `2026 ജൂൺ 15`) and which reach two live
+call sites — `historyChart`'s axis budget (`charts.js:1177`, which applies no
+`WIDTH_SAFETY` at all, because it decides how many labels to DROP) and
+`frequencyChart`'s row gutter (`:1450`). They are in the harness now. Adding
+them moved `ml-IN`'s own worst case to `2026 ജൂൺ` at 1.07x and left the
+overall worst where it was.
+
+The current figures live in the comment above `WIDTH_SAFETY` itself, which is
+the one that must be updated (with a fresh harness run) if the rates or the
+sum ever change again.
+
+**The fix is only safe because of a rate change that shipped separately,
+first — #131's own recalibration of `LONE.indic` from a value near 1.0 up to
+1.7.** The mark-billing bug being removed here is what the ORIGINAL indic rate
+needed covering for: at the old, lower rate, freeing the mark made Malayalam
+`ബു` (the case a deleted regression test named directly) under-estimate badly
+— 11.0px estimated against an 18.0px real render. Re-billing the mark was a
+workaround for an under-calibrated base rate, not a property of marks
+themselves, and it is only correct to remove now because the base rate it was
+compensating for has already been fixed. Raw margin at the tightest case this
+sweep found (`ബു` at font-size 11) is 3.7% before `WIDTH_SAFETY` is even
+applied — thin, but real, and `WIDTH_SAFETY`'s own 1.25 sits on top of it. Do
+not remove the mark-billing fix without re-checking this dependency, and do
+not lower `LONE.indic` again without re-checking this fix.
+
+**Two behaviours named in the issue's own "not a bug" section are recorded at
+the code, not fixed, because neither is reachable from anywhere the app
+calls them:** `formatDayRange` throwing a `RangeError` when handed an invalid
+`Date`, and `formatStamp('2026-13')` formatting as January 2027 (`Date`'s own
+month-rollover, since `new Date(yyyy, 13 - 1, 15)` is month index 12). Every
+caller of both builds its `Date`/stamp from data this app already validated —
+`BUCKETERS` in `stats.js` never emits a month outside `01`–`12`, and
+`fromISOLocal` is only ever handed a string that passed `assertDate` or a
+device clock read — so there is no path through the API that reaches either
+input. See the comments at the two functions themselves.
+
+**`formatRange`'s ja-JP/zh-CN mismatch between the dashboard's range label and
+the day dialog's long date stays as it is — Mark's decision, not an oversight
+left for later.** Both are `Intl`'s own answer, correctly asked with each
+surface's own granularity (a two-ended RANGE versus a single LONG date), and
+they legitimately format a shared day differently in those two locales because
+the two calls ask different questions. Overriding one to match the other means
+hand-picking a format for languages neither of us reads, which is exactly the
+kind of hardcoded table `formatDayRange` exists to avoid needing. See the
+comment at `formatDayRange` in `dates.js` for the specific strings compared.
