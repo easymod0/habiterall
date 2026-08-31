@@ -126,6 +126,15 @@ const LOCALES = [
   ['kn-IN', 'Kannada — an abugida with vowel signs', true],
   ['gu-IN', 'Gujarati — an abugida with vowel signs, no headline stroke', true],
   ['he-IL', 'Hebrew — right-to-left breadth; CLDR weekday/month names carry no niqqud', true],
+  // Added after review. `dates.js`'s `WIDTH_SAFETY` comment records Greek
+  // `Μαρ` at 1.23x as the GOVERNING worst case and derives the margin's 1.6%
+  // of headroom from it — and that number was found by extending this list by
+  // hand, off to one side, and then not committing the extension. The one
+  // figure the comment tells you to re-run this file to reproduce was the one
+  // figure this file could not produce. Greek is also the case #286 is about:
+  // `classOf` has no class for it, so it falls through to the generic `other`
+  // rate against a real per-glyph rate around 0.71.
+  ['el-GR', 'Greek — no `classOf` class at all, and the governing worst case (#286)', true],
 ];
 
 /**
@@ -147,6 +156,25 @@ const datesSrc = readFileSync(join(here, '..', 'public', 'ui', 'dates.js'), 'utf
 const MONTHS = Array.from({ length: 12 }, (_, i) => `2026-${String(i + 1).padStart(2, '0')}-15`);
 
 const YEAR_SAMPLES = ['2025-06-15', '2026-06-15'];
+
+/**
+ * The stamps `formatStamp` is fed, which the harness did not measure until
+ * review pointed it out — and they are the WIDEST strings the estimator is
+ * ever asked about: `26 de dez. de 2026`, `أغسطس ٢٠٢٦`, `2026 ജൂൺ 15`.
+ *
+ * Two live call sites, and the first is why this matters more than breadth.
+ * `historyChart` (`charts.js:1177`) budgets its axis at `AXIS_SIZE` 9.5 with
+ * explicitly NO `WIDTH_SAFETY` applied — it decides how many labels to DROP,
+ * so there is no margin absorbing an under-estimate — and `frequencyChart`
+ * (`charts.js:1450`) sizes its row gutter. The month caption's right-edge
+ * clamp at `charts.js:524` and `:891` is `width - estimateTextWidth(...)`, so
+ * a smaller estimate clamps LESS and can draw the caption further right.
+ *
+ * Both shapes `formatStamp` branches on: `YYYY-MM` through `monthAndYear`,
+ * and `YYYY-MM-DD` through `formatDateShort`. The bare `YYYY` / `YYYY-Qn`
+ * third branch returns its input unchanged and is ASCII in every locale.
+ */
+const STAMPS = ['2026-06', '2026-12', '2026-06-15', '2026-12-26'];
 
 /**
  * Range pairs chosen to hit the shapes `streakChart` actually feeds
@@ -189,7 +217,7 @@ function pageScript() {
 (function () {
   ${datesSrc}
   const Dates = { weekdayNames, formatMonthShort, formatYear, formatDayRange,
-    fromISOLocal, estimateTextWidth };
+    formatStamp, fromISOLocal, estimateTextWidth };
 
   document.body.setAttribute('style', ${JSON.stringify(FONT_CSS)});
   const NS = 'http://www.w3.org/2000/svg';
@@ -205,6 +233,9 @@ function pageScript() {
   }
   for (const iso of ${JSON.stringify(YEAR_SAMPLES)}) {
     labels.push(['year', Dates.formatYear(Dates.fromISOLocal(iso))]);
+  }
+  for (const stamp of ${JSON.stringify(STAMPS)}) {
+    labels.push(['stamp', Dates.formatStamp(stamp)]);
   }
   for (const [a, b] of ${JSON.stringify(RANGES)}) {
     for (const style of ['medium', 'short']) {
@@ -258,16 +289,21 @@ const out = (s = '') => console.log(s);
 
 let mismatched = 0;
 const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: here, encoding: 'utf8' }).trim();
-out('# Label-width baseline — master, before #132');
+// NOT "master, before #132", which is what this said and what stopped being
+// true the moment the file landed beside the fix. The header describes the
+// tree it is run on and nothing else — the point of the artifact is that
+// anyone can re-run it later and compare, and a hardcoded claim about which
+// commit it measures is false for every run after the first.
+out('# Label-width baseline');
 out();
 out(`Measured ${new Date().toISOString().slice(0, 10)} at commit \`${commit}\`, ` +
-  'against `estimateTextWidth` and `WIDTH_SAFETY` as they stand on this tree ' +
-  '(no behaviour changed for this measurement — see the brief, Step 1).');
+  'against `estimateTextWidth` and `WIDTH_SAFETY` **as they stand on this tree**. ' +
+  'Re-run it after any change to the rates, the script classes, or the sum.');
 out();
 out('`estimateTextWidth` vs `getComputedTextLength()`, six sizes ' +
   `(${SIZES.join(', ')}), ${LOCALES.length} locales, ` +
-  `${7 * 3 + MONTHS.length + YEAR_SAMPLES.length + RANGES.length * 2} labels each ` +
-  '(weekday×3 widths + months + years + ranges×2 styles).');
+  `${7 * 3 + MONTHS.length + YEAR_SAMPLES.length + STAMPS.length + RANGES.length * 2} `
+  + 'labels each (weekday×3 widths + months + years + stamps + ranges×2 styles).');
 out();
 out('| locale | resolved | worst under-estimate (real/estimate) | worst over-estimate (estimate/real) |');
 out('|---|---|---|---|');
@@ -342,10 +378,15 @@ try {
     `("${overallWorstUnder.text}" @ ${overallWorstUnder.size}px, ${overallWorstUnder.locale}) ` +
     `against \`WIDTH_SAFETY = ${WIDTH_SAFETY}\`. ` +
     (overallWorstUnder.ratio > WIDTH_SAFETY
-      ? '**This EXCEEDS WIDTH_SAFETY — master is already clipping a real label in a locale ' +
-        'this sweep covers.** See the brief\'s "Stop and report if" clause.'
-      : 'This is inside the current margin, so master is not observed clipping any label ' +
+      ? '**This EXCEEDS WIDTH_SAFETY — this tree is clipping a real label in a locale ' +
+        'this sweep covers.**'
+      : 'This is inside the current margin, so this tree is not observed clipping any label ' +
         'this sweep covers.'));
+  out();
+  out('Note what "this sweep covers" excludes: a locale not in `LOCALES`, and a label '
+    + 'shape not in the loop above. Both have already been the answer once — Greek was '
+    + 'absent when 1.23x was first recorded, and `formatStamp`\'s output was absent when '
+    + 'the mark-billing change was first vouched for.');
 } finally {
   await closeChrome({ chrome, port: PORT, profile });
 }

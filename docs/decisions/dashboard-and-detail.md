@@ -518,26 +518,46 @@ issue, and the reason Step 1 of it was a measurement harness built BEFORE any
 behaviour changed. `shared/test/label-widths.mjs` renders every label
 `charts.js` draws, at the six font sizes it uses, in a real Chrome, and
 compares `estimateTextWidth` against `getComputedTextLength()`. Re-run after
-the fix, across the ten `locales.mjs` locales plus six added for #132: five
-for scripts that stack a combining vowel sign on a base consonant (`ml-IN`,
-`ta-IN`, `te-IN`, `kn-IN`, `gu-IN`), since none of the original ten's
+the fix, across the ten `locales.mjs` locales plus **seven** added for #132:
+five for scripts that stack a combining vowel sign on a base consonant
+(`ml-IN`, `ta-IN`, `te-IN`, `kn-IN`, `gu-IN`), since none of the original ten's
 weekday/month/range labels carries a mark at all and that sweep alone could
-not have seen the case the fix is about, and `he-IL` for breadth — its CLDR
+not have seen the case the fix is about; `he-IL` for breadth — its CLDR
 weekday/month names carry no niqqud either, so it exercises right-to-left and
-a distinct script rather than a mark. The worst under-estimate **across those
-sixteen** was unchanged at 1.19x (Arabic `أغسطس`, which has no mark in it
-either) — `WIDTH_SAFETY` stayed at 1.25, re-verified rather than carried over
-unchecked.
+a distinct script rather than a mark; and `el-GR`, added after review, below.
 
-Read that 1.19x as a fact about the sixteen and not about the estimator.
-Review extended the same harness further and found **el-GR `Μαρ` at 1.23x**,
-which is the real worst case and leaves 1.6% of headroom rather than 4.8%. It
-has nothing to do with marks — Greek has no class in `classOf` at all, so it
-falls through to the generic `other` rate — and it is pre-existing, but it is
-what the sixteen could not see, exactly as the original ten could not see
-Malayalam. Filed as #286. The lesson is the one this section is already about:
-a sweep answers for the locales in it, and the number it produces is only ever
-a lower bound on the worst case.
+Review found **el-GR `Μαρ` at 1.23x**, which is the worst case and leaves 1.6%
+of headroom. It has nothing to do with marks — Greek has no class in `classOf`
+at all, so it falls through to the generic `other` rate — and it is
+pre-existing, but it is what the sixteen could not see, exactly as the original
+ten could not see Malayalam. Filed as **#286**. The lesson is the one this
+section is already about: a sweep answers for the locales in it, and the number
+it produces is only ever a lower bound on the worst case.
+
+It was found by extending the harness's locale list by hand and NOT committing
+the extension, which made the governing figure the one thing the committed
+instrument could not reproduce — `el-GR` is in `LOCALES` now, and re-running
+the harness reproduces 1.23x.
+
+**On Arabic, because two records disagree and only one can be current.**
+Master's `WIDTH_SAFETY` comment names 1.23x — Arabic `أغسطس` — as its worst
+case. This harness measures the same string at **1.19x**, and the estimate for
+it is byte-identical before and after this change (`أغسطس` carries no
+combining mark, so nothing here could have moved it). So the two figures are
+two INSTRUMENTS, not two states of the code, and master's is the one retired:
+it came from a 67-locale corpus that no longer exists in the tree and cannot be
+re-run. Every ratio recorded now is this harness's — including the 1.23x above,
+which is Greek and not Arabic. If the older sweep read systematically high, it
+read high for Greek too.
+
+**Review also found the sweep was not measuring the labels `formatStamp`
+produces**, which are the widest strings the estimator is ever handed
+(`26 de dez. de 2026`, `أغسطس ٢٠٢٦`, `2026 ജൂൺ 15`) and which reach two live
+call sites — `historyChart`'s axis budget (`charts.js:1177`, which applies no
+`WIDTH_SAFETY` at all, because it decides how many labels to DROP) and
+`frequencyChart`'s row gutter (`:1450`). They are in the harness now. Adding
+them moved `ml-IN`'s own worst case to `2026 ജൂൺ` at 1.07x and left the
+overall worst where it was.
 
 The current figures live in the comment above `WIDTH_SAFETY` itself, which is
 the one that must be updated (with a fresh harness run) if the rates or the
@@ -547,12 +567,12 @@ sum ever change again.
 first — #131's own recalibration of `LONE.indic` from a value near 1.0 up to
 1.7.** The mark-billing bug being removed here is what the ORIGINAL indic rate
 needed covering for: at the old, lower rate, freeing the mark made Malayalam
-`ബু` (the case a deleted regression test named directly) under-estimate badly
+`ബു` (the case a deleted regression test named directly) under-estimate badly
 — 11.0px estimated against an 18.0px real render. Re-billing the mark was a
 workaround for an under-calibrated base rate, not a property of marks
 themselves, and it is only correct to remove now because the base rate it was
 compensating for has already been fixed. Raw margin at the tightest case this
-sweep found (`ബু` at font-size 11) is 3.7% before `WIDTH_SAFETY` is even
+sweep found (`ബു` at font-size 11) is 3.7% before `WIDTH_SAFETY` is even
 applied — thin, but real, and `WIDTH_SAFETY`'s own 1.25 sits on top of it. Do
 not remove the mark-billing fix without re-checking this dependency, and do
 not lower `LONE.indic` again without re-checking this fix.

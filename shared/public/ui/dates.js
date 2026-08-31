@@ -474,11 +474,17 @@ function classOf(ch) {
  * pt-PT and `Jumamosi` in sw-KE, and the last two overflowed a fixed 34px
  * gutter and rendered as `omingo` and `umamosi`.
  *
- * The rates are MEASURED, against `getComputedTextLength()` over 22,512 label
- * renderings — every weekday, month, month-and-year and range this app draws,
- * in 67 locales at the six sizes the charts use. Across the 20,100 that are
- * real labels rather than probes, none is under-estimated by more than
- * `WIDTH_SAFETY`.
+ * The rates are MEASURED, against `getComputedTextLength()` in a real Chrome.
+ * **`WIDTH_SAFETY`'s comment below is where the current measurement is
+ * recorded, and it is the only one this function is covered by.** Do not
+ * restate a coverage figure here: this comment used to carry one — 22,512
+ * renderings in 67 locales, "none under-estimated by more than
+ * `WIDTH_SAFETY`" — and #132 changed how the sum bills a mark-bearing word,
+ * in the UNDER-estimating direction, without that sentence moving. It then
+ * read as a current guarantee, over 51 locales nobody re-swept, sitting
+ * directly above the loop that had invalidated it and twelve lines above a
+ * replacement that says it supersedes nothing. The next reader cites the one
+ * attached to the function, so the function carries no number.
  *
  * @param {string} text
  * @param {number} fontSize
@@ -495,9 +501,20 @@ export function estimateTextWidth(text, fontSize) {
   // sees. Summing over `solid` — the same filter, once — bills one rendered
   // cluster per non-mark code point and nothing extra for what rides on it.
   const solid = chars.filter((ch) => !COMBINING.test(ch));
+  // A string of NOTHING BUT marks bills as one cluster rather than as zero.
+  // Summing over `solid` is what makes a mark free, and free is right when it
+  // rides on a base glyph that was billed; with no base glyph at all the same
+  // sum answers 0 for a non-empty string, and 0 is not an estimate — it is a
+  // label two call sites would treat as occupying no space (`charts.js:524`'s
+  // right-edge clamp, and `fits()` at `:1262`). Nothing can reach it today:
+  // every argument here is `Intl` output, and no locale's weekday, month or
+  // range label is a bare mark. Closed anyway, because it costs one line and
+  // the alternative is a comment asserting unreachability about a function
+  // whose inputs are chosen by CLDR rather than by this repo.
+  const billed = solid.length ? solid : chars.slice(0, 1);
   const rate = solid.length <= 2 ? LONE : JOINED;
   let ems = 0;
-  for (const ch of solid) ems += rate[classOf(ch)];
+  for (const ch of billed) ems += rate[classOf(ch)];
   return ems * fontSize;
 }
 
@@ -511,48 +528,75 @@ export function estimateTextWidth(text, fontSize) {
  * how `estimateTextWidth` sums a mark-bearing word (by rendered cluster
  * rather than by code point), which makes some estimates SMALLER — the
  * dangerous direction, since under-reserving clips a word — so the margin
- * needed re-deriving rather than inheriting. `shared/test/label-widths.mjs`
- * measures the fixed estimator against `getComputedTextLength()` in a real
- * Chrome, over the **16** locales `locales.mjs`'s 10 plus six added for
- * #132: five for this mark-billing change specifically (`ml-IN`, `ta-IN`,
- * `te-IN`, `kn-IN`, `gu-IN`) — the original ten's weekday/month/range labels
- * carry no combining mark at all, so a sweep of them alone could not have
- * seen the exact case (Malayalam `ബু`, the deleted test's own string) the
- * mark-sum change is about — and `he-IL` for breadth, since its own CLDR
- * weekday/month names carry no niqqud either. Of those 16, 15 have CLDR data
- * in this Chrome build (`ne-NP` resolves but falls back to ASCII names), at
- * the six font sizes the charts use, across every weekday/month/year/range
- * label this app draws — 4,050 renderings, not the 20,100-over-67-locales
- * figure an earlier comment here cited, which this file makes no claim to
- * reproduce or supersede.
+ * needed re-deriving rather than inheriting.
  *
- * The worst under-estimate found is 1.23x — Greek `Μαρ` at 9.5px (real
- * 20.3px, estimate 16.5px) — found by extending the harness's own locale list
- * to `el-GR`, which #132's original sweep did not include. This is
+ * `shared/test/label-widths.mjs` is the instrument, and everything below is
+ * reproducible by running it: `node shared/test/label-widths.mjs`. It measures
+ * this file's estimator against `getComputedTextLength()` in a real Chrome,
+ * over **17** locales at the six font sizes the charts use, across 49 labels
+ * each — every weekday, month, year, month-stamp and range this app draws.
+ * Of the 17, 16 have CLDR data in this Chrome build (`ne-NP` resolves but
+ * falls back to ASCII names).
+ *
+ * The locale list is `locales.mjs`'s 10 plus seven. Five (`ml-IN`, `ta-IN`,
+ * `te-IN`, `kn-IN`, `gu-IN`) are for this mark-billing change specifically —
+ * the original ten's labels carry no combining mark at all, so a sweep of
+ * them alone could not have seen the exact case (Malayalam `ബു`, the deleted
+ * test's own string) the change reasons about. `he-IL` is breadth: CLDR's
+ * Hebrew weekday and month names carry no niqqud either. `el-GR` is the
+ * seventh and was added after review, for the reason below.
+ *
+ * **The worst under-estimate is 1.23x — Greek `Μαρ` at 9.5px (real 20.3px,
+ * estimate 16.5px).** Against 1.25 that leaves 1.6% of headroom. It is
  * PRE-EXISTING and not caused by the mark-billing fix: `Μαρ` carries no
  * combining mark, and the cause is not a rate that needs re-measuring but a
- * script `classOf` has no class for at all — Greek (`Ͱ`-`Ͽ`) sits
- * below `SEMITIC`'s `֐`-`ࣿ` and above every other script test, so it
- * falls through all of them to the generic `other` rate (0.58 joined) against
- * a real per-glyph rate measured around 0.71. Against `WIDTH_SAFETY = 1.25`
- * that leaves 1.6% of headroom, not the 4.8% an earlier version of this
- * comment claimed from a since-superseded worst case (Arabic `أغسطس` at 8px,
- * 1.19x, whose letters join more tightly than the per-character rate can
- * express — still true, just no longer the worst). The worst case among the
- * five mark-heavy additions is Malayalam's `ബুধൻ` at 1.05x, comfortably
- * inside the margin; `he-IL` is the sixth addition and, having no niqqud on
- * its CLDR weekday/month names, contributes breadth rather than a mark case.
- * `ബু` alone (the deleted test's exact string) is not an under-estimate at
- * all — 18.7px estimated against 18.03px real at font-size 11, a raw 3.7%
- * margin before this 1.25 is even applied. That margin is thin only because
- * `#131` already re-measured `LONE.indic` up to 1.7 (from a rate the deleted
- * test's own numbers imply was closer to 1.0); freeing the mark on TOP of the
- * old, lower rate is what the deleted test's under-estimate came from, and
- * re-billing it was a workaround for that rate rather than a property of
- * marks. Do not widen this margin to cover Greek — issue #286 is the missing
- * script class, which is where the fix belongs. Re-run the harness and update
- * this comment again if a future change to the rates, the classes, or the sum
- * moves this number.
+ * script `classOf` has no class for at all — Greek (`Ͱ`-`Ͽ`) sits below
+ * `SEMITIC`'s `֐`-`ࣿ` and above every other script test, so it falls
+ * through to the generic `other` rate (0.58 joined) against a real per-glyph
+ * rate around 0.71. Do not widen this margin to cover Greek: **#286** is the
+ * missing script class, which is where the fix belongs.
+ *
+ * That number was originally found by extending the harness's locale list by
+ * hand and not committing the extension, so the one figure this comment tells
+ * you to re-run the harness for was the one figure the harness could not
+ * produce. `el-GR` is in `LOCALES` now.
+ *
+ * **On the Arabic figure, which two records disagree about.** Master's
+ * version of this comment names 1.23x — Arabic `أغسطس` as the worst case.
+ * This harness measures that same string at **1.19x** (real 29.4, estimate
+ * 24.8, at 8px), and the estimate for it is byte-identical before and after
+ * #132 — `أغسطس` carries no combining mark, so nothing in this change could
+ * have moved it. The two figures are therefore two different INSTRUMENTS, not
+ * two states of the code, and master's is the one being retired: it came from
+ * a corpus (the 67-locale sweep) that no longer exists in the tree and cannot
+ * be re-run. Read every ratio here as this harness's, including the 1.23x
+ * above — if the older sweep was systematically higher, it was higher for
+ * Greek too. Arabic remains a genuine near-miss for a reason worth keeping:
+ * its letters join more tightly than a per-character rate can express.
+ *
+ * The worst case among the five mark-heavy additions is Malayalam's `ബുധൻ`
+ * at 1.05x, comfortably inside the margin. `ബു` alone (the deleted test's
+ * exact string) is not an under-estimate at all — 18.7px estimated against
+ * 18.03px real at font-size 11, a raw 3.7% margin before this 1.25 is
+ * applied. That margin is thin only because #131 already re-measured
+ * `LONE.indic` up to 1.7 (from a rate the deleted test's own numbers imply
+ * was closer to 1.0); freeing the mark on TOP of the old, lower rate is what
+ * the deleted test's under-estimate came from, and re-billing it was a
+ * workaround for that rate rather than a property of marks.
+ *
+ * **`formatStamp`'s output is in the sweep, and was not until review.** The
+ * harness claimed to measure "every label `charts.js` draws" while omitting
+ * the widest strings the estimator is ever handed — `26 de dez. de 2026`,
+ * `أغسطس ٢٠٢٦`, `2026 ജൂൺ 15`. That matters at `charts.js:1177`, where
+ * `historyChart` budgets its axis with explicitly NO `WIDTH_SAFETY` applied
+ * because it decides how many labels to DROP, so no margin absorbs an
+ * under-estimate there; and at `:524` / `:891`, where a smaller estimate
+ * clamps the month caption LESS. Adding those labels moved `ml-IN`'s own
+ * worst case to `2026 ജൂൺ` at 1.07x and did not move the overall worst,
+ * which is still Greek.
+ *
+ * Re-run the harness and update this comment if a future change to the rates,
+ * the classes, or the sum moves any of these numbers.
  *
  * Deliberately separate from `estimateTextWidth`, which answers "how wide is
  * this, roughly". Folding the margin in made the estimate wrong in the other

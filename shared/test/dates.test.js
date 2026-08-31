@@ -277,7 +277,7 @@ test('a mark-bearing cluster is still estimated at or above what Chrome actually
   //
   // The mark billing this replaces existed because, at the rates that
   // shipped alongside it, freeing the mark under-estimated Malayalam
-  // ബু — 18.0px real at font-size 11 against an 11.0px estimate,
+  // ബു — 18.0px real at font-size 11 against an 11.0px estimate,
   // the worst under-estimate in that era's whole corpus. #131 has since
   // re-measured `LONE.indic` from a rate near 1.0 up to 1.7, which alone
   // clears that same real width (18.7px estimated, no mark billing needed) —
@@ -296,11 +296,16 @@ test('a mark-bearing cluster is still estimated at or above what Chrome actually
   // A second mark-bearing cluster, from a script at the OTHER end of the
   // range: Devanagari's vowel sign attaches below the consonant with no
   // measured advance at all — बु and ब alone both render
-  // 6.28px at font-size 11 in Chrome — so this case has far more headroom
-  // than Malayalam's. Included so this test is not a single sample, and so a
-  // rate cut affecting `indic` generally (rather than something
-  // Malayalam-specific) is still caught here even though Malayalam is the
-  // tight case.
+  // 6.28px at font-size 11 in Chrome.
+  //
+  // **It is a second SAMPLE, not a second catch, and an earlier version of
+  // this comment claimed otherwise.** The estimate is 18.7 against a real
+  // 6.28 — a 3x margin — so `LONE.indic` would have to fall from 1.7 to
+  // below 0.57 before this line reddens, while the Malayalam assertion
+  // above fires at 1.64. Any rate cut that reaches this one has already
+  // failed that one. What it does buy is breadth: it is a different script
+  // and a different mark, so a change that special-cases Malayalam's own
+  // block rather than the rate would be visible here.
   const REAL_DEVA_BU_AT_11 = 6.28; // getComputedTextLength(), Chrome for Testing 152
   const devaEstimate = estimateTextWidth('बु', 11);
   assert.ok(devaEstimate >= REAL_DEVA_BU_AT_11,
@@ -355,6 +360,17 @@ test('a label width is estimated generously, never meanly', () => {
   assert.ok(estimateTextWidth('Mon', 10.5) > 0);
   assert.equal(estimateTextWidth('', 10.5), 0);
   assert.ok(estimateTextWidth('Jumamosi', 10.5) > estimateTextWidth('Mon', 10.5));
+
+  // A NON-EMPTY string is never zero, even with no base glyph in it. Summing
+  // over the non-mark code points is what makes a mark free — right when it
+  // rides on a base glyph that was billed, and an answer of 0 when there is
+  // no base glyph at all. Zero is not an estimate: `charts.js:524`'s
+  // right-edge clamp and `fits()` at `:1262` would both treat such a label as
+  // occupying no space. Asserted apart from the empty string above, which
+  // must stay 0.
+  assert.ok(estimateTextWidth('ुु', 11) > 0,
+    'a string of nothing but combining marks still occupies space');
+  assert.equal(estimateTextWidth('', 11), 0, 'but an empty string does not');
 
   // A square CJK glyph against a Latin capital.
   assert.ok(estimateTextWidth('\u6708', 10.5) > estimateTextWidth('M', 10.5));
