@@ -70,7 +70,8 @@ const MAX_ACCOUNTS_PER_TICK = Number(process.env.NOTIFY_MAX_ACCOUNTS) || 500;
  * A hardcoded number would silently starve the API the moment an operator set
  * `PG_POOL_MAX` below what it assumed.
  */
-const COLLECT_CONCURRENCY = Math.max(1, Math.min(6, Math.floor((pool.options?.max ?? 10) / 2)));
+export const COLLECT_CONCURRENCY =
+  Math.max(1, Math.min(6, Math.floor((pool.options?.max ?? 10) / 2)));
 
 /**
  * How many accounts `runTick` (`@habiterall/shared/notify-send.js`) delivers
@@ -95,7 +96,8 @@ const COLLECT_CONCURRENCY = Math.max(1, Math.min(6, Math.floor((pool.options?.ma
  * the default pool sees the derivation only shrink the number when the pool
  * itself is the constraint, never raise it past what always ran.
  */
-const DELIVERY_CONCURRENCY = Math.max(1, Math.min(8, Math.floor((pool.options?.max ?? 10) / 2)));
+export const DELIVERY_CONCURRENCY =
+  Math.max(1, Math.min(8, Math.floor((pool.options?.max ?? 10) / 2)));
 
 /**
  * The accounts with something for this server to deliver.
@@ -605,9 +607,23 @@ export async function sendTest(userId, settings, deps = {}) {
 /**
  * Start the reminder loop. Entry points only.
  *
+ * `deps.startNotifier` exists for one test and is the only way to write it.
+ * The delivery limit this edition derives is read by `runTick` several layers
+ * inside the shared module, and `startNotifier` hands back only `{stop}` — so
+ * nothing observes whether `start()` passed the number along. It did not need
+ * to: deleting `deliveryConcurrency: DELIVERY_CONCURRENCY` below restores the
+ * literal 8 this replaced and leaves unit, cloud, tenancy and typecheck green.
+ * The alternative — call the real `startNotifier` in a test and inspect what it
+ * received — is not available, because it ticks IMMEDIATELY and synchronously
+ * on construction, against whatever the suite's database holds, with a real
+ * `fetch`. So the seam is here rather than a spy.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @param {{startNotifier?: typeof startNotifier}} [deps]
  * @returns {{stop: () => void} | null} null when disabled
  */
-export function start(env = process.env) {
+export function start(env = process.env, deps = {}) {
+  const begin = deps.startNotifier ?? startNotifier;
   const config = notifierConfig(env);
   if (!config.enabled) {
     log.warn('notify.disabled', { reason: 'HABITERALL_NOTIFY=off' });
@@ -623,6 +639,13 @@ export function start(env = process.env) {
     interval_ms: config.intervalMs,
     app_url: config.appUrl || '(unset)',
     max_accounts_per_tick: MAX_ACCOUNTS_PER_TICK,
+    // Both are DERIVED from `PG_POOL_MAX` and had no surface at all. An
+    // operator who sets the pool to 2 to fit a small managed Postgres silently
+    // gets a tick one account wide; one who raises it to 40 expecting a faster
+    // tick silently gets the 6/8 caps. Both are correct, and neither was
+    // discoverable from anywhere but the source.
+    collect_concurrency: COLLECT_CONCURRENCY,
+    delivery_concurrency: DELIVERY_CONCURRENCY,
     ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
   });
 
@@ -640,7 +663,14 @@ export function start(env = process.env) {
     })
     : null;
 
-  const notifier = startNotifier({
+  // Named rather than passed inline, so the wiring is observable. Everything
+  // below is a DECISION the shared suite already pins — `deliveryConcurrency:
+  // 1` serialises two Discord accounts, `2` lets them overlap — and none of
+  // that says this edition actually HANDS its derived limit over. Deleting the
+  // line below restores the literal 8 this commit was written to remove and
+  // left every suite green, which is the defect class the root `CLAUDE.md`
+  // names by hand: pinning the decision is not pinning the wiring.
+  const ctx = {
     log,
     intervalMs: config.intervalMs,
     appUrl: config.appUrl,
@@ -667,7 +697,9 @@ export function start(env = process.env) {
     },
     mark,
     recordOutcome,
-  });
+  };
+
+  const notifier = begin(ctx);
 
   return {
     stop() {

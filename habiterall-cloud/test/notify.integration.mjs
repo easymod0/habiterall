@@ -686,6 +686,61 @@ try {
         a?.id !== undefined && Array.isArray(a?.habits) && a.habits.length > 0),
     JSON.stringify(concurrencySurvivors.map((a) => ({ id: a?.id, habits: a?.habits?.length }))));
 
+  /* ---------- the two derived limits, and that start() hands one over ---------- */
+
+  // Everything above pins DECISIONS. The shared suite pins them harder — a
+  // `deliveryConcurrency` of 1 serialises two different-webhook Discord
+  // accounts and 2 lets them overlap, and both would fail if `runTick` ignored
+  // `ctx`. None of it says this edition derives the number or passes it on:
+  // deleting `deliveryConcurrency: DELIVERY_CONCURRENCY` from `start()`
+  // restored the literal 8 the fix-round commit was written to remove, and
+  // left unit, cloud, tenancy and typecheck all green.
+  console.log('\n--- the derived concurrency limits, and the wiring ---');
+
+  const poolMax = pool.options?.max ?? 10;
+  // The arithmetic as literals, not as a second copy of the expression: a test
+  // that restates `Math.max(1, Math.min(6, ...))` passes against any edit that
+  // changes both it and the source together. The caps differ on purpose — a
+  // collect worker holds its checkout across a whole four-query read, a
+  // delivery worker only for one `mark`/`recordOutcome` write.
+  check('COLLECT_CONCURRENCY is half the pool, floored at 1 and capped at 6',
+    notifier.COLLECT_CONCURRENCY === Math.min(6, Math.max(1, Math.floor(poolMax / 2))),
+    `pool max ${poolMax} -> ${notifier.COLLECT_CONCURRENCY}`);
+  check('DELIVERY_CONCURRENCY is the same fraction, capped at 8 instead',
+    notifier.DELIVERY_CONCURRENCY === Math.min(8, Math.max(1, Math.floor(poolMax / 2))),
+    `pool max ${poolMax} -> ${notifier.DELIVERY_CONCURRENCY}`);
+  // Never zero, whatever an operator sets: `mapWithLimit`'s floor is the last
+  // line of defence and this is the first.
+  check('neither can be 0, which mapWithLimit would have to rescue',
+    notifier.COLLECT_CONCURRENCY >= 1 && notifier.DELIVERY_CONCURRENCY >= 1,
+    `${notifier.COLLECT_CONCURRENCY} / ${notifier.DELIVERY_CONCURRENCY}`);
+
+  // The wiring itself: the object `start()` hands `startNotifier`.
+  //
+  // Through the injection seam rather than by calling the real thing and
+  // watching. `startNotifier` ticks IMMEDIATELY and synchronously on
+  // construction — against this suite's own database, with a real `fetch`, and
+  // the fixtures here carry a Discord webhook URL — so letting it run would
+  // put a live request on the network and race the pool teardown below.
+  let handedOver = null;
+  const started = notifier.start(
+    { ...process.env, HABITERALL_NOTIFY: 'on' },
+    { startNotifier: (ctx) => { handedOver = ctx; return { stop: () => {} }; } }
+  );
+  started?.stop();
+
+  check('start() hands startNotifier the DERIVED delivery limit, not a literal',
+    handedOver?.deliveryConcurrency === notifier.DELIVERY_CONCURRENCY,
+    `ctx carried ${JSON.stringify(handedOver?.deliveryConcurrency)}, `
+    + `constant is ${notifier.DELIVERY_CONCURRENCY}`);
+  // Guards the guard. If `DELIVERY_CONCURRENCY` ever equalled the 8 it
+  // replaces, the check above would pass against the literal the commit was
+  // written to remove. On the default pool of 10 it is 5, so the two differ,
+  // and saying so is what makes the check above mean anything.
+  check('...and on this pool that number is not the 8 it replaced',
+    notifier.DELIVERY_CONCURRENCY !== 8,
+    `pool max ${poolMax} -> ${notifier.DELIVERY_CONCURRENCY}`);
+
   console.log(fails === 0 ? '\nALL CLOUD NOTIFY CHECKS PASSED' : `\n${fails} CHECK(S) FAILED`);
 } finally {
   await admin.end();

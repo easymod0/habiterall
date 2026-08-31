@@ -1110,11 +1110,20 @@ letting the fan-out send ntfy in parallel would make that shared bucket worse,
 not just unprotected. `gatedByHost` (`shared/src/notify-send.js`) is the fix: a
 module-level map from host to its tail promise, and an ntfy send (its
 `Retry-After` retry included) queues behind whatever else is already sending to
-that same host before it starts, so at most one is ever in flight per host.
-Keyed on the host rather than one instance-wide gate, because two accounts on
-different self-hosted ntfy servers share no bucket and queuing one behind the
-other would slow a healthy destination to punish a busy one it has nothing to
-do with.
+that same host before it starts, so at most one is ever in flight per host
+**in the tick**. Not instance-wide, and the difference is one path: `sendTest`
+calls `sendToChannel` directly and never touches `gatedByHost`, so a press of
+the settings dialog's test button is an ntfy send in flight outside the gate.
+Small blast radius — it is one deliberate press — but do not size the delivery
+limit against the sentence without the qualifier. Keyed on the host rather than
+one instance-wide gate, because two accounts on different self-hosted ntfy
+servers share no bucket and queuing one behind the other would slow a healthy
+destination to punish a busy one it has nothing to do with.
+
+The wait it imposes is reported as `queued_ms` on `notify.sent` /
+`notify.failed`, apart from `ms`: folding it in made the tenth account of ten
+report a multi-second send with `throttled: false`, which reads as a failing
+destination rather than as the gate working.
 
 ## Traps
 

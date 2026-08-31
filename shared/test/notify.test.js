@@ -2189,6 +2189,27 @@ test('mapWithLimit: a limit of 0 still processes every item, rather than silentl
   assert.deepEqual(out, [2, 4, 6]);
 });
 
+test('mapWithLimit: a NaN limit does too, which Math.max alone did NOT give', async () => {
+  // The half the test above cited in its own comment and did not cover.
+  // `Math.max` PROPAGATES NaN rather than ignoring it, so the original
+  // `Math.max(1, Math.min(NaN, 3))` was NaN, `w < NaN` is false, zero workers
+  // were spawned, and this returned `[undefined, undefined, undefined]` — the
+  // exact silent shape both comments say is prevented. Asserted as the mapped
+  // values rather than as a length, because the holes ARE full length.
+  const out = await mapWithLimit([1, 2, 3], NaN, async (item) => item * 2);
+  assert.deepEqual(out, [2, 4, 6]);
+
+  // The two spellings a misconfigured pool size actually arrives as. `??` does
+  // not catch NaN and neither does a truthiness test on `undefined` once a
+  // default has been applied, so both reach the guard rather than a fallback.
+  assert.deepEqual(await mapWithLimit([1, 2], Number('nope'), async (i) => i), [1, 2]);
+  assert.deepEqual(await mapWithLimit([1, 2], undefined, async (i) => i), [1, 2]);
+
+  // Infinity is finite-adjacent and must NOT be floored to one worker: it is
+  // "no bound", and `Math.min(Infinity, n)` is already the right answer.
+  assert.deepEqual(await mapWithLimit([1, 2, 3], Infinity, async (i) => i), [1, 2, 3]);
+});
+
 // The per-host ntfy gate. Delivery now fans out across accounts (`runTick`),
 // and this is the guard that stops that fan-out from turning into ten
 // requests at once against ntfy.sh's one shared bucket. The ordinary

@@ -492,12 +492,24 @@ export async function sendToChannel(channel, args, deps = {}) {
 export async function mapWithLimit(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
-  // `Math.max(1, ...)` because `limit` can be 0 or NaN — both callers derive
-  // theirs from a pool size, and a misconfigured or absent one must not turn
-  // into zero workers: with none spawned, `Promise.all([])` resolves at once
-  // and this returns a full-length array of holes with no error at all, which
-  // a caller's `.filter(Boolean)` quietly turns into "nothing was due".
-  const workerCount = Math.max(1, Math.min(limit, items.length));
+  // A floor of 1, because `limit` can be 0 or NaN — both callers derive theirs
+  // from a pool size, and a misconfigured or absent one must not turn into zero
+  // workers: with none spawned, `Promise.all([])` resolves at once and this
+  // returns a full-length array of holes with no error at all, which a caller's
+  // `.filter(Boolean)` quietly turns into "nothing was due" — every account's
+  // reminders stopped, `accounts: 0` in the tick log, and no error line
+  // anywhere.
+  //
+  // `Math.max` is NOT the guard for the NaN half and this line used to claim it
+  // was: `Math.max` PROPAGATES NaN rather than ignoring it, so
+  // `Math.max(1, Math.min(NaN, 3))` is NaN, `w < NaN` is false, and the loop
+  // below produced exactly the outcome the paragraph above says it prevents.
+  // Nothing reaches it today — cloud's producer is `Number(PG_POOL_MAX) || 10`
+  // and personal passes nothing and gets the `?? 8` default — but `??` does not
+  // catch NaN either, so one `||` in another workspace was the whole defence
+  // while the comment told the next person this line already covered it.
+  const bounded = Number.isFinite(limit) ? limit : 1;
+  const workerCount = Math.max(1, Math.min(bounded, items.length));
   const workers = [];
   for (let w = 0; w < workerCount; w++) {
     workers.push((async () => {
@@ -734,6 +746,16 @@ export async function deliverAccount(account, ctx) {
       };
       const startedAt = Date.now();
       let throttled = false;
+      // Where the SEND actually began, which is not where this item did once
+      // `gatedByHost` is in front of it. Ten accounts on ntfy.sh due in the
+      // same minute make the last one wait for the nine ahead, and folding
+      // that into `ms` reported a multi-second send with `throttled: false` —
+      // which reads as a slow or failing destination rather than as the gate
+      // working exactly as designed. `throttled` exists so the pre-existing
+      // `Retry-After` sleep is not mistaken for latency; the new wait gets
+      // `queued_ms` for the same reason. Equal to `startedAt` when there is no
+      // gate, so `queued_ms` is 0 on every Discord send.
+      let sendStartedAt = startedAt;
 
       // Discord's limit is a handful of posts every couple of seconds, so a
       // morning where five habits come due at once can trip it. Honouring the
@@ -765,6 +787,7 @@ export async function deliverAccount(account, ctx) {
       // a host of its own never queues behind ntfy.sh's traffic, or anyone
       // else's.
       const send = async () => {
+        sendStartedAt = Date.now();
         let result = await sendToChannel(channel, payload, { fetch: ctx.fetch });
         if (result.retryAfterMs) {
           throttled = true;
@@ -788,7 +811,8 @@ export async function deliverAccount(account, ctx) {
         // A handful a day per user, and the only positive proof delivery works.
         log.info?.('notify.sent', {
           channel, habit: item.habit.id, user: account.id, date: item.date,
-          at: item.time, mode: result.mode, ms: Date.now() - startedAt, throttled,
+          at: item.time, mode: result.mode, ms: Date.now() - sendStartedAt,
+          queued_ms: sendStartedAt - startedAt, throttled,
         });
         continue;
       }
@@ -811,7 +835,8 @@ export async function deliverAccount(account, ctx) {
       log.warn?.('notify.failed', {
         channel, habit: item.habit.id, user: account.id, date: item.date,
         permanent: !!result.permanent, status: result.status,
-        reason: result.error, ms: Date.now() - startedAt,
+        reason: result.error, ms: Date.now() - sendStartedAt,
+        queued_ms: sendStartedAt - startedAt,
       });
     }
   }
