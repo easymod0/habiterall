@@ -382,6 +382,13 @@ const WIDE =
 // Arabic, Hebrew, Thaana, Syriac — cursive, and NARROW once joined.
 const SEMITIC = /[\u0590-\u08FF]/;
 
+// Greek and Coptic, whole block. Greek Extended (polytonic, ἀ-῿) is
+// deliberately excluded: rating it at this class's 0.72 would under-estimate
+// it 1.58x, outside WIDTH_SAFETY, so one class cannot serve both. See
+// WIDTH_SAFETY below for the measurement — quote that figure and not a ratio
+// of the two blocks' maxima, which is a different and easily confused number.
+const GREEK = /[\u0370-\u03FF]/;
+
 // Indic. The widest of the alphabetic scripts here.
 const INDIC = /[\u0900-\u0DFF]/;
 
@@ -437,14 +444,14 @@ const UPPER = /[A-Z]/;
 const LONE = {
   wide: 1, semitic: 1.25, indic: 1.7, thaiLao: 0.7, broad: 1,
   mark: 0.5, space: 0.3, digit: 0.7, wideDigit: 0.96, punct: 0.4,
-  upper: 0.95, other: 0.8,
+  upper: 0.95, other: 0.8, greek: 0.8,
 };
 
 /** Rates inside a word, where glyphs shape, join and kern. */
 const JOINED = {
   wide: 1, semitic: 0.62, indic: 1.15, thaiLao: 0.55, broad: 0.95,
   mark: 0.35, space: 0.3, digit: 0.6, wideDigit: 0.88, punct: 0.25,
-  upper: 0.95, other: 0.58,
+  upper: 0.95, other: 0.58, greek: 0.72,
 };
 
 function classOf(ch) {
@@ -454,6 +461,10 @@ function classOf(ch) {
   // BROAD's — so asking about the script first bills a numeral as a letter.
   if (DIGIT.test(ch)) return NARROW_DIGIT.test(ch) ? 'digit' : 'wideDigit';
   if (WIDE.test(ch)) return 'wide';
+  // BEFORE SEMITIC: SEMITIC's range starts above Greek's (`֐` vs
+  // `Ͱ`), so without this Greek fell through every script test to the
+  // generic `other` rate. That was the whole bug (#286).
+  if (GREEK.test(ch)) return 'greek';
   if (SEMITIC.test(ch)) return 'semitic';
   if (INDIC.test(ch)) return 'indic';
   if (THAI_LAO.test(ch)) return 'thaiLao';
@@ -546,20 +557,192 @@ export function estimateTextWidth(text, fontSize) {
  * Hebrew weekday and month names carry no niqqud either. `el-GR` is the
  * seventh and was added after review, for the reason below.
  *
- * **The worst under-estimate is 1.23x — Greek `Μαρ` at 9.5px (real 20.3px,
- * estimate 16.5px).** Against 1.25 that leaves 1.6% of headroom. It is
- * PRE-EXISTING and not caused by the mark-billing fix: `Μαρ` carries no
- * combining mark, and the cause is not a rate that needs re-measuring but a
- * script `classOf` has no class for at all — Greek (`Ͱ`-`Ͽ`) sits below
- * `SEMITIC`'s `֐`-`ࣿ` and above every other script test, so it falls
- * through to the generic `other` rate (0.58 joined) against a real per-glyph
- * rate around 0.71. Do not widen this margin to cover Greek: **#286** is the
- * missing script class, which is where the fix belongs.
+ * **#286 (Greek): fixed.** `classOf` had no class for Greek at all — Greek
+ * (`Ͱ`-`Ͽ`) sits below `SEMITIC`'s `֐`-`ࣿ` and above every other
+ * script test, so every Greek code point fell through to the generic `other`
+ * rate. A `GREEK` class now sits above `SEMITIC`, tested first for that
+ * reason. `Μαρ` at 9.5px is real 20.25px against an estimate of 20.52px —
+ * no longer an under-estimate at all.
  *
- * That number was originally found by extending the harness's locale list by
- * hand and not committing the extension, so the one figure this comment tells
+ * The rates: `JOINED.greek = 0.72`, `LONE.greek = 0.8`, measured with
+ * `getComputedTextLength()` over the whole Greek and Coptic block (129
+ * letters, non-mark) at the six sizes `charts.js` uses, flat across all six —
+ * the per-glyph rate in a UNIFORM three-glyph run (`ch.repeat(3)`, real width
+ * / 3 / font size) has p50 0.6042 and max 0.907 at every one of the six, to
+ * four figures — so this is a per-em property and not a size artefact. Read
+ * every per-glyph figure below as that measurement: a first draft took them
+ * from four-letter runs of *differing* letters, which is the max of a per-run
+ * AVERAGE and reads a third low at the top of the range.
+ *
+ * **The rule for choosing the number is "cover the widest label the
+ * estimator is actually handed, and no more" — because every increment
+ * above that is charged to the three call sites that apply no
+ * `WIDTH_SAFETY`.** The widest real el-GR CLDR label is `Μαρ` at 0.711 per
+ * glyph, so 0.72 is the smallest round rate that covers it (estimate 20.52px
+ * against a real 20.25px at 9.5px). A first draft used 0.74, on the
+ * reasoning that unknowns are billed high; that is right for a RESERVATION,
+ * where `WIDTH_SAFETY` is applied on top anyway, and wrong here, because
+ * `historyChart`'s stride, `weekdayChart`'s `fits` and `streakChart`'s
+ * shrink loop all read this number raw and DEGRADE on it. Measured, the two
+ * extra hundredths cost one more slot of the weekday axis: at 0.74 the short
+ * Greek weekday names are refused at a 24px column, where they really fit at
+ * 21.5px. That particular slot is not one a card can produce — see the
+ * `weekdayChart` bullet below — but the other two sites lose bands the cards
+ * do reach, and 0.74 would widen both.
+ *
+ * What no single rate can do is span this script's own spread, and that is
+ * worth knowing before anyone tunes it again. Measured whole and in
+ * isolation — real width / glyphs / font size, which is the only sense in
+ * which a WORD has a rate — `Μαρ` is 0.711 and `Τρί` is 0.480: a 1.48x range
+ * inside one script, so a per-character rate covering the first necessarily
+ * over-estimates the second by half again. `Ιουν` is 0.510 on the same
+ * instrument. The 0.472 an earlier draft gave `Ιουν` was not a measurement:
+ * it was the label `Ιουν 2026`'s real width with this file's own ESTIMATE
+ * rates for the space and the four digits subtracted back out, which makes
+ * the estimator one of the instruments measuring itself. See the note below
+ * on what this moves.
+ *
+ * `LONE = 0.8` is deliberately the same number as `other`'s lone rate, and
+ * that is a measured result rather than a coincidence: the widest real Greek
+ * lone label is Π at 0.731, so 0.8 already covers every one with headroom,
+ * and the block's widest glyph (Μ, 0.907) sits at 1.134x, inside the margin.
+ * Raising it would worsen every degrade decision above to buy an
+ * under-estimate that no CLDR label produces. Do not delete the entry as
+ * redundant — `classOf` returning `'greek'` with no `greek` key in the table
+ * makes every Greek label `NaN` wide.
+ *
+ * **The widest per-glyph rates in the span, and what they are and are not
+ * safe against.** In a uniform run the block's widest letters are Μ (U+039C)
+ * and Ϻ (U+03FA) at 0.907, and the widest of the 14 Coptic letters in the
+ * tail (U+03E2-U+03EF) is Ϣ (U+03E2) at 0.892. Against `JOINED.greek = 0.72`
+ * those are **1.26x and 1.24x** — the Coptic one inside `WIDTH_SAFETY` and
+ * only just, the Greek one marginally outside it — and the three degrade
+ * sites apply no margin at all, so neither is covered by 1.25 in the place it
+ * would matter. What makes the span safe is not those two numbers: it is that
+ * nothing hands this function a uniform run of a block's widest letter. The
+ * arguments are CLDR words, and a word's rate is the mean over its letters —
+ * the widest real el-GR word is `Μαρ` at 0.711, which 0.72 covers, and the
+ * harness's el-GR row measures no Greek under-estimate at all. Coptic is safe
+ * for a plainer reason still: no CLDR date label in any locale is Coptic, so
+ * the tail is in the class for span tidiness rather than for a caller. The
+ * block's 15 non-letter code points all measure narrower than its letters
+ * (0.156-0.648 as a uniform run), so including them costs only a slight
+ * over-estimate on code points no date label contains.
+ *
+ * **Greek Extended (`ἀ`-`῿`, polytonic Greek) is deliberately EXCLUDED
+ * from `GREEK` and stays on `other`, and re-measuring made that exclusion
+ * STRONGER rather than weaker.** Its widest per-glyph rate in a uniform run
+ * is 1.138 — Ἧ (U+1F2F) and ᾟ (U+1F9F), a capital eta wearing a rough
+ * breathing and an iota subscript — against the base block's 0.907, so one
+ * class cannot serve both: rated for the base block at 0.72 it would
+ * under-estimate a polytonic glyph **1.58x**, well *outside* `WIDTH_SAFETY`
+ * and so a worse defect than the one being fixed; rated for polytonic
+ * instead it would over-estimate the real modern-Greek words by 1.60x
+ * (`Μαρ`) to 2.37x (`Τρί`). It stays where it was, on `other`, where it
+ * under-estimates **1.96x** — pre-existing, and reached by no locale in the
+ * sweep, since el-GR CLDR is monotonic and polytonic is `el-polyton`.
+ *
+ * **Cyrillic has no class either, and this comment's headline number does not
+ * cover it.** `classOf` has nothing for U+0400-U+04FF: not `SEMITIC`, whose
+ * range starts at U+0590; not `BROAD`; and `UPPER` is ASCII-only — so Cyrillic
+ * falls through to `other` exactly as Greek did, and this is the same shape of
+ * disclosure as the Greek Extended exclusion above. Measured against real CLDR
+ * labels: mn-MN `Ням` **1.201x**, kk-KZ `мам.` 1.187x, ru-RU `май` 1.118x,
+ * mk-MK `мар.` 1.106x. The narrow weekday `Ш`, which is CLDR's narrow form for
+ * several Cyrillic locales, measures **1.295x against `LONE.other` — outside
+ * `WIDTH_SAFETY`** — though no reachable call site was found where it clips,
+ * the narrow set being what a chart falls back TO rather than reserves for.
+ * `label-widths.mjs`'s `LOCALES` contains no Cyrillic locale at all, so the
+ * 1.19x below is the worst case of the SWEEP and a lower bound on the app's.
+ * Deliberately not folded in here: a `CYRILLIC` class is the same kind of
+ * change this one is, wants its own measurement of what it moves at the three
+ * degrade sites, and would move the headline number — so it is left for a
+ * separate decision rather than smuggled into Greek's.
+ *
+ * **With Greek classed, the worst under-estimate THIS HARNESS finds is 1.19x —
+ * Arabic `أغسطس` at 8px (real 29.4px, estimate 24.8px)** — and read that as
+ * the sweep's worst rather than the app's, for the Cyrillic reason above.
+ * Against 1.25 that leaves 4.8% of headroom — `(1.25 - ratio) / 1.25`, the
+ * same arithmetic the retired Greek sentence's 1.6% came from, stated here
+ * because a reviewer read it as `1.25 / ratio - 1` and got 5.4%: the two
+ * readings differ by 0.03 points at 1.23x and by half a point at 1.19x, so
+ * they are only indistinguishable at the figure this comment used to carry.
+ * el-GR's own worst case is now 1.03x, and it is no
+ * longer a Greek string at all: it is `28/1/2026 – 3/2/2026` at 8px, the same
+ * ASCII date range that is already the worst case in eight other locales. The
+ * cost of the class is on the other side and is priced deliberately — el-GR's
+ * worst OVER-estimate rises from 1.44x to ~1.50x (`Τρί`), which is what
+ * `LONE.greek` is held at 0.8 and `JOINED.greek` at 0.72 to limit.
+ *
+ * **What this MOVES, measured, because a wider estimate degrades as well as
+ * reserves.** Measured by importing the real `historyChart`, `weekdayChart`
+ * and `streakChart` and driving them against the same ~15-line fake DOM
+ * `rendercheck.mjs` builds, then COUNTING the `<text>` nodes each emits under
+ * `LC_ALL=el_GR.UTF-8` — before and after, "before" being a whole copy of
+ * `shared/public/` with `JOINED.greek` set to 0.58. A first version of these
+ * bullets transcribed the three charts' arithmetic from prose into a script
+ * instead, got two of the formulas wrong, and named a width and a string at
+ * which nothing happens. Every reachable `width` here is at least 320, which
+ * is `chartWidth`'s floor (`Math.max(320, cardInnerWidth(host))`,
+ * `ui/detail.js:492`).
+ *
+ *   - A REAL LOSS. `historyChart` labels fewer buckets, in one band per
+ *     bucket count. The widest axis ESTIMATE at 9.5px moves 47.69px → 53.01px
+ *     — both from `Ιουν 2026`, the four-letter month — so the per-caption
+ *     budget (`widest + 10`) goes 57.7px → 63.0px, and the count drops wherever
+ *     `floor((width - 46) / budget)` crosses. Measured over 320-1440px: 12
+ *     buckets go 12 → 6 at 739-802px and 6 → 4 at 393-424px; 16 go 16 → 8 at
+ *     970-1054px and 6 → 4 at 393-424px; 10 go 5 → 4 at 335-361px, which is
+ *     the phone. Nothing moves at 328px, and nothing moves at 700px for 12
+ *     buckets — the retired version of this bullet claimed both. The axis was
+ *     NOT overlapping before: the widest real label is `Μαρ 2026` at 44.45px
+ *     against that 57.7px budget, so this site is pure loss. It is also
+ *     unavoidable at any rate covering `Μαρ` — swept rate by rate against the
+ *     real chart, holding each band needs `JOINED.greek` at or below 0.580
+ *     (the 739px band), 0.670 (1024px), 0.700 (420px) and 0.710 (360px), and
+ *     `Μαρ` really measures 0.711.
+ *   - A REAL LOSS. `streakChart` gives up the wordy range label for the
+ *     numeric one at EVERY reachable card width below 374px — 320-373px,
+ *     which includes 328 and 360 — for one label shape: a cross-year range
+ *     whose two ends are both four-letter months, `28 Ιουν 2025 – 4 Ιουλ
+ *     2026`. That estimates 165.72px against a 160px budget (`LABEL_W`'s 168
+ *     floor less `LABEL_GAP`'s 8) where the words really measure 142.84px, so
+ *     17px of real room is thrown away. `labelSize` does not move at any
+ *     width; the loss is the format alone. The `28 Δεκ 2025 – 4 Ιαν 2026` the
+ *     retired version named does not degrade at ANY width — 149.15px
+ *     estimated, inside the same 160px — and neither does the same-year `28
+ *     Ιουν – 4 Ιουλ 2026` at 134.66px: the four-letter month has to land at
+ *     both ends of a range that also carries two years, which takes a streak
+ *     of about a year. This is the same lv-LV case the comment above cites,
+ *     arriving in Greek.
+ *   - NO CHANGE AT ALL. `weekdayChart` does not move at any width the app
+ *     draws, and the retired version of this bullet presented half of what it
+ *     does as a defect this fixes — the only item in the list stated as a
+ *     gain rather than a trade, and it was not reachable at any width. The
+ *     crossover from the short names (`Κυρ Δευ …`) to the narrow ones goes
+ *     from a 19.14px column to a 23.76px one, and the real widest short name
+ *     is `Παρ` at 21.50px (size 11) — so on paper the fix stops a clipped
+ *     short axis between a 19.1 and a 21.5px column, and becomes pessimistic
+ *     between 21.5 and 23.8px, choosing the narrow set
+ *     (`Κ Δ Τ Τ Π Π Σ`, two pairs of duplicates — exactly the "axis you have
+ *     to count along" the `fits` comment argues against) where the short one
+ *     fits. Both bands need a 180-212px chart. The floor is 320, whose column
+ *     is 39.1px, and both sets fit that on both sides of the change. Kept
+ *     rather than deleted because "no reachable width" is the finding.
+ *
+ * The two real losses are the intra-script spread above, arriving as a UX
+ * consequence rather than as an arithmetic one. **It is deliberately NOT
+ * fixed here: the stride and the shared reserve are #285, which wants a
+ * decision rather than a number.** The fix for it is not a different Greek
+ * rate — no single rate spans 0.480 to 0.711 — it is a stride that measures
+ * the label it is about to drop.
+ *
+ * Greek's 1.23x was originally found by extending the harness's locale list by
+ * hand and not committing the extension, so the one figure this comment told
  * you to re-run the harness for was the one figure the harness could not
- * produce. `el-GR` is in `LOCALES` now.
+ * produce. `el-GR` is in `LOCALES` now, and re-running the harness reproduces
+ * the 1.03x above rather than the 1.23x, which is how this paragraph is
+ * checkable at all.
  *
  * **On the Arabic figure, which two records disagree about.** Master's
  * version of this comment names 1.23x — Arabic `أغسطس` as the worst case.
@@ -569,10 +752,14 @@ export function estimateTextWidth(text, fontSize) {
  * have moved it. The two figures are therefore two different INSTRUMENTS, not
  * two states of the code, and master's is the one being retired: it came from
  * a corpus (the 67-locale sweep) that no longer exists in the tree and cannot
- * be re-run. Read every ratio here as this harness's, including the 1.23x
- * above — if the older sweep was systematically higher, it was higher for
- * Greek too. Arabic remains a genuine near-miss for a reason worth keeping:
- * its letters join more tightly than a per-character rate can express.
+ * be re-run. Read every ratio here as this harness's. The two records now
+ * agree about which STRING is the worst case and differ only in the figure
+ * they give it, which is the cleanest possible statement of the instrument
+ * gap: master's corpus said Arabic `أغسطس` at 1.23x, this one says the same
+ * string at 1.19x, and #286 is why the title went to Greek and back again in
+ * between. Arabic is a genuine near-miss for a reason worth keeping — its
+ * letters join more tightly than a per-character rate can express — and it is
+ * a rate that would need re-measuring, unlike Greek, which needed a class.
  *
  * The worst case among the five mark-heavy additions is Malayalam's `ബുധൻ`
  * at 1.05x, comfortably inside the margin. `ബു` alone (the deleted test's
@@ -593,7 +780,7 @@ export function estimateTextWidth(text, fontSize) {
  * under-estimate there; and at `:524` / `:891`, where a smaller estimate
  * clamps the month caption LESS. Adding those labels moved `ml-IN`'s own
  * worst case to `2026 ജൂൺ` at 1.07x and did not move the overall worst,
- * which is still Greek.
+ * which was Greek at the time and is Arabic now that Greek has a class.
  *
  * Re-run the harness and update this comment if a future change to the rates,
  * the classes, or the sum moves any of these numbers.
