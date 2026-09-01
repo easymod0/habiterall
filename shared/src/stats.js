@@ -246,6 +246,39 @@ export function unansweredCounts(habit, unlogged) {
 }
 
 /**
+ * **Had this habit stated an answer by `date`?** — which is what decides
+ * whether SILENCE on that day may be read as compliance (#223).
+ *
+ * Under `success` a day nobody answered reads as "I stayed under the limit by
+ * not doing anything about it", and that reading needs the habit to have
+ * answered at least ONCE. Before its first real answer there is nothing for the
+ * silence to be compliance with, so a lone skipped day a year ago reported a
+ * 365-day streak and a strength of exactly 1.000 beside a `totalCompleted` of
+ * zero.
+ *
+ * `creditFrom` is the day credit may begin, from `resolveWindow` / `creditStart`
+ * — `start ??` the earliest row that STATES a value `?? end`. An absent
+ * `creditFrom` is no gate at all, which is what a direct caller of a pass gets.
+ *
+ * **This is a condition ON TOP of `unansweredCounts`, never a third level of
+ * it**, and the difference is not cosmetic: the first draft expressed the gate
+ * by handing the passes `'miss'` for a day before `creditFrom`, which a habit's
+ * OWN `at_most_unlogged: 'success'` then overrode — the account's answer is what
+ * `unansweredCounts` reads last, so the gate silently did nothing for exactly
+ * the habits the issue is about and worked for the ones on `'default'`. It is
+ * therefore a separate argument to `isCompleted` / `dayCredit`, applied to their
+ * ANSWER, and the wiring test that fires on both spellings of the same habit is
+ * what caught it.
+ *
+ * @param {string} date
+ * @param {string} [creditFrom]
+ * @returns {boolean}
+ */
+function answeredBy(date, creditFrom) {
+  return !creditFrom || date >= creditFrom;
+}
+
+/**
  * Did this entry satisfy the habit on its day?
  * Skips are neither success nor failure — they are excluded from scoring
  * entirely, matching Loop's behaviour.
@@ -260,11 +293,15 @@ export function unansweredCounts(habit, unlogged) {
  *
  * @param {*} [unlogged] `'miss'` | `'success'`, from the account's
  *   `atMostUnlogged`. Read only for a day with no row.
+ * @param {boolean} [mayCredit] whether silence may be read as compliance on
+ *   this day at all — `false` before the habit's first real answer, which is
+ *   `answeredBy` / #223. Read only for a day with no row, and it can only ever
+ *   withhold credit `unlogged` would have granted.
  */
-export function isCompleted(habit, entry, unlogged = UNLOGGED_DEFAULT) {
+export function isCompleted(habit, entry, unlogged = UNLOGGED_DEFAULT, mayCredit = true) {
   const { value, status } = normalizeEntry(habit, entry);
   if (status === 'skip') return null; // "not applicable"
-  if (status === 'unknown' && !unansweredCounts(habit, unlogged)) return false;
+  if (status === 'unknown' && !(mayCredit && unansweredCounts(habit, unlogged))) return false;
 
   if (habit.type === 'boolean') return value === YES;
   // numerical
@@ -300,12 +337,13 @@ function normalizeEntry(habit, entry) {
  * all-or-nothing; numerical habits get partial credit toward their target so
  * that 6 of 8 glasses of water still moves the needle.
  */
-function dayCredit(habit, entry, unlogged = UNLOGGED_DEFAULT) {
+function dayCredit(habit, entry, unlogged = UNLOGGED_DEFAULT, mayCredit = true) {
   const { value, status } = normalizeEntry(habit, entry);
   if (status === 'skip') return null;
   // The same rule `isCompleted` states, and it has to be the same or the score
-  // and the streak disagree about the very same day.
-  if (status === 'unknown' && !unansweredCounts(habit, unlogged)) return 0;
+  // and the streak disagree about the very same day. `mayCredit` is part of
+  // that rule and so is threaded identically — see `answeredBy`.
+  if (status === 'unknown' && !(mayCredit && unansweredCounts(habit, unlogged))) return 0;
   if (habit.type === 'boolean') return value === YES ? 1 : 0;
 
   const target = habit.target_value;
@@ -346,8 +384,12 @@ function dayCredit(habit, entry, unlogged = UNLOGGED_DEFAULT) {
  * responsive. And the sqrt term means a less frequent habit decays more
  * slowly (3x/week works out at ~20 days), so missing one of three weekly
  * sessions does not punish you as hard as missing a day of a daily habit.
+ *
+ * @param {string} [creditFrom] the day silence may start counting as success —
+ *   see `answeredBy`. Absent means no gate.
  */
-export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
+export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                              creditFrom = undefined) {
   const num = Math.max(1, habit.freq_numerator || 1);
   const den = Math.max(1, habit.freq_denominator || 1);
 
@@ -360,7 +402,9 @@ export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_D
 
   // Credit per day, with skips recorded as null so they can be excluded from
   // the window rather than counted as failures.
-  const credits = dates.map((date) => dayCredit(habit, entryMap.get(date), unlogged));
+  const credits = dates.map(
+    (date) => dayCredit(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom))
+  );
 
   const out = [];
   let score = 0;
@@ -419,10 +463,12 @@ export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_D
  * day and the requirement clamps to it, so this reduces exactly to
  * `isCompleted` and daily habits behave precisely as they always have.
  *
+ * @param {string} [creditFrom] see `answeredBy`.
  * @returns {{date: string, ok: boolean|null}[]} `null` on a skipped day, which
  *   is transparent: it neither starts, extends nor breaks a run.
  */
-function onPaceSeries(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
+function onPaceSeries(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                      creditFrom = undefined) {
   const num = Math.max(1, Number(habit.freq_numerator) || 1);
   const den = Math.max(1, Number(habit.freq_denominator) || 1);
 
@@ -431,7 +477,9 @@ function onPaceSeries(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) 
   // through an import — would otherwise spin for hundreds of thousands of
   // iterations and block the event loop for every user of the process.
   const dates = boundedRange(start, end);
-  const done = dates.map((date) => isCompleted(habit, entryMap.get(date), unlogged));
+  const done = dates.map(
+    (date) => isCompleted(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom))
+  );
 
   const out = [];
   let windowDone = 0;
@@ -477,8 +525,13 @@ function onPaceSeries(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) 
  * habit: a 3×/week habit kept for a month is a 30-day streak, not a 12-day
  * one. That is what people mean by "I have kept this up for a month", and it
  * keeps the number comparable with a daily habit's.
+ *
+ * @param {string} [creditFrom] see `answeredBy`. A route that scans streaks
+ *   itself — both editions' `/overview`, for `bestStreak` — has to pass this or
+ *   it serves a figure the rest of the same payload disagrees with (#223).
  */
-export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
+export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                               creditFrom = undefined) {
   const streaks = [];
   let runStart = null;
   let runEnd = null;
@@ -491,7 +544,7 @@ export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_
   let runSkips = 0;
   let pendingSkips = 0;
 
-  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged)) {
+  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged, creditFrom)) {
     if (ok === null) { // skip: neither extends nor breaks
       if (runStart !== null) pendingSkips++;
       continue;
@@ -543,12 +596,13 @@ export function bestStreak(streaks) {
  * Skips are transparent here for the same reason they bridge a streak — a day
  * that "didn't happen" is not a failure to come back from.
  */
-export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
+export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                                creditFrom = undefined) {
   const runs = [];
   let runStart = null;
   let runEnd = null;
 
-  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged)) {
+  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged, creditFrom)) {
     if (ok === null) continue;
 
     if (!ok) {
@@ -716,14 +770,14 @@ export function computeSurvival(streaks, end, thresholds = SURVIVAL_THRESHOLDS) 
  * when this habit fails, what happens next?
  */
 export function computeResilience(habit, entryMap, streaks, start, end,
-                                  unlogged = UNLOGGED_DEFAULT) {
+                                  unlogged = UNLOGGED_DEFAULT, creditFrom = undefined) {
   // This used to refuse to run for anything but a daily habit, because a miss
   // run meant "a day it was not done" and a 3×/week habit has four of those
   // every week — a perfectly-kept habit reported as lapsing continuously.
   // `onPaceSeries` fixed the premise rather than the symptom: a miss is now a
   // day the habit fell BELOW ITS RATE, which is a real failure for any
   // frequency, so there is nothing left to suppress.
-  const missRuns = computeMissRuns(habit, entryMap, start, end, unlogged);
+  const missRuns = computeMissRuns(habit, entryMap, start, end, unlogged, creditFrom);
   return {
     // Retained: the response shape is public, and the detail view still guards
     // on it. Nothing sets it false any more.
@@ -778,7 +832,8 @@ const BUCKETERS = {
  * @param {'monday'|'sunday'} [weekStart]
  */
 export function computeHistory(habit, entryMap, start, end, granularity = 'day',
-                               weekStart = 'monday', unlogged = UNLOGGED_DEFAULT) {
+                               weekStart = 'monday', unlogged = UNLOGGED_DEFAULT,
+                               creditFrom = undefined) {
   // `Object.hasOwn`, because `granularity` is a query parameter and
   // `BUCKETERS['valueOf']` is an inherited function: truthy, so `??` never
   // reaches the default, and calling it unbound throws instead of bucketing
@@ -795,7 +850,7 @@ export function computeHistory(habit, entryMap, start, end, granularity = 'day',
     }
     const b = buckets.get(key);
     const value = entryMap.get(date);
-    const done = isCompleted(habit, value, unlogged);
+    const done = isCompleted(habit, value, unlogged, answeredBy(date, creditFrom));
 
     if (done === null) {
       b.skipped += 1;
@@ -825,12 +880,13 @@ export function computeHistory(habit, entryMap, start, end, granularity = 'day',
  * @returns {Array<{month: string, days: Array<{weekday: number, completed: number,
  *   total: number, rate: number}>}>}
  */
-export function computeWeekdayByMonth(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
+export function computeWeekdayByMonth(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                                      creditFrom = undefined) {
   const byMonth = new Map();
 
   for (const date of boundedRange(start, end)) {
     const value = entryMap.get(date);
-    const done = isCompleted(habit, value, unlogged);
+    const done = isCompleted(habit, value, unlogged, answeredBy(date, creditFrom));
     // A skip is "this day didn't happen", so it must not count against the
     // weekday's rate — same rule as everywhere else.
     if (done === null) continue;
@@ -861,7 +917,8 @@ export function computeWeekdayByMonth(habit, entryMap, start, end, unlogged = UN
  * Success counts per day of week (0 = Sunday), for spotting which days
  * a habit reliably fails on.
  */
-export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT) {
+export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                                creditFrom = undefined) {
   const days = Array.from({ length: 7 }, (_, i) => ({
     weekday: i,
     completed: 0,
@@ -871,7 +928,7 @@ export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED
 
   for (const date of boundedRange(start, end)) {
     const value = entryMap.get(date);
-    const done = isCompleted(habit, value, unlogged);
+    const done = isCompleted(habit, value, unlogged, answeredBy(date, creditFrom));
     if (done === null) continue;
 
     const wd = fromISO(date).getDay();
@@ -894,13 +951,16 @@ export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED
  * @param {string} start
  * @param {string} end
  * @param {'monday'|'sunday'} [weekStart]
+ * @param {*} [unlogged]
+ * @param {string} [creditFrom] see `answeredBy`.
  */
 export function computeFrequency(habit, entryMap, start, end, weekStart = 'monday',
-                                 unlogged = UNLOGGED_DEFAULT) {
+                                 unlogged = UNLOGGED_DEFAULT, creditFrom = undefined) {
   const weekTotals = new Map();
 
   for (const date of boundedRange(start, end)) {
-    if (isCompleted(habit, entryMap.get(date), unlogged) !== true) continue;
+    if (isCompleted(habit, entryMap.get(date), unlogged,
+      answeredBy(date, creditFrom)) !== true) continue;
     const week = startOfWeek(date, weekStart);
     weekTotals.set(week, (weekTotals.get(week) ?? 0) + 1);
   }
@@ -976,37 +1036,27 @@ export function computeCoverage(entryMap, start, end) {
 /* ---------- top-level summary ---------- */
 
 /**
- * The window every top-level summary shares: the entry map, keyed by date and
- * holding `{value, status}`, and `from` — clamped to `MAX_RANGE_DAYS` and
- * normalised to a real day. `computeStats` and `summaryStats` both call this
- * rather than each carrying their own copy, so the clamp and the
- * normalisation cannot drift between the detail view and the dashboard.
+ * `start ?? anchor`, clamped to `MAX_RANGE_DAYS` and normalised to a real day.
  *
- * @param {import('./types.js').Entry[]} entries
+ * `resolveWindow` derives TWO dates this way — the day the window OPENS at, and
+ * the day silence may start counting as success (#223) — and both come through
+ * here. Two spellings of the clamp would be two chances for them to disagree
+ * about the same stored row, and every word below about the ORDERING would have
+ * to hold twice.
+ *
+ * @param {string} anchor the date to use when the caller named no `start`
  * @param {string|undefined} start
  * @param {string} end
- * @returns {{entryMap: Map<string, {value: *, status: string}>, from: string}}
+ * @returns {string}
  */
-function resolveWindow(entries, start, end) {
-  // Preserve `status` alongside the value so skips stay distinguishable from
-  // a numerical habit legitimately recording the value 3.
-  const entryMap = new Map(
-    entries.map((e) => [e.date, { value: e.value, status: e.status ?? '' }])
-  );
-
-  // Don't assume the caller sorted the entries, and never span more than
-  // MAX_RANGE_DAYS even if a stray entry is dated decades ago.
-  const firstEntry = entries.length
-    ? entries.reduce((min, e) => (e.date < min ? e.date : min), entries[0].date)
-    : end;
-
+function windowStart(anchor, start, end) {
   const earliest = addDays(end, -MAX_RANGE_DAYS);
-  let from = start ?? firstEntry;
+  let from = start ?? anchor;
 
   if (from < earliest) from = earliest;
   if (from > end) from = end;
 
-  // `firstEntry` comes out of STORAGE, so it can be a date that is not a real
+  // `anchor` comes out of STORAGE, so it can be a date that is not a real
   // day — `assertDate` refuses one on the way in, but a row predating that
   // guard does not have to be a real day to be read back. `dateRange`
   // normalises such a start (a walk from 2026-02-30 begins on 2026-03-02),
@@ -1047,7 +1097,126 @@ function resolveWindow(entries, start, end) {
   const asDate = fromISO(from);
   if (!Number.isNaN(asDate.getTime())) from = toISO(asDate);
 
-  return { entryMap, from };
+  return from;
+}
+
+/**
+ * The earliest row in the map that STATES a value — anything but a skip — or
+ * `null` when nothing does.
+ *
+ * `status === 'skip'` and nothing cleverer. There is no habit to ask here, and
+ * `normalizeEntry`'s boolean SKIP-sentinel rule applies only to bare numbers
+ * and never to the object form this map holds — so this is exactly what every
+ * other reader of the map already treats as a skip, and a numerical habit's
+ * legitimate value of 3 stays a stated value, which is the whole reason skips
+ * are stored out of band.
+ *
+ * **A row holding 0 states a value.** That is the user recording "I was at
+ * zero that day" — real evidence, and precisely the row the root `CLAUDE.md`'s
+ * "a stored lapse can move window-derived figures, and that is the model
+ * working" paragraph is about. Only a skip states nothing.
+ *
+ * @param {Map<string, {value: *, status: string}>} entryMap
+ * @returns {string|null}
+ */
+function firstStatedAnswer(entryMap) {
+  let stated = null;
+  for (const [date, v] of entryMap) {
+    if (v.status === 'skip') continue;
+    if (stated === null || date < stated) stated = date;
+  }
+  return stated;
+}
+
+/**
+ * The day an unanswered day may start counting as success — for a caller that
+ * computes a pass DIRECTLY instead of going through `computeStats` /
+ * `summaryStats`. Both editions' `/overview` is one: it scans streaks itself
+ * for `bestStreak`, so without this it serves a figure the `score` and
+ * `currentStreak` beside it disagree with.
+ *
+ * `start ??` the earliest row that states a value `?? end`, and all three
+ * clauses are load bearing:
+ *
+ * - **an explicit `start` wins**, because it is a window the CALLER named and
+ *   this rule exists to stop STORAGE-derived silence from inventing evidence.
+ *   `resolveWindow` already gives `start` precedence over the derived anchor and
+ *   this is derived the same way; without it, `start: '2026-08-10'` with one row
+ *   today reports a 1-day streak where it reported 10. **A caller whose own
+ *   `start` came out of storage — `/overview`'s `entries[0].date` — must pass
+ *   `undefined` here**, or the thing being fixed comes back through the route.
+ * - **`?? end`** is what makes a habit with no evidence read like a habit with
+ *   no rows at all: credit begins today, so today alone is credited, which is
+ *   the answer an empty history already gave.
+ * - and it is **clamped and normalised exactly as `from` is**, because it is a
+ *   stored date about to be compared against the normalised days of a walked
+ *   range. #270 is untouched and applies to it in the same way and no more: a
+ *   phantom date reaching here behaves as its rollover, which is why it goes
+ *   through the same sequence rather than a second one.
+ *
+ * @param {Map<string, {value: *, status: string}>} entryMap
+ * @param {string|undefined} start
+ * @param {string} end
+ * @returns {string}
+ */
+export function creditStart(entryMap, start, end) {
+  return windowStart(firstStatedAnswer(entryMap) ?? end, start, end);
+}
+
+/**
+ * The window every top-level summary shares: the entry map, keyed by date and
+ * holding `{value, status}`; `from`, the day the reading opens at; and
+ * `creditFrom`, the day an unanswered day may start counting as success. Both
+ * dates are clamped to `MAX_RANGE_DAYS` and normalised to a real day.
+ * `computeStats` and `summaryStats` both call this rather than each carrying
+ * their own copy, so neither the clamp nor either date can drift between the
+ * detail view and the dashboard.
+ *
+ * **They are two questions, and #223 is why they are two dates.** `from` is how
+ * far back the reading REACHES, and a skip belongs in it: `computeCoverage` asks
+ * whether a day was ANSWERED and a skip answers — measured, a first row of
+ * `{2026-01-01, skip}` followed by a stated value every day afterwards loses a
+ * fully-answered January out of `coverage`, and an award rung with it, the
+ * moment the window opens one day later. `creditFrom` is whether SILENCE inside
+ * that reach may be read as compliance, and a skip does not answer that at all:
+ * it says "this day does not count", which is no evidence that a limit was
+ * kept. So the window still opens at the earliest row of ANY kind, and credit
+ * waits for the earliest row that STATES a value.
+ *
+ * Both are derived from the deduped MAP rather than from `entries`, so the two
+ * dates and every downstream reader see the same rows by construction. They can
+ * only differ where one date appears twice — the map keeps the LAST of them — so
+ * reading the array would let a value row the map has already overwritten with
+ * a skip go on granting credit over a window that holds no stated value as far
+ * as every other figure is concerned. No route can produce that shape (both
+ * editions declare `PRIMARY KEY (habit_id, date)` on `entries`), and deriving it
+ * here makes the disagreement unrepresentable rather than merely unreachable.
+ *
+ * @param {import('./types.js').Entry[]} entries
+ * @param {string|undefined} start
+ * @param {string} end
+ * @returns {{entryMap: Map<string, {value: *, status: string}>, from: string,
+ *            creditFrom: string}}
+ */
+function resolveWindow(entries, start, end) {
+  // Preserve `status` alongside the value so skips stay distinguishable from
+  // a numerical habit legitimately recording the value 3.
+  const entryMap = new Map(
+    entries.map((e) => [e.date, { value: e.value, status: e.status ?? '' }])
+  );
+
+  // Don't assume the caller sorted the entries, and never span more than
+  // MAX_RANGE_DAYS even if a stray entry is dated decades ago.
+  let firstEntry = null;
+  for (const date of entryMap.keys()) {
+    if (firstEntry === null || date < firstEntry) firstEntry = date;
+  }
+
+  return {
+    entryMap,
+    from: windowStart(firstEntry ?? end, start, end),
+    creditFrom: creditStart(entryMap, start, end),
+  };
 }
 
 /**
@@ -1088,10 +1257,16 @@ export function computeStats(habit, entries,
                                weekStart = 'monday',
                                unlogged = UNLOGGED_DEFAULT,
                                coverage = true } = {}) {
-  const { entryMap, from } = resolveWindow(entries, start, end);
+  const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
 
-  const scores = computeScores(habit, entryMap, from, end, unlogged);
-  const streaks = computeStreaks(habit, entryMap, from, end, unlogged);
+  // `creditFrom` goes to EVERY pass that reads `unlogged`, not only to the two
+  // the issue measured. `dayCredit` and `isCompleted` state the same rule
+  // deliberately — "or the score and the streak disagree about the very same
+  // day" — and a history bar, a weekday rate or a times-per-week bucket
+  // painting a day as kept that the streak beside it counts as missed is that
+  // same disagreement one surface further out.
+  const scores = computeScores(habit, entryMap, from, end, unlogged, creditFrom);
+  const streaks = computeStreaks(habit, entryMap, from, end, unlogged, creditFrom);
 
   // Bounded to the same [from, end] window every other figure in this payload
   // uses. Filtering the whole map counted entries outside the range — a
@@ -1109,11 +1284,12 @@ export function computeStats(habit, entries,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),
     totalCompleted,
-    history: computeHistory(habit, entryMap, from, end, granularity, weekStart, unlogged),
-    weekdays: computeWeekdays(habit, entryMap, from, end, unlogged),
-    weekdayByMonth: computeWeekdayByMonth(habit, entryMap, from, end, unlogged),
-    frequency: computeFrequency(habit, entryMap, from, end, weekStart, unlogged),
-    resilience: computeResilience(habit, entryMap, streaks, from, end, unlogged),
+    history: computeHistory(habit, entryMap, from, end, granularity, weekStart, unlogged,
+      creditFrom),
+    weekdays: computeWeekdays(habit, entryMap, from, end, unlogged, creditFrom),
+    weekdayByMonth: computeWeekdayByMonth(habit, entryMap, from, end, unlogged, creditFrom),
+    frequency: computeFrequency(habit, entryMap, from, end, weekStart, unlogged, creditFrom),
+    resilience: computeResilience(habit, entryMap, streaks, from, end, unlogged, creditFrom),
     // On the payload rather than passed into `computeAwards` as a second data
     // source. `awards.js`'s header states that every award is a reading of the
     // figures already here and that nothing is counted a second way; an entry
@@ -1144,10 +1320,10 @@ export function computeStats(habit, entries,
  * @returns {import('./types.js').SummaryStats}
  */
 export function summaryStats(habit, entries, { start, end, unlogged = UNLOGGED_DEFAULT } = {}) {
-  const { entryMap, from } = resolveWindow(entries, start, end);
+  const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
 
-  const scores = computeScores(habit, entryMap, from, end, unlogged);
-  const streaks = computeStreaks(habit, entryMap, from, end, unlogged);
+  const scores = computeScores(habit, entryMap, from, end, unlogged, creditFrom);
+  const streaks = computeStreaks(habit, entryMap, from, end, unlogged, creditFrom);
 
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,

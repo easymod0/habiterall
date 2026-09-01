@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const {
   computeStreaks, currentStreak, bestStreak, computeHistory,
   computeWeekdays, computeFrequency, computeScores, computeStats, summaryStats,
-  computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS,
+  computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditStart,
   summariseMembers, summariseByCategory,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
 } = await import('../src/stats.js');
@@ -2019,4 +2019,392 @@ test('summariseByCategory: a member whose firstEntry EQUALS the reading day is l
 
   assert.equal(health.unloggedExcluded, 0, 'a member landing ON the reading day already counts');
   assert.equal(health.mean, 0.5, 'both members are averaged in: (0.7 + 0.3) / 2');
+});
+
+/* ---------- issue #223: an unanswered day needs an answer behind it ---------- */
+
+/*
+ * Under `at_most_unlogged: 'success'` a day nobody answered reads as "I stayed
+ * under the limit", and that reading used to need no evidence whatever: the
+ * window opened at the earliest stored row of ANY kind, so one skipped day a
+ * year ago credited the 365 silent days after it and reported a strength of
+ * exactly 1.000 beside a `totalCompleted` of zero.
+ *
+ * The fix is a CREDIT rule and deliberately NOT a window move. `resolveWindow`
+ * answers a second date — `creditFrom`, the earliest row that STATES a value —
+ * and every pass asks per day whether the habit had answered by then. The
+ * window itself is untouched, which is what the coverage test below is about:
+ * a skip IS an answer to `computeCoverage`'s question (`entryMap.has(date)`,
+ * and `awards.js` says outright that "`done`, `skip`, `no` and `unknown` are
+ * four things") even though it is not evidence that a limit was kept. Moving
+ * the window instead — the rejected first attempt, PR #292 — dropped a
+ * fully-answered January out of `coverage` and took an award rung with it.
+ *
+ * Every fixture here sets `target_value` to 2 (`parseHabit`'s stored default is
+ * 0 — `Number(body.target_value ?? 0)`; the habit dialog's DISPLAY fallback of 1
+ * is a different thing) and `at_most_unlogged` to `'success'` rather than
+ * `'default'`, on purpose — except the pair built to test `'default'` itself.
+ * Literals throughout, measured on unmodified master and re-measured after
+ * (`.claude/work/issue-223-credit/before.txt`, `after.txt`).
+ */
+const limit223 = (over = {}) => ({
+  id: 1, name: 'Coffee', type: 'numerical', target_type: 'at_most',
+  target_value: 2, freq_numerator: 1, freq_denominator: 1,
+  at_most_unlogged: 'success', ...over,
+});
+const atLeast223 = (over = {}) => ({
+  id: 2, name: 'Water', type: 'numerical', target_type: 'at_least',
+  target_value: 2, freq_numerator: 1, freq_denominator: 1,
+  at_most_unlogged: 'success', ...over,
+});
+const END_223 = '2026-08-19';
+const SKIP_223 = '2025-08-19';
+const skipOnly223 = () => [{ date: SKIP_223, value: 0, status: 'skip' }];
+const lapseOnly223 = () => [{ date: SKIP_223, value: 0, status: '' }];
+
+test('issue #223: silence is not compliance until the habit has answered once', () => {
+  // The issue's own fixture: a daily at-most habit, target 2, resolved to
+  // `success`, holding one skip a year before `end` and nothing else. Master
+  // reported 365 / 1.000 / 0. It must now read exactly as "no rows at all"
+  // does — 1 / 0.051922 / 0, asserted as the literal that fixture produces
+  // rather than by computing the empty case beside it, which would pass with
+  // both wrong in the same way.
+  const stats = computeStats(limit223(), skipOnly223(), { end: END_223 });
+  assert.equal(stats.currentStreak, 1);
+  assert.equal(stats.score, 0.051922);
+  assert.equal(stats.totalCompleted, 0);
+  assert.equal(stats.bestStreak, 1);
+
+  // The same row, the same date, an at-LEAST habit: the whole finding is that
+  // the sign flips rather than the bug disappearing — an at-most habit was
+  // handed unearned CREDIT for the silence where an at-least habit gets
+  // unearned BLAME. Side by side so the difference is one test's worth of
+  // evidence and not two.
+  const atLeast = computeStats(atLeast223(), skipOnly223(), { end: END_223 });
+  assert.equal(atLeast.currentStreak, 0);
+  assert.equal(atLeast.score, 0);
+  assert.equal(atLeast.totalCompleted, 0);
+});
+
+test('issue #223: the WINDOW does not move — only what silence inside it is worth', () => {
+  // This is the difference between this fix and the anchor form it replaces,
+  // and it is asserted on the fixture that would show the move: the skip still
+  // opens the reading at 2025-08-19 and the series is still 366 days long,
+  // while the streak inside it is 1. An anchor-moving implementation gives one
+  // score point dated 2026-08-19 and passes every assertion in the test above.
+  const stats = computeStats(limit223(), skipOnly223(), { end: END_223 });
+  assert.equal(stats.scores.length, 366);
+  assert.equal(stats.scores[0].date, '2025-08-19');
+  assert.equal(stats.scores[0].score, 0);
+  assert.equal(stats.currentStreak, 1);
+
+  // ...and the same window still reaches every month between, so `coverage`
+  // still has eleven whole months to report on rather than one.
+  assert.equal(stats.coverage.length, 11);
+  assert.deepEqual(stats.coverage[0], { month: '2025-09', answered: 0, days: 30 });
+});
+
+test('issue #223: a fully-answered month whose first row is a skip keeps its coverage', () => {
+  // The measurement that rejected the anchor form, pinned as a test so nobody
+  // re-derives it. A habit whose FIRST EVER row is a skip on 2026-01-01 and
+  // which then holds a stated value on every single day to `end`: master
+  // reports seven fully-answered coverage months, the anchor form reported six
+  // — dropping a January in which all 31 days hold a row, because a window
+  // that opens on the 2nd no longer CONTAINS January. `computeCoverage` counts
+  // an answer, and a skip is one.
+  const entries = [{ date: '2026-01-01', value: 0, status: 'skip' }];
+  for (let d = new Date(Date.UTC(2026, 0, 2));
+    d <= new Date(Date.UTC(2026, 7, 19));
+    d.setUTCDate(d.getUTCDate() + 1)) {
+    entries.push({ date: d.toISOString().slice(0, 10), value: 1, status: '' });
+  }
+  // The fixture cannot silently stop being fully answered.
+  assert.equal(entries.filter((e) => e.date.startsWith('2026-01')).length, 31);
+
+  const stats = computeStats(limit223(), entries, { end: END_223 });
+  assert.deepEqual(stats.coverage.map((m) => m.month),
+    ['2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07']);
+  assert.deepEqual(stats.coverage[0], { month: '2026-01', answered: 31, days: 31 });
+  assert.equal(stats.scores[0].date, '2026-01-01');
+  // And the habit is otherwise exactly as strong as it was: this fixture has a
+  // stated answer on its second day, so credit begins there and every figure
+  // is master's.
+  assert.equal(stats.currentStreak, 230);
+  assert.equal(stats.score, 0.999995);
+  assert.equal(stats.totalCompleted, 230);
+});
+
+test('issue #223: the WIRING — the gate sits above the two-level precedence', () => {
+  // "Pinning the DECISION is not pinning the WIRING", and this is the test that
+  // caught the first draft of the fix. That draft expressed the gate by handing
+  // the passes `'miss'` for a day before `creditFrom` — which `unansweredCounts`
+  // then OVERRODE, because a habit's own `at_most_unlogged` outranks the
+  // account's answer. So it worked for a habit on `'default'` and did nothing
+  // whatever for a habit carrying an explicit `'success'`: the exact habits the
+  // issue is about. All three spellings are asserted for that reason.
+  const skip = skipOnly223();
+
+  // (a) the habit says `success` and the ACCOUNT says miss — the habit wins,
+  // and the gate must still fire.
+  const own = computeStats(limit223(), skip, { end: END_223, unlogged: 'miss' });
+  assert.equal(own.currentStreak, 1);
+  assert.equal(own.score, 0.051922);
+
+  // (b) the habit defers and the ACCOUNT says success — the fix must fire for a
+  // habit that resolves through the account, not only for an explicit one.
+  const viaAccount = computeStats(limit223({ at_most_unlogged: 'default' }), skip,
+    { end: END_223, unlogged: 'success' });
+  assert.equal(viaAccount.currentStreak, 1);
+  assert.equal(viaAccount.score, 0.051922);
+  assert.equal(viaAccount.totalCompleted, 0);
+
+  // (c) the habit defers and the ACCOUNT says miss — nothing to withhold, and
+  // the reading is untouched. The gate can only ever take credit away that
+  // `unlogged` would have granted.
+  const asMiss = computeStats(limit223({ at_most_unlogged: 'default' }), skip,
+    { end: END_223, unlogged: 'miss' });
+  assert.equal(asMiss.currentStreak, 0);
+  assert.equal(asMiss.score, 0);
+});
+
+test('issue #223: a stored lapse is still evidence — deliberately unchanged', () => {
+  // Mark's decision and not an oversight. A row holding 0 with status `''` is
+  // the user recording "I was at zero that day": real evidence, unlike a skip's
+  // "this day does not count". Credited silence AFTER real evidence is exactly
+  // what the root CLAUDE.md's "a stored lapse can move window-derived figures,
+  // and that is the model working" paragraph describes, and this fix qualifies
+  // that paragraph rather than contradicting it.
+  const lapse = computeStats(limit223(), lapseOnly223(), { end: END_223 });
+  assert.equal(lapse.currentStreak, 366);
+  assert.equal(lapse.score, 1);
+  assert.equal(lapse.totalCompleted, 1);
+
+  const lapseAndToday = computeStats(limit223(),
+    [...lapseOnly223(), { date: END_223, value: 1, status: '' }], { end: END_223 });
+  assert.equal(lapseAndToday.currentStreak, 366);
+  assert.equal(lapseAndToday.score, 1);
+  assert.equal(lapseAndToday.totalCompleted, 2);
+
+  // Through the account rather than the habit, for the same reason as above.
+  const viaAccount = computeStats(limit223({ at_most_unlogged: 'default' }), lapseOnly223(),
+    { end: END_223, unlogged: 'success' });
+  assert.equal(viaAccount.currentStreak, 366);
+  assert.equal(viaAccount.score, 1);
+});
+
+test('issue #223: credit begins at the first STATED answer, wherever it falls', () => {
+  // Not merely "a skip is ignored": the rule names a day, and a stated answer
+  // eight months after the skip is where credit starts. The window still opens
+  // at the skip — 366 points, first dated 2025-08-19 — and the four days
+  // between the answer and `end` are credited, so the streak is 5 and not 365.
+  const stats = computeStats(limit223(),
+    [{ date: SKIP_223, value: 0, status: 'skip' }, { date: '2026-08-15', value: 1, status: '' }],
+    { end: END_223 });
+  assert.equal(stats.currentStreak, 5);
+  assert.equal(stats.score, 0.234017);
+  assert.equal(stats.totalCompleted, 1);
+  assert.equal(stats.scores.length, 366);
+  assert.equal(stats.scores[0].date, '2025-08-19');
+
+  // The date itself, asked of the function the two routes also call.
+  const map = new Map([
+    [SKIP_223, { value: 0, status: 'skip' }],
+    ['2026-08-15', { value: 1, status: '' }],
+  ]);
+  assert.equal(creditStart(map, undefined, END_223), '2026-08-15');
+  // Nothing states a value ⇒ credit begins at `end`, which is what makes the
+  // skip-only reading identical to an empty one for a daily habit.
+  assert.equal(creditStart(new Map([[SKIP_223, { value: 0, status: 'skip' }]]),
+    undefined, END_223), '2026-08-19');
+});
+
+test('issue #223: an explicit start still grants credit — the half already right', () => {
+  // `ui/detail.js` sends no `start`, which is why credit does not run backwards
+  // before a habit's first row. A caller that DOES name a window is naming it,
+  // and this rule exists to stop STORAGE-derived silence from inventing
+  // evidence, not to overrule a caller. Measured 10 / 0.41327 on master and it
+  // must not regress: without the `start ??` clause this reads 1 / 0.051922.
+  const stats = computeStats(limit223(), [{ date: END_223, value: 1, status: '' }],
+    { end: END_223, start: '2026-08-10' });
+  assert.equal(stats.currentStreak, 10);
+  assert.equal(stats.score, 0.41327);
+  assert.equal(stats.scores[0].date, '2026-08-10');
+
+  assert.equal(creditStart(new Map([[END_223, { value: 1, status: '' }]]),
+    '2026-08-10', END_223), '2026-08-10');
+});
+
+test('issue #223: a skip that is not the earliest row changes nothing', () => {
+  const rows = [
+    { date: SKIP_223, value: 1, status: '' },
+    { date: '2026-01-01', value: 0, status: 'skip' },
+  ];
+  const atMost = computeStats(limit223(), rows, { end: END_223 });
+  assert.equal(atMost.currentStreak, 366);
+  assert.equal(atMost.score, 1);
+  assert.equal(atMost.totalCompleted, 1);
+
+  const atLeast = computeStats(atLeast223(),
+    [{ date: SKIP_223, value: 5, status: '' }, { date: '2026-01-01', value: 0, status: 'skip' }],
+    { end: END_223 });
+  assert.equal(atLeast.currentStreak, 0);
+  assert.equal(atLeast.score, 0);
+  assert.equal(atLeast.totalCompleted, 1);
+});
+
+test('issue #223: summaryStats gets the same credit date, so /overview agrees', () => {
+  // The dashboard's entry point calls the same `resolveWindow` but computes its
+  // own two figures, and the existing parity test would pass with both entry
+  // points wrong in the same way. Asserted directly, in literals.
+  assert.deepEqual(summaryStats(limit223(), skipOnly223(), { end: END_223 }),
+    { score: 0.051922, currentStreak: 1 });
+  assert.deepEqual(summaryStats(limit223(), lapseOnly223(), { end: END_223 }),
+    { score: 1, currentStreak: 366 });
+});
+
+test('issue #223: every pass that reads `unlogged` was handed the credit date', () => {
+  // Nine functions take it, and the two the issue measures are `computeScores`
+  // and `onPaceSeries`. The other seven are what stops a history bar, a weekday
+  // rate or a times-per-week bucket painting a day as kept that the streak
+  // beside it counts as missed — the disagreement `dayCredit`'s own comment
+  // exists to prevent, one surface further out. A pass left unthreaded shows up
+  // here as 365 where this expects 1.
+  const stats = computeStats(limit223(), skipOnly223(), { end: END_223 });
+
+  assert.equal(stats.history.length, 366);
+  assert.equal(stats.history.reduce((n, h) => n + h.completed, 0), 1);
+  assert.equal(stats.history.at(-1).completed, 1);
+
+  assert.equal(stats.weekdays.reduce((n, w) => n + w.completed, 0), 1);
+  // The skipped day is still excluded and every other day still JUDGED, so the
+  // denominator is untouched: this is a change to what a day is worth, not to
+  // which days are read.
+  assert.equal(stats.weekdays.reduce((n, w) => n + w.total, 0), 365);
+
+  assert.equal(stats.weekdayByMonth.length, 13);
+  assert.equal(
+    stats.weekdayByMonth.reduce((n, m) => n + m.days.reduce((a, d) => a + d.completed, 0), 0), 1);
+
+  assert.deepEqual(stats.frequency, [{ month: '2026-08', counts: { 1: 1 } }]);
+
+  // `computeMissRuns` through `computeResilience`: 364 silent uncredited days
+  // are one long lapse now, where master saw none at all.
+  assert.equal(stats.resilience.worstLapse, 364);
+  assert.equal(stats.resilience.recovery.lapses, 1);
+});
+
+test('issue #223: at-least and at-most-`miss` habits do not move at all', () => {
+  // The anchor form this replaces moved them: it opened the window later for
+  // any habit whose earliest row was a skip, which on a NON-DAILY habit raised
+  // the score (measured there, 0.053382 → 0.120939) because `onPaceSeries`
+  // pro-rates its requirement by the window's width. A credit rule cannot do
+  // that — it only ever changes what an UNANSWERED day is worth, and both these
+  // shapes already count one as a miss. Daily and 3×/7 both asserted, because
+  // a daily fixture is immune to the pro-rating and so could not have shown the
+  // difference either way.
+  const rows = (v) => [
+    { date: SKIP_223, value: 0, status: 'skip' },
+    { date: '2026-08-15', value: v, status: '' },
+  ];
+  const cases = [
+    ['daily at-least', atLeast223(), rows(5), 0.04195],
+    ['daily at-most miss', limit223({ at_most_unlogged: 'miss' }), rows(1), 0.04195],
+    ['3x/7 at-least', atLeast223({ freq_numerator: 3, freq_denominator: 7 }), rows(5), 0.053382],
+    ['3x/7 at-most miss',
+      limit223({ at_most_unlogged: 'miss', freq_numerator: 3, freq_denominator: 7 }),
+      rows(1), 0.053382],
+  ];
+  for (const [label, habit, entries, score] of cases) {
+    const stats = computeStats(habit, entries, { end: END_223 });
+    assert.equal(stats.score, score, `${label} score`);
+    assert.equal(stats.currentStreak, 0, `${label} streak`);
+    assert.equal(stats.totalCompleted, 1, `${label} totalCompleted`);
+  }
+});
+
+test('issue #223: a NON-daily at-most habit lands lower than an empty one, and why', () => {
+  // Stated rather than smoothed over. For a DAILY habit the skip-only reading
+  // becomes identical to the no-rows reading, which is the issue's own table.
+  // For a 3×/7 habit it does not: the window legitimately still reaches back a
+  // year, so the trailing seven days ask for three completions and the one
+  // credited day cannot meet it — where a habit with NO rows is read over a
+  // one-day window whose requirement pro-rates down to 3/7. Both figures
+  // measured; the difference is `onPaceSeries`' leniency window, not the credit
+  // rule, and it is the same asymmetry `shared/CLAUDE.md` records under
+  // "moving the earliest entry EARLIER re-judges the first `den - 1` days".
+  const weekly = limit223({ freq_numerator: 3, freq_denominator: 7 });
+  const skipOnly = computeStats(weekly, skipOnly223(), { end: END_223 });
+  assert.equal(skipOnly.currentStreak, 0);
+  assert.equal(skipOnly.score, 0.011434);
+
+  const empty = computeStats(weekly, [], { end: END_223 });
+  assert.equal(empty.currentStreak, 1);
+  assert.equal(empty.score, 0.034303);
+});
+
+test('issue #223: the credit date is derived from the deduped MAP, not the array', () => {
+  // The map keeps the LAST row for a date, so a value row followed by a skip on
+  // the same day leaves the map holding a skip — and a rule that read the
+  // `entries` array would credit a window in which, as far as every other
+  // figure is concerned, nothing states a value. Unreachable through either
+  // edition (`PRIMARY KEY (habit_id, date)`) and asserted anyway, in both
+  // orderings, because a rule reading the array passes one of them by accident.
+  const valueThenSkip = computeStats(limit223(), [
+    { date: SKIP_223, value: 1, status: '' },
+    { date: SKIP_223, value: 0, status: 'skip' },
+  ], { end: END_223 });
+  assert.equal(valueThenSkip.currentStreak, 1);
+  assert.equal(valueThenSkip.score, 0.051922);
+
+  const skipThenValue = computeStats(limit223(), [
+    { date: SKIP_223, value: 0, status: 'skip' },
+    { date: SKIP_223, value: 1, status: '' },
+  ], { end: END_223 });
+  assert.equal(skipThenValue.currentStreak, 366);
+  assert.equal(skipThenValue.score, 1);
+});
+
+test('issue #223: #270 is untouched — no phantom-dated row becomes the anchor', () => {
+  // The anchor form made this shape reachable: with a valid-dated skip no
+  // longer able to open the window, a phantom-dated first VALUE row did — and
+  // '2026-07-99' normalises to 2026-10-07, past `end`, so `boundedRange`
+  // answered [] and every figure read zero for a habit with a live streak.
+  // A credit rule moves no anchor, so the window is master's byte for byte:
+  // 230 score points opening at 2026-01-01, streak 2, score 0.101149,
+  // totalCompleted 3. Measured on master and after.
+  const phantom = [
+    { date: '2026-01-01', value: 0, status: 'skip' },
+    { date: '2026-07-99', value: 2, status: '' },
+    { date: '2026-08-17', value: 2, status: '' },
+    { date: '2026-08-18', value: 2, status: '' },
+  ];
+  const daily = {
+    id: 3, name: 'Floss', type: 'boolean', target_type: 'at_least',
+    target_value: 1, freq_numerator: 1, freq_denominator: 1, at_most_unlogged: 'default',
+  };
+  const stats = computeStats(daily, phantom, { end: '2026-08-18' });
+  assert.equal(stats.scores.length, 230);
+  assert.equal(stats.scores[0].date, '2026-01-01');
+  assert.equal(stats.currentStreak, 2);
+  assert.equal(stats.score, 0.101149);
+  assert.equal(stats.totalCompleted, 3);
+
+  // The same rows on an at-most habit resolved to `success` DO move, and this
+  // is the honest half: the phantom date is the earliest stated value, so the
+  // credit date is its rollover — 2026-10-07, past `end` — and no unanswered
+  // day is credited at all, which is #270's hazard reaching a second date by
+  // the same route rather than a new one. The window is still untouched (230
+  // points from 2026-01-01) and the figures are the at-most-`miss` reading of
+  // the same rows.
+  const asLimit = computeStats(limit223(), [
+    { date: '2026-01-01', value: 0, status: 'skip' },
+    { date: '2026-07-99', value: 1, status: '' },
+    { date: '2026-08-17', value: 1, status: '' },
+    { date: '2026-08-18', value: 1, status: '' },
+  ], { end: '2026-08-18' });
+  assert.equal(asLimit.scores.length, 230);
+  assert.equal(asLimit.scores[0].date, '2026-01-01');
+  assert.equal(asLimit.currentStreak, 2);
+  assert.equal(asLimit.score, 0.101149);
+  assert.equal(asLimit.totalCompleted, 3);
 });

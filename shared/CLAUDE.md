@@ -205,8 +205,13 @@ look strong instead of one. `test/stats.test.js` pins the curve at days 13, 30
 and 60 so it cannot drift back.
 
 **Every date range is clamped**, and `computeStats` starts at
-`from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`). That
-window is derived inside `computeStats` and never returned, which is why anything
+`from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`).
+`resolveWindow` answers a **second** date beside it — `creditFrom`, the same
+expression over the earliest row that STATES a value — which every pass reading
+`unlogged` is handed so that an unanswered day counts as success only once the
+habit has answered once (#223). A route computing a pass ITSELF must ask
+`creditStart`, and must pass `undefined` for a `start` that came out of storage.
+That window is derived inside `computeStats` and never returned, which is why anything
 needing a figure from it gets a returned field rather than walking the entries
 again — `computeRecovery` answers `longest` and `lastEnd` for that reason. Every
 aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
