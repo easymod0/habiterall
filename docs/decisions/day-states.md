@@ -602,7 +602,9 @@ old rule is how a dashboard and a detail page come to disagree about one habit.
    fetched"**. So both routes read the lifetime `first_answer` out of the grouped
    `MIN(date)` query, resolve it ONCE through `creditAnchor`, and hand that one
    date to `summaryStats` and to the streak scan — one derivation, so the three
-   figures cannot disagree by construction. `creditAnchor` takes no `start`
+   figures cannot disagree about WHEN THE HABIT FIRST ANSWERED by construction.
+   That is the credit date and not the window; the paragraph below is what the
+   windows still do to `currentStreak`. `creditAnchor` takes no `start`
    parameter at all rather than documenting that a route must pass `undefined`,
    because a parameter that must always hold one value is a rule waiting to be
    broken. The grouped read consequently runs in ARCHIVED mode too, where it used
@@ -613,11 +615,45 @@ old rule is how a dashboard and a detail page come to disagree about one habit.
    round's fixtures put every row 365 days back, inside both windows, where the
    two derivations agree and neither could fail.
 
-   What is left, and it is older than this issue: `score` reads 400 days and
-   `bestStreak` reads 1830, so a habit whose only stored row is 500 days old
-   still reports `score` 0.051922 beside `bestStreak` 501. That is the window
-   mismatch, not the credit rule — measured identical on master — and it is out
-   of scope here.
+   What is left, and it is older than this issue: the credit date is now one
+   date, but the WINDOWS it is applied over are still three. `score` and
+   `currentStreak` read 400 days (`SUMMARY_WINDOW_DAYS`), `bestStreak` reads
+   1830 (`STREAK_HISTORY_DAYS`), and `/habits/:id/stats` reads lifetime — so a
+   habit whose only stored row is 500 days old still reports `score` 0.051922,
+   `currentStreak` **1** and `bestStreak` 501 on the dashboard, against 1 / 501
+   / 501 on its own page. **`currentStreak` belongs in that list and used to be
+   missing from it**, and naming it matters more than the other two, because it
+   is the figure that disagrees even where they have been brought into
+   agreement.
+
+   Measured at both routes on this branch, on the very fixture this item's
+   regression test builds — at-most habit resolved to `success`, one stated
+   value 500 days back, one skip 350 days back:
+
+   | | `/overview` | `/habits/:id/stats` |
+   |---|---|---|
+   | `score` | 1 | 1 |
+   | `bestStreak` | 501 | 501 |
+   | `currentStreak` | **350** | **501** |
+
+   `score` and `bestStreak` agree there — that is this fix working — while
+   `currentStreak` is out by 151 days on the same habit in the same second: a
+   streak of 350 under the habit's name on the dashboard and 501 on that
+   habit's own page. The cause is not the credit date, which both reads resolve
+   to the same day, and it is not `unlogged` either. It is `from` in
+   `resolveWindow`, which opens the reading at the earliest row IN THE SLICE IT
+   WAS HANDED: the 400-day slice holds nothing but the skip, and a skip cannot
+   OPEN a run, so the streak starts the day after it and is 350 days long; the
+   lifetime read opens at the stated answer 500 days back and carries that same
+   skip through without breaking it: `{length: 501, skips: 1}`.
+   Reproduced byte-identical against master with no `creditFrom` mechanism in
+   the tree at all, which is what makes it older than this issue.
+
+   Closing it means making the dashboard's `currentStreak` a lifetime read,
+   which is a behaviour change on that route's hot path and out of scope here.
+   So it is instead PINNED where it stands — 350 from `/overview` and 501 from
+   `/stats`, as literals, in both editions' regression blocks — so that the gap
+   stays visible and cannot move without a test saying so.
 2. **The category comparison.** `computeCategoryStats` scores each member from
    `memberWarm`, and a skip-only member read **1.00** there against **0.051922**
    on its own page — a wider version of the 0.97-against-0.41 gap
@@ -679,8 +715,15 @@ in — a rendering gap rather than a data gap — and it wants its own issue wit
 
 **The far end of the credit window is still unbounded**, deliberately, as above.
 
-**And `/overview`'s two windows still disagree about each other** — `score` reads
-400 days where `bestStreak` reads 1830, so a habit whose only stored row is 500
-days old reports `score` 0.051922 beside a `bestStreak` of 501. Measured
+**And `/overview`'s windows still disagree about each other, `currentStreak`
+loudest.** `score` and `currentStreak` read 400 days where `bestStreak` reads
+1830 and the detail page reads lifetime, so a habit whose only stored row is 500
+days old reports `score` 0.051922 and `currentStreak` 1 beside a `bestStreak` of
+501. **`currentStreak` is the one that disagrees even when the other two have
+been brought into agreement**: on the fixture item 1's regression test builds —
+one stated value 500 days back, one skip 350 days back — `/overview` reports 350
+where the habit's own page reports 501, with `score` and `bestStreak` matching
+at 1 and 501. Both figures are pinned as literals in the two editions'
+regression blocks so the gap cannot drift while it is unfixed. Measured
 identical on master: that is the window mismatch, older than this issue and out
 of scope for it.

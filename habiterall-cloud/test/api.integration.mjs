@@ -488,6 +488,28 @@ ck('...and bestStreak agrees with the score beside it rather than with a '
   staleRow.bestStreak === staleStats.bestStreak,
   `${staleRow.bestStreak} vs ${staleStats.bestStreak}`);
 
+/* `currentStreak` is the one figure on this payload that does NOT agree, and it
+ * is pinned WHERE IT STANDS rather than asserted into a parity that does not
+ * hold. Not the credit date — both reads resolve the same one — and not
+ * `unlogged`: purely the window. `summaryStats` gets a 400-day slice holding
+ * nothing but the skip, and a skip cannot OPEN a run, so the streak starts the
+ * day after it; the habit's own page opens at the stated answer 500 days back
+ * and carries that skip through without breaking it. Older than #223,
+ * reproduced identical on master, and closing it means making this route's
+ * streaks a lifetime read — a behaviour change on the dashboard's hot path.
+ *
+ * Two LITERALS and not `staleStats.currentStreak - 151`, because the point is
+ * that changing SUMMARY_WINDOW_DAYS fails here by name: widened past 500 the
+ * slice sees the answer and this reads 501, narrowed below 350 it sees no row
+ * at all and reads 1. A relative assertion would go on passing through both.
+ * Same figures as personal's `test/overview.integration.mjs`, which is the
+ * point — two implementations of one route surface.
+ * See docs/decisions/day-states.md. */
+ck('...while currentStreak still disagrees, at the width of the 400-day slice',
+  staleRow.currentStreak === 350, String(staleRow.currentStreak));
+ck("...against the lifetime read behind the habit's own page",
+  staleStats.currentStreak === 501, String(staleStats.currentStreak));
+
 // ...and in ARCHIVED mode, which is the one line of the route with no other test
 // on it. The grouped lifetime read that answers the credit date used to be
 // skipped there — it fed only `categorySummaries`, which archived mode omits —
