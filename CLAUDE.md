@@ -78,8 +78,8 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 
 | working in | read | archive |
 |---|---|---|
-| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md` |
-| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md`, `caching.md` |
+| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md`, `phantom-dates.md` |
+| `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md`, `caching.md`, `phantom-dates.md` |
 | `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md` |
 | `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md`, `caching.md` |
@@ -116,6 +116,9 @@ from the habit's first row that STATES a value, so a skip cannot buy compliance
 it states nothing about while a stored lapse still can — a second date
 (`creditFrom`), never a narrower window, because `computeCoverage` shares the
 window and a skip IS an answer to it (`docs/decisions/day-states.md`, #223).
+The one exception to "moves window-derived figures": a row dated a day that
+does not exist is not a day the habit lived, so it can never anchor a window it
+would otherwise widen — see `docs/decisions/phantom-dates.md` (#270).
 
 **Every date range is clamped** (`boundedRange`, `MAX_RANGE_DAYS`). Ranges
 derived from *stored* data are attacker-controlled: one entry dated year 0100

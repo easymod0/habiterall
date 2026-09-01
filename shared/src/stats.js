@@ -56,6 +56,82 @@ export function addDays(iso, n) {
 }
 
 /**
+ * The canonical SHAPE — four year digits, two month, two day — checked
+ * before anything is parsed. This is a deliberate re-spelling of
+ * `DATE_RE` in `validate.js`, not an import of it: `validate.js` already
+ * imports `notify.js`, which imports `isCompleted` from THIS file, so
+ * `stats.js -> validate.js` would close a cycle (`stats.js -> validate.js ->
+ * notify.js -> stats.js`). `shared/test/stats.test.js` has a table of inputs
+ * both regexes are asserted against, so the two cannot drift silently; if
+ * you change one, change the other and re-run that test. See also the
+ * comment beside `DATE_RE` in `validate.js`.
+ */
+export const CANONICAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Is `iso` the canonical spelling of a day that exists — the canonical SHAPE
+ * *and* round-tripping through `fromISO`/`toISO` unchanged? This refuses
+ * three different things with one check: a PHANTOM day (`fromISO('2026-02-30')`
+ * rolls into March, so `toISO` answers `'2026-03-02'` and the two strings
+ * disagree), a non-canonical spelling of a real one (`'2026-8-10'` parses to
+ * the same `Date` as `'2026-08-10'` but is not the string this file would
+ * ever spell), and a real day whose YEAR falls outside this file's domain —
+ * `'10000-01-01'` parses to a real `Date` and `toISO` pads a year to a
+ * MINIMUM of four digits rather than exactly four, so it round-trips
+ * unchanged and would pass the first two checks alone. That third case is not
+ * hypothetical: Postgres accepts and stores `DATE '10000-01-01'`, and
+ * `to_char` renders it back unchanged, so cloud's `entries.date` can hold one.
+ * Every comparison in `stats.js` is LEXICAL — `from <= date <= end` — and a
+ * five-digit year sorts BELOW every `'20xx-…'` date, exactly the hazard the
+ * `windowStart` ordering comment describes for a normalised `'9999-99-99'`
+ * rolling into year 10007.
+ *
+ * `fromISO`'s two-digit-year behaviour rides along for free: `'0050-01-01'`
+ * parses as `new Date(50, 0, 1)`, which `Date` resolves to the year 1950, so
+ * it is refused here even though `assertDate` would accept it as a shape.
+ * `'0999-12-31'` is a real year outside that 0-99 special case and is
+ * accepted.
+ *
+ * @param {string} iso
+ * @returns {boolean}
+ */
+export function isRealDay(iso) {
+  if (!CANONICAL_DATE_RE.test(iso)) return false;
+  const d = fromISO(iso);
+  return !Number.isNaN(d.getTime()) && toISO(d) === iso;
+}
+
+/**
+ * The earliest date in `dates` that `isRealDay` accepts, or `null` when none
+ * does — the min a window may OPEN at, #270's Half 2. A phantom row stays in
+ * `dates` (it is not deleted, and it is not hidden from anything that reads
+ * the map directly); it is simply never a candidate here, because a date that
+ * is not a day is not a day the habit lived, so it cannot be the day the
+ * window opens. Don't assume the caller sorted `dates` — every call site here
+ * hands this a `Map`'s key iterator, in insertion order, not date order.
+ *
+ * Exported for both editions' `/overview`, the last #270 anchor site: its
+ * `bestStreak` is a streak scan the ROUTE runs itself, over a `streakMap` it
+ * builds one line above the call, and it opened at `entries[0].date` — the
+ * lexical min out of `ORDER BY date`, which is exactly as phantom-capable as
+ * the raw `MIN(date)` reads `creditAnchor` and `computeCategoryStats` already
+ * refuse. This is the one spelling of "skip a phantom when choosing an
+ * anchor"; a route must not restate the loop inline. See
+ * `docs/decisions/phantom-dates.md`.
+ *
+ * @param {Iterable<string>} dates
+ * @returns {string|null}
+ */
+export function earliestRealDay(dates) {
+  let earliest = null;
+  for (const date of dates) {
+    if (!isRealDay(date)) continue;
+    if (earliest === null || date < earliest) earliest = date;
+  }
+  return earliest;
+}
+
+/**
  * Whole days from `a` to `b`. Math.round absorbs the +/- 1 hour a DST
  * transition introduces, which is why this is correct across timezones.
  * @param {string} a 'YYYY-MM-DD'
@@ -1073,16 +1149,51 @@ function windowStart(anchor, start, end) {
   // request, for a habit that has none of those days; clamped first it is
   // `end`.
   //
-  // NECESSARY AND NOT SUFFICIENT, and the difference is filed as #270 rather
-  // than fixed here. The clamp is a STRING comparison and the reformat is a
-  // rollover worth up to ~8 years, so a date inside the window lexically can
-  // still land outside it afterwards, with neither clamp having run since:
-  // '2026-07-99' sorts below an `end` of '2026-08-18', normalises to
-  // '2026-10-07', and `boundedRange` then answers [] — every figure zero for a
-  // habit with a live streak. Measured, and byte-identical on master, so it is
-  // older than the padding fix and is not something the ordering ever closed.
-  // The fix is to re-apply the clamps AFTER this line; it is not done here
-  // because it changes what an affected account's figures say.
+  // NECESSARY AND NOT SUFFICIENT, which is #270. The clamp above is a STRING
+  // comparison and the reformat below is a rollover worth up to ~8 years, so a
+  // date inside the window lexically can land outside it afterwards, with
+  // neither clamp having run since: '2026-07-99' sorts below an `end` of
+  // '2026-08-18', normalises to '2026-10-07', and `boundedRange` would answer
+  // [] — every figure zero for a habit with a live streak. Measured, and
+  // byte-identical on master, so it is older than the padding fix and is not
+  // something the ordering ever closed. The two clamps are therefore
+  // RE-APPLIED below, after the reformat, as a backstop for exactly this: a
+  // date arriving here already inside `[earliest, end]` but landing outside it
+  // once normalised is clamped straight back in, rather than left to widen or
+  // empty the window. This is Half 1 of #270's fix; Half 2 (`resolveWindow`'s
+  // `firstEntry` loop and `firstStatedAnswer`) stops a phantom date from ever
+  // being CHOSEN as `anchor` in the first place.
+  //
+  // A REVIEW ROUND FOUND THE LAST GAP IN THAT: `creditAnchor` itself used to
+  // hand `anchor` straight through unfiltered, on the theory that "it has only
+  // one date and no map to filter through `isRealDay`" — but it can, and now
+  // does, exactly the way `firstStatedAnswer` (Site B) and
+  // `computeCategoryStats`'s supplied `firstAnswer` (Site D) already do: a
+  // non-real anchor degrades to "no evidence" rather than reaching here raw.
+  // So of the three callers of this function, none now hands `anchor` a
+  // phantom: `resolveWindow`'s two calls are pre-filtered (`earliestRealDay`
+  // for the window, `firstStatedAnswer` for credit) and `creditAnchor`
+  // filters its own. The backstop below is NOT therefore unreachable, the way
+  // `computeCategoryStats`'s equivalent normalise block now is (see the
+  // comment there) — this function is also reached with a caller-NAMED
+  // `start` (`resolveWindow`'s `start ??` clause, one line up), and nothing in
+  // this file asserts that one is a real day; that is a route's job
+  // (`assertDate`), not this module's. A `start` that arrived here unreal —
+  // through a test, or a caller added later that skips the route's guard —
+  // still needs the clamp-then-normalise-then-clamp sequence below, and the
+  // ordering argument for it is unchanged from before this fix.
+  //
+  // The ordering above `from` is normalised is still load bearing even with
+  // the backstop below, and re-applying the clamps after the reformat does not
+  // make it not matter: normalised FIRST, '9999-99-99' still lands in
+  // '10007-...', which is still BELOW `earliest` (five digits sorts under
+  // four), so the re-clamp below would replace it with `earliest` — the
+  // widest window `MAX_RANGE_DAYS` allows, on every request, for a habit that
+  // has none of those days. Clamped first, the pre-reformat pair leaves it at
+  // `end`, and the post-reformat pair does nothing further because `end` is
+  // already inside `[earliest, end]`. The two orderings still answer
+  // differently; only the WORST case moved, from "every figure zero" to
+  // "every figure computed over the widest window instead of the narrowest".
   // (`toISO` used not to pad the year at all, and that was a LATENT hazard
   // here rather than a wrong figure: normalising '0999-12-31' yielded
   // '999-12-31', which sorts ABOVE '2016-...' — but under THIS ordering the
@@ -1096,6 +1207,12 @@ function windowStart(anchor, start, end) {
   // years wide read as one in the future.)
   const asDate = fromISO(from);
   if (!Number.isNaN(asDate.getTime())) from = toISO(asDate);
+
+  // Re-apply both clamps now that `from` is normalised — see the comment
+  // above for why this is necessary despite the pair already having run once,
+  // and why the ordering above is still worth having even though this exists.
+  if (from < earliest) from = earliest;
+  if (from > end) from = end;
 
   return from;
 }
@@ -1116,6 +1233,16 @@ function windowStart(anchor, start, end) {
  * "a stored lapse can move window-derived figures, and that is the model
  * working" paragraph is about. Only a skip states nothing.
  *
+ * **#270's Half 2 reaches this loop too** (Decision 4) — `if (!isRealDay(date))
+ * continue` sits beside the skip check, and the two guards are for different
+ * reasons even though both `continue`. A skip is a row that states nothing;
+ * a phantom date states something but is not a day the habit could have
+ * stated it ON, so it cannot be the day credit begins any more than it can be
+ * the day a window opens. Refusing it here is what keeps `creditFor` (and so
+ * `creditAnchor`) from ever being handed a phantom `firstAnswer` by this
+ * path — a route's own `MIN(date)` read still can, which is `windowStart`'s
+ * re-clamp's job, not this one's.
+ *
  * @param {Map<string, {value: *, status: string}>} entryMap
  * @returns {string|null}
  */
@@ -1123,6 +1250,7 @@ function firstStatedAnswer(entryMap) {
   let stated = null;
   for (const [date, v] of entryMap) {
     if (v.status === 'skip') continue;
+    if (!isRealDay(date)) continue;
     if (stated === null || date < stated) stated = date;
   }
   return stated;
@@ -1185,13 +1313,35 @@ function creditFor(firstAnswer, start, end) {
  * this rule removes; a parameter that must always be `undefined` is a rule
  * waiting to be broken.
  *
+ * **A `firstAnswer` that is not a real day is refused as an anchor, the same
+ * way `firstStatedAnswer` (Site B) and `computeCategoryStats`'s supplied
+ * `firstAnswer` (Site D) already refuse one — this is not a function that
+ * "has only one date and no map to filter", it degrades to "no evidence"
+ * exactly as they do.** Both routes' `/overview` supplies this out of a raw
+ * `MIN(date) FILTER (WHERE status <> 'skip')` read, which is exactly as
+ * phantom-capable as the `MIN(date)` that feeds `firstEntry`/`warmAnchor`, and
+ * a phantom date normalises INSIDE `[earliest, end]` more often than it rolls
+ * out of it — `windowStart`'s re-clamp only catches the second case.
+ * Unguarded, `'2026-02-30'` (a stated VALUE row, five and a half months
+ * before the habit's only real answer) normalised to `'2026-03-02'`, inside
+ * the window, and credited five and a half months of silence nobody answered
+ * for: measured, `mean: 0.999884` on the category comparison against
+ * `0.051922` on the same habit's own page, which computes this date through
+ * `firstStatedAnswer` and so already refused it. Treating a non-real
+ * `firstAnswer` as `null` here — before `isRealDay` is asked, since it throws
+ * on `null`/`undefined` — makes `creditFor`'s `?? end` clause do the same job
+ * it already does for "never answered": credit begins at `end`, i.e. no
+ * evidence, never an invented one.
+ *
  * @param {string|null} firstAnswer the habit's LIFETIME earliest row that states
- *   a value, or `null` when it has never stated one
+ *   a value, or `null` when it has never stated one, or a stored date that is
+ *   not a real day (treated the same as `null`: no admissible evidence)
  * @param {string} end
  * @returns {string}
  */
 export function creditAnchor(firstAnswer, end) {
-  return creditFor(firstAnswer, undefined, end);
+  const anchor = firstAnswer != null && !isRealDay(firstAnswer) ? null : firstAnswer;
+  return creditFor(anchor, undefined, end);
 }
 
 /**
@@ -1246,11 +1396,13 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
   );
 
   // Don't assume the caller sorted the entries, and never span more than
-  // MAX_RANGE_DAYS even if a stray entry is dated decades ago.
-  let firstEntry = null;
-  for (const date of entryMap.keys()) {
-    if (firstEntry === null || date < firstEntry) firstEntry = date;
-  }
+  // MAX_RANGE_DAYS even if a stray entry is dated decades ago. #270's Half 2:
+  // a phantom row stays in `entryMap` (a day nobody logged is still owed a
+  // `no`/`unknown` reading everywhere else) but is refused HERE — a date that
+  // is not a day cannot be the day the window opens, so `earliestRealDay`
+  // skips it rather than letting `windowStart`'s re-clamp catch it after the
+  // fact.
+  const firstEntry = earliestRealDay(entryMap.keys());
 
   return {
     entryMap,
@@ -1521,7 +1673,15 @@ export function summariseMembers(rows) {
  *   `score` as of (`summaryEnd`), so a member whose earliest entry is AFTER
  *   it is not yet landed even though it has one. Matches `landedAt`'s rule
  *   in `computeCategoryStats`'s `section` below: has this member landed by
- *   the day being read, not merely does it have an entry at all.
+ *   the day being read, not merely does it have an entry at all. **A `first`
+ *   that is not a real day (`isRealDay`) counts as landed unconditionally**,
+ *   the same rule `computeCategoryStats`'s own `firstEntry`/`landsOn` already
+ *   applies (#270): it cannot say WHEN the habit landed — a phantom date has
+ *   no lexical relationship to `day` worth trusting, and comparing it anyway
+ *   is what let a member with a fully-inert `MIN(date)` read as unlanded here
+ *   while that same function's `landsOn: firstEntry === null ? null :
+ *   memberWarm` already landed it at `warmStart`. A phantom row still says the
+ *   habit HAS an entry, which is the one thing this field is asked.
  * @returns {import('./types.js').CategorySummaryRow[]}
  */
 export function summariseByCategory(categories, payloads, firstEntry, day) {
@@ -1533,11 +1693,20 @@ export function summariseByCategory(categories, payloads, firstEntry, day) {
   }
   const summarise = (members) => summariseMembers(members.map((h) => {
     const first = firstEntry.get(h.id);
+    // A non-real `first` cannot say WHEN the habit landed, only THAT it has an
+    // entry — the same distinction `computeCategoryStats`'s `landsOn` already
+    // draws between a phantom `firstEntry` (still landed, at `warmStart`) and
+    // a phantom `warmAnchor` (refused as a WARM-UP date). Landed here means
+    // "has an entry at all, dated on or before `day`, once real days are the
+    // only ones asked to prove that" — so a phantom counts as landed
+    // unconditionally rather than losing a lexical comparison it cannot
+    // honestly make.
+    const landed = first != null && (!isRealDay(first) || first <= day);
     return {
       id: h.id,
       name: h.name,
       score: h.score,
-      landed: first != null && first <= day,
+      landed,
     };
   }));
   return [
@@ -1724,44 +1893,80 @@ export function computeCategoryStats(categories, members,
     // `landedAt` already refuses to read a member on a day before it landed. The
     // two dates are now the same one, so that coupling is load bearing:
     // weakening the landing rule means widening this range back.
-    let memberWarm = firstEntry && firstEntry > warmStart ? firstEntry : warmStart;
+    //
+    // **#270's Half 2: the clamp is applied to an ANCHOR, not to the raw
+    // `firstEntry`.** `firstEntry` itself is left alone above — it is what
+    // answers "has this habit ever been logged", which a phantom row is a
+    // genuine answer to, so `landsOn` below still reads it directly and a
+    // phantom-only member still LANDS rather than falling into
+    // `unloggedExcluded`. But a phantom date cannot be the day the WARM-UP
+    // opens at, for the same reason it cannot be the day a window opens in
+    // `resolveWindow`: it is not a day the habit lived. `warmAnchor` is the
+    // real day this member's warm-up may open at instead of `firstEntry` when
+    // that one is a phantom.
+    //
+    // The fallback — the earliest REAL row in the fetched slice — is narrower
+    // than the truth, and honestly so: a caller-supplied `lifetimeFirst` that
+    // is a phantom cannot be replaced by the true lifetime-first REAL row,
+    // because SQL handed us one date (`MIN(date)`, itself phantom-capable) and
+    // not a second, filtered one. Degrading further to `warmStart` when the
+    // slice holds no real row at all is the same shape of compromise.
+    //
+    // **Both of those NARROW the warm-up, and a review round found this
+    // comment claiming the opposite.** `earliestRealDay(entryMap.keys())` is
+    // bounded below by the slice's own earliest fetched date — the route
+    // hands this function `entries` from `start - SCORE_WARMUP_DAYS` onward,
+    // never earlier — so the fallback can never land BEFORE `warmStart`, only
+    // at or after it; `warmStart` itself is of course no earlier either. A
+    // member with a phantom `firstEntry` and real rows starting partway into
+    // the window therefore lands LATER than an unguarded rollover of that same
+    // phantom sometimes did, and drops out of whichever early buckets fall
+    // before its real first row (measured: `members` 2 → 1 and `value`
+    // 0.025961 → 0.051922 on the window's first bucket, for a member logged
+    // from 2026-06-15 with a `firstEntry` of `2024-99-99` —
+    // `docs/decisions/phantom-dates.md` has the fixture in full).
+    //
+    // Narrowing is nonetheless the safe direction here, same as it is for
+    // `firstAnswer` below (Site D) — the two err in the SAME direction, not
+    // opposite ones, and an earlier version of this comment said otherwise.
+    // Landing a member before its first REAL evidence is exactly the warm-up
+    // defect the clamp two paragraphs up exists to prevent (0.969536 against
+    // an own-page 0.41327): admitting it any EARLIER than the truth can prove
+    // is the dangerous direction, not the safe one. Excluding a member from an
+    // early bucket it cannot yet honestly support is a smaller, visible cost —
+    // one bucket's `members` count is off by one until the real row arrives —
+    // against a wrong score standing behind a bucket that looks fully counted.
+    const warmAnchor = firstEntry !== null && isRealDay(firstEntry)
+      ? firstEntry
+      : earliestRealDay(entryMap.keys());
+    let memberWarm = warmAnchor && warmAnchor > warmStart ? warmAnchor : warmStart;
 
-    // **Normalised AFTER the clamp, never before**, which is `resolveWindow`'s
-    // own shape and is here for the same reason: `firstEntry` comes out of
-    // STORAGE and does not have to be a real day. `assertDate` refuses one on
-    // the way in, but a row predating that guard does not, and `computeScores`
-    // normalises the start it is handed (a walk from 2026-02-30 begins on
-    // 2026-03-02) while `landedAt` below selects by STRING comparison. The two
-    // then disagreed about the days in between: 2026-03-01 read as landed, with
-    // no score point behind it, which is `undefined` through `meanScoreAt` and
-    // one NaN bucket — serialised as `null` and dropped by `ui/categories.js`'s
-    // own filter, so the drawn line quietly lost a vertex. Measured: `mean`
-    // itself survived, because the last bucket is `end`, long past the gap.
+    // **This block is unreachable by any input now, and is kept as a
+    // documented backstop rather than removed.** `warmAnchor` is a real day by
+    // construction on both branches — `isRealDay(firstEntry)` on the first,
+    // `earliestRealDay`'s own guarantee on the second — and `warmStart` is
+    // `addDays` over `dates[0]`, itself always real, so `memberWarm` is always
+    // one of two real days and `fromISO`/`toISO` below is always a no-op.
     //
-    // A phantom day never happened, so the member lands on the real day the walk
-    // reaches instead. `unloggedExcluded` is unmoved either way — the member has
-    // an entry, whatever that entry is dated.
-    //
-    // The ORDERING is the whole safety of it, exactly as it is in
-    // `resolveWindow`: the clamp above is a string comparison and normalising
-    // is a rollover of a stored string, so normalising first lets the rollover
-    // decide which of the two dates the comparison picks. '9999-99-99' lands in
-    // year 10007 — five digits, which sorts BELOW '2026-...' however the year
-    // is padded — so a member holding one junk row would compare as OLDER than
-    // `warmStart` and be scored over the full warm-up from a day it did not
-    // exist, which is the reading the clamp above exists to refuse. A
-    // `firstEntry` OLDER than `warmStart` is never reformatted at all and does
-    // not need to be: `memberWarm` is then `warmStart`, a real day, and the
-    // member is admitted on every day of the window under either spelling.
-    //
-    // NECESSARY AND NOT SUFFICIENT here too, and filed as #270 with
-    // `resolveWindow`'s half. A `firstEntry` that sorts AFTER `warmStart` is
-    // not clamped, and the rollover can then carry it past `end`: '2025-99-99'
-    // against a `warmStart` of '2025-04-27' normalises to '2033-06-07', and
-    // `landedAt` refuses the member on every day of the window — reported as
-    // never logged while holding a row, and the category reads 1.00 because
-    // the member dragging it down was excluded rather than scored. Measured,
-    // and identical on master.
+    // Do not read this as still pinning an ordering a test can see: before
+    // Half 2, a phantom `firstEntry` could reach this normalise directly and
+    // the ORDER of clamp-then-normalise decided whether a member holding one
+    // was admitted at the widest warm-up or refused for the whole window (see
+    // git history on this comment for the full argument and the '9999-99-99'
+    // / '2025-99-99' measurements). A route's own `MIN(date)` read is still
+    // phantom-capable and still reaches this function — both editions' category
+    // routes hand `firstEntry` straight from SQL — but `warmAnchor` above
+    // already filtered it through `isRealDay` one line up, so nothing phantom
+    // survives to reach this block. The credit anchor a few lines below reads
+    // its own SQL-supplied `firstAnswer` the same way now, for the mirror-image
+    // hole that shipped without it (a supplied `firstAnswer` reached
+    // `windowStart` unfiltered) — so neither of this function's own calls into
+    // `windowStart` can hand it a raw phantom. The ordering pin itself has
+    // moved to `windowStart`'s own re-clamp (#270 Half 1) and its
+    // `creditAnchor` tests in `test/stats.test.js` — `creditAnchor` is called
+    // directly by `/overview` and `/habits/:id/stats`, outside this function,
+    // and is the one path left where a raw phantom anchor still reaches
+    // `windowStart` unfiltered.
     if (memberWarm) {
       const asDate = fromISO(memberWarm);
       if (!Number.isNaN(asDate.getTime())) memberWarm = toISO(asDate);
@@ -1785,15 +1990,50 @@ export function computeCategoryStats(categories, members,
     // Nothing states a value ⇒ credit begins at `end`, which is what makes such
     // a member read as having no evidence rather than a perfect record.
     //
+    // **The supplied branch needs `warmAnchor`'s own guard, and did not have
+    // it.** Both editions' `MIN(date) FILTER (WHERE status <> 'skip')` read is
+    // exactly as phantom-capable as the raw `MIN(date)` that feeds
+    // `firstEntry`/`warmAnchor` above — it filters `skip`, never `isRealDay` —
+    // and unlike the DERIVED branch, `firstStatedAnswer` below, which already
+    // refuses a phantom via Site B's own guard (Decision 4), a SUPPLIED
+    // `lifetimeAnswer` reached `windowStart` unfiltered. A phantom
+    // `firstAnswer` normalises INSIDE `[earliest, end]` more often than it
+    // rolls out of it, so `windowStart`'s re-clamp backstop mostly does not
+    // fire, and credit begins on a day the habit stated nothing — the fail-OPEN
+    // direction #223 exists to close, and the whole reason the derived branch
+    // is filtered at all. `rawAnswer` mirrors `warmAnchor`'s own shape: prefer
+    // the supplied value, but a non-real one cannot be repaired into "the true
+    // lifetime first REAL stated answer" (SQL gave us one date, not a second,
+    // filtered one), so it degrades to what the fetched slice can prove
+    // instead — `firstStatedAnswer(entryMap)`, already `isRealDay`-filtered.
+    //
+    // Get the `null` cases right: an ABSENT `lifetimeAnswer` key means "derive
+    // it from the slice" (`lifetimeAnswer !== undefined`), and an explicit
+    // `null` means "this habit has never stated one" and must stay `null`
+    // rather than fall into the phantom branch — `rawAnswer !== null` guards
+    // that. **This NARROWS in the same direction `warmAnchor` above does, not
+    // the opposite one** — a review round found the two described as pulling
+    // opposite ways, which was wrong. Both fall back to the earliest REAL date
+    // the fetched slice can prove, never to anything earlier, so both can only
+    // move a member's figures LATER than an unguarded phantom might have.
+    // Narrowing is the safe direction for each, for its own reason: here,
+    // because crediting silence with no evidence behind it is #223's own
+    // defect — nothing stated is `end`, i.e. no evidence, never a perfect
+    // record — and for `warmAnchor`, because scoring a member before its first
+    // real evidence is the warm-up defect the clamp above exists to prevent.
+    const rawAnswer = lifetimeAnswer !== undefined
+      ? lifetimeAnswer
+      : firstStatedAnswer(entryMap);
+    const firstAnswer = rawAnswer !== null && !isRealDay(rawAnswer)
+      ? firstStatedAnswer(entryMap)
+      : rawAnswer;
+
     // Clamped and normalised through the same helper the other two dates use,
     // and it takes no `start`: the comparison's `start` is a window this route
     // was ASKED for, where `creditFor`'s `start ??` clause is about a caller
     // naming the window a habit's own figures are read over. Honouring it here
     // would credit every silent day of any explicitly-started comparison, which
     // is the defect this is fixing arriving through the other route.
-    const firstAnswer = lifetimeAnswer !== undefined
-      ? lifetimeAnswer
-      : firstStatedAnswer(entryMap);
     const memberCredit = windowStart(firstAnswer ?? end, undefined, end);
 
     const scoreAt = new Map();
