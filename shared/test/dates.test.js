@@ -312,6 +312,108 @@ test('a mark-bearing cluster is still estimated at or above what Chrome actually
     `estimate ${devaEstimate} must cover the real ${REAL_DEVA_BU_AT_11}px Devanagari render`);
 });
 
+test('the Greek block is no longer billed at the generic rate — #286', () => {
+  // The issue's own case. `classOf` had no class for Greek at all: Greek
+  // (`Ͱ`-`Ͽ`) sits below `SEMITIC`'s `֐`-`ࣿ` and above every other
+  // script test, so every Greek code point fell through to `other` — 0.58
+  // JOINED, `Μαρ` estimating 16.53 (3 * 0.58 * 9.5) against a real render
+  // that was already 20-odd pixels wide. This is the regression coverage for
+  // the fix, in the direction that matters: against `getComputedTextLength()`
+  // in a real Chrome, not against the rate table's own arithmetic.
+  const REAL_EL_MAR_AT_9_5 = 20.25; // getComputedTextLength(), Chrome for Testing 152.0.7977.42, el-GR
+  const estimate = estimateTextWidth('Μαρ', 9.5);
+  assert.ok(estimate >= REAL_EL_MAR_AT_9_5,
+    `estimate ${estimate} must cover the real ${REAL_EL_MAR_AT_9_5}px Greek render`);
+});
+
+test('every real el-GR label the app draws is covered, not just the worst one', () => {
+  // `Μαρ` above is the governing worst case; this widens the coverage to every
+  // shape of el-GR label the charts actually draw. The two halves of the table
+  // do NOT bite the same mutation, and saying which is which is the point of
+  // this header — an earlier version claimed the LONE rows covered the class
+  // branch, and they cannot:
+  //
+  //   - the three JOINED rows (`Μαρ`, `Παρ`, `Σάβ` — three glyphs, so
+  //     `estimateTextWidth` reads the JOINED table) are the regression
+  //     coverage for #286. Delete `if (GREEK.test(ch)) return 'greek';` and
+  //     all three fail: JOINED greek is 0.72 against `other`'s 0.58.
+  //   - the two LONE rows (`Π`, `Τ`) guard the TABLE KEY rather than the class
+  //     branch, because `LONE.greek` is 0.8 and so is `LONE.other` — by
+  //     measurement and not by coincidence, the widest real Greek lone label
+  //     being Π at 0.731, which 0.8 covers (see the `WIDTH_SAFETY` comment).
+  //     So they pass byte-identically with the `GREEK` branch deleted. What
+  //     they DO bite is deleting the `greek` key from `LONE`: `classOf` still
+  //     answers `'greek'`, the lookup is `undefined`, every Greek estimate is
+  //     `NaN`, and `NaN >= real` is false, so both rows fail. That is the
+  //     mutation they are kept for.
+  //
+  // Every real width here is measured with
+  // getComputedTextLength(), Chrome for Testing 152.0.7977.42, el-GR via
+  // CDP `Emulation.setLocaleOverride`, the app's font stack
+  // (`shared/test/label-widths.mjs`'s FONT_CSS) — re-measured directly rather
+  // than copied from anywhere else, since the point is what this Chrome build
+  // actually renders.
+  const LABELS = [
+    ['Μαρ', 9.5, 20.25],  // month, short — the worst case
+    ['Παρ', 9.5, 18.58],  // weekday, short
+    ['Σάβ', 9.5, 17.19],  // weekday, short
+    ['Π', 9.5, 6.95],     // weekday, narrow — LONE
+    ['Τ', 10.5, 5.84],    // weekday, narrow — LONE
+  ];
+  for (const [label, size, real] of LABELS) {
+    const estimate = estimateTextWidth(label, size);
+    assert.ok(estimate >= real,
+      `"${label}" @ ${size}px: estimate ${estimate} must cover the real ${real}px render`);
+  }
+});
+
+test('the Greek class spans the whole Greek and Coptic block, and stops there', () => {
+  // Decision 1: the span is the whole block including its Coptic tail, U+03E2
+  // through U+03EF — a Coptic letter costs exactly what a Greek letter does,
+  // rather than falling to the generic rate the way it did before the fix.
+  // This is what stops the span being narrowed later without anyone noticing.
+  //
+  // The equality alone is not enough to catch the class being deleted
+  // outright: with no GREEK branch at all, a Coptic letter and a Greek
+  // letter fall to the SAME generic `other` rate and still measure equal to
+  // each other — the mutation that removes `if (GREEK.test(ch)) return
+  // 'greek';` passes this line unchanged. So this also pins that both cost
+  // MORE than a same-length run of plain (non-upper) Latin, which is
+  // unambiguously `other`: JOINED greek is 0.72 against JOINED other's 0.58,
+  // a gap the class-deleted mutation collapses to zero. Three characters,
+  // not one, because `LONE.greek` is DELIBERATELY equal to `LONE.other`
+  // (0.8 both — see the WIDTH_SAFETY comment), so a lone-glyph comparison
+  // could never tell the fixed rate table from the deleted class either.
+  const coptic = estimateTextWidth('ϢϢϢ', 10);   // U+03E2, three times
+  const greek = estimateTextWidth('ΜΜΜ', 10);    // U+039C, three times
+  const genericLatin = estimateTextWidth('xyz', 10); // definitely `other`
+  assert.equal(coptic, greek,
+    'a Coptic run (U+03E2) inside the block must cost what a Greek run (Μ) does');
+  assert.ok(coptic > genericLatin,
+    `a Coptic run (${coptic}) must cost MORE than the same-length generic run (${genericLatin}), ` +
+    'or the Greek class has collapsed into the fallback rate');
+  assert.ok(greek > genericLatin,
+    `a Greek run (${greek}) must cost MORE than the same-length generic run (${genericLatin}), ` +
+    'or the Greek class has collapsed into the fallback rate');
+
+  // Decision 2: Greek Extended (polytonic, U+1F00-U+1FFF) is deliberately NOT
+  // in the class. Measured as a uniform three-glyph run its widest per-glyph
+  // rate is 1.138 (Ἧ, U+1F2F) against the base block's 0.907, so one class
+  // cannot rate both without pushing the other outside `WIDTH_SAFETY`: rated
+  // at greek's 0.72 a polytonic glyph under-estimates 1.58x (see the comment
+  // above `WIDTH_SAFETY` for the rest). It stays on `other`, under-estimating
+  // 1.96x, pre-existing and unreached by any locale this harness sweeps. This
+  // is a boundary assertion, not an oversight to "fix": three Greek Extended
+  // letters must cost exactly what three generic letters do.
+  //
+  // Compared against a same-length generic run rather than against a literal
+  // `0.58 * 3 * 10`. The claim is "Greek Extended is still billed as `other`",
+  // and hardcoding `other`'s rate would redden this line — with a
+  // Greek-Extended-shaped message — the next time `other` is re-measured for
+  // reasons that have nothing to do with polytonic Greek.
+  assert.equal(estimateTextWidth('ἯἯἯ', 10), estimateTextWidth('xyz', 10));
+});
+
 test('every weekday width is indexed the same way, and narrow is one character', () => {
   // `narrow` is what the seven-column grid header and the month grid's rows
   // read, and both depend on it staying one character. Measured across en, de,

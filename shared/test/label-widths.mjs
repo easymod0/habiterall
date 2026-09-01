@@ -126,15 +126,16 @@ const LOCALES = [
   ['kn-IN', 'Kannada — an abugida with vowel signs', true],
   ['gu-IN', 'Gujarati — an abugida with vowel signs, no headline stroke', true],
   ['he-IL', 'Hebrew — right-to-left breadth; CLDR weekday/month names carry no niqqud', true],
-  // Added after review. `dates.js`'s `WIDTH_SAFETY` comment records Greek
-  // `Μαρ` at 1.23x as the GOVERNING worst case and derives the margin's 1.6%
-  // of headroom from it — and that number was found by extending this list by
-  // hand, off to one side, and then not committing the extension. The one
-  // figure the comment tells you to re-run this file to reproduce was the one
-  // figure this file could not produce. Greek is also the case #286 is about:
-  // `classOf` has no class for it, so it falls through to the generic `other`
-  // rate against a real per-glyph rate around 0.71.
-  ['el-GR', 'Greek — no `classOf` class at all, and the governing worst case (#286)', true],
+  // Added after review, when Greek `Μαρ` at 1.23x was the GOVERNING worst
+  // case and the margin's 1.6% of headroom was derived from it — a number
+  // found by extending this list by hand, off to one side, and then not
+  // committing the extension, so the one figure `dates.js` told you to re-run
+  // this file to reproduce was the one figure this file could not produce.
+  // #286 has since given Greek its own `classOf` class, so this row no longer
+  // governs the margin: it measures 1.03x now and the worst case has gone back
+  // to Arabic. It stays in the list precisely because it is the row that would
+  // report the class being lost again.
+  ['el-GR', 'Greek — the #286 script class, and the case that had no class at all before it', true],
 ];
 
 /**
