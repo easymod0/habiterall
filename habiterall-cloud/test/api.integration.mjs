@@ -368,6 +368,89 @@ ck("today's window still carries its entries",
   Object.keys(rowNow.entries).length === 7,
   String(Object.keys(rowNow.entries).length));
 
+/* ---- issue #223: /overview's bestStreak reads the same credit rule ----
+ *
+ * `score` and `currentStreak` come from `summaryStats` and so from
+ * `resolveWindow`; `bestStreak` is a streak scan this ROUTE does itself, over a
+ * wider window and starting at the earliest row of any kind. Until the credit
+ * date was handed to it, `/overview` served `bestStreak: 365` for a habit whose
+ * own `/stats` page said 1.
+ *
+ * The SAME literals as `habiterall-personal/test/overview.integration.mjs`, on
+ * purpose: one route surface, two implementations, and they have drifted before
+ * — this edition once counted a skip as done on an at-most habit where personal
+ * did not. Written through the router rather than the data layer so the memo is
+ * invalidated the way a real write invalidates it.
+ */
+const creditHabitRes = await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Coffee 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'cups',
+  }),
+});
+const creditHabit = await creditHabitRes.json();
+await fetch(`${overviewBase}/api/habits/${creditHabit.id}/entries/${isoDaysAgo(365)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ status: 'skip' }),
+});
+
+const creditView = await getOverview({ days: 7 });
+const creditRow = creditView.habits.find((h) => h.id === creditHabit.id);
+const creditStats = await fetch(`${overviewBase}/api/habits/${creditHabit.id}/stats`)
+  .then((r) => r.json());
+
+ck('a skip-only limit habit reports no unearned best streak on /overview',
+  creditRow.bestStreak === 1, String(creditRow.bestStreak));
+ck('...and /overview agrees with /stats about all three figures',
+  creditRow.bestStreak === creditStats.bestStreak
+  && creditRow.currentStreak === creditStats.currentStreak
+  && creditRow.score === creditStats.score,
+  `overview ${creditRow.score}/${creditRow.currentStreak}/${creditRow.bestStreak} vs `
+  + `stats ${creditStats.score}/${creditStats.currentStreak}/${creditStats.bestStreak}`);
+ck('the habit is genuinely resolved to success, or this fixture proves nothing',
+  creditRow.unlogged_is_success === true, String(creditRow.unlogged_is_success));
+ck('a habit with zero completions still says so',
+  creditRow.totalCompleted === 0, String(creditRow.totalCompleted));
+
+// A stored LAPSE is real evidence, so the same shape keeps its long best streak.
+// Without this the checks above pass against a route that credits nothing ever.
+const lapseHabit = await (await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Soda 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'cans',
+  }),
+})).json();
+await fetch(`${overviewBase}/api/habits/${lapseHabit.id}/entries/${isoDaysAgo(365)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 0 }),
+});
+
+const lapseView = await getOverview({ days: 7 });
+const lapseRow223 = lapseView.habits.find((h) => h.id === lapseHabit.id);
+const lapseStats223 = await fetch(`${overviewBase}/api/habits/${lapseHabit.id}/stats`)
+  .then((r) => r.json());
+
+ck('a stored lapse still earns the credited best streak',
+  lapseRow223.bestStreak === 366, String(lapseRow223.bestStreak));
+ck('...and the two surfaces agree about that too',
+  lapseRow223.bestStreak === lapseStats223.bestStreak
+  && lapseRow223.currentStreak === lapseStats223.currentStreak,
+  `overview ${lapseRow223.currentStreak}/${lapseRow223.bestStreak} vs `
+  + `stats ${lapseStats223.currentStreak}/${lapseStats223.bestStreak}`);
+
+// Both habits go again, with their rows: the import-isolation check further down
+// counts EVERY entry this account has and expects exactly one, so a fixture left
+// behind here fails a test about tenancy with a number about this block.
+for (const id of [creditHabit.id, lapseHabit.id]) {
+  await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
+}
+
 // While the router is mounted, the other route added alongside it. The notify
 // suite exercises the storage behind this through `notifier.deliveryStatus`
 // directly, which would go on passing if the route itself were wired to the

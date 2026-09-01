@@ -184,6 +184,68 @@ ck('?archived=true carries no categorySummaries',
   !('categorySummaries' in archivedOverview),
   JSON.stringify(Object.keys(archivedOverview)));
 
+/* ---- issue #223: /overview's bestStreak reads the same credit rule ----
+ *
+ * `score` and `currentStreak` come from `summaryStats`, which goes through
+ * `resolveWindow`; `bestStreak` is a streak scan the ROUTE does itself, over a
+ * wider window and starting at the earliest row of any kind. So the credit date
+ * has to be handed to it explicitly, and until it was, this route served
+ * `bestStreak: 365` for a habit whose own `/stats` page said 1 — same habit,
+ * same second, three figures from two rules.
+ *
+ * A limit habit whose unlogged days count as kept, holding ONE skip a year ago
+ * and nothing else. That is the issue's own fixture, and it is the shape where
+ * the two rules disagree maximally: the skip contributes nothing to any run
+ * while being the only row in the habit's history. Both figures are asserted as
+ * literals, and the cloud edition's API suite asserts the SAME literals over its
+ * own implementation of this route — the two editions ship one route surface
+ * from two code paths and have drifted before.
+ */
+const limit = await post('/habits', {
+  name: 'Coffee', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'cups',
+});
+await put(`/habits/${limit.id}/entries/${daysAgo(365)}`, { status: 'skip' });
+
+const withLimit = await overview({ days: 7 });
+const limitRow = withLimit.habits.find((h) => h.id === limit.id);
+const limitStats = await fetch(`${base}/api/habits/${limit.id}/stats`).then((r) => r.json());
+
+ck('a skip-only limit habit reports no unearned best streak on /overview',
+  limitRow.bestStreak === 1, String(limitRow.bestStreak));
+ck('...and /overview agrees with /stats about all three figures',
+  limitRow.bestStreak === limitStats.bestStreak
+  && limitRow.currentStreak === limitStats.currentStreak
+  && limitRow.score === limitStats.score,
+  `overview ${limitRow.score}/${limitRow.currentStreak}/${limitRow.bestStreak} vs `
+  + `stats ${limitStats.score}/${limitStats.currentStreak}/${limitStats.bestStreak}`);
+ck('the habit is genuinely resolved to success, or this fixture proves nothing',
+  limitRow.unlogged_is_success === true, String(limitRow.unlogged_is_success));
+ck('a habit with zero completions still says so',
+  limitRow.totalCompleted === 0, String(limitRow.totalCompleted));
+
+// The other half of the same rule: a stored LAPSE is real evidence, so the same
+// habit shape with a 0 row a year ago DOES keep its long best streak. Without
+// this the assertions above pass against a route that credits nothing ever.
+const lapsing = await post('/habits', {
+  name: 'Soda', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'cans',
+});
+await put(`/habits/${lapsing.id}/entries/${daysAgo(365)}`, { value: 0 });
+
+const withLapse = await overview({ days: 7 });
+const lapseRow = withLapse.habits.find((h) => h.id === lapsing.id);
+const lapseStats = await fetch(`${base}/api/habits/${lapsing.id}/stats`)
+  .then((r) => r.json());
+
+ck('a stored lapse still earns the credited best streak',
+  lapseRow.bestStreak === 366, String(lapseRow.bestStreak));
+ck('...and the two surfaces agree about that too',
+  lapseRow.bestStreak === lapseStats.bestStreak
+  && lapseRow.currentStreak === lapseStats.currentStreak,
+  `overview ${lapseRow.currentStreak}/${lapseRow.bestStreak} vs `
+  + `stats ${lapseStats.currentStreak}/${lapseStats.bestStreak}`);
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

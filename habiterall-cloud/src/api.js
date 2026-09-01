@@ -34,7 +34,8 @@ import {
   DATE_RE, queryDate,
 } from '@habiterall/shared/validate.js';
 import {
-  computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
+  computeStats, summaryStats, computeStreaks, bestStreak, creditStart, isCompleted,
+  UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
   summariseByCategory,
@@ -1238,12 +1239,27 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
 
     const totalCompleted = totals.get(h.id) ?? 0;
 
+    // This scan reads a WIDER window than `summaryStats` above and so builds its
+    // own map — which means it also has to be handed its own credit date, or
+    // `bestStreak` is the one figure on this payload still crediting silence the
+    // habit has no answer behind, beside a `score` and a `currentStreak` that no
+    // longer do (#223: measured 365 here against 1 from `/stats`, same habit,
+    // same second). `undefined` for the start on purpose: this route's start is
+    // `all[0].date`, straight out of storage, and `creditStart`'s `start ??`
+    // clause is for a window a CALLER named. The date inherits this scan's
+    // `STREAK_HISTORY_DAYS` bound, which is the same trade the figures beside it
+    // already make — a habit that has answered nothing inside the window reads
+    // as having no evidence, understating rather than overstating.
+    const streakMap = new Map(
+      all.map((e) => [e.date, { value: e.value, status: e.status }])
+    );
     const streaks = computeStreaks(
       h,
-      new Map(all.map((e) => [e.date, { value: e.value, status: e.status }])),
+      streakMap,
       all.length ? all[0].date : summaryEnd,
       summaryEnd,
-      unlogged
+      unlogged,
+      creditStart(streakMap, undefined, summaryEnd)
     );
 
     return {

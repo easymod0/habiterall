@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
 import {
-  computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
+  computeStats, summaryStats, computeStreaks, bestStreak, creditStart, isCompleted,
+  UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
   summariseByCategory,
@@ -785,12 +786,27 @@ api.get('/overview', (req, res) => {
       )
     ).n;
 
+    // This scan reads a WIDER window than `summaryStats` above and so builds its
+    // own map — which means it also has to be handed its own credit date, or
+    // `bestStreak` is the one figure on this payload still crediting silence the
+    // habit has no answer behind, beside a `score` and a `currentStreak` that no
+    // longer do (#223: measured 365 here against 1 from `/stats`, same habit,
+    // same second). `undefined` for the start on purpose: this route's start is
+    // `entries[0].date`, straight out of storage, and `creditStart`'s `start ??`
+    // clause is for a window a CALLER named. The date inherits this scan's
+    // `STREAK_HISTORY_DAYS` bound, which is the same trade the figures beside it
+    // already make — a habit that has answered nothing inside the window reads
+    // as having no evidence, understating rather than overstating.
+    const streakMap = new Map(
+      entries.map((e) => [e.date, { value: e.value, status: e.status }])
+    );
     const allStreaks = computeStreaks(
       h,
-      new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
+      streakMap,
       entries.length ? entries[0].date : summaryEnd,
       summaryEnd,
-      unlogged
+      unlogged,
+      creditStart(streakMap, undefined, summaryEnd)
     );
 
     return {
