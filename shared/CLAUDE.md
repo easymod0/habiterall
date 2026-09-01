@@ -205,8 +205,10 @@ look strong instead of one. `test/stats.test.js` pins the curve at days 13, 30
 and 60 so it cannot drift back.
 
 **Every date range is clamped**, and `computeStats` starts at
-`from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`). That
-window is derived inside `computeStats` and never returned, which is why anything
+`from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`).
+`firstEntry` is the earliest row that STATES a value — a `status: 'skip'` row
+cannot anchor it (`docs/decisions/day-states.md`, #223). That window is
+derived inside `computeStats` and never returned, which is why anything
 needing a figure from it gets a returned field rather than walking the entries
 again — `computeRecovery` answers `longest` and `lastEnd` for that reason. Every
 aggregation in `stats.js` already uses `boundedRange`; keep it that way, because

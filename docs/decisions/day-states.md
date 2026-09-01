@@ -289,10 +289,13 @@ section, and it left `unlogged_is_success`'s own fill untouched: a
 kept-unlogged cell still paints its own faint fill, independent of whatever
 the connector pass decides about the days around it.
 
-**The credit window's missing far end is issue #223.** Different layer again —
-this is about which cells paint which fill; #223 is about how far a range that
-starts at the earliest stored entry should reach, which the root `CLAUDE.md`
-already documents as "the model working" rather than a bug.
+**The credit window's missing far end was issue #223, addressed below.**
+Different layer again — this is about which cells paint which fill; #223 is
+about how far a range that starts at the earliest stored entry should reach.
+What remains open after it: the far end stays deliberately unbounded, the
+category-comparison surface still anchors on a skip, coverage can now lose a
+fully-answered month (a design question for Mark, not a deferred fix), and
+`/overview`'s `bestStreak` still reads the pre-#223 anchor.
 
 ## Issue #176 — a streak is linked through cells painted "no entry"
 
@@ -382,7 +385,200 @@ Same habit, same run, three surfaces still disagreeing about it — the gap
 #222 found between the Calendar card and the History card, still open here in
 a different pair of surfaces.
 
-**The credit window's missing far end is still issue #223**, unrelated to
-this one: different layer again, about how far a range that starts at the
-earliest stored entry should reach rather than which cells carry a mark.
+**The credit window's missing far end was issue #223, now addressed below.**
+Different layer again from anything in this section: it is about how far a
+range that starts at the earliest stored entry should reach, not which cells
+carry a mark. What remains open after it: the far end of the window is
+deliberately still unbounded (there is no "silence expires" rule), the
+category-comparison surface (`computeCategoryStats`, `summariseByCategory`)
+still anchors on a lifetime `MIN(date)` that a skip can win, coverage can now
+lose a fully-answered month (a design question for Mark, not a deferred
+fix), and `/overview`'s `bestStreak` still reads the pre-#223 anchor.
+
+## Issue #223 — a skip is not evidence
+
+`resolveWindow` (`shared/src/stats.js`) is the function every top-level
+summary shares for the window's opening day: `from = start ?? firstEntry`.
+Until this issue, `firstEntry` was the earliest row of *any* kind — including
+`status: 'skip'` — so a lone skip a year in the past could anchor a window a
+year wide, and every unanswered day inside it read as though it had been
+answered. Measured on unmodified master, a daily at-most habit (target 2,
+`at_most_unlogged: 'success'`, window ending 2026-08-19):
+
+| stored rows | streak | strength | totalCompleted |
+|---|---|---|---|
+| none at all | 1 | 0.052 | 0 |
+| one row today, value 1 | 1 | 0.052 | 1 |
+| one row today + imported lapse a year earlier | 366 | 1.000 | 2 |
+| ONLY an imported lapse a year earlier | 366 | 1.000 | 1 |
+| ONLY a skip a year earlier (before) | **365** | **1.000** | **0** |
+| ONLY a skip a year earlier (after) | **1** | **0.052** | **0** |
+
+Only the fifth row moves, and it moves to become identical to the first: a
+habit with no evidence at all now reads like a habit with no evidence at all,
+whichever shape that evidence's absence takes.
+
+**A skip is not evidence.** `onPaceSeries` treats a skipped day as neither a
+success nor a failure — it is transparent to the run, contributing nothing to
+its length or its score. A skip was nonetheless the one thing deciding where
+the run could *begin*, which is how a habit with zero completions reported a
+365-day streak and a strength of exactly 1.000: the window's entire content
+was silence the skip had made eligible to be read as kept. The fix is
+`resolveWindow` picking `firstEntry` as the earliest row whose status is not
+`'skip'` (falling back to `end`, as the empty case already did).
+
+It is derived from the entry MAP rather than from the `entries` array, so the
+anchor and every downstream reader see the same rows by construction. The two
+can only differ where one date appears twice — the map keeps the LAST of them,
+so reading the array would let a value row the map has already overwritten
+with a skip go on anchoring a window that holds no stated value as far as
+every other figure is concerned. No route can produce that shape (both
+editions declare `PRIMARY KEY (habit_id, date)` on `entries`), and it is
+derived from the map anyway: unrepresentable beats unreachable, and the
+duplicate-date test in `shared/test/stats.test.js` pins both orderings,
+because a rule that reads the array passes one of them by accident. The first
+draft of this fix did read the array, and the review that caught it is the
+reason the test exists.
+
+**The imported-lapse row is deliberately left at 366 — say so, don't quietly
+narrow it.** A row holding `0` (status `''`) is the user recording "I was at
+zero that day": real evidence, unlike a skip's "this day does not count". A
+window opened by that evidence, with the unanswered days after it reading as
+kept, is what the root `CLAUDE.md`'s "a stored lapse can move window-derived
+figures, and that is the model working" paragraph and this file's own opening
+already describe. This issue qualifies that paragraph rather than
+contradicting it: it was written under `miss`, where the wider window adds
+BLAME to every unknown day, and under `success` the identical mechanism adds
+CREDIT instead — the opposite sign on the same rule. The archive's "say so
+before fixing it" already covered the lapse; it did not cover the skip,
+because a skip cannot be the lapse the paragraph is about.
+
+**Rejected: bound the silence — credit unanswered days only within N days of
+the last real answer.** This would need both a number nobody has measured and
+a name for what happens past it (a streak that stops growing is not one that
+breaks), and it moves figures for a sparse-but-real limit habit that is
+genuinely still being kept, not only for the skip-anchored shape this issue
+is about.
+
+**Rejected: gate the streak/strength on `totalCompleted > 0`.** A symptom
+patch on the report rather than the window: it would leave the two figures
+disagreeing with the window that produced them, exactly the disagreement
+`resolveWindow` exists to prevent — the same split `totalCompleted counts
+ANSWERS while the window-derived figures count DAYS` describes above, made
+worse rather than resolved.
+
+**The rule is unconditional, not gated to at-most habits resolved to
+`success`.** `resolveWindow` takes no habit and no `unlogged`, and gating the
+exclusion on `unansweredCounts` would have meant threading both through it —
+making the window's ANCHOR depend on the account's `atMostUnlogged`, so
+toggling that one setting would move `totalCompleted`, the coverage months
+and the history buckets, not merely the verdicts inside one window. A skip
+means "this day does not count" regardless of habit shape, so it should
+neither credit silence on an at-most habit nor blame silence on an at-least
+one — the rule is symmetric on its own terms, and that symmetry is the
+better design.
+
+The measured consequence: an at-least or an at-most-`miss` habit whose
+earliest row is a skip now opens its window later, at the first real answer,
+and so scores *higher* than before — a deliberate side effect, not a
+suppressed one. It is not visible on a **daily** habit: an all-miss prefix
+leaves the EWMA at exactly `0` (`0*alpha + 0*(1-alpha)` is `0`), and a daily
+habit's `onPaceSeries` window is one day wide whenever `num >= den`, so the
+window's width never enters the requirement — measured unchanged at `0.04195`
+on the at-least shape and `0.042` on the at-most-`miss` shape, before and
+after this fix. This is the root `CLAUDE.md`'s own trap arriving from the other
+side: a daily fixture cannot show this side effect at all. A **3×/7** habit
+can, because its pro-rated requirement makes the window's width matter: an
+at-least habit and an at-most-`miss` habit, each skip-anchored then given one
+real answer eight months later, both moved from `0.053382` to `0.120939`.
+Both figures are re-verified against `HEAD`'s own `stats.js` and pinned in
+`shared/test/stats.test.js`'s own comment.
+
+**What this does not touch.** The entry map still holds every skip row —
+skips stay transparent to `onPaceSeries`, `computeStreaks` and
+`computeScores` exactly as before, a streak's `skips` banking is unchanged,
+and `totalCompleted` keeps its rule (window-bounded, `isCompleted`-based;
+only its *value* moves, because the window moved). The test is
+`status === 'skip'`, never the boolean SKIP-sentinel rule `normalizeEntry`
+applies to bare numbers, so a numerical habit's legitimate value of 3 is
+still a stated value — which is the whole reason skips are stored out of
+band in the first place.
+
+**Three things are left open by this fix, not one.**
+
+1. **The category-comparison surface still anchors on a skip.**
+   `computeCategoryStats`'s `memberWarm` and `summariseByCategory`'s landing
+   rule both take a `firstEntry` supplied by SQL — a lifetime `MIN(date)`
+   grouped by habit, in both editions' `api.js` — which still counts a skip
+   row. So the same defect is still live on `/categories/stats`: a
+   skip-anchored habit can read stronger there than it now does on its own
+   detail page — the same shape of two surfaces disagreeing about one habit
+   that `shared/CLAUDE.md` already documents as **0.97** on the category
+   comparison against **0.41** on the habit's own page, in miniature. The fix
+   would be the same shape as this one — `MIN(date) FILTER (WHERE status <>
+   'skip')` (or the equivalent `WHERE`), in both editions' SQL — but it is a
+   change to another agent's file lane this run and is left out on purpose.
+   It wants its own issue.
+
+2. **Coverage can lose a fully-answered month — a design question awaiting
+   Mark's decision, not a deferred fix.** `computeCoverage` counts `answered`
+   as `entryMap.has(date)`, so a skip *is* an answer for coverage's purposes
+   even though the same skip is deliberately not evidence of compliance for
+   the score or the streaks beside it — `awards.js` states outright that
+   "`done`, `skip`, `no` and `unknown` are four things." Because `coverage`
+   inherits the exact same `[from, end]` window as every other figure here —
+   the invariant that keeps it from disagreeing with the awards beside it
+   about what "ever" means — a month whose only early row is a skip can now
+   fall entirely outside that window. Measured: a daily at-most habit, target
+   2, `at_most_unlogged: 'success'`, first row `{2026-01-01, skip}` followed
+   by a stated value on every day through `2026-08-19` — master reports
+   coverage months `2026-01 … 2026-07` (7), this branch `2026-02 … 2026-07`
+   (6), dropping a January every one of whose 31 days has a row. Pinned in
+   `shared/test/stats.test.js` so that changing this is a deliberate act
+   rather than a discovery; whether `computeCoverage` should get its own
+   window or its own anchor is a design decision, and it is Mark's to make.
+
+3. **`/overview`'s `bestStreak` still comes from the pre-#223 anchor.** Both
+   editions' `/overview` compute their own streak scan directly —
+   `computeStreaks(h, entryMap, entries.length ? entries[0].date :
+   summaryEnd, summaryEnd, unlogged)` (`habiterall-personal/src/api.js`
+   ~788, the same shape in cloud's `api.js` ~1241) — and `entries[0].date` is
+   the earliest row of *any* kind, precisely the anchor this issue removed
+   everywhere else. `score` and `currentStreak` on the same payload come from
+   `summaryStats`, which does go through the fixed `resolveWindow`, so
+   `bestStreak` is now the one field on `/overview` still reading the old
+   way. This is **not a regression**: `bestStreak` is byte-identical to what
+   master already served, so the fix corrects two of the three fields and
+   leaves the third exactly where it was — an incomplete fix, not a new
+   defect. Measured on the headline skip-only fixture (skip dated
+   2025-08-19, end 2026-08-19): master's `/overview` and `/stats` both report
+   `score 1, currentStreak 365, bestStreak 365`; this branch's `/stats`
+   reports `score 0.051922, currentStreak 1, bestStreak 1`, while
+   `/overview` reports `score 0.051922, currentStreak 1, bestStreak 365`. No
+   current renderer reads it (`ui/detail.js` reads `/stats`; Android parses
+   the field but displays nothing), which bounds the impact without excusing
+   it. The fix is the same shape in both editions' `api.js` — pass the
+   resolved anchor through rather than `entries[0].date` — and it is left
+   out because it is another change's file lane this run. It wants its own
+   issue.
+
+**#270 is untouched, and this change raises its priority rather than leaving
+it neutral.** The hazard itself does not move — the clamp is still a string
+comparison, the normalisation a few lines later is still a rollover, and a
+stored phantom date can still walk out of the window between them — but a
+valid-dated skip used to be able to MASK a phantom-dated value row behind it,
+because the skip anchored the window and the phantom row's own date was never
+asked whether it survives the reformat; now a skip cannot anchor anything, so
+a phantom-dated first-*value* row is newly exposed to the hazard whenever it
+is the earliest STATED row, and the movement only ever removes masking, never
+adds it. Measured, boolean daily habit, rows `{2026-01-01, skip}`,
+`{2026-07-99, value 2}`, `{2026-08-17, 2}`, `{2026-08-18, 2}`, `end:
+2026-08-18`: master opens the window at `from = 2026-01-01` (230 score
+points, `currentStreak 2`, `score 0.101149`, `totalCompleted 3`), while this
+branch opens at the phantom row itself — `from = 2026-07-99` normalises to
+`2026-10-07`, past `end`, so `boundedRange` answers `[]` and every figure
+reads zero. Legacy rows only, still (`assertDate` refuses a phantom date on
+the way in), so the population able to reach it stays small — but that is
+why #270 is out of scope, not a reason to call this change neutral toward
+it.
 

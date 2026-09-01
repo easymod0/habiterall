@@ -2020,3 +2020,304 @@ test('summariseByCategory: a member whose firstEntry EQUALS the reading day is l
   assert.equal(health.unloggedExcluded, 0, 'a member landing ON the reading day already counts');
   assert.equal(health.mean, 0.5, 'both members are averaged in: (0.7 + 0.3) / 2');
 });
+
+/* ---------- issue #223: a skip is not evidence ---------- */
+
+// `firstEntry` used to be the earliest row of ANY kind, so a lone skip
+// opened the window it could never be a run inside of. Every fixture below
+// sets `target_value` and `at_most_unlogged` away from their defaults (2,
+// not 0 — `parseHabit`'s stored default, `Number(body.target_value ?? 0)`;
+// 'success', not 'default') on purpose, except the two built to test
+// 'default' itself — a fixture holding a field's default compares equal to
+// itself and passes with the field dropped entirely.
+const limitHabit = (over = {}) => ({
+  id: 1, name: 'Coffee', type: 'numerical', target_type: 'at_most',
+  target_value: 2, freq_numerator: 1, freq_denominator: 1,
+  at_most_unlogged: 'success', ...over,
+});
+const atLeastLimitHabit = (over = {}) => ({
+  id: 2, name: 'Water', type: 'numerical', target_type: 'at_least',
+  target_value: 2, freq_numerator: 1, freq_denominator: 1,
+  at_most_unlogged: 'success', ...over,
+});
+const END_223 = '2026-08-19';
+const SKIP_223 = '2025-08-19';
+
+test('issue #223: a skip cannot anchor the window — the headline, and the sign it flips', () => {
+  // A daily at-most habit, target 2, resolved to `success`, with nothing
+  // stored but one skip a year before `end`. On master `firstEntry` picked
+  // the skip because it was the earliest row of any kind, so the window
+  // opened there — 366 days wide — and a habit with zero completions read
+  // as a 365-day streak at full strength (measured on unmodified master,
+  // `.claude/work/issue-223/before.txt`). A skip is transparent to
+  // `onPaceSeries`: it neither starts, extends nor breaks a run, so it
+  // contributed nothing to those 365 days while being the only thing
+  // deciding where the run could begin. With no row stating a value at all,
+  // this must read exactly as "none at all" does.
+  const habit = limitHabit();
+  const skipOnly = [{ date: SKIP_223, value: 0, status: 'skip' }];
+
+  const stats = computeStats(habit, skipOnly, { end: END_223 });
+  assert.equal(stats.currentStreak, 1);
+  assert.equal(stats.score, 0.051922);
+  assert.equal(stats.totalCompleted, 0);
+
+  // The same skip, the same date, an at-LEAST habit instead — the issue's
+  // whole point is that the sign flips rather than the bug disappearing: an
+  // at-most habit was handed unearned CREDIT for the silence, an at-least
+  // habit unearned BLAME. Put side by side so the sign difference is
+  // visible in one test rather than reconstructed from two.
+  const atLeastStats = computeStats(atLeastLimitHabit(), skipOnly, { end: END_223 });
+  assert.equal(atLeastStats.currentStreak, 0);
+  assert.equal(atLeastStats.score, 0);
+  assert.equal(atLeastStats.totalCompleted, 0);
+});
+
+test('issue #223: a stored lapse still anchors the window — deliberately unchanged', () => {
+  // Mark's decision, not an oversight: a stored lapse (a row holding 0,
+  // status '') is the user recording "I was at zero that day" — real
+  // evidence — and a stretch of credited silence after real evidence is
+  // what the root CLAUDE.md's "a stored lapse can move window-derived
+  // figures, and that is the model working" paragraph already describes.
+  // Only a SKIP, which states nothing, is disqualified from anchoring.
+  const habit = limitHabit();
+
+  const lapseOnly = computeStats(habit, [{ date: SKIP_223, value: 0, status: '' }],
+    { end: END_223 });
+  assert.equal(lapseOnly.currentStreak, 366);
+  assert.equal(lapseOnly.score, 1);
+  assert.equal(lapseOnly.totalCompleted, 1);
+
+  const lapsePlusToday = computeStats(habit, [
+    { date: END_223, value: 1, status: '' },
+    { date: SKIP_223, value: 0, status: '' },
+  ], { end: END_223 });
+  assert.equal(lapsePlusToday.currentStreak, 366);
+  assert.equal(lapsePlusToday.score, 1);
+  assert.equal(lapsePlusToday.totalCompleted, 2);
+});
+
+test('issue #223: the fix fires through the ACCOUNT setting, not only an explicit success', () => {
+  // "Pinning the DECISION is not pinning the WIRING" (root CLAUDE.md). The
+  // habit itself carries no override — `at_most_unlogged: 'default'` — so
+  // this only fires if the fix reaches the habit resolving to `success`
+  // through the ACCOUNT's `unlogged`, not merely one hard-coded on the habit.
+  const habit = limitHabit({ at_most_unlogged: 'default' });
+  const skipOnly = [{ date: SKIP_223, value: 0, status: 'skip' }];
+
+  const success = computeStats(habit, skipOnly, { end: END_223, unlogged: 'success' });
+  assert.equal(success.currentStreak, 1);
+  assert.equal(success.score, 0.051922);
+  assert.equal(success.totalCompleted, 0);
+
+  const miss = computeStats(habit, skipOnly, { end: END_223, unlogged: 'miss' });
+  assert.equal(miss.currentStreak, 0);
+  assert.equal(miss.score, 0);
+  assert.equal(miss.totalCompleted, 0);
+});
+
+test('issue #223: the anchor MOVES to the first stated value, not merely past the skip', () => {
+  // Not "a skip is ignored" but "the window opens on the next thing that
+  // states a value" — a skip, then a real answer eight months later, must
+  // anchor exactly on the answer's date. `scores[0].date` pins the opening
+  // day directly, so this cannot pass on a number that could come from
+  // elsewhere. This is also the shape the awards property test (root
+  // CLAUDE.md) cannot see: it walks a habit from a FIXED first entry, so
+  // the anchor in that suite never moves at all.
+  const habit = limitHabit();
+  const entries = [
+    { date: SKIP_223, value: 0, status: 'skip' },
+    { date: '2026-08-15', value: 1, status: '' },
+  ];
+  const stats = computeStats(habit, entries, { end: END_223 });
+
+  assert.equal(stats.scores[0].date, '2026-08-15',
+    'the window opened on the skip, not on the first stated value');
+  assert.equal(stats.scores.length, 5, 'five days: the 15th through the 19th');
+  assert.equal(stats.currentStreak, 5);
+  assert.equal(stats.score, 0.234017);
+  assert.equal(stats.totalCompleted, 1);
+});
+
+test('issue #223: an explicit start still wins outright over any anchor', () => {
+  // `ui/detail.js` sends no `start`, so this is only reachable through a
+  // caller that supplies one — `start ?? firstEntry` must still put `start`
+  // first regardless of what would otherwise anchor the window. No skip is
+  // involved: this pins that the fix left this half of the line alone.
+  const habit = limitHabit();
+  const stats = computeStats(habit, [{ date: END_223, value: 1, status: '' }],
+    { end: END_223, start: '2026-08-10' });
+  assert.equal(stats.currentStreak, 10);
+  assert.equal(stats.score, 0.41327);
+});
+
+test('issue #223: a skip that is not the earliest row changes nothing', () => {
+  // The rule is about the ANCHOR, not about skips in general — a skip
+  // anywhere else in the entries is exactly as transparent as it always was.
+  const habit = limitHabit();
+
+  const atMostStats = computeStats(habit, [
+    { date: SKIP_223, value: 1, status: '' },
+    { date: '2026-01-01', value: 0, status: 'skip' },
+  ], { end: END_223 });
+  assert.equal(atMostStats.currentStreak, 366);
+  assert.equal(atMostStats.score, 1);
+  assert.equal(atMostStats.totalCompleted, 1);
+
+  const atLeastStats = computeStats(atLeastLimitHabit(), [
+    { date: SKIP_223, value: 5, status: '' },
+    { date: '2026-01-01', value: 0, status: 'skip' },
+  ], { end: END_223 });
+  assert.equal(atLeastStats.currentStreak, 0);
+  assert.equal(atLeastStats.score, 0);
+  assert.equal(atLeastStats.totalCompleted, 1);
+});
+
+test('issue #223: summaryStats opens on the same anchor, not only computeStats', () => {
+  // The parity test above is not a substitute here: it would pass with
+  // both entry points reading the SAME wrong anchor, since it only checks
+  // that they agree with each other. `/overview` calls `summaryStats`
+  // directly, so this asserts that surface rather than `computeStats`.
+  const habit = limitHabit();
+  const summary = summaryStats(habit, [{ date: SKIP_223, value: 0, status: 'skip' }],
+    { end: END_223 });
+  assert.equal(summary.currentStreak, 1);
+  assert.equal(summary.score, 0.051922);
+});
+
+test('issue #223: the side effect — an at-least or at-most-miss habit anchored past a skip scores HIGHER', () => {
+  // `resolveWindow` takes no habit and no `unlogged`, so the rule is
+  // unconditional and reaches every habit shape, not only an at-most habit
+  // resolved to `success`. An at-least or an at-most-'miss' habit whose
+  // earliest row was a skip used to be scored over the widest window the
+  // skip could open — almost all of it unanswered days reading as misses.
+  // With the skip no longer eligible to anchor, the window opens later, at
+  // the first real answer, and a habit actually kept since then scores
+  // higher for it. Deliberate, not suppressed — see "Why the rule is not
+  // gated" in the brief this issue shipped from.
+  //
+  // A DAILY habit cannot show this, which is why a 3x/7 one is used here
+  // instead: `onPaceSeries`'s trailing window is one day wide whenever
+  // `num >= den`, so widening a MISS-only prefix ahead of an
+  // already-converged EWMA changes nothing (0 decays to 0 regardless of how
+  // far back it is walked) — measured directly against a daily at-least
+  // habit built the same way as the fixture above, which reports the
+  // identical currentStreak: 0, score: 0.04195 both before and after this
+  // fix. A 3x/7 habit's pro-rated requirement makes the window's WIDTH
+  // itself matter, not only its contents.
+  const skipThenValue = [
+    { date: SKIP_223, value: 0, status: 'skip' },
+    { date: '2026-08-15', value: 5, status: '' },
+  ];
+  const atLeastWeekly = computeStats(
+    atLeastLimitHabit({ freq_numerator: 3, freq_denominator: 7 }),
+    skipThenValue, { end: END_223 }
+  );
+  assert.equal(atLeastWeekly.score, 0.120939,
+    'measured before this fix (skip-anchored): 0.053382');
+
+  const atMostMissWeekly = computeStats(
+    limitHabit({ freq_numerator: 3, freq_denominator: 7, at_most_unlogged: 'miss' }),
+    [
+      { date: SKIP_223, value: 0, status: 'skip' },
+      { date: '2026-08-15', value: 1, status: '' },
+    ], { end: END_223 }
+  );
+  assert.equal(atMostMissWeekly.score, 0.120939,
+    'measured before this fix (skip-anchored): 0.053382');
+});
+
+test('issue #223: the anchor reads the deduped MAP, so a duplicate date cannot split it', () => {
+  // The anchor is derived from `entryMap` rather than from the `entries`
+  // array, so it and every downstream reader see the same rows. The two can
+  // only differ when one date appears TWICE, where the map keeps the LAST of
+  // them — and reading the array instead would let a value row that the map
+  // has already overwritten with a skip go on anchoring a window that, as far
+  // as every other figure is concerned, holds no stated value at all.
+  //
+  // Not reachable through either edition's API: both declare
+  // `PRIMARY KEY (habit_id, date)` on `entries`, so no route can hand this
+  // function one date twice. Pinned here because this is the layer where the
+  // shape IS reachable, exactly as `validate.test.js` pins the one-element
+  // array no route as configured can produce — and because deriving the
+  // anchor from the map is what makes the disagreement unrepresentable rather
+  // than merely unreachable.
+  const habit = limitHabit();
+  const dupDate = '2026-08-15';
+
+  // The map keeps the skip, so no row states a value and the window falls
+  // back to `end` — one day, reading exactly as "no rows at all" does.
+  const skipWins = computeStats(habit, [
+    { date: dupDate, value: 1, status: '' },
+    { date: dupDate, value: 0, status: 'skip' },
+  ], { end: END_223 });
+  assert.equal(skipWins.scores[0].date, END_223,
+    'the overwritten value row must not anchor a window the map has no value in');
+  assert.equal(skipWins.scores.length, 1);
+  assert.equal(skipWins.currentStreak, 1);
+  assert.equal(skipWins.score, 0.051922);
+  assert.equal(skipWins.totalCompleted, 0);
+
+  // The other order: the map keeps the value, so that date does state one and
+  // anchors normally. Both directions pinned, because a rule that reads the
+  // array passes one of them by accident.
+  const valueWins = computeStats(habit, [
+    { date: dupDate, value: 0, status: 'skip' },
+    { date: dupDate, value: 1, status: '' },
+  ], { end: END_223 });
+  assert.equal(valueWins.scores[0].date, dupDate);
+  assert.equal(valueWins.scores.length, 5);
+  assert.equal(valueWins.currentStreak, 5);
+  assert.equal(valueWins.score, 0.234017);
+  assert.equal(valueWins.totalCompleted, 1);
+});
+
+test('issue #223: a fully-answered month is dropped from coverage when its only row is the skip — accepted, UNDER REVIEW BY MARK', () => {
+  // A real consequence of this fix, measured rather than reasoned, and not a
+  // pre-existing bug: `computeStats` states as an invariant that `coverage`
+  // inherits the same `[from, end]` window as every other figure, "so
+  // coverage cannot disagree with the awards beside it about what 'ever'
+  // means" — and `from` now opens on the first row that STATES a value rather
+  // than on this habit's very first row. A daily at-most habit, target 2,
+  // resolved to `success`, whose first ever row is `{2026-01-01, skip}`,
+  // followed by a value row on every day from 2026-01-02 through `END_223`
+  // (2026-08-19):
+  //
+  //   |             | window opens | coverage months        |
+  //   |-------------|--------------|-------------------------|
+  //   | master      | 2026-01-01   | 2026-01 … 2026-07 (7)   |
+  //   | this branch | 2026-01-02   | 2026-02 … 2026-07 (6)   |
+  //
+  // January is dropped even though every one of its 31 days has a row.
+  // `computeCoverage` counts `answered` as `entryMap.has(date)`
+  // (`shared/src/stats.js`), so a skip IS an answer for coverage's purposes —
+  // `awards.js` says outright that "`done`, `skip`, `no` and `unknown` are
+  // four things" — even though the same skip is deliberately not evidence of
+  // compliance for the score or the streaks beside it. This is the one place
+  // where "a skip is not evidence" is arguably the wrong rule, because
+  // coverage asks a question a skip genuinely does answer.
+  //
+  // NOT fixed here on purpose: giving `computeCoverage` its own window or its
+  // own anchor is a design decision about what "ever" means for a coverage
+  // award, and it is Mark's to make, not this test's. This test exists so
+  // that changing this behaviour is a deliberate act rather than a discovery
+  // — if the ambiguity is ever resolved, this test says so by failing.
+  const habit = limitHabit();
+  const entries = [{ date: '2026-01-01', value: 0, status: 'skip' }];
+  for (const d of dateRange('2026-01-02', END_223)) {
+    entries.push({ date: d, value: 1, status: '' });
+  }
+
+  // The fixture can only mean what the comment above says while January
+  // stays fully answered — pin the row count so an edit that quietly drops a
+  // day cannot leave this test passing for the wrong reason.
+  const january = entries.filter((e) => e.date.startsWith('2026-01'));
+  assert.equal(january.length, 31, 'January must stay fully answered for this fixture to mean anything');
+
+  const stats = computeStats(habit, entries, { end: END_223 });
+  assert.equal(stats.scores[0].date, '2026-01-02',
+    'the anchor moved past the skip — this is the cause of the dropped month, made visible');
+  assert.deepEqual(stats.coverage.map((c) => c.month), [
+    '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07',
+  ]);
+});

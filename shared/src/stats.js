@@ -977,10 +977,12 @@ export function computeCoverage(entryMap, start, end) {
 
 /**
  * The window every top-level summary shares: the entry map, keyed by date and
- * holding `{value, status}`, and `from` — clamped to `MAX_RANGE_DAYS` and
- * normalised to a real day. `computeStats` and `summaryStats` both call this
- * rather than each carrying their own copy, so the clamp and the
- * normalisation cannot drift between the detail view and the dashboard.
+ * holding `{value, status}`, and `from` — anchored to the earliest row that
+ * STATES A VALUE (falling back to `end` when none does), then clamped to
+ * `MAX_RANGE_DAYS` and normalised to a real day. `computeStats` and
+ * `summaryStats` both call this rather than each carrying their own copy, so
+ * the clamp and the normalisation cannot drift between the detail view and
+ * the dashboard.
  *
  * @param {import('./types.js').Entry[]} entries
  * @param {string|undefined} start
@@ -994,11 +996,44 @@ function resolveWindow(entries, start, end) {
     entries.map((e) => [e.date, { value: e.value, status: e.status ?? '' }])
   );
 
+  // **A skip is not evidence, so it cannot be the anchor.** A skipped day is
+  // transparent to `onPaceSeries` — neither a success nor a failure — yet it
+  // used to be the one thing deciding where a run could BEGIN: the earliest
+  // row of any kind opened the window. On an at-most habit whose unlogged
+  // days count as kept, one skip a year old therefore reported a 365-day
+  // streak and a strength of exactly 1.000 with no completion ever recorded.
+  // The anchor is now the earliest row that STATES A VALUE. A stored LAPSE (a
+  // row holding 0, status `''`) still qualifies and still opens the window —
+  // that is the user recording "I was at zero that day", which is real
+  // evidence and is the model working as designed. See the root `CLAUDE.md`
+  // and `docs/decisions/day-states.md` (#223), which also records why this is
+  // not gated to at-most habits.
+  //
+  // **Derived from the MAP, not from `entries`**, so the anchor and every
+  // downstream reader are looking at the same rows by construction. The two
+  // differ only when the array holds one date twice — where the map keeps the
+  // LAST of them, so reading the array would let a value row that was
+  // overwritten by a skip still anchor a window the map has no stated value
+  // in. Both editions declare `PRIMARY KEY (habit_id, date)` on `entries`, so
+  // no route can produce that shape; deriving it here makes the disagreement
+  // unrepresentable rather than merely unreachable, which is what the
+  // duplicate-date test in `test/stats.test.js` pins.
+  //
+  // `status === 'skip'` and nothing cleverer: this function has no habit to
+  // ask, and `normalizeEntry`'s boolean SKIP-sentinel rule applies only to
+  // bare numbers, never to the object form stored here — so this is exactly
+  // what every reader of this map already treats as a skip, and a numerical
+  // habit's legitimate 3 stays a stated value, which is the whole reason
+  // skips are stored out of band.
+  //
   // Don't assume the caller sorted the entries, and never span more than
   // MAX_RANGE_DAYS even if a stray entry is dated decades ago.
-  const firstEntry = entries.length
-    ? entries.reduce((min, e) => (e.date < min ? e.date : min), entries[0].date)
-    : end;
+  let stated = null;
+  for (const [date, v] of entryMap) {
+    if (v.status === 'skip') continue;
+    if (stated === null || date < stated) stated = date;
+  }
+  const firstEntry = stated ?? end;
 
   const earliest = addDays(end, -MAX_RANGE_DAYS);
   let from = start ?? firstEntry;
