@@ -1442,7 +1442,12 @@ api.get('/export', route(async (req, res) => {
   });
 }));
 
-/** All checkmarks as a single Loop-shaped CSV. */
+/**
+ * The Loop-shaped CSV archive: `Habits.csv` + `Checkmarks.csv`, plus
+ * `Categories.csv` when the account has any categories (#257). See the
+ * personal edition's `/export.csv` for the whole reasoning, including why
+ * that third member is optional.
+ */
 api.get('/export.csv', route(async (req, res) => {
   const { habits, entries, categoryRows } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(
@@ -1450,7 +1455,8 @@ api.get('/export.csv', route(async (req, res) => {
     const { rows: entries } = await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
        FROM entries ORDER BY date`);
-    const { rows: categoryRows } = await db.query(`SELECT id, name FROM categories`);
+    const { rows: categoryRows } = await db.query(
+      `SELECT id, name, color, position FROM categories ORDER BY position, id`);
     return { habits, entries, categoryRows };
   });
 
@@ -1465,7 +1471,7 @@ api.get('/export.csv', route(async (req, res) => {
     ...h, category: categoryNames.get(h.category_id) ?? '',
   }));
 
-  const body = buildCsvArchive(withCategory, (id) => byHabit.get(id) ?? []);
+  const body = buildCsvArchive(withCategory, (id) => byHabit.get(id) ?? [], categoryRows);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
@@ -1541,7 +1547,20 @@ api.post('/import', route(async (req, res) => {
   // the personal edition's route and `apply-import.js`'s own comment for why
   // a habit's `category` is resolved against this by NAME rather than by any
   // id the file happens to carry.
-  const result = await applyImport(uid(req), habits, mode, backupCategories(buf) ?? []);
+  const parsedCategories = backupCategories(buf);
+  const result = await applyImport(uid(req), habits, mode, parsedCategories ?? []);
+  // `categorySkip` is set when the file's categories carried nothing usable, or
+  // when more were declared than `LIMITS.categories` allows — see its own
+  // comment in `backupCategories`. Added here rather than in `apply-import.js`,
+  // which never sees the file's raw category rows, only the already-repaired
+  // list handed to it above.
+  //
+  // UNSHIFTED, not pushed. `applyImport` has already filled `skipped` with one
+  // line per bad row, and the dialog renders `slice(0, 8)` and then "…and N
+  // more" — so an import that also carries eight bad dates would hide the one
+  // message this whole channel exists for behind the ellipsis, and a
+  // hand-edited file is precisely the shape that has both.
+  if (parsedCategories?.categorySkip) result.skipped.unshift(parsedCategories.categorySkip);
 
   // Replace mode only — "make this account look like the file". A merge adds
   // habits to what is already here and must not rewrite the rest of the

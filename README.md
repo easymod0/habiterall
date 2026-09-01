@@ -1648,8 +1648,33 @@ name, `?mode=replace` clears first.
 | What | Where |
 |---|---|
 | Full JSON backup (round-trippable) | ⚙ → Backup & Restore, or `GET /api/export` |
-| CSV archive — `Habits.csv` + `Checkmarks.csv`, zipped | `GET /api/export.csv` |
+| CSV archive — `Habits.csv` + `Checkmarks.csv`, zipped (plus `Categories.csv` when you have any categories, carrying each one's colour and order) | `GET /api/export.csv` |
 | Loop-compatible `.db` | `GET /api/export-loop.db` |
+
+`Categories.csv` is ours rather than Loop's, and it is the member you are most
+likely to hand-edit, so its format is deliberately small:
+
+```csv
+Name,Color,Position
+Fitness,#f43f5e,0
+Health,#10b981,1
+```
+
+- Columns are matched by **name**, case-insensitively — reorder them, or leave
+  `Color` or `Position` out entirely, and the rest still reads. `Name` is the
+  only one that has to be there, and a row without a name is dropped.
+- `Color` wants `#rrggbb`. Anything else restores at the default blue.
+- A **blank** `Position` means "not stated", not zero: that row falls back to
+  its own place in the file, counting from 0 — so leaving the whole column
+  blank keeps the order you wrote the rows in.
+- Spaces around a value are ignored, so `Health, #10b981, 1` is fine.
+- At most **30** categories are restored. A file that carries more, or one that
+  parses to no usable rows at all, is named in the restore dialog rather than
+  restoring quietly.
+
+The JSON backup's own `categories` array goes through the same repair — the
+colour rule, the blank-or-absent position rule and the 30 cap — so a hand-edited
+`"position": "5"` works there too.
 
 The JSON backup carries your **settings** as well as your habits, and only a
 `replace` applies them — that mode means "make this account look like the file",

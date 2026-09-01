@@ -421,6 +421,64 @@ ck('and describes a habit exactly as the personal edition does',
   JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),
   Object.keys(exported ?? {}).sort().join(','));
 
+// `GET /export.csv` itself, which nothing in the repo called before this: the
+// cloud round-trip suite hand-builds its own archive with
+// `buildCsvArchive(seeded, ..., FIXTURE_CATEGORIES)`, so its fidelity
+// assertions compare the shared builder against a literal the test itself
+// supplied and never reach this route. Seeded with a non-default colour and
+// position, so a SELECT that dropped either column fails here rather than
+// happening to already agree with the defaults.
+const csvCategoryIds = await withUser(alice, async (db) => {
+  const { rows } = await db.query(
+    `INSERT INTO categories (user_id, name, color, position)
+     VALUES ($1, 'Zip Colour Check', '#123456', 7),
+            ($1, 'Zip Position Check', '#abcdef', 3)
+     RETURNING id`,
+    [alice]
+  );
+  return rows.map((r) => r.id);
+});
+
+const { unzip } = await import('@habiterall/shared/unzip.js');
+const csvExportZip = Buffer.from(
+  await (await fetch(`${overviewBase}/api/export.csv`)).arrayBuffer());
+const csvExportMembers = unzip(csvExportZip);
+ck('GET /export.csv carries a Categories.csv when the account has categories',
+  csvExportMembers.has('Categories.csv'), [...csvExportMembers.keys()].join(', '));
+
+const categoriesCsvText = csvExportMembers.get('Categories.csv')?.toString('utf8') ?? '';
+ck("and it carries the colour the route's own SELECT reads, not the default",
+  categoriesCsvText.includes('Zip Colour Check,#123456,7'), categoriesCsvText);
+ck("and the position the route's own SELECT reads, not 0 for every row",
+  categoriesCsvText.includes('Zip Position Check,#abcdef,3'), categoriesCsvText);
+
+// ...and in the account's own position ORDER, which the two `includes` checks
+// above are blind to — they pass just as well against a file in whatever order
+// the rows happened to come back. This edition's SELECT had no `ORDER BY` at
+// all until #257's second round, where personal reads the same list through
+// `q.allCategories`'s own `ORDER BY position, id` (pinned in its round trip
+// against a fixture whose positions are the inverse of its creation order), so
+// two exports of one unmodified account were not byte-identical to each other
+// across the editions, and no test could have said so.
+//
+// 'Zip Position Check' is at position 3 and was inserted SECOND. So insertion
+// order and position order disagree here on purpose: drop the `ORDER BY` and a
+// seq scan hands back 'Zip Colour Check' (7) first, which is the inverse of
+// what this asserts. The `includes` guard is what stops a missing row reading
+// as a pass, since `indexOf` answers -1 for both and -1 < -1 is false only by
+// luck of the comparison.
+ck("and its rows are in the account's own position order, not insertion order",
+  categoriesCsvText.includes('Zip Position Check')
+  && categoriesCsvText.indexOf('Zip Position Check')
+     < categoriesCsvText.indexOf('Zip Colour Check'),
+  categoriesCsvText);
+
+// Clean up — the reorder block below asserts positions 0/1 of the WHOLE
+// category list and would otherwise read past these.
+for (const id of csvCategoryIds) {
+  await fetch(`${overviewBase}/api/categories/${id}`, { method: 'DELETE' });
+}
+
 /* ---------- the device-clock middleware ---------- */
 //
 // The whole reporting half of `notifyTimezone: 'auto'` — and until this, every
@@ -913,6 +971,92 @@ replaceImportServer.close();
 // carol is a throwaway account for this block alone; the `ci-%` cleanup at
 // the end of this file removes her along with everything CASCADE-deleted
 // from her.
+
+/* ---- issue #257: the ROUTE is what puts a lost category into `skipped` ----
+ *
+ * `backupCategories` attaches `categorySkip` to the list it returns, and
+ * `applyImport` never sees it — the four lines that move it onto
+ * `result.skipped` live in this edition's `/api/import` handler alone. This
+ * edition's round-trip suite calls `applyImport` DIRECTLY (see the CSV
+ * archive section there), so both ends of that hand-off were tested and the
+ * route between them was executed by nothing: delete the line and every
+ * cloud suite stays green while a cloud user's `Categories.csv` failure goes
+ * silent, which is the shape the export half of this PR was already caught
+ * in once. The personal edition pins it through its own round trip; this is
+ * the same assertion against the other edition's route, because a rule
+ * written in two places is two places it can be wrong.
+ *
+ * A JSON backup rather than a zip, for the reason the personal suite gives:
+ * the CSV reader drops a malformed date before `applyImport` ever sees it,
+ * so a zip cannot produce the eight other noisy lines the ordering half
+ * needs — and the over-cap report used to be the zip branch's alone, so this
+ * pins that it reaches this format too.
+ *
+ * The counts are LITERAL. 35 declared against a cap of 30 is 5 dropped, and
+ * a fixture built out of `LIMITS.categories` would pin the name of the
+ * constant rather than the number the user is told.
+ */
+const dave = await mkUser('ci-dave-catskip');
+
+const catSkipApp = express();
+catSkipApp.use((req, _res, next) => { req.session = { user: { id: dave } }; next(); });
+catSkipApp.use('/api/import', express.raw({ type: '*/*', limit: '5mb' }));
+catSkipApp.use(express.json());
+catSkipApp.use('/api', api);
+const catSkipServer = await new Promise((resolve) => {
+  const s = catSkipApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const catSkipBase = `http://127.0.0.1:${catSkipServer.address().port}`;
+
+const catSkipBackup = Buffer.from(JSON.stringify({
+  version: 1,
+  app: 'habiterall',
+  categories: Array.from({ length: 35 }, (_, i) => ({
+    name: `Noisy Cat ${i}`, color: '#111111', position: i,
+  })),
+  // Nine of them, so `applyImport` fills `skipped` with more than the eight
+  // lines the dialog renders before it collapses the rest into "…and N more".
+  habits: [{
+    name: 'Noisy Habit',
+    type: 'boolean',
+    entries: Array.from({ length: 9 }, (_, i) => ({ date: `not-a-date-${i}`, value: 2 })),
+  }],
+}));
+const catSkipRes = await fetch(`${catSkipBase}/api/import?mode=replace`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: catSkipBackup,
+});
+ck('the over-cap import itself succeeds', catSkipRes.status === 200, String(catSkipRes.status));
+const catSkipResult = await catSkipRes.json();
+const catSkipped = catSkipResult.skipped ?? [];
+
+ck(
+  'THE assertion: the category message reached `skipped` through THIS ' +
+  "edition's route — 5 of 35 dropped against a cap of 30",
+  catSkipped.some((s) => s.includes('5 of 35 categories in the backup were dropped')
+    && s.includes('at most 30 are allowed')),
+  JSON.stringify(catSkipped));
+
+ck('…and the file that needs it most still carries eight other lines, so the ' +
+  'ordering below is a real cap and not a fixture that fits either way',
+  catSkipped.length > 8, `${catSkipped.length} lines`);
+
+ck(
+  "THE assertion: it is FIRST — `applyImport` fills `skipped` before the " +
+  'route touches it and the dialog renders `slice(0, 8)`, so a pushed ' +
+  'message is one nine bad rows hide behind the ellipsis',
+  catSkipped[0]?.includes('5 of 35 categories in the backup were dropped'),
+  JSON.stringify(catSkipped.slice(0, 3)));
+
+const catSkipCategories = await withUser(dave, (db) =>
+  db.query(`SELECT name FROM categories`).then((r) => r.rows));
+ck('the cap is the one that was reported: exactly 30 categories exist',
+  catSkipCategories.length === 30, `${catSkipCategories.length}`);
+
+catSkipServer.close();
+// dave is a throwaway account for this block alone, cleaned up by `ci-%`
+// at the end of this file along with carol.
 
 /* ---- issue #256: the fold vs Postgres lower(), swept over every codepoint,
  * under BOTH collation providers this server can answer with ----

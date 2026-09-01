@@ -1162,6 +1162,223 @@ test('backupCategories is capped at LIMITS.categories, the same ceiling POST /ca
   assert.equal(backupCategories(buf).length, LIMITS.categories);
 });
 
+/* ---------- categories in a zip's Categories.csv ---------- */
+
+test('backupCategories reads Categories.csv out of a zip', () => {
+  // Non-default colours and non-sequential positions — a fixture matching
+  // what a category defaults to would pass even against code that read
+  // nothing at all.
+  const categories = [
+    { name: 'Health', color: '#10b981', position: 5 },
+    { name: 'Work', color: '#f43f5e', position: 1 },
+  ];
+  const habits = [{ id: 1, name: 'Meditate', category: '' }];
+  const buf = buildCsvArchive(habits, () => [], categories);
+  assert.deepEqual(backupCategories(buf), categories);
+});
+
+test('a zip without a Categories.csv reads null, exactly as today', () => {
+  const habits = [{ id: 1, name: 'Meditate', category: '' }];
+  const buf = buildCsvArchive(habits, () => [], []);
+  assert.equal(backupCategories(buf), null);
+});
+
+test('a Categories.csv row is repaired the same way a JSON one is', () => {
+  // A nameless row, a junk colour and a non-integer position, in one file —
+  // the mutation for this test is making the zip branch skip the repair tail
+  // and return the raw rows, which fails every assertion below.
+  const csv = 'Name,Color,Position\n,#ffffff,0\nHealth,not-a-colour,oops\n';
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: csv },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, 1, JSON.stringify(cats));               // the nameless row is dropped
+  assert.equal(cats[0].name, 'Health');
+  assert.match(cats[0].color, /^#[0-9a-f]{6}$/i, 'an invalid colour repairs to the default');
+  assert.equal(cats[0].position, 0, 'a non-integer position is replaced by its index');
+});
+
+test('a Categories.csv with data survives with no categorySkip note', () => {
+  // The ordinary case, so the two failure tests below are proving something:
+  // a file that DOES carry usable rows must not also be reported as having
+  // lost anything.
+  const buf = buildCsvArchive(
+    [{ id: 1, name: 'Meditate', category: '' }], () => [],
+    [{ name: 'Health', color: '#10b981', position: 0 }]
+  );
+  assert.equal(backupCategories(buf).categorySkip, undefined);
+});
+
+test('a header-only Categories.csv is reported, not silently empty', () => {
+  // Nothing in the repo's own writer produces this — `buildCsvArchive` omits
+  // the member entirely for zero categories — so this is the shape a hand
+  // edit or a truncated upload takes. The habit still restores, and until now
+  // nothing said the account's colours and positions never arrived.
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: 'Name,Color,Position\n' },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, 0);
+  assert.match(cats.categorySkip, /no usable categories/);
+});
+
+test('a header with no Name column is reported the same way', () => {
+  // `parseCategoriesCsvRows` returns `[]` outright when `name` is missing from
+  // the header — a different code path to the header-only file above, and the
+  // same user-visible outcome, so it gets the same report.
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: 'Color,Position\n#111111,0\n' },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, 0);
+  assert.match(cats.categorySkip, /no usable categories/);
+});
+
+test('a Categories.csv over LIMITS.categories reports how many were dropped', () => {
+  const rows = Array.from(
+    { length: LIMITS.categories + 3 }, (_, i) => `Cat ${i},#111111,${i}`
+  ).join('\n');
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: `Name,Color,Position\n${rows}\n` },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, LIMITS.categories);
+  assert.match(cats.categorySkip, /3 of \d+ categories in Categories\.csv were dropped/);
+  assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
+});
+
+test('a hand-written Categories.csv with spaces after the commas keeps its colours', () => {
+  // The way people write CSV by hand. `COLOR_RE` is anchored, so one leading
+  // space was the difference between a colour restoring and silently becoming
+  // `#3b82f6` — and because both rows are NAMED, `named` is 2, no
+  // `categorySkip` is set, and `result.skipped` says nothing. The file looked
+  // like it restored with exactly one of the two properties #257 is about
+  // gone. The name has always been trimmed here and `Number(' 5')` is `5`, so
+  // the colour was the only one of the three fields that the whitespace
+  // reached.
+  const csv = 'Name,Color,Position\nHealth, #10b981, 5\nFitness, #f43f5e, 3\n';
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: csv },
+  ]);
+  const cats = backupCategories(buf);
+  assert.deepEqual(cats, [
+    { name: 'Health', color: '#10b981', position: 5 },
+    { name: 'Fitness', color: '#f43f5e', position: 3 },
+  ]);
+  assert.equal(cats.categorySkip, undefined, 'nothing was lost, so nothing is reported');
+});
+
+test('a JSON backup gets the same colour trim, because the repair tail is shared', () => {
+  // The trim lives in `normalizeCategories` rather than in the CSV row reader
+  // precisely so this holds: fixing it in the reader would have left the two
+  // formats repairing one field differently, which is the thing that function
+  // exists to prevent.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [{ name: 'Health', color: ' #10b981 ', position: 2 }],
+  }));
+  assert.deepEqual(backupCategories(buf), [
+    { name: 'Health', color: '#10b981', position: 2 },
+  ]);
+});
+
+test('a JSON backup over LIMITS.categories reports the cut too, not just a zip', () => {
+  // The cap lives in the shared repair tail; the REPORT of it used to live in
+  // the zip branch alone, so the same loss was announced or silent depending
+  // on which format carried it. The nearest thing to a channel on this side
+  // was `resolveOrCreateCategory` noticing a habit that named a cut category
+  // — which reports only when a cut category happened to be in use.
+  const many = Array.from({ length: LIMITS.categories + 3 },
+    (_, i) => ({ name: `Cat ${i}`, color: '#111111', position: i }));
+  const cats = backupCategories(Buffer.from(JSON.stringify({ categories: many })));
+  assert.equal(cats.length, LIMITS.categories);
+  assert.match(cats.categorySkip, /3 of \d+ categories in the backup were dropped/);
+  assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
+});
+
+test('a JSON backup inside the cap carries no note', () => {
+  // So the test above is proving the cut and not merely that a string exists.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [{ name: 'Health', color: '#10b981', position: 0 }],
+  }));
+  assert.equal(backupCategories(buf).categorySkip, undefined);
+});
+
+test('a blank Position cell falls back to row index, not to 0 for every row', () => {
+  // `Number('')` is `0`, and `Number.isInteger(0)` is true — so a blank cell
+  // used to look like a stated position of 0 rather than an absent one, and
+  // every row in a hand-edited file landed at 0 instead of its own index.
+  // Junk text (covered above) hits the same fallback through a different
+  // door: `Number('oops')` is `NaN`, which is not an integer either.
+  const csv = 'Name,Color,Position\nAlpha,#111111,\nBeta,#222222,\nGamma,#333333,\n';
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: csv },
+  ]);
+  const cats = backupCategories(buf);
+  assert.deepEqual(cats.map((c) => c.position), [0, 1, 2],
+    JSON.stringify(cats));
+});
+
+test('a JSON backup stating its positions as TEXT keeps them, like the CSV does', () => {
+  // The other half of the shared repair tail, and the same shape as the
+  // colour trim beside it: a hand-edited habiterall backup. `Categories.csv`
+  // can only ever carry text, so the CSV branch has always read a position
+  // with `Number()` — while the JSON branch handed `c.position` straight to
+  // `Number.isInteger`. A file writing `"5"` for `5` therefore restored every
+  // category in DECLARATION order (the index fallback) instead of its stated
+  // one, with all rows named, so no `categorySkip` and nothing in
+  // `result.skipped` to say a position had been dropped.
+  //
+  // Positions are the inverse of declaration order on purpose: read as the
+  // index they would come back 0, 1, 2 — which is what a fixture stating
+  // 0, 1, 2 could not have told apart.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [
+      { name: 'Alpha', color: '#111111', position: '4' },
+      { name: 'Beta', color: '#222222', position: '2' },
+      { name: 'Gamma', color: '#333333', position: '0' },
+    ],
+  }));
+  assert.deepEqual(backupCategories(buf).map((c) => c.position), [4, 2, 0]);
+});
+
+test('...and a nullish or blank position is still "no position", never 0', () => {
+  // The guard that stops the line above from being `Number(c.position)`.
+  // `Number(null)`, `Number('')` and `Number('   ')` are all `0`, and
+  // `Number.isInteger(0)` is true — so a bare coercion would land every
+  // category that declared nothing at position 0 rather than at its index,
+  // which is exactly the blank-`Position`-cell bug one format up. Junk text
+  // is NaN and falls through the same way an absent field does.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [
+      { name: 'Alpha', color: '#111111', position: null },
+      { name: 'Beta', color: '#222222' },
+      { name: 'Gamma', color: '#333333', position: '  ' },
+      { name: 'Delta', color: '#444444', position: 'oops' },
+    ],
+  }));
+  assert.deepEqual(backupCategories(buf).map((c) => c.position), [0, 1, 2, 3]);
+});
+
+test('a zip with only PK\'s magic bytes reads null rather than throwing', () => {
+  // Not a complete zip at all — no end-of-central-directory record — so
+  // `unzip` itself throws. `backupCategories` only ever answers a doubt with
+  // `null`; the real upload is still rejected, by `parseUpload`.
+  const truncated = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]);
+  assert.equal(backupCategories(truncated), null);
+});
+
 /* ---------- repairing an imported habit ---------- */
 
 const { normaliseImportedHabit } = await import('../src/import.js');

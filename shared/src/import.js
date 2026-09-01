@@ -264,7 +264,159 @@ export function backupSettings(buf) {
 }
 
 /**
- * The categories a habiterall JSON backup carries, if it is one.
+ * The repair tail every raw category list gets before it is handed back,
+ * regardless of which format supplied it: a nameless entry dropped (the same
+ * rule `parseCategory` throws on for a typed-in one — a backup that repairs
+ * everything else still has no honest name to give an empty entry, so it is
+ * dropped rather than invented), a name trimmed to `LIMITS.name`, a colour
+ * failing `COLOR_RE` replaced with the default, a position read as a number
+ * and replaced by the index unless it is an integer, and the list capped at
+ * `LIMITS.categories`.
+ *
+ * Both of `backupCategories`'s branches — the JSON backup and a zip's
+ * `Categories.csv` — call this rather than repeating it, so the two formats
+ * cannot repair one field differently from the other.
+ *
+ * `diagnostics`, when handed an object, is filled in with `named` — the count
+ * that survived the nameless-entry drop, before the `LIMITS.categories`
+ * slice — so a caller that needs to know whether the slice actually cut
+ * anything does not have to repeat the filter to find out.
+ *
+ * @param {Array<{name?: any, color?: any, position?: any}>} raw
+ * @param {{named?: number}} [diagnostics]
+ * @returns {Array<{name: string, color: string, position: number}>}
+ */
+function normalizeCategories(raw, diagnostics) {
+  const named = raw
+    .map((c) => {
+      // TRIMMED before the test, and that is not cosmetic. `COLOR_RE` is
+      // anchored, so one leading space is the difference between a colour
+      // restoring and silently becoming the default — and a hand-edited
+      // `Categories.csv` written the way people write CSV by hand
+      // (`Health, #10b981, 5`) is exactly that. The name has always been
+      // trimmed here and `Number` tolerates the space on a position, so the
+      // colour was the one field of the three where the whitespace survived
+      // to be judged. Trimming here rather than in the CSV row reader is what
+      // keeps the promise this function exists for: both formats repair the
+      // field the same way.
+      const color = String(c.color ?? '').trim();
+      // READ AS A NUMBER here, for the same reason the colour is trimmed
+      // here: a position arrives as a number from our own JSON backup and as
+      // TEXT from `Categories.csv`, and this function is what stops the two
+      // formats repairing one field differently. The coercion used to live in
+      // the CSV row reader alone, so `{"position": "5"}` in a hand-edited
+      // JSON backup — the same hand-edited file the trim above exists for —
+      // was not an integer, fell through to the index below, and restored
+      // every category in declaration order with nothing in `result.skipped`
+      // to say so.
+      //
+      // A BLANK or nullish position is "no position", never 0. `Number('')`
+      // and `Number(null)` are both `0` and `Number.isInteger(0)` is true, so
+      // a bare `Number()` here would land every empty `Position` cell and
+      // every `"position": null` at 0 — the bug the blank-cell check in
+      // `parseCategoriesCsvRows` used to hold on its own, which is why that
+      // check moved here rather than being duplicated. Junk text is NaN,
+      // which falls through to the index exactly as an absent field does.
+      const position = typeof c.position === 'string'
+        ? Number(c.position.trim() || NaN)
+        : c.position;
+      return {
+        name: String(c.name ?? '').trim().slice(0, LIMITS.name),
+        // The same regex `normalizeColor` below already validates a habit's
+        // own colour with — a category's is never a Loop palette index, so
+        // `normalizeColor` itself is the wrong tool despite being right there.
+        color: COLOR_RE.test(color) ? color : '#3b82f6',
+        position,
+      };
+    })
+    .filter((c) => c.name);
+  if (diagnostics) diagnostics.named = named.length;
+  return named
+    .slice(0, LIMITS.categories)
+    .map((c, i) => ({ ...c, position: Number.isInteger(c.position) ? c.position : i }));
+}
+
+/**
+ * CATEGORIES with a one-line explanation of what it lost attached, for the
+ * route to append to `result.skipped`.
+ *
+ * Non-enumerable, so the property cannot reach a response body or a comparison
+ * of the list against itself — it is a channel to the caller, not a member.
+ *
+ * @param {Array<{name: string, color: string, position: number}>} categories
+ * @param {string} message
+ */
+function withSkip(categories, message) {
+  Object.defineProperty(categories, 'categorySkip', { value: message });
+  return categories;
+}
+
+/**
+ * ...specifically, that `normalizeCategories` capped the list.
+ *
+ * Both formats, not just the zip. The cap lives in the shared repair tail, so
+ * a habiterall JSON backup declaring more than `LIMITS.categories` is cut in
+ * exactly the same silence a zip was — and the reporting used to be the one
+ * half of the repair that was NOT shared, which made the message depend on the
+ * format rather than on what happened. The nearest thing to a channel on the
+ * JSON side was `resolveOrCreateCategory` noticing a habit that named a cut
+ * category, which reports the loss only when a cut category was in USE.
+ *
+ * `source` names the file in the sentence the user reads, since by the time
+ * they see it the two formats are the only thing that tells them where to look.
+ *
+ * @param {Array<{name: string, color: string, position: number}>} categories
+ * @param {{named?: number}} diagnostics
+ * @param {string} source
+ */
+function overCapSkip(categories, diagnostics, source) {
+  const named = diagnostics.named ?? 0;
+  if (named <= LIMITS.categories) return categories;
+  return withSkip(categories,
+    `${named - LIMITS.categories} of ${named} categories in ${source} `
+    + `were dropped: at most ${LIMITS.categories} are allowed`);
+}
+
+/**
+ * `Categories.csv`'s own header — `Name,Color,Position`, exactly what
+ * `buildCategoriesCsv` (export-csv.js) writes — read into the same raw shape
+ * `backupCategories`'s JSON branch produces before `normalizeCategories`
+ * repairs either. Matched case-insensitively by column NAME rather than
+ * position, the way `parseLoopHabitsCSV` reads its own header, so a reordered
+ * or partially-absent column degrades rather than misreads.
+ *
+ * @param {string} text
+ * @returns {Array<{name: string, color: string, position: string|undefined}>}
+ */
+function parseCategoriesCsvRows(text) {
+  const rows = parseCSV(text);
+  if (rows.length < 1) return [];
+
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const cName = header.indexOf('name');
+  if (cName === -1) return [];
+  const cColor = header.indexOf('color');
+  const cPosition = header.indexOf('position');
+
+  return rows.slice(1).map((row) => ({
+    name: row[cName] ?? '',
+    color: cColor === -1 ? '' : (row[cColor] ?? ''),
+    // Handed over as the RAW cell. `normalizeCategories` is what reads a
+    // position as a number, and it has to do that for the JSON branch's
+    // values anyway — so the blank-cell rule that used to live here (a blank
+    // is "no position" and not a stated 0) moved there with it, rather than
+    // being written once per format. An absent COLUMN is `undefined`, which
+    // is that same "no position" and the shape the JSON branch produces for
+    // a category that declared none.
+    position: cPosition === -1 ? undefined : row[cPosition],
+  }));
+}
+
+/**
+ * The categories a habiterall backup carries, if it names any — from the
+ * JSON format's own `categories` array, or from a zip's `Categories.csv`
+ * (`buildCsvArchive`, export-csv.js) alongside `Habits.csv` and
+ * `Checkmarks.csv`.
  *
  * Same shape and guards as `backupSettings` beside it, and the same reason to
  * be separate from `parseHabiterallJSON`'s result rather than a field on it:
@@ -273,18 +425,85 @@ export function backupSettings(buf) {
  * single habit is written, so a habit naming a category by NAME (see
  * `normaliseImportedHabit` below) has something to resolve against.
  *
- * Returns `null` for every other format. Neither Loop format has anywhere to
- * put a category — habiterall's own is the only backup that carries one.
+ * Returns `null` for every other format, and for a zip carrying no
+ * `Categories.csv` — a Loop-produced zip never has one, and that member is
+ * optional on our own (`buildCsvArchive` omits it for an account with no
+ * categories), so this must stay exactly as inert on either as it always was.
+ * Neither Loop `.db` nor Loop's own CSV pair has anywhere to put a category.
  *
  * Capped at `LIMITS.categories`, the same ceiling `POST /categories` enforces,
  * and non-objects are dropped the way `parseHabiterallJSON` filters its own
  * `habits` array — a file is not to be trusted merely for being valid JSON.
  *
+ * From a zip's `Categories.csv`, the returned array may carry a non-enumerable
+ * `categorySkip` string naming a whole-file failure the caller cannot see any
+ * other way — a header with no usable rows, or more rows than the cap allows.
+ * Each edition's `/api/import` route pushes it onto `result.skipped`.
+ *
  * @param {Buffer} buf the raw request body
- * @returns {Array<{name: string, color: string, position: number}>|null}
+ * @returns {(Array<{name: string, color: string, position: number}> &
+ *   {categorySkip?: string})|null}
  */
 export function backupCategories(buf) {
   if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
+
+  if (buf.length >= 4 && buf.toString('latin1', 0, 4) === 'PK\x03\x04') {
+    // Sniffed the same 4 bytes `parseUpload` sniffs. Any failure to actually
+    // read it as a zip is reported by `parseUpload` itself when the real
+    // import runs — this reader only ever answers `null` on a doubt, never
+    // throws.
+    //
+    // This is the SECOND `unzip()` of the same buffer on an ordinary import:
+    // both routes call `parseUpload(buf)` (whose zip branch decompresses
+    // every member to reach `Habits.csv`/`Checkmarks.csv`) and then this
+    // function on the identical `buf`, so a large `Checkmarks.csv` is
+    // inflated twice, once for no reason a Loop zip can ever satisfy — it has
+    // no `Categories.csv` to find. `MAX_TOTAL_BYTES` is a per-call bound, so
+    // this doubles the inflate cost a request may spend rather than the
+    // memory held at once. The right fix is `parseUpload` returning
+    // categories alongside habits from its own single unzip, which is a
+    // wider change than a review round should carry — filed as #282 rather
+    // than done here.
+    let files;
+    try {
+      files = unzip(buf);
+    } catch {
+      return null;
+    }
+
+    const find = (suffix) => {
+      for (const [name, contents] of files) {
+        if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
+      }
+      return null;
+    };
+
+    const categoriesCsv = find('categories.csv');
+    if (categoriesCsv === null) return null;   // a Loop zip, or one of ours with none
+
+    // Unlike the JSON branch below, a zip's `Categories.csv` is new with this
+    // format (#257) and every way it can carry nothing was silent: a header
+    // with no `name` column, a header-only file, or more rows than
+    // `LIMITS.categories` allows. In every case the import still succeeds —
+    // habits still name their categories from `Habits.csv`, and
+    // `resolveOrCreateCategory` re-invents each at the default colour — and
+    // nothing told the user their file's own colours and positions were
+    // dropped. `categorySkip` carries that sentence for the route to add to
+    // `result.skipped`, the channel already built for exactly this; a `null`
+    // result above (no member, or an unreadable zip) is not this, and never
+    // gets one, because there `Categories.csv` was never there to lose.
+    const diagnostics = {};
+    const categories = normalizeCategories(parseCategoriesCsvRows(categoriesCsv), diagnostics);
+    if ((diagnostics.named ?? 0) === 0) {
+      // Zip-only, and deliberately: a JSON backup with an empty `categories`
+      // array is a legitimate shape that says "this account has none", while a
+      // `Categories.csv` member that parsed to nothing is a file that was
+      // supposed to carry something.
+      return withSkip(categories,
+        'Categories.csv carried no usable categories: colours and positions were not restored');
+    }
+    return overCapSkip(categories, diagnostics, 'Categories.csv');
+  }
 
   const head = buf.toString('utf8').replace(/^﻿/, '').trimStart();
   if (!head.startsWith('{')) return null;      // a bare habits array, or not JSON
@@ -299,23 +518,15 @@ export function backupCategories(buf) {
   const categories = data?.categories;
   if (!Array.isArray(categories)) return null;
 
-  // A nameless category is nothing at all, the same rule `parseCategory`
-  // throws on for a typed-in one — a backup that repairs everything else
-  // still has no honest name to give an empty entry, so it is dropped rather
-  // than invented.
-  return categories
-    .filter((c) => c && typeof c === 'object' && !Array.isArray(c))
-    .map((c) => ({
-      name: String(c.name ?? '').trim().slice(0, LIMITS.name),
-      // The same regex `normalizeColor` below already validates a habit's own
-      // colour with — a category's is never a Loop palette index, so
-      // `normalizeColor` itself is the wrong tool despite being right there.
-      color: COLOR_RE.test(c.color ?? '') ? c.color : '#3b82f6',
-      position: c.position,
-    }))
-    .filter((c) => c.name)
-    .slice(0, LIMITS.categories)
-    .map((c, i) => ({ ...c, position: Number.isInteger(c.position) ? c.position : i }));
+  const diagnostics = {};
+  return overCapSkip(
+    normalizeCategories(
+      categories.filter((c) => c && typeof c === 'object' && !Array.isArray(c)),
+      diagnostics
+    ),
+    diagnostics,
+    'the backup'
+  );
 }
 
 /* ---------- Loop .db backup ---------- */

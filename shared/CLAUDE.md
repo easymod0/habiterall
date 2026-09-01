@@ -17,7 +17,7 @@ Postgres one.
 | `src/discord-gateway.js` | the WebSocket that receives presses, so no inbound port is needed |
 | `src/import.js` | parsers: habiterall JSON, Loop `.db`, Loop CSV |
 | `src/export-loop.js` | writes a Loop-compatible `.db` |
-| `src/export-csv.js` | builds the `Habits.csv` + `Checkmarks.csv` archive |
+| `src/export-csv.js` | builds the `Habits.csv` + `Checkmarks.csv` archive, plus an optional `Categories.csv` |
 | `src/unzip.js` | minimal ZIP reader (Loop's CSV export) |
 | `src/zip.js` | minimal ZIP writer, for the CSV archive |
 | `src/constants.js` | `UNSET` / `YES` / `SKIP` wire values |

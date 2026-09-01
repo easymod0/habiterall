@@ -984,6 +984,12 @@ api.get('/export', (req, res) => {
  * produces. Both files are needed: Checkmarks.csv alone has no habit types,
  * so a measurable habit's 3 would be read back as Loop's SKIP sentinel.
  *
+ * Plus a THIRD member, `Categories.csv`, when the account has any categories
+ * (#257) — ours rather than Loop's, and optional precisely so a Loop-produced
+ * zip, which never has one, stays inert on the way back in. `Habits.csv`
+ * carries the category a habit wears, by name; that file carries the
+ * categories themselves, with each one's colour and position.
+ *
  * The route keeps its `.csv` name for existing bookmarks; the payload is a zip.
  */
 api.get('/export.csv', (req, res) => {
@@ -991,13 +997,12 @@ api.get('/export.csv', (req, res) => {
   // `buildHabitsCsv` reads `h.category` by NAME, the same as `/export`
   // above — a raw habit row only carries `category_id`, which means nothing
   // once restored elsewhere (or nowhere, on a Loop round trip).
-  const categoryNames = new Map(
-    /** @type {any[]} */ (q.allCategories.all()).map((c) => [c.id, c.name])
-  );
+  const categories = /** @type {any[]} */ (q.allCategories.all());
+  const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
   const withCategory = habits.map((h) => ({
     ...h, category: categoryNames.get(h.category_id) ?? '',
   }));
-  const body = buildCsvArchive(withCategory, (id) => q.entriesFor.all(id));
+  const body = buildCsvArchive(withCategory, (id) => q.entriesFor.all(id), categories);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition',
@@ -1077,7 +1082,20 @@ api.post('/import', (req, res, next) => {
       // `applyImport` iterates this before a single habit is written; see its
       // own comment for why a habit's `category` is resolved against it by
       // NAME rather than by any id the file happens to carry.
-      const result = applyImport(habits, mode, backupCategories(buf) ?? []);
+      const parsedCategories = backupCategories(buf);
+      const result = applyImport(habits, mode, parsedCategories ?? []);
+      // `categorySkip` is set when the file's categories carried nothing
+      // usable, or when more were declared than `LIMITS.categories` allows —
+      // see its own comment in `backupCategories`. Added here rather than in
+      // `apply-import.js`, which never sees the file's raw category rows, only
+      // the already-repaired list handed to it above.
+      //
+      // UNSHIFTED, not pushed. `applyImport` has already filled `skipped` with
+      // one line per bad row, and the dialog renders `slice(0, 8)` and then
+      // "…and N more" — so an import that also carries eight bad dates would
+      // hide the one message this whole channel exists for behind the ellipsis,
+      // and a hand-edited file is precisely the shape that has both.
+      if (parsedCategories?.categorySkip) result.skipped.unshift(parsedCategories.categorySkip);
 
       // Replace mode only: it means "make this account look like the file", and
       // the file's preferences are part of that. A merge is "add these habits to

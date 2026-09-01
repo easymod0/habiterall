@@ -108,8 +108,10 @@ export function init() {
 
   $('#export-json').addEventListener('click',
     () => download('/api/export?download=true', 'habiterall-backup.json'));
-  // A zip of Habits.csv + Checkmarks.csv, matching Loop's own export. The route
-  // keeps its historical `.csv` name; the file does not.
+  // A zip of Habits.csv + Checkmarks.csv, matching Loop's own export, plus
+  // Categories.csv when the account has any — that third member is ours and a
+  // Loop zip has no counterpart for it (#257). The route keeps its historical
+  // `.csv` name; the file does not.
   $('#export-csv').addEventListener('click',
     () => download('/api/export.csv', 'habiterall-csv.zip'));
   $('#export-loop').addEventListener('click',
