@@ -452,6 +452,27 @@ ck("and it carries the colour the route's own SELECT reads, not the default",
 ck("and the position the route's own SELECT reads, not 0 for every row",
   categoriesCsvText.includes('Zip Position Check,#abcdef,3'), categoriesCsvText);
 
+// ...and in the account's own position ORDER, which the two `includes` checks
+// above are blind to — they pass just as well against a file in whatever order
+// the rows happened to come back. This edition's SELECT had no `ORDER BY` at
+// all until #257's second round, where personal reads the same list through
+// `q.allCategories`'s own `ORDER BY position, id` (pinned in its round trip
+// against a fixture whose positions are the inverse of its creation order), so
+// two exports of one unmodified account were not byte-identical to each other
+// across the editions, and no test could have said so.
+//
+// 'Zip Position Check' is at position 3 and was inserted SECOND. So insertion
+// order and position order disagree here on purpose: drop the `ORDER BY` and a
+// seq scan hands back 'Zip Colour Check' (7) first, which is the inverse of
+// what this asserts. The `includes` guard is what stops a missing row reading
+// as a pass, since `indexOf` answers -1 for both and -1 < -1 is false only by
+// luck of the comparison.
+ck("and its rows are in the account's own position order, not insertion order",
+  categoriesCsvText.includes('Zip Position Check')
+  && categoriesCsvText.indexOf('Zip Position Check')
+     < categoriesCsvText.indexOf('Zip Colour Check'),
+  categoriesCsvText);
+
 // Clean up — the reorder block below asserts positions 0/1 of the WHOLE
 // category list and would otherwise read past these.
 for (const id of csvCategoryIds) {

@@ -372,6 +372,21 @@ ck('the archive contains both CSVs',
 ck('and now Categories.csv too, since this account has categories',
   members.has('Categories.csv'), [...members.keys()].join(', '));
 
+// ...with its rows in the account's own POSITION order, which is the inverse of
+// the order the categories were created in: `seed()` creates Health first (it
+// walks `FIXTURE_CATEGORIES` in order) and `FIXTURE_CATEGORIES` declares Health
+// at position 1 and Fitness at 0, so a route reading the list without
+// `ORDER BY position, id` writes Health first. That is not a hypothetical —
+// cloud's own `/export.csv` had no `ORDER BY` at all until #257's second round,
+// which is what made two exports of the same account differ between the
+// editions. This is that property pinned at the route on this side; cloud's is
+// pinned in `api.integration.mjs`.
+const categoriesCsvText = members.get('Categories.csv')?.toString('utf8') ?? '';
+ck('and its rows are in position order, not the order they were created in',
+  categoriesCsvText.includes('Fitness')
+  && categoriesCsvText.indexOf('Fitness') < categoriesCsvText.indexOf('Health'),
+  categoriesCsvText);
+
 const csvResult = await restore(csvZip);
 const afterCsv = await current({ fields: CSV_HABIT_FIELDS, notes: false });
 

@@ -1442,7 +1442,12 @@ api.get('/export', route(async (req, res) => {
   });
 }));
 
-/** All checkmarks as a single Loop-shaped CSV. */
+/**
+ * The Loop-shaped CSV archive: `Habits.csv` + `Checkmarks.csv`, plus
+ * `Categories.csv` when the account has any categories (#257). See the
+ * personal edition's `/export.csv` for the whole reasoning, including why
+ * that third member is optional.
+ */
 api.get('/export.csv', route(async (req, res) => {
   const { habits, entries, categoryRows } = await withUser(uid(req), async (db) => {
     const { rows: habits } = await db.query(

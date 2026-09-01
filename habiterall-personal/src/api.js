@@ -984,6 +984,12 @@ api.get('/export', (req, res) => {
  * produces. Both files are needed: Checkmarks.csv alone has no habit types,
  * so a measurable habit's 3 would be read back as Loop's SKIP sentinel.
  *
+ * Plus a THIRD member, `Categories.csv`, when the account has any categories
+ * (#257) — ours rather than Loop's, and optional precisely so a Loop-produced
+ * zip, which never has one, stays inert on the way back in. `Habits.csv`
+ * carries the category a habit wears, by name; that file carries the
+ * categories themselves, with each one's colour and position.
+ *
  * The route keeps its `.csv` name for existing bookmarks; the payload is a zip.
  */
 api.get('/export.csv', (req, res) => {
