@@ -118,6 +118,36 @@ forged one finds nothing rather than someone else's habit; the tenancy suite
 attacks exactly that. Two accounts naming the same channel resolves to neither,
 because guessing would write to the wrong person's history.
 
+**And a press is DATED by its account, so a fixture here has to name a zone.**
+`interactionAdapter().today` resolves the day through `resolveTimeZone`, whose
+third tier is the server's own clock — so a suite that dates its answer in UTC
+and leaves the fixture's zone unstated has two clocks and no rule making them
+agree. That suite passes in CI, which runs UTC, and fails on a developer machine
+west of UTC once the UTC date has rolled over: six checks at once, every one of
+them reporting `that date is in the future` about a date the test had just
+called today (#288). Every account in `test/ntfy-answer.integration.mjs`
+therefore names `notifyTimezone` explicitly, and names a `device_time_zone` that
+DISAGREES with it, so tier 1 beating tier 2 stays load-bearing rather than
+incidental. `test/notify.integration.mjs` already named the setting on the
+accounts whose day it asserts; the accounts it leaves on `auto` are the ones
+whose whole point is to follow a reported zone, and they are asserted against
+that zone rather than against UTC.
+
+**Pinning the fixture to UTC is also what would blind it, which is why the 26-hour
+pair exists.** An account on UTC cannot tell a route that resolves its zone
+correctly from one that ignores the account and hardcodes `toISOString()` — the
+two agree in every runner zone, so the suite's own fix would have removed its
+ability to see the defect next door to the one it fixed. `Pacific/Kiritimati`
+(UTC+14) and `Etc/GMT+12` (UTC−12) are 26 hours apart, which
+`docs/decisions/timezones.md` establishes is wider than a calendar day: their
+local dates ALWAYS differ. So one signed date string, presented for one account
+in each zone, must be accepted by the eastern one and refused as future by the
+western one — and any route judging both by a single clock, UTC or the server's,
+answers them identically and fails the pair. That holds in every runner zone and
+at every hour, and it is race-free in both directions: the eastern account's age
+is 0 or 1 against a `MAX_ANSWER_AGE_DAYS` of 2, and the western one's is always
+negative. Mutation-tested both ways round, under `TZ=UTC`.
+
 **A webhook URL is a user-supplied URL that the server fetches.** It is
 validated in `shared/src/notify.js` against Discord's own hosts and stored
 canonicalised; `/api/notify/test` re-reads it from the database rather than
