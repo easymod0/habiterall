@@ -73,11 +73,12 @@ function saneDeclaredPosition(value) {
  * @param {Array}  habits  parsed habits (shape from the shared parsers)
  * @param {'merge'|'replace'} mode
  * @param {Array<{name: string, color: string, position?: number}>} categories
- *   the file's own categories, from `backupCategories(buf)` — `[]` (never
- *   `null`) for a format with nowhere to carry one. A habit's own `category`
- *   is a NAME, not this array's index, and is resolved against it below —
- *   see the personal edition's writer for the identical rule, mirrored here
- *   inside the same `withUser` transaction rather than a second one.
+ *   the file's own categories, from `parseUpload`'s `categories` — `[]`
+ *   (never `null`) for a format with nowhere to carry one. A habit's own
+ *   `category` is a NAME, not this array's index, and is resolved against it
+ *   below — see the personal edition's writer for the identical rule,
+ *   mirrored here inside the same `withUser` transaction rather than a
+ *   second one.
  */
 export async function applyImport(userId, habits, mode = 'merge', categories = []) {
   const result = {
@@ -267,7 +268,7 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
 
     // The file's own declared categories, each with its own colour — applied
     // before any habit, so a habit naming one of these below almost never has
-    // to invent it. `backupCategories(buf)` already caps this at
+    // to invent it. `parseUpload`'s `categories` already caps this at
     // LIMITS.categories and drops anything nameless; the cap above is the
     // backstop for a merge pushing the account's own total past it.
     for (const c of categories) await resolveOrCreateCategory(c.name, c.color, c.position, true);

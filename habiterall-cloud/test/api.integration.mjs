@@ -986,11 +986,15 @@ replaceImportServer.close();
  * the same assertion against the other edition's route, because a rule
  * written in two places is two places it can be wrong.
  *
- * A JSON backup rather than a zip, for the reason the personal suite gives:
- * the CSV reader drops a malformed date before `applyImport` ever sees it,
- * so a zip cannot produce the eight other noisy lines the ordering half
- * needs — and the over-cap report used to be the zip branch's alone, so this
- * pins that it reaches this format too.
+ * A JSON backup rather than a zip, for a MEASURED reason rather than an
+ * inherited one: a zip's `Checkmarks.csv` row with an unreadable date is
+ * dropped by `parseLoopCheckmarksCSV` before `applyImport` ever sees it —
+ * verified on this branch, nine bad dates yield one habit with ZERO entries —
+ * so only a JSON backup can fill `skipped` with the other eight lines the
+ * ORDERING assertion below needs. The REACHABILITY half — that a lost
+ * category's message reaches `skipped` through this route for a ZIP upload
+ * too, and the zip's own two sentences (`Categories.csv`, not `the backup`) —
+ * is pinned by the block that follows this one.
  *
  * The counts are LITERAL. 35 declared against a cap of 30 is 5 dropped, and
  * a fixture built out of `LIMITS.categories` would pin the name of the
@@ -1057,6 +1061,102 @@ ck('the cap is the one that was reported: exactly 30 categories exist',
 catSkipServer.close();
 // dave is a throwaway account for this block alone, cleaned up by `ci-%`
 // at the end of this file along with carol.
+
+/* ---- issue #257 zip: the ROUTE, and the zip's OWN sentence ----
+ *
+ * The block above pins the JSON format and the ordering half a zip cannot
+ * produce (see its comment). This pins REACHABILITY for a zip upload — the
+ * zip path this branch's first commit added, `parseZipExport` answering
+ * `categories` out of its one `unzip`, reaching the route through the new
+ * `{habits, categories}` destructure, had no cloud route-level coverage at
+ * all — and it pins the one sentence that differs between the two formats:
+ * `overCapSkip`'s `source` argument is `'Categories.csv'` for a zip and
+ * `'the backup'` for JSON, and nothing before this asserted the zip says the
+ * former and not the latter.
+ *
+ * The counts are LITERAL, for the same reason the JSON block's are: 35
+ * declared against a cap of 30 is 5 dropped.
+ *
+ * The 35 rows carry a non-default colour and a position that is NOT the row's
+ * index — `#3b82f6`/index would compare the default to itself and pass with
+ * the whole colour-and-position path deleted. `#10b981`/`#f43f5e` alternating,
+ * positions counting down from 100, so every kept row's position disagrees
+ * with its own array index.
+ */
+const erin = await mkUser('ci-erin-zipcatskip');
+
+const zipCatSkipApp = express();
+zipCatSkipApp.use((req, _res, next) => { req.session = { user: { id: erin } }; next(); });
+zipCatSkipApp.use('/api/import', express.raw({ type: '*/*', limit: '5mb' }));
+zipCatSkipApp.use(express.json());
+zipCatSkipApp.use('/api', api);
+const zipCatSkipServer = await new Promise((resolve) => {
+  const s = zipCatSkipApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const zipCatSkipBase = `http://127.0.0.1:${zipCatSkipServer.address().port}`;
+
+const { zip } = await import('@habiterall/shared/zip.js');
+
+const zipCatSkipColor = (i) => (i % 2 === 0 ? '#10b981' : '#f43f5e');
+const zipCatSkipPosition = (i) => 100 - i;
+const zipCatSkipRows = Array.from({ length: 35 }, (_, i) =>
+  `Cat ${i},${zipCatSkipColor(i)},${zipCatSkipPosition(i)}`);
+const zipCatSkipFixture = zip([
+  // One real habit with one real entry, so the route does not answer
+  // "no habits found in the uploaded file" before it ever reaches
+  // `Categories.csv`.
+  { name: 'Habits.csv', data: 'Name\nZip Habit\n' },
+  { name: 'Checkmarks.csv', data: 'Date,Zip Habit\n2026-01-05,1\n' },
+  { name: 'Categories.csv', data: `Name,Color,Position\n${zipCatSkipRows.join('\n')}\n` },
+]);
+
+const zipCatSkipRes = await fetch(`${zipCatSkipBase}/api/import?mode=replace`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: zipCatSkipFixture,
+});
+ck('the over-cap ZIP import itself succeeds',
+  zipCatSkipRes.status === 200, String(zipCatSkipRes.status));
+const zipCatSkipResult = await zipCatSkipRes.json();
+const zipCatSkipped = zipCatSkipResult.skipped ?? [];
+
+ck(
+  'THE assertion: the category message reached `skipped` through THIS ' +
+  "edition's route for a ZIP upload — 5 of 35 dropped against a cap of 30",
+  zipCatSkipped.some((s) => s.includes('5 of 35 categories in Categories.csv were dropped')
+    && s.includes('at most 30 are allowed')),
+  JSON.stringify(zipCatSkipped));
+
+ck(
+  'THE OTHER assertion: it names `Categories.csv`, never `the backup` — the ' +
+  "one sentence that differs between the two formats' report, and the half " +
+  'no cloud test held before this block',
+  zipCatSkipped.some((s) => s.includes('Categories.csv') && !s.includes('the backup')),
+  JSON.stringify(zipCatSkipped));
+
+const zipCatSkipCategories = await withUser(erin, (db) =>
+  db.query(`SELECT name, color, position FROM categories`).then((r) => r.rows));
+ck('the cap is the one that was reported: exactly 30 categories exist',
+  zipCatSkipCategories.length === 30, `${zipCatSkipCategories.length}`);
+
+const zipCatSkipByName = new Map(zipCatSkipCategories.map((c) => [c.name, c]));
+const zipCatSkipTravelled = Array.from({ length: 30 }, (_, i) => {
+  const got = zipCatSkipByName.get(`Cat ${i}`);
+  return got != null
+    && got.color === zipCatSkipColor(i)
+    && got.position === zipCatSkipPosition(i);
+}).every(Boolean);
+ck(
+  "the kept 30 came back with the fixture's OWN colours and positions, not " +
+  're-invented at the default — proof the zip travelled through ' +
+  '`parseZipExport` -> the route -> `applyImport` rather than ' +
+  '`resolveOrCreateCategory` inventing them',
+  zipCatSkipTravelled,
+  JSON.stringify(zipCatSkipCategories));
+
+zipCatSkipServer.close();
+// erin is a throwaway account for this block alone, cleaned up by `ci-%`
+// at the end of this file along with carol and dave.
 
 /* ---- issue #256: the fold vs Postgres lower(), swept over every codepoint,
  * under BOTH collation providers this server can answer with ----

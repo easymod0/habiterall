@@ -26,7 +26,7 @@ import {
 import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
-import { backupSettings, backupCategories, parseUpload } from '@habiterall/shared/import.js';
+import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
 import { UNSET, YES, SKIP } from '@habiterall/shared/constants.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
@@ -1540,15 +1540,16 @@ api.post('/import', route(async (req, res) => {
     throw httpError(400, 'request body must be the file to import');
   }
 
-  const habits = await parseUpload(buf);
+  const { habits, categories } = await parseUpload(buf);
   if (!habits.length) throw httpError(400, 'no habits found in the uploaded file');
 
   // `[]`, never `null`, for a format with nowhere to carry a category — see
   // the personal edition's route and `apply-import.js`'s own comment for why
   // a habit's `category` is resolved against this by NAME rather than by any
-  // id the file happens to carry.
-  const parsedCategories = backupCategories(buf);
-  const result = await applyImport(uid(req), habits, mode, parsedCategories ?? []);
+  // id the file happens to carry. `categories` is `parseUpload`'s own second
+  // return value now (#282), out of the zip branch's one unzip rather than a
+  // second one.
+  const result = await applyImport(uid(req), habits, mode, categories ?? []);
   // `categorySkip` is set when the file's categories carried nothing usable, or
   // when more were declared than `LIMITS.categories` allows — see its own
   // comment in `backupCategories`. Added here rather than in `apply-import.js`,
@@ -1560,7 +1561,7 @@ api.post('/import', route(async (req, res) => {
   // more" — so an import that also carries eight bad dates would hide the one
   // message this whole channel exists for behind the ellipsis, and a
   // hand-edited file is precisely the shape that has both.
-  if (parsedCategories?.categorySkip) result.skipped.unshift(parsedCategories.categorySkip);
+  if (categories?.categorySkip) result.skipped.unshift(categories.categorySkip);
 
   // Replace mode only — "make this account look like the file". A merge adds
   // habits to what is already here and must not rewrite the rest of the

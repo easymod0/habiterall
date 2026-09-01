@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { unlinkSync } from 'node:fs';
+import { unlinkSync, readFileSync } from 'node:fs';
 
 
 const {
@@ -182,6 +182,29 @@ test('CSV parser tolerates CRLF and a BOM', () => {
   const rows = parseCSV('﻿Date,X\r\n2026-01-01,YES_MANUAL\r\n');
   assert.deepEqual(rows[0], ['Date', 'X']);
   assert.deepEqual(rows[1], ['2026-01-01', 'YES_MANUAL']);
+});
+
+test('CSV parser drops a row whose every cell is blank, and keeps one with any content', () => {
+  // Pinned because NOTHING else in this repo reaches it. The filter used to be
+  // a `.filter` over the finished array and is now a per-row predicate inside
+  // `forEachCsvRow`, so that the streaming category reader never holds a file
+  // it is about to discard — and when that predicate was deliberately deleted
+  // to check the split was safe, the ENTIRE suite stayed green, including both
+  // round trips. Every `Checkmarks.csv` fixture in the repo has a non-blank
+  // `Date` cell and every `Habits.csv` one a non-blank name, so no existing
+  // test can tell a parser that drops blank rows from one that does not.
+  //
+  // A blank ROW, not a blank COLUMN: the second is ordinary and must survive,
+  // which is the half a `.filter(Boolean)` would get wrong.
+  assert.deepEqual(
+    parseCSV('a,b\n1,2\n\n   ,\t \n3,4\n'),
+    [['a', 'b'], ['1', '2'], ['3', '4']],
+    'an empty line and an all-whitespace line are both dropped');
+
+  assert.deepEqual(
+    parseCSV('a,b\n,2\n3,\n'),
+    [['a', 'b'], ['', '2'], ['3', '']],
+    'a row with one blank cell and one filled is content and stays, both ways round');
 });
 
 /* ---------- Loop Checkmarks.csv ---------- */
@@ -949,7 +972,7 @@ test('a habiterall JSON backup is recognised from its bytes', async () => {
     version: 1, app: 'habiterall',
     habits: [{ name: 'Meditate', type: 'boolean', entries: [] }],
   });
-  const habits = await parseUpload(Buffer.from(backup, 'utf8'));
+  const { habits } = await parseUpload(Buffer.from(backup, 'utf8'));
   assert.equal(habits.length, 1);
   assert.equal(habits[0].name, 'Meditate');
 });
@@ -958,8 +981,8 @@ test('a bare array is accepted too, and a BOM does not defeat it', async () => {
   // A BOM survives a round trip through several Windows editors, and would
   // otherwise make JSON.parse fail on a file that is perfectly valid.
   const bare = JSON.stringify([{ name: 'Gym', type: 'boolean', entries: [] }]);
-  assert.equal((await parseUpload(Buffer.from(bare, 'utf8')))[0].name, 'Gym');
-  assert.equal((await parseUpload(Buffer.from('﻿' + bare, 'utf8')))[0].name, 'Gym');
+  assert.equal((await parseUpload(Buffer.from(bare, 'utf8'))).habits[0].name, 'Gym');
+  assert.equal((await parseUpload(Buffer.from('﻿' + bare, 'utf8'))).habits[0].name, 'Gym');
 });
 
 test('a Loop CSV zip is recognised, and needs its Habits.csv', async () => {
@@ -974,7 +997,7 @@ test('a Loop CSV zip is recognised, and needs its Habits.csv', async () => {
     { date: '2026-01-05', value: 3, status: '', notes: '' },
   ]);
 
-  const parsed = await parseUpload(zip);
+  const { habits: parsed } = await parseUpload(zip);
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].type, 'numerical',
     'without Habits.csv the type is unknown and a 3 reads as Loop\'s SKIP');
@@ -1000,7 +1023,7 @@ test('a CSV archive of an account with no entries restores its habits', async ()
     },
   ];
 
-  const parsed = await parseUpload(buildCsvArchive(habits, () => []));
+  const { habits: parsed } = await parseUpload(buildCsvArchive(habits, () => []));
   assert.deepEqual(parsed.map((h) => h.name), ['Alpha', 'Beta']);
   assert.equal(parsed[0].description, 'Nothing recorded yet');
   assert.equal(parsed[1].type, 'numerical',
@@ -1009,7 +1032,7 @@ test('a CSV archive of an account with no entries restores its habits', async ()
   assert.equal(parsed[1].freq_denominator, 7);
 
   // The mixed case: one habit with entries and one without, in one archive.
-  const mixed = await parseUpload(buildCsvArchive(habits, (id) =>
+  const { habits: mixed } = await parseUpload(buildCsvArchive(habits, (id) =>
     (id === 1 ? [{ date: '2026-01-05', value: 2, status: '', notes: '' }] : [])));
   assert.deepEqual(mixed.map((h) => [h.name, h.entries.length]),
     [['Alpha', 1], ['Beta', 0]]);
@@ -1031,7 +1054,7 @@ test('a habit only Habits.csv knows about is still restored', async () => {
     { name: 'Checkmarks.csv', data: 'Date,Water\n2026-01-05,6\n' },
   ]);
 
-  const parsed = await parseUpload(archive);
+  const { habits: parsed } = await parseUpload(archive);
   assert.deepEqual(parsed.map((h) => h.name), ['Water', 'Ghost'],
     'checkmarks order first, then Habits.csv order for the rest');
   assert.equal(parsed[0].entries.length, 1);
@@ -1043,13 +1066,13 @@ test('an archive describing no habits at all is still empty', async () => {
   // The guard the API turns into a 400 has to keep working: reading the header
   // must not make every unusable upload look like a successful empty import.
   assert.deepEqual(
-    await parseUpload(zip([{ name: 'Checkmarks.csv', data: 'Date\n' }])), [],
+    (await parseUpload(zip([{ name: 'Checkmarks.csv', data: 'Date\n' }]))).habits, [],
     'a Date column and nothing else names no habits');
 
-  // A zero-byte member reads as an ABSENT one, because `find` returns its
-  // contents and '' is falsy. Pinned as it stands: the answer is a 400 either
-  // way, and which of the two sentences it is belongs with the "oversized
-  // member reported as a missing one" note in #80 rather than here.
+  // A zero-byte member reads as an ABSENT one, because `findMember` returns
+  // its contents and '' is falsy. Pinned as it stands: the answer is a 400
+  // either way, and which of the two sentences it is belongs with the
+  // "oversized member reported as a missing one" note in #80 rather than here.
   await assert.rejects(
     () => parseUpload(zip([{ name: 'Checkmarks.csv', data: '' }])),
     /Checkmarks\.csv/);
@@ -1093,6 +1116,204 @@ test('a zip without a Checkmarks.csv says so', async () => {
   // caller, so this is easy to get wrong from memory.
   const bogus = zip([{ name: 'Habits.csv', data: 'Name\nMeditate\n' }]);
   await assert.rejects(() => parseUpload(bogus), /Checkmarks\.csv/);
+});
+
+test('a genuinely truncated zip is a 400 through parseUpload too', async () => {
+  // The same magic-bytes-only buffer backupCategories's own truncated-zip
+  // test uses (below) — there it answers null rather than throwing, because
+  // that reader only ever answers a doubt with null. Here, on the path that
+  // actually has to read the file, `unzip` throwing must still surface as
+  // the client's 400.
+  const truncated = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]);
+  await assert.rejects(
+    () => parseUpload(truncated),
+    (err) => {
+      assert.equal(err.status, 400, 'the error must carry a client status');
+      return true;
+    }
+  );
+});
+
+/* ---------- parseUpload: one unzip, and the categories it now carries (#282) ---------- */
+
+test('parseUpload unzips a zip exactly once, not twice', async () => {
+  const { unzip } = await import('../src/unzip.js');
+  const habits = [{ id: 1, name: 'Meditate', category: '' }];
+  const categories = [
+    { name: 'Health', color: '#10b981', position: 7 },
+    { name: 'Fitness', color: '#f43f5e', position: 3 },
+  ];
+  const buf = buildCsvArchive(habits, () => [
+    { date: '2026-01-05', value: 1, status: '', notes: '' },
+  ], categories);
+
+  // Shadowed as an OWN property, so the buffer stays a buffer throughout —
+  // `Buffer.isBuffer` and `toString` are untouched, only `readUInt32LE` is
+  // counted while it runs.
+  const orig = buf.readUInt32LE.bind(buf);
+  const countCalls = async (fn) => {
+    let n = 0;
+    Object.defineProperty(buf, 'readUInt32LE', {
+      value: (o) => { n++; return orig(o); },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      await fn();
+    } finally {
+      Object.defineProperty(buf, 'readUInt32LE', { value: orig, writable: true, configurable: true });
+    }
+    return n;
+  };
+
+  assert.equal(Buffer.isBuffer(buf), true, 'the shadow must not change what the buffer is');
+
+  const single = await countCalls(() => unzip(buf));
+  const throughUpload = await countCalls(() => parseUpload(buf));
+
+  assert.ok(single > 0, 'the counter itself must have seen something — unzip is not the business here');
+  assert.equal(throughUpload, single,
+    `parseUpload read the buffer ${throughUpload} times against a single unzip's own ${single} — ` +
+    'the zip branch must decompress the archive exactly once');
+});
+
+test("parseUpload's zip branch carries the categories, at non-default values", async () => {
+  const categories = [
+    { name: 'Health', color: '#10b981', position: 7 },
+    { name: 'Fitness', color: '#f43f5e', position: 3 },
+  ];
+  const habits = [{ id: 1, name: 'Meditate', category: '' }];
+  const buf = buildCsvArchive(habits, () => [
+    { date: '2026-01-05', value: 1, status: '', notes: '' },
+  ], categories);
+
+  const { habits: parsed, categories: parsedCategories } = await parseUpload(buf);
+  assert.deepEqual(parsedCategories, categories);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].name, 'Meditate');
+  assert.equal(parsed[0].entries.length, 1, 'the habit from Checkmarks.csv is still carried');
+});
+
+test("parseUpload's categories match backupCategories(buf), per format", async (t) => {
+  // `categorySkip` is non-enumerable (`withSkip`), so `deepEqual` cannot see
+  // it — asserted separately, always.
+  //
+  // Each format is its own SUBTEST, not a shared sequence of assertions in
+  // one test body: a failure in one format must not stop the rest from
+  // running, which is what lets a mutation test check the zip cases fail
+  // while the Loop-shaped-zip case (categories null on both sides either way)
+  // still passes — proof it is not the assertion carrying the whole suite.
+  const assertParity = async (buf, label) => {
+    const { categories: fromUpload } = await parseUpload(buf);
+    const fromBackup = backupCategories(buf);
+    assert.deepEqual(fromUpload, fromBackup, `${label}: categories must match backupCategories(buf)`);
+    assert.equal(fromUpload?.categorySkip, fromBackup?.categorySkip,
+      `${label}: categorySkip must match too`);
+  };
+
+  await t.test('a habiterall JSON backup with categories', async () => {
+    const buf = Buffer.from(JSON.stringify({
+      version: 1, app: 'habiterall',
+      categories: [{ name: 'Health', color: '#10b981', position: 1 }],
+      habits: [{ name: 'Meditate', type: 'boolean', entries: [] }],
+    }));
+    await assertParity(buf, 'JSON with categories');
+    // Parity alone is vacuous here — both sides come from the same file, so
+    // the literal is what proves either answer is actually right.
+    assert.deepEqual((await parseUpload(buf)).categories,
+      [{ name: 'Health', color: '#10b981', position: 1 }]);
+  });
+
+  await t.test('the same, with an explicitly empty categories array', async () => {
+    // "This account has none" — a legitimate shape and not an absence.
+    const buf = Buffer.from(JSON.stringify({
+      version: 1, app: 'habiterall', categories: [],
+      habits: [{ name: 'Meditate', type: 'boolean', entries: [] }],
+    }));
+    await assertParity(buf, 'JSON with "categories": []');
+    assert.deepEqual((await parseUpload(buf)).categories, []);
+  });
+
+  await t.test('a JSON backup with no categories key at all', async () => {
+    const buf = Buffer.from(JSON.stringify({
+      version: 1, app: 'habiterall',
+      habits: [{ name: 'Meditate', type: 'boolean', entries: [] }],
+    }));
+    await assertParity(buf, 'JSON with no categories key');
+    assert.equal((await parseUpload(buf)).categories, null);
+  });
+
+  await t.test('a bare habits array', async () => {
+    const buf = Buffer.from(JSON.stringify([{ name: 'Gym', type: 'boolean', entries: [] }]));
+    await assertParity(buf, 'bare array');
+  });
+
+  await t.test('a habiterall zip carrying Categories.csv', async () => {
+    const zipHabits = [{ id: 1, name: 'Meditate', category: '' }];
+    const buf = buildCsvArchive(zipHabits, () => [],
+      [{ name: 'Health', color: '#10b981', position: 1 }]);
+    await assertParity(buf, 'zip with Categories.csv');
+  });
+
+  await t.test('a Loop-shaped zip with no Categories.csv', async () => {
+    const zipHabits = [{ id: 1, name: 'Meditate', category: '' }];
+    const buf = buildCsvArchive(zipHabits, () => [], []);
+    await assertParity(buf, 'Loop-shaped zip with no Categories.csv');
+  });
+
+  await t.test('a .db backup', async () => {
+    // Real bytes, not just the sniffed header, so parseUpload actually opens
+    // it rather than rejecting before reaching this comparison.
+    const dbPath = join(tmpdir(), `import-parity-${process.pid}-${Date.now()}.db`);
+    try { unlinkSync(dbPath); } catch { /* fresh file */ }
+    await makeLoopDb(dbPath);
+    const dbBuf = readFileSync(dbPath);
+    try {
+      await assertParity(dbBuf, '.db backup');
+    } finally {
+      try { unlinkSync(dbPath); } catch { /* best effort */ }
+    }
+  });
+
+  await t.test('a bare Checkmarks.csv', async () => {
+    const buf = Buffer.from('Date,Meditate\n2026-01-05,YES\n', 'utf8');
+    await assertParity(buf, 'bare Checkmarks.csv');
+  });
+});
+
+test("a zip's unusable Categories.csv still reaches the caller with its skip", async () => {
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: 'Name,Color,Position\n' },
+  ]);
+  const { categories } = await parseUpload(buf);
+  assert.deepEqual(categories, []);
+  assert.match(categories.categorySkip, /no usable categories/);
+});
+
+test('a Loop zip is inert: no categories, and its habits are unchanged', async () => {
+  // The exact archive `parseZipExport`'s own Habits.csv-union test builds
+  // above — same fixture, so "unchanged" is checkable rather than asserted.
+  const archive = zip([
+    {
+      name: 'Habits.csv',
+      data: [
+        'Position,Name,Type,Question,Description,FrequencyNumerator,FrequencyDenominator,Color,Unit,Target Type,Target Value,Archived?',
+        '001,Water,NUMERICAL,,Stay hydrated,1,1,10,glasses,AT_LEAST,8.0,false',
+        '002,Ghost,YES_NO,,Never checked off,1,1,11,,,,false',
+      ].join('\n') + '\n',
+    },
+    { name: 'Checkmarks.csv', data: 'Date,Water\n2026-01-05,6\n' },
+  ]);
+
+  const { habits, categories } = await parseUpload(archive);
+  assert.equal(categories, null, 'a Loop zip never has a Categories.csv to find');
+  assert.deepEqual(habits.map((h) => h.name), ['Water', 'Ghost'],
+    'checkmarks order first, then Habits.csv order for the rest');
+  assert.equal(habits[0].entries.length, 1);
+  assert.deepEqual(habits[1].entries, []);
+  assert.equal(habits[1].description, 'Never checked off');
 });
 
 /* ---------- categories in a habiterall JSON backup ---------- */
@@ -1255,6 +1476,72 @@ test('a Categories.csv over LIMITS.categories reports how many were dropped', ()
   assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
 });
 
+/* ---------- the cap's own boundary, from both sides ---------- */
+
+// `overCapSkip`'s comparison is `named <= LIMITS.categories`, and NOTHING in
+// this repo used to sit on either side of that `<=`. Every other fixture is
+// well under the cap (one or two rows) or well over it (33, 35, 40, 50,000),
+// so changing the `<=` to `<` left the ENTIRE suite green — `npm test`, both
+// round trips, `test:apishape`, `test:cloud` and its zip block — while a file
+// holding exactly the cap gained the sentence "0 of 30 categories in
+// Categories.csv were dropped: at most 30 are allowed", a report of a loss
+// that did not happen. The two tests below are that boundary from each side.
+//
+// THE COUNTS ARE LITERAL, here and in the messages. A fixture built from
+// `LIMITS.categories` pins the NAME of the constant and not the number the
+// user is told, which is how the `fresh` window passed with 7 widened to 30
+// while its own comment claimed the boundary was covered. If the cap ever
+// moves, both of these must fail and be re-read — that is the point of them,
+// not a maintenance cost to be engineered away.
+//
+// Both fixtures carry a non-default colour (`#3b82f6` is the default) and a
+// position that is never its own row index, so neither can pass with the
+// colour or the position path deleted.
+const boundaryRow = (i) => `Cat ${i},${i % 2 === 0 ? '#10b981' : '#f43f5e'},${100 - i}`;
+const boundaryZip = (n) => zip([
+  { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+  { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+  {
+    name: 'Categories.csv',
+    data: `Name,Color,Position\n${Array.from({ length: n }, (_, i) => boundaryRow(i)).join('\n')}\n`,
+  },
+]);
+
+test('exactly 30 named categories — the cap itself — carries no note at all', () => {
+  const cats = backupCategories(boundaryZip(30));
+
+  assert.equal(cats.length, 30, 'all thirty are kept — the cap is reached, not exceeded');
+  assert.equal(cats.categorySkip, undefined,
+    'nothing was dropped, so there is nothing to report: `named <= 30` must not report');
+
+  // The file's own colours and positions, so this fixture cannot pass with
+  // either path removed. Descending from 100, so no position equals its index.
+  assert.deepEqual(cats.map((c) => c.position),
+    Array.from({ length: 30 }, (_, i) => 100 - i));
+  assert.deepEqual(cats.map((c) => c.color).slice(0, 4),
+    ['#10b981', '#f43f5e', '#10b981', '#f43f5e']);
+});
+
+test('thirty-one named categories — one past the cap — reports exactly one dropped', () => {
+  // The other side of the same `<=`, and independently unexercised. It catches
+  // an off-by-one the test above cannot: widening the comparison to
+  // `named <= LIMITS.categories + 1` leaves a 31-row file silent while the
+  // 33-, 35- and 50,000-row fixtures elsewhere all still report, so this is the
+  // only fixture in the repo that fails. Verified by running that mutation.
+  const cats = backupCategories(boundaryZip(31));
+
+  assert.equal(cats.length, 30, 'the thirty-first is the one cut');
+  // The WHOLE sentence, not a regex over part of it. The over-cap test above
+  // matches `/3 of \d+ .../`, which cannot tell 33 from 3,300 — and "1 of 31"
+  // is where a mistake in `named - LIMITS.categories` shows at its smallest.
+  assert.equal(cats.categorySkip,
+    '1 of 31 categories in Categories.csv were dropped: at most 30 are allowed');
+
+  assert.deepEqual(cats.map((c) => c.position),
+    Array.from({ length: 30 }, (_, i) => 100 - i),
+    'the thirty kept are the first thirty, at the positions the file declared');
+});
+
 test('a hand-written Categories.csv with spaces after the commas keeps its colours', () => {
   // The way people write CSV by hand. `COLOR_RE` is anchored, so one leading
   // space was the difference between a colour restoring and silently becoming
@@ -1377,6 +1664,165 @@ test('a zip with only PK\'s magic bytes reads null rather than throwing', () => 
   // `null`; the real upload is still rejected, by `parseUpload`.
   const truncated = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]);
   assert.equal(backupCategories(truncated), null);
+});
+
+/* ---------- the category build is bounded by the cap, not by what it reads ---------- */
+
+test('the category build no longer scales with the row count, and the cap still bounds what is returned', async () => {
+  // `LIMITS.categories` used to bound what `normalizeCategories` RETURNED, not
+  // what it BUILT: `parseCSV` materialised every row, a `.map` turned each into
+  // a raw object, and a second `.map`+`.filter` repaired each of THOSE, all
+  // before `.slice(0, LIMITS.categories)` ever ran — three materialisations of
+  // a file's every row to keep thirty of them. The real trigger is 654,990
+  // rows; 50,000 is enough to see the shape of that cost and fast enough to run
+  // on every `npm test`.
+  //
+  // A child process because the assertion needs `--expose-gc`. `global.gc()`
+  // is what keeps the measurement from being decided by whichever GC pass
+  // happens to land inside the test runner's own process, and every parsed
+  // RESULT is explicitly retained in an array past its own `global.gc()` call
+  // — a `result` that is never read again after being assigned is provably
+  // dead before that point, and V8 is free to collect it before the "after"
+  // sample is taken, which silently turns the measurement into one of
+  // transient parsing garbage rather than of what the build actually RETAINS.
+  //
+  // `heapUsed`, not `rss`: RSS moves in whole OS pages (measured as low as
+  // -356KiB and as high as +2.2MiB for the SAME 500-row parse back to back,
+  // noise on the order of the signal this test is looking for) where
+  // `heapUsed` after a forced `global.gc()` reports what V8 actually still
+  // holds reachable — measured stable to within a few percent run to run,
+  // for both the fixed code and every mutation below.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const importSrc = new URL('../src/import.js', import.meta.url).href;
+  const zipSrc = new URL('../src/zip.js', import.meta.url).href;
+
+  const script = [
+    'const { parseUpload } = await import(' + JSON.stringify(importSrc) + ');',
+    'const { zip } = await import(' + JSON.stringify(zipSrc) + ');',
+    '',
+    'function buildZip(n) {',
+    '  const rows = [];',
+    '  for (let i = 0; i < n; i++) rows.push("Cat " + i + ",#111111," + i);',
+    '  const csvBody = "Name,Color,Position\\n" + rows.join("\\n") + "\\n";',
+    '  return zip([',
+    '    { name: "Habits.csv", data: "Name\\nMeditate\\n" },',
+    '    { name: "Checkmarks.csv", data: "Date,Meditate\\n" },',
+    '    { name: "Categories.csv", data: csvBody },',
+    '  ]);',
+    '}',
+    '',
+    'async function measureBurst(n, iterations) {',
+    '  const buf = buildZip(n);',
+    '  const retained = [];',
+    '  for (let i = 0; i < 2; i++) await parseUpload(buf);',   // warmup, discarded
+    '  global.gc(); global.gc();',
+    '  const before = process.memoryUsage().heapUsed;',
+    '  for (let i = 0; i < iterations; i++) retained.push(await parseUpload(buf));',
+    '  global.gc();',
+    '  const after = process.memoryUsage().heapUsed;',
+    '  return { delta: after - before, last: retained[retained.length - 1] };',
+    '}',
+    '',
+    'const ITER = 10;',
+    'const small = await measureBurst(500, ITER);',
+    'const large = await measureBurst(50000, ITER);',
+    'console.log(JSON.stringify({',
+    '  smallDelta: small.delta,',
+    '  largeDelta: large.delta,',
+    '  largeLen: large.last.categories.length,',
+    '  largeSkip: large.last.categories.categorySkip,',
+    '}));',
+  ].join('\n');
+
+  const { stdout } = await promisify(execFile)(
+    process.execPath, ['--expose-gc', '--input-type=module', '-e', script],
+    { maxBuffer: 1 << 20 }
+  );
+  const { smallDelta, largeDelta, largeLen, largeSkip } = JSON.parse(stdout.trim());
+
+  // The RATIO first, deliberately ahead of the shape assertions below: it is
+  // the one this test exists for, and it must be the one that trips when the
+  // cap stops bounding the BUILD (dropping the `kept.length < LIMITS.categories`
+  // guard keeps every named row, which `largeLen` below would also catch, but
+  // only after masking whether the memory claim itself still holds). The claim
+  // is the RATIO, not a megabyte figure: ten parses of a 100x bigger file must
+  // not cost anywhere near ~100x the retained heap. Measured on this branch:
+  // ~0.3-0.4x fixed (the large fixture actually retains LESS, since its
+  // `categorySkip` string is the only thing that scales with `named` and both
+  // fixtures return the same 30 capped rows), ~110x with that guard removed —
+  // the threshold sits with a wide margin either side of both.
+  const ratio = largeDelta / Math.max(smallDelta, 1);
+  assert.ok(ratio < 10,
+    `retained heap over ${10} parses must not scale with the row count: ` +
+    `500-row delta=${smallDelta}B, 50,000-row delta=${largeDelta}B, ratio=${ratio.toFixed(2)}`);
+
+  assert.equal(largeLen, LIMITS.categories, 'the cap still bounds what is RETURNED');
+  assert.match(largeSkip, /49970 of 50000 categories in Categories\.csv were dropped/);
+});
+
+test('the exact named total survives the bounding, not truncated to the cap', () => {
+  // The assertion the obvious wrong fix — capping the SCAN rather than the
+  // build — fails: `overCapSkip`'s sentence names the exact count of NAMED
+  // rows in the whole file, and that count must keep counting after the
+  // thirtieth is kept, not stop there.
+  const rows = Array.from({ length: 50_000 }, (_, i) => `Cat ${i},#111111,${i}`).join('\n');
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: `Name,Color,Position\n${rows}\n` },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, LIMITS.categories);
+  assert.match(cats.categorySkip, /49970 of 50000 categories in Categories\.csv were dropped/);
+  assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
+});
+
+test('a blank Position cell defaults to the row\'s rank among the KEPT rows, not its rank in the file', () => {
+  // 40 lines, but every fourth is UNNAMED — dropped before it ever reaches
+  // `named`/`kept` — so a named row's rank in the FILE and its rank among the
+  // rows actually KEPT diverge. `done()` must default a blank position to the
+  // second: the mutation this guards is `done()` using the row's rank in the
+  // file instead, which is what an index computed before the cap ran would
+  // give, and which happens to agree with the rank-among-kept only when
+  // nothing before the cap was ever dropped — the case every OTHER fixture in
+  // this file uses, and why this one interleaves unnamed rows on purpose.
+  const lines = [];
+  let namedCount = 0;
+  for (let i = 0; i < 40; i++) {
+    if (i % 4 === 3) lines.push(',#111111,');            // unnamed filler, dropped
+    else { lines.push(`Cat ${namedCount},#111111,`); namedCount++; }
+  }
+  assert.equal(namedCount, 30, 'fixture sanity: exactly 30 named rows, all of them kept');
+
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: `Name,Color,Position\n${lines.join('\n')}\n` },
+  ]);
+  const cats = backupCategories(buf);
+  assert.deepEqual(cats.map((c) => c.position), Array.from({ length: 30 }, (_, i) => i),
+    JSON.stringify(cats));
+});
+
+test('a stated position survives the cap verbatim, not merely because it equals its own index', () => {
+  // A fixture whose stated positions equal their index would pass with the
+  // whole `Number.isInteger(c.position) ? c.position : i` branch deleted —
+  // every position would look "defaulted" and be indistinguishable from being
+  // read back. Descending values that are never equal to their kept index are
+  // what makes this test only pass if the stated value truly survived.
+  const lines = [];
+  for (let i = 0; i < 30; i++) lines.push(`Cat ${i},#111111,${100 - i}`);
+  for (let i = 30; i < 40; i++) lines.push(`Extra ${i},#111111,999`);   // over the cap, dropped
+
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: `Name,Color,Position\n${lines.join('\n')}\n` },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, LIMITS.categories);
+  assert.deepEqual(cats.map((c) => c.position), Array.from({ length: 30 }, (_, i) => 100 - i));
 });
 
 /* ---------- repairing an imported habit ---------- */

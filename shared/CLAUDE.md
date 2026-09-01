@@ -822,6 +822,62 @@ habits have no entries exported a lone header line and restored as
 the other file, were parsed and thrown away. `parseZipExport` unions the two
 now, which also covers a habit named in one file and not the other.
 
+**`parseUpload` answers `{habits, categories}` from one `unzip`, not two
+(#282).** `parseZipExport`'s zip branch already inflated every member to reach
+`Checkmarks.csv`/`Habits.csv`; it now reads `Categories.csv` out of that same
+pass instead of a route calling `backupCategories(buf)` afterwards on the
+identical buffer. `backupCategories` remains the buffer-only reader — a caller
+holding nothing but bytes still has one function to ask, and a zip handed to
+it directly still pays its own inflate — but neither route reaches it for a
+zip any more. The per-request inflate ceiling on the zip path drops from two
+`MAX_TOTAL_BYTES` to one — 128 MiB to 64 MiB — and members considered from
+1,024 (2 × `MAX_ENTRIES`) to 512; the per-member ceiling stays `MAX_ENTRY_BYTES`
+(32 MiB), untouched either way. Peak resident decompressed bytes is unchanged,
+because the two passes never overlapped — each `files` Map was already garbage
+once its caller returned. This is a CPU-cost fix, not a new cap: every bound
+that held on both passes before holds on the one pass now.
+
+**One input class got DEARER, and a perf change has to say which.** The
+categories are now read inside `parseUpload`, so they are parsed BEFORE the
+route's `no habits found in the uploaded file` 400 — where the second call used
+to sit after it. A zip whose `Checkmarks.csv` is a bare `Date\n` and whose
+`Categories.csv` is enormous therefore 400s having done that work, where the
+old ordering answered in 3 ms without ever reaching it. The per-request
+CEILING still went down rather than up — the same attacker buys strictly more
+work on the old ordering by adding one column to `Checkmarks.csv`, which makes
+it do two inflates AND the same category parse — so this is a cost moved onto a
+request that answers 400, not a bound weakened.
+
+**The cap bounds what the category reader RETURNS, and it now bounds what the
+reader BUILDS too.** It did not before, in any version of this file: reading a
+`Categories.csv` materialised every row three times — `parseCSV`'s whole
+`string[][]`, a `.map` into raw objects, a second `.map` + `.filter` — and only
+then ran `.slice(0, LIMITS.categories)`, so thirty rows cost a file's worth of
+memory. `forEachCsvRow` is `parseCSV`'s char loop with the row handed to a
+callback instead of pushed onto an array (`parseCSV` is now a thin collector
+over it, unchanged for its own callers), and `categoryCollector` keeps at most
+`LIMITS.categories` repaired rows while counting every NAMED one — the count
+has to keep going after the thirtieth, because `overCapSkip`'s sentence names
+the exact total in the whole file.
+
+Measured through `parseUpload` on the input above, a 22.9 MiB / 654,990-row
+member: **535 ms and 498 MiB of RSS growth before, 320 ms and 66 MiB after** —
+and the residual is now bounded by `unzip`'s own `MAX_TOTAL_BYTES` (its `files`
+Map, plus the member decoded to text) rather than by how many rows the file
+declares, which is the property that was missing. A per-row bound is the rule
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` already follow one section up, for
+the reason stated there: anything materialising the array first has already
+spent the memory.
+
+**This is a HARDENING and not a regression that this change introduced** — the
+triple materialisation is as old as the category reader and cost master the
+same. Do not read it as closing a class: the ceiling is still `MAX_ENTRY_BYTES`
+worth of text arriving as a deflated member, and what changed is the multiple
+on top of it. The blank-row filter that moved into `forEachCsvRow` with the
+split is pinned by its own test in `test/import.test.js`, because when it was
+deleted deliberately to check the split, the entire suite stayed green — every
+`Checkmarks.csv` fixture in the repo has a non-blank `Date` cell.
+
 ## Reminders and destinations
 
 **A destination is either on-device or server-sent, and the difference is the

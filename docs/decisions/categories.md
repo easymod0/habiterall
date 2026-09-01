@@ -73,7 +73,11 @@ rest of what a category is:
   `backupCategories` (`import.js`) reads it back through the same
   `normalizeCategories` repair tail the JSON branch already used, so the two
   formats cannot repair a nameless entry, a bad colour or a non-integer
-  position differently from each other. A zip with no `Categories.csv` — a
+  position differently from each other — on the import path (#282) it is
+  `parseUpload` that reads `Categories.csv`, out of the same single `unzip`
+  it already does to reach `Checkmarks.csv`/`Habits.csv`, through that same
+  repair tail; `backupCategories` still answers identically for a caller
+  handed only the buffer. A zip with no `Categories.csv` — a
   Loop-produced one, or one of our own from an account with no categories —
   still answers `null`, exactly as before #257, so `resolveOrCreateCategory`
   still invents each restored category fresh at `DEFAULT_COLOR` and
