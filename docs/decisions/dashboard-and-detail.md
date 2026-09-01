@@ -699,16 +699,20 @@ over-estimate real modern-Greek words by 1.60x to 2.37x. On `other` it
 under-estimates 1.96x, pre-existing and reached by no locale in the sweep, el-GR
 CLDR being monotonic. **Cyrillic (U+0400–U+04FF) has no class either**, for
 exactly the reason Greek had none, and it is a live gap rather than a considered
-exclusion: measured against real CLDR labels, mn-MN `Ням` is 1.201x, kk-KZ
+exclusion (**superseded — fixed in the section below**): measured against real
+CLDR labels, mn-MN `Ням` is 1.201x, kk-KZ
 `мам.` 1.187x, ru-RU `май` 1.118x, mk-MK `мар.` 1.106x, and the narrow weekday
 `Ш` — CLDR's narrow form for several Cyrillic locales — is 1.295x against
 `LONE.other`, outside the margin, though no reachable call site was found where
-it clips. `LOCALES` contains no Cyrillic locale at all, so the 1.19x headline is
+it clips. **Three of those four figures are not reproducible and the section
+below says why** — mn-MN, kk-KZ and mk-MK have no CLDR weekday or month data in
+this Chrome build; `Ш` and `май` are the two that stand.
+`LOCALES` contains no Cyrillic locale at all, so the 1.19x headline is
 the worst case of the SWEEP and a lower bound on the app's. Left open on
 purpose: a `CYRILLIC` class is the same kind of change this one is, wants its
 own measurement of what it moves at the three degrade sites, and would move the
 headline number — so it is a separate decision and not something to fold into
-Greek's.
+Greek's. (It did not move the headline. See below.)
 
 **What the review round found, since the pattern is the point of this file.**
 Every figure that had to be corrected came from an instrument standing in for a
@@ -723,3 +727,167 @@ rates for the space and the digits subtracted back out — the estimator was one
 of the two instruments. It measures 0.510 when measured. The lesson matches the
 `#132` section's: the number a sweep produces is a lower bound on the worst
 case, and the number a re-implementation produces is not a measurement at all.
+
+## Cyrillic had no class either, and its two rates are two measurements (#294's finding)
+
+The `#286` section above left this open by name and predicted three things about
+picking it up: that it would be the same kind of change, that it would need its
+own measurement of what it moves at the degrade sites, and that it would move
+the headline number. The first two were right. **The third was wrong — the
+headline did not move.**
+
+**The defect was the same missing-class shape, one block over and worse.**
+`classOf` tested seven script spans and Cyrillic (U+0400–U+04FF) was in none of
+them: `SEMITIC` starts at U+0590, `BROAD` covers Armenian and Georgian but not
+this, and `UPPER` is ASCII-only. Unlike Greek there was no precedence subtlety
+to get right — no span in the list overlaps U+0400–U+04FF at all, which is
+exactly why it fell through — so the new branch sits beside `GREEK` for
+readability and its comment says the placement is free.
+
+**The interesting part is that Cyrillic needed TWO different rates, and the
+existing two-table design already had the shape for it.** CLDR's Cyrillic month
+and weekday *words* are lowercase and narrow; its narrow weekday is a single
+*capital* and wide. Measured per glyph over every label the harness draws, in
+the five Cyrillic locales this Chrome has data for: the widest real word is
+uz-Cyrl-UZ `шан` at **0.6885** and the widest real lone glyph is `Ш` at
+**1.0362** — a 1.51x spread *between the tables* inside one script. So
+`JOINED.cyrillic = 0.70` and `LONE.cyrillic = 1.05` are not one number raised
+twice; `LONE`/`JOINED` is doing precisely the job it was built for. Greek's own
+1.48x spread (`Τρί` 0.480 to `Μαρ` 0.711) is a spread *within* the joined table,
+which no single rate can absorb; this one falls on the seam between the two
+tables, which is why it can be.
+
+**`LONE.cyrillic` departs from `#286`'s reasoning, deliberately, and the
+departure is a measurement rather than a preference.** Greek held `LONE.greek`
+at `other`'s 0.8 on two grounds: that raising it would worsen every degrade
+decision, and that no CLDR label produced an under-estimate needing it. Both are
+false here. `Ш` **is** a CLDR label — the narrow weekday in six Cyrillic
+locales — and at `LONE.other`'s 0.8 it under-estimated **1.296x**, *outside*
+`WIDTH_SAFETY`: the only figure in that file that was not merely thin but
+uncovered. And the degrade cost was measured at **zero**: driving the real
+`historyChart`, `weekdayChart`, `streakChart` and `weekdayMonthChart` at every
+width from 320 to 1440 with `JOINED` held at the old 0.58 and `LONE` at 1.05
+reproduces the unfixed tree's output exactly, chart for chart and width for
+width. Every caption the change costs is `JOINED`'s. That isolation run is what
+makes this a decision rather than a guess, and it is the run to repeat before
+anyone "simplifies" the entry back to 0.8.
+
+**`JOINED = 0.70` is one hundredth above the rule, and the extra hundredth has
+a price in captions.** `#286`'s rule is "the smallest round rate covering the
+widest real label", which here is 0.69 — and 0.69 covers `шан` by **0.2%**,
+which is inside the variance of the font stack itself: `system-ui` is not the
+same font on two platforms and every figure in these records is one Chrome
+build's. The price was measured rather than waved away: 0.70 rather than 0.69
+costs one month caption at 420px on `weekdayMonthChart` (11 → 10) and one pixel
+of `streakChart`'s wordy-label crossover (403 → 404px), and nothing else at any
+width. Both numbers are in the `WIDTH_SAFETY` comment so nobody has to re-derive
+them to re-open the question.
+
+**The span was decided per block, and every extension failed the test `#286`
+applied to Coptic.** That test is: is the block's widest glyph, as a uniform
+three-glyph run, inside `WIDTH_SAFETY` against the class rate? Coptic passed at
+1.24x and stayed in `GREEK`; Greek Extended failed at 1.58x and was excluded.
+Here only the base block passes — Supplement's widest is 2.01x the class rate,
+Extended-B's 1.92x, Extended-C's 1.28x (outside, and only just, which is what
+made this a measurement rather than a judgement). Two blocks were excluded for
+reasons that are *not* about width, and they are worth keeping because a reader
+scanning for ratios would mis-read both: **Extended-A is 32 combining marks and
+nothing else**, so a branch covering it would be dead code under `COMBINING`;
+and **Extended-D has no glyph coverage in this font stack at all** — every one
+of its 96 code points measures 0.6003, the .notdef box, indistinguishable from
+the 33 unassigned ones beside it. There is nothing there to rate.
+
+The base block's own widest glyph is far outside the margin — Ѹ (U+0478), the
+digraph capital uk, at 1.743x — and that is stated plainly rather than smoothed
+over, on the same argument Greek's 1.26x rests on: nothing hands the estimator a
+uniform run of a block's widest letter, because the arguments are CLDR words
+whose rate is the mean over their letters. Of the block's 256 code points only
+**39** appear in any label the harness draws, they span U+0412–U+0459, and their
+own widest is Ш at 1.0351 — a glyph that only ever arrives alone, where `LONE`
+covers it.
+
+**The block holds seven combining marks and Greek's held none, so this one
+needed a test Greek did not.** U+0483–U+0489 are `\p{Mn}`, inert only because
+`COMBINING` is tested *first* in `classOf`, ahead of every script test. That is
+an ORDER property, not a rate, and no rate assertion implies it — so it has its
+own test, which fails `10.5 !== 5` when `COMBINING` is moved below `CYRILLIC`.
+
+### Two instruments again, and this time the older one is partly retired
+
+`#294` recorded four Cyrillic figures. **mn-MN `Ням` at 1.201x, kk-KZ `мам.` at
+1.187x and mk-MK `мар.` at 1.106x cannot be reproduced.** All three resolve to
+the tag they are asked for in this Chrome build and then format every weekday
+and month in the ASCII root pattern — `Mon`, `Jan` — which is exactly the
+`ne-NP` failure mode `label-widths.mjs`'s third field was added to catch.
+Sixteen Cyrillic tags were swept and **five** have CLDR data here: ru, uk, bg,
+sr-Cyrl, uz-Cyrl. Node's own full-ICU build *does* have those labels, so those
+three figures came from a mixed instrument — Node's label strings measured
+against Chrome's renderer — which is the same defect this file records twice
+already, and the reason the committed sweep carries only locales it can actually
+measure. What `#294` got exactly right is the one that governed: `Ш` at 1.296x,
+independently reproduced here, and reported by the harness itself as 1.30x.
+
+**There was also a contradiction to resolve before any of this could be
+measured, and it resolved as two instruments rather than an error.** `#294` says
+"the harness sweeps no Cyrillic locale" while **issue #285's caption-count table
+lists ru-RU at 390px among its measured locales**. Both are true and they
+describe different instruments: the first is `label-widths.mjs` (committed, 17
+tags, no Cyrillic, width ratios); the second is the hand-run caption counter
+#285 describes in its own words as run by hand and never committed, whose locale
+list included ru-RU, ko-KR and si-LK — none of which is in any committed list,
+and none of which was ever deleted from the tree, because it was never in it.
+Checked against git history: no instrument with a wider locale list has ever
+been committed and removed.
+
+That is a **harness gap as well as a rate gap**, and it is the transferable
+finding: a script can be exercised by one instrument, at one width, in a table
+somebody read and acted on, and still be invisible to the instrument that
+governs the margin. ru-RU had been *measured* — just not for width. The two
+sweeps now overlap on Cyrillic; they still do not overlap on ko-KR or si-LK.
+
+### What it moves — reported, not fixed, and #285 is still the fix
+
+Measured by importing the real charts and counting the `<text>` nodes they emit
+against `rendercheck.mjs`'s fake DOM, at every width from 320 to 1440, with the
+locale pinned by patching `Intl` before import — `LC_ALL` cannot express
+uz-Cyrl-UZ at all (`uz_UZ@cyrillic` maps to the invalid tag `uz-UZ-cyrillic` and
+Node falls back to Latin).
+
+**The first version of this rig was wrong, in the way this file keeps
+recording.** `historyChart` keys its bucket labels on `bucket`; the rig used
+`label`, so every axis caption was `undefined`, the count was zero at every
+width, and it reported "no change" for a reason that had nothing to do with the
+rates. It was caught by an isolation run printing `0/0` — not by review, and not
+by anything in the output that looked wrong. A caption count of zero is a
+plausible-looking number.
+
+- ⚠ `historyChart` loses captions, one band per bucket count. ru-RU: 12 → 6 at
+  896–963px, 6 → 4 at 471–504px, 16 → 8 at 1179–1269px, 10 → 5 at 754–810px,
+  4 → 3 at 330–351px (the phone). uz-Cyrl-UZ, whose month abbreviations are
+  shorter: 12 → 6 at 701–741px, 16 → 8 at 919–973px.
+- ⚠ `weekdayMonthChart` — **#285's own chart** — loses the most. ru-RU, 12
+  months: 12 → 7 at 382–395px, → 8 at 396–409px, → 10 at 410–421px, → 11 at
+  422–435px, and below 382px the counts collapse to 6. **At 390px that is
+  12 → 7**, and 390px in ru-RU is the exact cell of #285's own table, which
+  records the greedy walk drawing 12 there — reproduced by this rig before the
+  change, which is two instruments agreeing on one number.
+- ⚠ `streakChart` gives up the wordy range label over **384–403px in ru-RU**
+  (20 widths, 390px inside it), crossover 384 → 404px, for a cross-year range.
+  Below 384px it was already numeric, so 328 and 360 do not move, and
+  `labelSize` never moves. uz-Cyrl-UZ does not move at any width.
+- ✅ `weekdayChart` does not move at any width in either locale — short names,
+  11px type, before and after. This is the site `LONE.cyrillic` would have been
+  charged at, and it is not charged.
+
+Swept rate by rate against the real chart, holding ru-RU's 12 captions at 390px
+needs `JOINED.cyrillic` ≤ 0.60, 11 needs ≤ 0.62, 10 needs ≤ 0.64 and 8 needs
+≤ 0.68; holding `streakChart`'s 384px crossover needs 0.58. The widest real
+Cyrillic word measures 0.6885, so **12 captions at 390px costs a 1.148x
+under-estimate on a label the app draws** — unavoidable at any rate that covers
+the words, exactly as Greek's was.
+
+None of it is fixed here. `WIDTH_SAFETY` stays at 1.25 and was not widened:
+a wider margin papers over every under-classified script at once and hides the
+next one the way these two were hidden. `columnsForWidth`'s default `reserved`
+was not touched, and the stride is still **#285**, which wants a decision rather
+than a number.
