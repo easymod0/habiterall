@@ -21,7 +21,7 @@
 // that simply was not binding at 2.2.10. Both were verified by building at both
 // versions rather than from AGP's pom.
 plugins {
-    id("com.android.application") version "9.3.1" apply false
+    id("com.android.application") version "9.3.2" apply false
     id("org.jetbrains.kotlin.plugin.serialization") version "2.4.10" apply false
     // From Kotlin 2.0 the Compose compiler ships with Kotlin and is applied as
     // its own plugin. The old `composeOptions.kotlinCompilerExtensionVersion`

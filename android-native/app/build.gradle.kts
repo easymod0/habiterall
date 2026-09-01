@@ -101,7 +101,7 @@ android {
 // plugin.
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2025.04.01")
+    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)
     // The same BOM for the JVM tests, so a composable is rendered by exactly the
@@ -141,7 +141,7 @@ dependencies {
     // Preferences: server URL and the last sync.
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
-    implementation("com.squareup.okhttp3:okhttp:5.4.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.0")
     // This was pinned at 1.9.0 against a ceiling that turns out not to exist,
     // and the correction is worth keeping because the reasoning sounded right.
     // A class compiled by a later Kotlin cannot be read by an earlier compiler,
@@ -161,7 +161,7 @@ dependencies {
     // and its effect is where every bug in this package has been, and a pure
     // function cannot reach it: `alarmUri` returning the right string does not
     // prove the snooze intent uses it.
-    testImplementation("org.robolectric:robolectric:4.16")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     // Lets a test ask what work a receiver enqueued, which is the only way to
     // see the difference between a snoozed delivery and a daily one.
     testImplementation("androidx.work:work-testing:2.10.0")
