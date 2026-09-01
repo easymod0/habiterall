@@ -414,6 +414,148 @@ test('the Greek class spans the whole Greek and Coptic block, and stops there', 
   assert.equal(estimateTextWidth('ἯἯἯ', 10), estimateTextWidth('xyz', 10));
 });
 
+test('the Cyrillic block is no longer billed at the generic rate — found by #294', () => {
+  // Same shape of defect as #286's Greek, one block over and worse. `classOf`
+  // had nothing for U+0400-U+04FF: not `SEMITIC` (which starts at U+0590), not
+  // `BROAD`, and `UPPER` is ASCII-only — so every Cyrillic code point fell
+  // through every script test to the generic `other` rate, 0.58 JOINED and 0.8
+  // LONE, both calibrated for Latin.
+  //
+  // Two governing cases, one per rate table, because Cyrillic splits cleanly
+  // between them: CLDR's Cyrillic month and weekday WORDS are lowercase and
+  // narrow, while its narrow weekday is a single CAPITAL and wide. That is
+  // exactly the split the two tables exist for.
+  const REAL_UZ_SHAN_AT_10_5 = 21.69; // uz-Cyrl-UZ short weekday, the widest real word
+  const REAL_UZ_SH_AT_8_5 = 8.81;     // uz-Cyrl-UZ narrow weekday `Ш` — was 1.296x, OUTSIDE 1.25
+  const joined = estimateTextWidth('шан', 10.5);
+  assert.ok(joined >= REAL_UZ_SHAN_AT_10_5,
+    `estimate ${joined} must cover the real ${REAL_UZ_SHAN_AT_10_5}px Cyrillic word render`);
+  const lone = estimateTextWidth('Ш', 8.5);
+  assert.ok(lone >= REAL_UZ_SH_AT_8_5,
+    `estimate ${lone} must cover the real ${REAL_UZ_SH_AT_8_5}px Cyrillic lone-capital render`);
+});
+
+test('every real Cyrillic label the app draws is covered, in BOTH rate tables', () => {
+  // Wider than the two governing cases above, and unlike #286's Greek
+  // equivalent BOTH halves of this table bite the class branch — `LONE.cyrillic`
+  // is 1.05 where `LONE.greek` was deliberately equal to `LONE.other`, so a
+  // Cyrillic lone glyph is not billed the fallback rate either. What each row
+  // catches:
+  //
+  //   - Every row fails if `if (CYRILLIC.test(ch)) return 'cyrillic';` is
+  //     deleted from `classOf`, EXCEPT `пн` — 2 glyphs of a narrow pair, which
+  //     `LONE.other`'s 0.8 already covers with room. It is kept because it is
+  //     the only label in this table that a chart ACTUALLY measures through the
+  //     LONE table (`weekdayChart`'s `fits` and `weekdayMonthChart`'s row
+  //     gutter both read `weekdayNames('short')`, and ru-RU's are two glyphs),
+  //     and because it does bite the mutation the next bullet names.
+  //   - Every row fails on `NaN` if the `cyrillic` key is deleted from `LONE`
+  //     or from `JOINED`: `classOf` still answers `'cyrillic'`, the lookup is
+  //     `undefined`, and `NaN >= real` is false.
+  //
+  // `понеделник` is the tightest of the joined rows on purpose — 49.88 real
+  // against 49.30 at the old generic rate, a 1.2% miss — so this table is not
+  // made only of comfortable margins.
+  //
+  // Every real width measured with getComputedTextLength(), Chrome for Testing
+  // 152.0.7977.42, the app's own font stack (`label-widths.mjs`'s FONT_CSS),
+  // the locale driven per target with CDP `Emulation.setLocaleOverride` and
+  // read back before being trusted.
+  const LABELS = [
+    // JOINED — 3+ glyphs
+    ['шан', 10.5, 21.69, 'uz-Cyrl-UZ weekday short — the widest real Cyrillic word'],
+    ['шан', 8, 16.52, 'uz-Cyrl-UZ weekday short, at the smallest size charts use'],
+    ['май', 8.5, 16.55, 'ru-RU month — #294 measured this at 1.119x'],
+    ['мар', 8.5, 16.44, 'sr-Cyrl-RS month'],
+    ['июнь', 9.5, 24.52, 'ru-RU month, four glyphs'],
+    ['лип.', 10.5, 21.88, 'uk-UA month — three letters and a PUNCT full stop'],
+    ['чоршанба', 8, 40.08, 'uz-Cyrl-UZ weekday long, eight glyphs'],
+    ['понеделник', 8.5, 49.88, 'bg-BG weekday long — the tightest row here'],
+    // LONE — 1-2 glyphs
+    ['Ш', 8.5, 8.81, 'uz-Cyrl-UZ weekday narrow — 1.296x before this class'],
+    ['Ж', 8, 7.25, 'uz-Cyrl-UZ weekday narrow'],
+    ['пн', 8, 9.77, 'ru-RU weekday short — the LONE label a chart really measures'],
+  ];
+  for (const [label, size, real, why] of LABELS) {
+    const estimate = estimateTextWidth(label, size);
+    assert.ok(estimate >= real,
+      `"${label}" @ ${size}px (${why}): estimate ${estimate} must cover the real ${real}px render`);
+  }
+});
+
+test('the Cyrillic class is the BASE block only, and every extended block stays out', () => {
+  // The span was decided per block, by measuring each one's widest glyph as a
+  // uniform three-glyph run and comparing it against `JOINED.cyrillic` — the
+  // same test #286 applied to Greek's Coptic tail (kept, 1.24x) and to Greek
+  // Extended (excluded, 1.58x). The figures are in the `WIDTH_SAFETY` comment.
+  // Only the base block passed.
+  const generic = estimateTextWidth('xyz', 10);  // unambiguously `other`
+
+  // In the class: both ENDS of U+0400-U+04FF, so the span cannot be quietly
+  // narrowed at either edge, plus a mid-block letter. These are the assertions
+  // that bite the class branch being deleted outright — the exclusions below
+  // cannot, since with no branch at all everything Cyrillic falls to the same
+  // generic rate and compares equal to it.
+  const blockStart = estimateTextWidth('ЀЀЀ', 10);   // U+0400
+  const blockEnd = estimateTextWidth('ӿӿӿ', 10);     // U+04FF
+  const midBlock = estimateTextWidth('шшш', 10);     // U+0448
+  assert.ok(blockStart > generic,
+    `a run at the block's first code point (${blockStart}) must cost MORE than the same-length ` +
+    `generic run (${generic}), or the Cyrillic class has collapsed into the fallback rate`);
+  assert.ok(blockEnd > generic,
+    `a run at the block's last code point (${blockEnd}) must cost MORE than the same-length ` +
+    `generic run (${generic}), or the span stops short of U+04FF`);
+  assert.equal(blockStart, blockEnd,
+    'every letter in the base block costs the same per glyph');
+  assert.equal(midBlock, blockEnd,
+    'a mid-block letter costs what the block edges do');
+
+  // OUT of the class, each for a measured reason. These are boundary
+  // assertions, not oversights to "fix": widen the span to any of these three
+  // and the matching line reddens.
+  //   - Supplement U+0500-052F: widest 1.4101 (Ԫ U+052A), 2.01x the class rate
+  //   - Extended-B U+A640-A69F: widest 1.3470 (Ꚙ U+A698), 1.92x
+  //   - Extended-C U+1C80-1C8F: widest 0.8980 (ᲅ U+1C85), 1.28x — outside 1.25
+  assert.equal(estimateTextWidth('ԪԪԪ', 10), generic,
+    'Cyrillic Supplement (U+052A) must still be billed as `other`');
+  assert.equal(estimateTextWidth('ꚘꚘꚘ', 10), generic,
+    'Cyrillic Extended-B (U+A698) must still be billed as `other`');
+  assert.equal(estimateTextWidth('ᲅᲅᲅ', 10), generic,
+    'Cyrillic Extended-C (U+1C85) must still be billed as `other`');
+});
+
+test('a combining mark inside the Cyrillic block is billed as a MARK, not as Cyrillic', () => {
+  // Unlike Greek's block, which holds zero of them, U+0400-U+04FF contains
+  // SEVEN combining marks (U+0483-U+0489). They are inert here only because
+  // `COMBINING` is tested FIRST in `classOf`, ahead of every script test — so
+  // this is a test of the ORDER of those branches, which is wiring rather than
+  // a rate, and it is not implied by anything above.
+  //
+  // A string of nothing but marks bills as one cluster (see `estimateTextWidth`'s
+  // own comment on `billed`), which is what makes the class reachable at all
+  // from a test: with `COMBINING` first the cluster is `mark`, and with
+  // `CYRILLIC` first it would be `cyrillic` at 1.05 instead of `mark` at 0.5.
+  //
+  // Compared against U+0300, a combining mark OUTSIDE any script span in the
+  // list, rather than against a literal — hardcoding `LONE.mark` would redden
+  // this line the next time that rate is re-measured for reasons that have
+  // nothing to do with Cyrillic.
+  // Spelled with escapes rather than as literal characters, the way the
+  // Devanagari and Malayalam cases above are: a bare combining mark renders as
+  // nothing at all in a diff, so a literal one is a byte a reviewer cannot see
+  // and a careless edit cannot be spotted corrupting.
+  const cyrillicMark = estimateTextWidth('\u0483\u0483\u0483', 10); // COMBINING CYRILLIC TITLO
+  const genericMark = estimateTextWidth('\u0300\u0300\u0300', 10);  // COMBINING GRAVE ACCENT
+  assert.equal(cyrillicMark, genericMark,
+    'a Cyrillic combining mark must cost what any other combining mark costs, ' +
+    'or COMBINING has fallen below CYRILLIC in classOf');
+
+  // ...and the mark still rides free on the base glyph it sits on, which is
+  // #132's rule arriving in this block: ш + a titlo is one rendered cluster.
+  assert.equal(estimateTextWidth('\u0448\u0483', 10), estimateTextWidth('\u0448', 10),
+    'a titlo on a Cyrillic base glyph must cost nothing beyond its cluster');
+});
+
 test('every weekday width is indexed the same way, and narrow is one character', () => {
   // `narrow` is what the seven-column grid header and the month grid's rows
   // read, and both depend on it staying one character. Measured across en, de,

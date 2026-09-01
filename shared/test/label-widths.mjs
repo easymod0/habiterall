@@ -136,6 +136,28 @@ const LOCALES = [
   // to Arabic. It stays in the list precisely because it is the row that would
   // report the class being lost again.
   ['el-GR', 'Greek — the #286 script class, and the case that had no class at all before it', true],
+  // Cyrillic, added with the `CYRILLIC` class. #294 recorded the gap and named
+  // mn-MN `Ням` at 1.201x as its worst figure; that locale CANNOT be measured
+  // in this Chrome build, and neither can kk-KZ or mk-MK — all three resolve to
+  // the tag they were asked for and then format every weekday and month in the
+  // ASCII root pattern, the `ne-NP` failure mode the third field above exists
+  // for. Sixteen Cyrillic tags were swept; exactly five have CLDR data here
+  // (ru, uk, bg, sr-Cyrl, uz-Cyrl), so those figures came from a mixed
+  // instrument — Node's full-ICU label strings measured against Chrome's
+  // renderer — and are not reproducible by this file. These two are.
+  //
+  // `uz-Cyrl-UZ` is the HARSHER of the pair and is here for two separate
+  // reasons, either of which alone would earn it: it holds the widest real
+  // Cyrillic word the estimator is handed (`шан`, 0.6885 per glyph, which is
+  // what `JOINED.cyrillic` is sized to cover) AND the widest real lone glyph
+  // (`Ш`, 1.0362, which is what `LONE.cyrillic` is sized to cover, and which
+  // under-estimated 1.296x — OUTSIDE `WIDTH_SAFETY` — before this class).
+  // `ru-RU` is the obvious second and the one anybody would reach for; it is
+  // milder (`май` at 1.119x before the class) and is kept because it is the
+  // only row here whose short weekday names are TWO glyphs, so it is the row
+  // that exercises the `LONE` table through a label a chart actually measures.
+  ['uz-Cyrl-UZ', 'Cyrillic — the harshest measurable: `шан` sizes JOINED, `Ш` sized LONE', true],
+  ['ru-RU', 'Cyrillic — the obvious second, and the only 2-glyph short weekday set here', true],
 ];
 
 /**
