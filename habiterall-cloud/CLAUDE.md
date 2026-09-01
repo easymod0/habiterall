@@ -142,11 +142,32 @@ ability to see the defect next door to the one it fixed. `Pacific/Kiritimati`
 `docs/decisions/timezones.md` establishes is wider than a calendar day: their
 local dates ALWAYS differ. So one signed date string, presented for one account
 in each zone, must be accepted by the eastern one and refused as future by the
-western one — and any route judging both by a single clock, UTC or the server's,
-answers them identically and fails the pair. That holds in every runner zone and
-at every hour, and it is race-free in both directions: the eastern account's age
-is 0 or 1 against a `MAX_ANSWER_AGE_DAYS` of 2, and the western one's is always
-negative. Mutation-tested both ways round, under `TZ=UTC`.
+western one, race-free in both directions (the eastern account's age is 0 or 1
+against a `MAX_ANSWER_AGE_DAYS` of 2, the western one's always negative) — and
+any route judging every account by ONE clock, UTC or the server's, answers them
+identically and fails the pair. That is exactly the class of defect the pair
+exists for, and it escapes the pair at 0 of 24 hours, in every runner zone,
+mutation-tested both ways round under `TZ=UTC`. It is not a wider claim than
+that: the two zones are two calendar days apart, not one, for a 2-hour window
+each day (10:00–12:00 UTC), where a route whose date is systematically a day
+too late slips the pair alone — it does not slip the suite, because `a
+future-dated reminder answers 400` and its companion sit on the UTC-pinned
+account and `shiftDay(1)` is an exact `age = -1` boundary there at every hour.
+And inverting the tier order fails the pair at every hour but the first
+account's own six checks only once the runner's UTC hour reaches 10, where
+Kiritimati stops sharing UTC's date — so it is the suite as a whole, not the
+pair by itself, that has no blind spot.
+
+**The tier-2 pair beside it pins the same property one tier down.** Every
+account above, this pair included, names `notifyTimezone` explicitly, so
+`resolveTimeZone`'s second tier — `device_time_zone`, what `'auto'` actually
+reads — is never exercised, and a route that dropped the reported zone
+entirely would pass unnoticed even though `'auto'` is the mode every real
+account starts on. Two more accounts, left on `'auto'` and split 26 hours
+apart on `device_time_zone` instead of `notifyTimezone`, close that: a single
+`auto` account asserted either way has the same single-instant blind spot as a
+single tier-1 account would, so it takes a pair here for the same reason it
+does above.
 
 **A webhook URL is a user-supplied URL that the server fetches.** It is
 validated in `shared/src/notify.js` against Discord's own hosts and stored

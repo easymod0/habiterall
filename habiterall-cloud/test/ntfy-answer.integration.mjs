@@ -103,9 +103,12 @@ const { srv, base: issuer } = await fakeIssuer();
 const port = 3600 + (process.pid % 200);
 const { child, base } = await boot(issuer, port);
 
-// The three fixture subjects this file owns, so setup and the `finally`
+// The five fixture subjects this file owns, so setup and the `finally`
 // cleanup cannot drift apart into deleting a different set.
-const SUBJECTS = ['sub-ntfy-http', 'sub-ntfy-http-e', 'sub-ntfy-http-w'];
+const SUBJECTS = [
+  'sub-ntfy-http', 'sub-ntfy-http-e', 'sub-ntfy-http-w',
+  'sub-ntfy-http-e-auto', 'sub-ntfy-http-w-auto',
+];
 
 try {
   await admin.connect();
@@ -270,26 +273,79 @@ try {
              '{"notifyTimezone":"Etc/GMT+12"}'::jsonb, 'UTC') RETURNING id`
   )).rows[0].id;
 
-  const eastHabitId = await mkHabit(eastId, 'ntfy tz-guard east');
-  const eastNtfy = await postNtfy(
-    signNtfyAnswer({ secret: SECRET, account: String(eastId), habitId: eastHabitId, date: D, action: 'yes' })
-  );
-  ck('the 26h pair: the east-of-the-line account accepts D',
-    eastNtfy.status === 200, JSON.stringify(eastNtfy));
-  const eastEntries = await entriesFor(eastId, eastHabitId);
-  ck('and the entry lands on D, read back from storage',
-    eastEntries.some((e) => e.date === D && Number(e.value) === 2),
-    JSON.stringify(eastEntries));
+  // One press of the pair's shared date `D`, for one fixture account: makes
+  // its habit, signs and posts the code, and reads back what storage says
+  // happened. The `ck` calls stay at each call site rather than inside here
+  // — see the comment above each pair for which tier it pins, and each
+  // label says so explicitly, since this helper cannot tell the difference
+  // itself.
+  const pressD = async (uid, habitName) => {
+    const habitId = await mkHabit(uid, habitName);
+    const ntfy = await postNtfy(
+      signNtfyAnswer({ secret: SECRET, account: String(uid), habitId, date: D, action: 'yes' })
+    );
+    const entries = await entriesFor(uid, habitId);
+    return { ntfy, entries };
+  };
 
-  const westHabitId = await mkHabit(westId, 'ntfy tz-guard west');
-  const westNtfy = await postNtfy(
-    signNtfyAnswer({ secret: SECRET, account: String(westId), habitId: westHabitId, date: D, action: 'yes' })
-  );
-  ck('the 26h pair: the west-of-the-line account refuses the same D as future',
-    westNtfy.status === 400 && /future/i.test(westNtfy.body?.error ?? ''),
-    JSON.stringify(westNtfy));
+  const east = await pressD(eastId, 'ntfy tz-guard east');
+  ck('the 26h pair (tier 1, notifyTimezone named explicitly): east accepts D',
+    east.ntfy.status === 200, JSON.stringify(east.ntfy));
+  ck('and the entry lands on D, read back from storage',
+    east.entries.some((e) => e.date === D && Number(e.value) === 2),
+    JSON.stringify(east.entries));
+
+  const west = await pressD(westId, 'ntfy tz-guard west');
+  ck('the 26h pair (tier 1): west refuses the same D as future',
+    west.ntfy.status === 400 && /future/i.test(west.ntfy.body?.error ?? ''),
+    JSON.stringify(west.ntfy));
   ck('and nothing was written for the west account',
-    (await entriesFor(westId, westHabitId)).length === 0);
+    west.entries.length === 0);
+
+  // Every account above — this pair included — names `notifyTimezone`
+  // explicitly, so `resolveTimeZone`'s first tier answers every request in
+  // this file and its second tier (`account.deviceZone`, the zone the LAST
+  // client reported) is never read: mutating `ntfyAnswerAdapter()
+  // .resolveAccount` in src/notifier.js to return `deviceZone: ''` — a
+  // route that drops the reported device zone entirely — leaves the whole
+  // suite passing. Every real account starts on `notifyTimezone: 'auto'`
+  // (#288's own default), which is exactly the mode that reads the
+  // reported zone, so that hole dates every such account by the server's
+  // clock. This second pair closes it: both accounts leave `notifyTimezone`
+  // on `'auto'` and put the 26-hour split on `device_time_zone` instead, so
+  // the same `D` is resolved through tier 2 rather than tier 1.
+  //
+  // It has to be a PAIR for the same reason tier 1's does. A single `auto`
+  // account asserted either way is caught only some hours of the day: under
+  // `TZ=UTC`, a route that drops the reported zone and falls to the server
+  // clock agrees with `D` for the ~10 hours a day Kiritimati and UTC share a
+  // date. Two accounts 26 hours apart via the REPORTED zone must get
+  // OPPOSITE answers for one date string at every hour, so any route that
+  // drops or ignores tier 2 answers them identically and fails always.
+  const eastAutoId = (await admin.query(
+    `INSERT INTO users (idp_subject, idp_issuer, display_name, settings, device_time_zone)
+     VALUES ('sub-ntfy-http-e-auto', 'https://idp', 'ntfy http test east auto',
+             '{"notifyTimezone":"auto"}'::jsonb, 'Pacific/Kiritimati') RETURNING id`
+  )).rows[0].id;
+  const westAutoId = (await admin.query(
+    `INSERT INTO users (idp_subject, idp_issuer, display_name, settings, device_time_zone)
+     VALUES ('sub-ntfy-http-w-auto', 'https://idp', 'ntfy http test west auto',
+             '{"notifyTimezone":"auto"}'::jsonb, 'Etc/GMT+12') RETURNING id`
+  )).rows[0].id;
+
+  const eastAuto = await pressD(eastAutoId, 'ntfy tz-guard east auto');
+  ck('the 26h pair (tier 2, notifyTimezone: auto, resolved from the reported device zone): east-auto accepts D',
+    eastAuto.ntfy.status === 200, JSON.stringify(eastAuto.ntfy));
+  ck('and the entry lands on D for east-auto, read back from storage',
+    eastAuto.entries.some((e) => e.date === D && Number(e.value) === 2),
+    JSON.stringify(eastAuto.entries));
+
+  const westAuto = await pressD(westAutoId, 'ntfy tz-guard west auto');
+  ck('the 26h pair (tier 2): west-auto refuses the same D as future',
+    westAuto.ntfy.status === 400 && /future/i.test(westAuto.ntfy.body?.error ?? ''),
+    JSON.stringify(westAuto.ntfy));
+  ck('and nothing was written for the west-auto account',
+    westAuto.entries.length === 0);
 
   // The limiter is written inline at the route, keyed on IP, and there is no
   // env switch in this edition that turns it off (unlike personal's
