@@ -1330,6 +1330,47 @@ test('a blank Position cell falls back to row index, not to 0 for every row', ()
     JSON.stringify(cats));
 });
 
+test('a JSON backup stating its positions as TEXT keeps them, like the CSV does', () => {
+  // The other half of the shared repair tail, and the same shape as the
+  // colour trim beside it: a hand-edited habiterall backup. `Categories.csv`
+  // can only ever carry text, so the CSV branch has always read a position
+  // with `Number()` — while the JSON branch handed `c.position` straight to
+  // `Number.isInteger`. A file writing `"5"` for `5` therefore restored every
+  // category in DECLARATION order (the index fallback) instead of its stated
+  // one, with all rows named, so no `categorySkip` and nothing in
+  // `result.skipped` to say a position had been dropped.
+  //
+  // Positions are the inverse of declaration order on purpose: read as the
+  // index they would come back 0, 1, 2 — which is what a fixture stating
+  // 0, 1, 2 could not have told apart.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [
+      { name: 'Alpha', color: '#111111', position: '4' },
+      { name: 'Beta', color: '#222222', position: '2' },
+      { name: 'Gamma', color: '#333333', position: '0' },
+    ],
+  }));
+  assert.deepEqual(backupCategories(buf).map((c) => c.position), [4, 2, 0]);
+});
+
+test('...and a nullish or blank position is still "no position", never 0', () => {
+  // The guard that stops the line above from being `Number(c.position)`.
+  // `Number(null)`, `Number('')` and `Number('   ')` are all `0`, and
+  // `Number.isInteger(0)` is true — so a bare coercion would land every
+  // category that declared nothing at position 0 rather than at its index,
+  // which is exactly the blank-`Position`-cell bug one format up. Junk text
+  // is NaN and falls through the same way an absent field does.
+  const buf = Buffer.from(JSON.stringify({
+    categories: [
+      { name: 'Alpha', color: '#111111', position: null },
+      { name: 'Beta', color: '#222222' },
+      { name: 'Gamma', color: '#333333', position: '  ' },
+      { name: 'Delta', color: '#444444', position: 'oops' },
+    ],
+  }));
+  assert.deepEqual(backupCategories(buf).map((c) => c.position), [0, 1, 2, 3]);
+});
+
 test('a zip with only PK\'s magic bytes reads null rather than throwing', () => {
   // Not a complete zip at all — no end-of-central-directory record — so
   // `unzip` itself throws. `backupCategories` only ever answers a doubt with

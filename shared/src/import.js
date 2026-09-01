@@ -269,8 +269,9 @@ export function backupSettings(buf) {
  * rule `parseCategory` throws on for a typed-in one — a backup that repairs
  * everything else still has no honest name to give an empty entry, so it is
  * dropped rather than invented), a name trimmed to `LIMITS.name`, a colour
- * failing `COLOR_RE` replaced with the default, a non-integer position
- * replaced by the index, and the list capped at `LIMITS.categories`.
+ * failing `COLOR_RE` replaced with the default, a position read as a number
+ * and replaced by the index unless it is an integer, and the list capped at
+ * `LIMITS.categories`.
  *
  * Both of `backupCategories`'s branches — the JSON backup and a zip's
  * `Categories.csv` — call this rather than repeating it, so the two formats
@@ -299,13 +300,33 @@ function normalizeCategories(raw, diagnostics) {
       // keeps the promise this function exists for: both formats repair the
       // field the same way.
       const color = String(c.color ?? '').trim();
+      // READ AS A NUMBER here, for the same reason the colour is trimmed
+      // here: a position arrives as a number from our own JSON backup and as
+      // TEXT from `Categories.csv`, and this function is what stops the two
+      // formats repairing one field differently. The coercion used to live in
+      // the CSV row reader alone, so `{"position": "5"}` in a hand-edited
+      // JSON backup — the same hand-edited file the trim above exists for —
+      // was not an integer, fell through to the index below, and restored
+      // every category in declaration order with nothing in `result.skipped`
+      // to say so.
+      //
+      // A BLANK or nullish position is "no position", never 0. `Number('')`
+      // and `Number(null)` are both `0` and `Number.isInteger(0)` is true, so
+      // a bare `Number()` here would land every empty `Position` cell and
+      // every `"position": null` at 0 — the bug the blank-cell check in
+      // `parseCategoriesCsvRows` used to hold on its own, which is why that
+      // check moved here rather than being duplicated. Junk text is NaN,
+      // which falls through to the index exactly as an absent field does.
+      const position = typeof c.position === 'string'
+        ? Number(c.position.trim() || NaN)
+        : c.position;
       return {
         name: String(c.name ?? '').trim().slice(0, LIMITS.name),
         // The same regex `normalizeColor` below already validates a habit's
         // own colour with — a category's is never a Loop palette index, so
         // `normalizeColor` itself is the wrong tool despite being right there.
         color: COLOR_RE.test(color) ? color : '#3b82f6',
-        position: c.position,
+        position,
       };
     })
     .filter((c) => c.name);
@@ -365,7 +386,7 @@ function overCapSkip(categories, diagnostics, source) {
  * or partially-absent column degrades rather than misreads.
  *
  * @param {string} text
- * @returns {Array<{name: string, color: string, position: number}>}
+ * @returns {Array<{name: string, color: string, position: string|undefined}>}
  */
 function parseCategoriesCsvRows(text) {
   const rows = parseCSV(text);
@@ -380,15 +401,14 @@ function parseCategoriesCsvRows(text) {
   return rows.slice(1).map((row) => ({
     name: row[cName] ?? '',
     color: cColor === -1 ? '' : (row[cColor] ?? ''),
-    // Junk text becomes NaN, which `normalizeCategories`'s own
-    // `Number.isInteger` check already treats as "no position" — the same
-    // outcome an absent field gets in the JSON branch. A BLANK cell is not
-    // junk to `Number`, though: `Number('')` is `0`, and `Number.isInteger(0)`
-    // is true, so the fallback never runs and every blank row lands at
-    // position 0. Checked for explicitly, so a blank or missing cell reads
-    // the same as an absent column.
-    position: cPosition === -1 || !row[cPosition]?.trim()
-      ? undefined : Number(row[cPosition]),
+    // Handed over as the RAW cell. `normalizeCategories` is what reads a
+    // position as a number, and it has to do that for the JSON branch's
+    // values anyway — so the blank-cell rule that used to live here (a blank
+    // is "no position" and not a stated 0) moved there with it, rather than
+    // being written once per format. An absent COLUMN is `undefined`, which
+    // is that same "no position" and the shape the JSON branch produces for
+    // a category that declared none.
+    position: cPosition === -1 ? undefined : row[cPosition],
   }));
 }
 
