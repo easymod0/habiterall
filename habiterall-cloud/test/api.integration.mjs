@@ -542,6 +542,77 @@ for (const id of [creditHabit.id, lapseHabit.id, staleAnswerHabit.id]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
 
+/* ---------- issue #224: a quick answer preserves that day's note ----------
+ *
+ * `parseEntry` now answers `notes: null` for a body that omits the key, and
+ * `entryWrite` carries that through to storage rather than collapsing it to
+ * `''` — the personal edition's own measurement, mirrored here against this
+ * route's own `upsertEntry`/`RETURNING notes`. Case 1 (a real button press,
+ * through `interactionAdapter().record`) lives in notify.integration.mjs,
+ * which has the real adapter this suite does not; every case here goes
+ * through a PUT that OMITS the key, since a test that writes a note and reads
+ * it straight back cannot fail. Habits of their own, deleted before the
+ * import-isolation count below, same as every other fixture in this block.
+ */
+console.log('\n--- notes survive an entry write that omits them (#224) ---');
+
+const NOTE_224 = 'coach said 10, only managed 8';
+const noteDay = isoDaysAgo(0);
+const mkNotesHabit = (name) => fetch(`${overviewBase}/api/habits`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name, type: 'numerical', unit: 'x' }),
+}).then((r) => r.json());
+const putNotes = (id, body) => fetch(`${overviewBase}/api/habits/${id}/entries/${noteDay}`, {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+}).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+// 2. PUT omitting the key preserves.
+const omitHabit224 = await mkNotesHabit('Notes omit 224');
+await putNotes(omitHabit224.id, { value: 2, notes: NOTE_224 });
+await putNotes(omitHabit224.id, { value: 2 });
+const omitRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [omitHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('a PUT that omits notes preserves the stored note',
+  omitRow?.notes === NOTE_224, JSON.stringify(omitRow));
+
+// 3. PUT notes:'' still clears.
+const clearHabit224 = await mkNotesHabit('Notes clear 224');
+await putNotes(clearHabit224.id, { value: 2, notes: NOTE_224 });
+await putNotes(clearHabit224.id, { value: 2, notes: '' });
+const clearRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [clearHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('an explicit empty notes still clears the stored note',
+  clearRow?.notes === '', JSON.stringify(clearRow));
+
+// 4. The echo is the row, not the request, on a preserve.
+const echoHabit224 = await mkNotesHabit('Notes echo 224');
+await putNotes(echoHabit224.id, { value: 2, notes: NOTE_224 });
+const echoOmit = await putNotes(echoHabit224.id, { value: 2 });
+ck('the response echoes the stored note, not the omitted request body',
+  echoOmit.body.notes === NOTE_224, JSON.stringify(echoOmit.body));
+
+// 5. The echo on a clear.
+const echoClear = await putNotes(echoHabit224.id, { value: 2, notes: '' });
+ck('the response echoes the cleared note',
+  echoClear.body.notes === '', JSON.stringify(echoClear.body));
+
+// 6. A skip preserves too, and the reply still reports the SKIP wire value.
+const skipHabit224 = await mkNotesHabit('Notes skip 224');
+await putNotes(skipHabit224.id, { value: 2, notes: NOTE_224 });
+const skipPut = await putNotes(skipHabit224.id, { status: 'skip' });
+const skipRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [skipHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('a skip preserves the stored note', skipRow?.notes === NOTE_224, JSON.stringify(skipRow));
+ck('...and the reply still reports the SKIP wire value',
+  skipPut.body.value === 3, JSON.stringify(skipPut.body));
+
+for (const id of [omitHabit224.id, clearHabit224.id, echoHabit224.id, skipHabit224.id]) {
+  await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
+}
+
 // While the router is mounted, the other route added alongside it. The notify
 // suite exercises the storage behind this through `notifier.deliveryStatus`
 // directly, which would go on passing if the route itself were wired to the

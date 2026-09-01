@@ -705,16 +705,17 @@ api.put('/habits/:id/entries/:date', route(async (req, res) => {
   // same one. Clearing a day is the DELETE route below, not a PUT of zero.
   const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
-  await withUserWrite(uid(req), async (db) => {
+  const storedNotes = await withUserWrite(uid(req), async (db) => {
     if (write.op === 'delete') {
       await db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
         [habit.id, date]);
-      return;
+      return '';
     }
-    await upsertEntry(db, uid(req), habit.id, date, write.value, write.status, write.notes);
+    const { rows } = await upsertEntry(db, uid(req), habit.id, date, write.value, write.status, write.notes);
+    return rows[0].notes;
   });
 
-  res.json({ habit_id: habit.id, date, ...write.reply });
+  res.json({ habit_id: habit.id, date, ...write.reply, notes: storedNotes });
 }));
 
 api.delete('/habits/:id/entries/:date', route(async (req, res) => {
@@ -729,13 +730,19 @@ api.delete('/habits/:id/entries/:date', route(async (req, res) => {
 }));
 
 function upsertEntry(db, userId, habitId, date, value, status, notes) {
+  // notes is bound once and referenced twice: the VALUES-side COALESCE
+  // collapses an absent (NULL) note to '' for a fresh row, and the conflict
+  // clause reads that same NULL as "leave the stored note alone" — it cannot
+  // go through EXCLUDED.notes, which the VALUES-side COALESCE has already
+  // flattened to '' by the time the conflict clause could see it.
   return db.query(
     `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
-     VALUES ($1,$2,$3,$4,$5,$6)
+     VALUES ($1,$2,$3,$4,$5,COALESCE($6,''))
      ON CONFLICT (habit_id, date) DO UPDATE
        SET value = EXCLUDED.value,
            status = EXCLUDED.status,
-           notes = EXCLUDED.notes`,
+           notes = COALESCE($6, entries.notes)
+     RETURNING notes`,
     [habitId, userId, date, value, status, notes]
   );
 }

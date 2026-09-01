@@ -41,11 +41,15 @@ const q = {
   `),
   sentOn: db.prepare(`SELECT habit_id, channel FROM notify_log WHERE date = ?`),
   habitById: db.prepare(`SELECT * FROM habits WHERE id = ?`),
+  // A Discord/ntfy reply never carries a note (answerBody has no such field),
+  // so an omitted notes here must preserve the stored one rather than clear
+  // it — see the COALESCE shape in api.js's upsertEntry.
   upsertEntry: db.prepare(`
-    INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)
+    INSERT INTO entries (habit_id, date, value, status, notes)
+    VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ''))
     ON CONFLICT(habit_id, date) DO UPDATE SET value = excluded.value,
                                               status = excluded.status,
-                                              notes = excluded.notes
+                                              notes = COALESCE(?5, entries.notes)
   `),
   deleteEntry: db.prepare(`DELETE FROM entries WHERE habit_id = ? AND date = ?`),
   markSent: db.prepare(`

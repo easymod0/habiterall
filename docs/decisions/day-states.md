@@ -727,3 +727,132 @@ at 1 and 501. Both figures are pinned as literals in the two editions'
 regression blocks so the gap cannot drift while it is unfixed. Measured
 identical on master: that is the window mismatch, older than this issue and out
 of scope for it.
+
+## Issue #224 — a quick answer erases that day's note
+
+Measured live against the real personal adapter, no mocks, before any change —
+a stored entry `{value: 2, notes: "coach said 10, only managed 8"}`, then a
+press of Yes through `interactionAdapter().record({action: 'yes'})`:
+
+```
+BEFORE:               {"value":2,"notes":"coach said 10, only managed 8"}
+AFTER  press :        {"value":2,"notes":""}     <- interactionAdapter().record(action:'yes')
+AFTER  PUT w/o notes: {"value":2,"notes":""}     <- the Android shade, Api.kt:817
+AFTER  PUT notes:"" : {"value":2,"notes":""}     <- the deliberate clear; must keep working
+```
+
+Three callers of `entryWrite` never had a note to send in the first place —
+`answerBody` builds a Discord/ntfy reply from the action alone, and the
+Android notification shade's PUT is the same shape — and all three were
+silently overwriting one anyway, because `parseEntry` read
+`String(body.notes ?? '')`: an absent key and an explicit `''` arrived at the
+function as the same string, and every upsert wrote `notes = excluded.notes`
+without asking which. The fourth caller, the web day dialog
+(`shared/public/ui/day-dialog.js:145`), always resends the note it loaded, so
+it never depended on the collapse and is the one path this had to keep
+working unchanged.
+
+### The governing precedent was already written down, for a different route
+
+`shared/CLAUDE.md`'s import rule — "a merge may add an answer and must never
+delete one" — draws exactly this line for `applyImport`: a bare lapse yields to
+a stored row in merge mode, and "bare" is `!notes.trim()`, not `!notes`,
+because content is what suspends the automated overwrite. That rule was never
+extended to the answer path, and #224 is the same content doing the same job
+one level down: a note is something a user typed on purpose, and an automated
+write — a button press, a reminder answer — that never saw it is not evidence
+the user wants it gone. The single case the precedent does NOT cover is
+`notes: ''` sent on purpose, which is why decision 2 exists separately: an
+explicit empty string is content too, in the sense that matters here — it is
+something the CALLER supplied, deliberately, rather than something `parseEntry`
+invented by collapsing an absence.
+
+### Where "absent" and "explicit-empty" stop being distinguishable
+
+They stop being distinguishable the moment `String(body.notes ?? '')` runs.
+Fixing it downstream — in each edition's route, or in each SQL upsert alone —
+would have meant fixing it three times (personal's route, personal's notifier,
+cloud's route, cloud's notifier: four, in fact) with three chances for one of
+them to re-collapse the two cases on the way in. `parseEntry` is upstream of
+all four, so the fix is one branch: `body.notes === undefined ||
+body.notes === null ? null : String(body.notes).slice(...)`. `null` now means
+what `??` used to erase — "not supplied" — and every downstream reader is
+handed the distinction rather than asked to reconstruct it. A JSON `null` is
+folded into the absent case rather than given a fourth meaning, for the same
+reason `??` folded it into `undefined` before: nothing sends it on purpose, and
+inventing a "the caller explicitly said no note" reading for it would be a
+second interpretation nobody asked for.
+
+### The SQL shape, and why the parameter is bound once and referenced twice
+
+The natural-looking fix — write `notes = excluded.notes` unless `excluded.notes
+IS NULL` — cannot be spelled through `excluded`, because the `COALESCE` on the
+`VALUES` side has already turned an absent note into `''` for the INSERT
+branch, by the time the conflict clause could read `excluded.notes` at all: a
+fresh row needs `''` to satisfy `NOT NULL`, so whatever value lands in
+`excluded.notes` is the post-`COALESCE` one, and the conflict clause needs the
+PRE-`COALESCE` value to tell "absent" from "cleared". The one value that
+survives to answer both questions is the bound parameter itself, asked twice:
+once inside the `VALUES`-side `COALESCE` (collapse `NULL` to `''` for a row
+that has never existed) and once in the `SET` clause's own `COALESCE`
+(`NULL` means "leave `entries.notes` alone"). This was proven against both
+engines before it was written down here — a real Postgres 17 container and
+`node:sqlite` — and the three things it establishes are the reason no schema
+change or migration was needed: `entries.notes` is already `TEXT NOT NULL
+DEFAULT ''` in both editions, so a stored `NULL` was never a legitimate value
+and is free to mean "absent" without colliding with anything a user could ever
+have saved.
+
+The over-eager version was tried and rejected on purpose, not merely avoided:
+`COALESCE(NULLIF(?, ''), entries.notes)` reads an explicit `''` as "nothing to
+say" too, and would preserve a note the user just asked to clear — the day
+dialog's own use case. The mutation that proves this is in the personal and
+cloud test suites, run and reverted: that exact SQL substitution is what makes
+the "PUT `notes:''` clears" and "the echo on a clear" cases fail, which is the
+day dialog's whole way of working.
+
+### The reply had to stop echoing the request
+
+Before this, `entryWrite`'s `reply` always carried `notes` straight from the
+`parsed` argument, so a route only had to spread it into `res.json(...)`. Under
+preserve semantics that stops being sound: a PUT that omits `notes` now has
+`notes: null` in `parsed`, and echoing `null` (or coercing it back to `''`)
+would tell the caller the note was cleared when storage still holds it — a
+fresh defect of exactly the kind #224 is about, this time in the response
+instead of the write. There is also no fallback value `entryWrite` could
+supply instead, because it is a pure function with no database handle; only
+the row the upsert just wrote knows what is actually stored. So `notes` was
+taken OUT of `reply` rather than patched — `reply` is `{value}` and `{value,
+status: 'skip'}` now — which makes "echo the request" something a route has to
+add back in on purpose rather than something it does by not thinking about it.
+Both editions' `upsertEntry` gained `RETURNING notes` for exactly this: the PUT
+route reads the returned row and answers with the note that is actually there,
+which is also why the notifier's own upsert deliberately did NOT gain a
+`RETURNING` — `answerText(...)` never contains a note, so there is nothing for
+that caller to echo and widening its query would be a change with no reader.
+`Api.kt:481`'s `val notes: String = ""` is the reason personal's route
+coalesces a missing row (the `delete` branch, which nothing reaches today) to
+`''` rather than leaving the field out: the client's own default already
+assumes a string is always present.
+
+### Why an entry write and a habit write are allowed to disagree
+
+`PUT /habits/:id` REPLACES, on purpose, and the root `CLAUDE.md`'s "the two
+habit routes disagree about what a write means" paragraph already says so —
+`parseHabit` supplies a default for every field a body omits, so an omission
+there IS the stated intent. Making `PUT /habits/:id/entries/:date` do the same
+with `notes`
+would not have been a neutral choice sitting beside that one; it would have
+been the same collapse #224 closes, just moved from `parseEntry` to
+`parseHabit`'s side of the fence. The distinction is not "notes are special",
+it is what KIND of body each route receives. A habit PUT is a form a client
+rendered in full and submitted whole — every field was ON SCREEN, so leaving
+one out is a decision about that field. An entry PUT is, at least as often, a
+button's entire vocabulary: `answerBody` for a Discord press or an ntfy button
+returns `{value}` or `{status: 'skip'}` and nothing else, because those UIs
+have a Yes, a No and a Skip and never rendered a note field to omit from. The
+Android notification shade is the same shape again, a third caller with no
+note in its own body. An omission from a form is intent; an omission from a
+button is ignorance — the button never had the information to omit on
+purpose — and treating the two alike would make one of the two write rules
+wrong regardless of which one it borrowed from.
