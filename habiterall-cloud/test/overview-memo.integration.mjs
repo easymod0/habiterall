@@ -451,6 +451,32 @@ try {
     warm.body.habits[0]?.entries?.[today] === undefined,
     JSON.stringify(warm.body.habits[0]?.entries));
 
+  // This press is dated by the ACCOUNT, not by the caller. The route compares
+  // the signed date against `resolveTimeZone(settings, device_time_zone)`
+  // (`interactionAdapter().today`), where every `call()` above is dated by the
+  // `X-Habiterall-Timezone` header instead — the two questions the root
+  // CLAUDE.md keeps apart. `today` is UTC, and the reason the route agrees is
+  // NOT stated anywhere in the fixture: this account names no `notifyTimezone`,
+  // so its day comes from tier 2, the zone its last client reported, and
+  // `call()` sends `UTC` on every request — which the device-zone middleware
+  // has already written to `users.device_time_zone` by the time this line runs.
+  // Tier 3, the server's own clock, is therefore never reached, which is why
+  // this suite is NOT vulnerable to #288 even though it looks it.
+  //
+  // That is an invariant of request ORDERING, invisible here and load-bearing.
+  // Move this block above the first `call()`, or change that default zone, and
+  // the press is dated by the server's clock instead — red only west of UTC,
+  // where CI would never see it. So it is asserted rather than trusted, and
+  // asserted on the STATE the route will read rather than on the outcome: the
+  // outcome is a 200 in most zones however wrong the reasoning, and it is the
+  // reasoning that decays.
+  const { rows: zoneRows } = await admin.query(
+    `SELECT settings, device_time_zone FROM users WHERE id = $1`, [user]);
+  ck('control: the zone that dates the press is one a request REPORTED, not the server clock',
+    String(zoneRows[0].device_time_zone ?? '') === 'UTC',
+    `device_time_zone=${JSON.stringify(zoneRows[0].device_time_zone)}`
+      + ` settings=${JSON.stringify(zoneRows[0].settings)}`);
+
   const code = signNtfyAnswer({
     secret: SECRET, account: String(user), habitId, date: today, action: 'yes',
   });
