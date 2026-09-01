@@ -125,10 +125,16 @@ and leaves the fixture's zone unstated has two clocks and no rule making them
 agree. That suite passes in CI, which runs UTC, and fails on a developer machine
 west of UTC once the UTC date has rolled over: six checks at once, every one of
 them reporting `that date is in the future` about a date the test had just
-called today (#288). Every account in `test/ntfy-answer.integration.mjs`
-therefore names `notifyTimezone` explicitly, and names a `device_time_zone` that
-DISAGREES with it, so tier 1 beating tier 2 stays load-bearing rather than
-incidental. `test/notify.integration.mjs` already named the setting on the
+called today (#288). So no account in `test/ntfy-answer.integration.mjs` leaves
+its zone to the server: each one states which TIER is meant to answer for it.
+Every account whose day is asserted through tier 1 names `notifyTimezone`
+explicitly and names a `device_time_zone` that DISAGREES with it, so tier 1
+beating tier 2 stays load-bearing rather than incidental — and the two accounts
+left on `'auto'` are the deliberate exception, because tier 2 is the thing they
+exist to assert. Do not reconcile them by pinning them to a named zone: that
+deletes the only tier-2 coverage in the file and the suite stays green, which is
+the hole two paragraphs below is about.
+`test/notify.integration.mjs` already named the setting on the
 accounts whose day it asserts; the accounts it leaves on `auto` are the ones
 whose whole point is to follow a reported zone, and they are asserted against
 that zone rather than against UTC.
@@ -149,25 +155,33 @@ identically and fails the pair. That is exactly the class of defect the pair
 exists for, and it escapes the pair at 0 of 24 hours, in every runner zone,
 mutation-tested both ways round under `TZ=UTC`. It is not a wider claim than
 that: the two zones are two calendar days apart, not one, for a 2-hour window
-each day (10:00–12:00 UTC), where a route whose date is systematically a day
-too late slips the pair alone — it does not slip the suite, because `a
-future-dated reminder answers 400` and its companion sit on the UTC-pinned
-account and `shiftDay(1)` is an exact `age = -1` boundary there at every hour.
+each day (10:00–12:00 UTC), and a route whose date is systematically a day too
+late slips BOTH pairs at exactly those two hours — it does not slip the suite,
+because `a future-dated reminder answers 400` and its companion sit on the
+UTC-pinned account, where `shiftDay(1)` is an exact `age = -1` boundary, and
+fail at all 24 hours.
 And inverting the tier order fails the pair at every hour but the first
 account's own six checks only once the runner's UTC hour reaches 10, where
 Kiritimati stops sharing UTC's date — so it is the suite as a whole, not the
 pair by itself, that has no blind spot.
 
-**The tier-2 pair beside it pins the same property one tier down.** Every
-account above, this pair included, names `notifyTimezone` explicitly, so
-`resolveTimeZone`'s second tier — `device_time_zone`, what `'auto'` actually
-reads — is never exercised, and a route that dropped the reported zone
-entirely would pass unnoticed even though `'auto'` is the mode every real
-account starts on. Two more accounts, left on `'auto'` and split 26 hours
-apart on `device_time_zone` instead of `notifyTimezone`, close that: a single
-`auto` account asserted either way has the same single-instant blind spot as a
-single tier-1 account would, so it takes a pair here for the same reason it
-does above.
+**A second pair sits one tier down, because the first one left tier 2 covered by
+nothing.** With every account naming `notifyTimezone`, `resolveTimeZone` answered
+at tier 1 for every request the file made and its second tier —
+`device_time_zone`, which is what `'auto'` reads — was exercised nowhere: a route
+returning `deviceZone: ''` from `resolveAccount` passed the whole suite, while
+dating every press by the server's clock for every account still on `'auto'`,
+the mode every real account starts on. So two more accounts stay on `'auto'` and
+carry the 26-hour split on `device_time_zone` instead.
+
+It takes a PAIR here for the same reason it does above, and the gap a single
+account leaves is most of the day rather than an instant. Measured against that
+same mutation under `TZ=UTC`: a lone eastern account passes at every hour before
+10:00 UTC, where `D` is the UTC date and its age is 0 — ten hours blind — and a
+lone western one passes from 10:00 UTC on, where `D` is a day ahead and its age
+is negative either way — fourteen hours blind. Two accounts 26 hours apart have
+to answer one date string OPPOSITELY, so a route that drops or ignores tier 2
+answers them alike and fails at every hour instead.
 
 **A webhook URL is a user-supplied URL that the server fetches.** It is
 validated in `shared/src/notify.js` against Discord's own hosts and stored
