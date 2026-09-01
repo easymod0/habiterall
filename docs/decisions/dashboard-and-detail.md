@@ -802,9 +802,13 @@ digraph capital uk, at 1.743x — and that is stated plainly rather than smoothe
 over, on the same argument Greek's 1.26x rests on: nothing hands the estimator a
 uniform run of a block's widest letter, because the arguments are CLDR words
 whose rate is the mean over their letters. Of the block's 256 code points only
-**39** appear in any label the harness draws, they span U+0412–U+0459, and their
-own widest is Ш at 1.0351 — a glyph that only ever arrives alone, where `LONE`
-covers it.
+**39** appear in any label measured across all five Cyrillic locales this Chrome
+has CLDR data for — a wider set than the two the sweep commits, since the in-use
+census is the argument and two locales would understate it. They span
+U+0412–U+0459, and their own widest is the capital Ш at 1.0351, a glyph that only
+ever arrives alone, where `LONE` covers it. Its lowercase ш is 0.8942 and does
+arrive inside words, but a word's rate is the mean over its letters and `шан`
+measures 0.6885.
 
 **The block holds seven combining marks and Greek's held none, so this one
 needed a test Greek did not.** U+0483–U+0489 are `\p{Mn}`, inert only because

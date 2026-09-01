@@ -723,9 +723,15 @@ export function estimateTextWidth(text, fontSize) {
  *     what makes the span safe is the same thing that made Greek's safe —
  *     nothing hands this function a uniform run of a block's widest letter. The
  *     arguments are CLDR words, whose rate is the mean over their letters. Of
- *     the block's 256 code points only **39** appear in any label the harness
- *     draws, they span U+0412-U+0459, and their own widest is Ш at 1.0351 — a
- *     glyph that only ever arrives ALONE, where `LONE`'s 1.05 covers it.
+ *     the block's 256 code points only **39** appear in any label measured
+ *     across ALL FIVE Cyrillic locales this Chrome has CLDR data for — a wider
+ *     set than the two the sweep commits, deliberately, since the in-use census
+ *     is the argument and two locales would understate it. They span
+ *     U+0412-U+0459, and their own widest is the CAPITAL Ш at 1.0351, a glyph
+ *     that only ever arrives ALONE (it is a narrow weekday and nothing else),
+ *     where `LONE`'s 1.05 covers it. Its lowercase ш is 0.8942 and does arrive
+ *     inside words, but a word's rate is the mean over its letters and `шан`
+ *     measures 0.6885.
  *   - **U+0500-052F Supplement, OUT.** 48 letters, widest 1.4101 (Ԫ U+052A) =
  *     2.014x. Rated at 0.70 a Supplement glyph would under-estimate twofold —
  *     a worse defect than the one being fixed, which is the Greek Extended
