@@ -184,6 +184,29 @@ test('CSV parser tolerates CRLF and a BOM', () => {
   assert.deepEqual(rows[1], ['2026-01-01', 'YES_MANUAL']);
 });
 
+test('CSV parser drops a row whose every cell is blank, and keeps one with any content', () => {
+  // Pinned because NOTHING else in this repo reaches it. The filter used to be
+  // a `.filter` over the finished array and is now a per-row predicate inside
+  // `forEachCsvRow`, so that the streaming category reader never holds a file
+  // it is about to discard — and when that predicate was deliberately deleted
+  // to check the split was safe, the ENTIRE suite stayed green, including both
+  // round trips. Every `Checkmarks.csv` fixture in the repo has a non-blank
+  // `Date` cell and every `Habits.csv` one a non-blank name, so no existing
+  // test can tell a parser that drops blank rows from one that does not.
+  //
+  // A blank ROW, not a blank COLUMN: the second is ordinary and must survive,
+  // which is the half a `.filter(Boolean)` would get wrong.
+  assert.deepEqual(
+    parseCSV('a,b\n1,2\n\n   ,\t \n3,4\n'),
+    [['a', 'b'], ['1', '2'], ['3', '4']],
+    'an empty line and an all-whitespace line are both dropped');
+
+  assert.deepEqual(
+    parseCSV('a,b\n,2\n3,\n'),
+    [['a', 'b'], ['', '2'], ['3', '']],
+    'a row with one blank cell and one filled is content and stays, both ways round');
+});
+
 /* ---------- Loop Checkmarks.csv ---------- */
 
 test('Checkmarks.csv yields one habit per column', () => {
@@ -1575,6 +1598,165 @@ test('a zip with only PK\'s magic bytes reads null rather than throwing', () => 
   // `null`; the real upload is still rejected, by `parseUpload`.
   const truncated = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]);
   assert.equal(backupCategories(truncated), null);
+});
+
+/* ---------- the category build is bounded by the cap, not by what it reads ---------- */
+
+test('the category build no longer scales with the row count, and the cap still bounds what is returned', async () => {
+  // `LIMITS.categories` used to bound what `normalizeCategories` RETURNED, not
+  // what it BUILT: `parseCSV` materialised every row, a `.map` turned each into
+  // a raw object, and a second `.map`+`.filter` repaired each of THOSE, all
+  // before `.slice(0, LIMITS.categories)` ever ran — three materialisations of
+  // a file's every row to keep thirty of them. The real trigger is 654,990
+  // rows; 50,000 is enough to see the shape of that cost and fast enough to run
+  // on every `npm test`.
+  //
+  // A child process because the assertion needs `--expose-gc`. `global.gc()`
+  // is what keeps the measurement from being decided by whichever GC pass
+  // happens to land inside the test runner's own process, and every parsed
+  // RESULT is explicitly retained in an array past its own `global.gc()` call
+  // — a `result` that is never read again after being assigned is provably
+  // dead before that point, and V8 is free to collect it before the "after"
+  // sample is taken, which silently turns the measurement into one of
+  // transient parsing garbage rather than of what the build actually RETAINS.
+  //
+  // `heapUsed`, not `rss`: RSS moves in whole OS pages (measured as low as
+  // -356KiB and as high as +2.2MiB for the SAME 500-row parse back to back,
+  // noise on the order of the signal this test is looking for) where
+  // `heapUsed` after a forced `global.gc()` reports what V8 actually still
+  // holds reachable — measured stable to within a few percent run to run,
+  // for both the fixed code and every mutation below.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const importSrc = new URL('../src/import.js', import.meta.url).href;
+  const zipSrc = new URL('../src/zip.js', import.meta.url).href;
+
+  const script = [
+    'const { parseUpload } = await import(' + JSON.stringify(importSrc) + ');',
+    'const { zip } = await import(' + JSON.stringify(zipSrc) + ');',
+    '',
+    'function buildZip(n) {',
+    '  const rows = [];',
+    '  for (let i = 0; i < n; i++) rows.push("Cat " + i + ",#111111," + i);',
+    '  const csvBody = "Name,Color,Position\\n" + rows.join("\\n") + "\\n";',
+    '  return zip([',
+    '    { name: "Habits.csv", data: "Name\\nMeditate\\n" },',
+    '    { name: "Checkmarks.csv", data: "Date,Meditate\\n" },',
+    '    { name: "Categories.csv", data: csvBody },',
+    '  ]);',
+    '}',
+    '',
+    'async function measureBurst(n, iterations) {',
+    '  const buf = buildZip(n);',
+    '  const retained = [];',
+    '  for (let i = 0; i < 2; i++) await parseUpload(buf);',   // warmup, discarded
+    '  global.gc(); global.gc();',
+    '  const before = process.memoryUsage().heapUsed;',
+    '  for (let i = 0; i < iterations; i++) retained.push(await parseUpload(buf));',
+    '  global.gc();',
+    '  const after = process.memoryUsage().heapUsed;',
+    '  return { delta: after - before, last: retained[retained.length - 1] };',
+    '}',
+    '',
+    'const ITER = 10;',
+    'const small = await measureBurst(500, ITER);',
+    'const large = await measureBurst(50000, ITER);',
+    'console.log(JSON.stringify({',
+    '  smallDelta: small.delta,',
+    '  largeDelta: large.delta,',
+    '  largeLen: large.last.categories.length,',
+    '  largeSkip: large.last.categories.categorySkip,',
+    '}));',
+  ].join('\n');
+
+  const { stdout } = await promisify(execFile)(
+    process.execPath, ['--expose-gc', '--input-type=module', '-e', script],
+    { maxBuffer: 1 << 20 }
+  );
+  const { smallDelta, largeDelta, largeLen, largeSkip } = JSON.parse(stdout.trim());
+
+  // The RATIO first, deliberately ahead of the shape assertions below: it is
+  // the one this test exists for, and it must be the one that trips when the
+  // cap stops bounding the BUILD (dropping the `kept.length < LIMITS.categories`
+  // guard keeps every named row, which `largeLen` below would also catch, but
+  // only after masking whether the memory claim itself still holds). The claim
+  // is the RATIO, not a megabyte figure: ten parses of a 100x bigger file must
+  // not cost anywhere near ~100x the retained heap. Measured on this branch:
+  // ~0.3-0.4x fixed (the large fixture actually retains LESS, since its
+  // `categorySkip` string is the only thing that scales with `named` and both
+  // fixtures return the same 30 capped rows), ~110x with that guard removed —
+  // the threshold sits with a wide margin either side of both.
+  const ratio = largeDelta / Math.max(smallDelta, 1);
+  assert.ok(ratio < 10,
+    `retained heap over ${10} parses must not scale with the row count: ` +
+    `500-row delta=${smallDelta}B, 50,000-row delta=${largeDelta}B, ratio=${ratio.toFixed(2)}`);
+
+  assert.equal(largeLen, LIMITS.categories, 'the cap still bounds what is RETURNED');
+  assert.match(largeSkip, /49970 of 50000 categories in Categories\.csv were dropped/);
+});
+
+test('the exact named total survives the bounding, not truncated to the cap', () => {
+  // The assertion the obvious wrong fix — capping the SCAN rather than the
+  // build — fails: `overCapSkip`'s sentence names the exact count of NAMED
+  // rows in the whole file, and that count must keep counting after the
+  // thirtieth is kept, not stop there.
+  const rows = Array.from({ length: 50_000 }, (_, i) => `Cat ${i},#111111,${i}`).join('\n');
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: `Name,Color,Position\n${rows}\n` },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, LIMITS.categories);
+  assert.match(cats.categorySkip, /49970 of 50000 categories in Categories\.csv were dropped/);
+  assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
+});
+
+test('a blank Position cell defaults to the row\'s rank among the KEPT rows, not its rank in the file', () => {
+  // 40 lines, but every fourth is UNNAMED — dropped before it ever reaches
+  // `named`/`kept` — so a named row's rank in the FILE and its rank among the
+  // rows actually KEPT diverge. `done()` must default a blank position to the
+  // second: the mutation this guards is `done()` using the row's rank in the
+  // file instead, which is what an index computed before the cap ran would
+  // give, and which happens to agree with the rank-among-kept only when
+  // nothing before the cap was ever dropped — the case every OTHER fixture in
+  // this file uses, and why this one interleaves unnamed rows on purpose.
+  const lines = [];
+  let namedCount = 0;
+  for (let i = 0; i < 40; i++) {
+    if (i % 4 === 3) lines.push(',#111111,');            // unnamed filler, dropped
+    else { lines.push(`Cat ${namedCount},#111111,`); namedCount++; }
+  }
+  assert.equal(namedCount, 30, 'fixture sanity: exactly 30 named rows, all of them kept');
+
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: `Name,Color,Position\n${lines.join('\n')}\n` },
+  ]);
+  const cats = backupCategories(buf);
+  assert.deepEqual(cats.map((c) => c.position), Array.from({ length: 30 }, (_, i) => i),
+    JSON.stringify(cats));
+});
+
+test('a stated position survives the cap verbatim, not merely because it equals its own index', () => {
+  // A fixture whose stated positions equal their index would pass with the
+  // whole `Number.isInteger(c.position) ? c.position : i` branch deleted —
+  // every position would look "defaulted" and be indistinguishable from being
+  // read back. Descending values that are never equal to their kept index are
+  // what makes this test only pass if the stated value truly survived.
+  const lines = [];
+  for (let i = 0; i < 30; i++) lines.push(`Cat ${i},#111111,${100 - i}`);
+  for (let i = 30; i < 40; i++) lines.push(`Extra ${i},#111111,999`);   // over the cap, dropped
+
+  const buf = zip([
+    { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+    { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+    { name: 'Categories.csv', data: `Name,Color,Position\n${lines.join('\n')}\n` },
+  ]);
+  const cats = backupCategories(buf);
+  assert.equal(cats.length, LIMITS.categories);
+  assert.deepEqual(cats.map((c) => c.position), Array.from({ length: 30 }, (_, i) => 100 - i));
 });
 
 /* ---------- repairing an imported habit ---------- */
