@@ -543,7 +543,17 @@ disagreement `resolveWindow` exists to prevent.
   rollover lands past `end` — #270's existing hazard reaching a second date by
   the same route, not a new hazard, and the reason `creditFrom` goes through the
   same clamp-then-normalise sequence rather than a second one. #270 itself is
-  untouched.
+  untouched. **The rollover moves the credit date in BOTH directions and the
+  disclosure has to say so**: it can land past `end` (above — nothing credited,
+  the fail-closed direction) and it can land EARLIER than the habit's real
+  answer, which credits silence the rule means to withhold. Measured, rows
+  `{2026-01-01 skip}`, `{2026-02-31 value 1}`, `{2026-08-18 value 1}` on the same
+  at-most-`success` habit: `2026-02-31` normalises to `2026-03-03`, so credit
+  begins five and a half months before the only real answer and `currentStreak`
+  reads **169** where the rule implies 2 (master read 229). Same #270 population
+  — a row predating `assertDate`, a direct insert or an import around it — and
+  the same conclusion, that #270 is worth fixing on its own; but the fail-open
+  half is stated rather than left out, and both are pinned.
 - One asymmetry worth stating: for a DAILY habit the skip-only reading becomes
   identical to the no-rows reading, which is the issue's table. For a **3×/7**
   habit it does not (0 / 0.011434 against 1 / 0.034303), because the window
@@ -559,19 +569,48 @@ explicitly — both were already inconsistent with the habit's own page and both
 are fixed here rather than deferred, because a fix that leaves one figure on the
 old rule is how a dashboard and a detail page come to disagree about one habit.
 
-1. **`/overview`'s `bestStreak`.** Both editions scan streaks themselves over a
-   wider window than `summaryStats` uses (`STREAK_HISTORY_DAYS`), starting at
-   `entries[0].date` — the earliest row of any kind. So `score` and
+1. **`/overview`'s three figures, and the credit date is a LIFETIME question.**
+   Both editions scan streaks themselves for `bestStreak`, over a wider window
+   than `summaryStats` uses (`STREAK_HISTORY_DAYS`, 1830 days against 400),
+   starting at `entries[0].date` — the earliest row of any kind. So `score` and
    `currentStreak` came from the fixed entry point while `bestStreak` beside them
    did not: measured on the skip-only fixture, `/stats` reported `bestStreak` 1
-   and `/overview` reported **365**, on the same habit, in the same second. Both
-   routes now pass `creditStart(map, undefined, summaryEnd)` — `undefined`
-   because their own start came out of storage. The credit date inherits that
-   scan's bound, which is the same trade the `score` beside it already makes: a
-   habit that has answered nothing in `STREAK_HISTORY_DAYS` is read as having no
-   evidence in the window, which understates rather than overstates. Pinned
-   behaviourally in each edition with the same literals, because the two editions
-   ship one route surface from two implementations.
+   and `/overview` reported **365**, on the same habit, in the same second.
+
+   The first version of this fix handed each of those two scans a credit date
+   derived from **its own slice**, and defended the bound as "the same trade the
+   `score` beside it already makes". That was wrong, and review caught it. The
+   `score`'s slice trade is harmless because an EWMA over 400 days has converged;
+   a credit date does not converge — it decides what the days at the END of the
+   window are worth. Measured, at-most habit resolved to `success`, one stated
+   value 500 days back and a skip 350 days back: master read **1.000** on the
+   dashboard and **1.000** on the habit's own page, and the slice-derived version
+   read **0.051922** against **1.000** — a disagreement this fix would have
+   CREATED, on precisely the habit class the issue is about. Worse, the payload
+   contradicted itself, because `bestStreak`'s 1830-day slice could see the
+   answer the 400-day one could not.
+
+   It is the same argument `firstEntry` already makes one item down: **a bounded
+   window cannot tell "never answered" from "answered before the rows I
+   fetched"**. So both routes read the lifetime `first_answer` out of the grouped
+   `MIN(date)` query, resolve it ONCE through `creditAnchor`, and hand that one
+   date to `summaryStats` and to the streak scan — one derivation, so the three
+   figures cannot disagree by construction. `creditAnchor` takes no `start`
+   parameter at all rather than documenting that a route must pass `undefined`,
+   because a parameter that must always hold one value is a rule waiting to be
+   broken. The grouped read consequently runs in ARCHIVED mode too, where it used
+   to be skipped for having no `categorySummaries` to feed: the row figures are
+   computed either way, and skipping it would make the archived view the one
+   place they are wrong. Pinned behaviourally in each edition, with a fixture
+   whose stated answer is deliberately OUTSIDE the 400-day slice — the first
+   round's fixtures put every row 365 days back, inside both windows, where the
+   two derivations agree and neither could fail.
+
+   What is left, and it is older than this issue: `score` reads 400 days and
+   `bestStreak` reads 1830, so a habit whose only stored row is 500 days old
+   still reports `score` 0.051922 beside `bestStreak` 501. That is the window
+   mismatch, not the credit rule — measured identical on master — and it is out
+   of scope here.
 2. **The category comparison.** `computeCategoryStats` scores each member from
    `memberWarm`, and a skip-only member read **1.00** there against **0.051922**
    on its own page — a wider version of the 0.97-against-0.41 gap

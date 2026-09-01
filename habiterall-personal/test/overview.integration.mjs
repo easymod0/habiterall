@@ -238,6 +238,39 @@ const lapseRow = withLapse.habits.find((h) => h.id === lapsing.id);
 const lapseStats = await fetch(`${base}/api/habits/${lapsing.id}/stats`)
   .then((r) => r.json());
 
+/* The shape the first round of this fix got wrong, and the reason the credit
+ * date is a LIFETIME date rather than one derived from whichever slice a figure
+ * happens to read. This route reads 400 days for `score`/`currentStreak` and
+ * 1830 for its own `bestStreak` scan, so a limit habit answered 500 days ago and
+ * skipped since holds nothing but a skip inside the narrow slice — which reads
+ * as "never answered" while the habit's own page, over lifetime rows, sees the
+ * answer and credits from it. Measured: master agreed at 1.000 on both surfaces;
+ * a slice-derived credit date read 0.051922 here against 1.000 there, with
+ * `bestStreak` on this same payload disagreeing with both because its wider
+ * slice COULD see the answer. Every fixture above puts its only row 365 days
+ * back, inside both windows, where the two derivations agree and neither can
+ * fail — which is exactly why this one is here. */
+const oldAnswer = await post('/habits', {
+  name: 'Wine', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'glasses',
+});
+await put(`/habits/${oldAnswer.id}/entries/${daysAgo(500)}`, { value: 1 });
+await put(`/habits/${oldAnswer.id}/entries/${daysAgo(350)}`, { status: 'skip' });
+
+const withOld = await overview({ days: 7 });
+const oldRow = withOld.habits.find((h) => h.id === oldAnswer.id);
+const oldStats = await fetch(`${base}/api/habits/${oldAnswer.id}/stats`)
+  .then((r) => r.json());
+
+ck('a habit answered before the summary window still has its silence credited',
+  oldRow.score === 1, String(oldRow.score));
+ck('...so the dashboard and the detail page agree about its strength',
+  oldRow.score === oldStats.score, `${oldRow.score} vs ${oldStats.score}`);
+ck('...and bestStreak agrees with the score beside it rather than with a ' +
+  'second credit date derived from its own wider window',
+  oldRow.bestStreak === oldStats.bestStreak,
+  `${oldRow.bestStreak} vs ${oldStats.bestStreak}`);
+
 ck('a stored lapse still earns the credited best streak',
   lapseRow.bestStreak === 366, String(lapseRow.bestStreak));
 ck('...and the two surfaces agree about that too',

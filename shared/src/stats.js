@@ -256,7 +256,7 @@ export function unansweredCounts(habit, unlogged) {
  * 365-day streak and a strength of exactly 1.000 beside a `totalCompleted` of
  * zero.
  *
- * `creditFrom` is the day credit may begin, from `resolveWindow` / `creditStart`
+ * `creditFrom` is the day credit may begin, from `resolveWindow` / `creditAnchor`
  * — `start ??` the earliest row that STATES a value `?? end`. An absent
  * `creditFrom` is no gate at all, which is what a direct caller of a pass gets.
  *
@@ -1129,38 +1129,69 @@ function firstStatedAnswer(entryMap) {
 }
 
 /**
- * The day an unanswered day may start counting as success — for a caller that
- * computes a pass DIRECTLY instead of going through `computeStats` /
- * `summaryStats`. Both editions' `/overview` is one: it scans streaks itself
- * for `bestStreak`, so without this it serves a figure the `score` and
- * `currentStreak` beside it disagree with.
+ * The day an unanswered day may start counting as success:
+ * `start ??` the habit's first stated answer `?? end`. All three clauses are
+ * load bearing.
  *
- * `start ??` the earliest row that states a value `?? end`, and all three
- * clauses are load bearing:
- *
- * - **an explicit `start` wins**, because it is a window the CALLER named and
+ * - **An explicit `start` wins**, because it is a window the CALLER named and
  *   this rule exists to stop STORAGE-derived silence from inventing evidence.
  *   `resolveWindow` already gives `start` precedence over the derived anchor and
  *   this is derived the same way; without it, `start: '2026-08-10'` with one row
- *   today reports a 1-day streak where it reported 10. **A caller whose own
- *   `start` came out of storage — `/overview`'s `entries[0].date` — must pass
- *   `undefined` here**, or the thing being fixed comes back through the route.
+ *   today reports a 1-day streak where it reported 10. A caller whose own
+ *   `start` came out of storage must not pass it here — which is why
+ *   `creditAnchor` below, the one a route uses, has no `start` parameter at all
+ *   rather than a rule about what to put in it.
  * - **`?? end`** is what makes a habit with no evidence read like a habit with
  *   no rows at all: credit begins today, so today alone is credited, which is
  *   the answer an empty history already gave.
- * - and it is **clamped and normalised exactly as `from` is**, because it is a
+ * - It is **clamped and normalised exactly as `from` is**, because it is a
  *   stored date about to be compared against the normalised days of a walked
  *   range. #270 is untouched and applies to it in the same way and no more: a
  *   phantom date reaching here behaves as its rollover, which is why it goes
  *   through the same sequence rather than a second one.
  *
- * @param {Map<string, {value: *, status: string}>} entryMap
+ * @param {string|null} firstAnswer
  * @param {string|undefined} start
  * @param {string} end
  * @returns {string}
  */
-export function creditStart(entryMap, start, end) {
-  return windowStart(firstStatedAnswer(entryMap) ?? end, start, end);
+function creditFor(firstAnswer, start, end) {
+  return windowStart(firstAnswer ?? end, start, end);
+}
+
+/**
+ * The same date from a **lifetime** first-answer date the caller supplies — for
+ * a route that computes a pass itself, or that hands one of these functions a
+ * bounded SLICE of a habit's entries.
+ *
+ * Both editions' `/overview` is both of those, and that is the whole reason this
+ * is exported. It reads a 400-day window for `score`/`currentStreak` and an
+ * 1830-day one for its own `bestStreak` scan, so **whether the habit has ever
+ * answered is a question neither of those slices can answer** — the same
+ * argument `computeCategoryStats`' `firstEntry` and `firstAnswer` already make,
+ * and the reason both are supplied out of a grouped `MIN(date)` read rather than
+ * derived from the rows that happened to be fetched.
+ *
+ * Deriving it from the slice is not a smaller version of the right answer, it is
+ * a different answer: measured, an at-most habit resolved to `success` whose only
+ * stated row is 500 days old and which has a skip 350 days old read
+ * `score: 1.000` on the dashboard and `1.000` on its own page before this issue,
+ * and `0.051922` against `1.000` with the credit date taken from the 400-day
+ * slice. The slice-derived version also disagreed with the SAME payload's
+ * `bestStreak`, whose wider slice could see the answer.
+ *
+ * There is deliberately no `start` here. A route's own start comes out of
+ * storage (`entries[0].date`), and honouring one would reinstate exactly what
+ * this rule removes; a parameter that must always be `undefined` is a rule
+ * waiting to be broken.
+ *
+ * @param {string|null} firstAnswer the habit's LIFETIME earliest row that states
+ *   a value, or `null` when it has never stated one
+ * @param {string} end
+ * @returns {string}
+ */
+export function creditAnchor(firstAnswer, end) {
+  return creditFor(firstAnswer, undefined, end);
 }
 
 /**
@@ -1192,13 +1223,22 @@ export function creditStart(entryMap, start, end) {
  * editions declare `PRIMARY KEY (habit_id, date)` on `entries`), and deriving it
  * here makes the disagreement unrepresentable rather than merely unreachable.
  *
+ * **`creditFrom` may be supplied instead**, and a caller handing these functions
+ * a bounded SLICE of a habit's entries must: whether the habit has ever answered
+ * is a lifetime question, and a slice that happens to hold only skips cannot
+ * tell "never answered" from "answered before the rows I fetched". `from` has no
+ * such override, deliberately — it is how far back THIS reading reaches, which
+ * is exactly what a slice does decide. See `creditAnchor`.
+ *
  * @param {import('./types.js').Entry[]} entries
  * @param {string|undefined} start
  * @param {string} end
+ * @param {string} [creditFrom] a credit date the caller has already resolved
+ *   through `creditAnchor`, for a bounded `entries`
  * @returns {{entryMap: Map<string, {value: *, status: string}>, from: string,
  *            creditFrom: string}}
  */
-function resolveWindow(entries, start, end) {
+function resolveWindow(entries, start, end, creditFrom = undefined) {
   // Preserve `status` alongside the value so skips stay distinguishable from
   // a numerical habit legitimately recording the value 3.
   const entryMap = new Map(
@@ -1215,7 +1255,7 @@ function resolveWindow(entries, start, end) {
   return {
     entryMap,
     from: windowStart(firstEntry ?? end, start, end),
-    creditFrom: creditStart(entryMap, start, end),
+    creditFrom: creditFrom ?? creditFor(firstStatedAnswer(entryMap), start, end),
   };
 }
 
@@ -1314,13 +1354,22 @@ export function computeStats(habit, entries,
  * `computeStats` over the same arguments, so a future change to one pass
  * cannot drift from the other unnoticed.
  *
+ * Its callers are the two `/overview` routes, and both hand it a BOUNDED slice —
+ * which is why `creditFrom` is an option here rather than always derived. See
+ * `creditAnchor`: a slice holding nothing but skips cannot tell a habit that has
+ * never answered from one that answered before the rows it fetched, and the two
+ * readings differ by the whole width of the figure.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
- * @param {{start?: string, end?: string, unlogged?: string}} [opts]
+ * @param {{start?: string, end?: string, unlogged?: string,
+ *          creditFrom?: string}} [opts]
  * @returns {import('./types.js').SummaryStats}
  */
-export function summaryStats(habit, entries, { start, end, unlogged = UNLOGGED_DEFAULT } = {}) {
-  const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
+export function summaryStats(habit, entries,
+                             { start, end, unlogged = UNLOGGED_DEFAULT,
+                               creditFrom: creditGiven } = {}) {
+  const { entryMap, from, creditFrom } = resolveWindow(entries, start, end, creditGiven);
 
   const scores = computeScores(habit, entryMap, from, end, unlogged, creditFrom);
   const streaks = computeStreaks(habit, entryMap, from, end, unlogged, creditFrom);
@@ -1727,7 +1776,7 @@ export function computeCategoryStats(categories, members,
     //
     // Clamped and normalised through the same helper the other two dates use,
     // and it takes no `start`: the comparison's `start` is a window this route
-    // was ASKED for, where `creditStart`'s `start ??` clause is about a caller
+    // was ASKED for, where `creditFor`'s `start ??` clause is about a caller
     // naming the window a habit's own figures are read over. Honouring it here
     // would credit every silent day of any explicitly-started comparison, which
     // is the defect this is fixing arriving through the other route.

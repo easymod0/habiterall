@@ -444,10 +444,54 @@ ck('...and the two surfaces agree about that too',
   `overview ${lapseRow223.currentStreak}/${lapseRow223.bestStreak} vs `
   + `stats ${lapseStats223.currentStreak}/${lapseStats223.bestStreak}`);
 
-// Both habits go again, with their rows: the import-isolation check further down
-// counts EVERY entry this account has and expects exactly one, so a fixture left
-// behind here fails a test about tenancy with a number about this block.
-for (const id of [creditHabit.id, lapseHabit.id]) {
+/* The shape the first round of this fix got wrong, and the reason the credit
+ * date is a LIFETIME date rather than one derived from whichever slice a figure
+ * happens to read. This route reads 400 days for `score`/`currentStreak` and
+ * 1830 for its own `bestStreak` scan, so a limit habit answered 500 days ago and
+ * skipped since holds nothing but a skip inside the narrow slice — which reads
+ * as "never answered" while the habit's own page, over lifetime rows, sees the
+ * answer. Measured: master agreed at 1.000 on both surfaces; a slice-derived
+ * credit date read 0.051922 here against 1.000 there, with `bestStreak` on this
+ * same payload disagreeing with both because its wider slice COULD see the
+ * answer. Every fixture above puts its only row 365 days back, inside both
+ * windows, where the two derivations agree and neither can fail. Same fixture
+ * and same claims as personal's `test/overview.integration.mjs`. */
+const staleAnswerHabit = await (await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Wine 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'glasses',
+  }),
+})).json();
+for (const [day, body] of [[500, { value: 1 }], [350, { status: 'skip' }]]) {
+  await fetch(`${overviewBase}/api/habits/${staleAnswerHabit.id}/entries/`
+    + `${isoDaysAgo(day)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+const staleView = await getOverview({ days: 7 });
+const staleRow = staleView.habits.find((h) => h.id === staleAnswerHabit.id);
+const staleStats = await fetch(
+  `${overviewBase}/api/habits/${staleAnswerHabit.id}/stats`
+).then((r) => r.json());
+
+ck('a habit answered before the summary window still has its silence credited',
+  staleRow.score === 1, String(staleRow.score));
+ck('...so the dashboard and the detail page agree about its strength',
+  staleRow.score === staleStats.score, `${staleRow.score} vs ${staleStats.score}`);
+ck('...and bestStreak agrees with the score beside it rather than with a '
+  + 'second credit date derived from its own wider window',
+  staleRow.bestStreak === staleStats.bestStreak,
+  `${staleRow.bestStreak} vs ${staleStats.bestStreak}`);
+
+// All three habits go again, with their rows: the import-isolation check further
+// down counts EVERY entry this account has and expects exactly one, so a fixture
+// left behind here fails a test about tenancy with a number about this block.
+for (const id of [creditHabit.id, lapseHabit.id, staleAnswerHabit.id]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const {
   computeStreaks, currentStreak, bestStreak, computeHistory,
   computeWeekdays, computeFrequency, computeScores, computeStats, summaryStats,
-  computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditStart,
+  computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditAnchor,
   summariseMembers, summariseByCategory,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
 } = await import('../src/stats.js');
@@ -2206,16 +2206,18 @@ test('issue #223: credit begins at the first STATED answer, wherever it falls', 
   assert.equal(stats.scores.length, 366);
   assert.equal(stats.scores[0].date, '2025-08-19');
 
-  // The date itself, asked of the function the two routes also call.
-  const map = new Map([
-    [SKIP_223, { value: 0, status: 'skip' }],
-    ['2026-08-15', { value: 1, status: '' }],
-  ]);
-  assert.equal(creditStart(map, undefined, END_223), '2026-08-15');
-  // Nothing states a value ⇒ credit begins at `end`, which is what makes the
-  // skip-only reading identical to an empty one for a daily habit.
-  assert.equal(creditStart(new Map([[SKIP_223, { value: 0, status: 'skip' }]]),
-    undefined, END_223), '2026-08-19');
+  // The date itself, asked of the function the two routes also call. They hold
+  // a LIFETIME date out of SQL rather than a map, because their own entries are
+  // a bounded slice — see `creditAnchor`.
+  assert.equal(creditAnchor('2026-08-15', END_223), '2026-08-15');
+  // Never answered ⇒ credit begins at `end`, which is what makes the skip-only
+  // reading identical to an empty one for a daily habit.
+  assert.equal(creditAnchor(null, END_223), '2026-08-19');
+  // ...and a stored date that is not a real day goes through the same
+  // clamp-then-normalise sequence `from` does, never a second one (#270 is
+  // unchanged by this and is not fixed here): '2026-07-99' rolls to 2026-10-07.
+  assert.equal(creditAnchor('2026-07-99', END_223), '2026-10-07');
+  assert.equal(creditAnchor('0100-01-01', END_223), addDays(END_223, -MAX_RANGE_DAYS));
 });
 
 test('issue #223: an explicit start still grants credit — the half already right', () => {
@@ -2230,8 +2232,10 @@ test('issue #223: an explicit start still grants credit — the half already rig
   assert.equal(stats.score, 0.41327);
   assert.equal(stats.scores[0].date, '2026-08-10');
 
-  assert.equal(creditStart(new Map([[END_223, { value: 1, status: '' }]]),
-    '2026-08-10', END_223), '2026-08-10');
+  // `creditAnchor` has no `start` parameter at all, deliberately: a route's own
+  // start comes out of storage. The `start ??` clause lives one level down, is
+  // reached only through `resolveWindow`, and is what the figures above pin.
+  assert.equal(creditAnchor(END_223, END_223), END_223);
 });
 
 test('issue #223: a skip that is not the earliest row changes nothing', () => {
@@ -2407,6 +2411,23 @@ test('issue #223: #270 is untouched — no phantom-dated row becomes the anchor'
   assert.equal(asLimit.currentStreak, 2);
   assert.equal(asLimit.score, 0.101149);
   assert.equal(asLimit.totalCompleted, 3);
+
+  // ...and the rollover moves the credit date in BOTH directions, which the
+  // first draft of this test disclosed only one of. `2026-02-31` normalises to
+  // 2026-03-03 — EARLIER than the habit's only real answer — so credit begins
+  // five and a half months before there is any evidence for it: streak 169
+  // where the rule implies 2 (master read 229 over the same 230-point window).
+  // Pinned so the fail-OPEN half is a stated consequence of #270 rather than a
+  // discovery, and so a fix for #270 has to move this number deliberately.
+  const rollsEarlier = computeStats(limit223(), [
+    { date: '2026-01-01', value: 0, status: 'skip' },
+    { date: '2026-02-31', value: 1, status: '' },
+    { date: '2026-08-18', value: 1, status: '' },
+  ], { end: '2026-08-18' });
+  assert.equal(creditAnchor('2026-02-31', '2026-08-18'), '2026-03-03');
+  assert.equal(rollsEarlier.scores.length, 230);
+  assert.equal(rollsEarlier.currentStreak, 169);
+  assert.equal(rollsEarlier.totalCompleted, 2);
 });
 
 test('issue #223: a skip-anchored member reads the same on the comparison as on its own page', () => {
@@ -2466,4 +2487,52 @@ test('issue #223: a skip-anchored member reads the same on the comparison as on 
     { start: '2025-08-20', end: END_223, granularity: 'month' }).categories[0];
   assert.equal(control.mean, computeStats(atLeast, skip, { end: END_223 }).score);
   assert.equal(control.mean, 0);
+});
+
+test('issue #223: summaryStats takes a LIFETIME credit date, because /overview hands it a slice', () => {
+  // The shape review caught, and the reason `creditFrom` is an option rather
+  // than always derived. `/overview` computes `score`/`currentStreak` over a
+  // 400-day slice and `bestStreak` over an 1830-day one, so a habit whose only
+  // stated answer is OLDER than 400 days but which holds a skip inside them
+  // looks, to the narrow slice alone, like a habit that has never answered.
+  //
+  // Master read 1.000 on the dashboard and 1.000 on the habit's own page for
+  // this shape. Deriving the credit date from the slice reads 0.051922 against
+  // 1.000 — a disagreement between two surfaces about one habit, which is
+  // exactly what this issue's category commit calls the defect.
+  const habit = limit223();
+  const lifetime = [
+    { date: '2025-04-06', value: 1, status: '' },   // 500 days before END_223
+    { date: '2025-09-03', value: 0, status: 'skip' }, // 350 days before, inside the slice
+  ];
+  const slice = lifetime.filter((e) => e.date >= '2025-07-15'); // ~400 days
+  assert.deepEqual(slice.map((e) => e.status), ['skip'],
+    'the fixture is only meaningful while the slice holds nothing but the skip');
+
+  const detail = computeStats(habit, lifetime, { end: END_223 });
+  assert.equal(detail.score, 1);
+  assert.equal(detail.currentStreak, 501);
+
+  // Derived from the slice — what the route must NOT do.
+  const fromSlice = summaryStats(habit, slice, { end: END_223 });
+  assert.equal(fromSlice.score, 0.051922);
+  assert.equal(fromSlice.currentStreak, 1);
+
+  // Supplied from the lifetime answer, which is what both routes now pass.
+  const supplied = summaryStats(habit, slice, {
+    end: END_223, creditFrom: creditAnchor('2025-04-06', END_223),
+  });
+  assert.equal(supplied.score, detail.score);
+  // 350 and not 501: the slice still bounds the WINDOW — it opens at the skip,
+  // which is the earliest row it holds — and only the CREDIT date is a lifetime
+  // fact. That is the pre-existing bounded-window trade, and the score above has
+  // converged over it, which is why the two surfaces agree on `score` while
+  // their streak lengths legitimately differ.
+  assert.equal(supplied.currentStreak, 350);
+
+  // `null` means the habit has genuinely never stated an answer, and must not
+  // be read as "no date supplied": credit begins at `end`.
+  assert.deepEqual(summaryStats(habit, skipOnly223(), {
+    end: END_223, creditFrom: creditAnchor(null, END_223),
+  }), { score: 0.051922, currentStreak: 1 });
 });

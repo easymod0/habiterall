@@ -34,7 +34,7 @@ import {
   DATE_RE, queryDate,
 } from '@habiterall/shared/validate.js';
 import {
-  computeStats, summaryStats, computeStreaks, bestStreak, creditStart, isCompleted,
+  computeStats, summaryStats, computeStreaks, bestStreak, creditAnchor, isCompleted,
   UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
@@ -1166,19 +1166,29 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   );
   const unlogged = unloggedFrom(prefs);
 
-  // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
-  // (same shape, line 453 there), reused here so a section header can tell
-  // "never logged" from "scored zero" — the bounded windows below cannot
-  // answer that, and `first_date` is used for a null check only, never
-  // `addDays` or `dateRange` (root CLAUDE.md). Skipped entirely in archived
-  // mode: that fetch has nothing active to average, so `categorySummaries`
-  // is omitted below rather than computed and discarded.
-  const { rows: firstRows } = archived ? { rows: [] } : await db.query(
-    `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
+  // The grouped lifetime read `/categories/stats` also runs (same shape, line
+  // 453 there), reused here for two things the bounded windows below cannot
+  // answer. `first_date` lets a section header tell "never logged" from "scored
+  // zero", and is used for a null check only, never `addDays` or `dateRange`
+  // (root CLAUDE.md). `first_answer` is whether the habit has EVER stated a
+  // value, which is what decides where silence starts counting as success
+  // (#223) — a lifetime question that a 400- or 1830-day slice holding nothing
+  // but skips would answer "never" for a habit that answered years ago.
+  //
+  // It therefore runs in ARCHIVED mode too, where it used to be skipped because
+  // `categorySummaries` is omitted there: the figures on each row are computed
+  // either way, so the read has a second consumer now and skipping it would
+  // make the archived view the one place these figures are wrong.
+  const { rows: firstRows } = ids.length ? await db.query(
+    `SELECT habit_id,
+            to_char(MIN(date), 'YYYY-MM-DD') AS first_date,
+            to_char(MIN(date) FILTER (WHERE COALESCE(status, '') <> 'skip'),
+                    'YYYY-MM-DD') AS first_answer
      FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
     [ids]
-  );
+  ) : { rows: [] };
   const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
+  const firstAnswer = new Map(firstRows.map((r) => [r.habit_id, r.first_answer]));
 
   // One query for the grid window, one for the lifetime figures, rather
   // than two per habit.
@@ -1251,21 +1261,30 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     // `computeResilience` — never started, once per habit, on the
     // dashboard's hot path. Awards are out of this route for the same
     // reason, stated at the `/stats` call site above.
-    const stats = summaryStats(h, recent, { end: summaryEnd, unlogged });
+    // **One credit date for all three figures on this row** (#223), resolved
+    // from the account's LIFETIME first stated answer rather than from either
+    // slice above. Both slices are bounded — 400 days for the summary, 1830 for
+    // the streak scan — and "has this habit ever answered?" is not a question a
+    // bounded window can answer: a limit habit answered 500 days ago and skipped
+    // since holds nothing but a skip inside the 400-day slice, which would read
+    // as no evidence at all. Measured: 0.051922 on this row against 1.000 on the
+    // habit's own page, with `bestStreak` on this same payload disagreeing with
+    // both because its wider slice could see the answer. Derived once and
+    // shared, so the three figures cannot disagree by construction.
+    const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
+
+    const stats = summaryStats(h, recent, { end: summaryEnd, unlogged, creditFrom });
 
     const totalCompleted = totals.get(h.id) ?? 0;
 
-    // This scan reads a WIDER window than `summaryStats` above and so builds its
-    // own map — which means it also has to be handed its own credit date, or
-    // `bestStreak` is the one figure on this payload still crediting silence the
-    // habit has no answer behind, beside a `score` and a `currentStreak` that no
-    // longer do (#223: measured 365 here against 1 from `/stats`, same habit,
-    // same second). `undefined` for the start on purpose: this route's start is
-    // `all[0].date`, straight out of storage, and `creditStart`'s `start ??`
-    // clause is for a window a CALLER named. The date inherits this scan's
-    // `STREAK_HISTORY_DAYS` bound, which is the same trade the figures beside it
-    // already make — a habit that has answered nothing inside the window reads
-    // as having no evidence, understating rather than overstating.
+    // This scan is the route's own and never reaches `resolveWindow`, so it has
+    // to be handed the same credit date explicitly — otherwise `bestStreak` is
+    // the one figure on this payload still crediting silence the habit has no
+    // answer behind, beside a `score` and a `currentStreak` that no longer do
+    // (#223: measured 365 here against 1 from `/stats`, same habit, same
+    // second). It is the SAME `creditFrom` the summary above got, not a second
+    // one derived from this wider slice, because the two derivations disagree
+    // exactly when the habit's answer falls between the two windows.
     const streakMap = new Map(
       all.map((e) => [e.date, { value: e.value, status: e.status }])
     );
@@ -1275,7 +1294,7 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
       all.length ? all[0].date : summaryEnd,
       summaryEnd,
       unlogged,
-      creditStart(streakMap, undefined, summaryEnd)
+      creditFrom
     );
 
     return {

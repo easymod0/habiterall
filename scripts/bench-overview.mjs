@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   computeStats, summaryStats, computeScores, computeStreaks, bestStreak, currentStreak,
+  creditAnchor,
   computeHistory, computeWeekdays, computeWeekdayByMonth, computeFrequency,
   computeResilience, computeCoverage, computeMissRuns,
   boundedRange, addDays, UNLOGGED_DEFAULT,
@@ -397,7 +398,11 @@ function main() {
 
   const streakScan = bench(() => {
     const m = new Map(all.map((e) => [e.date, { value: e.value, status: e.status }]));
-    return bestStreak(computeStreaks(HABIT, m, all[0].date, END, UNLOGGED_DEFAULT));
+    // The route's own shape, `creditAnchor` included (#223): it resolves one
+    // credit date per habit and hands it to this scan and to `summaryStats`
+    // alike, so a bench that omitted it would stop measuring the code it names.
+    return bestStreak(computeStreaks(HABIT, m, all[0].date, END, UNLOGGED_DEFAULT,
+      creditAnchor(all[0].date, END)));
   });
 
   console.log(`## #184 — \`bestStreak\` over ${HISTORY_DAYS} days, per habit, per load\n`);

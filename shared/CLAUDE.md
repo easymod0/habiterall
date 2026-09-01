@@ -209,8 +209,13 @@ and 60 so it cannot drift back.
 `resolveWindow` answers a **second** date beside it — `creditFrom`, the same
 expression over the earliest row that STATES a value — which every pass reading
 `unlogged` is handed so that an unanswered day counts as success only once the
-habit has answered once (#223). A route computing a pass ITSELF must ask
-`creditStart`, and must pass `undefined` for a `start` that came out of storage.
+habit has answered once (#223). A route that computes a pass ITSELF, or that
+hands `summaryStats` a bounded SLICE — both editions' `/overview` does both —
+must ask `creditAnchor` with the habit's LIFETIME first answer out of SQL, and
+must hand the one date to every figure on the row: whether a habit has ever
+answered is not a question a 400- or an 1830-day window can answer, and two
+windows deriving it separately disagree exactly when the answer falls between
+them.
 That window is derived inside `computeStats` and never returned, which is why anything
 needing a figure from it gets a returned field rather than walking the entries
 again — `computeRecovery` answers `longest` and `lastEnd` for that reason. Every
