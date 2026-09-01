@@ -1476,6 +1476,72 @@ test('a Categories.csv over LIMITS.categories reports how many were dropped', ()
   assert.match(cats.categorySkip, new RegExp(`at most ${LIMITS.categories} are allowed`));
 });
 
+/* ---------- the cap's own boundary, from both sides ---------- */
+
+// `overCapSkip`'s comparison is `named <= LIMITS.categories`, and NOTHING in
+// this repo used to sit on either side of that `<=`. Every other fixture is
+// well under the cap (one or two rows) or well over it (33, 35, 40, 50,000),
+// so changing the `<=` to `<` left the ENTIRE suite green — `npm test`, both
+// round trips, `test:apishape`, `test:cloud` and its zip block — while a file
+// holding exactly the cap gained the sentence "0 of 30 categories in
+// Categories.csv were dropped: at most 30 are allowed", a report of a loss
+// that did not happen. The two tests below are that boundary from each side.
+//
+// THE COUNTS ARE LITERAL, here and in the messages. A fixture built from
+// `LIMITS.categories` pins the NAME of the constant and not the number the
+// user is told, which is how the `fresh` window passed with 7 widened to 30
+// while its own comment claimed the boundary was covered. If the cap ever
+// moves, both of these must fail and be re-read — that is the point of them,
+// not a maintenance cost to be engineered away.
+//
+// Both fixtures carry a non-default colour (`#3b82f6` is the default) and a
+// position that is never its own row index, so neither can pass with the
+// colour or the position path deleted.
+const boundaryRow = (i) => `Cat ${i},${i % 2 === 0 ? '#10b981' : '#f43f5e'},${100 - i}`;
+const boundaryZip = (n) => zip([
+  { name: 'Habits.csv', data: 'Name\nMeditate\n' },
+  { name: 'Checkmarks.csv', data: 'Date,Meditate\n' },
+  {
+    name: 'Categories.csv',
+    data: `Name,Color,Position\n${Array.from({ length: n }, (_, i) => boundaryRow(i)).join('\n')}\n`,
+  },
+]);
+
+test('exactly 30 named categories — the cap itself — carries no note at all', () => {
+  const cats = backupCategories(boundaryZip(30));
+
+  assert.equal(cats.length, 30, 'all thirty are kept — the cap is reached, not exceeded');
+  assert.equal(cats.categorySkip, undefined,
+    'nothing was dropped, so there is nothing to report: `named <= 30` must not report');
+
+  // The file's own colours and positions, so this fixture cannot pass with
+  // either path removed. Descending from 100, so no position equals its index.
+  assert.deepEqual(cats.map((c) => c.position),
+    Array.from({ length: 30 }, (_, i) => 100 - i));
+  assert.deepEqual(cats.map((c) => c.color).slice(0, 4),
+    ['#10b981', '#f43f5e', '#10b981', '#f43f5e']);
+});
+
+test('thirty-one named categories — one past the cap — reports exactly one dropped', () => {
+  // The other side of the same `<=`, and independently unexercised. It catches
+  // an off-by-one the test above cannot: widening the comparison to
+  // `named <= LIMITS.categories + 1` leaves a 31-row file silent while the
+  // 33-, 35- and 50,000-row fixtures elsewhere all still report, so this is the
+  // only fixture in the repo that fails. Verified by running that mutation.
+  const cats = backupCategories(boundaryZip(31));
+
+  assert.equal(cats.length, 30, 'the thirty-first is the one cut');
+  // The WHOLE sentence, not a regex over part of it. The over-cap test above
+  // matches `/3 of \d+ .../`, which cannot tell 33 from 3,300 — and "1 of 31"
+  // is where a mistake in `named - LIMITS.categories` shows at its smallest.
+  assert.equal(cats.categorySkip,
+    '1 of 31 categories in Categories.csv were dropped: at most 30 are allowed');
+
+  assert.deepEqual(cats.map((c) => c.position),
+    Array.from({ length: 30 }, (_, i) => 100 - i),
+    'the thirty kept are the first thirty, at the positions the file declared');
+});
+
 test('a hand-written Categories.csv with spaces after the commas keeps its colours', () => {
   // The way people write CSV by hand. `COLOR_RE` is anchored, so one leading
   // space was the difference between a colour restoring and silently becoming
