@@ -271,6 +271,26 @@ ck('...and bestStreak agrees with the score beside it rather than with a ' +
   oldRow.bestStreak === oldStats.bestStreak,
   `${oldRow.bestStreak} vs ${oldStats.bestStreak}`);
 
+// ...and in ARCHIVED mode, which is the one line of the route with no other
+// test on it. The grouped lifetime read that answers the credit date used to be
+// skipped there — it fed only `categorySummaries`, which archived mode omits —
+// so re-gating it makes this row report 0.051922 against the same habit's own
+// page at 1, and nothing else in either edition's suite would notice. The row
+// figures are computed either way, so the read has to run either way.
+await put(`/habits/${oldAnswer.id}`, {
+  name: 'Wine', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'glasses', archived: true,
+});
+const archivedView = await overview({ days: 7, archived: 'true' });
+const archivedRow = archivedView.habits.find((h) => h.id === oldAnswer.id);
+
+ck('an archived habit\'s figures are credited from the same lifetime answer',
+  archivedRow && archivedRow.score === oldStats.score,
+  `${archivedRow && archivedRow.score} vs ${oldStats.score}`);
+ck('...and its bestStreak too',
+  archivedRow && archivedRow.bestStreak === oldStats.bestStreak,
+  `${archivedRow && archivedRow.bestStreak} vs ${oldStats.bestStreak}`);
+
 ck('a stored lapse still earns the credited best streak',
   lapseRow.bestStreak === 366, String(lapseRow.bestStreak));
 ck('...and the two surfaces agree about that too',

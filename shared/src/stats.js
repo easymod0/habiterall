@@ -1255,6 +1255,17 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
   return {
     entryMap,
     from: windowStart(firstEntry ?? end, start, end),
+    // `??` and not `!== undefined`, which is the opposite of the contract
+    // `computeCategoryStats` gives its `firstAnswer` one screen down — and the
+    // difference is deliberate, because the two parameters hold different
+    // things. There, `firstAnswer` is a raw DATE and `null` is a real answer
+    // ("never stated one"). Here, `creditFrom` is an already-resolved credit
+    // date, and a nullish one would sail through `answeredBy`'s `!creditFrom`
+    // guard and disable the gate outright — crediting every silent day, which is
+    // the defect this exists to remove. So a nullish value falls back to
+    // deriving one, which is merely narrower than the caller intended rather
+    // than wrong in the dangerous direction. Both routes pass `creditAnchor`,
+    // which always answers a real day, so neither spelling is reachable today.
     creditFrom: creditFrom ?? creditFor(firstStatedAnswer(entryMap), start, end),
   };
 }

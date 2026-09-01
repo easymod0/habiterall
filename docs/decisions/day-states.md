@@ -292,9 +292,12 @@ the connector pass decides about the days around it.
 **What silence is WORTH was issue #223, addressed below.** Different layer
 again — this is about which cells paint which fill; #223 is about whether an
 unanswered day may be read as compliance at all, which it now may only once the
-habit has stated one real answer. What remains open after it: the window's far
-end is still deliberately unbounded, so an abandoned limit habit with one real
-answer still accrues credited silence.
+habit has stated one real answer. **It adds a case to THIS section's family,
+though**, and says so at its own end: the kept-unlogged fill is drawn from a
+per-habit boolean with no date in it, so a day before the credit date paints as
+kept while every figure counts it a miss. What else remains open: the window's
+far end is still deliberately unbounded, so an abandoned limit habit with one
+real answer still accrues credited silence.
 
 ## Issue #176 — a streak is linked through cells painted "no entry"
 
@@ -384,11 +387,15 @@ Same habit, same run, three surfaces still disagreeing about it — the gap
 #222 found between the Calendar card and the History card, still open here in
 a different pair of surfaces.
 
-**What silence is WORTH was issue #223, now addressed below**, unrelated to
-this one: a different layer again, about whether an unanswered day may be read
-as compliance rather than which cells carry a mark. What remains open after it
-is the far end of the credit window, deliberately — there is still no "silence
-expires" rule, so an abandoned limit habit with one real answer keeps accruing.
+**What silence is WORTH was issue #223, now addressed below**: a different
+layer again, about whether an unanswered day may be read as compliance rather
+than which cells carry a mark — but not unrelated, because it leaves behind one
+more surface disagreeing with another about one day. The kept-unlogged fill is
+drawn from a per-habit boolean carrying no date, so a day before the credit date
+paints as kept while every figure counts it a miss; that gap is measured and
+named at the end of the #223 section. What else remains open is the far end of
+the credit window, deliberately — there is still no "silence expires" rule, so
+an abandoned limit habit with one real answer keeps accruing.
 
 
 ## Issue #223 — an unanswered day counts as success only once the habit has answered
@@ -624,3 +631,56 @@ old rule is how a dashboard and a detail page come to disagree about one habit.
    stays usable standalone. The window there still opens at `memberWarm`, so the
    landing rule, `unloggedExcluded` and `landsOn` are untouched — a skip-anchored
    member still lands and is still averaged in, now at an honest strength.
+
+### What this leaves open, and one of them is new
+
+**The clients still paint a kept-unlogged cell from a per-habit BOOLEAN, and the
+rule now has a date in it.** `unlogged_is_success` rides on the `/overview` and
+`/stats` payloads and every renderer asks the same thing of it — `value == null
+&& habit.unlogged_is_success` in `charts.js`' calendar cell and its history
+fill, in `ui/day-strip.js`, and in Android's `DayGrid.kt` and `Widgets.kt`. That
+boolean cannot carry "…and only from the day this habit first answered", so for
+an unanswered day BEFORE the credit date the cell paints "counted as kept, no
+entry" while the server counts it a miss.
+
+Measured on this branch against master — numerical at-most, target 2,
+`at_most_unlogged: 'success'`, rows `{2026-01-01 skip}` and `{2026-08-01 value
+1}`, today 2026-08-19, reading the day 2026-06-15:
+
+| | master | this branch |
+|---|---|---|
+| `score` / `currentStreak` | 0.999995 / 230 | 0.636894 / 19 |
+| `history` bucket for that day | `completed: 1` | `completed: 0` |
+| calendar cell, day strip, Android grid and widget | kept fill | **kept fill — unchanged** |
+
+On the detail page the disagreement is on ONE screen: the Calendar card paints
+that day as kept, the History card beside it draws a zero bar for it, and the
+legend swatch under both says "Kept, unlogged". This is the class #222 and #176
+are about — the same day read differently by two surfaces — and this issue adds
+a case to it rather than only inheriting one, which is why both of those
+sections' closing paragraphs now say so.
+
+A weaker version predates this: an unanswered day OUTSIDE `[from, end]` was
+always painted kept while contributing to nothing. What is new is a day INSIDE
+the reading painted kept and counted as a miss, and it can span months.
+
+It is left out of this PR deliberately rather than for lack of a fix. The fix
+shape is known and is not small: serve the resolved date beside
+`unlogged_is_success` — both `/overview` loops already hold it as `creditFrom`
+and `/stats` has it inside `resolveWindow` — and gate the paint on
+`date >= credit_from` in all five renderers. That is a new response field, two
+web modules and two Kotlin ones, a `CACHE_VERSION` bump (introducing
+`unlogged_is_success` itself was treated as one, for the same three modules
+moving together), and verification in the browser suites and an Android build.
+The data is right on every surface that computes a figure; what lags is the
+paint, which is the direction this project's own scope rule prefers to be wrong
+in — a rendering gap rather than a data gap — and it wants its own issue with
+#222 and #176 beside it.
+
+**The far end of the credit window is still unbounded**, deliberately, as above.
+
+**And `/overview`'s two windows still disagree about each other** — `score` reads
+400 days where `bestStreak` reads 1830, so a habit whose only stored row is 500
+days old reports `score` 0.051922 beside a `bestStreak` of 501. Measured
+identical on master: that is the window mismatch, older than this issue and out
+of scope for it.

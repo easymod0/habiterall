@@ -488,6 +488,31 @@ ck('...and bestStreak agrees with the score beside it rather than with a '
   staleRow.bestStreak === staleStats.bestStreak,
   `${staleRow.bestStreak} vs ${staleStats.bestStreak}`);
 
+// ...and in ARCHIVED mode, which is the one line of the route with no other test
+// on it. The grouped lifetime read that answers the credit date used to be
+// skipped there — it fed only `categorySummaries`, which archived mode omits —
+// so re-gating it makes this row report 0.051922 against the same habit's own
+// page at 1, and nothing else in either edition's suite would notice.
+await fetch(`${overviewBase}/api/habits/${staleAnswerHabit.id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Wine 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'glasses', archived: true,
+  }),
+});
+const archivedStaleView = await getOverview({ days: 7, archived: 'true' });
+const archivedStaleRow = archivedStaleView.habits.find(
+  (h) => h.id === staleAnswerHabit.id
+);
+
+ck("an archived habit's figures are credited from the same lifetime answer",
+  archivedStaleRow && archivedStaleRow.score === staleStats.score,
+  `${archivedStaleRow && archivedStaleRow.score} vs ${staleStats.score}`);
+ck('...and its bestStreak too',
+  archivedStaleRow && archivedStaleRow.bestStreak === staleStats.bestStreak,
+  `${archivedStaleRow && archivedStaleRow.bestStreak} vs ${staleStats.bestStreak}`);
+
 // All three habits go again, with their rows: the import-isolation check further
 // down counts EVERY entry this account has and expects exactly one, so a fixture
 // left behind here fails a test about tenancy with a number about this block.
