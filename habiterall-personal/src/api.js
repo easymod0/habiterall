@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
 import {
-  computeStats, summaryStats, computeStreaks, bestStreak, isCompleted, UNLOGGED_DEFAULT,
+  computeStats, summaryStats, computeStreaks, bestStreak, creditAnchor, isCompleted,
+  UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
   summariseByCategory,
@@ -194,7 +195,10 @@ const q = {
    * question the fetched slice cannot.
    */
   firstEntryPerHabit: db.prepare(`
-    SELECT habit_id, MIN(date) AS first_date FROM entries GROUP BY habit_id
+    SELECT habit_id,
+           MIN(date) AS first_date,
+           MIN(CASE WHEN COALESCE(status, '') <> 'skip' THEN date END) AS first_answer
+      FROM entries GROUP BY habit_id
   `),
   entriesForSince: db.prepare(`
     SELECT date, value, status, notes
@@ -463,9 +467,17 @@ api.get('/categories/stats', (req, res) => {
 
   const habits = /** @type {any[]} */ (q.everyHabit.all());
 
+  // Two lifetime dates per habit out of one grouped read: the earliest row of
+  // any kind, which decides where a member's window OPENS, and the earliest row
+  // that states a value, which decides where silence inside it starts counting
+  // as success (#223). The second is a lifetime question for exactly the reason
+  // the first is — the slice fetched below cannot answer either.
+  const firstRows = /** @type {any[]} */ (q.firstEntryPerHabit.all());
   const firstEntry = new Map(
-    /** @type {any[]} */ (q.firstEntryPerHabit.all())
-      .map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+    firstRows.map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+  );
+  const firstAnswer = new Map(
+    firstRows.map((r) => [r.habit_id, /** @type {string|null} */ (r.first_answer)])
   );
 
   // One SELECT over `entries`, bucketed by habit — the same shape `/overview`
@@ -495,6 +507,9 @@ api.get('/categories/stats', (req, res) => {
       // `computeCategoryStats` to derive the answer from the entries it was
       // given, which is the truncated slice this route deliberately fetched.
       firstEntry: firstEntry.get(h.id) ?? null,
+      // Same rule, same reason: absent would mean "derive it from the truncated
+      // slice", where `null` is the answer that the habit has never stated one.
+      firstAnswer: firstAnswer.get(h.id) ?? null,
     })),
     { start, end, granularity, weekStart, unlogged }
   ));
@@ -713,16 +728,25 @@ api.get('/overview', (req, res) => {
   // dashboard's hot path.
   const unlogged = storedUnlogged();
 
-  // The grouped lifetime `MIN(date)` read `/categories/stats` already runs
-  // (`q.firstEntryPerHabit`), reused here so a section header can tell "never
-  // logged" from "scored zero" — the bounded windows below cannot answer that,
-  // and `first_date` is used for a null check only, never `addDays` or
-  // `dateRange` (root CLAUDE.md). Skipped entirely in archived mode: that
-  // fetch has nothing active to average, so `categorySummaries` is omitted
-  // below rather than computed and discarded.
+  // The grouped lifetime read `/categories/stats` also runs
+  // (`q.firstEntryPerHabit`), reused here for two things the bounded windows
+  // below cannot answer. `first_date` lets a section header tell "never logged"
+  // from "scored zero", and is used for a null check only, never `addDays` or
+  // `dateRange` (root CLAUDE.md). `first_answer` is whether the habit has EVER
+  // stated a value, which is what decides where silence starts counting as
+  // success (#223) — a lifetime question that a 400- or 1830-day slice holding
+  // nothing but skips would answer "never" for a habit that answered years ago.
+  //
+  // It therefore runs in ARCHIVED mode too, where it used to be skipped because
+  // `categorySummaries` is omitted there: the figures on each row are computed
+  // either way, so the read has a second consumer now and skipping it would make
+  // the archived view the one place these figures are wrong.
+  const firstRows = /** @type {any[]} */ (q.firstEntryPerHabit.all());
   const firstEntry = archived ? null : new Map(
-    /** @type {any[]} */ (q.firstEntryPerHabit.all())
-      .map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+    firstRows.map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+  );
+  const firstAnswer = new Map(
+    firstRows.map((r) => [r.habit_id, /** @type {string|null} */ (r.first_answer)])
   );
 
   // For the grid the frontend only needs something paintable, so skips are
@@ -772,7 +796,19 @@ api.get('/overview', (req, res) => {
     // `computeWeekdayByMonth`, `computeFrequency`, `computeResilience` — never
     // started, once per habit, on the dashboard's hot path. Awards are out of
     // this route for the same reason, stated at the `/stats` call site above.
-    const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged });
+    // **One credit date for all three figures on this row** (#223), resolved
+    // from the account's LIFETIME first stated answer rather than from either
+    // slice above. Both slices are bounded — 400 days for the summary, 1830 for
+    // the streak scan — and "has this habit ever answered?" is not a question a
+    // bounded window can answer: a limit habit answered 500 days ago and skipped
+    // since holds nothing but a skip inside the 400-day slice, which would read
+    // as no evidence at all. Measured: 0.051922 on this row against 1.000 on the
+    // habit's own page, with `bestStreak` on this same payload disagreeing with
+    // both because its wider slice could see the answer. Derived once and shared,
+    // so the three figures cannot disagree by construction.
+    const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
+
+    const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged, creditFrom });
 
     // Counted in SQLite rather than by walking every row in JS. The
     // expression mirrors isCompleted exactly, including that a skip is
@@ -785,12 +821,24 @@ api.get('/overview', (req, res) => {
       )
     ).n;
 
+    // This scan is the route's own and never reaches `resolveWindow`, so it has
+    // to be handed the same credit date explicitly — otherwise `bestStreak` is
+    // the one figure on this payload still crediting silence the habit has no
+    // answer behind, beside a `score` and a `currentStreak` that no longer do
+    // (#223: measured 365 here against 1 from `/stats`, same habit, same
+    // second). It is the SAME `creditFrom` the summary above got, not a second
+    // one derived from this wider slice, because the two derivations disagree
+    // exactly when the habit's answer falls between the two windows.
+    const streakMap = new Map(
+      entries.map((e) => [e.date, { value: e.value, status: e.status }])
+    );
     const allStreaks = computeStreaks(
       h,
-      new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
+      streakMap,
       entries.length ? entries[0].date : summaryEnd,
       summaryEnd,
-      unlogged
+      unlogged,
+      creditFrom
     );
 
     return {

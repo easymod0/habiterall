@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   computeStats, summaryStats, computeScores, computeStreaks, bestStreak, currentStreak,
+  creditAnchor,
   computeHistory, computeWeekdays, computeWeekdayByMonth, computeFrequency,
   computeResilience, computeCoverage, computeMissRuns,
   boundedRange, addDays, UNLOGGED_DEFAULT,
@@ -310,6 +311,11 @@ function main() {
   const recent = all.filter((e) => e.date >= cutoff);
 
   const from = recent[0].date;
+  // The date both routes resolve once per habit and hand to every figure on the
+  // row (#223) — the LIFETIME earliest row that states a value, which is what
+  // `creditAnchor` takes. Read off `all` rather than `recent`, because that is
+  // where the routes read it from: a grouped `MIN(date)` over the whole table.
+  const firstStated = all.find((e) => (e.status ?? '') !== 'skip')?.date ?? null;
   const recentMap = new Map(recent.map((e) => [e.date, { value: e.value, status: e.status }]));
   const streaks = computeStreaks(HABIT, recentMap, from, END, UNLOGGED_DEFAULT);
 
@@ -328,8 +334,14 @@ function main() {
   // #183's actual fix: this is what `/overview` calls now, timed the same way
   // as the row above — same fixture, same `END`, same warmup — so the two are
   // directly comparable rather than one being a cold call.
+  // `creditFrom` supplied, as the route supplies it (#223): both routes resolve
+  // ONE credit date per habit from the lifetime first STATED answer and hand it
+  // to this call and to the streak scan below, so a bench omitting it would pay
+  // for a `firstStatedAnswer` walk over the whole window that the route skips —
+  // and would overstate the figure quoted in `shared/CLAUDE.md`.
+  const creditFrom = creditAnchor(firstStated, END);
   const summary = bench(() =>
-    summaryStats(HABIT, recent, { end: END, unlogged: UNLOGGED_DEFAULT }));
+    summaryStats(HABIT, recent, { end: END, unlogged: UNLOGGED_DEFAULT, creditFrom }));
 
   /* --- #183: what the route keeps and what it throws away --- */
 
@@ -397,7 +409,14 @@ function main() {
 
   const streakScan = bench(() => {
     const m = new Map(all.map((e) => [e.date, { value: e.value, status: e.status }]));
-    return bestStreak(computeStreaks(HABIT, m, all[0].date, END, UNLOGGED_DEFAULT));
+    // The route's own shape, `creditAnchor` included (#223): it resolves one
+    // credit date per habit and hands it to this scan and to `summaryStats`
+    // alike, so a bench that omitted it would stop measuring the code it names.
+    // The same `firstStated` date as the summary above, not `all[0].date`: the
+    // route's date is the first row that STATES a value, and the two differ for
+    // any habit whose earliest row is a skip.
+    return bestStreak(computeStreaks(HABIT, m, all[0].date, END, UNLOGGED_DEFAULT,
+      creditAnchor(firstStated, END)));
   });
 
   console.log(`## #184 — \`bestStreak\` over ${HISTORY_DAYS} days, per habit, per load\n`);

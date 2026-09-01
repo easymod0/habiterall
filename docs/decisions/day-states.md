@@ -289,10 +289,15 @@ section, and it left `unlogged_is_success`'s own fill untouched: a
 kept-unlogged cell still paints its own faint fill, independent of whatever
 the connector pass decides about the days around it.
 
-**The credit window's missing far end is issue #223.** Different layer again —
-this is about which cells paint which fill; #223 is about how far a range that
-starts at the earliest stored entry should reach, which the root `CLAUDE.md`
-already documents as "the model working" rather than a bug.
+**What silence is WORTH was issue #223, addressed below.** Different layer
+again — this is about which cells paint which fill; #223 is about whether an
+unanswered day may be read as compliance at all, which it now may only once the
+habit has stated one real answer. **It adds a case to THIS section's family,
+though**, and says so at its own end: the kept-unlogged fill is drawn from a
+per-habit boolean with no date in it, so a day before the credit date paints as
+kept while every figure counts it a miss. What else remains open: the window's
+far end is still deliberately unbounded, so an abandoned limit habit with one
+real answer still accrues credited silence.
 
 ## Issue #176 — a streak is linked through cells painted "no entry"
 
@@ -382,7 +387,343 @@ Same habit, same run, three surfaces still disagreeing about it — the gap
 #222 found between the Calendar card and the History card, still open here in
 a different pair of surfaces.
 
-**The credit window's missing far end is still issue #223**, unrelated to
-this one: different layer again, about how far a range that starts at the
-earliest stored entry should reach rather than which cells carry a mark.
+**What silence is WORTH was issue #223, now addressed below**: a different
+layer again, about whether an unanswered day may be read as compliance rather
+than which cells carry a mark — but not unrelated, because it leaves behind one
+more surface disagreeing with another about one day. The kept-unlogged fill is
+drawn from a per-habit boolean carrying no date, so a day before the credit date
+paints as kept while every figure counts it a miss; that gap is measured and
+named at the end of the #223 section. What else remains open is the far end of
+the credit window, deliberately — there is still no "silence expires" rule, so
+an abandoned limit habit with one real answer keeps accruing.
 
+
+## Issue #223 — an unanswered day counts as success only once the habit has answered
+
+`unansweredCounts` says whether a day with no row counts as having met an
+at-most habit. Under `success` it does — "I stayed under the limit by not doing
+anything about it" — and until this issue that reading needed no evidence of any
+kind. `resolveWindow` opened every top-level summary at `start ?? firstEntry`
+with `firstEntry` the earliest stored row of ANY kind, so a lone **skip** a year
+in the past opened a year-wide window in which every silent day was credited.
+Measured on master, a daily at-most habit, target 2, `at_most_unlogged:
+'success'`, window ending 2026-08-19:
+
+| stored rows | streak | strength | totalCompleted |
+|---|---|---|---|
+| none at all | 1 | 0.052 | 0 |
+| one row today, value 1 | 1 | 0.052 | 1 |
+| one row today + an imported lapse a year earlier | 366 | 1.000 | 2 |
+| ONLY an imported lapse a year earlier | 366 | 1.000 | 1 |
+| ONLY a skip a year earlier — **before** | **365** | **1.000** | **0** |
+| ONLY a skip a year earlier — **after** | **1** | **0.052** | **0** |
+
+Only the last row moves, and it moves to become identical to the first: a habit
+with no evidence reads like a habit with no rows. The same skip on an at-LEAST
+habit reports 0 / 0.000 both before and after — the finding was never the number,
+it was that the identical mechanism adds BLAME on one habit shape and CREDIT on
+the other.
+
+### It is a credit rule, not a window move — and that is the whole design
+
+The obvious fix, and the one that shipped first as **PR #292**, was to move the
+anchor: make `firstEntry` the earliest row whose status is not `'skip'`. It
+produces the table above and it was rejected, for a cost that only shows up one
+figure over.
+
+**`computeCoverage` asks a different question, and a skip answers it.** Coverage
+counts `answered` as `entryMap.has(date)` — `awards.js` states outright that
+"`done`, `skip`, `no` and `unknown` are four things" — and it shares the one
+window with everything else in the payload, deliberately, "so coverage cannot
+disagree with the awards beside it about what 'ever' means". Measured: a habit
+whose first ever row is `{2026-01-01, skip}` and which then holds a stated value
+on **every** day through 2026-08-19 reports seven fully-answered coverage months
+on master and **six** under the anchor form — January dropped, a month in which
+all 31 days hold a row, because a window opening on the 2nd no longer CONTAINS
+January. A coverage award rung goes down for a month the user answered
+completely. That is the anchor form paying for the fix with a figure that was
+right.
+
+So the window stays where it is and a **second** date decides credit:
+
+```
+from       = start ?? earliest row of ANY kind ?? end     (unchanged)
+creditFrom = start ?? earliest row that STATES a value ?? end
+```
+
+Both go through one clamp-and-normalise helper (`windowStart`), because two
+spellings of that sequence would be two chances for them to disagree about the
+same stored row and every word about the ORDERING would have to hold twice. Two
+questions, two dates: `from` is how far back the reading REACHES, and a skip
+belongs in it because a skip is an answer; `creditFrom` is whether SILENCE inside
+that reach may be read as compliance, and a skip does not answer that — it says
+"this day does not count", which is no evidence a limit was kept.
+
+`start ??` is the first clause of both and is load bearing. A caller that names a
+window is naming it; this rule exists to stop STORAGE-derived silence from
+inventing evidence, not to overrule a caller. `ui/detail.js` sends no `start`,
+which is the half the issue calls already-right and which is untouched — and with
+an explicit `start: '2026-08-10'` and one row today the reading is 10 / 0.41327
+before and after. Drop that clause and it reads 1 / 0.051922. The corollary is a
+rule for direct callers: **a caller whose own `start` came out of storage must
+pass `undefined`**, which is exactly what both editions' `/overview` does with
+its `entries[0].date`.
+
+### The gate sits ABOVE the two-level precedence, and the first draft got it wrong
+
+The first draft threaded the rule as an `unlogged` VALUE — hand the passes
+`'miss'` for a day before `creditFrom`. That is wrong and it failed silently in
+the most misleading direction: `unansweredCounts` resolves a habit's own
+`at_most_unlogged` over the account's answer, so a habit carrying an explicit
+`'success'` overrode the gate and only habits on `'default'` were fixed — the
+exact habits the issue is about, unfixed, with a passing measurement beside them.
+It is therefore a separate argument (`mayCredit`) applied to `isCompleted` /
+`dayCredit`'s ANSWER, and it can only ever withhold credit that `unlogged` would
+have granted. The wiring test asserts all three spellings — habit `success` with
+account `miss`, habit `default` with account `success`, habit `default` with
+account `miss` — because a fixture using one of them cannot see this.
+
+`creditFrom` reaches **nine** passes: `computeScores`, `onPaceSeries` (and so
+`computeStreaks`, `computeMissRuns`, `computeResilience`), `computeHistory`,
+`computeWeekdays`, `computeWeekdayByMonth` and `computeFrequency`. Not just the
+two the issue measures: `dayCredit`'s own comment says the rule "has to be the
+same or the score and the streak disagree about the very same day", and a history
+bar or a weekday rate painting a day as kept that the streak beside it counts as
+missed is that same disagreement one surface further out.
+
+Both dates are derived from the deduped entry MAP rather than from the `entries`
+array, so the two of them and every downstream reader see the same rows by
+construction. They can only differ where one date appears twice — the map keeps
+the LAST — so reading the array would let a value row the map has already
+overwritten with a skip go on granting credit over a window that holds no stated
+value as far as every other figure is concerned. Unreachable through either
+edition (`PRIMARY KEY (habit_id, date)`), and the test pins both orderings
+because a rule reading the array passes one of them by accident.
+
+### The imported-lapse row is deliberately left at 366
+
+A row holding `0` with status `''` is the user recording "I was at zero that
+day": real evidence, unlike a skip's "this day does not count". A stretch of
+credited silence after real evidence is precisely what the root `CLAUDE.md`'s
+"a stored lapse can move window-derived figures, and that is the model working"
+paragraph and this file's own opening describe, and it is said out loud here
+rather than quietly narrowed. This issue **qualifies** that paragraph rather than
+contradicting it: it was written under `miss`, where a wider window adds BLAME to
+every unknown day, and under `success` the identical mechanism adds CREDIT — the
+opposite sign on the same rule. The archive's "say so before fixing it" covered
+the lapse; it could not have covered the skip, because a skip is not the lapse
+the paragraph is about.
+
+**The window still has no far end**, also deliberately. An abandoned at-most-
+`success` habit with one real answer still accrues credited silence for as long
+as the account exists. Bounding it — "credit unanswered days only within N days
+of the last real answer" — was the issue's option 2 and lost: it needs a number
+nobody has measured AND a name for what happens past it (a streak that stops
+growing is not one that breaks), and it moves figures for a sparse-but-real limit
+habit that genuinely is still being kept. Gating the streak and the strength on
+`totalCompleted > 0` lost too, as a symptom patch on the report: it leaves the
+two figures disagreeing with the window that produced them, which is the
+disagreement `resolveWindow` exists to prevent.
+
+### What did NOT move, measured
+
+- **At-least and at-most-`miss` habits do not move at all.** Those shapes already
+  count an unanswered day as a miss, so there is no credit to withhold. This is
+  the second thing the anchor form cost and this one does not: there, a
+  skip-anchored NON-daily habit opened its window later and scored HIGHER for it
+  (measured 0.053382 → 0.120939 on a 3×/7 habit, because `onPaceSeries` pro-rates
+  its requirement by the window's width), while a daily habit of either shape was
+  immune and so could not show it. Here both are byte-identical: 0.04195 daily,
+  0.053382 at 3×/7, before and after.
+- **`coverage`, `totalCompleted` and every `entryMap.has` figure** are untouched,
+  the window not having moved. `totalCompleted` walks stored rows only, so no
+  unanswered day ever reached it.
+- **A skip that is not the earliest row** changes nothing (366 / 1.000 / 1).
+- **#270 stops being adjacent.** The anchor form made a phantom-dated row
+  reachable as the anchor — rows `{2026-01-01 skip}`, `{2026-07-99 value}`,
+  `{2026-08-17}`, `{2026-08-18}` gave 2 / 0.101149 / 3 over 230 score points on
+  master and *every figure zero* on that branch, because `2026-07-99` normalises
+  to 2026-10-07 and `boundedRange` answered `[]`. A credit rule moves no anchor,
+  so that window is master's byte for byte and the interaction is gone. The
+  honest half: on an at-most habit resolved to `success` those same rows now
+  credit nothing, because the phantom date is the earliest stated value and its
+  rollover lands past `end` — #270's existing hazard reaching a second date by
+  the same route, not a new hazard, and the reason `creditFrom` goes through the
+  same clamp-then-normalise sequence rather than a second one. #270 itself is
+  untouched. **The rollover moves the credit date in BOTH directions and the
+  disclosure has to say so**: it can land past `end` (above — nothing credited,
+  the fail-closed direction) and it can land EARLIER than the habit's real
+  answer, which credits silence the rule means to withhold. Measured, rows
+  `{2026-01-01 skip}`, `{2026-02-31 value 1}`, `{2026-08-18 value 1}` on the same
+  at-most-`success` habit: `2026-02-31` normalises to `2026-03-03`, so credit
+  begins five and a half months before the only real answer and `currentStreak`
+  reads **169** where the rule implies 2 (master read 229). Same #270 population
+  — a row predating `assertDate`, a direct insert or an import around it — and
+  the same conclusion, that #270 is worth fixing on its own; but the fail-open
+  half is stated rather than left out, and both are pinned.
+- One asymmetry worth stating: for a DAILY habit the skip-only reading becomes
+  identical to the no-rows reading, which is the issue's table. For a **3×/7**
+  habit it does not (0 / 0.011434 against 1 / 0.034303), because the window
+  legitimately still reaches back a year and the trailing seven days ask for
+  three completions where a one-day window pro-rates down to 3/7. That is
+  `onPaceSeries`' leniency window, not the credit rule, and it is pinned.
+
+### The two surfaces that scan a pass themselves, fixed in the same PR
+
+`resolveWindow` is only reached through `computeStats` and `summaryStats`. Two
+surfaces compute a pass directly and so had to be handed the credit date
+explicitly — both were already inconsistent with the habit's own page and both
+are fixed here rather than deferred, because a fix that leaves one figure on the
+old rule is how a dashboard and a detail page come to disagree about one habit.
+
+1. **`/overview`'s three figures, and the credit date is a LIFETIME question.**
+   Both editions scan streaks themselves for `bestStreak`, over a wider window
+   than `summaryStats` uses (`STREAK_HISTORY_DAYS`, 1830 days against 400),
+   starting at `entries[0].date` — the earliest row of any kind. So `score` and
+   `currentStreak` came from the fixed entry point while `bestStreak` beside them
+   did not: measured on the skip-only fixture, `/stats` reported `bestStreak` 1
+   and `/overview` reported **365**, on the same habit, in the same second.
+
+   The first version of this fix handed each of those two scans a credit date
+   derived from **its own slice**, and defended the bound as "the same trade the
+   `score` beside it already makes". That was wrong, and review caught it. The
+   `score`'s slice trade is harmless because an EWMA over 400 days has converged;
+   a credit date does not converge — it decides what the days at the END of the
+   window are worth. Measured, at-most habit resolved to `success`, one stated
+   value 500 days back and a skip 350 days back: master read **1.000** on the
+   dashboard and **1.000** on the habit's own page, and the slice-derived version
+   read **0.051922** against **1.000** — a disagreement this fix would have
+   CREATED, on precisely the habit class the issue is about. Worse, the payload
+   contradicted itself, because `bestStreak`'s 1830-day slice could see the
+   answer the 400-day one could not.
+
+   It is the same argument `firstEntry` already makes one item down: **a bounded
+   window cannot tell "never answered" from "answered before the rows I
+   fetched"**. So both routes read the lifetime `first_answer` out of the grouped
+   `MIN(date)` query, resolve it ONCE through `creditAnchor`, and hand that one
+   date to `summaryStats` and to the streak scan — one derivation, so the three
+   figures cannot disagree about WHEN THE HABIT FIRST ANSWERED by construction.
+   That is the credit date and not the window; the paragraph below is what the
+   windows still do to `currentStreak`. `creditAnchor` takes no `start`
+   parameter at all rather than documenting that a route must pass `undefined`,
+   because a parameter that must always hold one value is a rule waiting to be
+   broken. The grouped read consequently runs in ARCHIVED mode too, where it used
+   to be skipped for having no `categorySummaries` to feed: the row figures are
+   computed either way, and skipping it would make the archived view the one
+   place they are wrong. Pinned behaviourally in each edition, with a fixture
+   whose stated answer is deliberately OUTSIDE the 400-day slice — the first
+   round's fixtures put every row 365 days back, inside both windows, where the
+   two derivations agree and neither could fail.
+
+   What is left, and it is older than this issue: the credit date is now one
+   date, but the WINDOWS it is applied over are still three. `score` and
+   `currentStreak` read 400 days (`SUMMARY_WINDOW_DAYS`), `bestStreak` reads
+   1830 (`STREAK_HISTORY_DAYS`), and `/habits/:id/stats` reads lifetime — so a
+   habit whose only stored row is 500 days old still reports `score` 0.051922,
+   `currentStreak` **1** and `bestStreak` 501 on the dashboard, against 1 / 501
+   / 501 on its own page. **`currentStreak` belongs in that list and used to be
+   missing from it**, and naming it matters more than the other two, because it
+   is the figure that disagrees even where they have been brought into
+   agreement.
+
+   Measured at both routes on this branch, on the very fixture this item's
+   regression test builds — at-most habit resolved to `success`, one stated
+   value 500 days back, one skip 350 days back:
+
+   | | `/overview` | `/habits/:id/stats` |
+   |---|---|---|
+   | `score` | 1 | 1 |
+   | `bestStreak` | 501 | 501 |
+   | `currentStreak` | **350** | **501** |
+
+   `score` and `bestStreak` agree there — that is this fix working — while
+   `currentStreak` is out by 151 days on the same habit in the same second: a
+   streak of 350 under the habit's name on the dashboard and 501 on that
+   habit's own page. The cause is not the credit date, which both reads resolve
+   to the same day, and it is not `unlogged` either. It is `from` in
+   `resolveWindow`, which opens the reading at the earliest row IN THE SLICE IT
+   WAS HANDED: the 400-day slice holds nothing but the skip, and a skip cannot
+   OPEN a run, so the streak starts the day after it and is 350 days long; the
+   lifetime read opens at the stated answer 500 days back and carries that same
+   skip through without breaking it: `{length: 501, skips: 1}`.
+   Reproduced byte-identical against master with no `creditFrom` mechanism in
+   the tree at all, which is what makes it older than this issue.
+
+   Closing it means making the dashboard's `currentStreak` a lifetime read,
+   which is a behaviour change on that route's hot path and out of scope here.
+   So it is instead PINNED where it stands — 350 from `/overview` and 501 from
+   `/stats`, as literals, in both editions' regression blocks — so that the gap
+   stays visible and cannot move without a test saying so.
+2. **The category comparison.** `computeCategoryStats` scores each member from
+   `memberWarm`, and a skip-only member read **1.00** there against **0.051922**
+   on its own page — a wider version of the 0.97-against-0.41 gap
+   `shared/CLAUDE.md` already records for the warm-up clamp, and worse, because
+   1.00 is the ceiling. The member's credit date has to be a LIFETIME question
+   for exactly the reason its `firstEntry` already is — a route fetches a bounded
+   slice, and "has never stated an answer" is not "has stated none in the window
+   I happened to fetch" — so it comes from SQL: one extra aggregate on the
+   grouped `MIN(date)` query both editions already run for `/categories/stats`,
+   `firstAnswer`, derived from `entries` when the key is absent so the function
+   stays usable standalone. The window there still opens at `memberWarm`, so the
+   landing rule, `unloggedExcluded` and `landsOn` are untouched — a skip-anchored
+   member still lands and is still averaged in, now at an honest strength.
+
+### What this leaves open, and one of them is new
+
+**The clients still paint a kept-unlogged cell from a per-habit BOOLEAN, and the
+rule now has a date in it.** `unlogged_is_success` rides on the `/overview` and
+`/stats` payloads and every renderer asks the same thing of it — `value == null
+&& habit.unlogged_is_success` in `charts.js`' calendar cell and its history
+fill, in `ui/day-strip.js`, and in Android's `DayGrid.kt` and `Widgets.kt`. That
+boolean cannot carry "…and only from the day this habit first answered", so for
+an unanswered day BEFORE the credit date the cell paints "counted as kept, no
+entry" while the server counts it a miss.
+
+Measured on this branch against master — numerical at-most, target 2,
+`at_most_unlogged: 'success'`, rows `{2026-01-01 skip}` and `{2026-08-01 value
+1}`, today 2026-08-19, reading the day 2026-06-15:
+
+| | master | this branch |
+|---|---|---|
+| `score` / `currentStreak` | 0.999995 / 230 | 0.636894 / 19 |
+| `history` bucket for that day | `completed: 1` | `completed: 0` |
+| calendar cell, day strip, Android grid and widget | kept fill | **kept fill — unchanged** |
+
+On the detail page the disagreement is on ONE screen: the Calendar card paints
+that day as kept, the History card beside it draws a zero bar for it, and the
+legend swatch under both says "Kept, unlogged". This is the class #222 and #176
+are about — the same day read differently by two surfaces — and this issue adds
+a case to it rather than only inheriting one, which is why both of those
+sections' closing paragraphs now say so.
+
+A weaker version predates this: an unanswered day OUTSIDE `[from, end]` was
+always painted kept while contributing to nothing. What is new is a day INSIDE
+the reading painted kept and counted as a miss, and it can span months.
+
+It is left out of this PR deliberately rather than for lack of a fix. The fix
+shape is known and is not small: serve the resolved date beside
+`unlogged_is_success` — both `/overview` loops already hold it as `creditFrom`
+and `/stats` has it inside `resolveWindow` — and gate the paint on
+`date >= credit_from` in all five renderers. That is a new response field, two
+web modules and two Kotlin ones, a `CACHE_VERSION` bump (introducing
+`unlogged_is_success` itself was treated as one, for the same three modules
+moving together), and verification in the browser suites and an Android build.
+The data is right on every surface that computes a figure; what lags is the
+paint, which is the direction this project's own scope rule prefers to be wrong
+in — a rendering gap rather than a data gap — and it wants its own issue with
+#222 and #176 beside it.
+
+**The far end of the credit window is still unbounded**, deliberately, as above.
+
+**And `/overview`'s windows still disagree about each other, `currentStreak`
+loudest.** `score` and `currentStreak` read 400 days where `bestStreak` reads
+1830 and the detail page reads lifetime, so a habit whose only stored row is 500
+days old reports `score` 0.051922 and `currentStreak` 1 beside a `bestStreak` of
+501. **`currentStreak` is the one that disagrees even when the other two have
+been brought into agreement**: on the fixture item 1's regression test builds —
+one stated value 500 days back, one skip 350 days back — `/overview` reports 350
+where the habit's own page reports 501, with `score` and `bestStreak` matching
+at 1 and 501. Both figures are pinned as literals in the two editions'
+regression blocks so the gap cannot drift while it is unfixed. Measured
+identical on master: that is the window mismatch, older than this issue and out
+of scope for it.

@@ -892,6 +892,96 @@ ck('...and the chart\'s last point is that same number here too',
   avoidSection?.series.at(-1)?.value === avoidSection?.mean,
   JSON.stringify({ last: avoidSection?.series.at(-1)?.value, mean: avoidSection?.mean }));
 
+/* -- issue #223: the LIFETIME first ANSWER is a second thing only SQL can say --
+ *
+ * The block above pins that the comparison agrees with a habit's own page about
+ * the WARM-UP. This pins the other date the route has to supply: the day silence
+ * may start counting as success. `computeCategoryStats` derives it from the
+ * `entries` it was handed when the key is absent — and this route hands it a
+ * slice starting 400 days before the window, so a habit whose only stated answer
+ * is OLDER than that slice would look, from inside the function, like a habit
+ * that has never answered at all. It would then be credited from `end` alone: a
+ * genuinely-converged limit habit reading ~0.05 on the comparison against ~1.0
+ * on its own page, which is the same class of disagreement as the block above
+ * with the sign reversed.
+ *
+ * So the fixture puts the stated answer OUTSIDE the fetched slice on purpose
+ * (500 days back, against a slice opening at 429) and a skip inside it. Only a
+ * route that asks the database for `MIN(date) ... WHERE status <> 'skip'` can
+ * answer this; an entries-derived fallback cannot, whatever the shared function
+ * does.
+ */
+
+const oldAnswerCategory = await (await postJson('/api/categories',
+  { name: 'Compare Old Answer', color: '#0f766e' })).json();
+const oldAnswerHabit = await makeHabit({
+  name: 'Compare Old Answer habit', type: 'numerical', unit: 'cups',
+  target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', category_id: oldAnswerCategory.id,
+});
+// A stated answer 500 days back — outside the 429-day slice this route fetches
+// — and a skip 400 days back, which is inside it. The skip is what the fallback
+// would find, and it states nothing.
+await fetch(`${base}/api/habits/${oldAnswerHabit.id}/entries/${addDays(STATS_END, -500)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 1 }),
+});
+await fetch(`${base}/api/habits/${oldAnswerHabit.id}/entries/${addDays(STATS_END, -400)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ status: 'skip' }),
+});
+
+const oldAnswerOwnPage = await (await fetch(
+  `${base}/api/habits/${oldAnswerHabit.id}/stats?end=${STATS_END}`)).json();
+const oldAnswerOwnScore = oldAnswerOwnPage.scores?.at(-1)?.score;
+const withOldAnswer = await categoryStats();
+const oldAnswerSection = withOldAnswer.categories.find((c) => c.id === oldAnswerCategory.id);
+
+ck('sanity: a limit habit answered 500 days ago is converged on its own page',
+  oldAnswerOwnScore === 1, JSON.stringify(oldAnswerOwnScore));
+ck('THE assertion: the comparison credits it from that answer, which means the ' +
+  'route asked SQL for the lifetime first ANSWER rather than letting the ' +
+  'truncated slice decide there had never been one',
+  oldAnswerSection?.mean === oldAnswerOwnScore,
+  JSON.stringify({ mean: oldAnswerSection?.mean, ownScore: oldAnswerOwnScore }));
+ck('...and the member still LANDS, the window not having moved',
+  oldAnswerSection?.members === 1 && oldAnswerSection?.unloggedExcluded === 0,
+  JSON.stringify({ members: oldAnswerSection?.members,
+                   unlogged: oldAnswerSection?.unloggedExcluded }));
+
+// The other half: a habit whose ONLY row is a skip has never answered, and both
+// surfaces must say so. Without this the check above passes against a route that
+// credits every member unconditionally — which is what it did before.
+const skipOnlyHabit = await makeHabit({
+  name: 'Compare Skip Only habit', type: 'numerical', unit: 'cups',
+  target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', category_id: oldAnswerCategory.id,
+});
+await fetch(`${base}/api/habits/${skipOnlyHabit.id}/entries/${addDays(STATS_END, -400)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ status: 'skip' }),
+});
+
+const skipOnlyOwn = await (await fetch(
+  `${base}/api/habits/${skipOnlyHabit.id}/stats?end=${STATS_END}`)).json();
+const skipOnlyOwnScore = skipOnlyOwn.scores?.at(-1)?.score;
+const withSkipOnly = await categoryStats();
+const twoMembers = withSkipOnly.categories.find((c) => c.id === oldAnswerCategory.id);
+
+ck('sanity: a skip-only limit habit is NOT converged on its own page',
+  typeof skipOnlyOwnScore === 'number' && skipOnlyOwnScore < 0.1,
+  JSON.stringify(skipOnlyOwnScore));
+ck('the comparison reads it as its own page does, so the two members are the ' +
+  'mean of two different numbers rather than both flattered to 1.0',
+  twoMembers?.members === 2
+  && Math.abs(twoMembers.mean - (oldAnswerOwnScore + skipOnlyOwnScore) / 2) < 1e-12,
+  JSON.stringify({ mean: twoMembers?.mean, own: oldAnswerOwnScore, skip: skipOnlyOwnScore }));
+ck('...and the worst member named is the one with no evidence',
+  twoMembers?.worst?.id === skipOnlyHabit.id, JSON.stringify(twoMembers?.worst));
+
 /* -- the range bounds --
  *
  * The ceiling is this route's OWN, and it is 1830 days — five years — not the

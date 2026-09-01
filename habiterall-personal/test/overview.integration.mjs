@@ -184,6 +184,141 @@ ck('?archived=true carries no categorySummaries',
   !('categorySummaries' in archivedOverview),
   JSON.stringify(Object.keys(archivedOverview)));
 
+/* ---- issue #223: /overview's bestStreak reads the same credit rule ----
+ *
+ * `score` and `currentStreak` come from `summaryStats`, which goes through
+ * `resolveWindow`; `bestStreak` is a streak scan the ROUTE does itself, over a
+ * wider window and starting at the earliest row of any kind. So the credit date
+ * has to be handed to it explicitly, and until it was, this route served
+ * `bestStreak: 365` for a habit whose own `/stats` page said 1 — same habit,
+ * same second, three figures from two rules.
+ *
+ * A limit habit whose unlogged days count as kept, holding ONE skip a year ago
+ * and nothing else. That is the issue's own fixture, and it is the shape where
+ * the two rules disagree maximally: the skip contributes nothing to any run
+ * while being the only row in the habit's history. Both figures are asserted as
+ * literals, and the cloud edition's API suite asserts the SAME literals over its
+ * own implementation of this route — the two editions ship one route surface
+ * from two code paths and have drifted before.
+ */
+const limit = await post('/habits', {
+  name: 'Coffee', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'cups',
+});
+await put(`/habits/${limit.id}/entries/${daysAgo(365)}`, { status: 'skip' });
+
+const withLimit = await overview({ days: 7 });
+const limitRow = withLimit.habits.find((h) => h.id === limit.id);
+const limitStats = await fetch(`${base}/api/habits/${limit.id}/stats`).then((r) => r.json());
+
+ck('a skip-only limit habit reports no unearned best streak on /overview',
+  limitRow.bestStreak === 1, String(limitRow.bestStreak));
+ck('...and /overview agrees with /stats about all three figures',
+  limitRow.bestStreak === limitStats.bestStreak
+  && limitRow.currentStreak === limitStats.currentStreak
+  && limitRow.score === limitStats.score,
+  `overview ${limitRow.score}/${limitRow.currentStreak}/${limitRow.bestStreak} vs `
+  + `stats ${limitStats.score}/${limitStats.currentStreak}/${limitStats.bestStreak}`);
+ck('the habit is genuinely resolved to success, or this fixture proves nothing',
+  limitRow.unlogged_is_success === true, String(limitRow.unlogged_is_success));
+ck('a habit with zero completions still says so',
+  limitRow.totalCompleted === 0, String(limitRow.totalCompleted));
+
+// The other half of the same rule: a stored LAPSE is real evidence, so the same
+// habit shape with a 0 row a year ago DOES keep its long best streak. Without
+// this the assertions above pass against a route that credits nothing ever.
+const lapsing = await post('/habits', {
+  name: 'Soda', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'cans',
+});
+await put(`/habits/${lapsing.id}/entries/${daysAgo(365)}`, { value: 0 });
+
+const withLapse = await overview({ days: 7 });
+const lapseRow = withLapse.habits.find((h) => h.id === lapsing.id);
+const lapseStats = await fetch(`${base}/api/habits/${lapsing.id}/stats`)
+  .then((r) => r.json());
+
+/* The shape the first round of this fix got wrong, and the reason the credit
+ * date is a LIFETIME date rather than one derived from whichever slice a figure
+ * happens to read. This route reads 400 days for `score`/`currentStreak` and
+ * 1830 for its own `bestStreak` scan, so a limit habit answered 500 days ago and
+ * skipped since holds nothing but a skip inside the narrow slice — which reads
+ * as "never answered" while the habit's own page, over lifetime rows, sees the
+ * answer and credits from it. Measured: master agreed at 1.000 on both surfaces;
+ * a slice-derived credit date read 0.051922 here against 1.000 there, with
+ * `bestStreak` on this same payload disagreeing with both because its wider
+ * slice COULD see the answer. Every fixture above puts its only row 365 days
+ * back, inside both windows, where the two derivations agree and neither can
+ * fail — which is exactly why this one is here. */
+const oldAnswer = await post('/habits', {
+  name: 'Wine', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'glasses',
+});
+await put(`/habits/${oldAnswer.id}/entries/${daysAgo(500)}`, { value: 1 });
+await put(`/habits/${oldAnswer.id}/entries/${daysAgo(350)}`, { status: 'skip' });
+
+const withOld = await overview({ days: 7 });
+const oldRow = withOld.habits.find((h) => h.id === oldAnswer.id);
+const oldStats = await fetch(`${base}/api/habits/${oldAnswer.id}/stats`)
+  .then((r) => r.json());
+
+ck('a habit answered before the summary window still has its silence credited',
+  oldRow.score === 1, String(oldRow.score));
+ck('...so the dashboard and the detail page agree about its strength',
+  oldRow.score === oldStats.score, `${oldRow.score} vs ${oldStats.score}`);
+ck('...and bestStreak agrees with the score beside it rather than with a ' +
+  'second credit date derived from its own wider window',
+  oldRow.bestStreak === oldStats.bestStreak,
+  `${oldRow.bestStreak} vs ${oldStats.bestStreak}`);
+
+/* `currentStreak` is the one figure on this payload that does NOT agree, and it
+ * is pinned WHERE IT STANDS rather than asserted into a parity that does not
+ * hold. Not the credit date — both reads resolve the same one — and not
+ * `unlogged`: purely the window. `summaryStats` gets a 400-day slice holding
+ * nothing but the skip, and a skip cannot OPEN a run, so the streak starts the
+ * day after it; the habit's own page opens at the stated answer 500 days back
+ * and carries that skip through without breaking it. Older than #223,
+ * reproduced identical on master, and closing it means making this route's
+ * streaks a lifetime read — a behaviour change on the dashboard's hot path.
+ *
+ * Two LITERALS and not `oldStats.currentStreak - 151`, because the point is
+ * that changing SUMMARY_WINDOW_DAYS fails here by name: widened past 500 the
+ * slice sees the answer and this reads 501, narrowed below 350 it sees no row
+ * at all and reads 1. A relative assertion would go on passing through both.
+ * See docs/decisions/day-states.md. */
+ck('...while currentStreak still disagrees, at the width of the 400-day slice',
+  oldRow.currentStreak === 350, String(oldRow.currentStreak));
+ck('...against the lifetime read behind the habit\'s own page',
+  oldStats.currentStreak === 501, String(oldStats.currentStreak));
+
+// ...and in ARCHIVED mode, which is the one line of the route with no other
+// test on it. The grouped lifetime read that answers the credit date used to be
+// skipped there — it fed only `categorySummaries`, which archived mode omits —
+// so re-gating it makes this row report 0.051922 against the same habit's own
+// page at 1, and nothing else in either edition's suite would notice. The row
+// figures are computed either way, so the read has to run either way.
+await put(`/habits/${oldAnswer.id}`, {
+  name: 'Wine', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'glasses', archived: true,
+});
+const archivedView = await overview({ days: 7, archived: 'true' });
+const archivedRow = archivedView.habits.find((h) => h.id === oldAnswer.id);
+
+ck('an archived habit\'s figures are credited from the same lifetime answer',
+  archivedRow && archivedRow.score === oldStats.score,
+  `${archivedRow && archivedRow.score} vs ${oldStats.score}`);
+ck('...and its bestStreak too',
+  archivedRow && archivedRow.bestStreak === oldStats.bestStreak,
+  `${archivedRow && archivedRow.bestStreak} vs ${oldStats.bestStreak}`);
+
+ck('a stored lapse still earns the credited best streak',
+  lapseRow.bestStreak === 366, String(lapseRow.bestStreak));
+ck('...and the two surfaces agree about that too',
+  lapseRow.bestStreak === lapseStats.bestStreak
+  && lapseRow.currentStreak === lapseStats.currentStreak,
+  `overview ${lapseRow.currentStreak}/${lapseRow.bestStreak} vs `
+  + `stats ${lapseStats.currentStreak}/${lapseStats.bestStreak}`);
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

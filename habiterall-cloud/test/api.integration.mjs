@@ -368,6 +368,180 @@ ck("today's window still carries its entries",
   Object.keys(rowNow.entries).length === 7,
   String(Object.keys(rowNow.entries).length));
 
+/* ---- issue #223: /overview's bestStreak reads the same credit rule ----
+ *
+ * `score` and `currentStreak` come from `summaryStats` and so from
+ * `resolveWindow`; `bestStreak` is a streak scan this ROUTE does itself, over a
+ * wider window and starting at the earliest row of any kind. Until the credit
+ * date was handed to it, `/overview` served `bestStreak: 365` for a habit whose
+ * own `/stats` page said 1.
+ *
+ * The SAME literals as `habiterall-personal/test/overview.integration.mjs`, on
+ * purpose: one route surface, two implementations, and they have drifted before
+ * — this edition once counted a skip as done on an at-most habit where personal
+ * did not. Written through the router rather than the data layer so the memo is
+ * invalidated the way a real write invalidates it.
+ */
+const creditHabitRes = await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Coffee 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'cups',
+  }),
+});
+const creditHabit = await creditHabitRes.json();
+await fetch(`${overviewBase}/api/habits/${creditHabit.id}/entries/${isoDaysAgo(365)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ status: 'skip' }),
+});
+
+const creditView = await getOverview({ days: 7 });
+const creditRow = creditView.habits.find((h) => h.id === creditHabit.id);
+const creditStats = await fetch(`${overviewBase}/api/habits/${creditHabit.id}/stats`)
+  .then((r) => r.json());
+
+ck('a skip-only limit habit reports no unearned best streak on /overview',
+  creditRow.bestStreak === 1, String(creditRow.bestStreak));
+ck('...and /overview agrees with /stats about all three figures',
+  creditRow.bestStreak === creditStats.bestStreak
+  && creditRow.currentStreak === creditStats.currentStreak
+  && creditRow.score === creditStats.score,
+  `overview ${creditRow.score}/${creditRow.currentStreak}/${creditRow.bestStreak} vs `
+  + `stats ${creditStats.score}/${creditStats.currentStreak}/${creditStats.bestStreak}`);
+ck('the habit is genuinely resolved to success, or this fixture proves nothing',
+  creditRow.unlogged_is_success === true, String(creditRow.unlogged_is_success));
+ck('a habit with zero completions still says so',
+  creditRow.totalCompleted === 0, String(creditRow.totalCompleted));
+
+// A stored LAPSE is real evidence, so the same shape keeps its long best streak.
+// Without this the checks above pass against a route that credits nothing ever.
+const lapseHabit = await (await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Soda 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'cans',
+  }),
+})).json();
+await fetch(`${overviewBase}/api/habits/${lapseHabit.id}/entries/${isoDaysAgo(365)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 0 }),
+});
+
+const lapseView = await getOverview({ days: 7 });
+const lapseRow223 = lapseView.habits.find((h) => h.id === lapseHabit.id);
+const lapseStats223 = await fetch(`${overviewBase}/api/habits/${lapseHabit.id}/stats`)
+  .then((r) => r.json());
+
+ck('a stored lapse still earns the credited best streak',
+  lapseRow223.bestStreak === 366, String(lapseRow223.bestStreak));
+ck('...and the two surfaces agree about that too',
+  lapseRow223.bestStreak === lapseStats223.bestStreak
+  && lapseRow223.currentStreak === lapseStats223.currentStreak,
+  `overview ${lapseRow223.currentStreak}/${lapseRow223.bestStreak} vs `
+  + `stats ${lapseStats223.currentStreak}/${lapseStats223.bestStreak}`);
+
+/* The shape the first round of this fix got wrong, and the reason the credit
+ * date is a LIFETIME date rather than one derived from whichever slice a figure
+ * happens to read. This route reads 400 days for `score`/`currentStreak` and
+ * 1830 for its own `bestStreak` scan, so a limit habit answered 500 days ago and
+ * skipped since holds nothing but a skip inside the narrow slice — which reads
+ * as "never answered" while the habit's own page, over lifetime rows, sees the
+ * answer. Measured: master agreed at 1.000 on both surfaces; a slice-derived
+ * credit date read 0.051922 here against 1.000 there, with `bestStreak` on this
+ * same payload disagreeing with both because its wider slice COULD see the
+ * answer. Every fixture above puts its only row 365 days back, inside both
+ * windows, where the two derivations agree and neither can fail. Same fixture
+ * and same claims as personal's `test/overview.integration.mjs`. */
+const staleAnswerHabit = await (await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Wine 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'glasses',
+  }),
+})).json();
+for (const [day, body] of [[500, { value: 1 }], [350, { status: 'skip' }]]) {
+  await fetch(`${overviewBase}/api/habits/${staleAnswerHabit.id}/entries/`
+    + `${isoDaysAgo(day)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+const staleView = await getOverview({ days: 7 });
+const staleRow = staleView.habits.find((h) => h.id === staleAnswerHabit.id);
+const staleStats = await fetch(
+  `${overviewBase}/api/habits/${staleAnswerHabit.id}/stats`
+).then((r) => r.json());
+
+ck('a habit answered before the summary window still has its silence credited',
+  staleRow.score === 1, String(staleRow.score));
+ck('...so the dashboard and the detail page agree about its strength',
+  staleRow.score === staleStats.score, `${staleRow.score} vs ${staleStats.score}`);
+ck('...and bestStreak agrees with the score beside it rather than with a '
+  + 'second credit date derived from its own wider window',
+  staleRow.bestStreak === staleStats.bestStreak,
+  `${staleRow.bestStreak} vs ${staleStats.bestStreak}`);
+
+/* `currentStreak` is the one figure on this payload that does NOT agree, and it
+ * is pinned WHERE IT STANDS rather than asserted into a parity that does not
+ * hold. Not the credit date — both reads resolve the same one — and not
+ * `unlogged`: purely the window. `summaryStats` gets a 400-day slice holding
+ * nothing but the skip, and a skip cannot OPEN a run, so the streak starts the
+ * day after it; the habit's own page opens at the stated answer 500 days back
+ * and carries that skip through without breaking it. Older than #223,
+ * reproduced identical on master, and closing it means making this route's
+ * streaks a lifetime read — a behaviour change on the dashboard's hot path.
+ *
+ * Two LITERALS and not `staleStats.currentStreak - 151`, because the point is
+ * that changing SUMMARY_WINDOW_DAYS fails here by name: widened past 500 the
+ * slice sees the answer and this reads 501, narrowed below 350 it sees no row
+ * at all and reads 1. A relative assertion would go on passing through both.
+ * Same figures as personal's `test/overview.integration.mjs`, which is the
+ * point — two implementations of one route surface.
+ * See docs/decisions/day-states.md. */
+ck('...while currentStreak still disagrees, at the width of the 400-day slice',
+  staleRow.currentStreak === 350, String(staleRow.currentStreak));
+ck("...against the lifetime read behind the habit's own page",
+  staleStats.currentStreak === 501, String(staleStats.currentStreak));
+
+// ...and in ARCHIVED mode, which is the one line of the route with no other test
+// on it. The grouped lifetime read that answers the credit date used to be
+// skipped there — it fed only `categorySummaries`, which archived mode omits —
+// so re-gating it makes this row report 0.051922 against the same habit's own
+// page at 1, and nothing else in either edition's suite would notice.
+await fetch(`${overviewBase}/api/habits/${staleAnswerHabit.id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Wine 223', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'glasses', archived: true,
+  }),
+});
+const archivedStaleView = await getOverview({ days: 7, archived: 'true' });
+const archivedStaleRow = archivedStaleView.habits.find(
+  (h) => h.id === staleAnswerHabit.id
+);
+
+ck("an archived habit's figures are credited from the same lifetime answer",
+  archivedStaleRow && archivedStaleRow.score === staleStats.score,
+  `${archivedStaleRow && archivedStaleRow.score} vs ${staleStats.score}`);
+ck('...and its bestStreak too',
+  archivedStaleRow && archivedStaleRow.bestStreak === staleStats.bestStreak,
+  `${archivedStaleRow && archivedStaleRow.bestStreak} vs ${staleStats.bestStreak}`);
+
+// All three habits go again, with their rows: the import-isolation check further
+// down counts EVERY entry this account has and expects exactly one, so a fixture
+// left behind here fails a test about tenancy with a number about this block.
+for (const id of [creditHabit.id, lapseHabit.id, staleAnswerHabit.id]) {
+  await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
+}
+
 // While the router is mounted, the other route added alongside it. The notify
 // suite exercises the storage behind this through `notifier.deliveryStatus`
 // directly, which would go on passing if the route itself were wired to the
@@ -1828,6 +2002,98 @@ ck('...and the chart\'s last point is that same number here too',
   avoidSection?.series.at(-1)?.value === avoidSection?.mean,
   JSON.stringify({ last: avoidSection?.series.at(-1)?.value, mean: avoidSection?.mean }));
 
+/* -- issue #223: the LIFETIME first ANSWER is a second thing only SQL can say --
+ *
+ * The block above pins that the comparison agrees with a habit's own page about
+ * the WARM-UP. This pins the other date the route supplies: the day silence may
+ * start counting as success. `computeCategoryStats` derives it from the entries
+ * it was handed when the key is absent, and this route hands it a slice opening
+ * 400 days before the window — so a habit whose only stated answer is OLDER than
+ * the slice would look, from inside the function, like one that has never
+ * answered, and be credited from `end` alone: ~0.05 on the comparison against
+ * ~1.0 on its own page.
+ *
+ * The stated answer therefore sits OUTSIDE the fetched slice on purpose (500
+ * days back against a slice opening at 429) with a skip inside it, which is what
+ * a fallback would find and what states nothing. Only `MIN(date) FILTER (WHERE
+ * COALESCE(status,'') <> 'skip')` can answer this. The personal edition's
+ * `apishape.integration.mjs` carries the same block: separate SQL, one promise.
+ */
+
+const oldAnswerCategory = await postCategory({
+  name: 'Compare Old Answer', color: '#0f766e',
+});
+const oldAnswerHabit = await postHabit({
+  name: 'Compare Old Answer habit', type: 'numerical', unit: 'cups',
+  target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', category_id: oldAnswerCategory.id,
+});
+await fetch(`${overviewBase}/api/habits/${oldAnswerHabit.id}/entries/`
+  + `${addDays(STATS_END, -500)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 1 }),
+});
+await fetch(`${overviewBase}/api/habits/${oldAnswerHabit.id}/entries/`
+  + `${addDays(STATS_END, -400)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ status: 'skip' }),
+});
+
+const oldAnswerOwn = await fetch(
+  `${overviewBase}/api/habits/${oldAnswerHabit.id}/stats?end=${STATS_END}`
+).then((r) => r.json());
+const oldAnswerOwnScore = oldAnswerOwn.scores?.at(-1)?.score;
+const withOldAnswer = await categoryStats();
+const oldAnswerSection = withOldAnswer.categories.find((c) => c.id === oldAnswerCategory.id);
+
+ck('sanity: a limit habit answered 500 days ago is converged on its own page',
+  oldAnswerOwnScore === 1, JSON.stringify(oldAnswerOwnScore));
+ck('THE assertion: the comparison credits it from that answer, which means the ' +
+  'route asked SQL for the lifetime first ANSWER rather than letting the ' +
+  'truncated slice decide there had never been one',
+  oldAnswerSection?.mean === oldAnswerOwnScore,
+  JSON.stringify({ mean: oldAnswerSection?.mean, ownScore: oldAnswerOwnScore }));
+ck('...and the member still LANDS, the window not having moved',
+  oldAnswerSection?.members === 1 && oldAnswerSection?.unloggedExcluded === 0,
+  JSON.stringify({ members: oldAnswerSection?.members,
+                   unlogged: oldAnswerSection?.unloggedExcluded }));
+
+// The other half: a habit whose ONLY row is a skip has never answered, and both
+// surfaces must say so. Without it the check above passes against a route that
+// credits every member unconditionally — which is what it did before.
+const skipOnlyHabit = await postHabit({
+  name: 'Compare Skip Only habit', type: 'numerical', unit: 'cups',
+  target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', category_id: oldAnswerCategory.id,
+});
+await fetch(`${overviewBase}/api/habits/${skipOnlyHabit.id}/entries/`
+  + `${addDays(STATS_END, -400)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ status: 'skip' }),
+});
+
+const skipOnlyOwn = await fetch(
+  `${overviewBase}/api/habits/${skipOnlyHabit.id}/stats?end=${STATS_END}`
+).then((r) => r.json());
+const skipOnlyOwnScore = skipOnlyOwn.scores?.at(-1)?.score;
+const withSkipOnly = await categoryStats();
+const twoMembers = withSkipOnly.categories.find((c) => c.id === oldAnswerCategory.id);
+
+ck('sanity: a skip-only limit habit is NOT converged on its own page',
+  typeof skipOnlyOwnScore === 'number' && skipOnlyOwnScore < 0.1,
+  JSON.stringify(skipOnlyOwnScore));
+ck('the comparison reads it as its own page does, so the two members are the ' +
+  'mean of two different numbers rather than both flattered to 1.0',
+  twoMembers?.members === 2
+  && Math.abs(twoMembers.mean - (oldAnswerOwnScore + skipOnlyOwnScore) / 2) < 1e-12,
+  JSON.stringify({ mean: twoMembers?.mean, own: oldAnswerOwnScore,
+                   skip: skipOnlyOwnScore }));
+ck('...and the worst member named is the one with no evidence',
+  twoMembers?.worst?.id === skipOnlyHabit.id, JSON.stringify(twoMembers?.worst));
+
 /* -- the range bounds --
  *
  * The ceiling is this route's OWN, and it is 1830 days — five years — not the
@@ -1899,7 +2165,7 @@ ck('an absent start opens the window a year before end, not at the ceiling',
 await withUser(alice, (db) => db.query(
   `DELETE FROM entries WHERE habit_id = ANY($1)`,
   [[keptHabit.id, archivedHabit.id, abandonedHabit.id, neverHabit.id, warmupHabit.id,
-    avoidHabit.id]]
+    avoidHabit.id, oldAnswerHabit.id, skipOnlyHabit.id]]
 ));
 
 /* ---------- which validator a date-into-a-RANGE route asks ----------

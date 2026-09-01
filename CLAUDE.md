@@ -110,7 +110,12 @@ decide from that. Both take `{value, status}` for this reason.
 working.** The score, the streaks and the completion count treat a 0 row and a
 missing row alike, but ranges that *start* at the earliest stored entry grow
 backwards when a lapse is imported, so every unknown day after it reads as a
-miss. Say so before "fixing" it.
+miss. Say so before "fixing" it. Under `success` the same mechanism adds CREDIT
+instead, and there it needs evidence: an unanswered day counts as success only
+from the habit's first row that STATES a value, so a skip cannot buy compliance
+it states nothing about while a stored lapse still can — a second date
+(`creditFrom`), never a narrower window, because `computeCoverage` shares the
+window and a skip IS an answer to it (`docs/decisions/day-states.md`, #223).
 
 **Every date range is clamped** (`boundedRange`, `MAX_RANGE_DAYS`). Ranges
 derived from *stored* data are attacker-controlled: one entry dated year 0100

@@ -205,8 +205,18 @@ look strong instead of one. `test/stats.test.js` pins the curve at days 13, 30
 and 60 so it cannot drift back.
 
 **Every date range is clamped**, and `computeStats` starts at
-`from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`). That
-window is derived inside `computeStats` and never returned, which is why anything
+`from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`).
+`resolveWindow` answers a **second** date beside it — `creditFrom`, the same
+expression over the earliest row that STATES a value — which every pass reading
+`unlogged` is handed so that an unanswered day counts as success only once the
+habit has answered once (#223). A route that computes a pass ITSELF, or that
+hands `summaryStats` a bounded SLICE — both editions' `/overview` does both —
+must ask `creditAnchor` with the habit's LIFETIME first answer out of SQL, and
+must hand the one date to every figure on the row: whether a habit has ever
+answered is not a question a 400- or an 1830-day window can answer, and two
+windows deriving it separately disagree exactly when the answer falls between
+them.
+That window is derived inside `computeStats` and never returned, which is why anything
 needing a figure from it gets a returned field rather than walking the entries
 again — `computeRecovery` answers `longest` and `lastEnd` for that reason. Every
 aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
@@ -544,7 +554,11 @@ because a chart whose last point disagrees with the number printed over it reads
 as a bug whichever of the two is right. "Never logged" is not "nothing in the
 entry slice": a route fetches a bounded window, so the LIFETIME first-entry date
 is supplied per member, and an abandoned habit keeps its genuine near-zero
-strength in the mean instead of being excused from it.
+strength in the mean instead of being excused from it. **`firstAnswer` rides
+beside it, out of the same grouped read and for the same reason** — the lifetime
+earliest row that STATES a value, which is where silence starts counting as
+success (#223). It moves no member's window and so no member's landing; without
+it a skip-anchored limit read 1.00 here against 0.051922 on its own page.
 
 **`MAX_COMPARE_DAYS` is 1830 and is deliberately not `MAX_RANGE_DAYS`.** That
 ceiling bounds a route walking ONE habit; a comparison walks every habit the
