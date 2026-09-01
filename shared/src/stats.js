@@ -1565,12 +1565,16 @@ export function summariseByCategory(categories, payloads, firstEntry, day) {
  *   them; Uncategorised is appended and is not one of these
  * @param {Array<{habit: import('./types.js').Habit,
  *                entries: import('./types.js').Entry[],
- *                firstEntry?: string|null}>} members every habit the account
+ *                firstEntry?: string|null,
+ *                firstAnswer?: string|null}>} members every habit the account
  *   has, with its entries from `start - SCORE_WARMUP_DAYS`. `firstEntry` is
  *   that habit's LIFETIME earliest entry date, or `null` if it has none —
  *   supply it, because a truncated `entries` slice cannot answer it and a
  *   habit last logged before the slice would otherwise read as never logged.
- *   Omit the key to derive it from `entries`.
+ *   Omit the key to derive it from `entries`. `firstAnswer` is the same
+ *   question asked of the earliest row that STATES a value — the day silence
+ *   may start counting as success (#223) — and is supplied and derived for
+ *   exactly the same reasons.
  * @param {{start?: string, end?: string, granularity?: string,
  *          weekStart?: 'monday'|'sunday', unlogged?: string}} [opts]
  * @returns {import('./types.js').CategoryStats}
@@ -1611,7 +1615,9 @@ export function computeCategoryStats(categories, members,
   // boundary. Every `refDay` therefore has a score point.
   const warmStart = dates.length ? addDays(dates[0], -SCORE_WARMUP_DAYS) : null;
 
-  const readings = active.map(({ habit, entries, firstEntry: lifetimeFirst }) => {
+  const readings = active.map(({
+    habit, entries, firstEntry: lifetimeFirst, firstAnswer: lifetimeAnswer,
+  }) => {
     // `status` is preserved alongside the value for the reason `resolveWindow`
     // states: a skip must stay distinguishable from a numerical habit
     // legitimately recording 3.
@@ -1701,14 +1707,44 @@ export function computeCategoryStats(categories, members,
       if (!Number.isNaN(asDate.getTime())) memberWarm = toISO(asDate);
     }
 
+    // **And the credit date is a LIFETIME question too, for the same reason
+    // `firstEntry` above is one** (#223). A member's window here opens at
+    // `memberWarm`, which is not moved by any of this — the landing rule,
+    // `landsOn` and `unloggedExcluded` are untouched, so a skip-anchored member
+    // still lands and is still averaged in, now at an honest strength. What
+    // moves is what SILENCE inside that window is worth: without this, a member
+    // whose only stored row is a skip converged to **1.00** on the comparison
+    // while its own detail page read **0.051922**, a wider version of the
+    // 0.97-against-0.41 gap the warm-up clamp above records, and worse, because
+    // 1.00 is the ceiling.
+    //
+    // `entries` is a bounded slice, so "has never stated an answer" is not "has
+    // stated none in the window I happened to fetch" — the caller supplies
+    // `firstAnswer` from SQL and this prefers it, exactly as `firstEntry` is
+    // preferred, and derives it from the slice only when the key is ABSENT.
+    // Nothing states a value ⇒ credit begins at `end`, which is what makes such
+    // a member read as having no evidence rather than a perfect record.
+    //
+    // Clamped and normalised through the same helper the other two dates use,
+    // and it takes no `start`: the comparison's `start` is a window this route
+    // was ASKED for, where `creditStart`'s `start ??` clause is about a caller
+    // naming the window a habit's own figures are read over. Honouring it here
+    // would credit every silent day of any explicitly-started comparison, which
+    // is the defect this is fixing arriving through the other route.
+    const firstAnswer = lifetimeAnswer !== undefined
+      ? lifetimeAnswer
+      : firstStatedAnswer(entryMap);
+    const memberCredit = windowStart(firstAnswer ?? end, undefined, end);
+
     const scoreAt = new Map();
     let rate = null;
     if (dates.length) {
-      for (const point of computeScores(habit, entryMap, memberWarm, end, unlogged)) {
+      for (const point of computeScores(habit, entryMap, memberWarm, end, unlogged,
+        memberCredit)) {
         scoreAt.set(point.date, point.score);
       }
       rate = computeRecovery(
-        computeMissRuns(habit, entryMap, dates[0], end, unlogged), end
+        computeMissRuns(habit, entryMap, dates[0], end, unlogged, memberCredit), end
       ).rate;
     }
 

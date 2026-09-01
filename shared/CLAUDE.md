@@ -549,7 +549,11 @@ because a chart whose last point disagrees with the number printed over it reads
 as a bug whichever of the two is right. "Never logged" is not "nothing in the
 entry slice": a route fetches a bounded window, so the LIFETIME first-entry date
 is supplied per member, and an abandoned habit keeps its genuine near-zero
-strength in the mean instead of being excused from it.
+strength in the mean instead of being excused from it. **`firstAnswer` rides
+beside it, out of the same grouped read and for the same reason** — the lifetime
+earliest row that STATES a value, which is where silence starts counting as
+success (#223). It moves no member's window and so no member's landing; without
+it a skip-anchored limit read 1.00 here against 0.051922 on its own page.
 
 **`MAX_COMPARE_DAYS` is 1830 and is deliberately not `MAX_RANGE_DAYS`.** That
 ceiling bounds a route walking ONE habit; a comparison walks every habit the

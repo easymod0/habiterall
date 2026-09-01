@@ -2408,3 +2408,62 @@ test('issue #223: #270 is untouched — no phantom-dated row becomes the anchor'
   assert.equal(asLimit.score, 0.101149);
   assert.equal(asLimit.totalCompleted, 3);
 });
+
+test('issue #223: a skip-anchored member reads the same on the comparison as on its own page', () => {
+  // The category comparison scores each member itself, from `memberWarm`, so it
+  // needed the credit date handing to it separately — and until it got one, a
+  // member whose only stored row is a SKIP converged to 1.00 here while its own
+  // detail page read 0.051922. That is the same defect as the warm-up clamp
+  // above (0.969536 against 0.41327) with a worse spread, 1.00 being the
+  // ceiling, and it is what makes two surfaces disagreeing about one habit
+  // indistinguishable from one of them being broken.
+  const cats = [{ id: 7, name: 'Health', color: '#123456' }];
+  const habit = limit223({ id: 30, category_id: 7 });
+  const skip = skipOnly223();
+
+  const own = computeStats(habit, skip, { end: END_223 }).score;
+  assert.equal(own, 0.051922);
+
+  const health = computeCategoryStats(cats, [{ habit, entries: skip, firstEntry: SKIP_223 }],
+    { start: '2025-08-20', end: END_223, granularity: 'month' }).categories[0];
+  assert.equal(health.mean, own);
+  // The window did NOT move, so the member still LANDS: it is counted into the
+  // mean at an honest strength rather than excused from it. An implementation
+  // that moved the anchor instead would show up here as `unloggedExcluded: 1`.
+  assert.equal(health.members, 1);
+  assert.equal(health.unloggedExcluded, 0);
+  // Same members, same day, same arithmetic — a headline that moved without the
+  // chart would leave the line saying the other number.
+  assert.equal(health.series.at(-1).value, health.mean);
+
+  // The lifetime answer is the CALLER's to supply, because `entries` here is a
+  // bounded slice: a habit whose stated answer predates the slice must still be
+  // credited from it. Supplied explicitly, the same member reads as converged.
+  const bounded = computeCategoryStats(cats,
+    [{ habit, entries: skip, firstEntry: SKIP_223, firstAnswer: '2024-01-01' }],
+    { start: '2025-08-20', end: END_223, granularity: 'month' }).categories[0];
+  assert.equal(bounded.mean, 1);
+
+  // ...and an ABSENT key still means "derive it from what you were given", so
+  // the function stays usable standalone — the same contract `firstEntry` has.
+  const derived = computeCategoryStats(cats, [{ habit, entries: skip }],
+    { start: '2025-08-20', end: END_223, granularity: 'month' }).categories[0];
+  assert.equal(derived.mean, 0.051922);
+
+  // The controls, and they are what say this is about the SHAPE and not the
+  // fixture. A stored LAPSE is evidence, so the identical rows with status ''
+  // stay at 1.00; and an at-least member has no credit to withhold, so it is
+  // byte-identical either way.
+  const lapse = computeCategoryStats(cats,
+    [{ habit, entries: lapseOnly223(), firstEntry: SKIP_223, firstAnswer: SKIP_223 }],
+    { start: '2025-08-20', end: END_223, granularity: 'month' }).categories[0];
+  assert.equal(lapse.mean, 1);
+  assert.equal(computeStats(habit, lapseOnly223(), { end: END_223 }).score, 1);
+
+  const atLeast = atLeast223({ id: 31, category_id: 7 });
+  const control = computeCategoryStats(cats,
+    [{ habit: atLeast, entries: skip, firstEntry: SKIP_223, firstAnswer: null }],
+    { start: '2025-08-20', end: END_223, granularity: 'month' }).categories[0];
+  assert.equal(control.mean, computeStats(atLeast, skip, { end: END_223 }).score);
+  assert.equal(control.mean, 0);
+});

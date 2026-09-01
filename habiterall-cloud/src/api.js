@@ -513,8 +513,19 @@ api.get('/categories/stats', route(async (req, res) => {
        ORDER BY date`,
       [ids, addDays(start, -SCORE_WARMUP_DAYS), end]
     ) : { rows: [] };
+    // Two lifetime dates per habit out of one grouped read: the earliest row of
+    // any kind, which decides where a member's window OPENS, and the earliest
+    // row that states a value, which decides where silence inside it starts
+    // counting as success (#223). The second is a lifetime question for exactly
+    // the reason the first is — the slice fetched above cannot answer either.
+    // The FILTER matches `firstStatedAnswer` in `shared/src/stats.js`:
+    // `COALESCE(status, '') <> 'skip'`, so a numerical habit's legitimate 3 is
+    // still a stated value.
     const { rows: firstRows } = ids.length ? await db.query(
-      `SELECT habit_id, to_char(MIN(date), 'YYYY-MM-DD') AS first_date
+      `SELECT habit_id,
+              to_char(MIN(date), 'YYYY-MM-DD') AS first_date,
+              to_char(MIN(date) FILTER (WHERE COALESCE(status, '') <> 'skip'),
+                      'YYYY-MM-DD') AS first_answer
        FROM entries WHERE habit_id = ANY($1) GROUP BY habit_id`,
       [ids]
     ) : { rows: [] };
@@ -522,6 +533,7 @@ api.get('/categories/stats', route(async (req, res) => {
     const byHabit = new Map(ids.map((id) => [id, []]));
     for (const r of entryRows) byHabit.get(r.habit_id).push(r);
     const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
+    const firstAnswer = new Map(firstRows.map((r) => [r.habit_id, r.first_answer]));
 
     return computeCategoryStats(
       categories,
@@ -532,6 +544,10 @@ api.get('/categories/stats', route(async (req, res) => {
         // `computeCategoryStats` to derive the answer from the entries it was
         // given, which is the truncated slice this route deliberately fetched.
         firstEntry: firstEntry.get(h.id) ?? null,
+        // Same rule, same reason: absent would mean "derive it from the
+        // truncated slice", where `null` is the answer that the habit has
+        // never stated one.
+        firstAnswer: firstAnswer.get(h.id) ?? null,
       })),
       { start, end, granularity, weekStart, unlogged }
     );

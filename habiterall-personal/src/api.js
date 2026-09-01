@@ -195,7 +195,10 @@ const q = {
    * question the fetched slice cannot.
    */
   firstEntryPerHabit: db.prepare(`
-    SELECT habit_id, MIN(date) AS first_date FROM entries GROUP BY habit_id
+    SELECT habit_id,
+           MIN(date) AS first_date,
+           MIN(CASE WHEN COALESCE(status, '') <> 'skip' THEN date END) AS first_answer
+      FROM entries GROUP BY habit_id
   `),
   entriesForSince: db.prepare(`
     SELECT date, value, status, notes
@@ -464,9 +467,17 @@ api.get('/categories/stats', (req, res) => {
 
   const habits = /** @type {any[]} */ (q.everyHabit.all());
 
+  // Two lifetime dates per habit out of one grouped read: the earliest row of
+  // any kind, which decides where a member's window OPENS, and the earliest row
+  // that states a value, which decides where silence inside it starts counting
+  // as success (#223). The second is a lifetime question for exactly the reason
+  // the first is — the slice fetched below cannot answer either.
+  const firstRows = /** @type {any[]} */ (q.firstEntryPerHabit.all());
   const firstEntry = new Map(
-    /** @type {any[]} */ (q.firstEntryPerHabit.all())
-      .map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+    firstRows.map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+  );
+  const firstAnswer = new Map(
+    firstRows.map((r) => [r.habit_id, /** @type {string|null} */ (r.first_answer)])
   );
 
   // One SELECT over `entries`, bucketed by habit — the same shape `/overview`
@@ -496,6 +507,9 @@ api.get('/categories/stats', (req, res) => {
       // `computeCategoryStats` to derive the answer from the entries it was
       // given, which is the truncated slice this route deliberately fetched.
       firstEntry: firstEntry.get(h.id) ?? null,
+      // Same rule, same reason: absent would mean "derive it from the truncated
+      // slice", where `null` is the answer that the habit has never stated one.
+      firstAnswer: firstAnswer.get(h.id) ?? null,
     })),
     { start, end, granularity, weekStart, unlogged }
   ));
