@@ -23,7 +23,7 @@ const SUMMARY_WINDOW_DAYS = 400;
 const STREAK_HISTORY_DAYS = 1830;
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
-import { backupSettings, backupCategories, parseUpload } from '@habiterall/shared/import.js';
+import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
 import {
@@ -1076,14 +1076,15 @@ api.post('/import', (req, res, next) => {
 
   // Express 4 does not catch rejections from async handlers, so forward them.
   parseUpload(buf)
-    .then((habits) => {
+    .then(({ habits, categories }) => {
       if (!habits.length) throw httpError(400, 'no habits found in the uploaded file');
       // `[]`, never `null`, for a format with nowhere to carry a category —
       // `applyImport` iterates this before a single habit is written; see its
       // own comment for why a habit's `category` is resolved against it by
-      // NAME rather than by any id the file happens to carry.
-      const parsedCategories = backupCategories(buf);
-      const result = applyImport(habits, mode, parsedCategories ?? []);
+      // NAME rather than by any id the file happens to carry. `categories` is
+      // `parseUpload`'s own second return value now (#282), out of the zip
+      // branch's one unzip rather than a second one.
+      const result = applyImport(habits, mode, categories ?? []);
       // `categorySkip` is set when the file's categories carried nothing
       // usable, or when more were declared than `LIMITS.categories` allows —
       // see its own comment in `backupCategories`. Added here rather than in
@@ -1095,7 +1096,7 @@ api.post('/import', (req, res, next) => {
       // "…and N more" — so an import that also carries eight bad dates would
       // hide the one message this whole channel exists for behind the ellipsis,
       // and a hand-edited file is precisely the shape that has both.
-      if (parsedCategories?.categorySkip) result.skipped.unshift(parsedCategories.categorySkip);
+      if (categories?.categorySkip) result.skipped.unshift(categories.categorySkip);
 
       // Replace mode only: it means "make this account look like the file", and
       // the file's preferences are part of that. A merge is "add these habits to

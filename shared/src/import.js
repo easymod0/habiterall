@@ -413,6 +413,61 @@ function parseCategoriesCsvRows(text) {
 }
 
 /**
+ * Find a zip member by suffix, case-insensitively, and answer its contents as
+ * UTF-8 text — the `find` closure `parseZipExport` and `backupCategories`'s
+ * zip branch each used to keep a copy of, extracted so the two readers of one
+ * unzip are provably the same reader.
+ *
+ * @param {Map<string, Buffer>} files as `unzip` returns
+ * @param {string} suffix matched against the lower-cased member name
+ * @returns {string|null} the member's text, or null if none matches
+ */
+function findMember(files, suffix) {
+  for (const [name, contents] of files) {
+    if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
+  }
+  return null;
+}
+
+/**
+ * The categories a zip's `Categories.csv` repairs to, given the text
+ * `findMember(files, 'categories.csv')` answered. `null` in, `null` out — no
+ * member at all, a Loop-produced zip or one of ours with none — which
+ * `parseZipExport` and `backupCategories`'s zip branch must both treat as
+ * inert alike.
+ *
+ * A zip's `Categories.csv` is new with this format (#257) and every way it
+ * can carry nothing was silent: a header with no `name` column, a header-only
+ * file, or more rows than `LIMITS.categories` allows. In every case the
+ * import still succeeds — habits still name their categories from
+ * `Habits.csv`, and `resolveOrCreateCategory` re-invents each at the default
+ * colour — and nothing told the user their file's own colours and positions
+ * were dropped. `categorySkip` carries that sentence for the route to add to
+ * `result.skipped`, the channel already built for exactly this; a `null`
+ * result above (no member at all) is not this, and never gets one, because
+ * there `Categories.csv` was never there to lose.
+ *
+ * @param {string|null} text
+ * @returns {(Array<{name: string, color: string, position: number}> &
+ *   {categorySkip?: string})|null}
+ */
+function categoriesFromCsvText(text) {
+  if (text === null) return null;
+
+  const diagnostics = {};
+  const categories = normalizeCategories(parseCategoriesCsvRows(text), diagnostics);
+  if ((diagnostics.named ?? 0) === 0) {
+    // Zip-only, and deliberately: a JSON backup with an empty `categories`
+    // array is a legitimate shape that says "this account has none", while a
+    // `Categories.csv` member that parsed to nothing is a file that was
+    // supposed to carry something.
+    return withSkip(categories,
+      'Categories.csv carried no usable categories: colours and positions were not restored');
+  }
+  return overCapSkip(categories, diagnostics, 'Categories.csv');
+}
+
+/**
  * The categories a habiterall backup carries, if it names any — from the
  * JSON format's own `categories` array, or from a zip's `Categories.csv`
  * (`buildCsvArchive`, export-csv.js) alongside `Habits.csv` and
@@ -453,17 +508,16 @@ export function backupCategories(buf) {
     // import runs — this reader only ever answers `null` on a doubt, never
     // throws.
     //
-    // This is the SECOND `unzip()` of the same buffer on an ordinary import:
-    // both routes call `parseUpload(buf)` (whose zip branch decompresses
-    // every member to reach `Habits.csv`/`Checkmarks.csv`) and then this
-    // function on the identical `buf`, so a large `Checkmarks.csv` is
-    // inflated twice, once for no reason a Loop zip can ever satisfy — it has
-    // no `Categories.csv` to find. `MAX_TOTAL_BYTES` is a per-call bound, so
-    // this doubles the inflate cost a request may spend rather than the
-    // memory held at once. The right fix is `parseUpload` returning
-    // categories alongside habits from its own single unzip, which is a
-    // wider change than a review round should carry — filed as #282 rather
-    // than done here.
+    // No longer the second unzip of an ordinary import (#282): both routes now
+    // get their categories out of `parseUpload`'s own single pass —
+    // `parseZipExport` answers `{habits, categories}` from the one
+    // `unzip(buf)` it already did, through the same `findMember` +
+    // `categoriesFromCsvText` this function calls below — and neither reaches
+    // this function for a zip's categories any more. This stays the entry
+    // point for a caller that holds only a buffer and nothing else
+    // (`habiterall-cloud/test/roundtrip.integration.mjs` calls it directly on
+    // a zip buffer), and a zip handed HERE still pays its own inflate: this
+    // reader has no other way to reach `Categories.csv`.
     let files;
     try {
       files = unzip(buf);
@@ -471,38 +525,7 @@ export function backupCategories(buf) {
       return null;
     }
 
-    const find = (suffix) => {
-      for (const [name, contents] of files) {
-        if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
-      }
-      return null;
-    };
-
-    const categoriesCsv = find('categories.csv');
-    if (categoriesCsv === null) return null;   // a Loop zip, or one of ours with none
-
-    // Unlike the JSON branch below, a zip's `Categories.csv` is new with this
-    // format (#257) and every way it can carry nothing was silent: a header
-    // with no `name` column, a header-only file, or more rows than
-    // `LIMITS.categories` allows. In every case the import still succeeds —
-    // habits still name their categories from `Habits.csv`, and
-    // `resolveOrCreateCategory` re-invents each at the default colour — and
-    // nothing told the user their file's own colours and positions were
-    // dropped. `categorySkip` carries that sentence for the route to add to
-    // `result.skipped`, the channel already built for exactly this; a `null`
-    // result above (no member, or an unreadable zip) is not this, and never
-    // gets one, because there `Categories.csv` was never there to lose.
-    const diagnostics = {};
-    const categories = normalizeCategories(parseCategoriesCsvRows(categoriesCsv), diagnostics);
-    if ((diagnostics.named ?? 0) === 0) {
-      // Zip-only, and deliberately: a JSON backup with an empty `categories`
-      // array is a legitimate shape that says "this account has none", while a
-      // `Categories.csv` member that parsed to nothing is a file that was
-      // supposed to carry something.
-      return withSkip(categories,
-        'Categories.csv carried no usable categories: colours and positions were not restored');
-    }
-    return overCapSkip(categories, diagnostics, 'Categories.csv');
+    return categoriesFromCsvText(findMember(files, 'categories.csv'));
   }
 
   const head = buf.toString('utf8').replace(/^﻿/, '').trimStart();
@@ -1068,8 +1091,30 @@ export function parseLoopHabitsCSV(text) {
  * Errors carry `status: 400` — an unreadable upload is the client's problem, and
  * both editions' error middleware reads that field.
  *
+ * Also answers `categories` (#282) — exactly what `backupCategories(buf)`
+ * would have answered, for any buffer this function ANSWERS rather than
+ * rejects, `null` included — so a route no longer has to call that function a
+ * second time on a zip it just unzipped here: the zip branch's own
+ * `categories` comes out of `parseZipExport`'s one `unzip(buf)`, and every
+ * other branch either has nowhere to carry a category (`null`, same as
+ * `backupCategories` already answers for that shape) or is the `{` branch,
+ * which still calls `backupCategories(buf)` for it — the one format where
+ * doing so costs no second unzip.
+ *
+ * The qualifier is the whole of the parity, not a hedge: over a buffer this
+ * function THROWS on, the two disagree and must. A zip carrying a
+ * `Categories.csv` and no `Checkmarks.csv` is the case — `backupCategories`
+ * answers that file's categories, because it answers a doubt with `null` and
+ * never throws, while this function rejects the upload with
+ * `400 zip does not contain a Checkmarks.csv`. Nothing is lost by that: a
+ * caller of this function has no `categories` to read when it threw, and the
+ * route's own `catch` is what the user hears.
+ *
  * @param {Buffer} buf the raw request body
- * @returns {Promise<object[]>} normalised habits, ready for applyImport
+ * @returns {Promise<{habits: object[], categories:
+ *   (Array<{name: string, color: string, position: number}> &
+ *   {categorySkip?: string})|null}>} normalised habits, ready for
+ *   applyImport, alongside the file's categories
  */
 export async function parseUpload(buf) {
   const fail = (message) => Object.assign(new Error(message), { status: 400 });
@@ -1090,7 +1135,9 @@ export async function parseUpload(buf) {
     const path = join(tmpdir(), `habiterall-import-${randomUUID()}.db`);
     writeFileSync(path, buf, { mode: 0o600 });
     try {
-      return await parseLoopDatabase(path);
+      // No Loop format has anywhere to put a category (see `backupCategories`),
+      // so this is `null` unconditionally rather than a call to it.
+      return { habits: await parseLoopDatabase(path), categories: null };
     } finally {
       try { unlinkSync(path); } catch { /* best effort */ }
     }
@@ -1116,12 +1163,17 @@ export async function parseUpload(buf) {
     } catch {
       throw fail('file is not valid JSON');
     }
-    return parseHabiterallJSON({ habits });
+    // A bare array has nowhere to carry a `categories` key either.
+    return { habits: parseHabiterallJSON({ habits }), categories: null };
   }
 
-  if (head.startsWith('{')) return parseHabiterallJSON(text);
+  if (head.startsWith('{')) {
+    return { habits: parseHabiterallJSON(text), categories: backupCategories(buf) };
+  }
 
-  if (/^"?date"?\s*,/i.test(head)) return parseLoopCheckmarksCSV(text);
+  if (/^"?date"?\s*,/i.test(head)) {
+    return { habits: parseLoopCheckmarksCSV(text), categories: null };
+  }
 
   throw fail(
     'unrecognized file: expected a habiterall JSON backup, a Loop .db backup, ' +
@@ -1143,21 +1195,23 @@ export async function parseUpload(buf) {
  * this — an account with no entries at all — so this union is what the mixed
  * cases need, and what keeps "no habits found in the uploaded file" an honest
  * thing to say about the pair rather than about one of the two files.
+ *
+ * The one `unzip(buf)` here is also where this archive's categories come
+ * from (#282): `findMember` + `categoriesFromCsvText` read `Categories.csv`
+ * out of the same `files` this function already has, so `parseUpload`'s zip
+ * branch never has to open the archive a second time to answer both halves.
+ *
+ * @returns {{habits: object[], categories:
+ *   (Array<{name: string, color: string, position: number}> &
+ *   {categorySkip?: string})|null}}
  */
 function parseZipExport(buf, fail) {
   const files = unzip(buf);
 
-  const find = (suffix) => {
-    for (const [name, contents] of files) {
-      if (name.toLowerCase().endsWith(suffix)) return contents.toString('utf8');
-    }
-    return null;
-  };
-
-  const checkmarksCsv = find('checkmarks.csv');
+  const checkmarksCsv = findMember(files, 'checkmarks.csv');
   if (!checkmarksCsv) throw fail('zip does not contain a Checkmarks.csv');
 
-  const habitsCsv = find('habits.csv');
+  const habitsCsv = findMember(files, 'habits.csv');
   const meta = habitsCsv ? parseLoopHabitsCSV(habitsCsv) : new Map();
   const habits = parseLoopCheckmarksCSV(checkmarksCsv, meta);
 
@@ -1168,7 +1222,7 @@ function parseZipExport(buf, fail) {
   for (const [name, habitMeta] of meta) {
     if (!columns.has(name)) habits.push(habitFromCsvMeta(name, habitMeta));
   }
-  return habits;
+  return { habits, categories: categoriesFromCsvText(findMember(files, 'categories.csv')) };
 }
 
 /**

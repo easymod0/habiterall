@@ -103,10 +103,10 @@ const clearAllHabits = db.prepare(`DELETE FROM habits`);
  * @param {any[]} habits
  * @param {'merge'|'replace'} mode
  * @param {Array<{name: string, color: string, position?: number}>} categories
- *   the file's own categories, from `backupCategories(buf)` — `[]` (never
- *   `null`) for a format with nowhere to carry one, so the loop below has
- *   nothing to iterate. A habit's own `category` is a NAME, not this array's
- *   index, and is resolved against it below.
+ *   the file's own categories, from `parseUpload`'s `categories` — `[]`
+ *   (never `null`) for a format with nowhere to carry one, so the loop below
+ *   has nothing to iterate. A habit's own `category` is a NAME, not this
+ *   array's index, and is resolved against it below.
  */
 export function applyImport(habits, mode = 'merge', categories = []) {
   // `entriesKept` counts days the file wanted to mark as missed and the account
@@ -225,7 +225,7 @@ export function applyImport(habits, mode = 'merge', categories = []) {
 
     // The file's own declared categories, each with its own colour — applied
     // before any habit, so a habit naming one of these below almost never has
-    // to invent it. `backupCategories(buf)` already caps this at
+    // to invent it. `parseUpload`'s `categories` already caps this at
     // LIMITS.categories and drops anything nameless; the cap above is the
     // backstop for a merge pushing the account's own total past it.
     for (const c of categories) resolveOrCreateCategory(c.name, c.color, c.position, true);

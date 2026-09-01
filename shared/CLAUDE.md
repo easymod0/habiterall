@@ -822,6 +822,39 @@ habits have no entries exported a lone header line and restored as
 the other file, were parsed and thrown away. `parseZipExport` unions the two
 now, which also covers a habit named in one file and not the other.
 
+**`parseUpload` answers `{habits, categories}` from one `unzip`, not two
+(#282).** `parseZipExport`'s zip branch already inflated every member to reach
+`Checkmarks.csv`/`Habits.csv`; it now reads `Categories.csv` out of that same
+pass instead of a route calling `backupCategories(buf)` afterwards on the
+identical buffer. `backupCategories` remains the buffer-only reader — a caller
+holding nothing but bytes still has one function to ask, and a zip handed to
+it directly still pays its own inflate — but neither route reaches it for a
+zip any more. The per-request inflate ceiling on the zip path drops from two
+`MAX_TOTAL_BYTES` to one — 128 MiB to 64 MiB — and members considered from
+1,024 (2 × `MAX_ENTRIES`) to 512; the per-member ceiling stays `MAX_ENTRY_BYTES`
+(32 MiB), untouched either way. Peak resident decompressed bytes is unchanged,
+because the two passes never overlapped — each `files` Map was already garbage
+once its caller returned. This is a CPU-cost fix, not a new cap: every bound
+that held on both passes before holds on the one pass now.
+
+**One input class got DEARER, and a perf change has to say which.** The
+categories are now read inside `parseUpload`, so they are parsed BEFORE the
+route's `no habits found in the uploaded file` 400 — where the second call used
+to sit after it. A zip whose `Checkmarks.csv` is a bare `Date\n` and whose
+`Categories.csv` is millions of rows therefore 400s having done that work:
+measured at 735 ms and ~1 GiB RSS for a 22.9 MiB member, against 3 ms on the
+old ordering, and `MAX_ENTRY_BYTES` puts the ceiling near ~1 s and ~1.5 GiB.
+The per-request CEILING still went down rather than up — the same attacker buys
+strictly more work on the old ordering by adding one column to
+`Checkmarks.csv`, which makes it do two inflates AND the same category parse —
+so this is a cost moved onto a request that answers 400, not a bound weakened.
+What actually makes that number large is older than this change and is not
+`unzip`: `normalizeCategories` materialises every row three times before
+`.slice(0, LIMITS.categories)` ever runs, so the cap bounds what is RETURNED
+and not what is BUILT. Bounding it where the rows are produced — the rule
+`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` already follow, one section up — is
+the fix, and it belongs to the category reader rather than here.
+
 ## Reminders and destinations
 
 **A destination is either on-device or server-sent, and the difference is the
