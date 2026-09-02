@@ -210,11 +210,26 @@
       </label>
 
       <label>Icon
-        <input name="icon" maxlength="32" autocomplete="off" placeholder="🏃">
+        <div class="icon-field-row">
+          <input name="icon" maxlength="32" autocomplete="off" placeholder="🏃">
+          <span class="icon-preview" id="icon-preview">
+            <span class="icon-preview-glyph" aria-hidden="true"></span>
+            <span class="field-hint icon-preview-caption" aria-live="polite"></span>
+          </span>
+          <button type="button" id="icon-picker-toggle" class="btn btn-icon"
+                  aria-label="Choose an emoji" aria-expanded="false" aria-controls="icon-picker">
+            <span aria-hidden="true">🙂</span>
+          </button>
+        </div>
         <span class="field-hint">
-          Optional, one character. The server keeps the first.
+          Optional, one character — type, paste, or choose one below.
         </span>
       </label>
+      <div id="icon-picker" class="icon-picker" hidden>
+        <input type="text" id="icon-search" autocomplete="off" placeholder="Search…"
+               aria-label="Search emoji">
+        <div id="icon-grid" class="icon-grid" role="group" aria-label="Emoji"></div>
+      </div>
 
       <label>Description
         <input name="description" maxlength="500" autocomplete="off">

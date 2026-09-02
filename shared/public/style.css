@@ -738,6 +738,75 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
    so a refusal here reads as ordinary help text without this line. */
 #target-hint.error { color: var(--danger); }
 
+/* ---------- icon field (habit dialog) ---------- */
+
+.icon-field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* The icon input sits in this row beside the preview and the toggle, so it
+   needs the same override `.category-new input[type='text']` uses below —
+   `dialog input` otherwise forces `display: block; width: 100%`. */
+.icon-field-row input {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+.icon-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+/* aria-hidden — see icon-field.js's `updatePreview`. Sized up from the rest
+   of the row so the glyph itself, not just the caption beside it, is what a
+   sighted user actually checks. */
+.icon-preview-glyph {
+  font-size: 20px;
+  line-height: 1;
+  min-width: 1.2em;
+  text-align: center;
+}
+.icon-preview-caption { margin-top: 0; }
+
+/* Inline in the dialog's own flow, not a fixed-position popover — that is
+   what keeps a narrow viewport honest (responsive.mjs checks it at 360px). */
+.icon-picker {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+#icon-search { margin-bottom: 8px; }
+/* `.starters`' own tile-grid shape (`auto-fill` + a minimum), scoped to a
+   scrolling panel the way `.category-manage` scopes its own list. */
+.icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.icon-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  font-size: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0;
+}
+.icon-cell:hover { border-color: var(--accent); }
+.icon-cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* ---------- category field (habit dialog) ---------- */
 
 .category-field { margin-bottom: 11px; }
