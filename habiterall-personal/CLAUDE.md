@@ -83,8 +83,14 @@ edition has no `withUserWrite` and no `data_version` to hang a single hook off
 of, so every write path that can move what those two figures mean for a habit
 calls `clearHabitSummary` or `clearAllSummaries` (`db.js`) itself: both
 branches of the entry PUT, the entry DELETE, `PUT /habits/:id` (it REPLACES, so
-`type` and `target_*` can move under the cached pair), and the three sites in
-`apply-import.js`. A write path added later that skips this serves a figure
+`type` and `target_*` can move under the cached pair), the three sites in
+`apply-import.js`, **`PUT /settings` and `DELETE /settings`** (the account-wide
+`atMostUnlogged` setting is an INPUT to `recomputeBestStreak` via
+`storedUnlogged()`, so it clears every habit's stamp, not one), and
+**`record()` in `notifier.js`** — the shared handler behind every ntfy and
+Discord button press, which writes an entry outside the `/api` router
+entirely and so cannot rely on either HTTP route's call. A write path added
+later that skips this serves a figure
 from before the write for the REST OF THAT DAY — not forever, because
 `summary_asof` holds the day it was computed for and `summaryCacheHit` is an
 equality test, so the next calendar day misses and recomputes. That bound is

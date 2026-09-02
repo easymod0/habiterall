@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
-  db, UNSET, YES, SKIP, isCategoryNameConflict, clearHabitSummary,
+  db, UNSET, YES, SKIP, isCategoryNameConflict, clearHabitSummary, clearAllSummaries,
 } from './db.js';
 import {
   computeStats, summaryStats, creditAnchor, isCompleted,
@@ -1021,11 +1021,17 @@ api.put('/settings', (req, res) => {
   for (const [key, value] of Object.entries(accepted)) {
     q.putSetting.run(key, JSON.stringify(value));
   }
+  // `atMostUnlogged` is an INPUT to the cached pair — `/overview` reads
+  // `storedUnlogged()` and hands it to `recomputeBestStreak` — so an account
+  // setting can move what every habit's cached bestStreak means, not just
+  // one. `clearAllSummaries`, not `clearHabitSummary`.
+  clearAllSummaries();
   res.json({ settings: accepted, ignored: rejected });
 });
 
 api.delete('/settings', (req, res) => {
   q.clearSettings.run();
+  clearAllSummaries();
   res.json({});
 });
 

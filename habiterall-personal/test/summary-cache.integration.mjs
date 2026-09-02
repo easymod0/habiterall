@@ -36,6 +36,7 @@ const { app } = await import('../src/server.js');
 // directly below is visible to them without a second connection to fight WAL
 // over — the same pattern overview.integration.mjs uses for its phantom row.
 const { db, clearAllSummaries } = await import('../src/db.js');
+const notifier = await import('../src/notifier.js');
 const server = await new Promise((resolve) => {
   const s = app.listen(0, '127.0.0.1', () => resolve(s));
 });
@@ -67,6 +68,9 @@ const put = (path, body) => fetch(`${base}/api${path}`, {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 }).then((r) => r.json());
+
+const del = (path) => fetch(`${base}/api${path}`, { method: 'DELETE' })
+  .then((r) => (r.status === 204 ? null : r.json()));
 
 const overview = () => fetch(`${base}/api/overview?days=7`).then((r) => r.json());
 
@@ -204,6 +208,134 @@ ck('THE assertion: score is non-zero on the cold path, over the FILTERED slice',
   typeof coldRow.score === 'number' && coldRow.score > 0, String(coldRow.score));
 ck('...and currentStreak sees the live ten-day run, not an empty derived slice',
   coldRow.currentStreak === 10, String(coldRow.currentStreak));
+
+/* ---- 5: a settings change moves a cached bestStreak, account-wide --------
+ *
+ * `atMostUnlogged` is an INPUT to `recomputeBestStreak` via `storedUnlogged()`
+ * (api.js), so it is not one habit's write — `PUT /settings` and
+ * `DELETE /settings` have to call `clearAllSummaries`, not `clearHabitSummary`.
+ * Reproduces the reviewer's own repro: an at-most habit with one stored
+ * completion 30 days ago reads `bestStreak: 1` under the account default
+ * (`miss`); flipping the account to `success` makes every unanswered day
+ * since count as kept too, so the TRUE answer is 31 — the span from that
+ * entry to today, inclusive.
+ */
+
+const habitE = await post('/habits', {
+  name: 'Settings clear', type: 'numerical', target_type: 'at_most', target_value: 5,
+});
+await put(`/habits/${habitE.id}/entries/${daysAgo(30)}`, { value: 0 });
+
+const beforeSettings = await overview();
+const rowBeforeSettings = beforeSettings.habits.find((h) => h.id === habitE.id);
+ck('sanity: under the account default (miss), only the stored day is a streak',
+  rowBeforeSettings.bestStreak === 1, String(rowBeforeSettings.bestStreak));
+
+await put('/settings', { atMostUnlogged: 'success' });
+
+ck('a settings write clears every habit\'s stamp, not just the one it names',
+  rawHabit(habitE.id).summary_asof === null, JSON.stringify(rawHabit(habitE.id)));
+
+const afterSettings = await overview();
+const rowAfterSettings = afterSettings.habits.find((h) => h.id === habitE.id);
+ck('THE assertion: the next load reports the NEW bestStreak (31, every day ' +
+  'since the stored entry now counts as kept), not the stale miss-based 1',
+  rowAfterSettings.bestStreak === 31, String(rowAfterSettings.bestStreak));
+
+// `DELETE /settings` resets `atMostUnlogged` back to the account default
+// (`miss`) — the same account-wide input, moving the same habit's bestStreak
+// back down, so it needs the identical `clearAllSummaries` call.
+await del('/settings');
+
+ck('a settings DELETE also clears every habit\'s stamp',
+  rawHabit(habitE.id).summary_asof === null, JSON.stringify(rawHabit(habitE.id)));
+
+const afterDeleteSettings = await overview();
+const rowAfterDeleteSettings = afterDeleteSettings.habits.find((h) => h.id === habitE.id);
+ck('THE assertion: the next load reports bestStreak back at 1 under the ' +
+  'restored default, not the stale success-based 31',
+  rowAfterDeleteSettings.bestStreak === 1, String(rowAfterDeleteSettings.bestStreak));
+
+/* ---- 6: a record() button press moves a cached totalCompleted ------------
+ *
+ * `record()` (notifier.js) is the shared handler behind every ntfy and
+ * Discord button press, and it writes an entry outside the `/api` router
+ * entirely — so it needs its own `clearHabitSummary` call rather than relying
+ * on either HTTP entry route's.
+ */
+
+const habitF = await post('/habits', { name: 'Button press', type: 'boolean' });
+const stampFirst = await overview(); // stamps habitF for today at totalCompleted 0
+const totalBeforePress = stampFirst.habits.find((h) => h.id === habitF.id)?.totalCompleted;
+ck('sanity: nothing completed on habitF yet', totalBeforePress === 0, String(totalBeforePress));
+
+const pressResult = notifier.interactionAdapter().record(
+  { id: null, settings: {} },
+  { habitId: habitF.id, date: daysAgo(0), action: 'yes' }
+);
+ck('the press itself reports success', pressResult.ok === true, JSON.stringify(pressResult));
+
+ck('a record() write clears the stamp',
+  rawHabit(habitF.id).summary_asof === null, JSON.stringify(rawHabit(habitF.id)));
+
+const afterPress = await overview();
+const totalAfterPress = afterPress.habits.find((h) => h.id === habitF.id)?.totalCompleted;
+ck('THE assertion: the next load reports the NEW totalCompleted after a ' +
+  'button press, not the stale one from before it',
+  totalAfterPress === totalBeforePress + 1, `${totalAfterPress} vs ${totalBeforePress}`);
+
+/* ---- 7: a source guard for a write path added with NO clear at all -------
+ *
+ * SOURCE TEXT, not behaviour — root CLAUDE.md is explicit that this shape of
+ * guard cannot see a renamed binding or an inverted comparison, only that
+ * SOMETHING resembling a clear call sits near the write. It exists for one
+ * thing only: a call site added later that calls none of the two functions
+ * at all. Tests 1-6 above are the real coverage; this is a tripwire beside
+ * them, not a replacement for either.
+ *
+ * **One live blind spot, named because a reader would otherwise assume it is
+ * covered.** `apply-import.js`'s general entry write is
+ * `(yielding ? insertEntryIfAbsent : insertEntry)\n  .run(...)` — the callee
+ * is an expression and `.run(` lands on the next line, so `WRITE_RE` does not
+ * match it and that site is invisible here. It DOES clear (three lines
+ * below), so this is not a live gap, and the regex was left narrow rather
+ * than widened to anything ending `.run(`, which would sweep in every
+ * unrelated prepared statement in the file and make the guard noise. The
+ * honest summary is that this catches a write spelled the ordinary way and
+ * nothing else, which is the shape both #184 misses actually had.
+ */
+
+{
+  const { readFileSync, readdirSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join: pathJoin } = await import('node:path');
+
+  const srcDir = pathJoin(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+  const WRITE_RE = /\b(?:q\.)?(?:upsertEntry|deleteEntry|updateHabit|insertEntry)\.run\(/;
+  const CLEAR_RE = /clearHabitSummary\(|clearAllSummaries\(/;
+  // Generous on both sides: the clear sits a handful of lines after the write
+  // at every real call site today (immediately after, through a multi-line
+  // `updateHabit.run(...)` call and its own comment), never before it.
+  const LINES_BEFORE = 3;
+  const LINES_AFTER = 20;
+
+  const unguarded = [];
+  for (const file of readdirSync(srcDir).filter((f) => f.endsWith('.js'))) {
+    const lines = readFileSync(pathJoin(srcDir, file), 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      if (!WRITE_RE.test(line)) return;
+      const start = Math.max(0, i - LINES_BEFORE);
+      const end = Math.min(lines.length, i + LINES_AFTER + 1);
+      if (!CLEAR_RE.test(lines.slice(start, end).join('\n'))) {
+        unguarded.push(`${file}:${i + 1}: ${line.trim()}`);
+      }
+    });
+  }
+
+  ck('source guard: every entry/habit write call site in src/*.js has a ' +
+    'clearHabitSummary/clearAllSummaries call nearby',
+    unguarded.length === 0, JSON.stringify(unguarded));
+}
 
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }

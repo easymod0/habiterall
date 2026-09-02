@@ -391,9 +391,11 @@ export function isCategoryNameConflict(err) {
  * This edition has no `data_version` and no `withUserWrite` to hang this off
  * of (`habiterall-cloud/src/db/pool.js`), so there is no single hook a write
  * runs through — every write path that can move what these two figures mean
- * for THIS habit calls this by hand: an entry write or delete, and a `PUT
+ * for THIS habit calls this by hand: an entry write or delete, a `PUT
  * /habits/:id` replace, which can move `type` or `target_*` and so change
- * what counts as completed.
+ * what counts as completed, and `record()` in `notifier.js` — the shared
+ * ntfy/Discord button handler, which writes an entry outside the `/api`
+ * router and so cannot rely on either HTTP route's call.
  *
  * `summary_asof IS NOT NULL` is not a redundant predicate — it is what makes
  * this write no row and no journal page for the ordinary case, an account

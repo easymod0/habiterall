@@ -10,7 +10,7 @@
  * when this process is not running.
  */
 
-import { db, UNSET, YES, SKIP } from './db.js';
+import { db, UNSET, YES, SKIP, clearHabitSummary } from './db.js';
 import {
   answeredIds, answerText, channelInteractive, needsServerDelivery, resolveTimeZone,
   serverChannels, zonedClock,
@@ -247,6 +247,10 @@ export function interactionAdapter() {
       const write = entryWrite(habit, parsed, { UNSET, SKIP });
       if (write.op === 'delete') q.deleteEntry.run(habitId, date);
       else q.upsertEntry.run(habitId, date, write.value, write.status, write.notes);
+      // A genuine entry write outside the `/api` router — every ntfy and
+      // Discord button press goes through here — so it has to clear the
+      // cached pair exactly as the HTTP entry routes do (root CLAUDE.md).
+      clearHabitSummary(habitId);
 
       return { ok: true, habit, text: answerText(habit, { action, value }) };
     },
