@@ -843,6 +843,60 @@ own behaviour on a trusted keypress, so a `new KeyboardEvent('keydown')` from
 script does not trigger it and a test built on one passes against the
 unguarded code. `categorycheck.mjs` drives CDP `Input.dispatchKeyEvent`.
 
+**The emoji picker is an ADDITION to the icon field, never a replacement, and
+`icon-field.js` is the sole owner of every `#icon-*` id.** The field stays a
+real, editable `<input name="icon">` because the OS picker (Win+. /
+Ctrl+Cmd+Space) lands its choice THERE, a paste from elsewhere is how an emoji
+not in any curated list arrives, and `parseIcon` deliberately accepts any
+grapheme — 運, ✓, a bare letter — that a ~200-entry list will never hold. A
+cell's click writes THE TEXT OF THE FIELD and nothing else: no hidden input, no
+module-level "selected" glyph that `iconField.value()` reads instead, because a
+preset arriving with #66 tier 2 has to be a *different field*, not a magic
+string smuggled through this one.
+
+`previewIcon` is a SECOND DECLARATION of `parseIcon`'s derivation — same strip
+set, same grapheme segmenter, same drop past `LIMITS.icon` — because
+`shared/src` is not served to the browser, exactly the `ui/values.js` ↔
+`src/constants.js` arrangement one level up. `test/icon-field.test.js` pins the
+two against each other behaviourally, over a shared example table, so they
+cannot quietly diverge. It decides what is DISPLAYED and nothing about what is
+STORED: the payload still sends the field's raw text, and `parseIcon` on the
+server is still the only authority on what a habit's icon becomes.
+
+The picker's search box is a text box inside `#habit-form` too, so it is the
+same Enter trap as the category boxes above, over a control this module owns
+instead — Enter there picks the FIRST matching cell rather than merely
+swallowing the key (a box where Enter does nothing is its own bug report) and
+calls `preventDefault()`. And while the panel is open, Escape closes the
+PANEL, not the `<dialog>` — `preventDefault` is what is load-bearing there,
+not `stopPropagation`: a `<dialog>`'s Escape-close is not a bubbling listener
+a `stopPropagation` could intercept, it is the keydown's own default action,
+so without `preventDefault` the first Escape a user presses to dismiss the
+picker closes the whole habit dialog too, losing everything typed into it.
+
+**That handler is bound to the DIALOG, guarded on the panel being open — not
+to the panel, which is where it obviously belongs and where it only half
+works.** `#icon-picker-toggle` sits beside the input and `#icon-picker` is a
+sibling AFTER it, so opening the picker with the mouse leaves focus on the
+TOGGLE, outside the panel: a keydown listener on the panel never runs, and
+Escape takes the whole dialog. The keyboard path — Tab into the panel, or the
+search box — is inside it and worked, which is exactly why the first version
+shipped and why the check that covered it (`feat4.mjs` (g)) could not see the
+hole: it focused `#icon-search` before pressing the key. Focusing the search
+box on open does not fix this either, since Shift+Tab puts the user back on
+the toggle with the panel still open. Case `g2` presses Escape from the
+toggle, and it needs a REAL CDP mouse press to get there — a synthetic
+`.click()` does not move focus, so a test built on one passes against the
+unfixed code.
+
+`#icon-picker`'s `hidden` state and `#icon-search`'s value are static markup,
+wired once by `initIconField()` — nothing about closing and reopening the
+dialog touches either on its own, so a panel left open (and a query left
+typed) in one session was still open and still filtering the grid the next
+time the dialog opened, for a *different* habit. `iconField.set()` — called
+from `habit-dialog.js`'s `openDialog`, for every session — resets both, which
+is the one seam every dialog open already passes through.
+
 **A localised name is never indexed by a Gregorian field.** `getMonth()`,
 `getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
 `MONTHS[d.getMonth()]` or `String(d.getDate())` silently assumes the locale's

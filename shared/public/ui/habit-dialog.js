@@ -10,6 +10,7 @@ import { amountComplaint, formatAmount, parseAmount } from '/shared/ui/amount.js
 import { api } from '/shared/ui/api.js';
 import { focusKeyOf } from '/shared/ui/components.js';
 import { convention } from '/shared/ui/count-field.js';
+import { iconField, initIconField } from '/shared/ui/icon-field.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { dashboardShowing, emit, staysOnList, state } from '/shared/ui/store.js';
@@ -22,6 +23,15 @@ const form = $('#habit-form');
 const title = $('#dialog-title');
 const del = $('#dialog-delete');
 const archivedWrap = $('#archived-wrap');
+
+// Wired once, here, rather than inside `init()` — `#icon-*` is static markup
+// like the dialog's other controls above, not something that depends on
+// which habit is showing. `icon-field.js` owns every `#icon-*` id itself;
+// this module must not name one (`test/ui-modules.test.js`) — `dialog` is
+// handed in as the element `#habit-dialog` already resolved to above, so
+// icon-field.js's own Escape handler can be bound to it without ever naming
+// that id itself.
+initIconField(dialog);
 
 /**
  * Six starting points, not seeded rows — an account with no habits gets no
@@ -863,7 +873,7 @@ export function openDialog(habit = null) {
 
   const f = form;
   f.name.value = habit?.name ?? '';
-  f.icon.value = habit?.icon ?? '';
+  iconField.set(habit?.icon ?? '');
   f.description.value = habit?.description ?? '';
   editingCategoryId = null;
   categoryHint('');
@@ -973,7 +983,7 @@ async function saveHabit(e) {
 
   const payload = {
     name: f.name.value,
-    icon: f.icon.value,
+    icon: iconField.value(),
     description: f.description.value,
     // A number or null, never '' — parseHabit reads anything else as no
     // category, and PUT /habits/:id REPLACES, so an omitted category_id would

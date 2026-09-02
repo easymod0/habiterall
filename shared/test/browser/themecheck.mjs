@@ -290,6 +290,86 @@ try {
     followed.painted === followed.expected, JSON.stringify(followed));
 
 
+  /* ---------- #182: the icon picker panel follows the theme too ----------
+   *
+   * A NEW, separate block, deliberately not folded into any setup above —
+   * see the root CLAUDE.md's note on this file: two of its blocks can look
+   * like near-duplicates while pinning different halves, and merging this one
+   * in would be exactly that. Everything it needs (its own boot, its own
+   * `look`-shaped probe, its own theme press) is self-contained here.
+   *
+   * `#icon-picker` is ordinary CSS, not an SVG attribute, so there is no
+   * `fill="var(...)"` text to read the way `look()` reads a calendar cell's
+   * `attr` above — the panel's colour only ever exists as a COMPUTED value.
+   * `getComputedStyle(...).backgroundColor` resolves to an `rgb(...)` string
+   * while `getPropertyValue('--surface-2')` returns the raw literal
+   * (`#eef0f4`, `#1f242c`) — so a direct `===` between the two would never be
+   * true in either theme, in either direction, which is the shape of test
+   * this repo's own CLAUDE.md calls out as unable to fail. `resolvedVar`
+   * below runs the custom property through a scratch element first, so both
+   * sides of the comparison come out through the same `backgroundColor`
+   * serialisation.
+   */
+  console.log('\n--- #182: the icon picker panel follows the theme too ---');
+
+  // A fresh boot to the dashboard: the blocks above leave the app on a
+  // habit's own page (or, for the `measurable` block, a second tab), and
+  // `#btn-new` — the toggle this block presses lives only behind it — is a
+  // dashboard-only control.
+  await boot();
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev,
+    `document.getElementById('habit-dialog').open === true
+      && !!document.getElementById('habit-form').icon`,
+    { what: 'the new-habit dialog, with its icon field present' });
+  await ev(`document.getElementById('icon-picker-toggle').click()`);
+  await waitUntil(ev,
+    `!document.getElementById('icon-picker').hidden
+      && document.querySelectorAll('#icon-grid .icon-cell').length > 0`,
+    { what: 'the icon picker panel, open with cells rendered' });
+
+  /**
+   * `.icon-picker`'s stylesheet rule reads `background: var(--surface-2)`,
+   * not `--surface` — it is a raised, bordered panel over the dialog's own
+   * `--surface`, the same relationship `.category-manage`'s scrolling panel
+   * has to the dialog around it — so `--surface-2` is the variable this
+   * panel's colour can actually be judged against.
+   */
+  const panelLook = () => ev(`(() => {
+    const panel = document.getElementById('icon-picker');
+    panel.dataset.marker = panel.dataset.marker || 'stamped';
+    const probe = document.createElement('div');
+    probe.style.backgroundColor = 'var(--surface-2)';
+    document.body.appendChild(probe);
+    const shouldBe = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return {
+      painted: getComputedStyle(panel).backgroundColor,
+      shouldBe,
+      marked: panel.dataset.marker,
+    };
+  })()`);
+
+  const beforePanel = await panelLook();
+  ck('the picker panel has a background colour to inspect',
+    /rgb|color\(/.test(beforePanel.painted), beforePanel.painted);
+  ck('...and it is the current theme\'s --surface-2',
+    beforePanel.painted === beforePanel.shouldBe, JSON.stringify(beforePanel));
+
+  await ev(`document.getElementById('btn-theme').click()`);
+  await sleep(1200);
+
+  const afterPanel = await panelLook();
+  ck('the picker panel colour actually changed with the theme',
+    afterPanel.painted !== beforePanel.painted,
+    `${beforePanel.painted} -> ${afterPanel.painted}`);
+  ck('...to the NEW theme\'s own --surface-2',
+    afterPanel.painted === afterPanel.shouldBe, JSON.stringify(afterPanel));
+  ck('nothing re-rendered — the same panel node is still there',
+    afterPanel.marked === 'stamped', `marker=${afterPanel.marked}`);
+
+  await ev(`document.getElementById('habit-dialog').close()`);
+
   console.log(fails === 0 ? '\nALL THEME CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

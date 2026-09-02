@@ -514,6 +514,58 @@ try {
     ck(`${vp.label}: every manage row holds all four buttons (↑ ↓ ✎ ✕)`,
       rows.length > 0 && rows.every((r) => r.buttonCount === 4), JSON.stringify(rows));
 
+    // #182: the emoji picker, opened in the same dialog session. `LAYOUT_PROBE`
+    // is no use here — it skips any element whose `overflowX` is `auto`/
+    // `scroll`, and `.icon-grid` is exactly that scroller — so this measures
+    // the cells' own rightmost edge against the panel's `getBoundingClientRect()`,
+    // the same per-container idiom the manage row above uses against
+    // `.category-manage`.
+    await ev(`document.getElementById('icon-picker-toggle').click()`);
+    await waitUntil(ev,
+      `!document.getElementById('icon-picker').hidden
+        && document.querySelectorAll('#icon-grid .icon-cell').length > 0`,
+      { what: 'the icon picker panel, open with cells rendered' });
+
+    const iconGrid = await ev(`(() => {
+      const panel = document.getElementById('icon-picker');
+      const panelRight = panel.getBoundingClientRect().right;
+      const cells = [...document.querySelectorAll('#icon-grid .icon-cell')];
+      const rightmost = cells.reduce(
+        (max, el) => Math.max(max, el.getBoundingClientRect().right), 0);
+      return {
+        cellCount: cells.length,
+        overflowsBy: Math.round(rightmost - panelRight),
+        tooSmall: cells.filter((c) => {
+          const b = c.getBoundingClientRect();
+          return Math.min(b.width, b.height) < ${MIN_TOUCH};
+        }).length,
+      };
+    })()`);
+    ck(`${vp.label}: the icon picker grid fits inside its panel`,
+      iconGrid.cellCount > 0 && iconGrid.overflowsBy <= 1, JSON.stringify(iconGrid));
+    // The two MOBILE viewports only — 'tablet' is 768px and marked `mobile:
+    // true` above for its emulated-metrics behaviour, not because it is the
+    // width this bound is about.
+    if (vp.label === 'small phone' || vp.label === 'phone') {
+      ck(`${vp.label}: icon picker cells clear ${MIN_TOUCH}px`,
+        iconGrid.tooSmall === 0, `${iconGrid.tooSmall} of ${iconGrid.cellCount} too small`);
+    }
+
+    // The dialog itself, not just what is inside it — the same `fitsWidth` /
+    // `onScreen` shape the settings/backup dialogs are checked with above,
+    // now with the panel's own extra height counted into the dialog's box.
+    const dlgWithPanel = await ev(`(() => {
+      const d = document.getElementById('habit-dialog');
+      const b = d.getBoundingClientRect();
+      const de = document.documentElement;
+      return {
+        fitsWidth: b.width <= de.clientWidth + 1,
+        onScreen: b.left >= -1 && b.right <= de.clientWidth + 1,
+      };
+    })()`);
+    ck(`${vp.label}: the habit dialog still fits the screen with the picker open`,
+      dlgWithPanel.fitsWidth && dlgWithPanel.onScreen, JSON.stringify(dlgWithPanel));
+
     await ev(`document.getElementById('dialog-cancel').click()`);
     await sleep(150);
   }
