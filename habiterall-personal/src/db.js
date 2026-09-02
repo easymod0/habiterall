@@ -258,6 +258,60 @@ if (!habitColumns.has('category_id')) {
   );
   console.log('migrated habits: added category_id');
 }
+if (!habitColumns.has('best_streak')) {
+  // The dashboard's two LIFETIME figures — bestStreak and totalCompleted —
+  // cached beside the habit instead of walked from scratch on every /overview
+  // load. What the cached pair MEANS and when it is stale is one shared rule,
+  // @habiterall/shared/summary-cache.js, for both editions; this is only the
+  // storage half. habiterall-cloud/src/db/migrations/018_habit_summary_cache.sql
+  // is the design in full and this schema matches its header comment.
+  //
+  // NULLABLE, with NO DEFAULT, and that is the whole of the design here too: a
+  // NOT NULL DEFAULT 0 would make a habit that has genuinely never been
+  // completed indistinguishable from one whose pair has never been computed —
+  // the collapse the root CLAUDE.md forbids everywhere else
+  // (`entryMap.get(date) ?? UNSET`), in the schema this time.
+  // `summary_asof` alone is the validity flag (`summaryCacheHit`), so an
+  // existing row upgrades with all three columns NULL, which is "invalidated"
+  // for free.
+  //
+  // No CHECK constraint here, unlike cloud's `habits_summary_cache_complete`.
+  // SQLite cannot add a table-level CHECK with `ALTER TABLE` — that needs a
+  // full table rebuild, and nothing in this file does one. The invariant the
+  // CHECK would enforce (a stamp with no figures behind it must never be
+  // served) is already enforced in the one shared reader both editions call,
+  // `summaryCacheHit`; cloud's CHECK is belt-and-braces on top of that, not
+  // the only place it holds.
+  //
+  // `summary_asof` is TEXT, not DATE: every date in this schema is TEXT (see
+  // `entries.date` above).
+  //
+  // Three columns, three separate guards, which is the idiom every block above
+  // uses and is not merely cosmetic here. `ALTER TABLE ADD COLUMN` is one
+  // statement per column and there is no transaction around these, so a
+  // process killed between them leaves the table half-migrated. Guarded as one
+  // block on `best_streak`, that state is permanent — the guard sees the first
+  // column and skips the other two forever — and it is not a quiet
+  // half-feature but a server that will not boot, because `q.writeBackSummary`
+  // (`api.js`) names all three and `db.prepare` runs at module load. Per
+  // column, the next start finishes the job.
+  db.exec(`ALTER TABLE habits ADD COLUMN best_streak INTEGER`);
+  console.log('migrated habits: added best_streak');
+}
+if (!habitColumns.has('total_completed')) {
+  // See the `best_streak` block above for the design; separately guarded so a
+  // half-applied migration repairs itself on the next start.
+  db.exec(`ALTER TABLE habits ADD COLUMN total_completed INTEGER`);
+  console.log('migrated habits: added total_completed');
+}
+if (!habitColumns.has('summary_asof')) {
+  // See the `best_streak` block above. This is the validity flag of the three,
+  // so a database that somehow had the two figures and not this one would read
+  // as permanently invalidated rather than as wrong — the safe direction, and
+  // still repaired here.
+  db.exec(`ALTER TABLE habits ADD COLUMN summary_asof TEXT`);
+  console.log('migrated habits: added summary_asof');
+}
 
 // Indexed because `habits.category_id` is the REFERENCING side of a foreign
 // key with `ON DELETE SET NULL`: deleting a category obliges SQLite to find
@@ -325,6 +379,47 @@ export const SKIP = 3;
 export function isCategoryNameConflict(err) {
   return err?.code === 'ERR_SQLITE_ERROR' && err.errcode === 2067 &&
     /categories\.name$/.test(String(err?.message ?? ''));
+}
+
+/**
+ * Clear one habit's cached lifetime summary (`best_streak`, `total_completed`,
+ * `summary_asof`) — the STAMP alone, which is what `summaryCacheHit`
+ * (@habiterall/shared/summary-cache.js) reads as "recompute". The two figures
+ * are left in place beside a NULL stamp, unread, exactly as cloud's own
+ * invalidation leaves them.
+ *
+ * This edition has no `data_version` and no `withUserWrite` to hang this off
+ * of (`habiterall-cloud/src/db/pool.js`), so there is no single hook a write
+ * runs through — every write path that can move what these two figures mean
+ * for THIS habit calls this by hand: an entry write or delete, and a `PUT
+ * /habits/:id` replace, which can move `type` or `target_*` and so change
+ * what counts as completed.
+ *
+ * `summary_asof IS NOT NULL` is not a redundant predicate — it is what makes
+ * this write no row and no journal page for the ordinary case, an account
+ * that has not loaded its dashboard since its last write to this habit.
+ *
+ * @param {number} habitId
+ */
+const clearHabitSummaryStmt = db.prepare(
+  `UPDATE habits SET summary_asof = NULL WHERE id = ? AND summary_asof IS NOT NULL`
+);
+export function clearHabitSummary(habitId) {
+  clearHabitSummaryStmt.run(habitId);
+}
+
+/**
+ * Clear every habit's cached lifetime summary — for a write that touches the
+ * whole account rather than one habit, such as a replace-mode import.
+ * Over-clearing costs a recomputation on the next `/overview`; under-clearing
+ * serves a figure from before the write. When a caller cannot name the habit
+ * it touched, or touches more than one, this is the safe direction.
+ */
+const clearAllSummariesStmt = db.prepare(
+  `UPDATE habits SET summary_asof = NULL WHERE summary_asof IS NOT NULL`
+);
+export function clearAllSummaries() {
+  clearAllSummariesStmt.run();
 }
 
 export default db;

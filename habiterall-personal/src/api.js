@@ -3,25 +3,23 @@ import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
 import {
-  computeStats, summaryStats, computeStreaks, bestStreak, creditAnchor, isCompleted,
+  db, UNSET, YES, SKIP, isCategoryNameConflict, clearHabitSummary,
+} from './db.js';
+import {
+  computeStats, summaryStats, creditAnchor, isCompleted,
   UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
-  summariseByCategory, earliestRealDay,
+  summariseByCategory,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
+import {
+  STREAK_HISTORY_DAYS, stripSummaryCache, summaryCacheHit, recomputeBestStreak,
+} from '@habiterall/shared/summary-cache.js';
 
 /** Lookback used for the dashboard's score/current-streak summary. */
 const SUMMARY_WINDOW_DAYS = 400;
-
-/**
- * How far back the dashboard's streak scan reads. Five years — far beyond
- * any streak a person will run, and it keeps the dashboard O(window) per
- * habit instead of O(lifetime). Matches the cloud edition.
- */
-const STREAK_HISTORY_DAYS = 1830;
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
 import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
@@ -139,6 +137,26 @@ const q = {
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
   setPosition: db.prepare(`UPDATE habits SET position = ? WHERE id = ?`),
+  /**
+   * Stamp a recomputed lifetime pair back onto a habit row, for the next
+   * `/overview` load on the same day to read instead of deriving again.
+   *
+   * No `data_version` guard, unlike cloud's `writeBackSummaries`
+   * (habiterall-cloud/src/api.js). Cloud needs one because Postgres is READ
+   * COMMITTED, so a concurrent write can commit between the entry reads and
+   * this statement inside the same route — and without the guard the stamp
+   * would be written from data that write just made stale. Personal's
+   * storage is `node:sqlite`, and `DatabaseSync` is SYNCHRONOUS: the entry
+   * reads, the derivation and this statement all run in one uninterrupted
+   * turn of the event loop, so nothing else can run a write in between. That
+   * is a real property of this route rather than an absence to leave
+   * unexplained, and it holds only as long as nothing here `await`s between
+   * the derivation and this call.
+   */
+  writeBackSummary: db.prepare(`
+    UPDATE habits SET best_streak = ?, total_completed = ?, summary_asof = ?
+    WHERE id = ?
+  `),
   // Categories: a user's own habit groupings, never seeded — see db.js.
   allCategories: db.prepare(`SELECT * FROM categories ORDER BY position, id`),
   categoryById: db.prepare(`SELECT * FROM categories WHERE id = ?`),
@@ -244,10 +262,19 @@ function habitRow(body) {
  *
  * The API contract is a boolean. Convert here, at the single boundary, rather
  * than teaching every client to accept both.
+ *
+ * Also strips the summary-cache columns (`stripSummaryCache`,
+ * @habiterall/shared/summary-cache.js) — `best_streak`, `total_completed` and
+ * `summary_asof` are an observation the SERVER makes about the cost of
+ * deriving a figure, the same category `unlogged_is_success` and
+ * `data_version` are in on the cloud side, and they are in no
+ * `*_HABIT_FIELDS` list. Left in, they would reach every client and
+ * `/api/export` the moment the columns existed, and `parseHabit` on the way
+ * back in would just as silently drop them again.
  */
 function toApiHabit(row) {
   if (!row) return row;
-  return { ...row, archived: Boolean(row.archived) };
+  return { ...stripSummaryCache(row), archived: Boolean(row.archived) };
 }
 
 /**
@@ -329,6 +356,9 @@ api.put('/habits/:id', (req, res) => {
     h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId,
     h.archived, id
   );
+  // This route REPLACES (root CLAUDE.md), so `type` and `target_*` can move —
+  // which changes what counts as completed, and so what the cached pair means.
+  clearHabitSummary(id);
   res.json(toApiHabit(q.habitById.get(id)));
 });
 
@@ -627,6 +657,10 @@ api.put('/habits/:id/entries/:date', (req, res) => {
 
   if (write.op === 'delete') q.deleteEntry.run(id, date);
   else q.upsertEntry.run(id, date, write.value, write.status, write.notes);
+  // Both branches: a day going back to `unknown` moves the lifetime figures
+  // exactly as answering it did (root CLAUDE.md, "a stored lapse can move
+  // window-derived figures").
+  clearHabitSummary(id);
 
   res.json({ habit_id: id, date, ...write.reply });
 });
@@ -637,6 +671,7 @@ api.delete('/habits/:id/entries/:date', (req, res) => {
   if (!DATE_RE.test(req.params.date)) throw httpError(400, 'date must be YYYY-MM-DD');
 
   q.deleteEntry.run(id, req.params.date);
+  clearHabitSummary(id);
   res.status(204).end();
 });
 
@@ -689,7 +724,13 @@ api.get('/habits/:id/stats', (req, res) => {
     // figures above, because `shared/src` is not served to the browser and no
     // renderer can call `unansweredCounts` itself. Derived, not stored: it
     // goes into no migration and no `*_HABIT_FIELDS` list.
-    habit: { ...habit, unlogged_is_success: unansweredCounts(habit, unlogged) },
+    // `stripSummaryCache`: `habit` here is the RAW row, which now carries
+    // `best_streak`/`total_completed`/`summary_asof` — server-side
+    // observations, in no `*_HABIT_FIELDS` list, that must not reach a client.
+    habit: {
+      ...stripSummaryCache(habit),
+      unlogged_is_success: unansweredCounts(habit, unlogged),
+    },
     ...stats,
     awards: computeAwards(stats, end, habit, unlogged, skipDays),
   });
@@ -771,24 +812,45 @@ api.get('/overview', (req, res) => {
   // `groupByCategory`, and every habit on the page needs the same list.
   const categories = /** @type {any[]} */ (q.allCategories.all());
 
+  /**
+   * Recomputed pairs to stamp back once the map below is done — see
+   * `q.writeBackSummary`. Declared here so the write-back can run once, after
+   * every habit has decided whether it needed one, rather than interleaved
+   * with the reads above.
+   * @type {Array<{id: number, best_streak: number, total_completed: number}>}
+   */
+  const recomputed = [];
+
   const habitPayloads = habits.map((h) => {
-    // The dashboard summary only needs a bounded lookback: with a 30-day
-    // half-life the score has long since converged, and streaks that matter
-    // here are recent. This keeps the dashboard O(window) rather than
-    // O(lifetime) per habit.
-    // Bounded, not lifetime. Reading every entry per habit made the
-    // dashboard O(lifetime x habits) and, worse, fed an unbounded array
-    // into computeStreaks — hundreds of thousands of iterations of
-    // synchronous work on a single-threaded server.
-    //
+    // **The partition, and everything below reads off it** (#184). A habit
+    // whose `summary_asof` is the CALLER's own day already carries both
+    // lifetime figures on the row, so it needs neither the 1830-day streak
+    // read nor `countCompleted` — `summaryCacheHit` is where the comparison
+    // lives, and it is equality rather than `<=` for a reason worth reading
+    // there: `summaryEnd` moves backwards for an account used from two zones.
+    const fresh = summaryCacheHit(h, summaryEnd);
+
     // Both lookbacks count back from `summaryEnd`, not from the grid's
     // `end`: these three figures describe the habit today.
-    const entries = /** @type {any} */ (
+    //
+    // **The 400-day slice comes from a different place depending on `fresh`,
+    // and that is the whole point of the split.** A fresh habit reads only
+    // the narrow window; a stale one reads the wide 1830-day window (it has
+    // to, for `recomputeBestStreak` and the completion count below) and
+    // FILTERS its own 400-day slice out of it rather than asking for it a
+    // second time — the wide window CONTAINS the narrow one. Issuing both
+    // reads unconditionally made every stale habit fetch its last 400 days
+    // twice, ~2,230 days per habit on the cold path — the first load of any
+    // day, and every load right after a write, which is exactly the load
+    // this cache exists to make faster.
+    const all = fresh ? null : /** @type {any} */ (
       q.entriesForSince.all(h.id, addDays(summaryEnd, -STREAK_HISTORY_DAYS))
     );
-    const windowed = /** @type {any} */ (
-      q.entriesForSince.all(h.id, addDays(summaryEnd, -SUMMARY_WINDOW_DAYS))
-    );
+    const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
+    const windowed = fresh
+      ? /** @type {any} */ (q.entriesForSince.all(h.id, cutoff))
+      : /** @type {any} */ (all).filter((e) => e.date >= cutoff);
+
     // Two numbers are read below — `score` and `currentStreak` — so this
     // calls `summaryStats` rather than `computeStats`: the same window and
     // the same two passes (`computeScores`, `computeStreaks`), with the five
@@ -810,45 +872,38 @@ api.get('/overview', (req, res) => {
 
     const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged, creditFrom });
 
-    // Counted in SQLite rather than by walking every row in JS. The
-    // expression mirrors isCompleted exactly, including that a skip is
-    // "not applicable" and never a completion — passing `e.value` instead
-    // of the whole row is what made this edition count skips as done on
-    // at_most habits while cloud did not.
-    const totalCompleted = /** @type {any} */ (
-      q.countCompleted.get(
-        h.id, h.type, h.target_type, h.target_value, h.target_value
-      )
-    ).n;
-
-    // This scan is the route's own and never reaches `resolveWindow`, so it has
-    // to be handed the same credit date explicitly — otherwise `bestStreak` is
-    // the one figure on this payload still crediting silence the habit has no
-    // answer behind, beside a `score` and a `currentStreak` that no longer do
-    // (#223: measured 365 here against 1 from `/stats`, same habit, same
-    // second). It is the SAME `creditFrom` the summary above got, not a second
-    // one derived from this wider slice, because the two derivations disagree
-    // exactly when the habit's answer falls between the two windows.
-    const streakMap = new Map(
-      entries.map((e) => [e.date, { value: e.value, status: e.status }])
-    );
-    // The other #270 anchor site: `entries` is `ORDER BY date`, so element 0
-    // was the raw LEXICAL min, phantom-capable exactly like the `MIN(date)`
-    // reads `creditAnchor` and `computeCategoryStats` already refuse. A row
-    // dated '2026-07-99' sorted first, opened the window there, and
-    // `boundedRange` rolled it forward past `summaryEnd` — every figure on
-    // this payload's own scan zero while `score`/`currentStreak` (through
-    // `resolveWindow`) stayed correct, which is what made the disagreement
-    // visible. `earliestRealDay` is the one guard, same as those two sites.
-    // See docs/decisions/phantom-dates.md.
-    const allStreaks = computeStreaks(
-      h,
-      streakMap,
-      earliestRealDay(streakMap.keys()) ?? summaryEnd,
-      summaryEnd,
-      unlogged,
-      creditFrom
-    );
+    // The cached pair, or the derivation it was cached from — off the same
+    // `fresh` the slice above was chosen by, so a habit cannot be served a
+    // stored figure over a window it was just told it had to recompute.
+    //
+    // `recomputeBestStreak` is the shared block
+    // (@habiterall/shared/summary-cache.js) — the same one cloud calls, and
+    // the anchor discipline (`earliestRealDay`, never the raw lexical minimum
+    // — #270) lives there now rather than here. It is handed the SAME
+    // `creditFrom` the summary above got, not a second one derived from its
+    // wider slice: the two derivations disagree exactly when the habit's
+    // answer falls between the two windows (#223).
+    let bestStreakValue;
+    let totalCompleted;
+    if (fresh) {
+      bestStreakValue = h.best_streak;
+      totalCompleted = h.total_completed;
+    } else {
+      bestStreakValue = recomputeBestStreak(h, /** @type {any} */ (all), {
+        summaryEnd, unlogged, creditFrom,
+      });
+      // Counted in SQLite rather than by walking every row in JS. The
+      // expression mirrors isCompleted exactly, including that a skip is
+      // "not applicable" and never a completion — passing `e.value` instead
+      // of the whole row is what made this edition count skips as done on
+      // at_most habits while cloud did not.
+      totalCompleted = /** @type {any} */ (
+        q.countCompleted.get(
+          h.id, h.type, h.target_type, h.target_value, h.target_value
+        )
+      ).n;
+      recomputed.push({ id: h.id, best_streak: bestStreakValue, total_completed: totalCompleted });
+    }
 
     return {
       ...toApiHabit(h),
@@ -856,7 +911,7 @@ api.get('/overview', (req, res) => {
       skips: skipsByHabit.get(h.id) ?? [],
       score: stats.score,
       currentStreak: stats.currentStreak,
-      bestStreak: bestStreak(allStreaks),
+      bestStreak: bestStreakValue,
       totalCompleted,
       // Same field, same reason as the `/stats` call site above: resolved
       // server-side because no renderer can import `unansweredCounts`, and
@@ -864,6 +919,22 @@ api.get('/overview', (req, res) => {
       unlogged_is_success: unansweredCounts(h, unlogged),
     };
   });
+
+  // Everything that was recomputed goes back on the row, so the next load on
+  // this day reads it instead of deriving it again. A WRITE inside a GET
+  // handler, same as the device-zone middleware above it in this file — and,
+  // like that one, it is never a reason to add a `data_version` here: this
+  // edition has none. Personal has no equivalent of cloud's guard either
+  // (`writeBackSummaries`, habiterall-cloud/src/api.js), and that absence is a
+  // property of this storage rather than a gap: `node:sqlite`'s `DatabaseSync`
+  // is SYNCHRONOUS, so the entry reads above, the derivation, and this loop
+  // all run in one uninterrupted turn of the event loop — nothing else can
+  // interleave a write between them. That holds only as long as nothing here
+  // `await`s between the derivation and the stamp, so this route stays
+  // deliberately synchronous throughout.
+  for (const r of recomputed) {
+    q.writeBackSummary.run(r.best_streak, r.total_completed, summaryEnd, r.id);
+  }
 
   // The mean is over `habitPayloads`' own `score` — the same number drawn on
   // the row beneath each header — never a second scoring pass. See
@@ -1054,6 +1125,13 @@ api.get('/export.csv', (req, res) => {
   // `buildHabitsCsv` reads `h.category` by NAME, the same as `/export`
   // above — a raw habit row only carries `category_id`, which means nothing
   // once restored elsewhere (or nowhere, on a Loop round trip).
+  //
+  // Neither this raw `habits` array nor `writeLoopDatabase`'s below is run
+  // through `stripSummaryCache`: both this route's `buildCsvArchive` and
+  // `/export-loop.db`'s `writeLoopDatabase` pick an explicit column list
+  // (`LOOP_HABIT_FIELDS` et al. — root CLAUDE.md), so `best_streak`,
+  // `total_completed` and `summary_asof` are never read off the row they were
+  // handed, in either format, and need no stripping here.
   const categories = /** @type {any[]} */ (q.allCategories.all());
   const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
   const withCategory = habits.map((h) => ({

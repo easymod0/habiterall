@@ -5,7 +5,9 @@
  * storage-specific half, so the shared parsers stay database-agnostic.
  */
 
-import { db, UNSET, YES, SKIP, isCategoryNameConflict } from './db.js';
+import {
+  db, UNSET, YES, SKIP, isCategoryNameConflict, clearHabitSummary, clearAllSummaries,
+} from './db.js';
 // Loop stores colours as a palette index, so imported habits need the same
 // index -> hex mapping the parsers use.
 import { entryValue, normaliseImportedHabit } from '@habiterall/shared/import.js';
@@ -124,6 +126,15 @@ export function applyImport(habits, mode = 'merge', categories = []) {
       // includes its categories — never a partial wipe that left a stray
       // category behind with nothing pointing at it.
       clearAllCategories.run();
+      // Technically inert against THIS statement order — `clearAllHabits`
+      // just deleted every row a stamp could have lived on, and every habit
+      // this import goes on to insert starts with `summary_asof` NULL anyway
+      // (db.js: nullable, no default). Called regardless, because a write
+      // path relying on the ORDER of two unrelated statements for its safety
+      // is exactly the kind of implicit invariant this repo's style avoids
+      // stating — and the cost is one bounded UPDATE against a table about to
+      // be empty.
+      clearAllSummaries();
     }
 
     // Preloaded with whatever the account already has — empty right after the
@@ -351,6 +362,11 @@ export function applyImport(habits, mode = 'merge', categories = []) {
         if (isSkip) {
           insertEntry.run(habitId, e.date, 0, 'skip', notes);
           result.entriesImported++;
+          // A skip is an answer, and it can bridge a run or change what the
+          // habit's window covers — the cached pair for THIS habit is no
+          // longer trustworthy. See db.js for why this edition has no single
+          // hook a write runs through and calls this by hand.
+          clearHabitSummary(habitId);
           continue;
         }
 
@@ -401,8 +417,15 @@ export function applyImport(habits, mode = 'merge', categories = []) {
         const yielding = mode === 'merge' && stored === UNSET && !notes.trim();
         const written = (yielding ? insertEntryIfAbsent : insertEntry)
           .run(habitId, e.date, stored, '', notes);
-        if (written.changes > 0) result.entriesImported++;
-        else result.entriesKept++;
+        if (written.changes > 0) {
+          result.entriesImported++;
+          // Only when a row actually changed: `insertEntryIfAbsent` yielding
+          // to what the account already had (`written.changes === 0`) wrote
+          // nothing, so the habit's cached pair is still exactly what it was.
+          clearHabitSummary(habitId);
+        } else {
+          result.entriesKept++;
+        }
       }
 
       if (untranslatable) {

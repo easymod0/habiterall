@@ -121,6 +121,29 @@ ck('GET /export returned the habit', exported.habits.length > 0);
 if (exported.habits.length) checkShape('GET /export', exported.habits[0]);
 
 /**
+ * `checkShape` above iterates a typed SUBSET, so an extra column — the
+ * summary-cache fields, `best_streak`/`total_completed`/`summary_asof`
+ * (#184), or anything else added later that forgets `stripSummaryCache` or
+ * `toApiHabit` — passes it silently. This is the exact-key tripwire cloud
+ * already has (`PORTABLE_HABIT_KEYS`, habiterall-cloud/test/api.integration.mjs)
+ * for its own `/export`, mirrored here so a leak on EITHER edition's backup
+ * fails a suite. Cloud's own comment says this needs a list both editions
+ * assert against to close the gap for good; until then, two copies of the
+ * same literal are strictly better than the one edition this used to cover.
+ */
+const PORTABLE_HABIT_KEYS = [
+  'archived', 'at_most_unlogged', 'category', 'category_id', 'color', 'created_at',
+  'description', 'entries', 'freq_denominator', 'freq_numerator', 'icon', 'id', 'name',
+  'position', 'reminder_message', 'reminder_time', 'show_as', 'target_type',
+  'target_value', 'type', 'unit',
+];
+ck('THE assertion: GET /export describes a habit with EXACTLY these keys, ' +
+  'not one more — the tripwire for best_streak/total_completed/summary_asof',
+  JSON.stringify(Object.keys(exported.habits[0] ?? {}).sort())
+    === JSON.stringify(PORTABLE_HABIT_KEYS),
+  Object.keys(exported.habits[0] ?? {}).sort().join(','));
+
+/**
  * `unlogged_is_success` — the flag `unansweredCounts` resolves onto the
  * response, checked at both call sites (`/overview`, `/stats`). Its own unit
  * tests pin the precedence rule; this is the wiring, which is exactly what a
