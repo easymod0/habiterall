@@ -485,6 +485,30 @@ sends only sometimes — see `shared/public/CLAUDE.md`, and note
 `res.vary(DEVICE_ZONE_HEADER)` is safe there because a device sends one zone on
 every request.
 
+## `bestStreak` and `totalCompleted` are cached on the habit row (#184)
+
+`best_streak`, `total_completed` and `summary_asof` (migration 018) are the
+server's own OBSERVATIONS about the cost of deriving a figure — the same
+category `data_version` is in — and not habit fields: `parseHabit` knows
+nothing about them, they are in no `*_HABIT_FIELDS` list, and `toApiHabit`
+(`stripSummaryCache`) strips them at every serialisation point, so they reach
+no client and no backup. `docs/decisions/caching.md` has the design in full —
+what the two figures are, the measurements, and the two defects found
+reviewing the salvaged draft.
+
+`withUserWrite`'s `{habits: [...]}` narrows the invalidation to the habits a
+write is known to have touched, so tapping one habit does not cost the other
+nineteen their cached pair. **An empty array means the same as `null`** —
+the whole account — not "clear nothing": `id = ANY('{}')` is false for every
+row, so the one spelling a caller reaches by computing an id list that
+happens to come out empty is the one that must not be read as "narrow to
+nothing". A caller unsure what it touched, or that touches more than one
+habit, passes `null` (the default) rather than guess.
+
+The write-back that stamps a recomputed pair (`writeBackSummaries`) never
+goes through `withUserWrite` and must never bump `data_version` — see
+"The write-back is a write on a GET" in `docs/decisions/caching.md`.
+
 ## Which claim names the account
 
 `displayName` in `src/auth.js` (unexported) picks what the chip shows:
