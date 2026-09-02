@@ -111,13 +111,22 @@ export function isRealDay(iso) {
  * hands this a `Map`'s key iterator, in insertion order, not date order.
  *
  * Exported for both editions' `/overview`, the last #270 anchor site: its
- * `bestStreak` is a streak scan the ROUTE runs itself, over a `streakMap` it
- * builds one line above the call, and it opened at `entries[0].date` — the
+ * `bestStreak` is a streak scan the ROUTE ran itself, over a `streakMap` it
+ * built one line above the call, and it opened at `entries[0].date` — the
  * lexical min out of `ORDER BY date`, which is exactly as phantom-capable as
  * the raw `MIN(date)` reads `creditAnchor` and `computeCategoryStats` already
  * refuse. This is the one spelling of "skip a phantom when choosing an
  * anchor"; a route must not restate the loop inline. See
  * `docs/decisions/phantom-dates.md`.
+ *
+ * Since #184 that scan is `recomputeBestStreak` in `src/summary-cache.js` —
+ * one copy for both editions, because its answer is now CACHED on the habit
+ * row and a window two editions spelled separately is two stored numbers under
+ * one name. The anchor moved with it and did not survive the move unassisted:
+ * the first draft of that function reverted to `entries[0].date`, reasoning
+ * from the query's `ORDER BY`. Caching raises the stakes of exactly this bug,
+ * since a derived zero is wrong until the row is fixed while a STORED zero is
+ * wrong until something invalidates it.
  *
  * @param {Iterable<string>} dates
  * @returns {string|null}

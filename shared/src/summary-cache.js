@@ -23,7 +23,7 @@
  * Pure logic: no storage, no HTTP, no DOM. See `docs/decisions/caching.md`.
  */
 
-import { bestStreak, computeStreaks } from './stats.js';
+import { bestStreak, computeStreaks, earliestRealDay } from './stats.js';
 
 /**
  * How far back the dashboard's streak scan reads.
@@ -136,11 +136,29 @@ export function summaryCacheHit(row, summaryEnd) {
  * slice handed in here — the two derivations disagree exactly when the habit's
  * answer falls between the two windows.
  *
+ * **The anchor is `earliestRealDay`, never `entries[0].date`** — this is #270's
+ * last site, and moving the scan in here is exactly where it could have been
+ * lost. Both editions' routes ask `earliestRealDay` today; a first draft of
+ * this function took the lexical minimum instead, on the reasoning that the
+ * query is `ORDER BY date` and so element 0 IS the minimum. It is, and that is
+ * the bug: a row dated `2026-07-99` sorts first, opens the window there, and
+ * `boundedRange` rolls it forward past `summaryEnd` — every figure on the scan
+ * zero, beside a `score` and a `currentStreak` that stayed correct because they
+ * go through `resolveWindow`. A date that is not a day is not a day the habit
+ * lived, so it cannot be the day the window opens.
+ *
+ * Caching makes that strictly worse than it was at the route, which is the
+ * reason to state it here rather than to inherit it: a derived zero is wrong
+ * until the row is fixed, where a STORED zero is wrong until something
+ * invalidates it, and nothing about `2026-07-99` ever changes.
+ *
+ * It also means the order `entries` arrives in stops mattering — the anchor is
+ * a scan for a minimum rather than a read of a position — so a caller is no
+ * longer silently depending on its query's `ORDER BY`.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {Array<{date: string, value: number, status?: string}>} entries the
- *   habit's rows over the last `STREAK_HISTORY_DAYS`, in ASCENDING date order
- *   (which is what both editions' queries return): `entries[0]` is read as the
- *   start of the scan
+ *   habit's rows over the last `STREAK_HISTORY_DAYS`. Any order.
  * @param {{summaryEnd: string, unlogged?: string, creditFrom?: string}} opts
  * @returns {number}
  */
@@ -150,11 +168,12 @@ export function recomputeBestStreak(habit, entries, { summaryEnd, unlogged, cred
   );
   // No entries is not a zero-day window: the scan still runs over `summaryEnd`
   // itself, because on an at-most habit whose unanswered days count as success
-  // that single day is a real streak of one.
+  // that single day is a real streak of one. `earliestRealDay` answering `null`
+  // — every row a phantom — lands in the same place, and for the same reason.
   const streaks = computeStreaks(
     habit,
     entryMap,
-    entries.length ? entries[0].date : summaryEnd,
+    earliestRealDay(entryMap.keys()) ?? summaryEnd,
     summaryEnd,
     unlogged,
     creditFrom

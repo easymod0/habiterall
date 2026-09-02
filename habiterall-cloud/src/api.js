@@ -1346,8 +1346,30 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived, dataV
   const recomputed = [];
 
   const habitPayloads = habits.map((h) => {
+    // Fresh or stale decides which of the two reads above covers this habit,
+    // and it is asked ONCE, here, so nothing below can answer it differently.
+    // `byHabit` is keyed on `staleIds`, so holding a slice IS being stale.
+    const fresh = !byHabit.has(h.id);
     const all = byHabit.get(h.id) ?? [];
-    const recent = recentByHabit.get(h.id) ?? [];
+    // **The 400-day slice comes from a different place for each half, and that
+    // is the whole of why the two queries above are disjoint.** A FRESH habit
+    // was in `recentRows` and nothing else; a STALE one was in `allRows`, whose
+    // 1830-day window CONTAINS this one, so it filters its own rather than
+    // being fetched twice. Issuing the recent query for every habit instead
+    // made a stale habit fetch its last 400 days in BOTH — ~2,230 days per
+    // habit on the cold path, where master shipped 1,830 — which is a
+    // regression on precisely the request this cache exists to speed up.
+    //
+    // Reading `recentByHabit` unconditionally is the other way to get this
+    // wrong and it is far worse than a cost: a stale habit is absent from
+    // `recentRows`, so `recent` is `[]`, and `summaryStats` over no entries
+    // answers `score: 0, currentStreak: 0`. Every habit is stale on the first
+    // load of a day and after every write, so that is the dashboard blanking
+    // its two live figures on the load a user actually watches, while
+    // `bestStreak` and `totalCompleted` beside them stay right.
+    const recent = fresh
+      ? (recentByHabit.get(h.id) ?? [])
+      : all.filter((e) => e.date >= cutoff);
     // Two numbers are read below — `score` and `currentStreak` — so this
     // calls `summaryStats` rather than `computeStats`: the same window and
     // the same two passes (`computeScores`, `computeStreaks`), with the
@@ -1370,15 +1392,14 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived, dataV
 
     const stats = summaryStats(h, recent, { end: summaryEnd, unlogged, creditFrom });
 
-    // The cached pair, or the derivation it was cached from. `summaryCacheHit`
-    // decided this once, above, and is asked again here through `staleIds`'
-    // own membership so the two cannot disagree about one habit.
+    // The cached pair, or the derivation it was cached from — off the same
+    // `fresh` the slice above was chosen by, so a habit cannot be served a
+    // stored `bestStreak` over a window it was told it had to recompute.
     //
     // `recomputeBestStreak` is the shared block (`summary-cache.js`), handed
     // the SAME `creditFrom` the summary above got rather than a second one
     // derived from its wider slice — the two disagree exactly when the habit's
     // answer falls between the two windows (#223).
-    const fresh = !byHabit.has(h.id);
     const bestStreak = fresh
       ? h.best_streak
       : recomputeBestStreak(h, all, { summaryEnd, unlogged, creditFrom });
