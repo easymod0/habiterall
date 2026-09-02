@@ -34,6 +34,21 @@ const EXAMPLES = [
   // save a control character the server discards.
   ['\u0007', ''],
   ['\u0007' + '\u{1F9D8}', '\u{1F9D8}'],
+  // The strip class has FOUR clauses, and the `evil` row above witnesses only
+  // the bidi OVERRIDE range (U+202A-202E). This is the ISOLATE range
+  // (U+2066-2069), which had no witness here, in `validate.test.js`, or
+  // anywhere else under `shared/test/`: drop `\u2066-\u2069` from
+  // `previewIcon`'s class alone and every other example still passes, while
+  // the preview offers to save a zero-width isolate — a blank glyph after
+  // "Will be saved as:" — for a value the server stores as `e`. Written as an
+  // escape rather than the character itself, because an invisible literal in
+  // this file is unreviewable and has already cost this branch a syntax error.
+  //
+  // The fourth clause (U+2028/2029) is deliberately left unwitnessed: both are
+  // JS whitespace, so `.trim()` decides a leading one and "first grapheme"
+  // decides any other, which is precisely the coincidence `parseIcon`'s own
+  // comment says the explicit strip must not be left depending on.
+  ['\u2066evil', 'e'],
 ];
 
 test('previewIcon agrees with parseIcon over the shared example table', () => {

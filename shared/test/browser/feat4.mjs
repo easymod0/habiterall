@@ -639,7 +639,8 @@ try {
   // one path that already worked even with the Escape listener bound to
   // `els.panel`: `#icon-search` is INSIDE `#icon-picker`, so a `keydown`
   // there always reached a panel-scoped listener. `#icon-picker-toggle` is
-  // not — it sits inside the `<label>`, `#icon-picker` is a sibling AFTER it,
+  // not — it sits in `.icon-field-row` beside the input, and `#icon-picker` is
+  // a sibling after the whole `.icon-field` block,
   // and a user who opens the picker with the MOUSE has focus land on the
   // button they pressed, never moved into the panel (`openPanel()`
   // deliberately does not steal it). A user who then immediately presses

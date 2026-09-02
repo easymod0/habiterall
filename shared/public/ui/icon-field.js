@@ -524,8 +524,10 @@ export function initIconField(dialogEl) {
   });
 
   // Escape closes the panel, not the dialog behind it — bound on the DIALOG,
-  // not `els.panel`. `#icon-picker-toggle` sits INSIDE the `<label>` and
-  // `#icon-picker` is a sibling AFTER it, and `openPanel()` deliberately does
+  // not `els.panel`. `#icon-picker-toggle` sits in `.icon-field-row` beside
+  // the input and `#icon-picker` is a sibling AFTER the whole `.icon-field`
+  // block — the toggle is OUTSIDE the panel either way, which is the part
+  // that matters — and `openPanel()` deliberately does
   // not move focus into the panel (a user can Shift+Tab back out of it onto
   // the toggle at any point, so stealing focus on open would only narrow this
   // hole, not close it) — so a panel opened by CLICKING the toggle leaves
