@@ -429,6 +429,102 @@ try {
   ck('a habit id that is not ours is refused',
     /no longer exists/i.test(forged.at(-1)?.data?.content ?? ''), JSON.stringify(forged.at(-1)));
 
+  /* ---------- a quick answer preserves that day's note (#224) ---------- */
+  //
+  // The issue's own measurement: a note written through the ordinary PUT,
+  // then a shade/Discord-style press that never carries `notes` at all —
+  // `answerBody` has no such field. Every case here goes through a path that
+  // OMITS the key, since a test that writes a note and reads it straight back
+  // cannot fail.
+
+  const notesHabit = await api('/api/habits', {
+    method: 'POST', body: JSON.stringify({ name: 'Notes preserve' }),
+  });
+  const notesId = notesHabit.body.id;
+  const NOTE = 'coach said 10, only managed 8';
+
+  // 1. The issue's own measurement.
+  await api(`/api/habits/${notesId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2, notes: NOTE }),
+  });
+  await press(`hab|${notesId}|${day}|yes`);
+  const afterPress = await api(`/api/habits/${notesId}/entries`);
+  const pressedRow = afterPress.body.find((e) => e.date === day);
+  ck('a quick Yes through the real adapter keeps the day\'s note',
+    pressedRow?.value === 2 && pressedRow?.notes === NOTE,
+    JSON.stringify(pressedRow));
+
+  // 2. PUT omitting the key preserves.
+  const omitHabit = await api('/api/habits', {
+    method: 'POST', body: JSON.stringify({ name: 'Notes omit' }),
+  });
+  const omitId = omitHabit.body.id;
+  await api(`/api/habits/${omitId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2, notes: NOTE }),
+  });
+  await api(`/api/habits/${omitId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2 }),
+  });
+  const afterOmit = await api(`/api/habits/${omitId}/entries`);
+  ck('a PUT that omits notes preserves the stored note',
+    afterOmit.body.find((e) => e.date === day)?.notes === NOTE,
+    JSON.stringify(afterOmit.body.find((e) => e.date === day)));
+
+  // 3. PUT notes:'' still clears.
+  const clearHabit = await api('/api/habits', {
+    method: 'POST', body: JSON.stringify({ name: 'Notes clear' }),
+  });
+  const clearId = clearHabit.body.id;
+  await api(`/api/habits/${clearId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2, notes: NOTE }),
+  });
+  await api(`/api/habits/${clearId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2, notes: '' }),
+  });
+  const afterClear = await api(`/api/habits/${clearId}/entries`);
+  ck('an explicit empty notes still clears the stored note',
+    afterClear.body.find((e) => e.date === day)?.notes === '',
+    JSON.stringify(afterClear.body.find((e) => e.date === day)));
+
+  // 4. The echo is the row, not the request, on a preserve.
+  const echoHabit = await api('/api/habits', {
+    method: 'POST', body: JSON.stringify({ name: 'Notes echo' }),
+  });
+  const echoId = echoHabit.body.id;
+  await api(`/api/habits/${echoId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2, notes: NOTE }),
+  });
+  const echoOmit = await api(`/api/habits/${echoId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2 }),
+  });
+  ck('the response echoes the stored note, not the omitted request body',
+    echoOmit.body.notes === NOTE, JSON.stringify(echoOmit.body));
+
+  // 5. The echo on a clear.
+  const echoClear = await api(`/api/habits/${echoId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2, notes: '' }),
+  });
+  ck('the response echoes the cleared note',
+    echoClear.body.notes === '', JSON.stringify(echoClear.body));
+
+  // 6. A skip preserves too.
+  const skipHabit = await api('/api/habits', {
+    method: 'POST', body: JSON.stringify({ name: 'Notes skip' }),
+  });
+  const skipId = skipHabit.body.id;
+  await api(`/api/habits/${skipId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2, notes: NOTE }),
+  });
+  const skipPut = await api(`/api/habits/${skipId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ status: 'skip' }),
+  });
+  const afterSkipPreserve = await api(`/api/habits/${skipId}/entries`);
+  ck('a skip preserves the stored note',
+    afterSkipPreserve.body.find((e) => e.date === day)?.notes === NOTE,
+    JSON.stringify(afterSkipPreserve.body.find((e) => e.date === day)));
+  ck('and the reply still reports the SKIP wire value',
+    skipPut.body.value === 3, JSON.stringify(skipPut.body));
+
   /* ---------- answering from an ntfy button ---------- */
   //
   // Reached over the real route (`NTFY_ANSWER_PATH`), not by calling
