@@ -28,7 +28,7 @@
  * own: the CHECK constraint has to be shown a stamp with nothing behind it, and
  * that is a row the app will not write.
  *
- * Five things only this file can see:
+ * Seven things only this file can see:
  *
  *  1. **The narrowing is real.** A tap on habit A must leave habit B's stamp
  *     alone. Without that case the whole `{habits: [...]}` option could be a
@@ -51,6 +51,27 @@
  *     only thing anyone loses. Load, write, load, and require the figure to
  *     have moved — the one assertion that fails when the clear is removed and
  *     that no amount of reading a freshly-computed pair can make.
+ *  6. **A cache HIT is genuinely served.** Every case above proves a WRITE
+ *     invalidates; none of them proves a READ that finds a live stamp actually
+ *     serves what the row holds rather than recomputing regardless. Plant a
+ *     deliberately wrong pair through the ADMIN connection, stamp it with the
+ *     CALLER's own day, and require `/overview` to answer with that wrong
+ *     pair. Without this, `summaryCacheHit` hardcoded to `return false` — a
+ *     cache that never hits, so every load recomputes and the three columns do
+ *     nothing at all — leaves every other case in this file green, because
+ *     both a hit and a permanent miss produce a CORRECT figure, only ever
+ *     computed a different number of times.
+ *  7. **A stamp dated AHEAD of `summaryEnd` is stale too.** Every other
+ *     fixture here stamps a day in the past, so a suite built only from those
+ *     cannot tell `asof !== summaryEnd` from `asof < summaryEnd` — both
+ *     spellings call a stamp dated yesterday stale. `summary-cache.js`'s own
+ *     comment names the direction that does: `summaryEnd` is the CALLER's
+ *     day, so an account used from two zones can move it BACKWARDS across a
+ *     date boundary, and a pair built for what was then "today" can be ahead
+ *     of a later request's `summaryEnd`. Plant a stamp dated TOMORROW and
+ *     require the pair to be recomputed, and the stamp moved back onto the
+ *     caller's own day rather than left pointing at a day that has not
+ *     happened yet.
  *
  * The Discord half is driven in process, through `handleInteraction` over the
  * real `interactionAdapter()`, because the alternative is faking a gateway
@@ -584,7 +605,14 @@ try {
 
   console.log('\n--- a cached load and an uncached load are the same payload ---');
 
-  // What proves the cache is not merely fast but RIGHT. Both loads are memo
+  // What this proves is narrower than it sounds: that the PAYLOAD SHAPE a hit
+  // and a miss produce is identical, key for key, when both start from the
+  // same underlying data. It does NOT prove a hit ever happens — a
+  // `summaryCacheHit` hardcoded to `return false` recomputes both loads from
+  // the same rows and passes this check too, since two correct answers agree
+  // whichever way each was produced. The case below named "a cache HIT is
+  // genuinely served" is what actually distinguishes the two, with a planted
+  // pair a recompute cannot arrive at by accident. Both loads here are memo
   // MISSES — the version is bumped out of band before each, which is the only
   // way to reach `buildOverview` twice with the same data — and the difference
   // between them is whether the three columns held anything.
@@ -612,6 +640,75 @@ try {
   } catch (err) { differ = err; }
   ck('a cached load and an uncached load are the same payload, key for key',
     differ === null, (differ?.message ?? '').split('\n').slice(0, 8).join(' / '));
+
+  console.log('\n--- a cache HIT is genuinely served, not silently recomputed ---');
+
+  // THE assertion this suite was missing. Every case above proves a WRITE
+  // invalidates the stamp; none of them proves a READ that finds a live one
+  // actually serves what the row holds. A `summaryCacheHit` hardcoded to
+  // `return false` recomputes on every load, so the columns do nothing at
+  // all — and the whole rest of this file stays green, because a hit and a
+  // permanent miss both answer correctly, only a different number of times.
+  //
+  // Planted through the ADMIN connection and stamped with the CALLER's own
+  // day, so `/overview` has no honest way to arrive at these numbers except
+  // by reading the row. One real completion makes the true pair (1, 1); 777
+  // is not reachable from that fixture by any recompute, the same shape
+  // personal's suite plants for the same reason.
+  const madeHit = await call('/habits', {
+    method: 'POST',
+    body: { name: 'Summary cache hit', type: 'boolean', freq_numerator: 1, freq_denominator: 1 },
+  });
+  const habitHit = madeHit.body.id;
+  const wroteHit = await call(`/habits/${habitHit}/entries/${today}`,
+    { method: 'PUT', body: { value: 2 } });
+  ck('control: the cache-hit probe and its one real completion were accepted',
+    madeHit.status === 201 && wroteHit.status < 300, `${madeHit.status}, ${wroteHit.status}`);
+
+  await admin.query(
+    `UPDATE habits SET best_streak = 777, total_completed = 777, summary_asof = $2
+      WHERE id = $1`, [habitHit, today]);
+
+  const hitRow = await overviewRow(habitHit);
+  ck('THE ASSERTION: /overview serves the deliberately WRONG cached pair, ' +
+    'proving it is read off the row rather than recomputed',
+    hitRow.bestStreak === 777 && hitRow.totalCompleted === 777, JSON.stringify(hitRow));
+
+  console.log('\n--- a stamp dated AHEAD of summaryEnd is recomputed, not served ---');
+
+  // Every fixture elsewhere in this file stamps a day in the PAST (`STAMP`,
+  // and `day(n)` above), so a suite built only from those cannot distinguish
+  // `asof !== summaryEnd` from `asof < summaryEnd` — a stamp dated yesterday
+  // is stale under both spellings. `summary-cache.js`'s own comment names the
+  // direction that does: `summaryEnd` is the CALLER's day, so an account used
+  // from two zones can move it BACKWARDS across a date boundary, and a pair
+  // built for what was then "today" can be dated ahead of a LATER request's
+  // `summaryEnd`. `<` would still call that "fresh"; only `!==` catches it.
+  const madeAhead = await call('/habits', {
+    method: 'POST',
+    body: { name: 'Summary cache tomorrow', type: 'boolean',
+            freq_numerator: 1, freq_denominator: 1 },
+  });
+  const habitAhead = madeAhead.body.id;
+  const wroteAhead = await call(`/habits/${habitAhead}/entries/${today}`,
+    { method: 'PUT', body: { value: 2 } });
+  ck('control: the tomorrow-stamp probe and its one real completion were accepted',
+    madeAhead.status === 201 && wroteAhead.status < 300,
+    `${madeAhead.status}, ${wroteAhead.status}`);
+
+  const tomorrow = addDays(today, 1);
+  await admin.query(
+    `UPDATE habits SET best_streak = 888, total_completed = 888, summary_asof = $2
+      WHERE id = $1`, [habitAhead, tomorrow]);
+
+  const aheadRow = await overviewRow(habitAhead);
+  const afterAhead = await pair(habitAhead);
+  ck('THE ASSERTION: a stamp dated ahead of summaryEnd is recomputed, not ' +
+    'served as fresh — the direction `!==` and `<` disagree on',
+    aheadRow.bestStreak === 1 && aheadRow.totalCompleted === 1, JSON.stringify(aheadRow));
+  ck('...and the stamp is moved back onto the caller\'s own day, not left ' +
+    'pointing at a day that has not happened yet',
+    afterAhead.asof === today, JSON.stringify(afterAhead));
 
   console.log('\n--- the write-back refuses a stale data_version ---');
 
