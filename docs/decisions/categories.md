@@ -787,16 +787,32 @@ can still see — not for the padding either, measured by reverting `toISO`'s
 year padding and watching both of them stay green, since the clamp replaces
 `from` before anything reformats it.
 
-**And the ordering is necessary without being sufficient, which is #270.** Both
-fixtures above are ones where the clamp FIRES. A `firstEntry` that sorts after
-`warmStart` is not clamped at all, and the rollover can then carry it past
-`end`: `2025-99-99` against a `warmStart` of `2025-04-27` normalises to
-`2033-06-07`, and `landedAt` refuses the member on every day of the window —
-`unloggedExcluded: 1` and a category reading 1.00 because the member dragging it
-down was excluded rather than scored, which is verbatim the outcome this
-paragraph says the ordering prevents. Older than the padding fix and identical
-on master. The fix is to re-apply the clamps after the reformat; it is filed
-rather than done because it changes what an affected account's figures say.
+**And the ordering was necessary without being sufficient — #270, now closed at
+the CHOOSING stage rather than papered over after.** Both fixtures above are
+ones where the clamp FIRES on the raw `firstEntry`. A `firstEntry` that sorts
+after `warmStart` was not clamped at all, and the rollover could then carry it
+past `end`: `2025-99-99` against a `warmStart` of `2025-04-27` normalises to
+`2033-06-07`, and `landedAt` refused the member on every day of the window —
+`unloggedExcluded: 1` and a category reading 1.00 because the member dragging
+it down was excluded rather than scored. That was true on master and is fixed
+now: `memberWarm` is computed from a `warmAnchor` that is `firstEntry` only
+when `isRealDay(firstEntry)`, and the earliest real row in the member's own
+slice otherwise (`null`, i.e. `warmStart`, if the slice holds none) — so
+`2025-99-99` never reaches the normalise-and-rollover at all and reads
+**identically** to `2024-99-99`, the already-inert case above.
+`landsOn`/`firstEntry` itself is untouched by this — a phantom row is a genuine
+answer to "has this habit ever been logged", so a phantom-only member still
+LANDS rather than falling into `unloggedExcluded`; only the WARM-UP anchor is
+narrowed to a real day. The clamp-then-normalise block below `memberWarm` is
+now unreachable by any input (`warmAnchor` is a real day by construction on
+both branches, and so is `warmStart`) and is kept as a documented backstop
+rather than removed; the ordering it used to pin has moved to `windowStart`'s
+own re-clamp and its `creditAnchor` tests in `shared/test/stats.test.js`, since
+a route's raw `MIN(date)` SQL read is the one path left that can still hand a
+phantom this deep — and it never reaches `computeCategoryStats`.
+`docs/decisions/phantom-dates.md` has the full measurement, both sites, and
+Decision 2's argument for why this is the model working rather than an
+exception to be softened.
 
 `landedAt` reads that normalised date rather than the raw `firstEntry`, because
 the clamp is what put the two in contact and they did not agree: `computeScores`

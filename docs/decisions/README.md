@@ -33,6 +33,7 @@ are already answered here, usually because they were the first thing tried.
 | `site.md` | habiterall.ca: why the wiki is generated from the README, the link check, the changelog source |
 | `categories.md` | one category per habit, `ON DELETE SET NULL`, uncategorised as a state, the case-fold divergence |
 | `caching.md` | the `/overview` memo and every bound in it, the shared eviction policy, the pool timeouts, `users.data_version` and the pool cliff, and the `Vary` that cost the offline dashboard |
+| `phantom-dates.md` | #270: why a date that is not a real day cannot anchor a window, the six sites it was closed at, why `2026-02-30` moving too is correct rather than collateral, and why Site F has a behavioural test only in personal |
 
 The first sixteen files are the original prose verbatim, sliced by topic and
 checked line-for-line against the pre-split `CLAUDE.md`; that split lost nothing.

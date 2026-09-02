@@ -9,7 +9,7 @@ import {
   UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
-  summariseByCategory,
+  summariseByCategory, earliestRealDay,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
@@ -832,10 +832,19 @@ api.get('/overview', (req, res) => {
     const streakMap = new Map(
       entries.map((e) => [e.date, { value: e.value, status: e.status }])
     );
+    // The other #270 anchor site: `entries` is `ORDER BY date`, so element 0
+    // was the raw LEXICAL min, phantom-capable exactly like the `MIN(date)`
+    // reads `creditAnchor` and `computeCategoryStats` already refuse. A row
+    // dated '2026-07-99' sorted first, opened the window there, and
+    // `boundedRange` rolled it forward past `summaryEnd` — every figure on
+    // this payload's own scan zero while `score`/`currentStreak` (through
+    // `resolveWindow`) stayed correct, which is what made the disagreement
+    // visible. `earliestRealDay` is the one guard, same as those two sites.
+    // See docs/decisions/phantom-dates.md.
     const allStreaks = computeStreaks(
       h,
       streakMap,
-      entries.length ? entries[0].date : summaryEnd,
+      earliestRealDay(streakMap.keys()) ?? summaryEnd,
       summaryEnd,
       unlogged,
       creditFrom

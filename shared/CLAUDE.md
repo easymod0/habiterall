@@ -349,29 +349,57 @@ figure is read off the walked list, so an un-normalised `from` counts the
 phantom row in one figure and in none of the others — exactly the disagreement
 the note above `totalCompleted` says was fixed.
 
-**It normalises AFTER the two clamps, never before, and the ordering is the
-whole safety of it.** Normalising is a ROLLOVER of a string that came out of
-storage, and a rollover moves the date by an amount nothing in `resolveWindow`
-bounds: `9999-99-99` lands in year 10007, five digits, which sorts BELOW
-`2026-…` however the year is padded. Normalised first it clamps to `earliest`,
-so one junk row opens the widest window `MAX_RANGE_DAYS` allows on every
-request for a habit that has none of those days; clamped first it is `end`. The
-same ordering, for the same reason, in `computeCategoryStats`' `memberWarm`,
-where that five-digit year would otherwise compare as OLDER than `warmStart`
-and score a member over a warm-up it never had.
+**It normalises AFTER the two clamps, never before, and the ordering is still
+load bearing even though #270 is fixed.** Normalising is a ROLLOVER of a string
+that came out of storage, and a rollover moves the date by an amount nothing in
+`resolveWindow` bounds: `9999-99-99` lands in year 10007, five digits, which
+sorts BELOW `2026-…` however the year is padded. Normalised first it clamps to
+`earliest`, so one junk row opens the widest window `MAX_RANGE_DAYS` allows on
+every request for a habit that has none of those days; clamped first it is
+`end`. The same ordering, for the same reason, in `computeCategoryStats`'
+`memberWarm`, where that five-digit year would otherwise compare as OLDER than
+`warmStart` and score a member over a warm-up it never had. `windowStart`'s
+`creditAnchor` tests in `shared/test/stats.test.js` still exercise both
+orderings directly, even though `creditAnchor` itself now refuses a non-real
+`anchor` before ever calling `windowStart` (a review round found it had not,
+and #223's own fail-open direction was reachable through it — see
+`docs/decisions/phantom-dates.md`): the ordering is pinned there rather than
+against a live caller, because `windowStart` is a general-purpose function and
+is also reached with a caller-NAMED `start`, which nothing in this file itself
+asserts is a real day.
 
-**It is NECESSARY AND NOT SUFFICIENT, which is #270.** The clamp is a string
-comparison and the reformat is a rollover worth up to ~8 years, so a date
-inside the window *lexically* can land outside it afterwards with neither clamp
-having run since. `2026-07-99` sorts below an `end` of `2026-08-18`, normalises
-to `2026-10-07`, and `boundedRange` answers `[]` — every figure zero for a
-habit with a live nine-day streak. `memberWarm` has the same hole above
-`warmStart`. Both are older than the year padding (measured byte-identical on
-master) and neither is something the ordering ever closed; the fix is to
-re-apply the clamps AFTER the reformat, and it is filed rather than done
-because it changes what an affected account's figures say. Do not read the
-paragraph above as saying the window is safe — it says only which of the two
-orderings is less wrong.
+**#270 is now two rules, not one: a phantom cannot be CHOSEN as an anchor, and
+`windowStart` re-clamps as a backstop for one that arrives anyway.** A date
+that is not the canonical spelling of a real day (`isRealDay`, beside
+`addDays`) is not a day the habit lived, so it can never be picked as the
+earliest entry — `resolveWindow`'s `firstEntry` loop and `firstStatedAnswer`
+both skip it via `earliestRealDay`, the same way a `skip` row is skipped, for a
+different reason: a skip states nothing, a phantom is not a day that could
+state anything. The junk row stays in storage and in `entryMap` — nothing here
+deletes it or hides it from a per-day lookup — it is simply never emitted by a
+range walk. `windowStart` still re-applies both clamps AFTER the reformat as a
+backstop: `2026-07-99` sorts below an `end` of `2026-08-18`, normalises to
+`2026-10-07`, and without the re-clamp `boundedRange` would answer `[]` —
+every figure zero for a habit with a live nine-day streak.
+
+**A raw `MIN(date)` route read no longer reaches `windowStart` unfiltered
+through any caller, `creditAnchor` included.** A route's own credit-date read
+(`MIN(date) FILTER (WHERE status <> 'skip')`) is exactly as phantom-capable as
+the plain `MIN(date)` that feeds `firstEntry`/`warmAnchor`, and a first
+version of this fix left `creditAnchor` filtering nothing — a phantom CREDIT
+date normalises *inside* `[earliest, end]` far more often than it rolls out of
+it, so the re-clamp above mostly did not catch it, and `/overview`'s own score
+disagreed with the habit's own page for the identical rows (#223's fail-open
+direction, arriving through #270's own fix). `creditAnchor` now refuses a
+non-real `firstAnswer` itself, the same way `firstStatedAnswer` (the derived
+path) and `computeCategoryStats`'s supplied `firstAnswer` already do. The
+category routes hand `computeCategoryStats` that same raw `MIN(date)` read
+too, as `firstEntry` and `firstAnswer` — it does reach that function, it is
+not routed around it — where `warmAnchor` and the credit anchor beside it
+filter both through `isRealDay` before either ever calls `windowStart`, so
+neither lands there raw from inside it. See `docs/decisions/phantom-dates.md`
+for the measured before/after and why `2026-02-30` moving too (170 → 9 history
+entries) is correct rather than collateral.
 
 The year padding closed the same trap one step earlier, and it was LATENT
 rather than live — say it that way round, because the difference is the whole

@@ -535,10 +535,96 @@ ck('...and its bestStreak too',
   archivedStaleRow && archivedStaleRow.bestStreak === staleStats.bestStreak,
   `${archivedStaleRow && archivedStaleRow.bestStreak} vs ${staleStats.bestStreak}`);
 
-// All three habits go again, with their rows: the import-isolation check further
-// down counts EVERY entry this account has and expects exactly one, so a fixture
-// left behind here fails a test about tenancy with a number about this block.
-for (const id of [creditHabit.id, lapseHabit.id, staleAnswerHabit.id]) {
+/* ---- issue #270, the last anchor site, cloud's own reproduction ----
+ *
+ * `docs/decisions/phantom-dates.md` used to say no cloud value could
+ * discriminate Site F's fix: personal's `'2026-07-99'` (a day that does not
+ * exist) is refused by Postgres at the INSERT, since `entries.date` is a
+ * native `DATE NOT NULL` here rather than personal's SQLite `TEXT`. That
+ * sub-case is genuinely unreachable in cloud. But a DIFFERENT storable value
+ * discriminates the fix from the bug it replaced: `DATE '10000-01-01'` is a
+ * real Postgres date — a five-digit year, which `isRealDay`'s canonical
+ * four-digit-year shape check refuses — and this route's own queries read it
+ * back with `to_char(date, 'YYYY-MM-DD') AS date ... ORDER BY date`. Postgres
+ * resolves a bare `ORDER BY` name that matches an OUTPUT alias to that
+ * alias (verified directly: `SELECT to_char(date,'YYYY-MM-DD') AS date FROM t
+ * ORDER BY date` sorts on the rendered TEXT, not on the underlying `DATE`
+ * column, whether or not the two would ever disagree) — so `all[0].date`, the
+ * unfixed anchor, is exactly as lexical as personal's TEXT column, not
+ * "chronological and therefore immune" as the archived doc claimed. A
+ * five-digit year sorts lexically BELOW every `'20xx-...'` row (`'1' < '2'`),
+ * so the unfixed code picks it as the earliest row.
+ *
+ * The habit is an at-most habit resolved to `success`, so the discrepancy is
+ * large rather than merely wrong-by-a-little: an old real STATED answer (here
+ * dated 3700 days back, past `STREAK_HISTORY_DAYS` so it is not itself a
+ * candidate for either anchor) sets the account's lifetime credit date
+ * (`creditAnchor`, Site E, already fixed and untouched by this test) far
+ * enough back that `boundedRange`'s own clamp on an unfixed '10000-01-01'
+ * start and the credit date land on the SAME point — so every unanswered day
+ * across the whole blown-out window reads as credited success, not as a run
+ * of misses a wide scan would otherwise wash out. `/habits/:id/stats` is not
+ * used as a cross-check here: its lifetime read has no `STREAK_HISTORY_DAYS`
+ * bound, so it sees that same old answer directly and legitimately reports a
+ * huge streak of its own (the same shape `staleRow`/`staleStats` pin above) —
+ * agreeing with a huge number would not prove anything.
+ */
+console.log("\n--- issue #270: cloud's own bestStreak anchor ---");
+
+const phantomAnchorHabit = await (await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'PhantomCloud 270', type: 'numerical', target_type: 'at_most', target_value: 2,
+    at_most_unlogged: 'success', unit: 'cups',
+  }),
+})).json();
+
+// Past STREAK_HISTORY_DAYS (1830), so it never competes as an anchor
+// candidate for either version of Site F — its only job is to push the
+// account's lifetime credit date (Site E) far enough back.
+await fetch(`${overviewBase}/api/habits/${phantomAnchorHabit.id}/entries/${isoDaysAgo(3700)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 1 }),
+});
+
+// A live 9-day streak of real rows, comfortably inside STREAK_HISTORY_DAYS —
+// this is the true earliest-of-any-kind row Site F's fix must land on.
+for (let i = 8; i >= 0; i--) {
+  await fetch(`${overviewBase}/api/habits/${phantomAnchorHabit.id}/entries/${isoDaysAgo(i)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value: 1 }),
+  });
+}
+
+// The phantom, INSERTed directly so it bypasses `assertDate` exactly as a row
+// predating that guard — or, here, a value Postgres's own DATE domain admits
+// that `assertDate` would refuse — already would.
+await withUser(alice, (db) => db.query(
+  `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+   VALUES ($1, $2, DATE '10000-01-01', 1, '', '')`,
+  [phantomAnchorHabit.id, alice]
+));
+
+const phantomCloudView = await getOverview({ days: 7 });
+const phantomCloudRow = phantomCloudView.habits.find((h) => h.id === phantomAnchorHabit.id);
+
+ck("a phantom-dated row does not blow out /overview's own bestStreak scan",
+  phantomCloudRow.bestStreak === 9, String(phantomCloudRow.bestStreak));
+ck('...currentStreak is the live nine-day run, unaffected by the same row',
+  phantomCloudRow.currentStreak === 9, String(phantomCloudRow.currentStreak));
+ck('...and the two agree, rather than bestStreak reading the credited span a ' +
+  "lexically-sorted five-digit year opens (3661: MAX_RANGE_DAYS's own clamp)",
+  phantomCloudRow.bestStreak === phantomCloudRow.currentStreak,
+  `bestStreak=${phantomCloudRow.bestStreak} vs currentStreak=${phantomCloudRow.currentStreak}`);
+
+// All four habits go again, with their rows: the import-isolation check
+// further down counts EVERY entry this account has and expects exactly one,
+// so a fixture left behind here fails a test about tenancy with a number
+// about this block.
+for (const id of [creditHabit.id, lapseHabit.id, staleAnswerHabit.id, phantomAnchorHabit.id]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
 
