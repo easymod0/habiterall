@@ -781,10 +781,15 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 }
 #icon-search { margin-bottom: 8px; }
 /* `.starters`' own tile-grid shape (`auto-fill` + a minimum), scoped to a
-   scrolling panel the way `.category-manage` scopes its own list. */
+   scrolling panel the way `.category-manage` scopes its own list. The track
+   minimum and the cell's own `min-height` are both 44px — `MIN_TOUCH` in
+   `responsive.mjs`, the same figure `.check` already meets above 640px — and
+   the two must move together: a cell is measured as `min(width, height)`, so
+   raising one alone leaves it as small as it ever was. At 360px this resolves
+   to five columns inside the dialog rather than seven, which is the trade. */
 .icon-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
   gap: 4px;
   max-height: 200px;
   overflow-y: auto;
@@ -793,7 +798,7 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 36px;
+  min-height: 44px;
   font-size: 18px;
   background: var(--surface);
   border: 1px solid var(--border);
