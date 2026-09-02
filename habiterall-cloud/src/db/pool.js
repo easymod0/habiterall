@@ -7,7 +7,8 @@
  * WHERE clause returns nothing instead of another user's rows.
  *
  * A query that WRITES goes through `withUserWrite` instead, which is `withUser`
- * plus the account's `data_version` bump in the same transaction.
+ * plus the account's `data_version` bump and its habits' cached summary figures
+ * being invalidated, both in the same transaction.
  */
 
 import pg from 'pg';
@@ -313,7 +314,8 @@ export async function withUser(userId, fn) {
 }
 
 /**
- * `withUser`, plus the account's `data_version` bump, in the SAME transaction.
+ * `withUser`, plus the account's `data_version` bump and the habit summary
+ * cache being cleared, in the SAME transaction.
  *
  * Every write path opts into this by name. It is deliberately NOT a line inside
  * `withUser`, and the issue that asked for it got this wrong in a way worth
@@ -325,29 +327,71 @@ export async function withUser(userId, fn) {
  * moves constantly while meaning nothing. The version's whole value is that it
  * changes when the DATA changes.
  *
+ * **The same argument is what puts the summary-cache clear here rather than a
+ * line further out or a line further in.** Inside `withUser` it would fire on
+ * every read, and a dashboard that invalidates its own cache on being looked at
+ * recomputes forever. Spread over a list of the mutating routes it would drift,
+ * exactly as `docs/decisions/caching.md` says the memo's invalidation would: "a
+ * list of the nine mutating routes is a list that drifts, and the two errors
+ * are not symmetrical — forgetting too much costs a recomputation, forgetting
+ * too little paints a user's own tap away." Here it inherits the enumeration
+ * `test:dataversion` already holds every write path to, including the two that
+ * never reach the `/api` router.
+ *
  * So this is the same discipline as `forgetAccount`: a named thing a write path
  * calls, rather than a router or a wrapper it happens to be inside of.
  *
- * **The bump shares the write's COMMIT, and that is the correctness property.**
- * Outside the transaction it could be observed without the write it announces
- * (a reader tags a rebuild with the new version and fills it from pre-write
- * data) or the write could be observed without it (a reader is served a stale
- * entry that is still reachable). Inside, no reader can see one without the
- * other.
+ * **Both extra statements share the write's COMMIT, and that is the correctness
+ * property.** Outside the transaction the bump could be observed without the
+ * write it announces (a reader tags a rebuild with the new version and fills it
+ * from pre-write data) or the write could be observed without it (a reader is
+ * served a stale entry that is still reachable). Inside, no reader can see one
+ * without the other — and the clear cannot be rolled back while the write it
+ * invalidates for commits.
  *
- * Issued AFTER `fn` rather than before, which is a lock-hold argument and not a
- * correctness one: the UPDATE takes a row lock on `users` that every concurrent
- * write by the same account then queues behind, so it is held for the tail of
- * the transaction rather than for all of it. Either order commits atomically.
+ * Both are issued AFTER `fn` rather than before, which is a lock-hold argument
+ * and not a correctness one: each takes row locks that every concurrent write
+ * by the same account then queues behind, so they are held for the tail of the
+ * transaction rather than for all of it. Either order commits atomically.
  *
  * @param {number} userId
  * @param {(client: pg.PoolClient) => Promise<T>} fn
+ * @param {{habits?: number[] | null}} [opts] `habits` narrows the summary-cache
+ *   clear to the ids the caller knows it touched. The default, `null`, clears
+ *   every habit on the account: forgetting too much is the safe direction, and
+ *   it is what a write path that says nothing gets. Narrowing is the whole
+ *   performance point — one tap must not cost the other nineteen rows their
+ *   cached pair — so a caller passes it only when it can name the habit.
+ *   **An EMPTY array means the same as `null`**, not "clear nothing":
+ *   `id = ANY('{}')` is false for every row, so the one spelling that fails in
+ *   the unsafe direction is the one a caller reaches by computing an id list
+ *   that happens to come out empty — and it would fail silently. The asymmetry
+ *   the paragraphs above rest on decides it: over-clearing costs a
+ *   recomputation, under-clearing serves a figure from before the write.
  * @returns {Promise<T>}
  * @template T
  */
-export async function withUserWrite(userId, fn) {
+export async function withUserWrite(userId, fn, { habits = null } = {}) {
+  // See the JSDoc: `[]` is a caller that named no habit, which is a caller that
+  // gets the whole account cleared.
+  const narrowTo = habits?.length ? habits : null;
   return withUser(userId, async (client) => {
     const result = await fn(client);
+    // The stamp alone is cleared, never the two figures: `summary_asof` is the
+    // validity flag (see `shared/src/summary-cache.js`), so a stale pair left
+    // beside a NULL stamp is unreadable rather than wrong, and the schema's
+    // `habits_summary_cache_complete` CHECK is written to permit exactly that.
+    //
+    // `summary_asof IS NOT NULL` is not a redundant predicate. It makes the
+    // statement write no row, no WAL and no transaction id when nothing is
+    // cached — which is every write by an account that has not loaded its
+    // dashboard since its last one — the same trick the device-zone
+    // middleware's `IS DISTINCT FROM` uses in `api.js`.
+    await client.query(
+      `UPDATE habits SET summary_asof = NULL
+        WHERE user_id = $1 AND summary_asof IS NOT NULL
+          AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))`,
+      [userId, narrowTo]);
     await client.query(
       'UPDATE users SET data_version = data_version + 1 WHERE id = $1', [userId]);
     return result;

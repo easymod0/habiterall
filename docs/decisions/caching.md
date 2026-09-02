@@ -686,3 +686,199 @@ gained nothing; `offline.js` lost `noteWrite` and its `flush()` call and gained
 nothing. That is the property worth remembering about this shape: the fix is
 entirely server-side, so an old client installed on somebody's phone gets it
 without updating.
+
+## #184: two lifetime figures move onto the habit row
+
+`/overview` carries four figures per habit. `score` and `currentStreak` are
+read over a bounded recent window and are cheap. `bestStreak` and
+`totalCompleted` are statements about the habit's WHOLE history — a scan back
+`STREAK_HISTORY_DAYS` and an aggregate with no date predicate at all — and
+neither can change between two loads on the same day unless something was
+WRITTEN. That is what makes them cacheable rather than merely slow: a figure
+that is a pure function of the account's writes, re-derived on every read that
+follows none, is exactly the shape a stored column pays for once. `score` and
+`currentStreak` are not this shape — they move if `summaryEnd` itself moves,
+with nothing written — so they stay derived.
+
+`shared/src/summary-cache.js` is the one rule for what the cached pair MEANS,
+imported by both editions: `SUMMARY_CACHE_COLUMNS`, `stripSummaryCache`,
+`summaryCacheHit` and `recomputeBestStreak`. The storage — the columns, the
+migration, the write path that invalidates them — is per edition, the same
+split the root `CLAUDE.md` draws everywhere else.
+
+### The measurements, and the correction in both directions
+
+The issue's own central claim needed correcting two opposite ways at once —
+smaller in milliseconds, bigger in proportion — which is the interesting part
+and worth stating exactly that way round rather than picking one side.
+Re-baselined on this branch's base (PR #300), `.claude/work/issue-184/measurements.md`:
+
+| | ms/habit | issue body |
+|---|---:|---:|
+| `computeStreaks`(1830d) + `bestStreak` | **0.81** | 3.57 |
+| `bestStreak`'s share of `/overview`'s per-habit JS | **62%** | 38% |
+
+The absolute figure is 4.4× smaller than the issue claimed, because #198 and
+#218 landed since and #218's `summaryStats` already cut `/overview`'s
+per-habit cost once. But the SHARE is much larger, not smaller: with the five
+passes `summaryStats` no longer runs, what is left of the route's per-habit JS
+is mostly this one scan. So the issue got smaller in milliseconds and bigger
+in proportion, and the proportion is what decides whether caching it is worth
+doing at all.
+
+On the SQL side, a seeded 20-habit / 29,460-entry / 1,830-day account. Measured
+with `EXPLAIN (ANALYZE, BUFFERS)` in `psql` as `habiterall_app` with
+`app.user_id` set, so the RLS policies are in force exactly as they are behind
+`withUser` — not through the app, so these are the statements' own costs and
+carry no Express, `pg` or JSON-serialisation overhead:
+
+| | total | per habit |
+|---|---:|---:|
+| the unbounded `totalCompleted` aggregate | 8.75 ms | 0.44 ms |
+| the 1830-day streak read | 21.30 ms | 1.07 ms |
+| the 400-day summary read | 4.34 ms | 0.22 ms |
+| the habit read, carrying the two cached columns | 0.056 ms | ~0 |
+
+The last row is the point: the cached pair folds into the `SELECT * FROM
+habits` the route already issues, so reading it is not a query at all — 0.056
+ms whether the row carries two more columns or not. Master issues the streak
+read and the aggregate for every habit and derives the 400-day slice from the
+streak read in JS: 30.05 ms of Postgres time per 20-habit load. Warm, this
+branch issues only the 400-day read: 4.34 ms — a ~25.7 ms cut, plus ~16.2 ms
+of synchronous Node CPU (20 × 0.81 ms) that master pays and this branch does
+not. Cold — every habit stale, which is every account's first load of a day
+and every load after a write — the cost is master's figure plus one write-back
+`UPDATE`. Framed honestly as "master, plus a write" rather than as a second
+win, which is exactly why the `staleIds`/`freshIds` split matters: issuing the
+400-day read for every habit as well, rather than deriving a stale habit's
+slice from the 1830-day read it already has, would make the cold path fetch a
+stale habit's last 400 days TWICE — ~2,230 days per habit against master's
+1,830, on the one load a user actually waits for.
+
+### The two editions gain asymmetrically, and this does not pretend otherwise
+
+Personal gains the most, and the PR is explicit about why: it has no memo at
+all, its storage is `node:sqlite` and synchronous, so every millisecond this
+takes off `/overview` is a millisecond the whole process is not blocked for
+anybody else. There is no warm/cold split to reason about the way there is on
+cloud — every fresh habit is a saving, full stop.
+
+Cloud gains only on memo MISSES. `/overview` there is already memoised
+("The dashboard is memoised, and a write is what clears it", above), so a
+repeated window inside the TTL already costs ~2.3 ms and never reaches this
+code at all. What these columns speed up is the first load of a window, a
+`data_version` bump, and the cold path generally — real costs, and the ones a
+user actually waits on, but not the common case the memo already made cheap.
+Saying so is the point: a change that only moves the miss path is a real win
+and a smaller one than "cache the dashboard's two lifetime figures" sounds
+like on a memoised edition.
+
+### Denormalised columns, not #191's bounded per-user caches
+
+#191 already gave cloud a bounded in-process cache per user. This is not that,
+for two reasons that both matter. First, the figure has to survive a restart —
+a process cache is gone on deploy, and a deploy is exactly when every habit on
+the instance goes cold at once, which is the worst possible moment to lose the
+saving. Second, a WRITE is the natural invalidation point for a figure that
+only changes when something is written: hanging it off the row a write already
+touches costs nothing extra to invalidate correctly, where a process cache
+needs its own eviction argued for separately, the way #191's own caches did.
+
+### Nullable, no default, and `summary_asof` as the only validity flag
+
+`best_streak`, `total_completed` and `summary_asof` are all nullable with no
+`DEFAULT`. `NOT NULL DEFAULT 0` would make a habit that has genuinely never
+been completed indistinguishable from one whose pair has never been computed —
+the same collapse the root `CLAUDE.md` forbids for `entryMap.get(date) ??
+UNSET`, in the schema this time. `summary_asof` alone decides validity: it
+holds the day the pair was computed FOR, so a stale pair sits beside a NULL
+stamp and is never served, and every pre-existing row upgrades to "invalidated"
+for free — there is no backfill and no migration that has to compute anything.
+
+### `<>`, never `<`
+
+`summaryCacheHit` compares the stamp against `summaryEnd` with equality, and a
+`<` reading like "at least this recent" is the wrong comparison to reach for.
+`summaryEnd` is the CALLER's day, not the server's, and an account used from
+two zones can move it BACKWARDS across a date boundary — a device west of the
+last one serves a `summaryEnd` earlier than a pair already stamped for
+tomorrow. `<` would call that pair "fresh enough" and keep serving it for the
+rest of that device's day. Equality is the only comparison under which a cache
+stamped with a day means the day it says.
+
+### The write-back is a write on a GET, and it must never bump `data_version`
+
+Recomputing a stale habit's pair and stamping it is a write inside a route
+whose method is GET. Cloud has exact precedent for that shape already: the
+device-zone middleware writes `users.device_time_zone` through bare `withUser`
+on every request and deliberately does not bump `data_version`, because it is
+an observation the server makes rather than a change to anything `/overview`
+reads. The write-back is the same kind of write for the same reason, and here
+the consequence of getting it wrong is sharper: bumping `data_version` inside
+`buildOverview` would invalidate the very memo entry this call is in the
+middle of filling, which does not settle into a stale-but-stable state — it is
+a rebuild loop that never converges, since every rebuild bumps the version the
+next rebuild has to beat.
+
+Cloud guards the write-back on the `data_version` it read at the START of the
+same transaction (`writeBackSummaries`), because `withUser` is READ COMMITTED
+and a write can commit between the entry reads and the stamp — the same
+"version last" hazard the memo section above describes, one level in: writing
+the recomputed pair unconditionally would stamp TODAY's date over data read
+before a concurrent write, and the wrong figure would then survive until
+something else invalidates it. Personal needs no such guard. `node:sqlite`'s
+`DatabaseSync` is synchronous, so the entry reads, the derivation and the
+stamp are one uninterrupted turn of the event loop — nothing can commit in
+between because nothing else can run at all. That holds only while nothing in
+the route AWAITS between the reads and the stamp, and the comment at the
+write-back says so; it is not a property of SQLite in general; it is a
+property of this route staying synchronous throughout.
+
+### The two defects found reviewing the salvaged draft
+
+An earlier run at this issue was killed by a spend limit with the cloud half
+uncommitted; it was transplanted verbatim in one commit and reviewed rather
+than trusted in the next, and this file records which wrong version shipped
+first the way it does everywhere else.
+
+**A stale habit was handed an empty 400-day slice.** Splitting the entry reads
+in two — the 400-day read scoped to fresh ids, the 1830-day read scoped to
+stale ones — is right, and it is what stops a stale habit fetching its own
+recent 400 days in both queries. But the per-habit read stayed
+`recentByHabit.get(h.id)`, which holds nothing for a stale habit, so
+`summaryStats` walked no entries and answered `score: 0, currentStreak: 0` for
+it. Every habit is stale on the first load of any day and after every write —
+exactly the load a user is watching — so this blanked the dashboard's two LIVE
+figures on that load, while `bestStreak` and `totalCompleted` beside them
+stayed correct, because those two came off the recompute rather than off the
+empty slice. A stale habit now filters its own recent slice out of the wide
+one it already holds (`all.filter`), which is also what master did before any
+of this existed.
+
+**`recomputeBestStreak` anchored the scan on `entries[0].date`** — the raw
+lexical minimum of a caller's `ORDER BY date` result — which is precisely the
+anchor #270/#300 replaced with `earliestRealDay` at both editions' `/overview`.
+Moving the streak scan into `shared/` is exactly where that fix could be lost,
+and it was: a row dated `2026-07-99` sorts first, opens the window there, and
+`boundedRange` rolls it past `summaryEnd` — every figure on the scan reads
+zero. Caching makes this strictly worse than it was at the route: a DERIVED
+zero is wrong until the row is fixed, where a STORED zero is wrong until
+something invalidates it, and nothing about `2026-07-99` ever changes on its
+own. The anchor is `earliestRealDay(entryMap.keys())` now, the same refusal
+`firstStatedAnswer` and `creditAnchor` already apply, which also means the
+function no longer depends on its caller's row order.
+
+**One of the two already had a test that caught it, and that is the part worth
+remembering.** The salvaged draft's own `test:summarycache` asserts that a
+cached load and an uncached load are the same payload key for key, and that
+assertion fails against the empty-slice bug — verified by putting the bug back
+and watching it go red. The draft was not missing the test; the run was killed
+before it ever executed one. A test that is written and never run has exactly
+the value of a test that cannot fail, and it is indistinguishable from one in
+a diff. The anchor defect had no test and now does.
+
+The parity assertion is also the shape to copy. Neither defect could have been
+caught by checking that the cached figures were right — both left
+`bestStreak` and `totalCompleted` correct and broke something else. What
+caught it was asserting that two paths to the same answer agree, which is the
+only assertion that does not have to predict which half the next bug lands in.

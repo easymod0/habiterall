@@ -773,7 +773,13 @@ test('a miss pays ONE checkout on the main pool, not two', () => {
     + 'one request must cost it one checkout, however the version is read');
 
   // ...and the rebuild runs inside that one, on the connection already in hand.
-  assert.match(route, /overviewMemo\(key, \{ db, \.\.\.arg \}\)/,
+  //
+  // Anchored on `{ db, ...arg` rather than on the whole call, because what is
+  // at stake is the CONNECTION being handed over and not the rest of the arg:
+  // #184 added `dataVersion` beside it (the counter the route read at the top
+  // of this same transaction, which `writeBackSummaries` is guarded on), and a
+  // guard that had to be edited for that would have been pinning a spelling.
+  assert.match(route, /overviewMemo\(key, \{ db, \.\.\.arg\b/,
     'the rebuild must run on the connection the route already holds');
 
   const build = code(region(text, 'async function buildOverview(', '\n}\n'));

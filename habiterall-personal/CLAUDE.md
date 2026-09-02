@@ -77,6 +77,49 @@ a month restated the summary as of that month. Both lookbacks count back from
 `summaryEnd`, so the bound above still holds. `test/overview.integration.mjs`
 pins it, and the cloud edition mirrors it exactly.
 
+**`bestStreak` and `totalCompleted` are cached on the habit row (`best_streak`,
+`total_completed`, `summary_asof`), and invalidation here is BY HAND.** This
+edition has no `withUserWrite` and no `data_version` to hang a single hook off
+of, so every write path that can move what those two figures mean for a habit
+calls `clearHabitSummary` or `clearAllSummaries` (`db.js`) itself: both
+branches of the entry PUT, the entry DELETE, `PUT /habits/:id` (it REPLACES, so
+`type` and `target_*` can move under the cached pair), the three sites in
+`apply-import.js`, **the three writers of `atMostUnlogged`** — `PUT /settings`,
+`DELETE /settings` and `POST /import`'s settings restore, which is portable and
+so carries the key too — since that setting is an INPUT to
+`recomputeBestStreak` via `storedUnlogged()` and therefore clears every habit's
+stamp rather than one, and **`record()` in `notifier.js`** — the shared handler
+behind every ntfy and Discord button press, which writes an entry outside the
+`/api` router entirely and so cannot rely on either HTTP route's call.
+
+Two things this list costs, both deliberate. The import's clear is **inert as
+the statements stand** — `applyImport` has already deleted every row a stamp
+could live on — and is called anyway, because a write path whose safety is the
+order of two statements in two different files is the implicit invariant this
+repo refuses to leave unstated. And a settings write clears the WHOLE account,
+including a theme toggle, which cannot move any figure: the next `/overview`
+then pays the full cold path. Narrowing it to the keys that are inputs is a
+rule that has to be revisited every time a setting becomes one, so the blanket
+clear is the safe direction rather than the free one. A write path added
+later that skips this serves a figure
+from before the write for the REST OF THAT DAY — not forever, because
+`summary_asof` holds the day it was computed for and `summaryCacheHit` is an
+equality test, so the next calendar day misses and recomputes. That bound is
+worth knowing in both directions: it is why a missed call is a wrong number
+rather than a permanently wrong one, and it is why a missed call is easy to
+not notice, since it heals overnight and never reproduces for whoever comes
+to look. There is also no CHECK constraint
+holding "a stamp with no figures behind it is never served": SQLite cannot add
+a table-level CHECK with `ALTER TABLE`, so that invariant is enforced only in
+`summaryCacheHit` (`@habiterall/shared/summary-cache.js`), the one reader both
+editions call — see `docs/decisions/caching.md` for the design in full. And the
+write-back that stamps a recomputed pair carries no `data_version` guard the
+way cloud's does, because `DatabaseSync` is synchronous: the entry reads, the
+derivation and the stamp are one uninterrupted turn of the event loop, so
+nothing can commit in between. That holds only while the route stays
+synchronous between the derivation and the stamp — an `await` inserted there
+reopens exactly the race cloud's guard exists for.
+
 **Auth is on unless the flag says exactly `off`.** Every other value — unset,
 empty, `false`, `0`, `disabled`, and every typo of `off` — leaves it ON, and
 `authFlagMisread` makes the server say so at startup rather than failing safe in
