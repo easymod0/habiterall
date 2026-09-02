@@ -34,31 +34,25 @@ import {
   DATE_RE, queryDate,
 } from '@habiterall/shared/validate.js';
 import {
-  computeStats, summaryStats, computeStreaks, bestStreak, creditAnchor, isCompleted,
+  computeStats, summaryStats, creditAnchor, isCompleted,
   UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
-  summariseByCategory, earliestRealDay,
+  summariseByCategory,
 } from '@habiterall/shared/stats.js';
+import {
+  STREAK_HISTORY_DAYS, recomputeBestStreak, stripSummaryCache, summaryCacheHit,
+} from '@habiterall/shared/summary-cache.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 
 export const api = express.Router();
 
 const SUMMARY_WINDOW_DAYS = 400;
 
-/**
- * How far back the dashboard's streak scan reads.
- *
- * The scan used to be unbounded, so a long history meant hundreds of
- * thousands of rows shipped to Node and ~850ms of synchronous CPU per
- * request — on a single-threaded server that stalls every tenant, and one
- * account could saturate the process within its rate limit.
- *
- * Five years bounds the work while being far beyond any streak a person will
- * actually run. `bestStreak` is therefore "best in the last five years",
- * which is the honest reading of a dashboard summary anyway.
- */
-const STREAK_HISTORY_DAYS = 1830;
+// `STREAK_HISTORY_DAYS` used to be declared here and is imported from
+// `@habiterall/shared/summary-cache.js` now, with its whole comment: the window
+// is part of what the CACHED figure MEANS, so a bound that drifted between the
+// editions would have them store two different numbers under one name.
 
 /** Per-user ceilings. Cheap insurance against one account exhausting the box. */
 const MAX_HABITS_PER_USER = Number(process.env.MAX_HABITS_PER_USER) || 200;
@@ -257,6 +251,29 @@ async function resolveCategoryId(db, body) {
   return id;
 }
 
+/**
+ * A habit row on its way OUT to a client.
+ *
+ * Named to mirror the personal edition's `toApiHabit`, which exists for a
+ * problem this edition does not have — SQLite's 0/1 `archived` against
+ * Postgres's real BOOLEAN — so the two functions do different work under one
+ * name on purpose: one boundary per edition, asked at the same places.
+ *
+ * What both do is drop the summary-cache columns. Every habit query here is
+ * `SELECT *` or `RETURNING *`, deliberately (see `/export` below for why), so
+ * the day those columns exist they are in client JSON unless something takes
+ * them out — and they are the server's own observations about the cost of
+ * deriving a figure, in the category `data_version` is in. They belong to no
+ * `*_HABIT_FIELDS` list, `parseHabit` has never heard of them, and
+ * `PORTABLE_HABIT_KEYS` in `test/api.integration.mjs` is the tripwire that says
+ * so out loud.
+ *
+ * @template {Record<string, any>} T
+ * @param {T} row
+ * @returns {T}
+ */
+const toApiHabit = (row) => stripSummaryCache(row);
+
 /* ---------- habits ---------- */
 
 api.get('/habits', route(async (req, res) => {
@@ -267,7 +284,7 @@ api.get('/habits', route(async (req, res) => {
       [archived]
     ).then((r) => r.rows)
   );
-  res.json(rows);
+  res.json(rows.map(toApiHabit));
 }));
 
 api.post('/habits', route(async (req, res) => {
@@ -299,12 +316,12 @@ api.post('/habits', route(async (req, res) => {
     return rows[0];
   });
 
-  res.status(201).json(created);
+  res.status(201).json(toApiHabit(created));
 }));
 
 api.get('/habits/:id', route(async (req, res) => {
   const habit = await getHabit(req);
-  res.json(habit);
+  res.json(toApiHabit(habit));
 }));
 
 api.put('/habits/:id', route(async (req, res) => {
@@ -327,10 +344,13 @@ api.put('/habits/:id', route(async (req, res) => {
        h.archived, id]
     );
     return rows[0];
-  });
+  // Narrowed: this route REPLACES, so `type`, `target_*` and `freq_*` can all
+  // move — the completion rule itself changing, and both cached figures are
+  // derived through it. One habit's, though; nothing here reaches another row.
+  }, { habits: [id] });
 
   if (!updated) throw httpError(404, 'habit not found');
-  res.json(updated);
+  res.json(toApiHabit(updated));
 }));
 
 api.delete('/habits/:id', route(async (req, res) => {
@@ -374,7 +394,7 @@ api.post('/habits/reorder', route(async (req, res) => {
     ).then((r) => r.rows);
   });
 
-  res.json(rows);
+  res.json(rows.map(toApiHabit));
 }));
 
 /* ---------- categories ---------- */
@@ -712,7 +732,10 @@ api.put('/habits/:id/entries/:date', route(async (req, res) => {
       return;
     }
     await upsertEntry(db, uid(req), habit.id, date, write.value, write.status, write.notes);
-  });
+  // Narrowed, and this is the call site the narrowing exists for: a tap is the
+  // dominant dashboard interaction, and clearing the account would cost the
+  // other nineteen habits their cached pair on every one.
+  }, { habits: [habit.id] });
 
   res.json({ habit_id: habit.id, date, ...write.reply });
 }));
@@ -723,7 +746,10 @@ api.delete('/habits/:id/entries/:date', route(async (req, res) => {
 
   await withUserWrite(uid(req), (db) =>
     db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
-      [habitId(req), req.params.date])
+      [habitId(req), req.params.date]),
+    // Narrowed, for the reason the PUT above is. A day going back to `unknown`
+    // moves both figures exactly as answering it did.
+    { habits: [habitId(req)] }
   );
   res.status(204).end();
 }));
@@ -807,7 +833,7 @@ api.get('/habits/:id/stats', route(async (req, res) => {
     // figures above, because `shared/src` is not served to the browser and no
     // renderer can call `unansweredCounts` itself. Derived, not stored: it
     // goes into no migration and no `*_HABIT_FIELDS` list.
-    habit: { ...habit, unlogged_is_success: unansweredCounts(habit, unlogged) },
+    habit: { ...toApiHabit(habit), unlogged_is_success: unansweredCounts(habit, unlogged) },
     ...stats,
     awards: computeAwards(stats, end, habit, unlogged, skipDays),
   });
@@ -1093,7 +1119,8 @@ api.get('/overview', route(async (req, res) => {
     // A missing row is an account deleted mid-request; RLS answers the queries
     // below with nothing anyway, so 0 keeps the key well formed rather than
     // spelling `undefined` into it.
-    const key = keyAt(row?.data_version ?? 0);
+    const dataVersion = row?.data_version ?? 0;
+    const key = keyAt(dataVersion);
 
     // Which of the three cases this is decides whether the connection now in
     // hand is wanted — see `memo.peek` in `cache.js`. Synchronous, so nothing
@@ -1110,7 +1137,12 @@ api.get('/overview', route(async (req, res) => {
     // A miss, so the rebuild runs on THIS connection and the version read above
     // was free: it shared the checkout the five queries were going to make
     // anyway. Awaited in here, because `db` is only alive until this returns.
-    return { json: await overviewMemo(key, { db, ...arg }) };
+    //
+    // `dataVersion` rides on the ARG rather than the key — the key is built by
+    // `keyAt` and already carries it. What the rebuild wants it for is
+    // `writeBackSummaries`, which refuses to stamp a pair if anything committed
+    // between this read and it; see `buildOverview`.
+    return { json: await overviewMemo(key, { db, ...arg, dataVersion }) };
   });
 
   res.send('json' in held ? held.json : await held.pending);
@@ -1130,11 +1162,22 @@ api.get('/overview', route(async (req, res) => {
  * what scopes these queries; `user` is still passed because two of them name it
  * for the planner, not because RLS needs telling twice.
  *
+ * **Two of the four per-row figures are read off the habit instead of derived**
+ * (#184). `bestStreak` and `totalCompleted` are statements about the habit's
+ * WHOLE history, so neither can change between two loads on the same day unless
+ * something was written — and a write is what clears `summary_asof`
+ * (`withUserWrite`, `db/pool.js`). What follows is the same payload either way:
+ * a habit whose stamp is the caller's own day is served its stored pair, and
+ * every other habit is recomputed and has the answer written back.
+ *
  * @param {import('pg').PoolClient} db a transaction already scoped to `user`
  * @param {{user: number, start: string, end: string, summaryEnd: string,
- *   archived: boolean}} arg
+ *   archived: boolean, dataVersion?: number}} arg `dataVersion` is the counter
+ *   the ROUTE read at the top of this same transaction, and it is what the
+ *   write-back is guarded on — it is not part of the memo key, which `keyAt`
+ *   builds for itself
  */
-async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
+async function buildOverview(db, { user, start, end, summaryEnd, archived, dataVersion }) {
   const { rows: habits } = await db.query(
     `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
     [archived]
@@ -1190,14 +1233,47 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   const firstEntry = new Map(firstRows.map((r) => [r.habit_id, r.first_date]));
   const firstAnswer = new Map(firstRows.map((r) => [r.habit_id, r.first_answer]));
 
-  // One query for the grid window, one for the lifetime figures, rather
-  // than two per habit.
+  // **The partition, and everything below reads off it** (#184). A habit whose
+  // `summary_asof` is the CALLER's own day already carries both lifetime
+  // figures, so it needs neither the 1830-day read nor a row in the lifetime
+  // aggregate. `summaryCacheHit` is where the comparison lives, and it is
+  // equality rather than `<=` for a reason worth reading there: `summaryEnd`
+  // moves backwards for an account used from two zones.
+  const staleIds = habits.filter((h) => !summaryCacheHit(h, summaryEnd)).map((h) => h.id);
+  // The complement, and it is what stops a stale habit paying twice. The
+  // 1830-day window CONTAINS the 400-day one, so issuing the summary read for
+  // every habit made a stale one fetch its most recent 400 days in BOTH
+  // queries: ~2,230 days per habit on the cold path — the first load of any
+  // day, when nothing is fresh, which is the load a user actually waits on —
+  // where master shipped 1,830. A ~22% regression on exactly the request this
+  // cache exists to make faster, hidden behind the win on the warm path. So a
+  // stale habit derives its recent slice from the wide one it already has
+  // (`all.filter`, which is what master did), and this query is for the fresh
+  // habits alone.
+  const staleSet = new Set(staleIds);
+  const freshIds = ids.filter((id) => !staleSet.has(id));
+
+  // One query for the grid window, one for the summary window, and — only if
+  // something is stale — one for the streak scan, rather than two per habit.
   const { rows: windowRows } = await db.query(
     `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
      FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
      ORDER BY date`,
     [ids, start, end]
   );
+  // The 400-day summary window, for the FRESH habits: `score` and
+  // `currentStreak` are read over it and neither is cached, so every habit
+  // needs the slice — but a stale one gets it out of the streak read below
+  // instead. On the cold path this query is not issued at all. No upper bound,
+  // exactly as before — an import can create future-dated rows and adding one
+  // here would change an answer rather than only a cost.
+  const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
+  const { rows: recentRows } = freshIds.length ? await db.query(
+    `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+     FROM entries WHERE habit_id = ANY($1) AND date >= $2 ORDER BY date`,
+    [freshIds, cutoff]
+  ) : { rows: [] };
+
   // Bounded, NOT lifetime. This query had no date predicate, so an account
   // with years of history shipped every row to Node and then spent ~850ms
   // of SYNCHRONOUS CPU per request in computeStreaks — blocking the event
@@ -1207,17 +1283,29 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   // STREAK_HISTORY_DAYS bounds what the streak scan reads. A streak longer
   // than this reports as capped rather than reading the whole table; the
   // count below is done in SQL instead of in JS.
+  //
+  // This read still serves the summary window for the habits it covers, by
+  // filtering it down in JS — see `recent` below. What the cache changes is
+  // WHICH habits it covers: a dashboard whose habits are all fresh issues this
+  // query not at all, and 1,430 days of rows per habit stop being shipped to
+  // Node to be discarded.
   const streakFrom = addDays(summaryEnd, -STREAK_HISTORY_DAYS);
-  const { rows: allRows } = await db.query(
+  const { rows: allRows } = staleIds.length ? await db.query(
     `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
      FROM entries WHERE habit_id = ANY($1) AND date >= $2 ORDER BY date`,
-    [ids, streakFrom]
-  );
+    [staleIds, streakFrom]
+  ) : { rows: [] };
 
   // Lifetime totals in the database, where counting is what it is for.
   // Postgres applies the same completion rule the shared code does; the
   // status check keeps skips out, matching isCompleted returning null.
-  const { rows: totalRows } = await db.query(
+  //
+  // Scoped to the stale ids, which is the whole of the saving here — this is
+  // the aggregate with no date predicate at all, so it reads every row the
+  // account has ever written and gets dearer as the account ages. The `CASE`
+  // itself is untouched: it mirrors `isCompleted`, personal's copy differs in
+  // one commented way, and a third copy of the completion rule is #195.
+  const { rows: totalRows } = staleIds.length ? await db.query(
     `SELECT e.habit_id,
             COUNT(*) FILTER (
               WHERE COALESCE(e.status, '') <> 'skip'
@@ -1230,8 +1318,8 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
        FROM entries e JOIN habits h ON h.id = e.habit_id
       WHERE e.habit_id = ANY($1)
       GROUP BY e.habit_id`,
-    [ids]
-  );
+    [staleIds]
+  ) : { rows: [] };
   const totals = new Map(totalRows.map((r) => [r.habit_id, r.completed]));
 
   const grid = new Map(ids.map((id) => [id, {}]));
@@ -1245,14 +1333,21 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     }
   }
 
-  const byHabit = new Map(ids.map((id) => [id, []]));
+  // `byHabit` holds the 1830-day slice and so has an entry only for a STALE
+  // habit; `recentByHabit` holds the 400-day one and has an entry for every
+  // habit. Two maps rather than one filtered per habit, which is what the split
+  // above buys.
+  const byHabit = new Map(staleIds.map((id) => [id, []]));
   for (const r of allRows) byHabit.get(r.habit_id).push(r);
+  const recentByHabit = new Map(ids.map((id) => [id, []]));
+  for (const r of recentRows) recentByHabit.get(r.habit_id).push(r);
 
-  const cutoff = addDays(summaryEnd, -SUMMARY_WINDOW_DAYS);
+  /** @type {Array<{id: number, best_streak: number, total_completed: number}>} */
+  const recomputed = [];
 
   const habitPayloads = habits.map((h) => {
     const all = byHabit.get(h.id) ?? [];
-    const recent = all.filter((e) => e.date >= cutoff);
+    const recent = recentByHabit.get(h.id) ?? [];
     // Two numbers are read below — `score` and `currentStreak` — so this
     // calls `summaryStats` rather than `computeStats`: the same window and
     // the same two passes (`computeScores`, `computeStreaks`), with the
@@ -1275,44 +1370,30 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
 
     const stats = summaryStats(h, recent, { end: summaryEnd, unlogged, creditFrom });
 
-    const totalCompleted = totals.get(h.id) ?? 0;
-
-    // This scan is the route's own and never reaches `resolveWindow`, so it has
-    // to be handed the same credit date explicitly — otherwise `bestStreak` is
-    // the one figure on this payload still crediting silence the habit has no
-    // answer behind, beside a `score` and a `currentStreak` that no longer do
-    // (#223: measured 365 here against 1 from `/stats`, same habit, same
-    // second). It is the SAME `creditFrom` the summary above got, not a second
-    // one derived from this wider slice, because the two derivations disagree
-    // exactly when the habit's answer falls between the two windows.
-    const streakMap = new Map(
-      all.map((e) => [e.date, { value: e.value, status: e.status }])
-    );
-    // The other #270 anchor site: `all` is `ORDER BY date`, so element 0 was
-    // the raw LEXICAL min, phantom-capable exactly like the `MIN(date)` reads
-    // `creditAnchor` and `computeCategoryStats` already refuse. A row dated
-    // '2026-07-99' sorted first, opened the window there, and `boundedRange`
-    // rolled it forward past `summaryEnd` — every figure on this payload's
-    // own scan zero while `score`/`currentStreak` (through `resolveWindow`)
-    // stayed correct, which is what made the disagreement visible.
-    // `earliestRealDay` is the one guard, same as those two sites. See
-    // docs/decisions/phantom-dates.md.
-    const streaks = computeStreaks(
-      h,
-      streakMap,
-      earliestRealDay(streakMap.keys()) ?? summaryEnd,
-      summaryEnd,
-      unlogged,
-      creditFrom
-    );
+    // The cached pair, or the derivation it was cached from. `summaryCacheHit`
+    // decided this once, above, and is asked again here through `staleIds`'
+    // own membership so the two cannot disagree about one habit.
+    //
+    // `recomputeBestStreak` is the shared block (`summary-cache.js`), handed
+    // the SAME `creditFrom` the summary above got rather than a second one
+    // derived from its wider slice — the two disagree exactly when the habit's
+    // answer falls between the two windows (#223).
+    const fresh = !byHabit.has(h.id);
+    const bestStreak = fresh
+      ? h.best_streak
+      : recomputeBestStreak(h, all, { summaryEnd, unlogged, creditFrom });
+    const totalCompleted = fresh ? h.total_completed : (totals.get(h.id) ?? 0);
+    if (!fresh) {
+      recomputed.push({ id: h.id, best_streak: bestStreak, total_completed: totalCompleted });
+    }
 
     return {
-      ...h,
+      ...toApiHabit(h),
       entries: grid.get(h.id) ?? {},
       skips: skips.get(h.id) ?? [],
       score: stats.score,
       currentStreak: stats.currentStreak,
-      bestStreak: bestStreak(streaks),
+      bestStreak,
       totalCompleted,
       // Same field, same reason as the `/stats` call site above: resolved
       // server-side because no renderer can import `unansweredCounts`, and
@@ -1320,6 +1401,13 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
       unlogged_is_success: unansweredCounts(h, unlogged),
     };
   });
+
+  // Everything that was recomputed goes back on the row, so the next load on
+  // this day reads it instead of deriving it again. A WRITE on a GET, and
+  // deliberately not through `withUserWrite` — see `writeBackSummaries`.
+  if (recomputed.length) {
+    await writeBackSummaries(db, user, dataVersion, summaryEnd, recomputed);
+  }
 
   // The mean is over `habitPayloads`' own `score` — the same number drawn
   // on the row beneath each header — never a second scoring pass. See
@@ -1332,6 +1420,64 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     habits: habitPayloads,
     ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
   };
+}
+
+/**
+ * Stamp the recomputed lifetime pairs onto the habit rows — unless anything
+ * committed since the version we read.
+ *
+ * **This is a WRITE ON A GET and it must not bump `data_version`.** There is
+ * exact precedent one screen up: the device-zone middleware writes
+ * `users.device_time_zone` on GETs through bare `withUser` and deliberately
+ * does not bump (`docs/decisions/caching.md`, "One write deliberately does not
+ * bump"). Bumping here would invalidate the memo entry this very call is in the
+ * middle of filling — a rebuild loop that never converges — and would break the
+ * control assertion `test:dataversion` rests on, that a READ leaves the counter
+ * alone. So: no `withUserWrite`, ever, on this path.
+ *
+ * **The `data_version` predicate is the whole of why this is a named function.**
+ * `withUser` is READ COMMITTED, so a write committing between the entry reads
+ * above and this statement has already set `summary_asof = NULL` — and without
+ * the guard we would immediately write it back, stamped as of TODAY, from
+ * pre-write data. That is the "version last" failure `caching.md` describes: it
+ * is silent, and it survives until the calendar day rolls over. The version was
+ * read at the START of this same transaction, so comparing against it asks
+ * exactly the right question. Zero rows update if anything moved, and the next
+ * load recomputes — wasteful and correct, which is the direction this repo
+ * always picks.
+ *
+ * A race is not deterministically reachable through the HTTP surface, so the
+ * guard would be untestable inside `buildOverview`. Exported, it can be called
+ * with a deliberately stale version, which is what
+ * `test/summary-cache.integration.mjs` does.
+ *
+ * @param {import('pg').PoolClient} db a transaction already scoped to `userId`
+ * @param {number} userId
+ * @param {number} version `users.data_version` as it was at the start of this
+ *   transaction (`pool.js` parses BIGINT as a Number, so this is a JS number).
+ *   An absent one arrives as NULL, which equals nothing, so a caller that
+ *   forgot it writes no row at all — the safe direction, and a cache that is
+ *   never filled rather than one that is filled wrongly
+ * @param {string} summaryEnd the day the pairs were computed FOR — the stamp
+ * @param {Array<{id: number, best_streak: number, total_completed: number}>} rows
+ * @returns {Promise<number>} how many habit rows were stamped
+ */
+export async function writeBackSummaries(db, userId, version, summaryEnd, rows) {
+  if (!rows.length) return 0;
+  const result = await db.query(
+    `UPDATE habits h
+        SET best_streak = v.best_streak,
+            total_completed = v.total_completed,
+            summary_asof = $2
+       FROM (SELECT * FROM unnest($3::bigint[], $4::int[], $5::int[])
+               AS t(id, best_streak, total_completed)) v
+      WHERE h.id = v.id
+        AND h.user_id = $1
+        AND (SELECT u.data_version FROM users u WHERE u.id = $1) = $6`,
+    [userId, summaryEnd, rows.map((r) => r.id), rows.map((r) => r.best_streak),
+     rows.map((r) => r.total_completed), version]
+  );
+  return result.rowCount ?? 0;
 }
 
 /**
@@ -1473,11 +1619,22 @@ api.get('/export', route(async (req, res) => {
       // query, because a backup that silently omits a NEW column is the worse
       // failure of the two: migration 009 added `reminder_message`, and a
       // hand-kept SELECT list is exactly what would have left it behind.
-      data: habits.map(({ user_id, ...h }) => ({
-        ...h,
-        category: categoryNames.get(h.category_id) ?? '',
-        entries: byHabit.get(h.id) ?? [],
-      })),
+      //
+      // `toApiHabit` drops the summary-cache columns for the second half of
+      // that same argument, and they are the case that proves the `SELECT *`
+      // still has to be paid for: migration 018 added three columns which are
+      // the SERVER's observations rather than the habit's, so a query that
+      // takes everything needs an explicit list of what a backup does not
+      // carry. One list, in `shared/src/summary-cache.js`, so this route and
+      // the seven others cannot each drop a different subset.
+      data: habits.map((row) => {
+        const { user_id, ...h } = toApiHabit(row);
+        return {
+          ...h,
+          category: categoryNames.get(h.category_id) ?? '',
+          entries: byHabit.get(h.id) ?? [],
+        };
+      }),
       // A user's own categories, so a backup can recreate them by name rather
       // than by an id that means nothing once restored — see apply-import.js.
       categories: categoryRows.map((c) => ({ name: c.name, color: c.color, position: c.position })),

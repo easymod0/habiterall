@@ -6,6 +6,7 @@
   "private": true,
   "exports": {
     "./stats.js": "./src/stats.js",
+    "./summary-cache.js": "./src/summary-cache.js",
     "./awards.js": "./src/awards.js",
     "./validate.js": "./src/validate.js",
     "./import.js": "./src/import.js",

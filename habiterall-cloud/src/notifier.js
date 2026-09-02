@@ -472,7 +472,11 @@ export function interactionAdapter() {
           }
 
           return { ok: true, habit, text: answerText(habit, { action, value }) };
-        });
+        // Narrowed to the habit the button names, exactly as the two entry
+        // routes are. A press is one habit's answer to one day, and an id that
+        // is not the account's finds no habit above and writes nothing — so the
+        // worst a forged one costs is a clear that matches no row.
+        }, { habits: [habitId] });
       } finally {
         forgetAccount(account.id);
       }

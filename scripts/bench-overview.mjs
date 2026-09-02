@@ -57,7 +57,12 @@ const END = '2026-06-30';
 /** `SUMMARY_WINDOW_DAYS` — what `summaryStats` is given on `/overview` now; `computeStats` is still given it here too, for the old-cost row. */
 const WINDOW_DAYS = 400;
 
-/** `STREAK_HISTORY_DAYS` — what the separate `bestStreak` scan reads. */
+/**
+ * `STREAK_HISTORY_DAYS` — what the separate `bestStreak` scan reads.
+ *
+ * Declared in `shared/src/summary-cache.js` since #184, not per edition: the
+ * window is part of what the CACHED figure means.
+ */
 const HISTORY_DAYS = 1830;
 
 /**
@@ -109,42 +114,54 @@ const HABIT = {
 /* ---------- keeping the fixture honest ---------- */
 
 /**
- * Fail if the route no longer uses the windows this file measures.
+ * Fail if the app no longer uses the windows this file measures.
  *
  * This reads SOURCE TEXT, so it is the weak kind of guard CLAUDE.md warns
  * about: it cannot see a renamed binding, and it cannot see a call site that
  * stopped passing the constant at all. Kept for the one thing it does catch,
- * which is the thing that actually happens — somebody tunes 400 or 1830 in
- * `api.js` and this bench goes on quoting figures for a window the app no
- * longer has. The behavioural half is that the numbers below are per-pass:
- * a window change moves all of them together and visibly.
+ * which is the thing that actually happens — somebody tunes 400 or 1830 and
+ * this bench goes on quoting figures for a window the app no longer has. The
+ * behavioural half is that the numbers below are per-pass: a window change
+ * moves all of them together and visibly.
+ *
+ * **The two constants are no longer declared in the same place, and that is
+ * #184.** `SUMMARY_WINDOW_DAYS` is still one declaration per edition, so both
+ * are read; `STREAK_HISTORY_DAYS` moved into `shared/src/summary-cache.js`,
+ * because the window a CACHED `bestStreak` was computed over is part of what
+ * the stored number means and two editions must not drift on it. So it is read
+ * once, from there. This function reading both editions in one pass is why it
+ * had to be repointed for both at once even though only cloud's declaration
+ * has gone yet.
  */
 function assertWindowsMatchTheRoutes() {
-  const expected = {
-    SUMMARY_WINDOW_DAYS: WINDOW_DAYS,
-    STREAK_HISTORY_DAYS: HISTORY_DAYS,
+  /**
+   * @param {string} file repo-relative
+   * @param {string} name
+   * @param {number} want
+   */
+  const windowIn = (file, name, want) => {
+    const src = readFileSync(join(ROOT, file), 'utf8');
+    const m = src.match(new RegExp(`const ${name}\\s*=\\s*(\\d+)`));
+    if (!m) {
+      throw new Error(
+        `${file} no longer declares ${name}. This bench's window literals are ` +
+        `now unanchored — re-read the source and update WINDOW_DAYS / ` +
+        `HISTORY_DAYS here, then re-measure #183, #184 and #196.`
+      );
+    }
+    if (Number(m[1]) !== want) {
+      throw new Error(
+        `${file} has ${name} = ${m[1]} and this bench assumes ${want}, which is ` +
+        `the window every figure quoted in #183/#184/#196 was taken over. ` +
+        `Re-measure before quoting the old numbers.`
+      );
+    }
   };
 
   for (const edition of ['habiterall-cloud', 'habiterall-personal']) {
-    const src = readFileSync(join(ROOT, edition, 'src', 'api.js'), 'utf8');
-    for (const [name, want] of Object.entries(expected)) {
-      const m = src.match(new RegExp(`const ${name}\\s*=\\s*(\\d+)`));
-      if (!m) {
-        throw new Error(
-          `${edition}/src/api.js no longer declares ${name}. This bench's ` +
-          `window literals are now unanchored — re-read the route and update ` +
-          `WINDOW_DAYS / HISTORY_DAYS here, then re-measure #183, #184 and #196.`
-        );
-      }
-      if (Number(m[1]) !== want) {
-        throw new Error(
-          `${edition}/src/api.js has ${name} = ${m[1]} and this bench assumes ` +
-          `${want}, which is the window every figure quoted in #183/#184/#196 ` +
-          `was taken over. Re-measure before quoting the old numbers.`
-        );
-      }
-    }
+    windowIn(join(edition, 'src', 'api.js'), 'SUMMARY_WINDOW_DAYS', WINDOW_DAYS);
   }
+  windowIn(join('shared', 'src', 'summary-cache.js'), 'STREAK_HISTORY_DAYS', HISTORY_DAYS);
 }
 
 /* ---------- the fixture itself ---------- */
