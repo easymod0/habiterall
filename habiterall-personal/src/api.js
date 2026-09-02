@@ -1256,6 +1256,21 @@ api.post('/import', (req, res, next) => {
           for (const [key, value] of Object.entries(accepted)) {
             q.putSetting.run(key, JSON.stringify(value));
           }
+          // The THIRD writer of `atMostUnlogged`, after the two settings
+          // routes — it is portable, so a backup carries it — and therefore
+          // the third thing that can move every habit's cached `bestStreak`.
+          //
+          // Inert as the statements stand: `applyImport` ran above and
+          // replace mode's `clearAllHabits` deleted every row a stamp could
+          // live on, so nothing is cached by the time this lands. Called
+          // anyway, for the reason `apply-import.js` gives one line from its
+          // own equally-inert call — a write path whose safety is the ORDER
+          // of two statements in two different files is exactly the implicit
+          // invariant this repo's style refuses to leave unstated. If a
+          // merge-mode settings restore is ever added, or this block moves
+          // above `applyImport`, this stops being inert and nothing else
+          // would have noticed.
+          clearAllSummaries();
           settings = Object.keys(accepted).length;
         }
       }

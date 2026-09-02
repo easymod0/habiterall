@@ -391,11 +391,24 @@ export function isCategoryNameConflict(err) {
  * This edition has no `data_version` and no `withUserWrite` to hang this off
  * of (`habiterall-cloud/src/db/pool.js`), so there is no single hook a write
  * runs through — every write path that can move what these two figures mean
- * for THIS habit calls this by hand: an entry write or delete, a `PUT
- * /habits/:id` replace, which can move `type` or `target_*` and so change
- * what counts as completed, and `record()` in `notifier.js` — the shared
- * ntfy/Discord button handler, which writes an entry outside the `/api`
- * router and so cannot rely on either HTTP route's call.
+ * for THIS habit calls this by hand. The full list, kept in step with the one
+ * in `habiterall-personal/CLAUDE.md` because two lists that disagree are how
+ * both of #184's misses got written down as covered:
+ *
+ *   - `PUT /habits/:id/entries/:date`, BOTH branches (`api.js`)
+ *   - `DELETE /habits/:id/entries/:date` (`api.js`)
+ *   - `PUT /habits/:id` — it REPLACES, so `type` and `target_*` can move and
+ *     change what counts as completed (`api.js`)
+ *   - `record()` in `notifier.js` — the shared ntfy/Discord button handler,
+ *     which writes an entry outside the `/api` router entirely and so cannot
+ *     rely on either HTTP route's call
+ *   - two sites in `apply-import.js`: the skip insert, and the general entry
+ *     write when it actually changed a row (a yielding `insertEntryIfAbsent`
+ *     wrote nothing, so it clears nothing)
+ *
+ * `clearAllSummaries` below has the account-wide ones — the two settings
+ * routes, the import's settings restore, and replace-mode's wipe — because a
+ * setting is an input to every habit's figure rather than to one.
  *
  * `summary_asof IS NOT NULL` is not a redundant predicate — it is what makes
  * this write no row and no journal page for the ordinary case, an account

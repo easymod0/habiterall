@@ -300,9 +300,19 @@ ck('THE assertion: the next load reports the NEW totalCompleted after a ' +
  * match it and that site is invisible here. It DOES clear (three lines
  * below), so this is not a live gap, and the regex was left narrow rather
  * than widened to anything ending `.run(`, which would sweep in every
- * unrelated prepared statement in the file and make the guard noise. The
- * honest summary is that this catches a write spelled the ordinary way and
- * nothing else, which is the shape both #184 misses actually had.
+ * unrelated prepared statement in the file and make the guard noise.
+ *
+ * **It covers ONE of #184's two misses, not both, and the one it misses is
+ * the likelier to recur.** The `record()` miss is an entry write spelled the
+ * ordinary way and this would have caught it. The settings miss is
+ * `q.putSetting.run(` / `q.clearSettings.run(` — deliberately outside
+ * `WRITE_RE`, because a settings write only matters when the KEY is an input
+ * to the cached pair, and no regex can ask that. Proved rather than assumed:
+ * with `clearAllSummaries()` removed from `PUT /settings`, the behavioural
+ * assertions above go red and this guard prints clean. So the next miss of
+ * the settings class — a new setting that feeds `recomputeBestStreak` — is
+ * one only tests 5 and 6 can catch, which is the argument for keeping them
+ * behavioural rather than folding them in here.
  */
 
 {
@@ -318,6 +328,18 @@ ck('THE assertion: the next load reports the NEW totalCompleted after a ' +
   // `updateHabit.run(...)` call and its own comment), never before it.
   const LINES_BEFORE = 3;
   const LINES_AFTER = 20;
+  // **The window STOPS at the end of the enclosing route, and that is not a
+  // refinement — without it the guard passes on a genuinely unguarded write.**
+  // Personal's entry writes are clustered inside ~35 lines of `api.js`, which
+  // is exactly where the next one gets added, and a bare 20-line window runs
+  // straight through `});` into the following route and is satisfied by ITS
+  // clear. Demonstrated: a new `PUT /habits/:id/entries/:date/note` inserted
+  // between the entry PUT and the entry DELETE, writing `q.upsertEntry.run`
+  // and clearing nothing, was reported clean — absorbed by the DELETE's
+  // `clearHabitSummary(id)` six lines below. A line that is exactly `});` or
+  // `}` at column 0 ends a top-level route or function here, so the scan for
+  // a clear stops there.
+  const BLOCK_END_RE = /^\}\)?;?$/;
 
   const unguarded = [];
   for (const file of readdirSync(srcDir).filter((f) => f.endsWith('.js'))) {
@@ -325,7 +347,10 @@ ck('THE assertion: the next load reports the NEW totalCompleted after a ' +
     lines.forEach((line, i) => {
       if (!WRITE_RE.test(line)) return;
       const start = Math.max(0, i - LINES_BEFORE);
-      const end = Math.min(lines.length, i + LINES_AFTER + 1);
+      let end = Math.min(lines.length, i + LINES_AFTER + 1);
+      for (let j = i + 1; j < end; j++) {
+        if (BLOCK_END_RE.test(lines[j])) { end = j + 1; break; }
+      }
       if (!CLEAR_RE.test(lines.slice(start, end).join('\n'))) {
         unguarded.push(`${file}:${i + 1}: ${line.trim()}`);
       }

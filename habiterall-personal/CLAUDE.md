@@ -84,12 +84,23 @@ of, so every write path that can move what those two figures mean for a habit
 calls `clearHabitSummary` or `clearAllSummaries` (`db.js`) itself: both
 branches of the entry PUT, the entry DELETE, `PUT /habits/:id` (it REPLACES, so
 `type` and `target_*` can move under the cached pair), the three sites in
-`apply-import.js`, **`PUT /settings` and `DELETE /settings`** (the account-wide
-`atMostUnlogged` setting is an INPUT to `recomputeBestStreak` via
-`storedUnlogged()`, so it clears every habit's stamp, not one), and
-**`record()` in `notifier.js`** — the shared handler behind every ntfy and
-Discord button press, which writes an entry outside the `/api` router
-entirely and so cannot rely on either HTTP route's call. A write path added
+`apply-import.js`, **the three writers of `atMostUnlogged`** — `PUT /settings`,
+`DELETE /settings` and `POST /import`'s settings restore, which is portable and
+so carries the key too — since that setting is an INPUT to
+`recomputeBestStreak` via `storedUnlogged()` and therefore clears every habit's
+stamp rather than one, and **`record()` in `notifier.js`** — the shared handler
+behind every ntfy and Discord button press, which writes an entry outside the
+`/api` router entirely and so cannot rely on either HTTP route's call.
+
+Two things this list costs, both deliberate. The import's clear is **inert as
+the statements stand** — `applyImport` has already deleted every row a stamp
+could live on — and is called anyway, because a write path whose safety is the
+order of two statements in two different files is the implicit invariant this
+repo refuses to leave unstated. And a settings write clears the WHOLE account,
+including a theme toggle, which cannot move any figure: the next `/overview`
+then pays the full cold path. Narrowing it to the keys that are inputs is a
+rule that has to be revisited every time a setting becomes one, so the blanket
+clear is the safe direction rather than the free one. A write path added
 later that skips this serves a figure
 from before the write for the REST OF THAT DAY — not forever, because
 `summary_asof` holds the day it was computed for and `summaryCacheHit` is an
