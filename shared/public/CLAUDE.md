@@ -867,12 +867,27 @@ The picker's search box is a text box inside `#habit-form` too, so it is the
 same Enter trap as the category boxes above, over a control this module owns
 instead — Enter there picks the FIRST matching cell rather than merely
 swallowing the key (a box where Enter does nothing is its own bug report) and
-calls `preventDefault()`. And inside the panel, Escape closes the PANEL, not
-the `<dialog>` — `preventDefault` is what is load-bearing there, not
-`stopPropagation`: a `<dialog>`'s Escape-close is not a bubbling listener a
-`stopPropagation` could intercept, it is the keydown's own default action, so
-without `preventDefault` the first Escape a user presses to dismiss the picker
-closes the whole habit dialog too.
+calls `preventDefault()`. And while the panel is open, Escape closes the
+PANEL, not the `<dialog>` — `preventDefault` is what is load-bearing there,
+not `stopPropagation`: a `<dialog>`'s Escape-close is not a bubbling listener
+a `stopPropagation` could intercept, it is the keydown's own default action,
+so without `preventDefault` the first Escape a user presses to dismiss the
+picker closes the whole habit dialog too, losing everything typed into it.
+
+**That handler is bound to the DIALOG, guarded on the panel being open — not
+to the panel, which is where it obviously belongs and where it only half
+works.** `#icon-picker-toggle` sits beside the input and `#icon-picker` is a
+sibling AFTER it, so opening the picker with the mouse leaves focus on the
+TOGGLE, outside the panel: a keydown listener on the panel never runs, and
+Escape takes the whole dialog. The keyboard path — Tab into the panel, or the
+search box — is inside it and worked, which is exactly why the first version
+shipped and why the check that covered it (`feat4.mjs` (g)) could not see the
+hole: it focused `#icon-search` before pressing the key. Focusing the search
+box on open does not fix this either, since Shift+Tab puts the user back on
+the toggle with the panel still open. Case `g2` presses Escape from the
+toggle, and it needs a REAL CDP mouse press to get there — a synthetic
+`.click()` does not move focus, so a test built on one passes against the
+unfixed code.
 
 `#icon-picker`'s `hidden` state and `#icon-search`'s value are static markup,
 wired once by `initIconField()` — nothing about closing and reopening the

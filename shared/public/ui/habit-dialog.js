@@ -27,8 +27,11 @@ const archivedWrap = $('#archived-wrap');
 // Wired once, here, rather than inside `init()` — `#icon-*` is static markup
 // like the dialog's other controls above, not something that depends on
 // which habit is showing. `icon-field.js` owns every `#icon-*` id itself;
-// this module must not name one (`test/ui-modules.test.js`).
-initIconField();
+// this module must not name one (`test/ui-modules.test.js`) — `dialog` is
+// handed in as the element `#habit-dialog` already resolved to above, so
+// icon-field.js's own Escape handler can be bound to it without ever naming
+// that id itself.
+initIconField(dialog);
 
 /**
  * Six starting points, not seeded rows — an account with no habits gets no

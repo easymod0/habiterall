@@ -740,6 +740,14 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 
 /* ---------- icon field (habit dialog) ---------- */
 
+/* Wraps the label, the row and the hint as one field-height group — the same
+   shape `.category-field` uses below for the same reason: the `<label>` here
+   names only the input (`for`, not wrapping it), so `dialog label`'s own
+   `margin-bottom: 11px` would otherwise land between "Icon" and the row
+   instead of after the whole field. */
+.icon-field { margin-bottom: 11px; }
+.icon-field label { margin-bottom: 4px; }
+
 .icon-field-row {
   display: flex;
   align-items: center;

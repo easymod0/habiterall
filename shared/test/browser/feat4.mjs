@@ -634,6 +634,59 @@ try {
   }
   await ev(`document.getElementById('habit-dialog').close()`);
 
+  console.log('--- g2. Escape from the TOGGLE (the mouse-opened path) closes the panel, not the dialog ---');
+  // Case g above focuses `#icon-search` before pressing Escape, which is the
+  // one path that already worked even with the Escape listener bound to
+  // `els.panel`: `#icon-search` is INSIDE `#icon-picker`, so a `keydown`
+  // there always reached a panel-scoped listener. `#icon-picker-toggle` is
+  // not — it sits inside the `<label>`, `#icon-picker` is a sibling AFTER it,
+  // and a user who opens the picker with the MOUSE has focus land on the
+  // button they pressed, never moved into the panel (`openPanel()`
+  // deliberately does not steal it). A user who then immediately presses
+  // Escape — without first tabbing or clicking into the panel — has focus
+  // outside `#icon-picker` the whole time, so a listener scoped to the panel
+  // never runs and the keydown's default action (the `<dialog>`'s own
+  // Escape-close) fires instead, discarding whatever had already been typed
+  // into Name and Description.
+  //
+  // `openPicker()`'s `.click()` is a SYNTHETIC activation and does not move
+  // focus the way a genuine click does — verified empirically, the assertion
+  // below fails against it — so this reproduces the mouse path with a real
+  // CDP click instead, at the toggle's own on-screen coordinates.
+  await openNewDialog();
+  await typeInto('#habit-form [name="name"]', 'Escape from the toggle');
+  const toggleBox = await ev(`(()=>{
+    const b = document.getElementById('icon-picker-toggle').getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+  })()`);
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await send('Input.dispatchMouseEvent',
+      { type, x: toggleBox.x, y: toggleBox.y, button: 'left', clickCount: 1 }, sessionId);
+  }
+  await waitUntil(ev,
+    `!document.getElementById('icon-picker').hidden
+      && document.querySelectorAll('#icon-grid .icon-cell').length > 0`,
+    { what: 'the icon picker panel, open with cells rendered (via a real mouse click)' });
+  const focusedAfterOpen = await ev(`document.activeElement && document.activeElement.id`);
+  check('opening the picker with a real mouse click leaves focus on the toggle',
+    focusedAfterOpen === 'icon-picker-toggle', focusedAfterOpen);
+  await pressEscape();
+  await waitUntil(ev,
+    `document.getElementById('icon-picker').hidden === true
+      || document.getElementById('habit-dialog').open === false`,
+    { what: 'the panel to close, or (if Escape reached the dialog instead) the dialog' });
+  const afterToggleEscape = await ev(`(()=>({
+    dialogOpen: document.getElementById('habit-dialog').open,
+    panelHidden: document.getElementById('icon-picker').hidden,
+    name: document.getElementById('habit-form').name.value,
+  }))()`);
+  check('Escape from the toggle closes the panel',
+    afterToggleEscape.panelHidden === true, JSON.stringify(afterToggleEscape));
+  check('Escape from the toggle leaves the dialog open, with what was typed still in it',
+    afterToggleEscape.dialogOpen === true && afterToggleEscape.name === 'Escape from the toggle',
+    JSON.stringify(afterToggleEscape));
+  await closeDialog();
+
   console.log('--- h. reopening the dialog resets the panel and the search ---');
   // `#icon-picker` is static markup wired once by `initIconField()`, so
   // nothing about closing and reopening the habit dialog touches it on its

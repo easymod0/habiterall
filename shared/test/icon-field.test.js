@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const { EMOJI, previewIcon, searchEmoji } = await import('../public/ui/icon-field.js');
-const { parseIcon } = await import('../src/validate.js');
+const { LIMITS, parseIcon } = await import('../src/validate.js');
 
 /* ---------- previewIcon agrees with parseIcon, and both are pinned ---------- */
 
@@ -26,6 +26,14 @@ const EXAMPLES = [
   [ZALGO, ''],
   ['ab', 'a'],
   [SKIN_TONED, SKIN_TONED],
+  // The ONE witness for the `\p{Cc}` strip clause — `validate.test.js:145-158`'s
+  // own comment says so, because `a\nb` above is decided by `.trim()` either
+  // way and cannot tell "the strip set is right" from "the strip set is
+  // missing \p{Cc}". Without stripping BEL (U+0007), `previewIcon('\u0007')`
+  // would return the BEL itself rather than '' — the preview promising to
+  // save a control character the server discards.
+  ['\u0007', ''],
+  ['\u0007' + '\u{1F9D8}', '\u{1F9D8}'],
 ];
 
 test('previewIcon agrees with parseIcon over the shared example table', () => {
@@ -35,6 +43,27 @@ test('previewIcon agrees with parseIcon over the shared example table', () => {
     assert.equal(previewIcon(input), parseIcon(input),
       `previewIcon and parseIcon disagree on ${JSON.stringify(input)}`);
   }
+});
+
+test('the cap sits at exactly 32 UTF-16 units, both as a literal and against LIMITS.icon', () => {
+  // Two assertions pulling in opposite directions, deliberately both present:
+  // the LITERAL 32 is what pins previewIcon's own copy of the cap (the repo
+  // rule that a test importing the constant it checks pins the name and
+  // nothing else — EMOJI.length above does the same for the same reason),
+  // and the import of LIMITS.icon is what makes a future change to that
+  // constant fail LOUDLY here instead of leaving previewIcon's literal to
+  // silently drift out of step with what the server actually enforces.
+  assert.equal(LIMITS.icon, 32);
+
+  const atCap = 'e' + '́'.repeat(31); // 1 + 31 = 32 UTF-16 units — kept
+  const overCap = 'e' + '́'.repeat(32); // 1 + 32 = 33 UTF-16 units — dropped
+  assert.equal(atCap.length, 32);
+  assert.equal(overCap.length, 33);
+
+  assert.equal(previewIcon(atCap), atCap);
+  assert.equal(parseIcon(atCap), atCap);
+  assert.equal(previewIcon(overCap), '');
+  assert.equal(parseIcon(overCap), '');
 });
 
 /* ---------- the dataset itself ---------- */

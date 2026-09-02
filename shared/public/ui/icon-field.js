@@ -318,7 +318,7 @@ export function searchEmoji(query) {
  * @type {{
  *   input: HTMLInputElement, glyph: HTMLElement, caption: HTMLElement,
  *   toggle: HTMLButtonElement, panel: HTMLElement, search: HTMLInputElement,
- *   grid: HTMLElement,
+ *   grid: HTMLElement, dialog: Element,
  * } | null}
  */
 let els = null;
@@ -480,8 +480,15 @@ export const iconField = {
  * import — never from inside this file, so importing `icon-field.js` under
  * Node (`test/icon-field.test.js`) touches no `document` unless this function
  * is actually called, which that test never does.
+ *
+ * @param {Element} dialogEl `#habit-dialog` itself, HANDED IN rather than
+ *   looked up: `#habit-dialog` is `habit-dialog.js`'s own id and naming it
+ *   here would give it two owners (`test/ui-modules.test.js`), exactly the
+ *   reason the input below is found by its `name` and not `#habit-form
+ *   input[...]`. The element is needed, not the id, for the Escape handler
+ *   below.
  */
-export function initIconField() {
+export function initIconField(dialogEl) {
   els = {
     // Not `#habit-form input[...]` — `#habit-form` is `habit-dialog.js`'s own
     // id, and naming it here would give it two owners
@@ -493,6 +500,7 @@ export function initIconField() {
     panel: document.getElementById('icon-picker'),
     search: /** @type {HTMLInputElement} */ (document.getElementById('icon-search')),
     grid: document.getElementById('icon-grid'),
+    dialog: dialogEl,
   };
 
   els.input.addEventListener('input', updatePreview);
@@ -515,18 +523,26 @@ export function initIconField() {
     if (first) first.click();
   });
 
-  // Escape inside the panel closes the panel, not the dialog behind it.
-  // `preventDefault` is what is load bearing here, not `stopPropagation`:
-  // `<dialog>`'s Escape-close is not a bubbling keydown listener a
-  // `stopPropagation` could intercept, it is the keydown's OWN DEFAULT ACTION
-  // (a close watcher that cancels the dialog unless the keydown arrived with
-  // its default already prevented) — so without `preventDefault` the first
-  // Escape a user presses to dismiss the picker closes the whole habit dialog
-  // too, `stopPropagation` notwithstanding. Both calls stay: `preventDefault`
-  // stops the dialog closing, `stopPropagation` is harmless insurance against
-  // some other ancestor listener also reacting to the key.
-  els.panel.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
+  // Escape closes the panel, not the dialog behind it — bound on the DIALOG,
+  // not `els.panel`. `#icon-picker-toggle` sits INSIDE the `<label>` and
+  // `#icon-picker` is a sibling AFTER it, and `openPanel()` deliberately does
+  // not move focus into the panel (a user can Shift+Tab back out of it onto
+  // the toggle at any point, so stealing focus on open would only narrow this
+  // hole, not close it) — so a panel opened by CLICKING the toggle leaves
+  // focus on the toggle, outside `#icon-picker`, and a listener scoped to the
+  // panel never runs. Guarded on `!els.panel.hidden` so every other Escape
+  // press still reaches the dialog's own close. `preventDefault` is what is
+  // load bearing here, not `stopPropagation`: `<dialog>`'s Escape-close is not
+  // a bubbling keydown listener a `stopPropagation` could intercept, it is the
+  // keydown's OWN DEFAULT ACTION (a close watcher that cancels the dialog
+  // unless the keydown arrived with its default already prevented) — so
+  // without `preventDefault` the first Escape a user presses to dismiss the
+  // picker closes the whole habit dialog too, `stopPropagation`
+  // notwithstanding. Both calls stay: `preventDefault` stops the dialog
+  // closing, `stopPropagation` is harmless insurance against some other
+  // ancestor listener also reacting to the key.
+  els.dialog.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || els.panel.hidden) return;
     e.preventDefault();
     e.stopPropagation();
     closePanel();
