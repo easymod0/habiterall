@@ -856,3 +856,33 @@ note in its own body. An omission from a form is intent; an omission from a
 button is ignorance — the button never had the information to omit on
 purpose — and treating the two alike would make one of the two write rules
 wrong regardless of which one it borrowed from.
+
+### Two places this rule deliberately does not reach
+
+Both were raised in review, and neither is a code change; they are here so the
+section above is not read as claiming more ground than it holds.
+
+**`DELETE` still takes the note, and has to.** The tap cycle's last step is
+`clear`, and `writeDay` (`shared/public/ui/day-strip.js`) sends
+`DELETE /habits/:id/entries/:date` for it; Android's widget reaches the same
+route through `Outbox`. That removes the row, and the note goes with it — no
+confirmation, and the strip never rendered the note to begin with, so it is the
+same "a button never saw it" shape the fix is about. It is nonetheless correct.
+A note is a column ON a row, `DELETE` means the fourth state — no row at all —
+and there is nowhere for a note to live on a day nothing is known about. The
+alternative would be a row that exists only to carry a note, which is precisely
+the arrangement the four-state rule was written to get rid of (see the top of
+this file: a note could once bring a row into being, and that is what made
+`unknown` unreachable). So the rule is about what an UPSERT does to a column it
+was not asked about, not about what deleting a row does to the row.
+
+**The precedent has a hole in the other direction, and it is pre-existing.**
+The import rule is quoted above as the governing one, but it only protects a
+stored note from a BARE lapse. In `merge` mode a non-bare imported entry goes
+through `insertEntry`, which still writes `notes = excluded.notes`, so importing
+a file whose entry carries no note over a stored row that has one erases it.
+That is untouched by #224 and is arguably right for the same reason
+`PUT /habits/:id` replaces — a backup file is a whole document, not a button —
+but it is a real asymmetry with what the answer path now does, and anyone
+reaching for this section as precedent should know the precedent is narrower
+than it sounds.
