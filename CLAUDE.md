@@ -265,6 +265,26 @@ each of which has cost a release:
 - **A guard that reads SOURCE TEXT cannot see a renamed binding or an inverted
   comparison.** Keep it for what it does catch — a call site that reads no
   setting at all — and add a behavioural test beside it.
+- **A SEQUENTIAL test cannot see a concurrency defect, and it passes loudly.**
+  `test:summarycache` proved the summary-cache write-back's guard was read and
+  compared; the guard was an InitPlan behind a One-Time Filter, so it could not
+  hold under a race at all, and a lock-order inversion in the same change turned
+  a user's tap into an unhandled 500. Force the interleaving with explicit
+  transactions on separate connections and a stall something else holds, and
+  then **prove from `pg_stat_activity` that it formed** — a harness that
+  silently ran sequentially passes every assertion and teaches nothing. That is
+  what `test:summaryrace` is, beside rather than instead of the sequential
+  inventory.
+
+**Two write paths in one edition must take their locks in ONE order.** Cloud's
+mutating paths all reach `users` last through the `data_version` bump, and
+`withUserWrite` clears the habit summary cache BEFORE `fn` for exactly this
+reason — with the clear last, `PUT /settings` alone went `users -> habits` while
+every other path went `habits -> users`, and five pairs of ordinary routes
+deadlocked. Nothing in either edition handles `40P01`, so the victim is a 500 on
+somebody's tap, and `writeBackSummaries` made a *dashboard load* a possible
+victim. Adding a statement to a shared write wrapper is therefore a lock-order
+question first and a performance one second.
 
 **Mutation-test before claiming.** Break the fix, watch the new test fail, put
 it back. Every rule above was found that way and not by reasoning.
@@ -291,6 +311,7 @@ Several layers, and they catch different things:
 | Every write bumps `data_version`, and no read does | `npm run test:dataversion -w habiterall-cloud` | Postgres |
 | The dashboard's two cached lifetime figures | `npm run test:summarycache -w habiterall-cloud` | Postgres |
 | The same, over SQLite | `npm run test:summarycache -w habiterall-personal` | nothing |
+| The same cache under a FORCED race | `npm run test:summaryrace -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |

@@ -448,6 +448,34 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/data-version.integration.mjs
 
+      # The invalidation inventory for the dashboard's two cached lifetime
+      # figures: one case per write path, plus a control that a READ clears
+      # nothing. Wired in here alongside the version suite because it is the
+      # same shape of claim — a clear that fails to happen makes a dashboard
+      # report a figure from before the tap, on every replica, until the
+      # calendar day rolls over, and nothing reports it.
+      - name: A write clears the habit summary cache
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/summary-cache.integration.mjs
+
+      # ...and the half the step above cannot reach. Every case up there is
+      # SEQUENTIAL, which is how two concurrency defects shipped underneath a
+      # green suite: a write-back guard that held sequentially and could not
+      # hold under a race, and a lock-order inversion that turned a user's tap
+      # into an unhandled 500. This one forces each interleaving with an
+      # advisory-lock stall on separate connections and proves from
+      # `pg_stat_activity` that it formed, so a run that silently went
+      # sequential fails by name instead of passing.
+      - name: The summary cache under a forced race
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+        run: node test/summary-race.integration.mjs
+
   roundtrip:
     name: Backup round-trip (personal)
     runs-on: ubuntu-latest
@@ -526,6 +554,16 @@ jobs:
       - name: Reminder delivery and its watermark
         working-directory: habiterall-personal
         run: node test/notify.integration.mjs
+
+      # The same invalidation inventory the cloud job runs, over SQLite. This
+      # edition needs no race suite beside it and that is a property of its
+      # storage rather than a gap — `DatabaseSync` is synchronous and there is
+      # one process, so there is no second writer to interleave with. The
+      # reasoning is at the write-back in `src/api.js`, and the condition to
+      # re-open it is named there.
+      - name: A write clears the habit summary cache (SQLite)
+        working-directory: habiterall-personal
+        run: node test/summary-cache.integration.mjs
 
   compose:
     name: Compose files
