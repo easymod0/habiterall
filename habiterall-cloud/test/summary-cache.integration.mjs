@@ -263,6 +263,16 @@ try {
        FROM habits WHERE id = $1`, [id])).rows[0];
 
   /**
+   * One habit's invalidation counter (migration 019), read by the owner.
+   *
+   * `::text` then `Number`, for `version()`'s reason: a BIGINT's arrival shape
+   * should not depend on whether `db/pool.js` has installed its parser on the
+   * shared `pg` module yet.
+   */
+  const epoch = async (id) => Number((await admin.query(
+    `SELECT summary_epoch::text AS e FROM habits WHERE id = $1`, [id])).rows[0].e);
+
+  /**
    * Give every one of the account's habits a cached pair — through the ROUTE.
    *
    * `GET /overview` is what fills these columns, so this is the priming that
@@ -710,7 +720,7 @@ try {
     'pointing at a day that has not happened yet',
     afterAhead.asof === today, JSON.stringify(afterAhead));
 
-  console.log('\n--- the write-back refuses a stale data_version ---');
+  console.log('\n--- the write-back refuses a stale summary_epoch ---');
 
   // Cloud's `withUser` is READ COMMITTED, so a write committing between the
   // entry reads and the write-back has already cleared the stamp — and without
@@ -718,18 +728,34 @@ try {
   // figures built from pre-write data. That is the "version last" failure
   // `caching.md` describes, and it survives until the calendar day rolls over.
   //
+  // **This block is SEQUENTIAL, and that is its limitation rather than its
+  // point.** It pins that the predicate is READ and compared — a
+  // `writeBackSummaries` with no guard at all fails the first case here. It
+  // cannot see whether the predicate SURVIVES a concurrent writer, and the
+  // guard this replaces passed exactly this block while failing that: an
+  // account-level `data_version` subquery is an InitPlan behind a One-Time
+  // Filter, which EvalPlanQual cannot re-run, so it held sequentially and not
+  // under a race. `test:summaryrace` is where the interleavings are forced;
+  // neither file is sufficient alone and this comment is the join between
+  // them.
+  //
   // The race is not deterministically reachable over HTTP, which is exactly why
-  // `writeBackSummaries` is a named export: called directly it can be handed a
-  // version that is deliberately behind.
+  // `writeBackSummaries` is a named export: called directly it can be handed an
+  // epoch that is deliberately behind.
   await admin.query(
     `UPDATE habits SET best_streak = $2, total_completed = $3, summary_asof = $4
       WHERE id = $1`, [habitB, BEST, TOTAL, STAMP]);
-  const liveVersion = await version();
+  const liveEpoch = await epoch(habitB);
+  // Non-zero on purpose: every write above has advanced it, so `liveEpoch - 1`
+  // is a real earlier value and not the "never invalidated" default that a
+  // fixture left at 0 would compare equal to.
+  ck('control: the fixture\'s epoch has actually been advanced by the writes above',
+    liveEpoch > 0, `epoch=${liveEpoch}`);
   const staleRows = await withUser(user, (db) =>
-    writeBackSummaries(db, user, liveVersion - 1, today,
-      [{ id: habitB, best_streak: 7, total_completed: 3 }]));
+    writeBackSummaries(db, user, today,
+      [{ id: habitB, best_streak: 7, total_completed: 3, summary_epoch: liveEpoch - 1 }]));
   const afterStale = await pair(habitB);
-  ck('a write-back at a stale data_version stamps nothing', staleRows === 0,
+  ck('a write-back at a stale summary_epoch stamps nothing', staleRows === 0,
     `rows=${staleRows}`);
   ck('...and leaves the row exactly as it found it',
     afterStale.best_streak === BEST && afterStale.total_completed === TOTAL
@@ -739,15 +765,38 @@ try {
   // The control without which the case above passes against a function that
   // writes nothing whatever it is handed.
   const liveRows = await withUser(user, (db) =>
-    writeBackSummaries(db, user, liveVersion, today,
-      [{ id: habitB, best_streak: 7, total_completed: 3 }]));
+    writeBackSummaries(db, user, today,
+      [{ id: habitB, best_streak: 7, total_completed: 3, summary_epoch: liveEpoch }]));
   const afterLive = await pair(habitB);
-  ck('control: the same call at the LIVE version does stamp the row',
+  ck('control: the same call at the LIVE epoch does stamp the row',
     liveRows === 1 && afterLive.best_streak === 7 && afterLive.total_completed === 3
       && afterLive.asof === today,
     `rows=${liveRows} ${JSON.stringify(afterLive)}`);
 
-  console.log('\n--- the three columns never reach a client ---');
+  // The guard is PER HABIT, which the account-level counter it replaced could
+  // not be. One call naming two habits, one of them at a stale epoch: the
+  // stale one must drop out on its own and the other must still be stamped.
+  // Under a scalar account-level guard this is 0 rows, not 1 — a write to
+  // habit A refusing the write-back for habit B, which no write to A can
+  // invalidate.
+  await admin.query(
+    `UPDATE habits SET best_streak = $2, total_completed = $3, summary_asof = $4
+      WHERE id = ANY($1)`, [[habitA, habitB], BEST, TOTAL, STAMP]);
+  const epochA = await epoch(habitA);
+  const epochB = await epoch(habitB);
+  const mixedRows = await withUser(user, (db) =>
+    writeBackSummaries(db, user, today, [
+      { id: habitA, best_streak: 11, total_completed: 12, summary_epoch: epochA },
+      { id: habitB, best_streak: 13, total_completed: 14, summary_epoch: epochB - 1 },
+    ]));
+  const mixedA = await pair(habitA);
+  const mixedB = await pair(habitB);
+  ck('one stale habit in a batch drops out and the fresh one is still stamped',
+    mixedRows === 1 && mixedA.best_streak === 11 && mixedA.asof === today
+      && mixedB.best_streak === BEST && mixedB.asof === STAMP,
+    `rows=${mixedRows} A=${JSON.stringify(mixedA)} B=${JSON.stringify(mixedB)}`);
+
+  console.log('\n--- the four cache columns never reach a client ---');
 
   // `api.integration.mjs`'s `PORTABLE_HABIT_KEYS` is the tripwire for `/export`
   // alone, and it is an exact key-set comparison that must keep passing
@@ -756,7 +805,14 @@ try {
   // otherwise carry them. Asserted by NAME, spelled out here rather than
   // imported, so a rename in `SUMMARY_CACHE_COLUMNS` cannot silently take the
   // assertion with it.
-  const SERVER_ONLY = ['best_streak', 'summary_asof', 'total_completed'];
+  // `summary_epoch` (migration 019) is the fourth, and it is here because it
+  // LEAKED: this assertion was named "the three columns never reach a client",
+  // passed while a scratch epoch column rode out on every one of these
+  // payloads, and could not have noticed — `stripSummaryCache` is a deny list
+  // and this list named the three it knew. `schema-plans.integration.mjs` is
+  // the general guard; this is the specific one.
+  const SERVER_ONLY = [
+    'best_streak', 'summary_asof', 'summary_epoch', 'total_completed'];
   const carries = (o) => (o ? SERVER_ONLY.filter((k) => k in o) : ['(no payload)']);
 
   const madeE = await call('/habits', {

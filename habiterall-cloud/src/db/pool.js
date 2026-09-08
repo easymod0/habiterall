@@ -349,10 +349,63 @@ export async function withUser(userId, fn) {
  * without the other — and the clear cannot be rolled back while the write it
  * invalidates for commits.
  *
- * Both are issued AFTER `fn` rather than before, which is a lock-hold argument
- * and not a correctness one: each takes row locks that every concurrent write
- * by the same account then queues behind, so they are held for the tail of the
- * transaction rather than for all of it. Either order commits atomically.
+ * **The clear runs BEFORE `fn` and the bump AFTER, and that ordering is now a
+ * correctness argument rather than a lock-hold one.** An earlier version issued
+ * both after `fn`, reasoning that row locks held for the tail of a transaction
+ * are cheaper than row locks held for all of it. True, and beside the point:
+ * with the clear last, `habits` and `users` were locked in one order by every
+ * write path except `PUT /settings`, whose own `fn` writes `users` first and
+ * only then reached the account-wide clear on `habits`. That is a lock-order
+ * INVERSION between two ordinary routes, and it deadlocks —
+ *
+ *     tap      : habits -> users
+ *     settings : users  -> habits
+ *
+ * — with no `40P01` handling anywhere in this edition, so the victim surfaced
+ * as an unhandled 500 on a user's tap. Measured over the real routes: five
+ * pairs of write paths deadlocked (`settings x tap`, `tap x habitDel`,
+ * `habitDel x habitDel`, `catDel x habitPutCat`, `reorder x settings`) where a
+ * pre-#301 re-implementation with no clear at all deadlocked zero times in
+ * every one of them, and `catDel x habitPutCat` throughput collapsed by two
+ * orders of magnitude. `writeBackSummaries` — a write on a GET — appeared in
+ * most of the observed cycles, so a DASHBOARD LOAD could deadlock.
+ *
+ * Moving the clear in front of `fn` gives every mutating path in this edition
+ * ONE lock order BETWEEN THE TWO TABLES, `habits` then `users`, which is what
+ * makes the table-level cycle unconstructible rather than merely rarer.
+ * Measured after: `settings x tap`, `tap x habitDel` and `habitDel x habitDel`
+ * all reach zero.
+ *
+ * **It does not settle the ROW order within `habits`, and that is a live
+ * residual rather than a closed question.** `writeBackSummaries` locks the rows
+ * `buildOverview` handed it, in `ORDER BY position, id`; an un-narrowed clear
+ * has only a `user_id` predicate and no index leading on `user_id`, so it
+ * seq-scans and locks in ctid order. Where those disagree the two deadlock, and
+ * pre-clearing AMPLIFIED that pair (`reorder x settings`: 2 before, 8 after)
+ * because the clear is now the first statement of every write and overlaps
+ * maximally with concurrent dashboard loads. `docs/decisions/caching.md` has
+ * the matrix, the cycle Postgres named, and the three candidate remedies —
+ * each of which costs something and none of which is in this change.
+ *
+ * Pre-clearing is sound for every
+ * path, and each way it could have been unsound is a case rather than a
+ * worry: a habit CREATED inside `fn` did not exist to clear and has no cached
+ * pair to invalidate (`summary_asof` and `summary_epoch` start at NULL and 0);
+ * a habit DELETED inside `fn` is cleared a moment before it goes, which is
+ * wasted work on one row and never a wrong answer; and the entry write's
+ * foreign keys take `FOR KEY SHARE`, which does not conflict with the
+ * `RowExclusiveLock` the clear already holds on the same habits row. Nothing
+ * computes the id list inside `fn` either — `habits` is an OPTION, decided
+ * before `fn` runs — so there is no path for which the clear needs `fn`'s
+ * result.
+ *
+ * The lock-hold cost is real and is paid knowingly: concurrent writes by the
+ * SAME account now queue on the clear at the top of the transaction rather
+ * than at the tail. One account's writes serialising against each other is a
+ * throughput note; two of them deadlocking is a 500.
+ *
+ * Either order still commits atomically, which is why this is an ordering
+ * choice and not a transactional one.
  *
  * @param {number} userId
  * @param {(client: pg.PoolClient) => Promise<T>} fn
@@ -376,22 +429,39 @@ export async function withUserWrite(userId, fn, { habits = null } = {}) {
   // gets the whole account cleared.
   const narrowTo = habits?.length ? habits : null;
   return withUser(userId, async (client) => {
-    const result = await fn(client);
+    // FIRST, so that `habits` is locked before `users` on every write path in
+    // this edition — see the JSDoc above for the deadlock this ordering
+    // removes and for why pre-clearing is sound on every path.
+    //
     // The stamp alone is cleared, never the two figures: `summary_asof` is the
     // validity flag (see `shared/src/summary-cache.js`), so a stale pair left
     // beside a NULL stamp is unreadable rather than wrong, and the schema's
     // `habits_summary_cache_complete` CHECK is written to permit exactly that.
     //
-    // `summary_asof IS NOT NULL` is not a redundant predicate. It makes the
-    // statement write no row, no WAL and no transaction id when nothing is
-    // cached — which is every write by an account that has not loaded its
-    // dashboard since its last one — the same trick the device-zone
-    // middleware's `IS DISTINCT FROM` uses in `api.js`.
+    // **`summary_epoch` advances with the stamp, and there is deliberately no
+    // longer an `AND summary_asof IS NOT NULL` beside it.** That predicate was
+    // here to make the statement write no row, no WAL and no transaction id
+    // when nothing was cached, the way the device-zone middleware's
+    // `IS DISTINCT FROM` does — and it was the mechanism by which the
+    // write-back's guard failed silently. When the stamp is already NULL, which
+    // is the state after every write, the predicate matched no row: the clear
+    // took NO ROW LOCK, so a concurrent `/overview` write-back never blocked on
+    // it and never had its qual re-checked, and the stamp itself said nothing
+    // either — the reader read NULL and the clear left NULL. The epoch is what
+    // the reader compares now, so it has to advance whether or not there was a
+    // stamp to clear, and the row has to be written so that the lock exists.
+    // Migration 019's header has the measurement and the EvalPlanQual reason.
+    //
+    // The cost is one row write per habit in scope per account write, where a
+    // dormant account previously paid none. It is bounded by the narrowing
+    // below, and the update stays HOT-eligible because neither column is in any
+    // index.
     await client.query(
-      `UPDATE habits SET summary_asof = NULL
-        WHERE user_id = $1 AND summary_asof IS NOT NULL
+      `UPDATE habits SET summary_asof = NULL, summary_epoch = summary_epoch + 1
+        WHERE user_id = $1
           AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))`,
       [userId, narrowTo]);
+    const result = await fn(client);
     await client.query(
       'UPDATE users SET data_version = data_version + 1 WHERE id = $1', [userId]);
     return result;

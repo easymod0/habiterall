@@ -358,7 +358,17 @@ api.delete('/habits/:id', route(async (req, res) => {
   const gone = await withUserWrite(uid(req), (db) =>
     db.query(`DELETE FROM habits WHERE id = $1 RETURNING id`, [id])
       .then((r) => r.rowCount > 0)
-  );
+  // Narrowed, and the narrowing is what makes this cheap rather than what
+  // makes it correct: REMOVING a habit cannot change another habit's cached
+  // pair, so clearing the account was strictly wasted work — and it was the
+  // sole cause of a measured `habitDel x habitDel` deadlock, two deletions of
+  // different habits each taking the other's row lock through an account-wide
+  // clear. The clear on the row about to be deleted is a row write a moment
+  // before a row deletion, which is a wasted update and never a wrong answer;
+  // it stays because it is also the statement that takes this transaction's
+  // `habits` lock BEFORE it reaches `users`, which is the one lock order this
+  // edition has (see `withUserWrite`).
+  , { habits: [id] });
   if (!gone) throw httpError(404, 'habit not found');
   res.status(204).end();
 }));
@@ -376,11 +386,13 @@ api.post('/habits/reorder', route(async (req, res) => {
     throw httpError(400, `order may not exceed ${MAX_HABITS_PER_USER} ids`);
   }
 
+  // Hoisted out of `fn` so it can narrow the clear below. RLS still confines
+  // both the update and the clear to the caller's own habits, so an id
+  // belonging to someone else simply matches nothing in either.
+  const ids = order.map((id) => Number(id));
+
   const rows = await withUserWrite(uid(req), async (db) => {
-    // One statement instead of a round trip per id. RLS still confines the
-    // update to the caller's own habits, so an id belonging to someone else
-    // simply matches nothing.
-    const ids = order.map((id) => Number(id));
+    // One statement instead of a round trip per id.
     if (ids.length) {
       await db.query(
         `UPDATE habits SET position = v.position
@@ -392,7 +404,15 @@ api.post('/habits/reorder', route(async (req, res) => {
     return db.query(
       `SELECT * FROM habits WHERE archived = false ORDER BY position, id`
     ).then((r) => r.rows);
-  });
+  // Narrowed to the habits this request actually named, rather than removed.
+  // Reordering moves `position` and nothing either cached figure is derived
+  // from, so the clear is not doing correctness work here — but every write in
+  // this edition clears SOMETHING, and a route that opted out would be the one
+  // place a future field added to the pair had no invalidation. Narrowing is
+  // what makes keeping it cheap. `[]` still means the whole account
+  // (`withUserWrite`), which is the right answer for a request that named no
+  // habit at all: it writes nothing, so over-clearing costs one recomputation.
+  }, { habits: ids });
 
   res.json(rows.map(toApiHabit));
 }));
@@ -1138,11 +1158,13 @@ api.get('/overview', route(async (req, res) => {
     // was free: it shared the checkout the five queries were going to make
     // anyway. Awaited in here, because `db` is only alive until this returns.
     //
-    // `dataVersion` rides on the ARG rather than the key — the key is built by
-    // `keyAt` and already carries it. What the rebuild wants it for is
-    // `writeBackSummaries`, which refuses to stamp a pair if anything committed
-    // between this read and it; see `buildOverview`.
-    return { json: await overviewMemo(key, { db, ...arg, dataVersion }) };
+    // `dataVersion` is NOT handed to the rebuild, and it used to be. The
+    // write-back was the only thing that wanted it, and its guard is now the
+    // per-habit `summary_epoch` the habits read already carries (migration 019,
+    // and `writeBackSummaries` for why the account-level counter could not do
+    // the job). The counter is still what `keyAt` built the memo key from, one
+    // screen up; it simply has no second consumer.
+    return { json: await overviewMemo(key, { db, ...arg }) };
   });
 
   res.send('json' in held ? held.json : await held.pending);
@@ -1172,12 +1194,11 @@ api.get('/overview', route(async (req, res) => {
  *
  * @param {import('pg').PoolClient} db a transaction already scoped to `user`
  * @param {{user: number, start: string, end: string, summaryEnd: string,
- *   archived: boolean, dataVersion?: number}} arg `dataVersion` is the counter
- *   the ROUTE read at the top of this same transaction, and it is what the
- *   write-back is guarded on — it is not part of the memo key, which `keyAt`
- *   builds for itself
+ *   archived: boolean}} arg no `dataVersion`: the write-back was its only
+ *   consumer in here and is now guarded on the per-habit `summary_epoch` the
+ *   habits read below already carries
  */
-async function buildOverview(db, { user, start, end, summaryEnd, archived, dataVersion }) {
+async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   const { rows: habits } = await db.query(
     `SELECT * FROM habits WHERE archived = $1 ORDER BY position, id`,
     [archived]
@@ -1342,7 +1363,10 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived, dataV
   const recentByHabit = new Map(ids.map((id) => [id, []]));
   for (const r of recentRows) recentByHabit.get(r.habit_id).push(r);
 
-  /** @type {Array<{id: number, best_streak: number, total_completed: number}>} */
+  /**
+   * @type {Array<{id: number, best_streak: number, total_completed: number,
+   *   summary_epoch: number}>}
+   */
   const recomputed = [];
 
   const habitPayloads = habits.map((h) => {
@@ -1405,7 +1429,16 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived, dataV
       : recomputeBestStreak(h, all, { summaryEnd, unlogged, creditFrom });
     const totalCompleted = fresh ? h.total_completed : (totals.get(h.id) ?? 0);
     if (!fresh) {
-      recomputed.push({ id: h.id, best_streak: bestStreak, total_completed: totalCompleted });
+      // `summary_epoch` comes off the row this recompute was derived FROM, and
+      // it is the write-back's whole guard (see `writeBackSummaries`). It rides
+      // on the row for free: `buildOverview`'s habits read is `SELECT *`, so
+      // the column costs no extra query and no extra round trip.
+      recomputed.push({
+        id: h.id,
+        best_streak: bestStreak,
+        total_completed: totalCompleted,
+        summary_epoch: h.summary_epoch,
+      });
     }
 
     return {
@@ -1427,7 +1460,7 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived, dataV
   // this day reads it instead of deriving it again. A WRITE on a GET, and
   // deliberately not through `withUserWrite` — see `writeBackSummaries`.
   if (recomputed.length) {
-    await writeBackSummaries(db, user, dataVersion, summaryEnd, recomputed);
+    await writeBackSummaries(db, user, summaryEnd, recomputed);
   }
 
   // The mean is over `habitPayloads`' own `score` — the same number drawn
@@ -1456,47 +1489,72 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived, dataV
  * control assertion `test:dataversion` rests on, that a READ leaves the counter
  * alone. So: no `withUserWrite`, ever, on this path.
  *
- * **The `data_version` predicate is the whole of why this is a named function.**
- * `withUser` is READ COMMITTED, so a write committing between the entry reads
- * above and this statement has already set `summary_asof = NULL` — and without
- * the guard we would immediately write it back, stamped as of TODAY, from
- * pre-write data. That is the "version last" failure `caching.md` describes: it
- * is silent, and it survives until the calendar day rolls over. The version was
- * read at the START of this same transaction, so comparing against it asks
- * exactly the right question. Zero rows update if anything moved, and the next
- * load recomputes — wasteful and correct, which is the direction this repo
- * always picks.
+ * **The `summary_epoch` predicate is the whole of why this is a named
+ * function.** `withUser` is READ COMMITTED, so a write committing between the
+ * entry reads above and this statement has already set `summary_asof = NULL` —
+ * and without a guard we would immediately write it back, stamped as of TODAY,
+ * from pre-write data. That is the "version last" failure `caching.md`
+ * describes: it is silent, and it survives until the calendar day rolls over.
+ * Zero rows update if anything moved, and the next load recomputes — wasteful
+ * and correct, which is the direction this repo always picks.
+ *
+ * **The guard used to be the ACCOUNT's `data_version` and it could not hold.**
+ * Written as a correlated subquery on `users`, it correlated to `$1` and to
+ * nothing on the habits scan, so the planner hoisted it into an InitPlan behind
+ * a One-Time Filter ABOVE the scan — evaluated once, cached in a PARAM_EXEC
+ * slot, and so not a per-row qual at all. When this statement blocks on a
+ * concurrent writer's row lock and resumes after it commits, Postgres re-checks
+ * the qual against the newly committed TARGET tuple (EvalPlanQual); EPQ cannot
+ * re-run an InitPlan, so the stale figures were stamped anyway. The commoner
+ * interleaving needed no EPQ at all: `withUserWrite`'s clear carried
+ * `AND summary_asof IS NOT NULL`, so with the stamp already NULL — the state
+ * after every write — it took no row lock and this statement never blocked.
+ * Measured over the real routes, `/overview` then served `totalCompleted=5`
+ * against a ground truth of 6, on every replica, until the day rolled over.
+ *
+ * `summary_epoch` (migration 019) is a per-habit counter that
+ * `withUserWrite`'s clear advances unconditionally. The predicate is on the
+ * TARGET relation's own column, compared against the value read off the same
+ * row this recompute was derived from, so EPQ re-checks it — and it is
+ * per-habit, which is what invalidation has always been: a tap on habit A no
+ * longer refuses the write-back for the other nineteen, because a tap on A
+ * cannot move B's lifetime figures.
+ *
+ * The epoch rides on each ROW rather than as one scalar for the whole call, so
+ * the join carries it: `$6` is a parallel array, and a habit whose epoch moved
+ * drops out on its own while the rest are stamped.
  *
  * A race is not deterministically reachable through the HTTP surface, so the
  * guard would be untestable inside `buildOverview`. Exported, it can be called
- * with a deliberately stale version, which is what
- * `test/summary-cache.integration.mjs` does.
+ * with a deliberately stale epoch, which is what
+ * `test/summary-cache.integration.mjs` does — and it can be raced for real
+ * against a forced interleaving, which is what
+ * `test/summary-race.integration.mjs` does.
  *
  * @param {import('pg').PoolClient} db a transaction already scoped to `userId`
- * @param {number} userId
- * @param {number} version `users.data_version` as it was at the start of this
- *   transaction (`pool.js` parses BIGINT as a Number, so this is a JS number).
- *   An absent one arrives as NULL, which equals nothing, so a caller that
- *   forgot it writes no row at all — the safe direction, and a cache that is
- *   never filled rather than one that is filled wrongly
  * @param {string} summaryEnd the day the pairs were computed FOR — the stamp
- * @param {Array<{id: number, best_streak: number, total_completed: number}>} rows
+ * @param {Array<{id: number, best_streak: number, total_completed: number,
+ *   summary_epoch: number}>} rows each row's `summary_epoch` as it was on the
+ *   habit row this recompute read (`pool.js` parses BIGINT as a Number, so it
+ *   is a JS number). An absent one arrives as NULL, which equals nothing, so a
+ *   caller that forgot it writes no row at all — the safe direction, and a
+ *   cache that is never filled rather than one that is filled wrongly
  * @returns {Promise<number>} how many habit rows were stamped
  */
-export async function writeBackSummaries(db, userId, version, summaryEnd, rows) {
+export async function writeBackSummaries(db, userId, summaryEnd, rows) {
   if (!rows.length) return 0;
   const result = await db.query(
     `UPDATE habits h
         SET best_streak = v.best_streak,
             total_completed = v.total_completed,
             summary_asof = $2
-       FROM (SELECT * FROM unnest($3::bigint[], $4::int[], $5::int[])
-               AS t(id, best_streak, total_completed)) v
+       FROM (SELECT * FROM unnest($3::bigint[], $4::int[], $5::int[], $6::bigint[])
+               AS t(id, best_streak, total_completed, summary_epoch)) v
       WHERE h.id = v.id
         AND h.user_id = $1
-        AND (SELECT u.data_version FROM users u WHERE u.id = $1) = $6`,
+        AND h.summary_epoch = v.summary_epoch`,
     [userId, summaryEnd, rows.map((r) => r.id), rows.map((r) => r.best_streak),
-     rows.map((r) => r.total_completed), version]
+     rows.map((r) => r.total_completed), rows.map((r) => r.summary_epoch)]
   );
   return result.rowCount ?? 0;
 }

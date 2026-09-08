@@ -1,0 +1,96 @@
+-- A per-habit counter of how many times this habit's cached pair was invalidated.
+--
+-- Migration 018 put two lifetime figures on the habit row and `summary_asof`
+-- beside them as the validity flag. `/overview` recomputes a stale pair and
+-- stamps it back — a write on a GET — and that write-back needs a guard, since
+-- `withUser` is READ COMMITTED and a real write can commit between the entry
+-- reads and the stamp. Without one the route puts pre-write figures back on the
+-- row stamped as of TODAY, and serves them on every replica until the calendar
+-- day rolls over.
+--
+-- The guard 018 shipped with was the ACCOUNT's `data_version`, compared inside
+-- the write-back's own UPDATE:
+--
+--     AND (SELECT u.data_version FROM users u WHERE u.id = $1) = $6
+--
+-- **That predicate cannot hold, and `EXPLAIN (VERBOSE)` says so.** The subquery
+-- correlates to `$1` and to nothing on the habits scan, so the planner hoists it
+-- into an InitPlan: it runs ONCE, caches its answer in a PARAM_EXEC slot, and
+-- the comparison lands in a One-Time Filter ABOVE the scan rather than in the
+-- scan's own qual. That is fatal in exactly the case the guard exists for.
+-- When the write-back blocks on a concurrent writer's row lock and resumes
+-- after that writer commits, Postgres re-runs the qual against the newly
+-- committed target tuple — EvalPlanQual — and EPQ re-checks the TARGET
+-- relation's own columns. It cannot re-run an InitPlan, and it does not
+-- re-fetch a non-target relation either (which is why folding `users` into the
+-- UPDATE's `FROM` was measured and rejected: a non-target relation is re-scanned
+-- on the statement's original snapshot). So the write-back resumed and stamped
+-- the stale figures anyway.
+--
+-- The commoner interleaving did not even need EPQ. 018's clear carried
+-- `AND summary_asof IS NOT NULL` as a WAL-saving predicate, so when the stamp
+-- was ALREADY NULL — the state after every single write — the clear matched no
+-- row, wrote no row, and took NO ROW LOCK. There was nothing for the write-back
+-- to block on, and nothing about the stamp to compare either: the reader read
+-- NULL and the clear left NULL. Measured through the real routes,
+-- `GET /overview` served `totalCompleted=5` against a ground truth of 6.
+--
+-- **Invalidation is already per-HABIT, so the validity marker has to be
+-- per-habit too.** That is the whole of this column. The clear bumps the epoch
+-- of every habit it clears; the read path selects it with the row it already
+-- fetches, at no extra query; the write-back's guard becomes
+-- `AND h.summary_epoch = v.summary_epoch`, a predicate on the TARGET
+-- relation's own column joined against a parameter array — which is precisely
+-- the shape EPQ re-checks — and the `users` subquery goes away. It is also
+-- STRICTER than what it replaces in the useful direction and LOOSER in the
+-- wasteful one: a tap on habit A no longer refuses the write-back for the other
+-- nineteen habits, because a tap on A cannot change B's lifetime figures.
+--
+-- Five candidates were measured against four forced interleavings before this
+-- one; `docs/decisions/caching.md` has the matrix and why the two that held
+-- were not both acceptable. The one other holding candidate took
+-- `FOR NO KEY UPDATE` on the users row, which inverts the lock order against
+-- every ordinary write path and deadlocks with the WRITE as the victim.
+--
+-- `BIGINT NOT NULL DEFAULT 0`, and the contrast with 018's three nullable
+-- columns is deliberate rather than an inconsistency. Those three are FIGURES,
+-- and a `0` there would be indistinguishable from "never computed" — the
+-- collapse the root `CLAUDE.md` forbids. This is a COUNTER, in the category
+-- `data_version` (migration 017) is in: `0` is a real, correct starting value
+-- meaning "never invalidated", not the absence of an answer. Every existing
+-- row therefore upgrades to a usable epoch for free, and the write-back's
+-- guard compares a number against a number on every row from the first
+-- request. Nullable it would need an `IS NOT DISTINCT FROM`, and a NULL epoch
+-- would compare equal to another NULL epoch across an invalidation — the
+-- failure this column exists to remove, reintroduced by its own type.
+--
+-- BIGINT for 017's reason: at one write a second without pause an account
+-- reaches the limit in roughly 292 billion years, so the wraparound this has no
+-- handling for is not a case.
+--
+-- No index, on purpose. The guard is only ever evaluated on a row already
+-- located by `h.id = v.id`, so an index on this column would be maintained for
+-- every clear and read by no plan. Leaving it unindexed is also what keeps the
+-- clear HOT-eligible: neither `summary_asof` nor this column is in any index,
+-- so bumping the epoch adds no index maintenance to a write.
+--
+-- No new RLS policy and no column grant, for the two reasons 018 spells out and
+-- a reader should not have to re-derive: this adds no TABLE, so the existing
+-- `habits_*` owner policies cover it like every other column of `habits`; and
+-- `002_roles.sql:23` grants UPDATE at TABLE level on `habits`, where 013's and
+-- 017's column-level grants are on `users` — the one table whose grant is split
+-- on purpose, to keep `idp_subject` and `blocked` out of the app role's reach.
+--
+-- Rolling-update safety: one column is ADDED and nothing is dropped, renamed or
+-- re-typed, so a previous release runs unchanged. It is worth being exact about
+-- what that release does DURING the rollout, because the answer is "exactly
+-- what it does today, and no worse". A replica on the previous release never
+-- bumps the epoch, so this guard is inert against ITS writes and its own
+-- write-back can still re-stamp a stale pair — which is the hazard described
+-- above, i.e. the behaviour already in production. In the other direction a new
+-- replica's clear bumps an epoch the old replica's write-back never reads, so
+-- the old replica stays precisely as broken as it was. Neither direction is
+-- newly wrong, and both end the moment the last old replica does.
+
+ALTER TABLE habits
+  ADD COLUMN IF NOT EXISTS summary_epoch BIGINT NOT NULL DEFAULT 0;
