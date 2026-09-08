@@ -517,13 +517,21 @@ export function parseHabit(body = {}) {
  * Returns `{ value, status, notes }`; a skip always carries value 0, since
  * skips are stored out of band and must never alias a real amount.
  *
+ * `notes` is `null` when the body did not supply one — a JSON `null` is
+ * grouped in with it, exactly as the old `??` grouped it with `undefined` —
+ * and a real string, possibly `''`, when it did. `entryWrite` is what turns
+ * that distinction into "leave the stored note alone" versus "clear it";
+ * `parseEntry` only stops collapsing the two.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {{value?: unknown, status?: string, notes?: unknown}} body
  * @param {{UNSET: number, YES: number, SKIP: number}} sentinels from constants.js
- * @returns {{value: number, status: import('./types.js').EntryStatus, notes: string}}
+ * @returns {{value: number, status: import('./types.js').EntryStatus, notes: string | null}}
  */
 export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
-  const notes = String(body.notes ?? '').slice(0, LIMITS.notes);
+  const notes = body.notes === undefined || body.notes === null
+    ? null
+    : String(body.notes).slice(0, LIMITS.notes);
 
   // A skip may be requested explicitly, or (for boolean habits only) by the
   // legacy SKIP wire value. On a numerical habit 3 is a real amount.
@@ -572,15 +580,38 @@ export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
  * question marks are off, since a lapse and an unknown day paint identically,
  * and never wrong in what it claims: the user did answer no.
  *
+ * An entry write PRESERVES a note it was not asked to change — `notes: null`
+ * out of `parseEntry` carries straight through to storage, which is where
+ * `COALESCE` reads it as "leave the row's note alone" — and an explicit
+ * `notes: ''` still clears one, because that is a real string and not the
+ * absent case. This is the entry-write mirror of the import rule that a merge
+ * may add an answer and must never delete one: a note is content, and content
+ * suspends an automated overwrite rather than yielding to it.
+ *
+ * It is deliberately the opposite of what `PUT /habits/:id` does with an
+ * omitted field, and both are right on purpose. A habit PUT is a form
+ * submitted whole by a client that rendered every field, so leaving one out is
+ * a stated intent to clear it — `parseHabit` REPLACES for exactly that reason.
+ * An entry PUT is what a *button* sends: a Discord press, an ntfy button, a
+ * notification-shade tap. Those bodies are assembled from the answer alone —
+ * `answerBody` never carries a note — and never saw one to begin with, so an
+ * omitted `notes` there is ignorance, not intent. Treating the two the same
+ * way would have one of them wrong regardless of which.
+ *
+ * Because the request may now carry no note at all, `reply` no longer carries
+ * one either: what the row actually holds is a question only storage can
+ * answer, and the caller has to ask it there rather than echo a `notes` this
+ * function was never given the truth of.
+ *
  * @param {import('./types.js').Habit} habit
- * @param {{value: number, status: string, notes: string}} parsed from parseEntry
+ * @param {{value: number, status: string, notes: string | null}} parsed from parseEntry
  * @param {{UNSET: number, SKIP: number}} sentinels
- * @returns {{op: 'upsert'|'delete', value: number, status: string, notes: string,
- *            reply: {value: number, status?: string, notes: string}}}
- *   `reply` is what the API echoes back: it reports a skip with the SKIP wire
- *   value even though 0 is what gets stored. `op` keeps its union — the callers
- *   switch on it — but nothing returns 'delete' any more; clearing a day is the
- *   DELETE route's own business.
+ * @returns {{op: 'upsert'|'delete', value: number, status: string, notes: string | null,
+ *            reply: {value: number, status?: string}}}
+ *   `reply` is what the API echoes back apart from `notes`: it reports a skip
+ *   with the SKIP wire value even though 0 is what gets stored. `op` keeps its
+ *   union — the callers switch on it — but nothing returns 'delete' any more;
+ *   clearing a day is the DELETE route's own business.
  */
 export function entryWrite(habit, parsed, { UNSET, SKIP }) {
   const { value, status, notes } = parsed;
@@ -588,11 +619,11 @@ export function entryWrite(habit, parsed, { UNSET, SKIP }) {
   if (status === 'skip') {
     return {
       op: 'upsert', value: 0, status: 'skip', notes,
-      reply: { value: SKIP, status: 'skip', notes },
+      reply: { value: SKIP, status: 'skip' },
     };
   }
 
-  return { op: 'upsert', value, status: '', notes, reply: { value, notes } };
+  return { op: 'upsert', value, status: '', notes, reply: { value } };
 }
 
 /**

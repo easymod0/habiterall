@@ -387,6 +387,32 @@ try {
     avoidedAfterNo?.status === '' && Number(avoidedAfterNo?.value) === 1,
     JSON.stringify(avoidedAfterNo));
 
+  /* ---------- issue #224: a quick answer preserves that day's note ---------- */
+  //
+  // The issue's own measurement, through the real adapter: a note written the
+  // ordinary way, then a Discord press — `answerBody` never carries a `notes`
+  // field, so the write below goes through a path that OMITS the key entirely.
+  const notesHabit224 = await withUser(wired, (db) =>
+    db.query(
+      `INSERT INTO habits (user_id, name, type) VALUES ($1, 'Notes 224', 'boolean')
+       RETURNING id`,
+      [wired]
+    ).then((r) => r.rows[0].id));
+  const NOTE_224 = 'coach said 10, only managed 8';
+  await withUser(wired, (db) => db.query(
+    `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+     VALUES ($1,$2,$3,2,'',$4)`,
+    [notesHabit224, wired, day, NOTE_224]
+  ));
+
+  await press(BOT_CHANNEL, `hab|${notesHabit224}|${day}|yes`);
+  const notesAfterPress = await withUser(wired, (db) =>
+    db.query(`SELECT value, notes FROM entries WHERE habit_id = $1 AND date = $2`,
+      [notesHabit224, day]).then((r) => r.rows[0]));
+  check('a quick Yes through the real adapter keeps the day\'s note',
+    Number(notesAfterPress?.value) === 2 && notesAfterPress?.notes === NOTE_224,
+    JSON.stringify(notesAfterPress));
+
   /* ---------- answering from an ntfy button: the tenancy question ---------- */
   //
   // ntfy's button carries no session and no channel to resolve an account

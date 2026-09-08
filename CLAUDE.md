@@ -154,7 +154,13 @@ no `.includes` — so a plain lookup let a crafted payload 500 the endpoint.
 a default for every absent field, so a partial write resets what it omits.
 `PUT /settings` MERGES, which is why the phone sends one key at a time. Android
 pays for the first with a dedicated `HabitInput` serialised with
-`encodeDefaults = true`.
+`encodeDefaults = true`. A third write means a third thing on purpose: `PUT
+/habits/:id/entries/:date` PRESERVES a `notes` it was not asked to change — an
+omitted key leaves the stored note alone, an explicit `""` still clears it —
+because that body is as often assembled by a button (a Discord press, an ntfy
+button, a notification-shade tap) as by the day dialog, and a button never saw
+the note to begin with. See `entryWrite` (`shared/src/validate.js`) and
+`docs/decisions/day-states.md`.
 
 **A new habit field has to be assigned to a fidelity list.** `LOOP_HABIT_FIELDS`
 is what both Loop formats carry, `LOOP_DB_HABIT_FIELDS` adds `reminder_time`

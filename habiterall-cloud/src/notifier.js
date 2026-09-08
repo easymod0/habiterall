@@ -460,13 +460,17 @@ export function interactionAdapter() {
             await db.query(`DELETE FROM entries WHERE habit_id = $1 AND date = $2`,
               [habitId, date]);
           } else {
+            // A Discord/ntfy reply never carries a note (answerBody has no
+            // such field), so an omitted notes here must preserve the stored
+            // one rather than clear it — see the COALESCE shape in api.js's
+            // upsertEntry.
             await db.query(
               `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
-               VALUES ($1,$2,$3,$4,$5,$6)
+               VALUES ($1,$2,$3,$4,$5,COALESCE($6,''))
                ON CONFLICT (habit_id, date) DO UPDATE
                  SET value = EXCLUDED.value,
                      status = EXCLUDED.status,
-                     notes = EXCLUDED.notes`,
+                     notes = COALESCE($6, entries.notes)`,
               [habitId, account.id, date, write.value, write.status, write.notes]
             );
           }

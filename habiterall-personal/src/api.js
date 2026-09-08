@@ -204,11 +204,18 @@ const q = {
     SELECT date, value, status, notes
     FROM entries WHERE habit_id = ? AND date >= ? ORDER BY date
   `),
+  // notes is bound once and referenced twice: COALESCE in VALUES collapses an
+  // absent (NULL) note to '' for a fresh row, and the conflict clause reads
+  // that same NULL as "leave the stored note alone" rather than through
+  // excluded.notes, which the VALUES-side COALESCE has already flattened to
+  // '' by the time a conflict clause could see it.
   upsertEntry: db.prepare(`
-    INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)
+    INSERT INTO entries (habit_id, date, value, status, notes)
+    VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ''))
     ON CONFLICT(habit_id, date) DO UPDATE SET value = excluded.value,
                                               status = excluded.status,
-                                              notes = excluded.notes
+                                              notes = COALESCE(?5, entries.notes)
+    RETURNING notes
   `),
   deleteEntry: db.prepare(`DELETE FROM entries WHERE habit_id = ? AND date = ?`),
   allSettings: db.prepare(`SELECT key, value FROM settings`),
@@ -625,10 +632,11 @@ api.put('/habits/:id/entries/:date', (req, res) => {
   // one. Clearing a day is the DELETE route below, not a PUT of zero.
   const write = entryWrite(habit, parsed, { UNSET, SKIP });
 
+  let row;
   if (write.op === 'delete') q.deleteEntry.run(id, date);
-  else q.upsertEntry.run(id, date, write.value, write.status, write.notes);
+  else row = q.upsertEntry.get(id, date, write.value, write.status, write.notes);
 
-  res.json({ habit_id: id, date, ...write.reply });
+  res.json({ habit_id: id, date, ...write.reply, notes: row?.notes ?? '' });
 });
 
 api.delete('/habits/:id/entries/:date', (req, res) => {
