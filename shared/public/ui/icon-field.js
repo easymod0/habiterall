@@ -394,10 +394,34 @@ function handleGridKey(e, cell) {
 }
 
 /**
- * Rebuild the grid from a list of entries. Called on open and on every
- * `#icon-search` keystroke, and resets the roving tab stop to the first cell
- * of whatever is now visible — the previous tab stop may not even be in the
- * new list.
+ * What the grid is currently drawn for: the query string behind the cells in
+ * the DOM right now, or `null` while it holds nothing at all.
+ *
+ * This is what makes the render LAZY, and the laziness is the whole point:
+ * `reset()` used to build all 182 cells on every habit-dialog open — measured,
+ * 182 `<button>`s for a picker most sessions never open — and `openPanel()`
+ * then built all 182 AGAIN, replacing every node. Measured with the nodes
+ * stamped: 0 of the first generation survived the panel opening.
+ *
+ * Nothing about a cell depends on the habit being edited or on the current
+ * icon value, which is what makes skipping the rebuild safe rather than
+ * merely cheaper: `renderGrid` reads `entry.glyph` and `entry.name` off the
+ * module's own frozen dataset and nothing else, and `.icon-cell` has no
+ * selected/checked style in `style.css` for a current value to light up —
+ * only `:hover` and `:focus-visible`. If a later tier gives a cell a
+ * per-habit or per-value appearance, this cache is the thing that has to
+ * learn about it, and the honest fix then is to widen the key rather than to
+ * delete the guard.
+ */
+let gridQuery = null;
+
+/**
+ * Rebuild the grid from a list of entries, and resets the roving tab stop to
+ * the first cell of whatever is now visible — the previous tab stop may not
+ * even be in the new list.
+ *
+ * Reached only through `showGrid` below, which decides whether a rebuild is
+ * needed at all.
  */
 function renderGrid(entries) {
   els.grid.replaceChildren();
@@ -429,11 +453,33 @@ function pickGlyph(glyph) {
   closePanel();
 }
 
+/**
+ * Draw the grid for `query`, unless it is already drawn for exactly that.
+ *
+ * @param {string} query
+ * @returns {boolean} whether it actually rebuilt
+ */
+function showGrid(query) {
+  if (gridQuery === query) return false;
+  renderGrid(searchEmoji(query));
+  gridQuery = query;
+  return true;
+}
+
 function openPanel() {
   els.panel.hidden = false;
   els.toggle.setAttribute('aria-expanded', 'true');
   els.search.value = '';
-  renderGrid(EMOJI);
+  showGrid('');
+  // The tab stop is reset here rather than left to `renderGrid`, and that is
+  // the one thing the old unconditional rebuild was really doing for us.
+  // `renderGrid` parks it on cell 0 as it builds, so a rebuild every open
+  // reset it for free — a SKIPPED rebuild leaves it wherever the arrow keys
+  // left it in the last session, and the next Tab into the panel would land
+  // in the middle of the grid. 182 `tabIndex` writes, against 182 elements
+  // created and inserted, is what the laziness is buying.
+  const first = cells()[0];
+  if (first) setRovingFocus(first);
 }
 
 function closePanel() {
@@ -451,11 +497,18 @@ function closePanel() {
  * for a different habit. Called from `iconField.set()`, which
  * `habit-dialog.js`'s `openDialog` already calls for every session (create or
  * edit), so this is the one seam a dialog open always passes through.
+ *
+ * It deliberately does NOT render. Clearing the box is what one session owes
+ * the next; building the cells is `openPanel`'s job, and doing it here spent
+ * 182 element creations per dialog open on a panel most sessions never open.
+ * The grid is left holding whatever it last drew, behind `hidden`, and
+ * `gridQuery` remembers which query that was — so the next open rebuilds
+ * exactly when the box no longer agrees with the cells (a session closed
+ * mid-search) and skips it when it does.
  */
 function reset() {
   closePanel();
   els.search.value = '';
-  renderGrid(EMOJI);
 }
 
 /**
@@ -504,12 +557,49 @@ export function initIconField(dialogEl) {
   };
 
   els.input.addEventListener('input', updatePreview);
+  gridQuery = null;
 
   els.toggle.addEventListener('click', () => {
     if (els.panel.hidden) openPanel(); else closePanel();
   });
 
-  els.search.addEventListener('input', () => renderGrid(searchEmoji(els.search.value)));
+  // A press outside the panel dismisses it, the way a menu or a popover is
+  // dismissed — clicking into Name or Description used to leave 182 cells
+  // sitting open under the form until Escape or a second press on the toggle.
+  //
+  // **The toggle is EXCLUDED, and without that exclusion one press is two
+  // state changes.** The toggle has a click handler of its own, so both run
+  // for a press on it, and the order decides only which way it breaks rather
+  // than whether it does: on `pointerdown` this listener runs FIRST, so a
+  // press meant to CLOSE the panel closes it here and the toggle's own
+  // handler then finds `hidden === true` and reopens it — a toggle that opens
+  // and never closes. Bound on `click` instead the order inverts and the
+  // OPENING press is the one that cancels itself. `contains` rather than
+  // `===` because the button's visible glyph is a `<span>` inside it, which
+  // is what a press actually lands on.
+  //
+  // `pointerdown` rather than `click` for two reasons: a dismissal that waits
+  // for the release does not happen at all when a press outside ends as a
+  // drag (no `click` is dispatched when the target changes), and one pointer
+  // event covers the mouse and the touchscreen together. The consequence
+  // worth knowing is in the tests rather than here: a scripted `.click()`
+  // dispatches no `pointerdown`, so a case built on one passes against a
+  // build with no dismissal in it at all — `feat4.mjs`'s `g4`/`g5` drive real
+  // CDP mouse presses, the same reason `g2` already does.
+  //
+  // No `preventDefault`: the press must still do what it was for — put the
+  // caret in the box that was clicked, or press the button that was pressed.
+  // And **no focus restore**, deliberately, which is finding 2's rule met
+  // from the other side: the toggle takes the caret back only when the caret
+  // was inside the picker, and here it is by definition somewhere else.
+  els.dialog.addEventListener('pointerdown', (e) => {
+    if (els.panel.hidden) return;
+    const target = /** @type {Node} */ (e.target);
+    if (els.panel.contains(target) || els.toggle.contains(target)) return;
+    closePanel();
+  });
+
+  els.search.addEventListener('input', () => showGrid(els.search.value));
 
   // Enter in the search box means "pick the first match", never the habit
   // form's Save — the same implicit-submission trap `enterPresses`

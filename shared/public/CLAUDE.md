@@ -902,6 +902,44 @@ contains the focused node blurs it and by then the answer is always `<body>`.
 Cases `g` and `g2` cannot see this: both press Escape from inside the picker,
 which is exactly where restoring focus is right. `g3` is the case for it.
 
+**A press outside the panel dismisses it, and the TOGGLE is excluded from
+that.** Clicking into Name or Description used to leave 182 cells open over the
+form until Escape or a second press on the toggle. The exclusion is not
+defensive tidiness: the toggle has a click handler of its own, so a press on it
+runs both, and unexcluded one press is two state changes — on `pointerdown`
+this listener runs first, closes the panel, and the toggle's own handler then
+finds it hidden and reopens it, giving a toggle that opens and can never close.
+Bound on `click` the order inverts and the OPENING press cancels itself
+instead; there is no ordering that works without the exclusion, which is why
+`g5` presses the toggle three times rather than once. `contains` rather than
+`===`, because the press lands on the `<span>` holding the glyph.
+`pointerdown` rather than `click` so a press that ends as a drag still
+dismisses and so one event covers mouse and touch — the cost is in the tests,
+where a scripted `.click()` dispatches no `pointerdown` at all and a case built
+on one passes against a build with no dismissal in it, so `g4`/`g5` drive real
+CDP mouse presses exactly as `g2` does. It restores focus to nothing, which is
+the rule above met from the other side.
+
+**The grid is built on the FIRST picker open and not rebuilt after it.**
+`reset()` used to build all 182 cells on every habit-dialog open and
+`openPanel()` built all 182 again — measured by stamping the nodes, 0 of the
+first generation survived the panel opening, so a session that opened the
+picker paid for 364 `<button>`s and one that never opened it paid for 182.
+Measured after: 0 at page load, **0 after a habit-dialog open**, 182 on the
+first picker open, and all 182 still the same nodes after a second dialog open
+and a second picker open. `gridQuery` is the key and it is the QUERY, not "has
+this ever been built" — a session closed mid-search leaves a filtered grid
+behind, so the next open has to rebuild; keyed on merely being populated, the
+picker reopens showing the one cell that matched `hydrate`. Nothing about a
+cell depends on the habit or the current icon value (`renderGrid` reads the
+frozen dataset alone, and `.icon-cell` has no selected style for a value to
+light up), which is what makes the skip safe rather than only cheap — give a
+cell a per-habit appearance later and this cache is what has to learn about
+it. The one thing the old rebuild really did was park the roving tab stop back
+on cell 0, so `openPanel` now does that explicitly whether or not it rebuilt;
+without it, Tab into a reopened picker lands wherever the arrow keys left it
+last session.
+
 **And the field's hint is `aria-describedby`, not a wrapping label.** The hint
 had to leave the `<label>` when the input did (the label names ONLY the input,
 so the live-region caption and the toggle stay out of the accessible name),

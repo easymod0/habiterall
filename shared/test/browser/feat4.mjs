@@ -394,6 +394,52 @@ try {
     await send('Input.insertText', { text }, sessionId);
   };
 
+  /**
+   * A REAL mouse press at an element's own on-screen centre.
+   *
+   * Not interchangeable with `.click()`, in two ways that both matter to the
+   * dismissal cases below. A scripted click moves no focus (`g2` measured
+   * that), and it dispatches no `pointerdown` at all — which is the event the
+   * outside-press dismissal is bound to, so a case built on `.click()` passes
+   * against a build with no dismissal in it whatsoever.
+   *
+   * The box is measured immediately before the press, per press: the habit
+   * dialog scrolls, and the panel opening or closing moves everything below
+   * it, so coordinates taken once and reused land somewhere else the second
+   * time.
+   */
+  const mousePress = async (selector) => {
+    const box = await ev(`(()=>{
+      const el = document.querySelector(${JSON.stringify(selector)});
+      el.scrollIntoView({ block: 'nearest' });
+      const b = el.getBoundingClientRect();
+      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await send('Input.dispatchMouseEvent',
+        { type, x: box.x, y: box.y, button: 'left', clickCount: 1 }, sessionId);
+    }
+    return box;
+  };
+
+  /**
+   * The state the dismissal cases judge by, in one read.
+   *
+   * `focused` prefers the `name` a form control has over an `id`, so the
+   * failure message names `icon-picker-toggle` when focus has been stolen and
+   * `description` when it has not.
+   */
+  const pickerState = () => ev(`(()=>{
+    const a = document.activeElement;
+    return {
+      dialogOpen: document.getElementById('habit-dialog').open,
+      panelHidden: document.getElementById('icon-picker').hidden,
+      expanded: document.getElementById('icon-picker-toggle').getAttribute('aria-expanded'),
+      focused: a ? (a.name || a.id || a.tagName) : null,
+      description: document.getElementById('habit-form').description.value,
+    };
+  })()`);
+
   const submitAndWait = async () => {
     await ev(`document.getElementById('habit-form').requestSubmit()`);
     await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
@@ -732,6 +778,75 @@ try {
     JSON.stringify(afterFieldEscape));
   await closeDialog();
 
+  console.log('--- g4. a press outside the panel dismisses it, and the caret lands where it was pressed ---');
+  // The user story this is for: the picker is open, and the next thing the
+  // user does is click into another field. The panel used to stay open,
+  // sitting over the form, until Escape or a second press on the toggle.
+  //
+  // The picker is opened with a REAL press so focus starts on the toggle —
+  // the mouse-opened path from `g2` — which makes the focus assertion below
+  // mean something: the caret has to MOVE to Description and stay there,
+  // rather than merely never having left.
+  await openNewDialog();
+  await mousePress('#icon-picker-toggle');
+  await waitUntil(ev,
+    `!document.getElementById('icon-picker').hidden
+      && document.querySelectorAll('#icon-grid .icon-cell').length > 0`,
+    { what: 'the panel open, from a real mouse press' });
+  const openedOnToggle = await pickerState();
+  check('the picker is open with focus on the toggle',
+    openedOnToggle.panelHidden === false && openedOnToggle.focused === 'icon-picker-toggle',
+    JSON.stringify(openedOnToggle));
+
+  await mousePress('#habit-form [name="description"]');
+  // A settle rather than a `waitUntil`, deliberately: the failure under test
+  // is the panel STAYING open, and `waitUntil` throws on a timeout — which
+  // would abort the suite with an error instead of failing these checks by
+  // name, and take 20s to do it. Waiting to see that something did not
+  // happen has no predicate to poll (root CLAUDE.md).
+  await sleep(250);
+  const afterOutside = await pickerState();
+  check('a press in Description closes the panel',
+    afterOutside.panelHidden === true, JSON.stringify(afterOutside));
+  check('...and reports it closed to assistive technology',
+    afterOutside.expanded === 'false', JSON.stringify(afterOutside));
+  check('...with the dialog itself still open',
+    afterOutside.dialogOpen === true, JSON.stringify(afterOutside));
+  check('...and the caret in Description rather than back on the toggle',
+    afterOutside.focused === 'description', JSON.stringify(afterOutside));
+  // The symptom, not just the state: whether the next keystroke goes where
+  // the user pressed. Focus restored to the toggle sends this to a button.
+  await typeChar('x');
+  const typedAfter = await pickerState();
+  check('...so the next keystroke lands in Description',
+    typedAfter.description === 'x', JSON.stringify(typedAfter));
+  await closeDialog();
+
+  console.log('--- g5. the toggle is still a toggle: one press, one net state change ---');
+  // The trap the exclusion exists for. The toggle has a click handler of its
+  // own and this dismissal is bound to the dialog, so a press on the toggle
+  // runs both — and unexcluded, one press is two state changes: on
+  // `pointerdown` the dismissal closes the panel first and the toggle's own
+  // handler then finds it hidden and reopens it, so the toggle opens and can
+  // never close. Real presses, for the reason `mousePress` gives.
+  await openNewDialog();
+  await mousePress('#icon-picker-toggle');
+  await sleep(250);
+  const press1 = await pickerState();
+  check('the first press on the toggle opens the panel',
+    press1.panelHidden === false && press1.expanded === 'true', JSON.stringify(press1));
+  await mousePress('#icon-picker-toggle');
+  await sleep(250);
+  const press2 = await pickerState();
+  check('the second press on the toggle closes it again',
+    press2.panelHidden === true && press2.expanded === 'false', JSON.stringify(press2));
+  await mousePress('#icon-picker-toggle');
+  await sleep(250);
+  const press3 = await pickerState();
+  check('and a third press opens it once more, so it is a toggle and not a one-shot',
+    press3.panelHidden === false && press3.expanded === 'true', JSON.stringify(press3));
+  await closeDialog();
+
   console.log('--- h. reopening the dialog resets the panel and the search ---');
   // `#icon-picker` is static markup wired once by `initIconField()`, so
   // nothing about closing and reopening the habit dialog touches it on its
@@ -760,6 +875,98 @@ try {
     reopened.searchValue === '', JSON.stringify(reopened));
   check('reopening the dialog resets aria-expanded to false',
     reopened.expanded === 'false', JSON.stringify(reopened));
+  await closeDialog();
+
+  console.log('--- i. the grid is built on first open, and not rebuilt after that ---');
+  // A fresh page, because this case is about what has NOT been built yet and
+  // every case above has already opened a picker in this document. `reload()`
+  // is the joined helper defined at the top of the file; it issues no new
+  // unjoined navigate.
+  await reload();
+  await openNewDialog();
+  const cellCount = () => ev(`document.querySelectorAll('#icon-grid .icon-cell').length`);
+  check('a habit-dialog open builds no cells on its own', await cellCount() === 0,
+    `${await cellCount()} cells`);
+  await openPicker();
+  const built = await cellCount();
+  check('opening the picker is what builds the grid', built > 0, `${built} cells`);
+
+  // Stamp the generation, then take the panel through a whole dialog session
+  // and back. A rebuild draws fresh nodes and loses the stamp — the same
+  // technique the double render was measured with in the first place.
+  const stampCells = (gen) => ev(`(()=>{
+    const cells = [...document.querySelectorAll('#icon-grid .icon-cell')];
+    for (const c of cells) c.dataset.gen = ${JSON.stringify(gen)};
+    return cells.length;
+  })()`);
+  const generation = (gen) => ev(`(()=>{
+    const cells = [...document.querySelectorAll('#icon-grid .icon-cell')];
+    return JSON.stringify({
+      total: cells.length,
+      survived: cells.filter((c) => c.dataset.gen === ${JSON.stringify(gen)}).length,
+    });
+  })()`);
+
+  // Move the roving tab stop off cell 0 first, so the reopen below can be
+  // asked about it. Case f established that a synthetic KeyboardEvent drives
+  // this handler.
+  await ev(`(()=>{
+    const cells = [...document.querySelectorAll('#icon-grid .icon-cell')];
+    const start = cells.find(c => c.tabIndex === 0);
+    start.focus();
+    for (let i = 0; i < 3; i++) {
+      document.activeElement.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    }
+    return 1;
+  })()`);
+  const movedStop = await ev(`(()=>{
+    const cells = [...document.querySelectorAll('#icon-grid .icon-cell')];
+    return cells.findIndex(c => c.tabIndex === 0);
+  })()`);
+  check('the tab stop has been moved off the first cell', movedStop > 0, `index ${movedStop}`);
+
+  await stampCells('first');
+  await closeDialog();
+  await openNewDialog();
+  await openPicker();
+  const reused = JSON.parse(await generation('first'));
+  check('opening the picker again reuses the very same cells, with no rebuild',
+    reused.total === built && reused.survived === built, JSON.stringify(reused));
+  // The one thing the old unconditional rebuild was really doing: parking the
+  // roving tab stop back on cell 0. A skipped rebuild leaves it wherever the
+  // arrows left it last session, so `openPanel` resets it explicitly.
+  const stopAfterReopen = await ev(`(()=>{
+    const cells = [...document.querySelectorAll('#icon-grid .icon-cell')];
+    return JSON.stringify({
+      firstIsStop: cells[0].tabIndex === 0,
+      tabZero: cells.filter(c => c.tabIndex === 0).length,
+    });
+  })()`);
+  check('...and the tab stop is back on the first cell, exactly one of them',
+    JSON.parse(stopAfterReopen).firstIsStop === true
+      && JSON.parse(stopAfterReopen).tabZero === 1, stopAfterReopen);
+
+  // The correctness half of the cache, and the case where skipping WOULD be
+  // wrong: a session closed mid-search left the grid holding a filtered list,
+  // so the next open has to rebuild it. Keyed on the query rather than on
+  // "has it ever been built", which is the mutation this catches.
+  await typeInto('#icon-search', 'hydrate');
+  await waitUntil(ev,
+    `document.getElementById('icon-search').value === 'hydrate'
+      && document.querySelectorAll('#icon-grid .icon-cell').length < ${built}`,
+    { what: 'the grid filtered down to the query' });
+  const filtered = await cellCount();
+  check('typing a query filters the grid', filtered > 0 && filtered < built,
+    `${filtered} of ${built}`);
+  await stampCells('filtered');
+  await closeDialog();
+  await openNewDialog();
+  await openPicker();
+  const afterMidSearch = JSON.parse(await generation('filtered'));
+  check('a session closed mid-search rebuilds, so the next open shows the whole list',
+    afterMidSearch.total === built && afterMidSearch.survived === 0,
+    JSON.stringify(afterMidSearch));
   await closeDialog();
 
   console.log(fails === 0 ? '\nALL FEATURE CHECKS PASSED' : `\n${fails} FEATURE CHECK(S) FAILED`);
