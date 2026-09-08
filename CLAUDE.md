@@ -289,6 +289,24 @@ somebody's tap, and `writeBackSummaries` made a *dashboard load* a possible
 victim. Adding a statement to a shared write wrapper is therefore a lock-order
 question first and a performance one second.
 
+**Ordering the TABLES is only half of it, and the other half turns on whether
+the work can be LOST: the discardable party skips, the mandatory parties agree
+on an order.** Two statements touching the same table's ROWS in different orders
+deadlock just as readily, and the fix is not the same for both of them. Ask
+first whether a statement's work is discardable. `writeBackSummaries` is a cache
+stamp on a GET — losing one costs a recomputation — so it takes
+`FOR NO KEY UPDATE SKIP LOCKED` and leaves every cycle it could have been in;
+what then has to be checked is that the loss is temporary and that coverage
+holds, which is measured and not assumed. `withUserWrite`'s clear is correctness
+on every write and can skip nothing, so it takes its locks `ORDER BY id` in an
+explicit `LockRows` pass — because a plan's scan order is NOT a defined order:
+both clears seq-scanned, so both locked in ctid order, and ctid order is not
+stable in a table being HOT-updated. Neither half adds a statement to a write
+path; both live inside a statement already there. `docs/decisions/caching.md`
+has the matrix, and `FOR NO KEY UPDATE` rather than `FOR UPDATE` in both places
+because the latter conflicts with the `FOR KEY SHARE` an `entries` foreign key
+takes.
+
 **Mutation-test before claiming.** Break the fix, watch the new test fail, put
 it back. Every rule above was found that way and not by reasoning.
 

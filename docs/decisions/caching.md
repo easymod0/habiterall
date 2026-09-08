@@ -1075,23 +1075,97 @@ Five of six pairs reach zero, and four of them are now FASTER than the pre-#301
 control that had no clear at all. `reorder x settings` recovers from 28
 completed operations to 12,505 — a ~450x recovery — and from 8 deadlocks to 3.
 
-**It is not zero, and the three that remain are a different cycle.**
-`writeBackSummaries` is absent from every one of them: both parties are now the
-clear itself, one narrowed (`reorder`) and one not (`settings`). Plans confirm
-why — BOTH multi-row clears seq-scan, so both lock in ctid order, and ctid order
+**It was not zero, and the three that remained were a different cycle.**
+`writeBackSummaries` was absent from every one of them: both parties were the
+clear itself, one narrowed (`reorder`) and one not (`settings`). Plans said why
+— BOTH multi-row clears seq-scan, so both locked in ctid order, and ctid order
 is not stable in a table being HOT-updated: two seq scans started at different
-moments see different line-pointer layouts. Postgres agrees, naming
+moments see different line-pointer layouts. Postgres agreed, naming
 `while rechecking updated tuple (143,12)` in the deadlock context. `SKIP LOCKED`
-cannot help here, because NEITHER party is discardable — both are mandatory
-invalidations — and an `ORDER BY` cannot be had from the clear's shape without
-one of the two remedies rejected above.
+could not help there, because NEITHER party is discardable — both are mandatory
+invalidations, and a clear that skipped a contended row would be a habit left
+serving a figure from before the write.
 
-So the honest statement is: this removes every deadlock in which a dashboard
-load is a party, and leaves one in which two concurrent multi-row-clearing
-WRITES on the same account are both parties. That needs one user reordering
-habits while changing a setting, on one account, concurrently. No blanket
-`40P01` retry was added; that is its own idempotency argument and it would hide
-this rather than answer it.
+### ...and then the mandatory parties agreed on an order
+
+The two remedies rejected earlier were rejected for putting the cost in the
+wrong place, not for being the wrong mechanism. An extra `SELECT ... FOR UPDATE`
+round trip on every tap is a new statement on the write path; an index is write
+amplification for a planner preference. **A more explicit lock inside the
+statement that is already there is neither of those**, and it is the other half
+of what the write-back had just proved: order the acquisition.
+
+```sql
+WITH victims AS (
+    SELECT id FROM habits
+     WHERE user_id = $1 AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))
+     ORDER BY id
+       FOR NO KEY UPDATE
+)
+UPDATE habits h SET summary_asof = NULL, summary_epoch = summary_epoch + 1
+  FROM victims v WHERE h.id = v.id AND h.user_id = $1
+```
+
+One statement, one round trip. Any two clears now take `habits` rows in the same
+sequence and cannot form a cycle — **regardless of scan order**, which is the
+point, because the scan order was the thing that could not be relied on.
+
+`FOR NO KEY UPDATE` for two reasons, both checked rather than assumed. It is the
+strength this UPDATE takes anyway: the only unique indexes on `habits` are on
+`(id)` and `(id, user_id)`, and neither `summary_asof` nor `summary_epoch`
+appears in either, so no key column moves and the outer UPDATE re-locking a row
+the CTE already holds is free — confirmed by the throughput, which did not
+collapse. And it does not conflict with the `FOR KEY SHARE` an `entries` foreign
+key takes, so an entry write and a clear still do not block each other.
+
+| pair | before any of this | + `SKIP LOCKED` | **+ ordered clear** | pre-#301 control |
+|---|---|---|---|---|
+| `settings x tap` | 7 | 0 (ok=12,676) | **0** (ok=12,297) | 0 (ok=11,813) |
+| `tap x habitDel` | 8 | 0 (ok=8,893) | **0** (ok=8,727) | 0 (ok=10,419) |
+| `habitDel x habitDel` | 5 | 0 (ok=7,483) | **0** (ok=7,280) | 0 (ok=7,590) |
+| `catDel x habitPutCat` | 8 (ok=84) | 0 (ok=10,832) | **0** (ok=10,376) | 0 (ok=9,600) |
+| `reorder x writeback` | 0 | 0 (ok=15,326) | **0** (ok=11,524) | 0 (ok=13,522) |
+| `reorder x settings` | 2 (ok=9,729) | **3** (ok=12,505) | **0** (ok=14,528) | 0 (ok=15,298) |
+
+**Every pair is zero.** The explicit lock pass costs 2–4% on most pairs and ~25%
+on `reorder x writeback`, and it GAINS 16% on `reorder x settings` because the
+deadlocks it removes cost a full `deadlock_timeout` each. Mutation: drop the
+`ORDER BY id` and keep the CTE and the lock, and `reorder x settings` returns to
+8 deadlocks while every other pair stays at 0 — so the ORDERING is the mechanism
+and the CTE is only how it is expressed.
+
+**It also fixed `reorder x reorder`, which this issue had written off as
+pre-existing.** Measured 0 deadlocks against the pre-#301 control's 9, and 2,587
+completed operations against the control's 7. Not by design: the clear now runs
+FIRST and takes every one of the reorder's habit rows in id order, so it is an
+ordered gate in front of `POST /habits/reorder`'s own position UPDATE, which
+locks in whatever order the client sent. Two reorders serialise on the gate and
+never reach the unordered statement concurrently. Recorded because the earlier
+version of this section says that deadlock is not this issue's to fix, and that
+is now false.
+
+No blanket `40P01` retry was added; that is its own idempotency argument and it
+would have hidden all of this rather than answering it.
+
+### The rule the two steps establish together
+
+The two halves are not two tricks, they are one rule with two cases, and it is
+worth stating in the form a future statement added to a write path can be tested
+against:
+
+> **The discardable party skips; the mandatory parties agree on an order.**
+
+Decide first whether a statement's work can be LOST. `writeBackSummaries` is a
+cache stamp on a GET, so losing one costs a recomputation — that party takes
+`SKIP LOCKED` and leaves every cycle it might have been in, and the only thing to
+check afterwards is that the loss is temporary and coverage holds. The clear is
+correctness on every write, so it cannot skip anything — that party has to take
+its locks in a defined order, and the order has to be defined by the statement
+rather than inherited from a scan, because a scan's order is not stable under
+concurrent writes.
+
+Neither case is achieved by adding a statement to the write path, and both are
+achieved inside a statement already there.
 
 ### What `SKIP LOCKED` costs, measured
 
@@ -1103,6 +1177,11 @@ habits, sampling the fraction of habits carrying a live stamp every 250 ms:
 |---|---|---|---|---|---|
 | 1 tapper, 2 loaders, 100 ms think (~10 taps/s) | 27.1% | 0.0% | **97.0%** | 95.0% | FULL |
 | 2 tappers, 4 loaders, no think (~790 taps/s) | 68.0% | 1.0% | **91.5%** | 85.0% | FULL |
+| ...and re-measured with the ordered clear below | 20.3% / 67.0% | 0.0% / 1.1% | **97.5%** / **92.6%** | 95.0% / 85.0% | FULL / FULL |
+
+The ordered clear did not cost the skip rate anything — it improved it slightly
+in both configurations, which is consistent with clears no longer stalling a
+full `deadlock_timeout` before being cancelled.
 
 The per-attempt skip rate is high and is the wrong number to read. What matters
 is coverage, and it holds at 97% under a load already an order of magnitude
