@@ -45,7 +45,7 @@ import { bestStreak, computeStreaks, earliestRealDay } from './stats.js';
 export const STREAK_HISTORY_DAYS = 1830;
 
 /**
- * The three columns, in one list so that every reader and every stripper
+ * The cache columns, in one list so that every reader and every stripper
  * agrees on what they are.
  *
  * They are NOT habit fields. They are observations the SERVER makes about the
@@ -54,12 +54,27 @@ export const STREAK_HISTORY_DAYS = 1830;
  * and they never reach a client or a backup. `stripSummaryCache` is how a
  * serialisation point says so.
  *
+ * **`summary_epoch` is on this list even though only ONE edition has the
+ * column**, and that is the whole reason the list is a list. Cloud's
+ * write-back is guarded on a per-habit invalidation counter (migration 019);
+ * personal has no such column because it has no such race. Stripping a key a
+ * row does not carry is free, and the alternative — a per-edition strip set —
+ * is two places for a serialisation point to forget one. This entry was
+ * added to the list in the same change that added the column, because it had
+ * already leaked once: a scratch `summary_epoch` reached the API payload
+ * underneath an assertion literally named "the three columns never reach a
+ * client", which only ever checked the three it knew. `SUMMARY_CACHE_COLUMNS`
+ * is a DENY list over `SELECT *` rows, so a column classified nowhere is a
+ * column that ships — which is what the schema-drift check in
+ * `habiterall-cloud/test/schema-plans.integration.mjs` is for.
+ *
  * @type {readonly string[]}
  */
 export const SUMMARY_CACHE_COLUMNS = Object.freeze([
   'best_streak',
   'total_completed',
   'summary_asof',
+  'summary_epoch',
 ]);
 
 /**

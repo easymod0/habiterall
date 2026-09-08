@@ -20,6 +20,10 @@ const cached = (over = {}) => ({
   best_streak: 12,
   total_completed: 40,
   summary_asof: TODAY,
+  // Cloud-only (migration 019), and non-zero on purpose: a fixture holding a
+  // column's default compares equal to itself and would pass with the column
+  // dropped from the strip set entirely.
+  summary_epoch: 5,
   ...over,
 });
 
@@ -86,7 +90,7 @@ test('a falsy row is a miss rather than a throw', () => {
   assert.equal(summaryCacheHit(undefined, TODAY), false);
 });
 
-test('stripSummaryCache removes exactly the three keys', () => {
+test('stripSummaryCache removes exactly the four cache columns', () => {
   const row = cached();
   const out = stripSummaryCache(row);
 
@@ -101,14 +105,19 @@ test('stripSummaryCache removes exactly the three keys', () => {
     // are not: losing it changes what an unanswered day is worth.
     at_most_unlogged: 'success',
   });
+  // The literals, in order. `summary_epoch` is cloud-only and is on the list
+  // anyway — the list is a DENY list over `SELECT *` rows, so a column
+  // classified nowhere ships, and this one already leaked once underneath an
+  // assertion named for the three it knew about.
   assert.deepEqual(SUMMARY_CACHE_COLUMNS,
-    ['best_streak', 'total_completed', 'summary_asof']);
+    ['best_streak', 'total_completed', 'summary_asof', 'summary_epoch']);
 
   // Non-destructive: both editions serialise a derivative of a row they are
   // still reading the cached pair off.
   assert.equal(row.best_streak, 12);
   assert.equal(row.total_completed, 40);
   assert.equal(row.summary_asof, TODAY);
+  assert.equal(row.summary_epoch, 5);
 
   assert.equal(stripSummaryCache(null), null);
   assert.equal(stripSummaryCache(undefined), undefined);
