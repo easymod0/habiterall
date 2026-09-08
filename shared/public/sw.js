@@ -283,7 +283,13 @@ const sw = self;
 // declares neither: "does not provide an export named 'freshnessHeader'" at
 // module LINK time, before `start()` runs and so outside `#view-error`.
 // No file is added or removed, so `SHELL` is unchanged.
-const CACHE_VERSION = 'v29';
+// v30: a new FILE under `shared/public/`, `ui/icon-field.js` (the emoji
+// picker, #182), imported STATICALLY by `ui/habit-dialog.js`. That is v20's
+// case again: `shellFirst` is stale-while-revalidate and writes into the
+// running worker's cache, so without this bump a shell can hold the new
+// `habit-dialog.js` over a cache with no `icon-field.js` in it at all — a
+// module link error before `start()` runs, and so outside `#view-error`.
+const CACHE_VERSION = 'v30';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
@@ -322,6 +328,7 @@ const SHELL = [
   '/shared/ui/day-strip.js',
   '/shared/ui/detail.js',
   '/shared/ui/habit-dialog.js',
+  '/shared/ui/icon-field.js',
   '/shared/ui/nudge.js',
   '/shared/ui/reminder-field.js',
   '/shared/ui/resample.js',
