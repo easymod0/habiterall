@@ -111,6 +111,17 @@ export const LIMITS = {
 const iconSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 export const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+/**
+ * A SHAPE only — four year digits, two month, two day — not whether the
+ * fields are in range (`assertDate`'s own comment says what that costs).
+ * `stats.js` needs the identical shape for `isRealDay` (a date it cannot
+ * compare lexically is not a date it can anchor a window on) but keeps its
+ * own copy, `CANONICAL_DATE_RE`, rather than importing this one:
+ * `validate.js -> notify.js -> stats.js` already exists, and importing this
+ * back the other way would close that into a cycle. The two regexes must
+ * agree; `shared/test/stats.test.js` asserts both against one shared table
+ * of inputs.
+ */
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const DEFAULT_COLOR = '#3b82f6';
 

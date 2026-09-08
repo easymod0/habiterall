@@ -40,7 +40,7 @@ import {
   creditAnchor,
   computeHistory, computeWeekdays, computeWeekdayByMonth, computeFrequency,
   computeResilience, computeCoverage, computeMissRuns,
-  boundedRange, addDays, UNLOGGED_DEFAULT,
+  boundedRange, addDays, earliestRealDay, UNLOGGED_DEFAULT,
 } from '@habiterall/shared/stats.js';
 
 const ROOT = join(import.meta.dirname, '..');
@@ -211,6 +211,25 @@ function buildEntries() {
 }
 
 /**
+ * Where both editions' `/overview` opens its own `bestStreak` scan —
+ * `earliestRealDay(streakMap.keys()) ?? summaryEnd`, in
+ * `habiterall-personal/src/api.js` and `habiterall-cloud/src/api.js` (#270).
+ *
+ * This file modelled that anchor as `all[0].date` — the lexical min out of
+ * `ORDER BY date`, which is what both routes read before #270 — and left it
+ * there when the routes changed. That is the root `CLAUDE.md`'s "pinning the
+ * DECISION is not pinning the WIRING" as a benchmark rather than a test: the
+ * bench then understated the shipped route by exactly the cost of the guard,
+ * and so could not see a regression in it. It is one spelling here for the
+ * same reason it is one spelling in `stats.js` — a bench that restates a
+ * route's expression is a bench that can drift from it again.
+ *
+ * @param {Iterable<string>} dates
+ * @returns {string}
+ */
+const historyAnchor = (dates) => earliestRealDay(dates) ?? END;
+
+/**
  * Everything the tables below claim about the fixture, checked.
  *
  * A bench states its fixture in prose and then measures whatever it actually
@@ -236,7 +255,14 @@ function verify(all, recent, streaks) {
   check('total rows', all.length, expectRows);
   check('rows in the summary window', recent.length, expectWindow);
   check('the walked summary window', boundedRange(recent[0].date, END).length, WINDOW_DAYS);
-  check('the walked history window', boundedRange(all[0].date, END).length, HISTORY_DAYS);
+  // Anchored the way the ROUTE anchors its streak scan (#270), not at
+  // `all[0].date`: this sentence is about the window the route walks, and the
+  // two expressions differ for any habit whose lexical min is a phantom row.
+  // They agree on this fixture, which builds no phantom — and that is the
+  // check, not an assumption: if one ever appeared here the count would move
+  // and this line would name it.
+  check('the walked history window',
+    boundedRange(historyAnchor(all.map((e) => e.date)), END).length, HISTORY_DAYS);
 
   const entryMap = new Map(recent.map((e) => [e.date, { value: e.value, status: e.status }]));
   const from = recent[0].date;
@@ -415,7 +441,11 @@ function main() {
     // The same `firstStated` date as the summary above, not `all[0].date`: the
     // route's date is the first row that STATES a value, and the two differ for
     // any habit whose earliest row is a skip.
-    return bestStreak(computeStreaks(HABIT, m, all[0].date, END, UNLOGGED_DEFAULT,
+    // The WINDOW anchor is the route's own too, and inside the timed closure
+    // because the route pays it there — once per habit, per load, over the
+    // whole 1830-day `streakMap` it builds one line above its own call. See
+    // `historyAnchor`.
+    return bestStreak(computeStreaks(HABIT, m, historyAnchor(m.keys()), END, UNLOGGED_DEFAULT,
       creditAnchor(firstStated, END)));
   });
 
@@ -432,7 +462,12 @@ function main() {
   /* --- #198: the walk that used to be 89% of it --- */
 
   const walkWindow = bench(() => boundedRange(from, END).length);
-  const walkHistory = bench(() => boundedRange(all[0].date, END).length);
+  // The route's anchor, resolved OUTSIDE the timed closure on purpose: this
+  // row is labelled `boundedRange` and reports its share of the scan above, so
+  // it has to measure the walk and not the anchor resolution the scan already
+  // pays for. What the anchor decides here is only which window is walked.
+  const historyFrom = historyAnchor(all.map((e) => e.date));
+  const walkHistory = bench(() => boundedRange(historyFrom, END).length);
   const scoresOnly = bench(() => computeScores(HABIT, recentMap, from, END, UNLOGGED_DEFAULT).length);
 
   console.log(`## #198 — the date walk, now that it is one \`Date\` instead of ${WINDOW_DAYS}\n`);

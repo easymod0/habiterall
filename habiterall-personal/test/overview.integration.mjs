@@ -28,6 +28,10 @@ process.env.HABITERALL_RATE_LIMIT = 'off';
 process.env.HABITERALL_DB = join(workdir, 'overview.db');
 
 const { app } = await import('../src/server.js');
+// The same DatabaseSync instance the routes hold, so a phantom-dated row
+// planted below (issue #270's last anchor site) is visible to them without a
+// second connection to fight WAL over.
+const { db } = await import('../src/db.js');
 const server = await new Promise((resolve) => {
   const s = app.listen(0, '127.0.0.1', () => resolve(s));
 });
@@ -318,6 +322,54 @@ ck('...and the two surfaces agree about that too',
   && lapseRow.currentStreak === lapseStats.currentStreak,
   `overview ${lapseRow.currentStreak}/${lapseRow.bestStreak} vs `
   + `stats ${lapseStats.currentStreak}/${lapseStats.bestStreak}`);
+
+/* ---- issue #270, the last anchor site: /overview's OWN bestStreak scan ----
+ *
+ * `score` and `currentStreak` above come from `summaryStats`, which goes
+ * through `resolveWindow` and so already refuses a phantom row when choosing
+ * where its window opens. `bestStreak` is a streak scan this route runs
+ * itself, over a `streakMap` built one line above the call, and it used to
+ * open at `entries[0].date` — the raw LEXICAL min out of `ORDER BY date`,
+ * exactly as phantom-capable as the `MIN(date)` reads `creditAnchor` already
+ * refuses. A row dated `2026-07-99` sorts before every real one in this
+ * fixture, opens the window there, and `boundedRange` rolls that forward past
+ * `summaryEnd` — the scan comes back empty and `bestStreak` reads 0 beside a
+ * `currentStreak`/`score` that no longer do, which is the disagreement this
+ * fix closes.
+ *
+ * The phantom row is INSERTed directly, as `export-loop.integration.mjs`
+ * does: `assertDate` refuses it on every write path, so a suite proving this
+ * has to plant it the way an old row (or a database predating that guard)
+ * would already hold one.
+ */
+const phantomAnchor = await post('/habits', { name: 'PhantomAnchor', type: 'boolean' });
+for (let i = 8; i >= 0; i--) {
+  await put(`/habits/${phantomAnchor.id}/entries/${daysAgo(i)}`, { value: 2 });
+}
+// Lexically before every real row above: 40 days back is more than a month
+// clear of the 9-day fixture, so `daysAgo(40)`'s 'YYYY-MM' prefix is strictly
+// less than the earliest real entry's, whatever the '-99' day component sorts
+// against within it.
+const phantomDate = `${daysAgo(40).slice(0, 7)}-99`;
+db.prepare(
+  `INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)`
+).run(phantomAnchor.id, phantomDate, 2, '', '');
+
+const withPhantom = await overview({ days: 7 });
+const phantomRow = withPhantom.habits.find((h) => h.id === phantomAnchor.id);
+const phantomStats = await fetch(`${base}/api/habits/${phantomAnchor.id}/stats`)
+  .then((r) => r.json());
+
+ck('a phantom-dated row does not zero the route\'s own bestStreak scan',
+  phantomRow.bestStreak === 9, String(phantomRow.bestStreak));
+ck('...currentStreak is the live nine-day run, not zeroed by the same row',
+  phantomRow.currentStreak === 9, String(phantomRow.currentStreak));
+ck('...and all three figures agree with the habit\'s own page',
+  phantomRow.bestStreak === phantomStats.bestStreak
+  && phantomRow.currentStreak === phantomStats.currentStreak
+  && phantomRow.score === phantomStats.score,
+  `overview ${phantomRow.score}/${phantomRow.currentStreak}/${phantomRow.bestStreak} vs `
+  + `stats ${phantomStats.score}/${phantomStats.currentStreak}/${phantomStats.bestStreak}`);
 
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }

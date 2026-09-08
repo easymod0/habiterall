@@ -7,6 +7,7 @@ const {
   computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditAnchor,
   summariseMembers, summariseByCategory,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
+  isRealDay, CANONICAL_DATE_RE,
 } = await import('../src/stats.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
@@ -151,11 +152,18 @@ test('dateRange spells every element exactly as toISO does', () => {
 test('totalCompleted counts the same window the walked figures do, even when the earliest stored date is not a real day', () => {
   // `computeStats` takes `from` as the earliest STORED entry when no window is
   // named, and selects `totalCompleted` by STRING comparison against it while
-  // every other figure comes from the walked list. So an un-normalised `from`
-  // puts the two on different windows: '2026-02-30' >= '2026-02-30' is true and
-  // counts the phantom row, while the walk starts on 2026-03-02 and never looks
-  // that key up — a payload claiming a completion no other figure in it can
-  // justify. Normalising `from` is what keeps them on one window.
+  // every other figure comes from the walked list — so whatever `from` ends up
+  // being, both readers of it must agree, or a payload claims a completion no
+  // other figure in it can justify.
+  //
+  // Before #270's Half 2 this fixture exercised the un-normalised-`from` hazard
+  // directly: '2026-02-30' was `firstEntry`, normalising made it '2026-03-02',
+  // and the walk and `totalCompleted` had to reach that same date independently
+  // (history was `['2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05']`).
+  // Half 2 changes which date is even a CANDIDATE: `earliestRealDay` skips
+  // '2026-02-30' outright, so `firstEntry` is the real row '2026-03-04' and
+  // `from` never touches the phantom's rollover at all. The two readers still
+  // have to agree about THAT window, which is what this fixture now pins.
   const habit = {
     type: 'boolean', target_value: 0, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1,
@@ -163,9 +171,9 @@ test('totalCompleted counts the same window the walked figures do, even when the
   const entries = [{ date: '2026-02-30', value: YES }, { date: '2026-03-04', value: YES }];
   const stats = computeStats(habit, entries, { end: '2026-03-05' });
 
-  // The window walked, and the count, agree: the phantom day is in neither.
-  assert.deepEqual(stats.history.map((h) => h.bucket),
-    ['2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05']);
+  // The window walked, and the count, agree: the phantom day is in neither,
+  // and is no longer even the window's anchor.
+  assert.deepEqual(stats.history.map((h) => h.bucket), ['2026-03-04', '2026-03-05']);
   assert.equal(stats.totalCompleted, 1);
 });
 
@@ -256,25 +264,35 @@ test('a stored entry dated year 0999 is clamped and reads as the day it is', () 
 });
 
 test('a stored entry of \'9999-99-99\' is clamped BEFORE it is normalised', () => {
-  // The ordering `resolveWindow` says is "the whole safety of it", pinned by
-  // the one shape that can still see it. Normalising is a ROLLOVER, and a
-  // rollover moves the date by an amount nothing in `resolveWindow` bounds:
-  // '9999-99-99' lands in year 10007, and '10007-...' sorts BELOW '2026-...'
-  // however the year is padded, because it is a digit longer.
+  // This USED to be the ordering `resolveWindow` says is "the whole safety of
+  // it", pinned by the one shape that could see it: normalising is a
+  // ROLLOVER, and a rollover moves the date by an amount nothing in
+  // `resolveWindow` bounds — '9999-99-99' lands in year 10007, and
+  // '10007-...' sorts BELOW '2026-...' however the year is padded, because it
+  // is a digit longer.
   //
   //   clamped first:    '9999-99-99' > end       -> from = end        (1 day)
   //   normalised first: '10007-06-07' < earliest -> from = earliest (3661 days)
   //
-  // So one junk row opens the widest window MAX_RANGE_DAYS allows, on every
-  // request, for a habit that has none of those days — 3660 day-steps per
-  // aggregation pass, eight passes to a `/habits/:id/stats`.
+  // #270's Half 2 changed what reaches `windowStart` at all, and this fixture
+  // stops discriminating that ordering because of it: the entry map holds
+  // only the phantom row, `earliestRealDay` finds no real day in it, so
+  // `firstEntry` is `null` and `windowStart` is handed `firstEntry ?? end` —
+  // `end` itself, a real day already. Neither clamp nor the normalise below it
+  // ever sees the phantom, under EITHER ordering, so both agree trivially. The
+  // ordering claim this test used to make now lives at Step 1's
+  // `creditAnchor('2026-07-99', …)` / `('9999-99-99', …)` assertions in the
+  // '#270 Half 1' test above, which still reach `windowStart` with a raw
+  // phantom `anchor` — this file's own comment on `windowStart` says why:
+  // `creditAnchor` is the one path a route's `MIN(date)` read still hands one.
   //
-  // The junk row is this habit's ONLY row on purpose, and it is not a fixture
-  // that could have been written any other way: `from` is `start ?? firstEntry`
-  // and `firstEntry` is the lexical MIN of the entries, so a date whose year
-  // field must reach 9999 to roll into five digits sorts ABOVE every real one
-  // and is never the min while a real row exists beside it. A single
-  // unparseable row is what an import that went around `assertDate` leaves.
+  // What this fixture is left pinning: a habit whose ONLY row is a phantom
+  // reads as though it had never been logged at all — `from` is `end`, a
+  // 1-day window, and `totalCompleted` is 0 — never the widest-window failure
+  // mode the un-fixed ordering used to produce. The junk row is this habit's
+  // ONLY row on purpose, so there is no real row beside it for `firstEntry` to
+  // prefer; a single unparseable row is what an import that went around
+  // `assertDate` leaves.
   const habit = {
     type: 'boolean', target_value: 0, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1,
@@ -293,6 +311,157 @@ test('a stored entry of \'9999-99-99\' is clamped BEFORE it is normalised', () =
   // not what discriminates — it is here because `totalCompleted` selects by
   // string comparison against `from` and is the one figure that would count it.
   assert.equal(stats.totalCompleted, 0);
+});
+
+test('#270 Half 1: windowStart re-clamps a rollover that lands outside the window even when the clamp did NOT fire before the reformat', () => {
+  // The '9999-99-99' test above is the case #272 already covered: the phantom
+  // sorts ABOVE every real date before it is reformatted, so the pre-reformat
+  // clamp catches it (`from > end` fires) regardless of whether the re-clamp
+  // below exists. Nothing until this test covered the other case — a phantom
+  // that sorts INSIDE `[earliest, end]` lexically and only leaves the window
+  // once the reformat rolls it over. '2026-07-99' sorts below an `end` of
+  // '2026-08-19' (neither pre-reformat clamp fires) and normalises to
+  // '2026-10-07', past `end` — so without the re-clamp `boundedRange` answers
+  // `[]` and every figure for a habit with a live streak reads zero.
+  assert.equal(creditAnchor('2026-07-99', '2026-08-19'), '2026-08-19');
+
+  // '2026-02-31' moved AGAIN, in a later review round: `creditAnchor` now
+  // refuses a non-real `firstAnswer` as an anchor at all (treats it as `null`)
+  // rather than letting it reach this re-clamp — a phantom stated VALUE
+  // normalises INSIDE `[earliest, end]` far more often than it rolls out of
+  // it, so the re-clamp mostly never fired for one and credit began on a day
+  // nobody answered, which is #223's own fail-open direction. It was
+  // '2026-03-03' here for a while (this file's own history has that literal);
+  // it is `end` now, the same "no evidence" answer `creditAnchor(null, …)`
+  // already gives.
+  assert.equal(creditAnchor('2026-02-31', '2026-08-18'), '2026-08-18');
+  // Unchanged by either fix, asserted as literals so only the case above
+  // moves: both already normalise to a date OUTSIDE `[earliest, end]`, which
+  // is exactly what the re-clamp below `windowStart`'s reformat still exists
+  // for — see that function's own comment for why it is not this fix's job.
+  assert.equal(creditAnchor('9999-99-99', '2026-08-18'), '2026-08-18');
+  assert.equal(creditAnchor('0100-01-01', '2026-08-19'), '2016-08-11');
+});
+
+test('#270 Half 2: \'2026-02-30\' moves too — a phantom is refused as the CHOSEN anchor, not only re-clamped', () => {
+  // Decision 3, and the consequence this repo agreed to accept rather than
+  // dodge. Re-clamping after the reformat (Half 1 alone) only rescues a date
+  // that ends up OUTSIDE `[earliest, end]`; it does nothing for one that rolls
+  // to a date still inside it. '2026-02-30' normalises to '2026-03-02', which
+  // is neither below `earliest` nor above `end` for this window, so under
+  // Half 1 alone a '2026-02-30' row was still this habit's chosen `firstEntry`
+  // and the window still opened there — `history.length` was **170** (days
+  // from 2026-03-02 to 2026-08-18), not 9 from the real first entry. That was
+  // this test before Step 2, asserted deliberately as "Half 1 alone does not
+  // stop a phantom date being CHOSEN as the anchor".
+  //
+  // Step 2 (`earliestRealDay` at Site A) refuses a phantom as a CANDIDATE
+  // anchor at all, so '2026-02-30' — like every other phantom — is skipped in
+  // favour of the real earliest row, moving `history.length` to 9 and
+  // `history[0].bucket` to the true first entry. That follows directly from
+  // the rule Mark stated: 2026-03-02 is not a day this habit lived either, so
+  // it cannot be the day the window opens — and it is correct, not collateral.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const entries = [{ date: '2026-02-30', value: YES }];
+  for (let d = 10; d <= 18; d++) entries.push({ date: `2026-08-${d}`, value: YES });
+  const stats = computeStats(habit, entries, { end: '2026-08-18' });
+
+  assert.equal(stats.history.length, 9);
+  assert.equal(stats.history[0].bucket, '2026-08-10');
+});
+
+test('#270 Half 2: the issue\'s worked example — a phantom row no longer zeroes a live habit\'s figures', () => {
+  // The premise, measured on master before this fix, for a daily boolean habit
+  // with rows 2026-08-10…2026-08-18 plus one junk row dated '2026-07-99', read
+  // over `{ end: '2026-08-18' }`:
+  //
+  //   history  totalCompleted  history[0]   score      currentStreak
+  //   0        0               undefined    0          0        <- the bug
+  //
+  // Every figure zero for a habit with a live nine-day streak, because
+  // '2026-07-99' was chosen as `firstEntry`, sorted below `end` (so neither
+  // pre-reformat clamp fired), and rolled over to '2026-10-07' — past `end` —
+  // emptying `boundedRange` outright.
+  //
+  // After #270 both halves land, the phantom is never even a CANDIDATE
+  // anchor, and the reading is byte for byte what the same nine rows read
+  // with no junk row at all.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const entries = [{ date: '2026-07-99', value: YES }];
+  for (let d = 10; d <= 18; d++) entries.push({ date: `2026-08-${d}`, value: YES });
+  const stats = computeStats(habit, entries, { end: '2026-08-18' });
+
+  assert.equal(stats.history.length, 9);
+  assert.equal(stats.history[0].bucket, '2026-08-10');
+  assert.equal(stats.totalCompleted, 9);
+  assert.equal(stats.score, 0.381137);
+  assert.equal(stats.currentStreak, 9);
+});
+
+test('isRealDay: the JSDoc claims, asserted directly rather than through a caller', () => {
+  // `isRealDay`'s own doc comment makes several specific claims that nothing
+  // else in this suite exercises head-on — every other test reaches it through
+  // `windowStart`, `firstStatedAnswer` or `computeCategoryStats`, which pins
+  // the WIRING but not the predicate's own boundary. Literals, not a
+  // re-implementation of the round-trip check.
+  assert.equal(isRealDay('0999-12-31'), true); // a real year outside the 0-99 special case
+  assert.equal(isRealDay('0050-01-01'), false); // `new Date(50, 0, 1)` resolves to 1950
+  assert.equal(isRealDay('2026-8-10'), false); // parses to a real day, but not the canonical spelling
+  assert.equal(isRealDay('2026-02-29'), false); // 2026 is not a leap year
+  assert.equal(isRealDay('2026-02-28'), true); // the real day beside it
+  assert.equal(isRealDay('9999-99-99'), false); // not a real month or day at all
+  assert.equal(isRealDay('2026-02-30'), false); // the phantom this whole file is about
+
+  // A year outside the 4-digit domain `toISO`/lexical comparison require
+  // (#270's cloud regression). `Date` round-trips every one of these fine —
+  // `fromISO('10000-01-01')` is a real `Date` and `toISO` pads a year to a
+  // MINIMUM of four digits, not exactly four, so the naive round-trip check
+  // alone reports `true`. That is refused here anyway, because every
+  // comparison in this file is LEXICAL and a five-digit year sorts BELOW
+  // every '20xx-…' date — the exact hazard the `windowStart` ordering
+  // comment already describes for a normalised '9999-99-99' landing in year
+  // 10007. Postgres accepts and stores this value and `to_char` renders it
+  // back unchanged, so this is reachable in cloud, not merely a shape a
+  // client could never produce.
+  assert.equal(isRealDay('10000-01-01'), false);
+  // Zero has no fourth case of its own here — `new Date(0, 0, 1)` hits
+  // `fromISO`'s two-digit-year special case and resolves to 1900, so this
+  // was already false on the round-trip check alone — but it belongs beside
+  // the others as a domain boundary asserted by literal rather than assumed.
+  assert.equal(isRealDay('0000-01-01'), false);
+});
+
+test("isRealDay and validate.js's DATE_RE agree on shape, over one shared table", async () => {
+  // stats.js cannot import DATE_RE from validate.js: validate.js already
+  // imports notify.js, which imports isCompleted from stats.js, so the
+  // reverse import would close stats.js -> validate.js -> notify.js ->
+  // stats.js into a cycle. isRealDay therefore keeps its own copy of the
+  // shape check, and this is what keeps the two from drifting silently —
+  // it fails the moment either regex's shape rule changes without the other.
+  const { DATE_RE } = await import('../src/validate.js');
+  const shapes = [
+    '2026-08-10',   // canonical
+    '2026-8-10',    // unpadded month
+    '10000-01-01',  // five-digit year — the #270 cloud regression
+    '999-12-31',    // unpadded (three-digit) year
+    '2026-00-10',   // canonical shape, not a real month (DATE_RE doesn't check range)
+    '2026-02-30',   // canonical shape, not a real day (ditto)
+    '',
+    '2026/08/10',
+  ];
+  for (const s of shapes) {
+    assert.equal(
+      DATE_RE.test(s),
+      CANONICAL_DATE_RE.test(s),
+      `DATE_RE and isRealDay's shape check disagree on ${JSON.stringify(s)}`
+    );
+  }
 });
 
 test('addDays crosses month and year boundaries', () => {
@@ -1437,12 +1606,29 @@ test('a member whose first entry is not a real calendar day lands on the day the
   // The clamp above is what put these two in contact, so this is its own
   // defect. `firstEntry` comes out of STORAGE and does not have to be a real
   // day — `assertDate` refuses one on the way in, but a row predating that
-  // guard, a direct insert or an import around it does not. `computeScores`
-  // normalises the start it is handed and begins its walk on 2026-03-02;
-  // `landedAt` selects by STRING comparison and admits 2026-03-01. That bucket
-  // then had a member and no score point behind it — an `undefined` summed into
-  // NaN, which serialises as `null` and is dropped by `ui/categories.js`'s
-  // `p.value !== null` filter, so the drawn line silently loses a vertex.
+  // guard, a direct insert or an import around it does not.
+  //
+  // This fixture does NOT exercise `computeScores` normalising a phantom
+  // start — `warmAnchor` (#270 Half 2) refuses PHANTOM via `isRealDay` before
+  // any of that arithmetic runs, and falls back to `earliestRealDay` over this
+  // member's own entries, which finds the real row already sitting on
+  // 2026-03-02 and hands it over untouched. The date below is chosen so that
+  // fallback lands on the same day a raw normalise of PHANTOM would have —
+  // mutation-tested: widening `warmAnchor` back to accept the raw `firstEntry`
+  // (dropping the `isRealDay` gate) leaves this test passing, because the
+  // still-unreachable clamp-then-normalise block a few lines under `warmAnchor`
+  // in `stats.js` then catches the raw phantom itself and rolls it to the
+  // identical 2026-03-02 — two different mechanisms, one coincidental date.
+  // The fixture that actually tells them apart is
+  // "#270 Half 2, Site C: a phantom-only member's ANCHOR is inert too" below,
+  // whose junk date rolls PAST the window instead of onto a row already there.
+  //
+  // What this fixture is left pinning: `landsOn` (and so `landedAt`) reads
+  // `memberWarm`, never the raw `firstEntry`, so the day `computeScores`
+  // actually begins its walk on and the day this member counts as landed
+  // cannot disagree — a mismatch there is what used to leave an `undefined` in
+  // `scoreAt`, summed into NaN, serialised as `null` and dropped by
+  // `ui/categories.js`'s `p.value !== null` filter, silently losing a vertex.
   //
   // `mean` itself survives, which is why this is small and why nothing else
   // here can see it: the last bucket's day is `end`, long past the two-day gap.
@@ -1458,7 +1644,7 @@ test('a member whose first entry is not a real calendar day lands on the day the
 
   // The fixture is only about this while the window holds the gap.
   assert.ok(at('2026-03-01'),
-    'the window must contain the day the phantom date normalises past');
+    'the window must contain the day before the real row this member falls back to, so the exclusion on that day is actually checked');
 
   const nan = health.series.filter((p) => Number.isNaN(p.value));
   assert.equal(nan.length, 0,
@@ -1479,33 +1665,30 @@ test('a member whose first entry is not a real calendar day lands on the day the
   assert.equal(health.series.at(-1).value, health.mean);
 });
 
-test('a member whose first entry ROLLS OVER is clamped to warmStart BEFORE it is normalised', () => {
-  // `memberWarm` clamps and then normalises, exactly as `resolveWindow` does
-  // and for the same reason, and nothing in this suite could see that ordering
-  // — reversing it left `npm test` at zero failures. The clamp is a STRING
-  // comparison against `warmStart` and normalising is a ROLLOVER of a stored
-  // string, so normalising first lets the rollover decide which of the two
-  // dates the comparison picks.
+test('a member whose only row is \'2024-99-99\' lands at warmStart and is scored, not excluded', () => {
+  // This fixture used to be the one that pinned `memberWarm`'s
+  // clamp-then-normalise ORDERING: '2024-99-99' rolls to '2032-06-07' (past
+  // `warmStart`, which is CAT_START - 400 = '2025-04-27'), so the wrong
+  // ordering (normalise before clamp) let the rollover carry `memberWarm`
+  // past `CAT_END` and `landedAt` excluded the member entirely — a habit
+  // reported as never logged when it holds a row, and a category reading
+  // 1.00 because the member dragging it down was quietly excluded.
   //
-  // '2024-99-99' is the fixture, and every digit of it is doing work.
-  // `warmStart` is CAT_START - 400 = '2025-04-27', so:
+  // #270's Half 2 makes this fixture unable to see that any more: `firstEntry`
+  // ('2024-99-99') fails `isRealDay`, there is no OTHER row in this member's
+  // slice for `earliestRealDay` to fall back to, so `warmAnchor` is `null` and
+  // `memberWarm` is `warmStart` directly — never anything the clamp-then-
+  // normalise block below could touch. That block is still there (see the
+  // comment above it in `stats.js` for why it is kept as an unreachable
+  // backstop), but nothing reaching it is ever a phantom now, so reversing its
+  // ordering leaves every test in this file green. The ordering pin has moved
+  // to `windowStart`'s own re-clamp — Step 1's `creditAnchor` assertions in
+  // the '#270 Half 1' test above.
   //
-  //   clamped first:    '2024-99-99' <= warmStart  -> memberWarm = warmStart
-  //   normalised first: '2032-06-07' >  warmStart  -> memberWarm = '2032-06-07'
-  //
-  // and '2032-06-07' is past CAT_END, so `landedAt` refuses the member on every
-  // day of the window: it drops out of `mean`, out of `worst`, out of every
-  // bucket's `members`, and into `unloggedExcluded` — a habit reported as never
-  // logged when it holds a row, and a category reading 1.00 because the member
-  // dragging it down was quietly excluded rather than scored.
-  //
-  // NOT '9999-99-99', which is the date `resolveWindow`'s own fixture uses:
-  // here it is invisible under either ordering. It sorts above `warmStart`, so
-  // clamped first `memberWarm` is '10007-06-07' — and `boundedRange` inside
-  // `computeScores` re-clamps that to end - MAX_RANGE_DAYS, because five year
-  // digits sort BELOW four. Both orderings then score the member over days it
-  // has no rows on and answer 0. The rollover has to land on the far side of
-  // `warmStart` to be seen, not merely be a rollover.
+  // What this fixture is left pinning: the ALREADY-inert case, the one the
+  // premise's own table calls the case "the clamp already caught" — kept here
+  // as the reference reading the new test below (2025-99-99, the case that
+  // WAS the bug) is asserted equal to.
   const ghost = { ...boolHabit, id: 31, name: 'Ghost', category_id: 1 };
   const members = [
     { habit: readHabit, entries: readRows },
@@ -1526,6 +1709,52 @@ test('a member whose first entry ROLLS OVER is clamped to warmStart BEFORE it is
   // late ones count two, which reads as the category improving.
   assert.equal(health.series[0].members, 2);
   assert.equal(health.series.at(-1).value, health.mean);
+});
+
+test('#270 Half 2, Site C: a phantom-only member\'s ANCHOR is inert too — \'2025-99-99\' now reads identically to \'2024-99-99\'', () => {
+  // The premise's own measurement, on master: with a fully-logged 'Read' and a
+  // second member whose only row is the junk date, in the window
+  // {start:'2026-06-01', end:'2026-06-30'} (this file's own CAT_WINDOW) —
+  //
+  //   2024-99-99   members=2  unloggedExcluded=0  worst=Ghost  series[0].members=2
+  //   2025-99-99   members=2  unloggedExcluded=1  worst=Read   series[0].members=1  <- the bug
+  //   2026-99-99   members=2  unloggedExcluded=1  worst=Read   series[0].members=1  <- the bug
+  //
+  // '2024-99-99' sorts BEFORE `warmStart` even after rolling over (see the
+  // test above), so the plain clamp already caught it; '2025-99-99' and
+  // '2026-99-99' roll PAST `warmStart` and past `CAT_END`, so `landedAt`
+  // dropped the member into `unloggedExcluded` and the category read 1.00
+  // because the member dragging it down was excluded rather than scored.
+  //
+  // #270's Half 2 makes all three inert at the CHOOSING stage: `warmAnchor`
+  // never sees a phantom `firstEntry` reach the normalise at all, so a member
+  // whose ONLY row is any of the three now lands at `warmStart` and is scored
+  // exactly as the already-correct '2024-99-99' case was. Asserting the two
+  // readings EQUAL is the point — that is what "all three junk dates are now
+  // inert" means, not merely "each answers some number".
+  const makeHealth = (junkDate) => {
+    const ghost = { ...boolHabit, id: 31, name: 'Ghost', category_id: 1 };
+    const members = [
+      { habit: readHabit, entries: readRows },
+      { habit: ghost, entries: [{ date: junkDate, value: YES, status: '' }] },
+    ];
+    return computeCategoryStats(CATS, members, CAT_WINDOW).categories[0];
+  };
+
+  const wasAlreadyFine = makeHealth('2024-99-99');
+  const wasTheBug = makeHealth('2025-99-99');
+
+  assert.equal(wasTheBug.members, 2);
+  assert.equal(wasTheBug.unloggedExcluded, 0);
+  assert.equal(wasTheBug.mean, 0.499968);
+  assert.equal(wasTheBug.worst.name, 'Ghost');
+  assert.equal(wasTheBug.series[0].members, 2);
+
+  // Byte for byte the same reading as the case that was never broken.
+  assert.equal(wasTheBug.mean, wasAlreadyFine.mean);
+  assert.equal(wasTheBug.unloggedExcluded, wasAlreadyFine.unloggedExcluded);
+  assert.equal(wasTheBug.worst.name, wasAlreadyFine.worst.name);
+  assert.equal(wasTheBug.series[0].members, wasAlreadyFine.series[0].members);
 });
 
 test('the mean is equal weight per HABIT, never per entry', () => {
@@ -2021,6 +2250,65 @@ test('summariseByCategory: a member whose firstEntry EQUALS the reading day is l
   assert.equal(health.mean, 0.5, 'both members are averaged in: (0.7 + 0.3) / 2');
 });
 
+test('summariseByCategory: a phantom-dated firstEntry counts as landed, agreeing with computeCategoryStats', () => {
+  // A review round's finding: `landed: first != null && first <= day` is a
+  // LEXICAL comparison against a raw stored `MIN(date)`, which
+  // `computeCategoryStats` stopped doing for its own `firstEntry`/`landsOn`
+  // when #270 was fixed there — a phantom `firstEntry` still LANDS (at
+  // `warmStart`), because a phantom row is a genuine answer to "has this
+  // habit ever been logged" even though it cannot say WHEN. This function
+  // never got the matching fix, so `/categories/stats` and the `/overview`
+  // section header disagreed about a member whose only row is a junk date
+  // that sorts AFTER the reading day: '2026-99-99' > '2026-06-30' lexically,
+  // so the un-fixed comparison excluded it here while `computeCategoryStats`
+  // had already landed it at `warmStart`.
+  //
+  // 'Read' logs every day of June; 'Ghost's only row is '2026-99-99'. Both
+  // functions are handed the SAME two members and the SAME reading day
+  // (2026-06-30), and must now agree byte for byte.
+  const boolHabit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1,
+  };
+  const day = '2026-06-30';
+  const categories = [{ id: 1, name: 'Health', color: '#2e7d32' }];
+  const readHabit = { ...boolHabit, id: 11, name: 'Read', category_id: 1 };
+  const readRows = rowsOn('2026-06-01', day, YES);
+  const ghost = { ...boolHabit, id: 31, name: 'Ghost', category_id: 1 };
+  const ghostRows = [{ date: '2026-99-99', value: YES, status: '' }];
+
+  // /categories/stats: `computeCategoryStats`, already fixed.
+  const catStats = computeCategoryStats(categories,
+    [{ habit: readHabit, entries: readRows },
+      { habit: ghost, entries: ghostRows, firstEntry: '2026-99-99' }],
+    { start: '2026-06-01', end: day }).categories[0];
+  assert.equal(catStats.members, 2);
+  assert.equal(catStats.unloggedExcluded, 0);
+  assert.equal(catStats.mean, 0.3990085);
+
+  // /overview's section header: `summariseByCategory`, the reading this test
+  // is about. Master excluded Ghost on both paths and the two agreed; before
+  // this fix, `computeCategoryStats` had already stopped excluding it while
+  // this function had not, so the mean here read `0.798017` (Read alone) with
+  // `unloggedExcluded: 1` — 0.3990085 is NOT that number, which is the point.
+  const readScore = computeStats(readHabit, readRows, { end: day }).score;
+  const ghostScore = computeStats(ghost, ghostRows, { end: day }).score;
+  const payloads = [
+    { id: 11, name: 'Read', score: readScore, category_id: 1 },
+    { id: 31, name: 'Ghost', score: ghostScore, category_id: 1 },
+  ];
+  const firstEntry = new Map([[11, '2026-06-01'], [31, '2026-99-99']]);
+  const overview = summariseByCategory(categories, payloads, firstEntry, day)[0];
+
+  assert.equal(overview.members, 2);
+  assert.equal(overview.unloggedExcluded, 0);
+  assert.equal(overview.mean, 0.3990085);
+
+  // The two surfaces now agree, byte for byte.
+  assert.equal(overview.mean, catStats.mean);
+  assert.equal(overview.unloggedExcluded, catStats.unloggedExcluded);
+});
+
 /* ---------- issue #223: an unanswered day needs an answer behind it ---------- */
 
 /*
@@ -2214,9 +2502,12 @@ test('issue #223: credit begins at the first STATED answer, wherever it falls', 
   // reading identical to an empty one for a daily habit.
   assert.equal(creditAnchor(null, END_223), '2026-08-19');
   // ...and a stored date that is not a real day goes through the same
-  // clamp-then-normalise sequence `from` does, never a second one (#270 is
-  // unchanged by this and is not fixed here): '2026-07-99' rolls to 2026-10-07.
-  assert.equal(creditAnchor('2026-07-99', END_223), '2026-10-07');
+  // clamp-then-normalise sequence `from` does, never a second one. #270's Half
+  // 1 re-clamps AFTER that reformat, so the rollover to 2026-10-07 — past
+  // `end` — is pulled straight back to `end` rather than left outside the
+  // window: was '2026-10-07' before the fix, `shared/test/stats.test.js`'s own
+  // history has the prior literal.
+  assert.equal(creditAnchor('2026-07-99', END_223), END_223);
   assert.equal(creditAnchor('0100-01-01', END_223), addDays(END_223, -MAX_RANGE_DAYS));
 });
 
@@ -2368,14 +2659,18 @@ test('issue #223: the credit date is derived from the deduped MAP, not the array
   assert.equal(skipThenValue.score, 1);
 });
 
-test('issue #223: #270 is untouched — no phantom-dated row becomes the anchor', () => {
-  // The anchor form made this shape reachable: with a valid-dated skip no
-  // longer able to open the window, a phantom-dated first VALUE row did — and
-  // '2026-07-99' normalises to 2026-10-07, past `end`, so `boundedRange`
-  // answered [] and every figure read zero for a habit with a live streak.
-  // A credit rule moves no anchor, so the window is master's byte for byte:
-  // 230 score points opening at 2026-01-01, streak 2, score 0.101149,
-  // totalCompleted 3. Measured on master and after.
+test('issue #223: #270 is no longer untouched — Site B refuses a phantom-dated row as the credit anchor', () => {
+  // Renamed from "#270 is untouched": it no longer is, and the third block
+  // below is exactly the number Decision 4 said would have to move.
+  //
+  // The anchor form made this shape reachable in the first place: with a
+  // valid-dated skip no longer able to open the WINDOW, a phantom-dated first
+  // VALUE row could still be chosen as the CREDIT date. `firstEntry`
+  // (`earliestRealDay` now) picks the real skip at 2026-01-01 regardless — a
+  // phantom row is never lexically the min while a real one this early sits
+  // beside it — so the window itself was never what #270 moved here. 230
+  // score points opening at 2026-01-01, streak 2, score 0.101149,
+  // totalCompleted 3, unaffected by either half of this fix.
   const phantom = [
     { date: '2026-01-01', value: 0, status: 'skip' },
     { date: '2026-07-99', value: 2, status: '' },
@@ -2393,13 +2688,18 @@ test('issue #223: #270 is untouched — no phantom-dated row becomes the anchor'
   assert.equal(stats.score, 0.101149);
   assert.equal(stats.totalCompleted, 3);
 
-  // The same rows on an at-most habit resolved to `success` DO move, and this
-  // is the honest half: the phantom date is the earliest stated value, so the
-  // credit date is its rollover — 2026-10-07, past `end` — and no unanswered
-  // day is credited at all, which is #270's hazard reaching a second date by
-  // the same route rather than a new one. The window is still untouched (230
-  // points from 2026-01-01) and the figures are the at-most-`miss` reading of
-  // the same rows.
+  // The same rows on an at-most habit resolved to `success` read identically
+  // to the block above, and for a reason worth stating plainly: `firstEntry`
+  // (window) is unmoved for the reason above, and `firstStatedAnswer` (Site B,
+  // Decision 4) now refuses '2026-07-99' as the credit anchor too, so credit
+  // begins at the same real row ('2026-08-17') the un-fixed code would only
+  // have reached by luck. Before Site B, this habit's credit date was the
+  // phantom's own rollover clamped to `end` by Step 1's re-clamp alone
+  // (`creditAnchor('2026-07-99', '2026-08-18')` is `'2026-08-18'` — see the
+  // '#270 Half 1' test above) — a DIFFERENT date from '2026-08-17' that
+  // happened to credit the same window here only because both fall after
+  // every unanswered day this fixture has. The next block is where that
+  // coincidence stops holding.
   const asLimit = computeStats(limit223(), [
     { date: '2026-01-01', value: 0, status: 'skip' },
     { date: '2026-07-99', value: 1, status: '' },
@@ -2412,22 +2712,39 @@ test('issue #223: #270 is untouched — no phantom-dated row becomes the anchor'
   assert.equal(asLimit.score, 0.101149);
   assert.equal(asLimit.totalCompleted, 3);
 
-  // ...and the rollover moves the credit date in BOTH directions, which the
-  // first draft of this test disclosed only one of. `2026-02-31` normalises to
-  // 2026-03-03 — EARLIER than the habit's only real answer — so credit begins
-  // five and a half months before there is any evidence for it: streak 169
-  // where the rule implies 2 (master read 229 over the same 230-point window).
-  // Pinned so the fail-OPEN half is a stated consequence of #270 rather than a
-  // discovery, and so a fix for #270 has to move this number deliberately.
+  // **This is the fail-OPEN half its own comment (before this fix) said "a fix
+  // for #270 has to move this number deliberately", and it now has.**
+  // '2026-02-31' normalises to 2026-03-03 — EARLIER than the habit's only real
+  // answer — so before Site B this was chosen as `firstStatedAnswer` and
+  // credit began five and a half months before there was any evidence for it:
+  // `currentStreak: 169`. `computeStats`'s OWN choice of anchor moved first:
+  // Site B skips '2026-02-31' (not a real day) and lands on the real row
+  // instead — '2026-08-18', the only other entry — so credit begins there and
+  // this fixture reads almost exactly as "no evidence yet": streak 1,
+  // totalCompleted 2, score 0.051922, the near-empty-history reading #223's
+  // own suite pins elsewhere as the honest answer for a habit with no
+  // admissible evidence.
+  //
+  // `creditAnchor('2026-02-31', '2026-08-18')` moved too, in a LATER review
+  // round: it used to be genuinely unchanged at `'2026-03-03'`, on the theory
+  // that this function is handed a raw anchor directly and has no map to run
+  // `firstStatedAnswer` over — but the same "no evidence" refusal applies to
+  // it just as directly, and not applying it there is exactly what let
+  // `/overview`'s own credit-date path (a route's raw `MIN(date) FILTER`
+  // read, `creditAnchor`'s whole reason to exist) disagree with this
+  // function's answer for the identical rows. It reads `'2026-08-18'` now,
+  // the same "no evidence" answer this test's own `computeStats` line above
+  // gives.
   const rollsEarlier = computeStats(limit223(), [
     { date: '2026-01-01', value: 0, status: 'skip' },
     { date: '2026-02-31', value: 1, status: '' },
     { date: '2026-08-18', value: 1, status: '' },
   ], { end: '2026-08-18' });
-  assert.equal(creditAnchor('2026-02-31', '2026-08-18'), '2026-03-03');
+  assert.equal(creditAnchor('2026-02-31', '2026-08-18'), '2026-08-18');
   assert.equal(rollsEarlier.scores.length, 230);
-  assert.equal(rollsEarlier.currentStreak, 169);
+  assert.equal(rollsEarlier.currentStreak, 1);
   assert.equal(rollsEarlier.totalCompleted, 2);
+  assert.equal(rollsEarlier.score, 0.051922);
 });
 
 test('issue #223: a skip-anchored member reads the same on the comparison as on its own page', () => {
@@ -2487,6 +2804,115 @@ test('issue #223: a skip-anchored member reads the same on the comparison as on 
     { start: '2025-08-20', end: END_223, granularity: 'month' }).categories[0];
   assert.equal(control.mean, computeStats(atLeast, skip, { end: END_223 }).score);
   assert.equal(control.mean, 0);
+});
+
+test('issue #270: a phantom SUPPLIED firstAnswer must credit the same as the same key derived', () => {
+  // The hole a review found in the fix above: `firstStatedAnswer` (the DERIVED
+  // branch, Site B) refuses a phantom via `isRealDay`, but the SUPPLIED branch
+  // — both editions' category routes hand `computeCategoryStats` a
+  // `MIN(date) FILTER (WHERE status <> 'skip')` read, exactly as
+  // phantom-capable as the `MIN(date)` `firstEntry`/`warmAnchor` already
+  // guard — went straight to `windowStart` unfiltered. `'2026-02-30'`
+  // normalises to `'2026-03-02'`, which lands INSIDE this window, so the
+  // re-clamp backstop does not fire, and credit began on a day the habit
+  // stated nothing — the fail-OPEN direction #223 exists to close.
+  //
+  // An at-most habit resolved to `success`, so credit is visible at all (an
+  // at-least habit has none to withhold — see the `control` case above). The
+  // window opens at a real skip (`firstEntry`, unmoved by any of this) and the
+  // habit's only two real rows are a phantom-dated value and one on `end`
+  // itself, so a supplied phantom `firstAnswer` and the derived one must land
+  // on the SAME real row, `end`, and credit nothing before it.
+  const cats270 = [{ id: 7, name: 'Health', color: '#123456' }];
+  const habit270 = limit223({ id: 30, category_id: 7 });
+  const entries270 = [
+    { date: '2026-01-01', value: 0, status: 'skip' },
+    { date: '2026-02-30', value: 1, status: '' },
+    { date: '2026-08-18', value: 1, status: '' },
+  ];
+  const end270 = '2026-08-18';
+
+  // The habit's own detail page: `computeStats` already runs `firstStatedAnswer`
+  // (Site B) over these same rows, so this is the honest answer — credit begins
+  // at `2026-08-18` and the fixture reads almost exactly as "no evidence yet".
+  const own270 = computeStats(habit270, entries270, { end: end270 }).score;
+  assert.equal(own270, 0.051922);
+
+  // SUPPLIED and phantom — the shape SQL hands both routes: `firstAnswer`
+  // straight from `MIN(date) FILTER`, never filtered through `isRealDay`.
+  const supplied270 = computeCategoryStats(cats270,
+    [{ habit: habit270, entries: entries270, firstEntry: '2026-01-01',
+      firstAnswer: '2026-02-30' }],
+    { start: '2025-08-20', end: end270, granularity: 'month' }).categories[0];
+  assert.equal(supplied270.mean, own270);
+  assert.equal(supplied270.mean, 0.051922);
+  assert.equal(supplied270.unloggedExcluded, 0);
+  assert.equal(supplied270.members, 1);
+
+  // DERIVED — the key omitted, so `computeCategoryStats` runs `firstStatedAnswer`
+  // over the slice itself, which already refuses the phantom (Site B). Byte for
+  // byte the same reading as the supplied case, which is the whole claim: the
+  // two branches must agree about the same phantom row.
+  const derived270 = computeCategoryStats(cats270,
+    [{ habit: habit270, entries: entries270, firstEntry: '2026-01-01' }],
+    { start: '2025-08-20', end: end270, granularity: 'month' }).categories[0];
+  assert.equal(derived270.mean, supplied270.mean);
+
+  // And the number this closes: unguarded, `'2026-02-30'` normalises to
+  // `'2026-03-02'` — inside `[warmStart, end]`, so the re-clamp backstop never
+  // fires — and credit begins there instead of at `2026-08-18`, crediting over
+  // five months of silence nobody answered for. Measured on the unguarded code:
+  // `mean: 0.999884`, a near-perfect record for a habit with one real answer on
+  // its very last day. `0.051922` is not that number, which is the point.
+  assert.notEqual(supplied270.mean, 0.999884);
+});
+
+test('issue #270: creditAnchor itself must refuse a phantom firstAnswer, so /overview agrees with the habit\'s own page', () => {
+  // A second review round's finding: the test above fixed
+  // `computeCategoryStats`'s SUPPLIED branch (Site D), but `creditAnchor` — the
+  // function `/overview` calls DIRECTLY with its own raw `MIN(date) FILTER
+  // (WHERE status <> 'skip')` read, for `score`/`currentStreak` over its own
+  // 400-day slice — had no guard of its own. A phantom credit date normalises
+  // INSIDE the window far more often than it rolls out of it, so
+  // `windowStart`'s re-clamp backstop mostly does not fire, and the two
+  // surfaces disagreed about the identical rows: `/habits/:id/stats` (which
+  // runs `computeStats`, already Site-B-filtered) read the honest
+  // "no evidence yet" answer while `/overview`'s own path, going through this
+  // function, read a near-perfect record instead.
+  //
+  // Same shape as the test above, and the same fixture the review measured:
+  // at-most, target 2, resolved to `success`, a skip on day 1 and a
+  // PHANTOM-dated stated value five and a half months before the habit's only
+  // other row.
+  const habit270b = limit223({ id: 30 });
+  const entries270b = [
+    { date: '2026-01-01', value: 0, status: 'skip' },
+    { date: '2026-02-30', value: 1, status: '' },
+    { date: '2026-08-18', value: 1, status: '' },
+  ];
+  const end270b = '2026-08-18';
+
+  // The habit's own detail page — `computeStats`, which already runs
+  // `firstStatedAnswer` (Site B) over these same rows.
+  const detail270b = computeStats(habit270b, entries270b, { end: end270b });
+  assert.equal(detail270b.score, 0.051922);
+  assert.equal(detail270b.currentStreak, 1);
+
+  // `/overview`'s own path: `summaryStats` over the SAME rows (standing in for
+  // its own slice, since this fixture holds nothing outside it), with
+  // `creditFrom` computed exactly as both routes compute it — `creditAnchor`
+  // over the raw `MIN(date) FILTER` read, `'2026-02-30'` here.
+  const overview270b = summaryStats(habit270b, entries270b,
+    { end: end270b, creditFrom: creditAnchor('2026-02-30', end270b) });
+
+  // Before this fix: `creditAnchor('2026-02-30', end270b)` was `'2026-03-02'`
+  // (the phantom's own rollover, landing INSIDE the window so the re-clamp
+  // never fired), and `overview270b` read `{ score: 0.999884, currentStreak:
+  // 170 }` — a near-perfect record where the habit's own page read no
+  // evidence at all. The two surfaces now AGREE.
+  assert.equal(overview270b.score, 0.051922);
+  assert.equal(overview270b.currentStreak, 1);
+  assert.deepEqual(overview270b, { score: detail270b.score, currentStreak: detail270b.currentStreak });
 });
 
 test('issue #223: summaryStats takes a LIFETIME credit date, because /overview hands it a slice', () => {

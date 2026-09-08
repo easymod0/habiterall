@@ -16,7 +16,13 @@
 // name. Taking only the writer left the parser behind, which is the shape a
 // half-finished dedupe leaves — one storage-key builder per file that needed
 // one, and its inverse still local.
-import { fromISOLocal, iso as toISO } from './dates.js';
+//
+// `iso` is imported under its own name, not aliased to `toISO`: the two now
+// AGREE (`dates.js`'s `iso()` pads the year the same way `shared/src/stats.js`'s
+// `toISO` does, #272), and the alias is dropped so a reader here cannot
+// mistake this for that function — `shared/src` is not served to the browser,
+// so there is no way to import the other one from this file regardless.
+import { fromISOLocal, iso } from './dates.js';
 
 /**
  * Cell geometry per zoom level.
@@ -121,7 +127,7 @@ export function calendarWindow(endDate, weeks, weekStart = 'monday') {
   const start = new Date(lastCell);
   start.setDate(start.getDate() - (weeks * 7 - 1));
 
-  return { start: toISO(start), end: toISO(lastCell) };
+  return { start: iso(start), end: iso(lastCell) };
 }
 
 /**
