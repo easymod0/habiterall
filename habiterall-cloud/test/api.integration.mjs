@@ -562,9 +562,17 @@ const mkNotesHabit = (name) => fetch(`${overviewBase}/api/habits`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ name, type: 'numerical', unit: 'x' }),
 }).then((r) => r.json());
+// The body is read as text and parsed loosely on purpose: case 7 below is a
+// write that must not 500, and Express answers a 500 with an HTML error page —
+// so `r.json()` would reject and take the whole file down with a JSON syntax
+// error naming nothing, where `ck` can name the check that broke.
 const putNotes = (id, body) => fetch(`${overviewBase}/api/habits/${id}/entries/${noteDay}`, {
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-}).then(async (r) => ({ status: r.status, body: await r.json() }));
+}).then(async (r) => {
+  const text = await r.text();
+  try { return { status: r.status, body: JSON.parse(text) }; }
+  catch { return { status: r.status, body: text.slice(0, 200) }; }
+});
 
 // 2. PUT omitting the key preserves.
 const omitHabit224 = await mkNotesHabit('Notes omit 224');
@@ -609,7 +617,24 @@ ck('a skip preserves the stored note', skipRow?.notes === NOTE_224, JSON.stringi
 ck('...and the reply still reports the SKIP wire value',
   skipPut.body.value === 3, JSON.stringify(skipPut.body));
 
-for (const id of [omitHabit224.id, clearHabit224.id, echoHabit224.id, skipHabit224.id]) {
+// 7. The OTHER half of the same bound parameter, stated. Every case above
+//    seeds a note first, so what each of them ASSERTS is the conflict clause;
+//    none of them names a day with NO row, which is where the VALUES-side
+//    COALESCE has to turn a NULL note into '' or the insert cannot satisfy
+//    `notes NOT NULL`. It is also the ordinary case — a first answer on a
+//    brand-new day, which is every tap-to-complete.
+const noRowHabit224 = await mkNotesHabit('Notes no row 224');
+const noRowPut = await putNotes(noRowHabit224.id, { value: 2 });
+ck('a PUT omitting notes on a day with NO row succeeds and answers an empty note',
+  noRowPut.status === 200 && noRowPut.body.notes === '', JSON.stringify(noRowPut));
+const noRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [noRowHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('...and the fresh row stores an empty note',
+  noRow?.notes === '', JSON.stringify(noRow));
+
+for (const id of [omitHabit224.id, clearHabit224.id, echoHabit224.id, skipHabit224.id,
+  noRowHabit224.id]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
 

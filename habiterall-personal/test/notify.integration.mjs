@@ -525,6 +525,26 @@ try {
   ck('and the reply still reports the SKIP wire value',
     skipPut.body.value === 3, JSON.stringify(skipPut.body));
 
+  // 7. The OTHER half of the same bound parameter, stated. Every case above
+  //    seeds a note first, so what each of them ASSERTS is the conflict
+  //    clause; none of them names a day with NO row, which is where the
+  //    VALUES-side COALESCE has to turn a NULL note into '' or the insert
+  //    cannot satisfy `notes NOT NULL`. It is also the ordinary case — a
+  //    first answer on a brand-new day, which is every tap-to-complete.
+  const noRowHabit = await api('/api/habits', {
+    method: 'POST', body: JSON.stringify({ name: 'Notes no row' }),
+  });
+  const noRowId = noRowHabit.body.id;
+  const noRowPut = await api(`/api/habits/${noRowId}/entries/${day}`, {
+    method: 'PUT', body: JSON.stringify({ value: 2 }),
+  });
+  ck('a PUT omitting notes on a day with NO row succeeds and answers an empty note',
+    noRowPut.status === 200 && noRowPut.body.notes === '', JSON.stringify(noRowPut));
+  const afterNoRow = await api(`/api/habits/${noRowId}/entries`);
+  ck('and the fresh row stores an empty note',
+    afterNoRow.body.find((e) => e.date === day)?.notes === '',
+    JSON.stringify(afterNoRow.body.find((e) => e.date === day)));
+
   /* ---------- answering from an ntfy button ---------- */
   //
   // Reached over the real route (`NTFY_ANSWER_PATH`), not by calling
