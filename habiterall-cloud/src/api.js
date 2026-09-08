@@ -1524,12 +1524,80 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
  * the join carries it: `$6` is a parallel array, and a habit whose epoch moved
  * drops out on its own while the rest are stamped.
  *
+ * **`SKIP LOCKED` is why this statement never WAITS, and that is a separate
+ * property from the guard above.** The guard decides whether a stamp is still
+ * VALID. This decides whether the statement is willing to queue for the chance
+ * to write one, and the answer is no.
+ *
+ * A deadlock needs a wait-for CYCLE, so every party in it has to be waiting.
+ * There are only ever two parties here, and they are not equals. The clear in
+ * `withUserWrite` is MANDATORY — it is correctness, it is on every write, and
+ * it must take its row locks and hold them to the COMMIT. This is
+ * OPPORTUNISTIC: it is a cache stamp on a GET, and losing one costs exactly one
+ * recomputation on the next load. So the two do not need to agree on a row
+ * ORDER, which was the shape of the residual after the clear was reordered —
+ * this statement walks `ORDER BY position, id` while an un-narrowed clear
+ * seq-scans in ctid order, and where those disagreed the two deadlocked, with
+ * `reorder x settings` the worst case because `reorder` permutes `position`
+ * while this reads it. Instead the DISCARDABLE party declines to wait at all,
+ * and a party that never waits cannot be in a cycle.
+ *
+ * The `candidates` CTE takes the row locks with `SKIP LOCKED`, so any habit a
+ * concurrent write already holds is dropped from the statement rather than
+ * queued behind. The outer UPDATE then only ever touches rows this transaction
+ * already holds at sufficient strength, so it does not wait either.
+ *
+ * **BOTH halves are load-bearing, and the first draft of this comment claimed
+ * otherwise.** It said `SKIP LOCKED` was doing all the work and the `ORDER BY
+ * id` was kept only for determinism. The mutation — remove `SKIP LOCKED`, keep
+ * the CTE and the sort — measured that wrong, and they turn out to fix
+ * DIFFERENT things:
+ *
+ *  - **`ORDER BY id` is what removed the write-back-versus-clear cycle.**
+ *    Without the CTE this statement locked rows in the order `buildOverview`
+ *    handed them over, which is `ORDER BY position, id` — and `position` is the
+ *    column `POST /habits/reorder` exists to permute. So the write-back's lock
+ *    order was being actively scrambled by another route while a clear
+ *    seq-scanned in ctid order. Sorting by `id` decouples the order from a
+ *    column anybody can reorder. Measured: `catDel x habitPutCat` 4 deadlocks
+ *    before, 0 with the sort alone.
+ *  - **`SKIP LOCKED` is what removed the WAITING**, and the waiting is most of
+ *    the cost. With the sort but no `SKIP LOCKED`, `reorder x settings`
+ *    completed 16 operations in 8 seconds against 12,505 with it — a ~780x
+ *    difference — and its deadlocks were 9 against 3.
+ *
+ * Neither half is decoration, and a future reader removing the sort because
+ * "nothing waits, so order cannot matter" would be repeating this comment's own
+ * first mistake.
+ *
+ * `FOR NO KEY UPDATE`, not `FOR UPDATE`, and the difference is the skip rate.
+ * `FOR UPDATE` conflicts with `FOR KEY SHARE`, which is what the `entries`
+ * foreign key takes on a habit row — so it would skip a habit merely because
+ * somebody was writing an ENTRY against it, which is the commonest write there
+ * is. `FOR NO KEY UPDATE` is the strength an UPDATE that changes no key column
+ * takes anyway, so it conflicts with exactly the writers whose row this would
+ * be fighting over and with none of the readers.
+ *
+ * One cost is real and is accepted: a candidate whose epoch HAS moved is locked
+ * by the CTE and then rejected by the outer guard, so this briefly holds a row
+ * lock it makes no use of. It cannot deadlock on it — it never waits — and the
+ * transaction is a dashboard read that ends immediately. The alternative,
+ * folding the epoch into the CTE, would put the validity test back on the
+ * pre-lock side of a `LockRows` node, which is the shape this whole guard
+ * exists to avoid.
+ *
  * A race is not deterministically reachable through the HTTP surface, so the
  * guard would be untestable inside `buildOverview`. Exported, it can be called
  * with a deliberately stale epoch, which is what
  * `test/summary-cache.integration.mjs` does — and it can be raced for real
  * against a forced interleaving, which is what
  * `test/summary-race.integration.mjs` does.
+ *
+ * @returns {Promise<number>} how many habit rows were stamped — which is now
+ *   at most `rows.length` rather than exactly the ones that passed the guard: a
+ *   row a concurrent write held was SKIPPED, and is simply left unstamped for
+ *   the next load to recompute. A caller cannot tell the two apart from this
+ *   number, and nothing needs to.
  *
  * @param {import('pg').PoolClient} db a transaction already scoped to `userId`
  * @param {string} summaryEnd the day the pairs were computed FOR — the stamp
@@ -1539,18 +1607,25 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
  *   is a JS number). An absent one arrives as NULL, which equals nothing, so a
  *   caller that forgot it writes no row at all — the safe direction, and a
  *   cache that is never filled rather than one that is filled wrongly
- * @returns {Promise<number>} how many habit rows were stamped
  */
 export async function writeBackSummaries(db, userId, summaryEnd, rows) {
   if (!rows.length) return 0;
   const result = await db.query(
-    `UPDATE habits h
+    `WITH candidates AS (
+        SELECT id FROM habits
+         WHERE user_id = $1 AND id = ANY($3::bigint[])
+         ORDER BY id
+           FOR NO KEY UPDATE SKIP LOCKED
+     )
+     UPDATE habits h
         SET best_streak = v.best_streak,
             total_completed = v.total_completed,
             summary_asof = $2
        FROM (SELECT * FROM unnest($3::bigint[], $4::int[], $5::int[], $6::bigint[])
-               AS t(id, best_streak, total_completed, summary_epoch)) v
+               AS t(id, best_streak, total_completed, summary_epoch)) v,
+            candidates c
       WHERE h.id = v.id
+        AND h.id = c.id
         AND h.user_id = $1
         AND h.summary_epoch = v.summary_epoch`,
     [userId, summaryEnd, rows.map((r) => r.id), rows.map((r) => r.best_streak),

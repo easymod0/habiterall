@@ -35,28 +35,36 @@
  * **So the rule this file exists to keep is: a concurrency claim needs a forced
  * interleaving, and a forced interleaving needs PROOF that it happened.** Every
  * racing block below stalls one transaction at a chosen point with an
- * `pg_advisory_xact_lock` a third session holds, then reads
- * `pg_stat_activity` / `pg_locks` and THROWS BY NAME if the other transaction
- * is not actually queued behind it. A harness that silently ran sequentially
- * would pass every assertion here and teach nothing — that is precisely the
- * shape of the suite these defects shipped under.
+ * `pg_advisory_xact_lock` a third session holds. A harness that silently ran
+ * sequentially would pass every assertion here and teach nothing — that is
+ * precisely the shape of the suite these defects shipped under.
  *
- * Six things only this file can see:
+ * **The proof mechanism is `lockProbe`, and it is not the obvious one.** The
+ * first version of this file proved an interleaving by requiring the write-back
+ * to be QUEUED behind the clear, read out of `pg_stat_activity`. That is no
+ * longer available, because the write-back now declines to queue at all: it
+ * takes its rows `FOR NO KEY UPDATE SKIP LOCKED`, so a habit somebody else is
+ * writing is dropped from the statement instead of waited for. The lock
+ * therefore has to be established independently — by asking, from a third
+ * session, whether the row can be locked — and "the write-back did NOT block"
+ * becomes an ASSERTION rather than the proof.
  *
- *  1. **R2 — the clear takes a row lock even when the stamp is ALREADY NULL.**
- *     The direct behavioural pin on dropping `AND summary_asof IS NOT NULL`,
- *     and the case a reviewer restoring that predicate as an optimisation would
- *     break. It is asserted as a BLOCK: the write-back must queue behind the
- *     clear. Without the row write there is no lock, nothing blocks, and the
- *     stale pair goes back on the row.
- *  2. **R1 — EPQ re-checks the guard.** Stamp stale but not null, so the clear
- *     matched under the old predicate too. The write-back blocks, the writer
- *     commits, the statement resumes — and must now stamp NOTHING. This is the
- *     case the InitPlan could not survive.
- *  3. **The SEQUENTIAL control.** The same refusal with no race at all, which
- *     is the case the old guard passed. It is here so that a fix which only
- *     works under contention, or a guard accidentally deleted, both fail
- *     somewhere.
+ * Seven things only this file can see:
+ *
+ *  1. **R2 — the clear takes a row lock even when the stamp is ALREADY NULL,
+ *     and the write-back skips rather than waits.** The row write is the direct
+ *     pin on dropping `AND summary_asof IS NOT NULL`: without it there is no
+ *     lock, `lockProbe` says so, and the stale pair goes back on the row. The
+ *     write-back returning while the writer is still open is the pin on
+ *     `SKIP LOCKED`.
+ *  2. **The skip is PER ROW.** One `/overview` stamps every habit it recomputed
+ *     in one statement, so all-or-nothing would mean a single tap costing the
+ *     whole account its write-back on every concurrent load. Two habits, one
+ *     held and one free, in one call: the free one is stamped and the held one
+ *     is not.
+ *  3. **The SEQUENTIAL control.** The guard refusing with no contention at all,
+ *     which is the case the old `data_version` guard passed and the reason it
+ *     shipped. It is here so that a guard which is simply deleted fails too.
  *  4. **The LEGITIMATE control.** A write-back with nothing racing it must
  *     stamp its row. Without this every assertion above is satisfied by a
  *     `writeBackSummaries` hardcoded to `return 0` — a cache that never fills,
@@ -71,11 +79,17 @@
  *     transaction HOLDS is not.
  *  6. **The user-visible consequence, over the real route.** Everything above
  *     is row counts and lock modes. This is `GET /overview` answering with the
- *     TRUE completion count after the race, which is the only thing anyone
- *     loses.
+ *     TRUE completion count after the race, and answering it WITHOUT waiting
+ *     for the tap — which is the only thing anyone loses either way.
+ *  7. **A skipped stamp is RECOVERED.** `SKIP LOCKED` trades a wait for a miss,
+ *     and the whole trade rests on the miss being temporary. Contend the row,
+ *     watch the stamp not appear, release, load again through the real route,
+ *     and require the stamp and the true figure. If this were false the cache
+ *     would decay under write pressure and never refill, which is a worse
+ *     defect than the deadlock it replaced.
  *
  * Runs against a database the cloud migrations have been applied to, and boots
- * a real server for block 6.
+ * a real server for blocks 5, 6 and 7.
  *
  *   DATABASE_URL=... ADMIN_URL=... node test/summary-race.integration.mjs
  */
@@ -131,6 +145,8 @@ const admin = new pg.Client({ connectionString: process.env.ADMIN_URL });
 const watch = new pg.Client({ connectionString: process.env.ADMIN_URL });
 /** The session that holds `STALL_KEY`. Nothing else runs on it. */
 const holder = new pg.Client({ connectionString: process.env.ADMIN_URL });
+/** Asks whether a row is locked, without joining any queue. See `lockProbe`. */
+const probe = new pg.Client({ connectionString: process.env.ADMIN_URL });
 
 let fails = 0;
 const ck = (label, cond, extra = '') => {
@@ -258,6 +274,33 @@ async function requireBlocked(what, { pid, like, by } = {}) {
     + 'assertions would have been vacuous.');
 }
 
+/**
+ * Is this habit row currently row-locked by somebody else?
+ *
+ * A row lock does not appear in `pg_locks` — a waiter shows up as an ungranted
+ * `transactionid ShareLock`, which names no relation and only exists once
+ * something is already queued. Since the whole point of the write-back is that
+ * it never queues, "the write-back blocked" is no longer available as the proof
+ * that a lock existed, and something else has to establish it.
+ *
+ * `FOR NO KEY UPDATE SKIP LOCKED` answers exactly that question and answers it
+ * instantly: zero rows back means the row was held. It is also
+ * non-perturbing in the case that matters — when the row IS locked it skips,
+ * so it takes no lock of its own and cannot be the reason a later write-back
+ * skips. The transaction is rolled back either way, for the case where the row
+ * was free and this did lock it.
+ */
+const lockProbe = async (probe, id) => {
+  await probe.query('BEGIN');
+  try {
+    const { rows } = await probe.query(
+      `SELECT id FROM habits WHERE id = $1 FOR NO KEY UPDATE SKIP LOCKED`, [id]);
+    return rows.length === 0;
+  } finally {
+    await probe.query('ROLLBACK').catch(() => {});
+  }
+};
+
 /** Nothing at all is waiting on a lock — the other half of the proof. */
 async function requireNotBlocked(what, { like }) {
   await idle(400);
@@ -287,6 +330,7 @@ try {
   await admin.connect();
   await watch.connect();
   await holder.connect();
+  await probe.connect();
 
   const today = dayIn(ZONE);
 
@@ -435,78 +479,99 @@ try {
     (db) => db.query(`SELECT pg_advisory_xact_lock($1)`, [STALL_KEY]),
     { habits: [h2] });
 
+  // THE PROOF, and it can no longer be "the write-back blocked": `SKIP LOCKED`
+  // is what stops it queueing, so the lock has to be established independently
+  // or every assertion below is about an interleaving that never formed.
+  ck('THE PROOF: the clear holds a row lock on the habit even though the stamp '
+    + 'was already NULL — so the clear really did write the row',
+    await lockProbe(probe, h2), `habit=${h2}`);
+
   // The write-back, on its own connection, at the epoch the reader saw.
-  let back2 = -1;
   const back2Promise = withUser(user, (db) =>
     writeBackSummaries(db, user, today,
       [{ id: h2, best_streak: 99, total_completed: 88,
-         summary_epoch: read2.summary_epoch }])
-  ).then((n) => { back2 = n; });
-  back2Promise.catch(() => {});
-
-  const ev2 = await requireBlocked('the write-back, behind a clear over a NULL stamp',
-    { like: '%summary_asof = $2%', by: w2.pid });
-  ck('THE PROOF: the write-back is queued behind the clear even though the '
-    + 'stamp was already NULL',
-    (ev2.blockers ?? []).includes(w2.pid),
-    `waited=${ev2.waitedMs}ms blockers=${JSON.stringify(ev2.blockers)} `
-    + `ungranted=${JSON.stringify(ev2.ungranted)}`);
+         summary_epoch: read2.summary_epoch }]));
+  // ...and it must come back WHILE the writer is still open. Under the previous
+  // design this queued behind the clear; the whole point of `SKIP LOCKED` is
+  // that the discardable party declines to wait, so this now resolves without
+  // the writer having committed anything.
+  await requireNotBlocked('the write-back over a locked row',
+    { like: '%summary_asof = $2%' });
+  const back2 = await back2Promise;
+  const during2 = await rowOf(h2);
+  ck('THE ASSERTION: it does not queue behind the clear — it returns while the '
+    + 'writer is STILL OPEN', true, `rows=${back2}`);
+  ck('...stamping nothing, because the row it wanted was skipped', back2 === 0,
+    `rows=${back2}`);
+  ck('...and leaving the row exactly as it found it — a skip is not a partial '
+    + 'write', during2.summary_asof === null
+      && during2.best_streak === PLANTED_BEST
+      && during2.total_completed === PLANTED_TOTAL,
+    JSON.stringify(during2));
 
   await w2.release();
-  await back2Promise;
   const after2 = await rowOf(h2);
-  ck('THE ASSERTION: it stamps nothing after the writer commits', back2 === 0,
-    `rows=${back2}`);
-  ck('...and leaves the row unstamped, with the epoch the clear advanced it to',
+  ck('...and the writer\'s own clear still committed, epoch advanced',
     after2.summary_asof === null && after2.summary_epoch === read2.summary_epoch + 1,
     JSON.stringify(after2));
 
-  /* ============ 2. R1: EvalPlanQual re-checks the guard =================== */
+  /* ============ 2. the skip is PER ROW, not per statement ================= */
   //
-  // The stamp is stale but NOT NULL here, so the clear matched under the old
-  // predicate too and the write-back really did block. What it could not do was
-  // survive resuming: the account-level guard was an InitPlan behind a One-Time
-  // Filter, and EPQ cannot re-run one. This is the case that re-stamped.
+  // One `/overview` stamps every habit it recomputed in ONE statement, so the
+  // question `SKIP LOCKED` raises is what happens to the rest when one row is
+  // contended. All-or-nothing would be a real cost: a single tap on a single
+  // habit would cost the whole account its write-back on every concurrent load,
+  // and under sustained writing the cache would never fill.
+  //
+  // Two habits, one held by a concurrent narrowed clear and one free, in one
+  // call: the free one must be stamped and the held one skipped. This is also
+  // the case that fails if the CTE is written to lock the whole account rather
+  // than the ids handed in.
 
-  console.log('\n--- 2. R1: the write-back blocks, resumes, and stamps nothing ---');
+  console.log('\n--- 2. the skip is per ROW: one contended habit, one free ---');
 
-  const h1 = await makeHabit('race r1', 5);
+  const h1 = await makeHabit('race batch held', 5);
+  const h1b = await makeHabit('race batch free', 3);
   await admin.query(
     `UPDATE habits SET summary_asof = $2, best_streak = $3, total_completed = $4
-      WHERE id = $1`, [h1, STALE_STAMP, PLANTED_BEST, PLANTED_TOTAL]);
+      WHERE id = ANY($1)`, [[h1, h1b], STALE_STAMP, PLANTED_BEST, PLANTED_TOTAL]);
   const read1 = await rowOf(h1);
-  ck('control: the reader\'s row carries a stale stamp the clear will match',
-    read1.summary_asof === STALE_STAMP, JSON.stringify(read1));
+  const read1b = await rowOf(h1b);
+  ck('control: both rows carry a stale stamp the clear will match',
+    read1.summary_asof === STALE_STAMP && read1b.summary_asof === STALE_STAMP,
+    `${JSON.stringify(read1)} ${JSON.stringify(read1b)}`);
 
+  // Narrowed to h1 alone, so h1b is genuinely uncontended.
   const w1 = await stalledWrite(
     (db) => db.query(`SELECT pg_advisory_xact_lock($1)`, [STALL_KEY]),
     { habits: [h1] });
 
-  let back1 = -1;
-  const back1Promise = withUser(user, (db) =>
-    writeBackSummaries(db, user, today,
-      [{ id: h1, best_streak: 99, total_completed: 88,
-         summary_epoch: read1.summary_epoch }])
-  ).then((n) => { back1 = n; });
-  back1Promise.catch(() => {});
+  ck('THE PROOF: h1 is row-locked and h1b is not',
+    (await lockProbe(probe, h1)) && !(await lockProbe(probe, h1b)),
+    `h1=${h1} h1b=${h1b}`);
 
-  const ev1 = await requireBlocked('the write-back, behind a clear over a stale stamp',
-    { like: '%summary_asof = $2%', by: w1.pid });
-  ck('THE PROOF: the write-back is queued behind the clear, so it will resume '
-    + 'through EvalPlanQual',
-    (ev1.blockers ?? []).includes(w1.pid),
-    `waited=${ev1.waitedMs}ms blockers=${JSON.stringify(ev1.blockers)}`);
+  const back1Promise = withUser(user, (db) =>
+    writeBackSummaries(db, user, today, [
+      { id: h1, best_streak: 99, total_completed: 88,
+        summary_epoch: read1.summary_epoch },
+      { id: h1b, best_streak: 77, total_completed: 66,
+        summary_epoch: read1b.summary_epoch },
+    ]));
+  await requireNotBlocked('the two-habit write-back',
+    { like: '%summary_asof = $2%' });
+  const back1 = await back1Promise;
+  const held1 = await rowOf(h1);
+  const free1 = await rowOf(h1b);
+  ck('THE ASSERTION: exactly one row is stamped — the uncontended one',
+    back1 === 1, `rows=${back1}`);
+  ck('...the free habit got its pair',
+    free1.summary_asof === today && free1.best_streak === 77
+      && free1.total_completed === 66, JSON.stringify(free1));
+  ck('...and the held habit was left alone, not half-written',
+    held1.summary_asof === STALE_STAMP && held1.best_streak === PLANTED_BEST
+      && held1.total_completed === PLANTED_TOTAL, JSON.stringify(held1));
 
   await w1.release();
-  await back1Promise;
-  const after1 = await rowOf(h1);
-  ck('THE ASSERTION: EPQ re-checks the epoch and the resumed statement stamps '
-    + 'nothing', back1 === 0, `rows=${back1}`);
-  ck('...and no pre-write figure is left stamped as of today',
-    after1.summary_asof === null
-      && after1.best_streak === PLANTED_BEST
-      && after1.total_completed === PLANTED_TOTAL,
-    JSON.stringify(after1));
 
   /* ============ 3. the SEQUENTIAL control ================================= */
   //
@@ -673,14 +738,20 @@ try {
 
   // The clear has already run, so this load finds the habit stale, recomputes
   // it from data the uncommitted tap is not in, and tries to stamp it.
+  ck('THE PROOF: the tap holds the habit row while the dashboard loads',
+    await lockProbe(probe, h6), `habit=${h6}`);
   const overviewPromise = prime();
-  const ev6 = await requireBlocked('the /overview write-back, behind the tap\'s clear',
-    { like: '%summary_asof = $2%', by: w6.pid });
-  ck('THE PROOF: a GET\'s write-back really did queue behind the tap',
-    (ev6.blockers ?? []).includes(w6.pid), `waited=${ev6.waitedMs}ms`);
+  // The load must COMPLETE while the tap is still open. It used to queue behind
+  // the tap's clear; now it skips the row and answers. A dashboard that waits
+  // on somebody's tap is the other half of what `SKIP LOCKED` is buying.
+  await requireNotBlocked('the /overview write-back',
+    { like: '%summary_asof = $2%' });
+  const servedDuring = await overviewPromise;
+  ck('...and the dashboard answered without waiting for the tap',
+    Boolean(servedDuring.habits.find((h) => h.id === h6)),
+    `habits=${servedDuring.habits.length}`);
 
   await w6.release();
-  await overviewPromise;
 
   const truth = Number((await admin.query(
     `SELECT count(*)::text AS n FROM entries WHERE habit_id = $1 AND value > 0`,
@@ -694,12 +765,57 @@ try {
     !(after6.summary_asof === today && after6.total_completed !== truth),
     JSON.stringify(after6));
 
+  /* ============ 7. a skipped stamp is RECOVERED, not lost ================= */
+  //
+  // `SKIP LOCKED` trades a wait for a miss, and the whole trade rests on the
+  // miss being temporary: a skipped row is simply left unstamped, so the next
+  // load that finds no contention recomputes it and stamps it. If that were not
+  // true the cache would decay under write pressure and never refill, which
+  // would be a worse defect than the deadlock this replaced.
+  //
+  // Proven rather than reasoned: contend the row, watch the stamp not appear,
+  // release, load again through the REAL route, and require the stamp AND the
+  // correct figures. The second load is what the argument depends on and it is
+  // the half that no amount of reading the first one can establish.
+
+  console.log('\n--- 7. a skipped stamp is recovered by the next quiet load ---');
+
+  const h7 = await makeHabit('race recovered', 4);
+  await admin.query(`UPDATE habits SET summary_asof = NULL WHERE id = $1`, [h7]);
+
+  const w7 = await stalledWrite(
+    (db) => db.query(`SELECT pg_advisory_xact_lock($1)`, [STALL_KEY]),
+    { habits: [h7] });
+  ck('control: the row is held while the contended load runs',
+    await lockProbe(probe, h7), `habit=${h7}`);
+  await prime();
+  const skipped7 = await rowOf(h7);
+  ck('the contended load leaves the row UNSTAMPED', skipped7.summary_asof === null,
+    JSON.stringify(skipped7));
+
+  await w7.release();
+  ck('control: the row is free again once the writer committed',
+    !(await lockProbe(probe, h7)), `habit=${h7}`);
+
+  const truth7 = Number((await admin.query(
+    `SELECT count(*)::text AS n FROM entries WHERE habit_id = $1 AND value > 0`,
+    [h7])).rows[0].n);
+  const served7 = (await prime()).habits.find((h) => h.id === h7);
+  const after7 = await rowOf(h7);
+  ck('THE ASSERTION: the next uncontended load stamps it, with the true figure',
+    after7.summary_asof === today && after7.total_completed === truth7,
+    `${JSON.stringify(after7)} truth=${truth7}`);
+  ck('...and the payload agrees with the row it just stored',
+    served7.totalCompleted === truth7,
+    `served=${served7.totalCompleted} truth=${truth7}`);
+
   /* ---------- clean up after ourselves ---------- */
   await admin.query(`DELETE FROM users WHERE id = $1`, [user]);
 } finally {
   for (const c of cleanups) await c().catch(() => {});
   child.kill('SIGKILL');
   srv.close();
+  await probe.end().catch(() => {});
   await holder.end().catch(() => {});
   await watch.end().catch(() => {});
   await admin.end().catch(() => {});
