@@ -1018,15 +1018,104 @@ loads. That is a real regression in that scenario and it is recorded here rather
 than smoothed over: "one lock order, everywhere" is achieved between the two
 TABLES and is not yet achieved between the two multi-row statements on `habits`.
 
-The remedy is a decision, not a detail, which is why it is not in this change.
-Sorting the write-back's array by `id` makes its order deterministic but does not
-make it agree with a seq scan's. The forms that would actually guarantee
-agreement each cost something: a `SELECT id ... ORDER BY id FOR UPDATE`
-pre-lock in the clear (the documented idiom, one extra statement and a stronger
-lock mode than the clear needs), or an index on `habits (user_id, id)` to make
-the clear's order id-ascending (a planner preference, not a guarantee, on a
-table this small). No blanket `40P01` retry was added either; that is its own
-idempotency argument and it would hide this rather than answer it.
+### The remedy: the DISCARDABLE party declines to wait
+
+Two remedies were considered first and both were rejected, for reasons worth
+keeping. A `SELECT id ... ORDER BY id FOR UPDATE` pre-lock inside the clear is
+the documented idiom, and it puts a new statement on the write path — on every
+tap — to fix a problem a dashboard load causes. An index on
+`habits (user_id, id)` is write amplification on every habit write, and it buys
+a planner PREFERENCE rather than a guarantee.
+
+**The reframe that changes the design: a deadlock needs a wait-for CYCLE, so
+every party has to be waiting, and these two parties are not equals.** The clear
+is MANDATORY — correctness, on every write, and it must hold its locks to the
+COMMIT. The write-back is OPPORTUNISTIC — a cache stamp on a GET, and losing one
+costs exactly one recomputation. So the two never needed to agree on a row
+order. One of them needed to never wait, and it should be the discardable one.
+
+```sql
+WITH candidates AS (
+    SELECT id FROM habits
+     WHERE user_id = $1 AND id = ANY($3::bigint[])
+     ORDER BY id
+       FOR NO KEY UPDATE SKIP LOCKED
+)
+UPDATE habits h SET ... FROM (unnest(...)) v, candidates c
+ WHERE h.id = v.id AND h.id = c.id AND h.user_id = $1
+   AND h.summary_epoch = v.summary_epoch
+```
+
+One statement, no extra round trip, and nothing added to any mutating route. The
+CTE takes the row locks and drops anything already held; the outer UPDATE then
+only touches rows this transaction already holds, so it does not wait either.
+`FOR NO KEY UPDATE` rather than `FOR UPDATE` because the latter conflicts with
+the `FOR KEY SHARE` an `entries` foreign key takes, which would skip a habit
+merely because somebody was writing an entry against it.
+
+**Both halves are load-bearing, and the first version of this section said
+otherwise.** It claimed `SKIP LOCKED` did all the work and the sort was
+decoration. The mutation — remove `SKIP LOCKED`, keep the CTE and the sort —
+measured that wrong, and they fix different things. `ORDER BY id` is what
+removed the write-back-versus-clear cycle: without the CTE this statement locked
+in `ORDER BY position, id`, and `position` is the column `reorder` exists to
+permute, so its lock order was being actively scrambled by another route.
+`SKIP LOCKED` is what removed the WAITING, and the waiting was most of the cost.
+
+| pair | before any of this | ordering + narrowing | **+ `SKIP LOCKED`** | sort but NO `SKIP LOCKED` |
+|---|---|---|---|---|
+| `settings x tap` | 7 | 0 | **0** (ok=12,676) | 0 (ok=6,634) |
+| `tap x habitDel` | 8 | 0 | **0** | 0 |
+| `habitDel x habitDel` | 5 | 0 | **0** | 0 |
+| `catDel x habitPutCat` | 8 (ok=84) | 4 (ok=3,825) | **0** (ok=10,832) | 0 (ok=6,518) |
+| `reorder x writeback` | 0 | 0 | **0** (ok=15,326) | 0 |
+| `reorder x settings` | 2 (ok=9,729) | 8 (ok=28) | **3** (ok=12,505) | 9 (ok=16) |
+
+Five of six pairs reach zero, and four of them are now FASTER than the pre-#301
+control that had no clear at all. `reorder x settings` recovers from 28
+completed operations to 12,505 — a ~450x recovery — and from 8 deadlocks to 3.
+
+**It is not zero, and the three that remain are a different cycle.**
+`writeBackSummaries` is absent from every one of them: both parties are now the
+clear itself, one narrowed (`reorder`) and one not (`settings`). Plans confirm
+why — BOTH multi-row clears seq-scan, so both lock in ctid order, and ctid order
+is not stable in a table being HOT-updated: two seq scans started at different
+moments see different line-pointer layouts. Postgres agrees, naming
+`while rechecking updated tuple (143,12)` in the deadlock context. `SKIP LOCKED`
+cannot help here, because NEITHER party is discardable — both are mandatory
+invalidations — and an `ORDER BY` cannot be had from the clear's shape without
+one of the two remedies rejected above.
+
+So the honest statement is: this removes every deadlock in which a dashboard
+load is a party, and leaves one in which two concurrent multi-row-clearing
+WRITES on the same account are both parties. That needs one user reordering
+habits while changing a setting, on one account, concurrently. No blanket
+`40P01` retry was added; that is its own idempotency argument and it would hide
+this rather than answer it.
+
+### What `SKIP LOCKED` costs, measured
+
+A skipped stamp is a cache miss, so the trade is only sound if misses are
+temporary and coverage stays high. Measured over 20 s on one account with 20
+habits, sampling the fraction of habits carrying a live stamp every 250 ms:
+
+| load | skipped by the row lock | refused by the epoch guard | steady coverage (2nd half) | min | recovery |
+|---|---|---|---|---|---|
+| 1 tapper, 2 loaders, 100 ms think (~10 taps/s) | 27.1% | 0.0% | **97.0%** | 95.0% | FULL |
+| 2 tappers, 4 loaders, no think (~790 taps/s) | 68.0% | 1.0% | **91.5%** | 85.0% | FULL |
+
+The per-attempt skip rate is high and is the wrong number to read. What matters
+is coverage, and it holds at 97% under a load already an order of magnitude
+heavier than any real account, and at 91.5% under a synthetic 790 taps per
+second on a single user. The floor is 85%, never zero, and one quiet load
+restores 20/20 in both configurations — which is the property block 7 of
+`test:summaryrace` pins rather than assumes.
+
+**No account goes persistently unstamped.** The habit that stays unstamped under
+load is the one being WRITTEN, which a write invalidates anyway; a row only
+needs one load to land while it is unheld, and write transactions are short.
+There is no starvation mechanism, and the measured floor is consistent with
+that.
 
 `reorder x reorder` is separately PRE-EXISTING — two concurrent reorders lock
 the same rows in client-supplied orders and deadlock with or without any of

@@ -271,10 +271,13 @@ each of which has cost a release:
   hold under a race at all, and a lock-order inversion in the same change turned
   a user's tap into an unhandled 500. Force the interleaving with explicit
   transactions on separate connections and a stall something else holds, and
-  then **prove from `pg_stat_activity` that it formed** — a harness that
-  silently ran sequentially passes every assertion and teaches nothing. That is
-  what `test:summaryrace` is, beside rather than instead of the sequential
-  inventory.
+  then **prove it formed** — a harness that silently ran sequentially passes
+  every assertion and teaches nothing. That is what `test:summaryrace` is,
+  beside rather than instead of the sequential inventory. Note what the proof
+  cannot be: "the other statement blocked" stops working the moment the code
+  under test is allowed not to block, so that suite establishes the lock from a
+  third session (`FOR NO KEY UPDATE SKIP LOCKED` returning no row) and asserts
+  the non-blocking separately.
 
 **Two write paths in one edition must take their locks in ONE order.** Cloud's
 mutating paths all reach `users` last through the `data_version` bump, and
