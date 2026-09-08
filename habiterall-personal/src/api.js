@@ -932,6 +932,25 @@ api.get('/overview', (req, res) => {
   // interleave a write between them. That holds only as long as nothing here
   // `await`s between the derivation and the stamp, so this route stays
   // deliberately synchronous throughout.
+  //
+  // **Cloud's guard has since been rebuilt on a per-habit `summary_epoch`
+  // (migration 019) and personal still gets NEITHER column nor counter, on
+  // purpose.** The account-level `data_version` predicate cloud shipped first
+  // could not hold — an InitPlan behind a One-Time Filter, which EvalPlanQual
+  // cannot re-run — and cloud's clear took no row lock at all when the stamp
+  // was already NULL, so a dashboard load re-stamped pre-write figures and
+  // served them until the day rolled over. **Neither interleaving is
+  // reachable here**, and not because SQLite is safer: because there is no
+  // second reader of this database to interleave WITH. One process, one
+  // `DatabaseSync` handle, and a write path that cannot be suspended
+  // mid-statement — so there is no moment between reading `summary_asof` and
+  // writing it back at which another transaction could commit, and therefore
+  // no epoch for a guard to compare. Mirroring the column would add a write to
+  // every invalidation, a join to every write-back, and a schema migration, to
+  // guard against an interleaving this edition has no way to produce. The
+  // condition to re-open this is named above and is the same one: the first
+  // `await` between the reads and this loop, or a second process opening the
+  // same file.
   for (const r of recomputed) {
     q.writeBackSummary.run(r.best_streak, r.total_completed, summaryEnd, r.id);
   }
