@@ -128,8 +128,17 @@ try {
 
   /**
    * The calendar's own account of itself: what it wrote, and what that paints
-   * as right now. `marker` is stamped on a node so a redraw can be told from a
-   * recolour — a rebuilt grid loses it.
+   * as right now. `marked` is a marker stamped on the nodes so a redraw can be
+   * told from a recolour — a rebuilt grid draws fresh nodes and loses it.
+   *
+   * **The probe only READS the marker.** It used to stamp one too, as
+   * `one.dataset.marker = one.dataset.marker || 'stamped'`, and then return
+   * what it had just written — which is `'stamped'` whether the node survived
+   * the theme press or was replaced outright, so the assertion below could not
+   * fail. `stampCells` is the one writer now, called once before the press,
+   * and the read is a bare `?? null` (never `undefined`: a key holding it is
+   * dropped crossing CDP's `returnByValue`, so the assertion would compare
+   * against a missing property rather than against a marker that is gone).
    */
   const look = () => ev(`(() => {
     const cells = [...document.querySelectorAll('.cal-cell')];
@@ -137,16 +146,30 @@ try {
     for (const c of cells) { const f = c.getAttribute('fill'); counts[f] = (counts[f] || 0) + 1; }
     const [attr] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
     const one = cells.find((c) => c.getAttribute('fill') === attr);
-    one.dataset.marker = one.dataset.marker || 'stamped';
     return {
       theme: document.documentElement.dataset.theme,
       attr,
       painted: getComputedStyle(one).fill,
       shouldBe: getComputedStyle(document.documentElement)
         .getPropertyValue('--grid-empty').trim(),
-      marked: one.dataset.marker,
+      marked: one.dataset.marker ?? null,
       cells: cells.length,
     };
+  })()`);
+
+  /**
+   * Stamp EVERY cell, rather than the one `look()` happens to pick.
+   *
+   * `look()` picks the first cell carrying the commonest `fill`, which is a
+   * choice made afresh on each call — so stamping only that node would tie
+   * the check to the two calls agreeing about which cell that is. Marking the
+   * whole grid needs no such agreement: after a rebuild NO cell carries the
+   * marker, whichever one the second probe reaches for.
+   */
+  const stampCells = () => ev(`(() => {
+    const cells = [...document.querySelectorAll('.cal-cell')];
+    for (const c of cells) c.dataset.marker = 'stamped';
+    return cells.length;
   })()`);
 
   // From a KNOWN state, and under a KNOWN device preference.
@@ -172,8 +195,17 @@ try {
   })()`);
   await sleep(400);
 
+  // Stamped BEFORE the first probe, so `before.marked` says the marker is
+  // readable where the second probe will look for it. Without that half the
+  // post-press read is unfalsifiable in the other direction: a marker nothing
+  // ever wrote is absent after the press too, and the check would be failing
+  // for a reason that has nothing to do with a re-render.
+  const stampedCells = await stampCells();
   const before = await look();
   ck('the calendar has cells to inspect', before.cells > 0, JSON.stringify(before));
+  ck('every cell is marked before the theme press',
+    stampedCells > 0 && before.marked === 'stamped',
+    `${stampedCells} cells, marker=${before.marked}`);
   ck('an unrecorded day defers to the theme rather than naming a colour',
     before.attr === 'var(--grid-empty)', `fill=${before.attr}`);
   ck('and it paints as something', /rgb|color\(/.test(before.painted), before.painted);
@@ -334,10 +366,15 @@ try {
    * `--surface`, the same relationship `.category-manage`'s scrolling panel
    * has to the dialog around it — so `--surface-2` is the variable this
    * panel's colour can actually be judged against.
+   *
+   * `marked` is read and never written here, for the reason `look()`'s own
+   * comment gives at length: a probe that stamps `marker || 'stamped'` and
+   * then returns it reads back what it just wrote, so it answers `'stamped'`
+   * whether the panel node survived the theme press or was replaced outright.
+   * `stampPanel` is the one writer, called once before the press.
    */
   const panelLook = () => ev(`(() => {
     const panel = document.getElementById('icon-picker');
-    panel.dataset.marker = panel.dataset.marker || 'stamped';
     const probe = document.createElement('div');
     probe.style.backgroundColor = 'var(--surface-2)';
     document.body.appendChild(probe);
@@ -346,15 +383,26 @@ try {
     return {
       painted: getComputedStyle(panel).backgroundColor,
       shouldBe,
-      marked: panel.dataset.marker,
+      marked: panel.dataset.marker ?? null,
     };
   })()`);
 
+  /** The one writer of the panel's marker. Called once, before the press. */
+  const stampPanel = () => ev(`(() => {
+    const panel = document.getElementById('icon-picker');
+    panel.dataset.marker = 'stamped';
+    return panel.dataset.marker;
+  })()`);
+
+  const panelStamp = await stampPanel();
   const beforePanel = await panelLook();
   ck('the picker panel has a background colour to inspect',
     /rgb|color\(/.test(beforePanel.painted), beforePanel.painted);
   ck('...and it is the current theme\'s --surface-2',
     beforePanel.painted === beforePanel.shouldBe, JSON.stringify(beforePanel));
+  ck('the panel is marked before the theme press',
+    panelStamp === 'stamped' && beforePanel.marked === 'stamped',
+    `wrote=${panelStamp} read=${beforePanel.marked}`);
 
   await ev(`document.getElementById('btn-theme').click()`);
   await sleep(1200);
