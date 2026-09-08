@@ -681,8 +681,14 @@ try {
     + 'bump — it holds no lock on `entries` because it has not written one yet',
     !heldRels.includes('entries'),
     `held=${JSON.stringify(ev5.held)} at: ${ev5.q}`);
-  ck('...and the statement it is waiting on is the clear',
-    /UPDATE habits SET summary_asof/.test(ev5.q ?? ''), ev5.q);
+  // The clear is a `WITH victims AS (... FOR NO KEY UPDATE)` statement now —
+  // that CTE is what makes two clears lock `habits` rows in one order — so this
+  // matches its shape rather than the bare UPDATE it used to be. The
+  // discriminator that matters is the second half: it must NOT be the `users`
+  // bump, which is where the tap queued under the old ordering.
+  ck('...and the statement it is waiting on is the clear, not the `users` bump',
+    /WITH victims AS/.test(ev5.q ?? '') && !/UPDATE users/.test(ev5.q ?? ''),
+    ev5.q);
 
   await w5.release();
   const tapRes = await tapPromise;

@@ -456,10 +456,50 @@ export async function withUserWrite(userId, fn, { habits = null } = {}) {
     // dormant account previously paid none. It is bounded by the narrowing
     // below, and the update stays HOT-eligible because neither column is in any
     // index.
+    //
+    // **The `victims` CTE is here so that two CLEARS cannot deadlock each
+    // other, and it is the other half of the mechanism `writeBackSummaries`
+    // uses.** Ordering the two TABLES stopped `habits`-versus-`users` cycles;
+    // it left cycles WITHIN `habits`, between two statements locking the same
+    // rows in different orders. The write-back could resolve its half by
+    // declining to wait (`SKIP LOCKED`), because a cache stamp is discardable.
+    // A clear is not: it is mandatory invalidation, so it must wait for a
+    // contended row rather than skip it, and two waiting parties are exactly
+    // what a cycle needs.
+    //
+    // So the clears agree on an order instead. Locking `ORDER BY id` in an
+    // explicit `LockRows` pass means any two of these acquire `habits` rows
+    // in the same sequence and cannot form a cycle — regardless of scan order,
+    // and that "regardless" is the point. Both multi-row clears SEQ-SCAN, so
+    // both used to lock in ctid order, and ctid order is not stable in a table
+    // being HOT-updated: two seq scans started moments apart see different
+    // line-pointer layouts. Postgres named it in the deadlock context,
+    // `while rechecking updated tuple (143,12)`.
+    //
+    // It stays ONE statement and one round trip. That is the constraint: an
+    // extra `SELECT ... FOR UPDATE` round trip on every tap was rejected, and
+    // a more explicit lock inside the statement already here is not that.
+    //
+    // `FOR NO KEY UPDATE` for two reasons, both checked rather than assumed.
+    // It is the strength this UPDATE takes anyway — the only unique indexes on
+    // `habits` are on `(id)` and `(id, user_id)`, and neither `summary_asof`
+    // nor `summary_epoch` appears in either, so no key column moves and the
+    // outer UPDATE re-locking a row the CTE already holds is free. And it does
+    // not conflict with the `FOR KEY SHARE` an `entries` foreign key takes on
+    // a habit row, so an entry write and a clear still do not block each other.
+    // `FOR UPDATE` would have been strong enough and wrong on the second count.
     await client.query(
-      `UPDATE habits SET summary_asof = NULL, summary_epoch = summary_epoch + 1
-        WHERE user_id = $1
-          AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))`,
+      `WITH victims AS (
+          SELECT id FROM habits
+           WHERE user_id = $1
+             AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))
+           ORDER BY id
+             FOR NO KEY UPDATE
+       )
+       UPDATE habits h
+          SET summary_asof = NULL, summary_epoch = summary_epoch + 1
+         FROM victims v
+        WHERE h.id = v.id AND h.user_id = $1`,
       [userId, narrowTo]);
     const result = await fn(client);
     await client.query(
