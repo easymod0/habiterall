@@ -602,3 +602,91 @@ instance and against `shared/src/stats.js`'s own
   compare, lexically or otherwise, against anything. Whatever a route does
   with a `null` reaching `entries[].date` is a shape mismatch, not a
   lexical-vs-chronological ordering bug, and is out of scope for #270.
+
+## What the guard COST, and the two things that hid it
+
+The guard is asked once per stored date, and `isRealDay` is not a cheap
+question: a regex test, then `fromISO` (a `split`, a `map(Number)`, a
+`new Date`), then `toISO` (three `String()`s, three `padStart`s, a template).
+`earliestRealDay` and `firstStatedAnswer` both asked it FIRST and compared the
+date to the running minimum second — so every key in the map paid for a full
+parse and format, when only a date that would BECOME the new minimum needs
+asking about at all. Swapping the two guards is order-independent and cannot
+change the answer, since a date that is not smaller than the current minimum
+can never become it. Verified rather than argued: 40,288 comparisons of the two
+loop shapes over ascending, descending and shuffled key orders, over
+all-phantom, empty, single-element, duplicate-heavy and
+phantom-as-the-lexical-min inputs, and a 20,000-trial randomised sweep — zero
+mismatches, for both loops and with three skip patterns over each input for
+`firstStatedAnswer`.
+
+Measured over a `Map`'s ascending key iterator, which is what both routes
+build via `ORDER BY date`:
+
+| input | order | predicate first | compare first |
+|---|---|---:|---:|
+| 1830 real keys (`STREAK_HISTORY_DAYS`, fully logged) | ascending | 1.2245 ms | 0.0168 ms |
+| 1830 real keys | descending | 1.2293 ms | 1.2411 ms |
+| 1830 real keys | shuffled | 1.3339 ms | 0.0246 ms |
+| 400 real keys (`SUMMARY_WINDOW_DAYS`) | ascending | 0.2674 ms | 0.0040 ms |
+| 1830 keys, all phantom | any | 0.0037 ms | 0.0039 ms |
+
+Two rows there are the honest half. **Descending keys buy nothing** — every key
+really is the new minimum, so every one is still checked — and an **all-phantom
+input is unchanged**, because the regex refuses before anything is parsed and
+`earliest` stays `null`, so the gate never fires. Neither is slower, and
+neither is a shape a route hands this: both routes' `streakMap` and `entryMap`
+come out of `ORDER BY date`.
+
+**The bench could not see any of it, and that is the second half of this
+entry.** `scripts/bench-overview.mjs` is the measurement base the figures in
+`shared/CLAUDE.md` are quoted from, and it modelled the route's streak anchor
+as `all[0].date` — what both routes read BEFORE this PR — and was left there
+when the routes changed to `earliestRealDay(streakMap.keys()) ?? summaryEnd`.
+So the bench understated the shipped route by exactly the cost of the guard it
+was no longer modelling: the root `CLAUDE.md`'s "pinning the DECISION is not
+pinning the WIRING", arriving as a benchmark rather than as a test. With the
+anchor mirrored (`historyAnchor`, one spelling, used by the timed scan and by
+the fixture check) the bench reads, on this machine, node v26.8.1:
+
+| | `bestStreak` scan, ms/habit | `summaryStats`, ms/habit |
+|---|---:|---:|
+| bench modelling `all[0].date` (what it said) | 0.83 | 0.51 |
+| bench mirroring the route, predicate first | 1.81 | 0.51 |
+| bench mirroring the route, compare first | 0.83 | 0.29 |
+
+The `/overview` per-habit total goes 2.32 ms to 1.14 ms — at 50 habits, ~59 ms
+of synchronous event-loop time per dashboard load. And note the
+`summaryStats` column, which is the figure `shared/CLAUDE.md` quotes and which
+has nothing to do with the bench's wiring: it reaches `earliestRealDay` through
+`resolveWindow`, so this PR had quietly moved it from the quoted 0.29 ms to
+0.51 ms. The reorder puts it back at 0.29 ms, which is why that number in
+`shared/CLAUDE.md` needed no edit — it is true again rather than still true.
+
+## `isRealDay` does not throw on `null`, and `creditAnchor`'s comment said it did
+
+Worth recording because the false version is the more useful-sounding one.
+`creditAnchor`'s JSDoc explained its `firstAnswer != null` guard as being there
+"before `isRealDay` is asked, since it throws on `null`/`undefined`". It does
+not: `isRealDay(null)`, `isRealDay(undefined)` and `isRealDay(42)` all answer
+`false`, because `CANONICAL_DATE_RE.test(null)` coerces its argument to the
+string `'null'` and fails the shape check before `fromISO` is ever reached.
+Verified by calling all three.
+
+`isRealDay` DOES throw a `TypeError` on a one-element ARRAY, which is the true
+version of the same sentence — `['2026-08-10']` passes the regex via the same
+string coercion, and then `fromISO` calls `.split` on the array. That is the
+exact shape `queryDate`'s JSDoc in `validate.js` documents as producible under
+Express's `extended` query parser, and it is the reason `queryDate` turns a
+non-string into `''` rather than string-coercing it. It is not reachable
+through `isRealDay` today: all six call sites are fed a `Map` key or a SQL
+scalar, never a query parameter.
+
+The guard itself is kept, and its real reason is narrower than the one that was
+written down. It is behaviourally REDUNDANT — checked across `null`,
+`undefined` and every non-real spelling, `creditFor` receives the identical
+date with the guard and without it, because the unguarded form answers `null`
+for a nullish input too. What it buys is that "never answered" is not decided
+by a predicate about date shape, which is a coincidence between two rules
+rather than one rule, and so is the kind of thing that stops being true
+quietly.
