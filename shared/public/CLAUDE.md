@@ -889,6 +889,30 @@ toggle, and it needs a REAL CDP mouse press to get there — a synthetic
 `.click()` does not move focus, so a test built on one passes against the
 unfixed code.
 
+**Bound to the dialog, it runs for a press made ANYWHERE in the dialog — so
+what it may not do is restore focus unconditionally.** The guard is the PANEL
+being open, which says nothing about where the caret is: with the picker open,
+click into Description, type, press Escape, and an unconditional
+`els.toggle.focus()` yanks the caret off the box being typed in and onto a
+button, so the next keystrokes go nowhere and Escape-to-cancel needs two
+presses. The restore is therefore asked of `els.panel.contains(activeElement)
+|| activeElement === els.toggle` — the two places a picker-opened focus can
+be — and it is asked BEFORE `closePanel()`, because hiding an element that
+contains the focused node blurs it and by then the answer is always `<body>`.
+Cases `g` and `g2` cannot see this: both press Escape from inside the picker,
+which is exactly where restoring focus is right. `g3` is the case for it.
+
+**And the field's hint is `aria-describedby`, not a wrapping label.** The hint
+had to leave the `<label>` when the input did (the label names ONLY the input,
+so the live-region caption and the toggle stay out of the accessible name),
+and a hint that is nobody's child reaches no assistive technology at all —
+measured through CDP's accessibility tree, the input's description was `null`.
+It carries an id and the input describes itself by it, which is a DESCRIPTION
+and not a name: measured again, name `"Icon"`, description the hint's own
+sentence. Do not fix a future version of this by putting the hint back inside
+the label; that is the accessible-name mutation this arrangement exists to
+avoid.
+
 `#icon-picker`'s `hidden` state and `#icon-search`'s value are static markup,
 wired once by `initIconField()` — nothing about closing and reopening the
 dialog touches either on its own, so a panel left open (and a query left

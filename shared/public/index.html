@@ -216,14 +216,20 @@
         subtree would make the INPUT's accessible name "Icon Nothing will be
         saved Choose an emoji" and have it mutate on every keystroke as the
         caption changes. The field hint stays inside a label elsewhere in
-        this dialog (see the Target field below); it is a sibling here only because the
-        input itself had to leave the label to keep the visual row intact —
-        it names nothing and reads as plain help text either way.
+        this dialog (see the Target field below); it is a sibling here only
+        because the input itself had to leave the label to keep the visual row
+        intact — and a hint that is nobody's child is a hint no assistive
+        technology is handed, so it carries an id and the input
+        `aria-describedby`s it. That is deliberately a DESCRIPTION and not a
+        name: it reaches a screen reader without joining the accessible name,
+        which is the whole reason the live region and the toggle were kept out
+        of the label in the first place.
       -->
       <div class="icon-field">
         <label for="icon-input">Icon</label>
         <div class="icon-field-row">
-          <input name="icon" id="icon-input" maxlength="32" autocomplete="off" placeholder="🏃">
+          <input name="icon" id="icon-input" maxlength="32" autocomplete="off" placeholder="🏃"
+                 aria-describedby="icon-hint">
           <span class="icon-preview" id="icon-preview">
             <span class="icon-preview-glyph" aria-hidden="true"></span>
             <span class="field-hint icon-preview-caption" aria-live="polite"></span>
@@ -233,7 +239,7 @@
             <span aria-hidden="true">🙂</span>
           </button>
         </div>
-        <span class="field-hint">
+        <span class="field-hint" id="icon-hint">
           Optional, one character — type, paste, or choose one below.
         </span>
       </div>

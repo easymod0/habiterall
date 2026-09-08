@@ -543,12 +543,28 @@ export function initIconField(dialogEl) {
   // notwithstanding. Both calls stay: `preventDefault` stops the dialog
   // closing, `stopPropagation` is harmless insurance against some other
   // ancestor listener also reacting to the key.
+  //
+  // What it must NOT do is restore focus unconditionally. The guard is the
+  // PANEL being open, which says nothing about where the caret is: open the
+  // picker, click into Description, type, and press Escape — the panel closes
+  // (right) and the dialog stays open (right), and an unconditional
+  // `els.toggle.focus()` then yanks the caret out of the box being typed in
+  // and onto a button, so the next keystrokes go nowhere and Escape-to-cancel
+  // needs two presses. So the focus is restored only when it was inside the
+  // picker to begin with — the panel's own subtree, or the toggle, which is
+  // where a mouse-opened panel leaves it (see `g2` in `feat4.mjs`).
+  //
+  // Asked BEFORE `closePanel()`, not after: hiding an element that contains
+  // the focused node blurs it, so by then `document.activeElement` is
+  // `<body>` and the question has only one answer.
   els.dialog.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || els.panel.hidden) return;
     e.preventDefault();
     e.stopPropagation();
+    const fromPicker = els.panel.contains(document.activeElement)
+      || document.activeElement === els.toggle;
     closePanel();
-    els.toggle.focus();
+    if (fromPicker) els.toggle.focus();
   });
 
   updatePreview();

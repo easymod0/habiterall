@@ -688,6 +688,50 @@ try {
     JSON.stringify(afterToggleEscape));
   await closeDialog();
 
+  console.log('--- g3. Escape with the panel open does not steal focus out of the field being typed in ---');
+  // The Escape handler is bound to the DIALOG and guarded only on the panel
+  // being open, so it runs for a press made ANYWHERE in the dialog — and it
+  // used to end in an unconditional `els.toggle.focus()`. Reproduced: open the
+  // picker, click into Description, type, press Escape. The panel closes
+  // (right) and the dialog stays open (right), and the caret is then sitting
+  // on the emoji toggle rather than in the box being typed in, so the next
+  // keystrokes go to a button and Escape-to-cancel needs a second press.
+  //
+  // Neither g nor g2 can see this: g focuses `#icon-search` and g2 the toggle,
+  // and both of those ARE inside the picker, which is exactly where restoring
+  // focus is the right answer. The restore is what is under test here, not the
+  // close — both halves are asserted, because a version that stopped closing
+  // the panel would also leave focus alone.
+  await openNewDialog();
+  await openPicker();
+  await typeInto('#habit-form [name="description"]', 'still typing');
+  const beforeEscape = await ev(`(()=>({
+    focused: document.activeElement && document.activeElement.name,
+    value: document.getElementById('habit-form').description.value,
+  }))()`);
+  check('the caret is in Description before the press',
+    beforeEscape.focused === 'description' && beforeEscape.value === 'still typing',
+    JSON.stringify(beforeEscape));
+  await pressEscape();
+  await waitUntil(ev,
+    `document.getElementById('icon-picker').hidden === true
+      || document.getElementById('habit-dialog').open === false`,
+    { what: 'the panel to close, or (if Escape reached the dialog instead) the dialog' });
+  const afterFieldEscape = await ev(`(()=>({
+    dialogOpen: document.getElementById('habit-dialog').open,
+    panelHidden: document.getElementById('icon-picker').hidden,
+    focused: document.activeElement && (document.activeElement.name || document.activeElement.id),
+    value: document.getElementById('habit-form').description.value,
+  }))()`);
+  check('Escape from Description closes the panel',
+    afterFieldEscape.panelHidden === true, JSON.stringify(afterFieldEscape));
+  check('Escape from Description leaves the dialog open',
+    afterFieldEscape.dialogOpen === true, JSON.stringify(afterFieldEscape));
+  check('...and the caret stays in Description rather than moving to the toggle',
+    afterFieldEscape.focused === 'description' && afterFieldEscape.value === 'still typing',
+    JSON.stringify(afterFieldEscape));
+  await closeDialog();
+
   console.log('--- h. reopening the dialog resets the panel and the search ---');
   // `#icon-picker` is static markup wired once by `initIconField()`, so
   // nothing about closing and reopening the habit dialog touches it on its
