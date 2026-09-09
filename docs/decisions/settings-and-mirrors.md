@@ -5,10 +5,12 @@ under the size that is loaded into every session. Nothing here is loaded
 automatically; the operative rules live in the nearest `CLAUDE.md`.
 
 **One rule decides what writing an entry does to storage**, and it lives in
-`entryWrite` (shared/src/validate.js) because three callers need it: both editions'
-PUT routes and the Discord button handler. It had been inline in the two routes,
-and a third copy in the interaction handler is how "not done" would start meaning
-something different depending on where you answered from.
+`entryWrite` (shared/src/validate.js) because four call sites need it: both
+editions' PUT routes (`api.js`) and both editions' notifiers (`notifier.js`),
+which are where every button press is answered — ntfy's as well as Discord's,
+through the one `record` adapter. It had been inline in the two routes, and a
+third and fourth copy in the interaction handlers is how "not done" would start
+meaning something different depending on where you answered from.
 
 **A client mirrors a rule only if it must work OFFLINE.** The native app keeps
 five hand-written copies of shared logic — the tap cycle, reminder-time parsing,
