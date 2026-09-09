@@ -295,6 +295,20 @@ try {
     ],
   }, sessionId);
 
+  // The clock the bound is measured against starts HERE, at the tap, and the
+  // timestamp is taken at that instant rather than reconstructed further down.
+  // It used to be taken after the 2s settle and the `look()` below it and then
+  // have 2000 added back, which corrects for the sleep and not for the round
+  // trip — so the figure the check quotes was short by however long `look()`
+  // took (~50ms today, and however long a loaded fleet makes it tomorrow).
+  //
+  // Taken immediately BEFORE the evaluate rather than after it: the fetch
+  // `ui/api.js` bounds is opened inside this click's own dispatch, so anything
+  // read after the evaluate returns is already past the start. Measuring from
+  // here instead includes the CDP round trip that delivers the click, so the
+  // figure can only be an OVER-estimate — the safe direction for a check whose
+  // job is to notice a bound that is too LONG.
+  const tappedAt = Date.now();
   // Read and clicked in ONE evaluation, and the key is kept: block 1b's last
   // check is keyed on WHICH write this tap is, so it has to be the day this
   // cell actually wrote. The grid's visible window is not fixed for the length
@@ -346,16 +360,15 @@ try {
   // catch. The three checks below already judge this wait's outcome, so it does
   // not need to judge it itself: an expired ceiling reports the elapsed time
   // against the bound, and the bar and message as absent.
-  const gaveUpAt = Date.now();
   const reportedOffline = `(()=>{
     const vis = (id) => !!document.getElementById(id)?.offsetParent;
     return vis('offline-bar') && vis('offline-message');})()`;
-  const offlineBy = gaveUpAt + BOUND_MS + SLACK_MS - 2000;
+  const offlineBy = tappedAt + BOUND_MS + SLACK_MS;
   while (Date.now() < offlineBy) {
     if (await ev(reportedOffline).catch(() => false)) break;
     await sleep(100);
   }
-  const gaveUp = Date.now() - gaveUpAt + 2000;
+  const gaveUp = Date.now() - tappedAt;
   const after = await look();
   const write = held.find((r) => r.method === 'PUT');
 
