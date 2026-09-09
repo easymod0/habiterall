@@ -134,8 +134,33 @@ try{
   ck('reset alone does not touch the saved values',
      (await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`)).dayOrder==='newest-right');
   await ev(`document.getElementById('settings-close').click()`); await sleep(700);
+  // Three facts rather than one bit, because a bare verdict here cannot tell a
+  // reader which of three things happened — and this check has failed once in
+  // CI with nothing under it at all. `stored` is whether the reset LEFT the
+  // page: `settings.reset()` sends `DELETE /api/settings` and an account
+  // holding nothing answers with no `dayOrder` key, so `newest-right` still
+  // there means the write never happened. `todayAt` is the direction the grid
+  // ended up in, which is the thing being asserted. And `settled` re-reads the
+  // grid after a further wait, ONLY once the assertion has already failed, so a
+  // read that merely landed early is distinguishable from a redraw that never
+  // came — at no cost to a passing run, in a suite that is one of the two
+  // longest in the fleet.
+  const gridDir = `(()=>{const d=[...document.querySelectorAll('.grid-date')];
+    return {todayAt:d.findIndex(x=>x.classList.contains('is-today')),columns:d.length,
+      first:d[0]?.textContent.trim()??null,last:d.at(-1)?.textContent.trim()??null};})()`;
+  const afterReset = await ev(gridDir);
+  const storedAfterReset = await ev(`(async()=>(await (await fetch('/api/settings')).json()))()`);
+  // The one key, not the whole blob: the cache holds every setting there is and
+  // printing it buries the three facts this line exists to show.
+  const cachedAfterReset = await ev(`(()=>{try{
+    return JSON.parse(localStorage.getItem('habiterall-settings')).dayOrder ?? null;
+  }catch{return 'unreadable';}})()`);
+  let settledAfterReset = null;
+  if (afterReset.todayAt !== 0) { await sleep(1500); settledAfterReset = await ev(gridDir); }
   ck('reset restores the default (today on the left)',
-     await ev(`document.querySelector('.grid-date').classList.contains('is-today')`) === true);
+     afterReset.todayAt === 0,
+     JSON.stringify({...afterReset, stored: storedAfterReset.dayOrder ?? null,
+       cached: cachedAfterReset, settled: settledAfterReset}));
 
   console.log('--- invalid values are ignored ---');
   await ev(`localStorage.setItem('habiterall-settings', JSON.stringify({dayOrder:'sideways'}))`);

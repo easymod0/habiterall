@@ -3147,7 +3147,61 @@ try {
     offlineHint.text.includes('Saved offline') && offlineHint.error === false,
     JSON.stringify(offlineHint));
 
+  /* Counted while the app is still OFFLINE, which is the only moment nothing
+     else can have drained it: `reportOffline` → `goOffline` resets the poll to
+     `initialDelayMs` on every failed request, so the timer standing here is a
+     2s one, and the first `emit()` after the flag flips below runs
+     `connectivity.js`'s own `await syncNow()`. That is a second flusher for
+     the same item, and `flush()` answers `sent: 0` to whichever caller loses —
+     to the second one because `flushing` is already set, and to the only one
+     if the background flush finished first. So "there was one write to drain"
+     is asked here, where `isReachable()` cannot succeed, and the flush below
+     asks only what it can answer for itself. */
+  const queuedByG = await ev(`(async()=>
+    (await import('/shared/offline.js')).pendingCount())()`);
+  ck('g: …and that press is durable — one write is queued for 2c to drain',
+    queuedByG === 1, `${queuedByG} queued`);
+
   await ev(`window.__offline = false; true`);
+
+  /* ...and drain what `g` staged, HERE, before the reload below rather than
+     after it.
+   *
+   * `g`'s press is a durable `POST /categories/reorder` sitting in the outbox,
+   * and the outbox survives a navigation. Every boot runs `watchConnectivity`'s
+   * first probe, which reports the transition to online, which is `syncNow()` —
+   * so the reload below replays that press at a moment nothing in this file
+   * bounds, and `syncNow` finishes with `emit('reload')`, whose `loadOverview`
+   * installs `state.categories` in the REORDERED order. `loadOverview` repaints
+   * the dashboard and not the open dialog, so a flush landing after
+   * `openDialog` has drawn the manage list leaves that list showing the
+   * pre-flush order over a store holding the post-flush one — and the press
+   * below then aims at the row the store already has at index 0, where
+   * `moveCategory` returns on `to < 0` having moved nothing and fetched
+   * nothing. That is a genuine app-side staleness and it is NOT what this block
+   * is about; here it is a fixture that had not settled. Draining first makes
+   * the boot's `syncNow` return at its own `if (!before) return`, so there is no
+   * background reload to race at all.
+   *
+   * `flush()` rather than the `clearAll()` that used to stand alone below: g's
+   * write is one this suite deliberately made durable, so it is sent rather
+   * than dropped, and the order 2c and `n` then see is the same one they have
+   * always seen locally. The direct call, not the watcher, for the reason the
+   * round-5 drain above gives.
+   *
+   * What is asserted is the OUTCOME — an empty outbox and nothing refused —
+   * and deliberately not `sent === 1`, which names the winner of a race this
+   * block does not care who wins. See `queuedByG` above for the second
+   * flusher; either way the queue is drained before 2c starts, which is the
+   * whole of what this drain is for. */
+  const flushedBefore2c = await ev(`(async()=>{
+    const { flush } = await import('/shared/offline.js');
+    const r = await flush();
+    return { sent: r.sent, failed: r.failed.map(f => f.status), remaining: r.remaining };
+  })()`);
+  ck("g: …and it replays cleanly, so 2c's list is settled before it starts",
+    flushedBefore2c.failed.length === 0 && flushedBefore2c.remaining === 0,
+    JSON.stringify(flushedBefore2c));
 
   /* ---------- 2c: a boundary press keeps the row it moved IN VIEW
      (review round 3, finding 2) ----------
@@ -3247,6 +3301,38 @@ try {
     scrolledC.scrollable === true && scrolledC.scrollTop > 0,
     JSON.stringify(scrolledC));
 
+  /* The row this block presses is chosen POSITIONALLY — `list.children[1]`,
+     because "the second row of a list scrolled down by one" is the state the
+     gesture is about — and which category that is depends on everything the
+     suite did above it. So establish it rather than assume it, and establish
+     the one property the press depends on: that the DOM row at index 1 is the
+     category the STORE also has at index 1. `moveCategory` reads
+     `state.categories`, not the list, and returns silently on `to < 0` when the
+     two disagree — a press that moves nothing, repaints nothing and fetches
+     nothing, which is indistinguishable from the boundary bug this block
+     exists for unless something asks the question here. Held on `window` so the
+     press below can read the store SYNCHRONOUSLY, inside its own single
+     evaluate: an `await import` there would break the property that makes
+     `pressedC` a reading of the first repaint. */
+  await ev(`(async()=>{
+    window.__cStore = (await import('/shared/ui/store.js')).state;
+    return true;
+  })()`);
+  const aimedC = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const rows = [...list.children];
+    const name = (li) => li.querySelector('.category-manage-name')?.textContent.trim() ?? null;
+    const dom = rows.map((li) => li.dataset.categoryId);
+    const store = window.__cStore.categories.map((c) => String(c.id));
+    return {
+      chose: { id: dom[1], name: name(rows[1]), domIndex: 1, storeIndex: store.indexOf(dom[1]) },
+      domOrder: rows.map(name),
+      storeOrder: window.__cStore.categories.map((c) => c.name),
+    };
+  })()`);
+  ck('2c sanity: the row the press is aimed at is the one the STORE holds at index 1',
+    aimedC.chose.storeIndex === 1, JSON.stringify(aimedC));
+
   // Focus, click and both reads inside ONE `Runtime.evaluate`, for the reason
   // `2a` and `2b` give. `moveCategory`'s synchronous prefix — splice, repaint,
   // scroll restore, reveal, focus restore — has completed by the time
@@ -3258,16 +3344,26 @@ try {
     const name = row.querySelector('.category-manage-name').textContent.trim();
     const before = list.scrollTop;
     const up = row.querySelector('.category-move-up');
+    // Read WITH the press rather than trusted from the check above: the two
+    // are separate evaluates and anything landing between them is exactly
+    // what a reader of a failure here needs told. moveCategory decides from
+    // this list, so this is the number that explains the outcome below.
+    // (No backticks in here — this comment is inside injected source.)
+    const storeIndex = window.__cStore.categories
+      .map((c) => String(c.id)).indexOf(id);
     up.focus();
     up.click();
     const moved = [...list.children].find(li => li.dataset.categoryId === id);
     const lb = list.getBoundingClientRect();
     const rb = moved.getBoundingClientRect();
     return {
-      id, name, before,
+      id, name, before, storeIndex,
+      upDisabled: up.disabled,
       index: [...list.children].indexOf(moved),
       scrollTop: list.scrollTop,
       visible: rb.top >= lb.top - 1 && rb.bottom <= lb.bottom + 1,
+      order: [...list.children].map(
+        li => li.querySelector('.category-manage-name')?.textContent.trim() ?? null),
     };
   })()`);
   ck('2c sanity: the press moved the row to the top boundary, from a scrolled list',
@@ -3275,8 +3371,13 @@ try {
   ck('2c: THE assertion: the press that reaches the boundary leaves the row it moved in view',
     pressedC.visible === true, JSON.stringify(pressedC));
 
+  // Downstream of the press, and the message says so with the press's own
+  // reading in it: `moveCategory` only reaches its refetch after the splice, so
+  // a press that moved nothing times out HERE having already failed above. Two
+  // facts, one cause, and a bare `what` reported them as two.
   await waitUntil(ev, `window.__cGets >= 1`,
-    { what: "the boundary press's own refetch to land and rebuild the list" });
+    { what: "the boundary press's own refetch to land and rebuild the list — "
+        + `which only fires if that press moved something: ${JSON.stringify(pressedC)}` });
   await sleep(300);
 
   const afterRefetchC = await ev(`(()=>{
