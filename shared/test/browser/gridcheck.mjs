@@ -238,6 +238,355 @@ try{
   await send('Network.emulateNetworkConditions',
     { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
 
+  /* ---------- the grid is fetched for ONE local day ---------- */
+
+  console.log('\n--- local midnight ---');
+  /*
+   * The dashboard's version of the detail view's #313 item 5, and it is a
+   * different defect with the same cause. This page holds only the fortnight it
+   * ASKED the server for, so a tab left open across local midnight is not merely
+   * drawn for yesterday — the new day's column is one `/overview` has never been
+   * asked about, and `state.gridLoaded` says so. Nothing else in the app cures
+   * it: the browser reminder's refresh runs only with the `web` channel on and
+   * declines a paged grid, and `'reload'` fires on an offline→online transition
+   * or on coming BACK to the list, neither of which is a tab that just stayed
+   * here.
+   *
+   * **The clock is moved with `Emulation.setTimezoneOverride`** — it changes the
+   * renderer's zone, so `new Date()`'s local fields move with it, which is
+   * exactly what `todayISO()` reads and exactly the question this page renders
+   * from (the browser's own calendar day, never a named zone;
+   * `docs/decisions/timezones.md`). The two extremes are 26 hours apart, so
+   * their calendar dates always differ from each other and at least one differs
+   * from this machine's — verified in the page rather than assumed. The second
+   * move below goes BACKWARD, which is a flight west and is why the watch
+   * compares the date rather than testing that it advanced.
+   *
+   * **One page load serves both triggers**, unlike `calcheck.mjs`, because the
+   * timer probe is installed before the only navigation this block makes. The
+   * two halves stay independently pinned: `visibilitychange` is dispatched for
+   * the first and never for the second, and the second invokes only the
+   * callbacks recorded before either move.
+   */
+  const settled = async (expr, ms = 15_000) => {
+    for (let i = 0; i < Math.ceil(ms / 50); i++) {
+      if (await ev(expr).catch(() => false)) return true;
+      await sleep(50);
+    }
+    return false;
+  };
+
+  /*
+   * `window.setTimeout` wrapped from a new-document script, exactly as
+   * `calcheck.mjs` does it and `themesync.mjs` wraps `fetch`: the recorded
+   * callback is the same function the platform would have invoked, invoked at a
+   * moment this suite chooses. `Emulation.setTimezoneOverride` moves the date
+   * but fires nothing and does not re-arm a pending `setTimeout`, and there is
+   * no zone in which "a few seconds before midnight" can be asked for. No
+   * production seam, and an app that stopped arming a timer at all fails the
+   * behavioural check below by name.
+   */
+  const timerProbe = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.setTimeout;
+      window.__armed = [];
+      window.setTimeout = function (fn, ms, ...rest) {
+        if (typeof fn === 'function' && Number(ms) >= 1000) {
+          window.__armed.push({ ms: Number(ms), at: Date.now(), fn });
+        }
+        return real.call(window, fn, ms, ...rest);
+      };
+    })();`,
+  }, sessionId);
+
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:APP},sessionId),
+    what: 'the dashboard with the timer probe installed',
+  });
+  // The block above tapped a cell offline, so a write is in the outbox and the
+  // reconnect that replays it ends in a `'reload'`. Waited out rather than slept
+  // past: a `load()` landing after the zone move below would refresh the grid
+  // and the staleness this block is about would never be observable.
+  await settled(`(async () => (await import('/shared/ui/store.js')).state.pending === 0)()`);
+  await sleep(400);
+
+  const zoneDay = () => ev(`(async () => {
+    const dates = await import('/shared/ui/dates.js');
+    return dates.todayISO();})()`);
+  // Sorted rather than taken in DOM order: `dayOrder` can draw the row
+  // newest-first, and which end today sits at is not what this block is about.
+  const lastColumn = () => ev(`(() => {
+    const cells = [...document.querySelectorAll('#grid .habit-row .check[data-date]')];
+    return cells.map(c => c.getAttribute('data-date')).sort().at(-1) ?? null;})()`);
+  // The window the SERVER answered with, which is the half a repaint cannot
+  // move. Without it a "fix" that only repainted would pass every check here:
+  // `paint()` resolves `todayISO()` itself, so the columns would walk on to the
+  // new day over a fortnight whose newest column has no data in it.
+  const loadedEnd = () => ev(
+    `(async () => (await import('/shared/ui/store.js')).state.gridLoaded?.end ?? null)()`);
+
+  const drawnFor = await zoneDay();
+  const drawnColumn = await lastColumn();
+  const drawnEnd = await loadedEnd();
+  ck('the grid is drawn for, and fetched for, the day the page loaded on',
+    drawnColumn === drawnFor && drawnEnd === drawnFor,
+    `columns end ${drawnColumn}, window ends ${drawnEnd} (loaded on ${drawnFor})`);
+
+  /*
+   * Which timers were armed for the next local midnight, computed BEFORE any
+   * zone move — `remaining` is read from the local clock, so asking after the
+   * override would compare timers armed for one zone's midnight against
+   * another's.
+   *
+   * Compared as an ABSOLUTE instant (`at + ms` against `now + remaining`), so
+   * the seconds between arming and reading cancel. The expectation is built
+   * from the clock fields rather than by calling `setHours(24, 0, 0, 0)`, which
+   * is the implementation's own expression: what this pins is that the arming
+   * targets local MIDNIGHT rather than a fixed 24 hours, since `+ 86400000`
+   * answers ~86.4e6 whatever the time of day.
+   *
+   * TWO views arm one of these — `app.js` calls `dashboard.init()` and
+   * `detail.init()` whichever view is booting, and each watch declines unless
+   * its own view is the one showing — so this check is CONTEXT and not the
+   * biting one: with the dashboard's arming deleted the detail view's timer is
+   * still here and this still passes. Every match is fired below and the
+   * REBUILD is what bites, because the detail view's callback returns at
+   * `state.openHabitId == null`. Attributing a timer to a module by its
+   * position in the list would be a dependence on the order `app.js` inits its
+   * views, which is not a thing this suite should be able to break.
+   */
+  const midnightTimers = () => ev(`(() => {
+    const now = new Date();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const remaining = ((24 * 60 - mins) * 60 - now.getSeconds()) * 1000
+      - now.getMilliseconds();
+    const wanted = Date.now() + remaining + 1000;
+    const armed = (window.__armed ?? []);
+    const hits = [];
+    armed.forEach((t, i) => {
+      if (Math.abs((t.at + t.ms) - wanted) <= 4000) hits.push({ i, off: (t.at + t.ms) - wanted });
+    });
+    return { hits, remaining, delays: armed.map(t => t.ms) };})()`);
+
+  const armed = await midnightTimers();
+  ck('a timer is armed for the next local midnight',
+    armed.hits.length >= 1,
+    `${JSON.stringify(armed)} (wanted one firing in about ${armed.remaining}ms)`);
+
+  // Whichever extreme is not this machine's own calendar day, and then the
+  // other one for the timer half.
+  const ZONES = ['Pacific/Kiritimati', 'Etc/GMT+12'];
+  let first = null;
+  for (const zone of ZONES) {
+    await send('Emulation.setTimezoneOverride', { timezoneId: zone }, sessionId);
+    if (await zoneDay() !== drawnFor) { first = zone; break; }
+  }
+  const nextDay = await zoneDay();
+  ck('the browser can be put on a different local date at all',
+    first !== null && nextDay !== drawnFor,
+    `${drawnFor} -> ${nextDay} (${first ?? 'neither zone moved it'})`);
+
+  // Nothing has told the page yet, and that is the state a tab left open
+  // overnight is in: LOOKING at it is what fixes it.
+  const stale = { columns: await lastColumn(), end: await loadedEnd() };
+  ck('...and the grid on screen is still the one fetched for the day before',
+    stale.columns === drawnFor && stale.end === drawnFor,
+    `${JSON.stringify(stale)} (the clock now says ${nextDay})`);
+
+  await ev(`document.dispatchEvent(new Event('visibilitychange')); true`);
+  const caughtByTab = await settled(`(async () => {
+    const store = await import('/shared/ui/store.js');
+    return store.state.gridLoaded?.end === ${JSON.stringify(nextDay)};})()`);
+  const byTab = {
+    columns: await lastColumn(),
+    end: await loadedEnd(),
+    today: await ev(`document.querySelectorAll('.grid-date.is-today').length`),
+    listShowing: await ev(`!document.getElementById('view-list').hidden`),
+  };
+  ck('coming back to the tab refetches the grid for the new local day',
+    caughtByTab === true && byTab.columns === nextDay && byTab.end === nextDay,
+    `${JSON.stringify(byTab)} expected ${nextDay}`);
+  ck('...with the header still marking exactly one column as today, and the '
+    + 'list still the view that is showing',
+    byTab.today === 1 && byTab.listShowing === true, JSON.stringify(byTab));
+
+  /* ----- the OTHER trigger: the timer, with no tab switch behind it ----- */
+
+  const second = ZONES.find((z) => z !== first);
+  await send('Emulation.setTimezoneOverride', { timezoneId: second }, sessionId);
+  const timerDay = await zoneDay();
+  ck('the clock moved again for the timer half', timerDay !== nextDay,
+    `${nextDay} -> ${timerDay} (${second})`);
+
+  // The second move is BACKWARD — the other extreme is the day the page
+  // originally loaded on — so this half can only observe anything if the half
+  // above really did move the page off it. Asked rather than assumed: with the
+  // `visibilitychange` listener deleted the page is still on `timerDay`, and a
+  // timer check that merely compared against it would pass having watched
+  // nothing happen. ANDed into the check below for the same reason.
+  const staleForTimer = { columns: await lastColumn(), end: await loadedEnd() };
+  ck('the grid is stale again, so the timer has something to be observed doing',
+    staleForTimer.end === nextDay && staleForTimer.columns === nextDay,
+    `${JSON.stringify(staleForTimer)} expected the page still on ${nextDay}, `
+    + `with the clock now saying ${timerDay}`);
+
+  // The callbacks the platform would have run, run now — every one recorded
+  // before either move, since which module armed which is not knowable from
+  // here. Guarded on there BEING one, for the reason `settled` is bounded
+  // rather than throwing: with nothing armed — precisely the mutation this
+  // exists to fail on — indexing into the list would throw out of the try
+  // block and cost every check below its own named failure and the
+  // `Emulation` override its reset.
+  if (armed.hits.length) {
+    await ev(`(() => { for (const i of ${JSON.stringify(armed.hits.map((h) => h.i))})
+      window.__armed[i].fn(); return true; })()`);
+  }
+  const caughtByTimer = armed.hits.length > 0 && await settled(`(async () => {
+    const store = await import('/shared/ui/store.js');
+    return store.state.gridLoaded?.end === ${JSON.stringify(timerDay)};})()`);
+  const byTimer = { columns: await lastColumn(), end: await loadedEnd() };
+  ck('the timer alone refetches the grid for the new local day, with no tab '
+    + 'switch behind it',
+    staleForTimer.end === nextDay
+    && caughtByTimer === true && byTimer.columns === timerDay && byTimer.end === timerDay,
+    `${JSON.stringify(byTimer)} expected ${timerDay}`
+    + (armed.hits.length ? '' : ' (no timer was armed to fire)')
+    + (staleForTimer.end === nextDay ? ''
+      : ` (and the page was already on ${staleForTimer.end} before it fired, so this`
+        + ' could not have observed the timer either way)'));
+
+  /* ----- a CACHED answer must not disarm either trigger ----- */
+
+  /*
+   * The record of which day the grid was fetched for is installed on the
+   * strength of `api()` not throwing, and a cached answer does not throw.
+   * `networkFirst` (`sw.js`) catches a failed or timed-out fetch and returns the
+   * last stored `/overview` as an ordinary 200 carrying
+   * `X-Habiterall-Offline: 1`; `ui/api.js` answers that header with
+   * `setOffline(true)` and then resolves with the payload like any other. Taken
+   * as an answer, that records "current for today" beside a `state.gridLoaded`
+   * that ends yesterday — and both triggers then compare equal and return, so
+   * neither the timer nor a tab switch acts again for 24 hours. One failed
+   * request buys that: a woken laptop whose Wi-Fi has not reassociated at the
+   * instant `visibilitychange` fires.
+   *
+   * It does not reliably heal, which is why this is a check and not a comment.
+   * `api()` calls `setOffline` directly rather than through the watcher, and
+   * `ui/connectivity.js` says at `reportOffline` what that costs: the watcher's
+   * own `last` stays true, so a later successful probe is not a TRANSITION and
+   * the `'reload'` that would have refetched is never emitted. Nothing here
+   * touches `/healthz`, so that is exactly the state this block runs in.
+   *
+   * **The real worker and the real cache, and the network is cut on the
+   * WORKER's own target.** A page under a service worker makes no network
+   * request of its own — `Fetch` or `Network` on this page's session sees
+   * nothing, measured: with `Fetch.enable` on `*` and a page-side `api()` call,
+   * zero `requestPaused` events arrive. The worker is a target of its own, and
+   * cutting ITS network is what makes `networkFirst` take the branch this block
+   * is about, with the header and the body it really produces rather than a
+   * canned imitation of them.
+   *
+   * **The warm-up is what makes the cached read possible at all, and it is a
+   * fact about this suite rather than about the app.** Every `/api` response
+   * carries `Vary: X-Habiterall-Timezone` and `caches.match` selects on it, so
+   * a stored body is served only to a request sending the zone it was stored
+   * under. In life that always holds — the day moves because time passes, with
+   * the zone fixed — but the only way to move the day HERE is to move the zone,
+   * which leaves the cache holding entries for a zone nothing will ask for
+   * again. So both cacheable reads `load()` makes are warmed under the zone now
+   * in force, through the app's own `api()` so the url, the headers and the
+   * Vary key are the ones `load()` would have produced. It touches no view
+   * state: `loadedDay` is `load()`'s to move, and nothing here calls it.
+   *
+   * Two guards keep this from passing vacuously: after the trigger the page
+   * must report itself offline, and it must be holding the list from BEFORE the
+   * probe habit was created. Between them they say the cached branch really ran.
+   */
+  console.log('\n--- a cached answer is not a fresh one ---');
+  await send('Emulation.setTimezoneOverride', { timezoneId: first }, sessionId);
+  const cacheDay = await zoneDay();
+  ck('the clock moved once more, so there is something for the watch to do',
+    cacheDay === nextDay && cacheDay !== timerDay,
+    `${timerDay} -> ${cacheDay}`);
+
+  // Both of `load()`'s cacheable reads, under the zone now in force. `/habits`
+  // is in `CACHEABLE_API` too and `load()` asks it FIRST, so leaving it cold
+  // would throw out of `load()` before `/overview` was ever reached — the
+  // ordinary offline path, and not the one this block is about.
+  const warmed = await ev(`(async () => {
+    const { GRID_DAYS } = await import('/shared/ui/window.js');
+    const { api } = await import('/shared/ui/api.js');
+    await api('/habits?archived=true');
+    await api('/overview?' + new URLSearchParams({ days: String(GRID_DAYS) }));
+    return !!navigator.serviceWorker.controller;})()`);
+
+  // Created AFTER the warm-up, so the cached copy and a live one are
+  // distinguishable by something the page shows.
+  const PROBE = 'Cached-answer probe';
+  const probeId = await ev(`(async () => {
+    const r = await fetch('/api/habits', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: ${JSON.stringify(PROBE)}, type: 'boolean' }) });
+    return (await r.json()).id;})()`);
+
+  const targets = await send('Target.getTargets', {});
+  const worker = targets.targetInfos.find(
+    (t) => t.type === 'service_worker' && t.url.startsWith(APP));
+  ck('the page is under its service worker, which is what makes this reachable',
+    warmed === true && !!worker,
+    `controller ${warmed}, worker target ${worker?.url ?? 'not found'}`);
+
+  let cached = { offline: null, hasProbe: null };
+  let refetched = { hasProbe: null, end: null };
+  let healed = false;
+  if (worker) {
+    const { sessionId: swSid } =
+      await send('Target.attachToTarget', { targetId: worker.targetId, flatten: true });
+    await send('Network.enable', {}, swSid);
+    await send('Network.emulateNetworkConditions',
+      { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, swSid);
+
+    await ev(`document.dispatchEvent(new Event('visibilitychange')); true`);
+    await settled(`(async () => (await import(
+      '/shared/ui/store.js')).state.offline === true)()`);
+    cached = await ev(`(async () => {
+      const { state } = await import('/shared/ui/store.js');
+      return { offline: state.offline,
+        hasProbe: state.habits.some(h => h.name === ${JSON.stringify(PROBE)}) };})()`);
+
+    await send('Network.emulateNetworkConditions',
+      { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, swSid);
+
+    // Nothing else can refetch here: the connectivity watcher emits `'reload'`
+    // only on a TRANSITION it observed, and it observed none — `api()` set the
+    // flag behind its back, its `last` is still true, and `/healthz` never
+    // stopped answering, the worker declining to cache it for exactly this
+    // class of reason. So the habit appearing is this watch, and only this
+    // watch, having stayed armed.
+    await ev(`document.dispatchEvent(new Event('visibilitychange')); true`);
+    healed = await settled(`(async () => (await import(
+      '/shared/ui/store.js')).state.habits.some(
+        h => h.name === ${JSON.stringify(PROBE)}))()`);
+    refetched = await ev(`(async () => {
+      const { state } = await import('/shared/ui/store.js');
+      return { hasProbe: state.habits.some(h => h.name === ${JSON.stringify(PROBE)}),
+        end: state.gridLoaded?.end ?? null };})()`);
+  }
+
+  ck('the worker answered from its cache, and the page took it as an answer',
+    cached.offline === true && cached.hasProbe === false,
+    `${JSON.stringify(cached)} (a live answer would carry ${JSON.stringify(PROBE)})`);
+  ck('...and a cached answer does not disarm the watch: the next look refetches',
+    cached.hasProbe === false && healed === true && refetched.hasProbe === true,
+    `${JSON.stringify(refetched)} (expected the page to pick up `
+    + `${JSON.stringify(PROBE)}, created while it was showing the saved copy)`);
+
+  await ev(`fetch('/api/habits/' + ${probeId}, { method: 'DELETE' })`);
+
+  await send('Emulation.setTimezoneOverride', { timezoneId: '' }, sessionId);
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: timerProbe.identifier }, sessionId);
+
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}
 finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}

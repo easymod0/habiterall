@@ -901,6 +901,41 @@ try {
   check('...and that redraw is spelled with a comma, not a point',
     (await habitSub()).includes('9,5'), await habitSub());
 
+  // ...and so does the FOURTH surface, the day editor's subtitle, which is not
+  // a `targetLabel` caller at all — it says the direction in words rather than
+  // as `≥`, because it is a sentence about the day being edited, so it carried
+  // its own template literal and its own copy of this bug.
+  //
+  // Pinned HERE rather than in `daydialog.mjs`, and the distinction is the one
+  // the root `CLAUDE.md` draws between pinning the DECISION and pinning the
+  // WIRING. That harness slices `openDayDialog` out of its module and hands
+  // every free identifier in, the formatter included, so it can see that the
+  // subtitle spells the goal through whatever it is GIVEN and cannot see which
+  // one the module asks for: `convention()` replaced by a literal `'point'` in
+  // `ui/day-dialog.js` passes there, and fails on the line below.
+  //
+  // Opened from the calendar because that is the surface that opens this
+  // dialog on a habit's own page — a strip tap on a measurable habit opens the
+  // amount control instead. The newest editable cell, so no assumption is made
+  // about how much history the fixture has.
+  await ev(`(() => {
+    const cells = [...document.querySelectorAll(
+      '#view-detail svg[aria-label="Completion calendar"] rect[cursor="pointer"]')];
+    cells.at(-1)?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return true;})()`);
+  await sleep(300);
+  const daySub = await ev(`(() => ({
+    open: document.getElementById('day-dialog').open,
+    sub: document.getElementById('day-sub').textContent,
+  }))()`);
+  // The negative conjunct for the same reason the dashboard row's has one: a
+  // subtitle carrying both spellings would satisfy the positive alone, and the
+  // claim is that the dot spelling is GONE from a comma account's screen.
+  check("a comma account's day editor states the goal in its own spelling too",
+    daySub.open === true && daySub.sub.endsWith('at least 9,5 pages')
+    && !daySub.sub.includes('9.5'), JSON.stringify(daySub));
+  await ev(`document.getElementById('day-cancel').click(); true`);
+
   await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ numberFormat: 'auto' }) }); })()`);

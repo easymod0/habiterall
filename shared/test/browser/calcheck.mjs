@@ -1095,25 +1095,39 @@ try {
    * NOT pin is a 23- or 25-hour day: that needs the DST transition to fall
    * between now and the next midnight in some zone this suite can name, which
    * is not a thing a run at an arbitrary moment can arrange.
+   *
+   * **EVERY match, not the first, and that is not defensiveness.** There are
+   * TWO day watches: `app.js` inits the dashboard and the detail view whichever
+   * one is booting, and each declines unless its own view is showing
+   * (`refreshIfDayChanged` in either module). So a habit's page arms two timers
+   * for the same instant, the dashboard's first, and a `findIndex` here picked
+   * the dashboard's — whose callback on this page returns at
+   * `state.openHabitId == null`, so the rebuild below never happened and this
+   * block failed against correct code. Attributing one to a module by its
+   * POSITION would be a dependence on the order `app.js` inits its views, which
+   * no suite should be able to break; firing both costs one no-op and asserts
+   * the rebuild, which only the detail view's callback can produce here.
    */
-  const midnightTimer = () => ev(`(() => {
+  const midnightTimers = () => ev(`(() => {
     const now = new Date();
     const mins = now.getHours() * 60 + now.getMinutes();
     const remaining = ((24 * 60 - mins) * 60 - now.getSeconds()) * 1000
       - now.getMilliseconds();
     const wanted = Date.now() + remaining + 1000;
     const armed = (window.__armed ?? []);
-    const index = armed.findIndex(t => Math.abs((t.at + t.ms) - wanted) <= 4000);
-    return {
-      index,
-      remaining,
-      delays: armed.map(t => t.ms),
-      off: index < 0 ? null : (armed[index].at + armed[index].ms) - wanted,
-    };})()`);
+    const hits = [];
+    armed.forEach((t, i) => {
+      if (Math.abs((t.at + t.ms) - wanted) <= 4000) hits.push({ i, off: (t.at + t.ms) - wanted });
+    });
+    return { hits, remaining, delays: armed.map(t => t.ms) };})()`);
 
-  const armed = await midnightTimer();
-  ck('the detail view arms a timer for the next local midnight',
-    armed.index >= 0,
+  const armed = await midnightTimers();
+  // The COUNT is not asserted, deliberately: it is two today and a third view
+  // with a day watch would be a change to `app.js` and not to this page. What
+  // has to be true is that at least one exists and that firing them rebuilds
+  // this view, which is the check the deletion of `armDayWatch()` fails.
+  ck('a timer is armed for the next local midnight',
+    armed.hits.length >= 1,
     `${JSON.stringify(armed)} (wanted one firing in about ${armed.remaining}ms)`);
 
   // Move the day WITHOUT telling the page: no `visibilitychange` is dispatched
@@ -1130,18 +1144,23 @@ try {
   ck('the clock moved for the timer half too', timerZone !== null,
     `${timerDay} (${timerZone ?? 'neither zone moved it'})`);
 
-  // The callback the platform would have run, run now. `armDayWatch`'s timer
-  // calls `refreshIfDayChanged()` and then re-arms, so both halves are
-  // observable from this one invocation.
+  // The callbacks the platform would have run, run now — see `midnightTimers`
+  // for why every match and not the first. `armDayWatch`'s timer calls
+  // `refreshIfDayChanged()` and then re-arms, so both halves are observable
+  // from this one invocation, and the dashboard's own watch contributes the
+  // re-arm and nothing else here.
   //
   // Guarded on there BEING one, for the reason `settled` above is bounded
-  // rather than a `waitUntil`: with no timer armed — which is precisely the
-  // mutation this block exists to fail on — `window.__armed[-1].fn()` throws
-  // out of the try block and costs every check below its own named failure,
-  // the `Emulation` override its reset, and the suite its exit line. A
-  // regression must be a named FAIL, never a harness error.
-  if (armed.index >= 0) await ev(`window.__armed[${armed.index}].fn(); true`);
-  const timerCaught = armed.index >= 0 && await settled(`(() => {
+  // rather than a `waitUntil`: with none armed — which is precisely the
+  // mutation this block exists to fail on — indexing into the list throws out
+  // of the try block and costs every check below its own named failure, the
+  // `Emulation` override its reset, and the suite its exit line. A regression
+  // must be a named FAIL, never a harness error.
+  if (armed.hits.length) {
+    await ev(`(() => { for (const i of ${JSON.stringify(armed.hits.map((h) => h.i))})
+      window.__armed[i].fn(); return true; })()`);
+  }
+  const timerCaught = armed.hits.length > 0 && await settled(`(() => {
     const cells = [...document.querySelectorAll('#view-detail .day-strip .check[data-date]')];
     return cells.map(c => c.getAttribute('data-date')).sort().at(-1)
       === ${JSON.stringify(timerDay)};})()`, 10_000);
@@ -1154,16 +1173,21 @@ try {
     + 'switch behind it',
     timerCaught === true && byTimer.strip === timerDay && byTimer.cell === timerDay,
     `${JSON.stringify(byTimer)} expected ${timerDay}`
-    + (armed.index < 0 ? ' (no timer was armed to fire)' : ''));
+    + (armed.hits.length ? '' : ' (no timer was armed to fire)'));
 
-  // ...and it re-arms from the clock as it now stands. The new zone's next
+  // ...and each re-arms from the clock as it now stands. The new zone's next
   // midnight is a different absolute instant from the old one's, so a re-arm
   // that reused the first delay — or a fixed 24 hours — lands outside the
-  // tolerance and this fails.
-  const rearmed = await midnightTimer();
-  ck('...and re-arms for the NEXT local midnight, recomputed from the clock',
-    armed.index >= 0 && rearmed.index >= 0 && rearmed.index !== armed.index,
-    `${JSON.stringify(rearmed)} (the first was index ${armed.index})`);
+  // tolerance and this fails. Asserted as "as many fresh ones as were fired,
+  // all of them recorded AFTER the ones that were": one watch re-arming for
+  // both would satisfy a bare "some hit exists" and is exactly the shape a
+  // careless edit to either module produces.
+  const rearmed = await midnightTimers();
+  const fired = armed.hits.map((h) => h.i);
+  ck('...and each re-arms for the NEXT local midnight, recomputed from the clock',
+    fired.length > 0 && rearmed.hits.length === fired.length
+    && rearmed.hits.every((h) => h.i > Math.max(...fired)),
+    `${JSON.stringify(rearmed)} (fired ${JSON.stringify(fired)})`);
 
   await send('Emulation.setTimezoneOverride', { timezoneId: '' }, sessionId);
   await send('Page.removeScriptToEvaluateOnNewDocument',

@@ -1567,6 +1567,38 @@ export function init() {
   // which is the difference between a page that flickers and a page that stays
   // wrong. `countcheck.mjs` forces that interleaving with CDP rather than
   // hoping for it.
+  //
+  // **The flicker was left, and the counter that would close it was looked at
+  // again and declined a second time — for a reason that is not "it is only
+  // cosmetic".** Two findings, and the archive
+  // (`docs/decisions/dashboard-and-detail.md`) has both in full. The residual
+  // is a little more than a flicker: for the length of the refetch promised
+  // behind the stale render, the head — and so the Edit button drawn with
+  // it — is holding the pre-second-save habit again, which is this section's
+  // own revert on a window one round trip long instead of two. And a counter
+  // scoped to "a reply issued before the last seed" would close that while
+  // leaving the LARGER hole untouched and looking closed: `refresh` guards
+  // this listener alone, and the eight OTHER callers of `open()` — the zoom
+  // press, three segmented controls and four cards' `redraw` — run
+  // unserialised, so two presses on the History granularity control put two
+  // differently-parameterised `/stats` in flight and the older landing last
+  // SETTLES the page on week buckets under a control reading month. That one
+  // is also the only one of the eight that can: the other seven send the
+  // identical request, so a reply out of order renders the same payload. One
+  // ticket on `open()` answers both (the `state.categoryReadSeq` shape in
+  // `ui/store.js`), and it has to decide what a DISCARDED reply returns —
+  // `open()`'s boolean is load bearing at boot, where `app.js` answers false
+  // by loading the dashboard instead. That is its own change with its own
+  // test, not a rider on this one.
+  //
+  // A third option gets proposed here and is in the archive with its
+  // rebuttal: make the SEED sticky — remember the saved habit and overlay it
+  // in `render()` on an id match — which closes the revert with no reply
+  // discarded. Its clearing rule is the whole of it: cleared on navigation it
+  // draws this device's last save over a rename made on the phone, forever,
+  // and cleared correctly it IS the generation comparison above. It also says
+  // nothing about which payload wins, so the settle stays open under a head
+  // that now looks right.
   on('change', (habit) => {
     if (state.openHabitId == null) return;
     seed(habit);
