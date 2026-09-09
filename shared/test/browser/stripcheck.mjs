@@ -167,6 +167,56 @@ try {
   const titles = () => ev(
     `[...document.querySelectorAll('#view-detail .card-title')].map(t=>t.textContent)`);
 
+  /**
+   * How many writes are sitting in the outbox.
+   *
+   * Declared up here beside the other page readers rather than in the #230
+   * block below, because both offline blocks guard on it now and a `const`
+   * declared in the second is in its temporal dead zone in the first.
+   */
+  const queued = () => ev(
+    `(async () => (await import('/shared/ui/store.js')).state.pending ?? 0)()`);
+
+  /**
+   * Come back online, and wait for the app to have NOTICED and to have DRAINED.
+   *
+   * This replaces `sleep(2500)` / a `navigator.onLine` read whose value was
+   * thrown away / `sleep(2500)`, at both of the two places this suite
+   * reconnects — five seconds of wall clock each, in the suite that is the
+   * fleet's floor. Neither sleep was the post-action settle the root
+   * CLAUDE.md exempts: that carve-out is for waiting to see something did NOT
+   * happen, which has no predicate to poll, and both of these were waiting for
+   * something to happen. The first was waiting for the app to notice the
+   * network was back and the second for the outbox to empty, and each has one.
+   *
+   * ONE predicate covers both, because the second cannot be true before the
+   * first: `watchConnectivity`'s `online` listener probes `/healthz`, reports
+   * the transition, and `syncNow` then flushes the outbox and refreshes the
+   * badge — so `state.pending === 0`, on a page that is holding a queued
+   * write, is that whole sequence having run. `navigator.onLine` stays as the
+   * first conjunct because it is what the discarded read was looking at, and
+   * because it tells a failed emulation apart from a failed flush in the
+   * message.
+   *
+   * A timeout is REPORTED rather than thrown, which is the one place this
+   * departs from `waitUntil`'s usual shape. Throwing is right where the wait
+   * is a precondition for the block after it; here the very next line is the
+   * check this wait exists to make honest, and this file's `catch` turns any
+   * throw into a single `suite ran to completion` FAIL — so a slow flush would
+   * cost the paging blocks, the #245 offline paging block and every #176
+   * ghost-tick check their own verdicts on a run that is already going to be
+   * red. The message goes into that check's evidence instead, so the wait
+   * still names what it wanted and nothing is swallowed.
+   *
+   * @returns {Promise<string>} '' when it drained, else why it did not
+   */
+  const reconnectAndDrain = () => send('Network.emulateNetworkConditions',
+    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId)
+    .then(() => waitUntil(ev, `(async () => navigator.onLine === true
+      && ((await import('/shared/ui/store.js')).state.pending ?? 0) === 0)()`,
+      { what: 'the reconnect to be noticed and the outbox to drain' }))
+    .then(() => '', (e) => ` — ${e.message}`);
+
   /* ---------- where it sits, on an account that has never chosen ---------- */
 
   console.log('--- the card, by default ---');
@@ -443,15 +493,21 @@ try {
   // rollback rule is what found it.
   for (const _ of [0, 1]) await tap(seeded.day1, 500);
   const offlineBox = await box(seeded.day1);
-  await send('Network.emulateNetworkConditions',
-    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
-  await sleep(2500);
-  await ev(`navigator.onLine`);
-  await sleep(2500);
+  // The same guard the #230 block below already carries, for the same reason:
+  // if the emulation ever fails open, both taps reach the server, the cycle is
+  // advanced by two ordinary online writes and the check below passes having
+  // tested nothing it claims to. Unreachable today — `Network.enable` and the
+  // offline conditions are both set eight lines up — which is why this is one
+  // line and not a block.
+  const offlineQueued = await queued();
+  ck('the two offline taps were queued rather than sent', offlineQueued >= 1,
+     `${offlineQueued} in the outbox`);
+  const drainedDay1 = await reconnectAndDrain();
   const afterFlush = await stored(seeded.day1);
   ck('two offline taps advance the cycle, rather than queueing the first twice',
      afterFlush !== null && afterFlush.value === 0,
-     `cell showed ${JSON.stringify(offlineBox)}, server holds ${JSON.stringify(afterFlush)}`);
+     `cell showed ${JSON.stringify(offlineBox)}, server holds `
+     + `${JSON.stringify(afterFlush)}${drainedDay1}`);
 
   /* ---------- offline, the calendar agrees with the strip (#230) ---------- */
 
@@ -496,8 +552,6 @@ try {
   // never written" are the two halves of that bug and only one of them shows.
   const calEnd = () => ev(
     `(async () => (await import('/shared/ui/store.js')).state.calEnd ?? null)()`);
-  const queued = () => ev(
-    `(async () => (await import('/shared/ui/store.js')).state.pending ?? 0)()`);
 
   // The habit's OWN colour, read from the API. A done day on a boolean habit is
   // `shade(color, 1)`, and `shade` returns its argument unchanged at `t >= 1` —
@@ -584,17 +638,14 @@ try {
      `range ${pagedRange} -> ${heldRange}, calEnd `
      + `${JSON.stringify(pagedEnd)} -> ${JSON.stringify(heldEnd)}`);
 
-  await send('Network.emulateNetworkConditions',
-    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
-  await sleep(2500);
-  await ev(`navigator.onLine`);
-  await sleep(2500);
+  const drainedDay3 = await reconnectAndDrain();
   // The optimistic redraw is only honest if the write it drew actually lands,
   // which is the `unknowncheck.mjs` model this suite already follows: ask the
   // API what the row says rather than believing the cell.
   const day3Flushed = await stored(seeded.day3);
   ck('and the queued write lands on reconnect, so the redraw told the truth',
-     day3Flushed !== null && day3Flushed.value === 2, JSON.stringify(day3Flushed));
+     day3Flushed !== null && day3Flushed.value === 2,
+     `${JSON.stringify(day3Flushed)}${drainedDay3}`);
 
   /* ---------- paging, and forgetting where it was ---------- */
 
@@ -1004,7 +1055,15 @@ try {
 } catch (e) {
   ck('suite ran to completion', false, e.message);
 } finally {
-  closeChrome(chrome);
+  // The whole shape `closeChrome` destructures, and awaited — this was the one
+  // call site in the repo passing the ChildProcess on its own. Destructured
+  // from that, `port` and `profile` are `undefined`: `askBrowserToClose` asks
+  // `http://127.0.0.1:undefined/json/version` and its failure is swallowed by
+  // design, `chrome?.pid` is undefined so the group kill never fires, and the
+  // `--user-data-dir` is never removed. Only `launchChrome`'s `exit` handler
+  // was actually killing this suite's browser, and nothing at all was removing
+  // its profile — 11MB and 442 files, every run, measured.
+  await closeChrome({ chrome, port: PORT, profile });
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL DAY-STRIP CHECKS PASSED');

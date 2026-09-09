@@ -1169,6 +1169,124 @@ try {
   await send('Page.removeScriptToEvaluateOnNewDocument',
     { identifier: timerProbe.identifier }, sessionId);
 
+  /* ----- the 23- and 25-hour day ----- */
+
+  console.log('\n--- a calendar day that is not 24 hours long ---');
+  /*
+   * What the block above does NOT pin, said in its own words: a 23- or
+   * 25-hour day. `setHours(24, 0, 0, 0)` is the whole reason `armDayWatch`
+   * spells it that way rather than adding a day's worth of milliseconds, and
+   * on every ordinary day the DST-aware answer and the DST-naive one agree, so
+   * nothing above can tell them apart.
+   *
+   * **Three implementations, and only this block separates the last two.**
+   * `Date.now() + 86400000` is caught by the block above on any day, since it
+   * answers ~86.4e6 whatever the time is. `startOfLocalDay + 86400000` is the
+   * one that survives it — it IS the next local midnight on 363 days a year —
+   * and on a transition day it is a whole hour out: on the fall-back case
+   * below it arms for 23:00 local, an hour before the day it is waiting for
+   * ends, so the page refetches, finds the date unchanged and re-arms; on the
+   * spring-forward case it arms an hour into the new day and the page is stale
+   * for that hour. `setHours(24, 0, 0, 0)` is right in both.
+   *
+   * **The clock is SHIFTED, and it has to be, because the transition cannot be
+   * waited for.** The condition this needs is that a DST transition falls
+   * between now and the next local midnight, which on any real run is true in
+   * no zone at all on ~340 days of the year — a block that can only bite on
+   * about twenty dates is a block that reports a pass having tested nothing,
+   * which is this repo's most-shipped defect. `Emulation.setVirtualTimePolicy`
+   * with `initialVirtualTime` was measured first and cannot do it: the clock
+   * it sets is honoured on the `about:blank` document and is RESET by the
+   * navigation to the app, and re-issuing it afterwards (paused first,
+   * same-origin, reloaded rather than navigated) leaves `new Date()` reading
+   * the real time in every ordering tried. So `window.Date` is shifted by a
+   * constant from a new-document script, exactly as `window.setTimeout` is
+   * wrapped above and as `themesync.mjs` wraps `window.fetch`.
+   *
+   * **The shim moves the world, it does not answer the question.** It shifts
+   * the epoch and nothing else: `setHours` on a shifted `Date` is still real
+   * ICU arithmetic in the overridden zone, so the app computes its own answer
+   * from the same platform a user's browser would. Nothing here reimplements
+   * or re-derives it — the expectation is a UTC INSTANT written out in full,
+   * from the IANA rule for the United States (DST ends 2026-11-01 at 02:00
+   * EDT, begins 2026-03-08 at 02:00 EST), parsed by node as arithmetic with no
+   * zone in it. That is the point of the two literals: a check that computed
+   * the delay with `setHours(24, 0, 0, 0)` would agree with a broken app about
+   * a broken answer.
+   *
+   * Only `window.__armed` is read. The page is rendering a day months from
+   * whatever the server holds, so its cells are empty and its figures are
+   * about a different date — irrelevant to the one claim here, and the reason
+   * this block asserts nothing about what is drawn.
+   */
+  for (const [what, nowISO, midnightISO, hours] of [
+    // 00:30 EDT on the fall-back day. The day is 25 hours long, so its last
+    // midnight is 24h30m away — MORE than a day.
+    ['a 25-hour day', '2026-11-01T04:30:00Z', '2026-11-02T05:00:00Z', 25],
+    // 00:30 EST on the spring-forward day: 22h30m to the next midnight.
+    ['a 23-hour day', '2026-03-08T05:30:00Z', '2026-03-09T04:00:00Z', 23],
+  ]) {
+    const shift = Date.parse(nowISO) - Date.now();
+    const wanted = Date.parse(midnightISO) + 1000;   // `armDayWatch`'s own +1s
+    const naiveDay = Date.parse(nowISO) + 86_400_000 + 1000;
+    const naiveMidnight = wanted + (hours === 25 ? -3_600_000 : 3_600_000);
+
+    const dstProbe = await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        const SHIFT = ${shift};
+        const R = Date;
+        function D(...a) {
+          if (!new.target) return new R(R.now() + SHIFT).toString();
+          return a.length ? new R(...a) : new R(R.now() + SHIFT);
+        }
+        D.prototype = R.prototype;
+        D.now = () => R.now() + SHIFT;
+        D.parse = R.parse;
+        D.UTC = R.UTC;
+        window.Date = D;
+        const real = window.setTimeout;
+        window.__armed = [];
+        window.setTimeout = function (fn, ms, ...rest) {
+          if (typeof fn === 'function' && Number(ms) >= 1000) {
+            window.__armed.push({ ms: Number(ms), at: Date.now() });
+          }
+          return real.call(window, fn, ms, ...rest);
+        };
+      })();`,
+    }, sessionId);
+    await send('Emulation.setTimezoneOverride',
+      { timezoneId: 'America/New_York' }, sessionId);
+
+    await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
+      reload: () => send('Page.navigate',
+        { url: `${APP}/?dst=${hours}#/habit/${day.id}` }, sessionId),
+      what: `the detail page on ${what}`,
+    });
+    await sleep(400);
+
+    // The control. A shim that failed to take leaves the page on the real
+    // clock, where the assertion below would fail for a reason that has
+    // nothing to do with `armDayWatch` — and the zone override alone cannot
+    // put the page on either of these dates.
+    const clock = await ev(`new Date().toISOString().slice(0, 10)`);
+    ck(`the control: the page's clock really is on ${what}`,
+      clock === nowISO.slice(0, 10), `${clock}, wanted ${nowISO.slice(0, 10)}`);
+
+    const fired = await ev(`(window.__armed ?? []).map(t => t.at + t.ms)`);
+    const off = fired.length
+      ? fired.map((f) => f - wanted).reduce((a, b) => (Math.abs(a) < Math.abs(b) ? a : b))
+      : null;
+    ck(`the midnight timer targets the end of ${what}, not 24 hours on from now`,
+      fired.some((f) => Math.abs(f - wanted) <= 2000),
+      `armed to fire at ${JSON.stringify(fired)}, wanted ${wanted} (closest is `
+      + `${off}ms out; a fixed 24 hours would be ${naiveDay}, a DST-naive next `
+      + `midnight ${naiveMidnight})`);
+
+    await send('Emulation.setTimezoneOverride', { timezoneId: '' }, sessionId);
+    await send('Page.removeScriptToEvaluateOnNewDocument',
+      { identifier: dstProbe.identifier }, sessionId);
+  }
+
 } catch (err) {
   console.log('FAIL  harness error :: ' + err.message);
   fails++;

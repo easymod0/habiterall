@@ -50,6 +50,28 @@ const send = (m, p = {}, s) => new Promise((res, rej) => {
  * Never drained by the handler: a block asks for what it is holding, releases
  * what it wants and empties this itself, so nothing that arrives between two
  * reads can be missed.
+ *
+ * **This stays here rather than moving to `chrome.mjs`, and the trigger for
+ * moving it is a caller in a SECOND FILE — not a third block in this one.**
+ * Three suites now pause a request (`hangcheck`, `stripcheck`, here) and no
+ * two of them do the same thing with it: hangcheck keeps `m.params.request`
+ * and never continues anything, stripcheck keeps the whole params and answers
+ * with `Fetch.fulfillRequest` and a 500, and only this file releases in a
+ * chosen order. So there is one duplicated LINE — the `if (m.method ===
+ * 'Fetch.requestPaused')` branch — and it is the one part that cannot move on
+ * its own: it lives inside a per-suite `ws.onmessage`, and `chrome.mjs` owns
+ * no socket, no `pend` map and no `send`. The two parts that could move,
+ * `takePaused` and `release`, have exactly one caller each, both in the last
+ * block of this file.
+ *
+ * So the move is not an extraction, it is `chrome.mjs` growing a collector a
+ * suite wires into its own dispatcher (`onEvent(m)`) plus a `take`/`release`
+ * pair over an injected `send` and `sessionId` — and normalising hangcheck's
+ * `.request`-only store on the way past. That is three suites edited and a
+ * new export in a file all 33 import, to serve one. Worth it the moment a
+ * suite that is not this one needs to release a held reply in an order it
+ * chooses; not worth it for a third block here, which would be the fourth
+ * caller of two helpers already ten lines from where it would sit.
  */
 const paused = [];
 
