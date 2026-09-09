@@ -81,7 +81,7 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 | `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md`, `phantom-dates.md` |
 | `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md`, `caching.md`, `phantom-dates.md` |
 | `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md` |
-| `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md` |
+| `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md`, `caching.md` |
 | `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md`, `caching.md` |
 | reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md` |
 | `site/`, habiterall.ca | `site/CLAUDE.md` | `site.md` |
@@ -270,7 +270,54 @@ each of which has cost a release:
   pure function that pinned them. Assert the output that reached the platform.
 - **A guard that reads SOURCE TEXT cannot see a renamed binding or an inverted
   comparison.** Keep it for what it does catch — a call site that reads no
-  setting at all — and add a behavioural test beside it.
+  setting at all — and add a behavioural test beside it. **And check that it
+  SEES the sites it claims**: #184's guard matched a statement's name followed
+  by `.run(`, so `(yielding ? insertEntryIfAbsent : insertEntry)\n  .run(...)`
+  was not a weak match but no match, and the one write path in personal with no
+  behavioural case either read as clean. An empty offender list means nothing
+  until the denominator is known, so the inventory a guard prints is part of
+  its assertion.
+- **A SEQUENTIAL test cannot see a concurrency defect, and it passes loudly.**
+  `test:summarycache` proved the summary-cache write-back's guard was read and
+  compared; the guard was an InitPlan behind a One-Time Filter, so it could not
+  hold under a race at all, and a lock-order inversion in the same change turned
+  a user's tap into an unhandled 500. Force the interleaving with explicit
+  transactions on separate connections and a stall something else holds, and
+  then **prove it formed** — a harness that silently ran sequentially passes
+  every assertion and teaches nothing. That is what `test:summaryrace` is,
+  beside rather than instead of the sequential inventory. Note what the proof
+  cannot be: "the other statement blocked" stops working the moment the code
+  under test is allowed not to block, so that suite establishes the lock from a
+  third session (`FOR NO KEY UPDATE SKIP LOCKED` returning no row) and asserts
+  the non-blocking separately.
+
+**Two write paths in one edition must take their locks in ONE order.** Cloud's
+mutating paths all reach `users` last through the `data_version` bump, and
+`withUserWrite` clears the habit summary cache BEFORE `fn` for exactly this
+reason — with the clear last, `PUT /settings` alone went `users -> habits` while
+every other path went `habits -> users`, and five pairs of ordinary routes
+deadlocked. Nothing in either edition handles `40P01`, so the victim is a 500 on
+somebody's tap, and `writeBackSummaries` made a *dashboard load* a possible
+victim. Adding a statement to a shared write wrapper is therefore a lock-order
+question first and a performance one second.
+
+**Ordering the TABLES is only half of it, and the other half turns on whether
+the work can be LOST: the discardable party skips, the mandatory parties agree
+on an order.** Two statements touching the same table's ROWS in different orders
+deadlock just as readily, and the fix is not the same for both of them. Ask
+first whether a statement's work is discardable. `writeBackSummaries` is a cache
+stamp on a GET — losing one costs a recomputation — so it takes
+`FOR NO KEY UPDATE SKIP LOCKED` and leaves every cycle it could have been in;
+what then has to be checked is that the loss is temporary and that coverage
+holds, which is measured and not assumed. `withUserWrite`'s clear is correctness
+on every write and can skip nothing, so it takes its locks `ORDER BY id` in an
+explicit `LockRows` pass — because a plan's scan order is NOT a defined order:
+both clears seq-scanned, so both locked in ctid order, and ctid order is not
+stable in a table being HOT-updated. Neither half adds a statement to a write
+path; both live inside a statement already there. `docs/decisions/caching.md`
+has the matrix, and `FOR NO KEY UPDATE` rather than `FOR UPDATE` in both places
+because the latter conflicts with the `FOR KEY SHARE` an `entries` foreign key
+takes.
 
 **Mutation-test before claiming.** Break the fix, watch the new test fail, put
 it back. Every rule above was found that way and not by reasoning.
@@ -295,6 +342,9 @@ Several layers, and they catch different things:
 | ntfy button answers, over the real route | `npm run test:ntfyanswer -w habiterall-cloud` | Postgres |
 | The dashboard memo, and what invalidates it | `npm run test:memo -w habiterall-cloud` | Postgres |
 | Every write bumps `data_version`, and no read does | `npm run test:dataversion -w habiterall-cloud` | Postgres |
+| The dashboard's two cached lifetime figures | `npm run test:summarycache -w habiterall-cloud` | Postgres |
+| The same, over SQLite | `npm run test:summarycache -w habiterall-personal` | nothing |
+| The same cache under a FORCED race | `npm run test:summaryrace -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |

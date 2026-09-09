@@ -418,6 +418,110 @@ check('its key is exactly (user_id, date), in that order',
 check('and it INCLUDEs nothing',
   JSON.stringify(logIncludeCols) === '[]', JSON.stringify(logIncludeCols));
 
+/* ---------- 6. every column of `habits` is classified SOMEWHERE ---------- */
+//
+// `stripSummaryCache` (`shared/src/summary-cache.js`) is a DENY list applied to
+// rows that arrive from `SELECT *` and `RETURNING *`. That is the shape in
+// which a new column SHIPS BY DEFAULT: add one to `habits` and every one of the
+// eight serialisation points starts carrying it, with no code change anywhere
+// and nothing red.
+//
+// It has already happened, and underneath an assertion that could not see it.
+// A scratch `summary_epoch` column reached the API payload while
+// `summary-cache.integration.mjs`'s check — named, in full, "the three columns
+// never reach a client" — went on passing, because it enumerated the three it
+// knew about and a fourth was not one of them. Every by-name assertion in this
+// repo has that property; the fix is not a longer list of names but a check
+// that reads the CATALOG and demands a classification for whatever it finds.
+//
+// So: every column `habits` actually has must appear in exactly one of three
+// buckets. A column in none of them fails this check BY NAME, and the author of
+// the migration that added it has to decide which it is — the same act the root
+// `CLAUDE.md` already demands of a new habit FIELD ("A new habit field has to be
+// assigned to a fidelity list"), extended to the columns that are not fields.
+//
+// `SUMMARY_CACHE_COLUMNS` is IMPORTED here rather than spelled out, and that is
+// the opposite of this repo's usual rule for a reason. The other two buckets are
+// literals, because a literal is what pins a decision. This bucket is not a
+// decision being pinned — it is the STRIP SET being pinned against the SCHEMA,
+// and importing it is what makes "a column the stripper does not know about"
+// the failing condition. Spelled out, the check would compare two hand-written
+// lists to each other and pass with the stripper empty.
+//
+// Deliberately NOT an inversion of `stripSummaryCache` into an allow-list. That
+// is a bigger change with a blast radius across both editions; this is the cheap
+// guard that makes forgetting loud.
+
+console.log('--- every column of habits is classified ---');
+
+const { SUMMARY_CACHE_COLUMNS } = await import('@habiterall/shared/summary-cache.js');
+
+// Structure: identity, ownership, ordering, lifecycle. Not the user's to send
+// and not portable, but not summary cache either.
+const HABITS_STRUCTURAL = [
+  'id', 'user_id', 'position', 'archived', 'created_at', 'category_id',
+];
+
+// The habit's own fields — what `parseHabit` normalises and what the backup
+// formats carry, at whatever fidelity each one manages. A new one of these
+// belongs in a `*_HABIT_FIELDS` list as well, which the round-trip suites are
+// what enforce; this only requires that it be declared a field at all.
+const HABITS_USER_FIELDS = [
+  'name', 'description', 'type', 'unit', 'target_value', 'target_type',
+  'freq_numerator', 'freq_denominator', 'color', 'reminder_time',
+  'reminder_message', 'at_most_unlogged', 'show_as', 'icon',
+];
+
+const { rows: habitCols } = await admin.query(`
+  SELECT attname FROM pg_attribute
+   WHERE attrelid = 'public.habits'::regclass AND attnum > 0 AND NOT attisdropped
+   ORDER BY attnum
+`);
+const actualHabitCols = habitCols.map((r) => r.attname);
+const classified = new Set([
+  ...HABITS_STRUCTURAL, ...HABITS_USER_FIELDS, ...SUMMARY_CACHE_COLUMNS,
+]);
+
+const unclassified = actualHabitCols.filter((c) => !classified.has(c));
+check('THE ASSERTION: no column of `habits` is classified nowhere — a new one '
+  + 'is a strip-set decision, not a default',
+  unclassified.length === 0,
+  unclassified.length ? `unclassified: ${unclassified.join(', ')} — add each to `
+    + 'SUMMARY_CACHE_COLUMNS (server-only, stripped at every serialisation '
+    + 'point), HABITS_USER_FIELDS (a habit field: also give it a *_HABIT_FIELDS '
+    + 'list) or HABITS_STRUCTURAL' : '');
+
+// Controls. Without these the assertion above passes against buckets that have
+// drifted away from the schema in either direction.
+//
+// A bucket naming a column that no longer exists is the silent direction: the
+// column is gone, nothing is unclassified, and the stale name sits there
+// covering for a column that could come back under a different meaning.
+const phantom = [...classified].filter((c) => !actualHabitCols.includes(c));
+check('control: every classified name is a real column of `habits`',
+  phantom.length === 0, phantom.join(', '));
+
+// And a column may not be in two buckets, because then removing it from one is
+// a change with no effect and no test.
+const doubled = actualHabitCols.filter((c) =>
+  [HABITS_STRUCTURAL.includes(c), HABITS_USER_FIELDS.includes(c),
+   SUMMARY_CACHE_COLUMNS.includes(c)].filter(Boolean).length > 1);
+check('control: no column is classified twice', doubled.length === 0,
+  doubled.join(', '));
+
+// The catalog read reached something, so the assertion is not passing over an
+// empty list. The literal is a floor rather than an equality: this number moves
+// every time a migration adds a column, and an equality here would be a second
+// place to edit that says nothing the assertion above does not.
+check('control: the catalog read found the habits table',
+  actualHabitCols.length >= 24, `${actualHabitCols.length} columns`);
+
+// And the cache columns really are among them — the bucket that is imported is
+// the one that could be empty without anything else here noticing.
+check('control: the strip set actually covers columns that exist',
+  SUMMARY_CACHE_COLUMNS.filter((c) => actualHabitCols.includes(c)).length === 4,
+  SUMMARY_CACHE_COLUMNS.join(', '));
+
 /* ---------- clean up after ourselves ---------- */
 // Only this file's own accounts: habits, entries and notify_log all cascade
 // from them. Nothing else in the database is this suite's to delete — unlike

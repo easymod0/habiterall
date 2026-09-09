@@ -15,6 +15,7 @@
     "test:roundtrip": "node test/roundtrip.integration.mjs",
     "test:apishape": "node test/apishape.integration.mjs",
     "test:overview": "node test/overview.integration.mjs",
+    "test:summarycache": "node test/summary-cache.integration.mjs",
     "test:awards": "node test/awards.integration.mjs",
     "test:callerday": "node test/callerday.integration.mjs",
     "test:querydate": "node test/querydate.integration.mjs",

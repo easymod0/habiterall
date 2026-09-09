@@ -7,7 +7,8 @@
  * WHERE clause returns nothing instead of another user's rows.
  *
  * A query that WRITES goes through `withUserWrite` instead, which is `withUser`
- * plus the account's `data_version` bump in the same transaction.
+ * plus the account's `data_version` bump and its habits' cached summary figures
+ * being invalidated, both in the same transaction.
  */
 
 import pg from 'pg';
@@ -313,7 +314,8 @@ export async function withUser(userId, fn) {
 }
 
 /**
- * `withUser`, plus the account's `data_version` bump, in the SAME transaction.
+ * `withUser`, plus the account's `data_version` bump and the habit summary
+ * cache being cleared, in the SAME transaction.
  *
  * Every write path opts into this by name. It is deliberately NOT a line inside
  * `withUser`, and the issue that asked for it got this wrong in a way worth
@@ -325,28 +327,180 @@ export async function withUser(userId, fn) {
  * moves constantly while meaning nothing. The version's whole value is that it
  * changes when the DATA changes.
  *
+ * **The same argument is what puts the summary-cache clear here rather than a
+ * line further out or a line further in.** Inside `withUser` it would fire on
+ * every read, and a dashboard that invalidates its own cache on being looked at
+ * recomputes forever. Spread over a list of the mutating routes it would drift,
+ * exactly as `docs/decisions/caching.md` says the memo's invalidation would: "a
+ * list of the nine mutating routes is a list that drifts, and the two errors
+ * are not symmetrical — forgetting too much costs a recomputation, forgetting
+ * too little paints a user's own tap away." Here it inherits the enumeration
+ * `test:dataversion` already holds every write path to, including the two that
+ * never reach the `/api` router.
+ *
  * So this is the same discipline as `forgetAccount`: a named thing a write path
  * calls, rather than a router or a wrapper it happens to be inside of.
  *
- * **The bump shares the write's COMMIT, and that is the correctness property.**
- * Outside the transaction it could be observed without the write it announces
- * (a reader tags a rebuild with the new version and fills it from pre-write
- * data) or the write could be observed without it (a reader is served a stale
- * entry that is still reachable). Inside, no reader can see one without the
- * other.
+ * **Both extra statements share the write's COMMIT, and that is the correctness
+ * property.** Outside the transaction the bump could be observed without the
+ * write it announces (a reader tags a rebuild with the new version and fills it
+ * from pre-write data) or the write could be observed without it (a reader is
+ * served a stale entry that is still reachable). Inside, no reader can see one
+ * without the other — and the clear cannot be rolled back while the write it
+ * invalidates for commits.
  *
- * Issued AFTER `fn` rather than before, which is a lock-hold argument and not a
- * correctness one: the UPDATE takes a row lock on `users` that every concurrent
- * write by the same account then queues behind, so it is held for the tail of
- * the transaction rather than for all of it. Either order commits atomically.
+ * **The clear runs BEFORE `fn` and the bump AFTER, and that ordering is now a
+ * correctness argument rather than a lock-hold one.** An earlier version issued
+ * both after `fn`, reasoning that row locks held for the tail of a transaction
+ * are cheaper than row locks held for all of it. True, and beside the point:
+ * with the clear last, `habits` and `users` were locked in one order by every
+ * write path except `PUT /settings`, whose own `fn` writes `users` first and
+ * only then reached the account-wide clear on `habits`. That is a lock-order
+ * INVERSION between two ordinary routes, and it deadlocks —
+ *
+ *     tap      : habits -> users
+ *     settings : users  -> habits
+ *
+ * — with no `40P01` handling anywhere in this edition, so the victim surfaced
+ * as an unhandled 500 on a user's tap. Measured over the real routes: five
+ * pairs of write paths deadlocked (`settings x tap`, `tap x habitDel`,
+ * `habitDel x habitDel`, `catDel x habitPutCat`, `reorder x settings`) where a
+ * pre-#301 re-implementation with no clear at all deadlocked zero times in
+ * every one of them, and `catDel x habitPutCat` throughput collapsed by two
+ * orders of magnitude. `writeBackSummaries` — a write on a GET — appeared in
+ * most of the observed cycles, so a DASHBOARD LOAD could deadlock.
+ *
+ * Moving the clear in front of `fn` gives every mutating path in this edition
+ * ONE lock order BETWEEN THE TWO TABLES, `habits` then `users`, which is what
+ * makes the table-level cycle unconstructible rather than merely rarer.
+ * Measured after: `settings x tap`, `tap x habitDel` and `habitDel x habitDel`
+ * all reach zero.
+ *
+ * **It does not settle the ROW order within `habits`, and that is a live
+ * residual rather than a closed question.** `writeBackSummaries` locks the rows
+ * `buildOverview` handed it, in `ORDER BY position, id`; an un-narrowed clear
+ * has only a `user_id` predicate and no index leading on `user_id`, so it
+ * seq-scans and locks in ctid order. Where those disagree the two deadlock, and
+ * pre-clearing AMPLIFIED that pair (`reorder x settings`: 2 before, 8 after)
+ * because the clear is now the first statement of every write and overlaps
+ * maximally with concurrent dashboard loads. `docs/decisions/caching.md` has
+ * the matrix, the cycle Postgres named, and the three candidate remedies —
+ * each of which costs something and none of which is in this change.
+ *
+ * Pre-clearing is sound for every
+ * path, and each way it could have been unsound is a case rather than a
+ * worry: a habit CREATED inside `fn` did not exist to clear and has no cached
+ * pair to invalidate (`summary_asof` and `summary_epoch` start at NULL and 0);
+ * a habit DELETED inside `fn` is cleared a moment before it goes, which is
+ * wasted work on one row and never a wrong answer; and the entry write's
+ * foreign keys take `FOR KEY SHARE`, which does not conflict with the
+ * `RowExclusiveLock` the clear already holds on the same habits row. Nothing
+ * computes the id list inside `fn` either — `habits` is an OPTION, decided
+ * before `fn` runs — so there is no path for which the clear needs `fn`'s
+ * result.
+ *
+ * The lock-hold cost is real and is paid knowingly: concurrent writes by the
+ * SAME account now queue on the clear at the top of the transaction rather
+ * than at the tail. One account's writes serialising against each other is a
+ * throughput note; two of them deadlocking is a 500.
+ *
+ * Either order still commits atomically, which is why this is an ordering
+ * choice and not a transactional one.
  *
  * @param {number} userId
  * @param {(client: pg.PoolClient) => Promise<T>} fn
+ * @param {{habits?: number[] | null}} [opts] `habits` narrows the summary-cache
+ *   clear to the ids the caller knows it touched. The default, `null`, clears
+ *   every habit on the account: forgetting too much is the safe direction, and
+ *   it is what a write path that says nothing gets. Narrowing is the whole
+ *   performance point — one tap must not cost the other nineteen rows their
+ *   cached pair — so a caller passes it only when it can name the habit.
+ *   **An EMPTY array means the same as `null`**, not "clear nothing":
+ *   `id = ANY('{}')` is false for every row, so the one spelling that fails in
+ *   the unsafe direction is the one a caller reaches by computing an id list
+ *   that happens to come out empty — and it would fail silently. The asymmetry
+ *   the paragraphs above rest on decides it: over-clearing costs a
+ *   recomputation, under-clearing serves a figure from before the write.
  * @returns {Promise<T>}
  * @template T
  */
-export async function withUserWrite(userId, fn) {
+export async function withUserWrite(userId, fn, { habits = null } = {}) {
+  // See the JSDoc: `[]` is a caller that named no habit, which is a caller that
+  // gets the whole account cleared.
+  const narrowTo = habits?.length ? habits : null;
   return withUser(userId, async (client) => {
+    // FIRST, so that `habits` is locked before `users` on every write path in
+    // this edition — see the JSDoc above for the deadlock this ordering
+    // removes and for why pre-clearing is sound on every path.
+    //
+    // The stamp alone is cleared, never the two figures: `summary_asof` is the
+    // validity flag (see `shared/src/summary-cache.js`), so a stale pair left
+    // beside a NULL stamp is unreadable rather than wrong, and the schema's
+    // `habits_summary_cache_complete` CHECK is written to permit exactly that.
+    //
+    // **`summary_epoch` advances with the stamp, and there is deliberately no
+    // longer an `AND summary_asof IS NOT NULL` beside it.** That predicate was
+    // here to make the statement write no row, no WAL and no transaction id
+    // when nothing was cached, the way the device-zone middleware's
+    // `IS DISTINCT FROM` does — and it was the mechanism by which the
+    // write-back's guard failed silently. When the stamp is already NULL, which
+    // is the state after every write, the predicate matched no row: the clear
+    // took NO ROW LOCK, so a concurrent `/overview` write-back never blocked on
+    // it and never had its qual re-checked, and the stamp itself said nothing
+    // either — the reader read NULL and the clear left NULL. The epoch is what
+    // the reader compares now, so it has to advance whether or not there was a
+    // stamp to clear, and the row has to be written so that the lock exists.
+    // Migration 019's header has the measurement and the EvalPlanQual reason.
+    //
+    // The cost is one row write per habit in scope per account write, where a
+    // dormant account previously paid none. It is bounded by the narrowing
+    // below, and the update stays HOT-eligible because neither column is in any
+    // index.
+    //
+    // **The `victims` CTE is here so that two CLEARS cannot deadlock each
+    // other, and it is the other half of the mechanism `writeBackSummaries`
+    // uses.** Ordering the two TABLES stopped `habits`-versus-`users` cycles;
+    // it left cycles WITHIN `habits`, between two statements locking the same
+    // rows in different orders. The write-back could resolve its half by
+    // declining to wait (`SKIP LOCKED`), because a cache stamp is discardable.
+    // A clear is not: it is mandatory invalidation, so it must wait for a
+    // contended row rather than skip it, and two waiting parties are exactly
+    // what a cycle needs.
+    //
+    // So the clears agree on an order instead. Locking `ORDER BY id` in an
+    // explicit `LockRows` pass means any two of these acquire `habits` rows
+    // in the same sequence and cannot form a cycle — regardless of scan order,
+    // and that "regardless" is the point. Both multi-row clears SEQ-SCAN, so
+    // both used to lock in ctid order, and ctid order is not stable in a table
+    // being HOT-updated: two seq scans started moments apart see different
+    // line-pointer layouts. Postgres named it in the deadlock context,
+    // `while rechecking updated tuple (143,12)`.
+    //
+    // It stays ONE statement and one round trip. That is the constraint: an
+    // extra `SELECT ... FOR UPDATE` round trip on every tap was rejected, and
+    // a more explicit lock inside the statement already here is not that.
+    //
+    // `FOR NO KEY UPDATE` for two reasons, both checked rather than assumed.
+    // It is the strength this UPDATE takes anyway — the only unique indexes on
+    // `habits` are on `(id)` and `(id, user_id)`, and neither `summary_asof`
+    // nor `summary_epoch` appears in either, so no key column moves and the
+    // outer UPDATE re-locking a row the CTE already holds is free. And it does
+    // not conflict with the `FOR KEY SHARE` an `entries` foreign key takes on
+    // a habit row, so an entry write and a clear still do not block each other.
+    // `FOR UPDATE` would have been strong enough and wrong on the second count.
+    await client.query(
+      `WITH victims AS (
+          SELECT id FROM habits
+           WHERE user_id = $1
+             AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))
+           ORDER BY id
+             FOR NO KEY UPDATE
+       )
+       UPDATE habits h
+          SET summary_asof = NULL, summary_epoch = summary_epoch + 1
+         FROM victims v
+        WHERE h.id = v.id AND h.user_id = $1`,
+      [userId, narrowTo]);
     const result = await fn(client);
     await client.query(
       'UPDATE users SET data_version = data_version + 1 WHERE id = $1', [userId]);

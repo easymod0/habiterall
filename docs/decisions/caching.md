@@ -686,3 +686,692 @@ gained nothing; `offline.js` lost `noteWrite` and its `flush()` call and gained
 nothing. That is the property worth remembering about this shape: the fix is
 entirely server-side, so an old client installed on somebody's phone gets it
 without updating.
+
+## #184: two lifetime figures move onto the habit row
+
+`/overview` carries four figures per habit. `score` and `currentStreak` are
+read over a bounded recent window and are cheap. `bestStreak` and
+`totalCompleted` are statements about the habit's WHOLE history — a scan back
+`STREAK_HISTORY_DAYS` and an aggregate with no date predicate at all — and
+neither can change between two loads on the same day unless something was
+WRITTEN. That is what makes them cacheable rather than merely slow: a figure
+that is a pure function of the account's writes, re-derived on every read that
+follows none, is exactly the shape a stored column pays for once. `score` and
+`currentStreak` are not this shape — they move if `summaryEnd` itself moves,
+with nothing written — so they stay derived.
+
+`shared/src/summary-cache.js` is the one rule for what the cached pair MEANS,
+imported by both editions: `SUMMARY_CACHE_COLUMNS`, `stripSummaryCache`,
+`summaryCacheHit` and `recomputeBestStreak`. The storage — the columns, the
+migration, the write path that invalidates them — is per edition, the same
+split the root `CLAUDE.md` draws everywhere else.
+
+### The measurements, and the correction in both directions
+
+The issue's own central claim needed correcting two opposite ways at once —
+smaller in milliseconds, bigger in proportion — which is the interesting part
+and worth stating exactly that way round rather than picking one side.
+Re-baselined on this branch's base (PR #300), `.claude/work/issue-184/measurements.md`:
+
+| | ms/habit | issue body |
+|---|---:|---:|
+| `computeStreaks`(1830d) + `bestStreak` | **0.81** | 3.57 |
+| `bestStreak`'s share of `/overview`'s per-habit JS | **62%** | 38% |
+
+The absolute figure is 4.4× smaller than the issue claimed, because #198 and
+#218 landed since and #218's `summaryStats` already cut `/overview`'s
+per-habit cost once. But the SHARE is much larger, not smaller: with the five
+passes `summaryStats` no longer runs, what is left of the route's per-habit JS
+is mostly this one scan. So the issue got smaller in milliseconds and bigger
+in proportion, and the proportion is what decides whether caching it is worth
+doing at all.
+
+On the SQL side, a seeded 20-habit / 29,460-entry / 1,830-day account. Measured
+with `EXPLAIN (ANALYZE, BUFFERS)` in `psql` as `habiterall_app` with
+`app.user_id` set, so the RLS policies are in force exactly as they are behind
+`withUser` — not through the app, so these are the statements' own costs and
+carry no Express, `pg` or JSON-serialisation overhead:
+
+| | total | per habit |
+|---|---:|---:|
+| the unbounded `totalCompleted` aggregate | 8.75 ms | 0.44 ms |
+| the 1830-day streak read | 21.30 ms | 1.07 ms |
+| the 400-day summary read | 4.34 ms | 0.22 ms |
+| the habit read, carrying the two cached columns | 0.056 ms | ~0 |
+
+The last row is the point: the cached pair folds into the `SELECT * FROM
+habits` the route already issues, so reading it is not a query at all — 0.056
+ms whether the row carries two more columns or not. Master issues the streak
+read and the aggregate for every habit and derives the 400-day slice from the
+streak read in JS: 30.05 ms of Postgres time per 20-habit load. Warm, this
+branch issues only the 400-day read: 4.34 ms — a ~25.7 ms cut, plus ~16.2 ms
+of synchronous Node CPU (20 × 0.81 ms) that master pays and this branch does
+not. Cold — every habit stale, which is every account's first load of a day
+and every load after a write — the cost is master's figure plus one write-back
+`UPDATE`. Framed honestly as "master, plus a write" rather than as a second
+win, which is exactly why the `staleIds`/`freshIds` split matters: issuing the
+400-day read for every habit as well, rather than deriving a stale habit's
+slice from the 1830-day read it already has, would make the cold path fetch a
+stale habit's last 400 days TWICE — ~2,230 days per habit against master's
+1,830, on the one load a user actually waits for.
+
+### The two editions gain asymmetrically, and this does not pretend otherwise
+
+Personal gains the most, and the PR is explicit about why: it has no memo at
+all, its storage is `node:sqlite` and synchronous, so every millisecond this
+takes off `/overview` is a millisecond the whole process is not blocked for
+anybody else. There is no warm/cold split to reason about the way there is on
+cloud — every fresh habit is a saving, full stop.
+
+Cloud gains only on memo MISSES. `/overview` there is already memoised
+("The dashboard is memoised, and a write is what clears it", above), so a
+repeated window inside the TTL already costs ~2.3 ms and never reaches this
+code at all. What these columns speed up is the first load of a window, a
+`data_version` bump, and the cold path generally — real costs, and the ones a
+user actually waits on, but not the common case the memo already made cheap.
+Saying so is the point: a change that only moves the miss path is a real win
+and a smaller one than "cache the dashboard's two lifetime figures" sounds
+like on a memoised edition.
+
+### Denormalised columns, not #191's bounded per-user caches
+
+#191 already gave cloud a bounded in-process cache per user. This is not that,
+for two reasons that both matter. First, the figure has to survive a restart —
+a process cache is gone on deploy, and a deploy is exactly when every habit on
+the instance goes cold at once, which is the worst possible moment to lose the
+saving. Second, a WRITE is the natural invalidation point for a figure that
+only changes when something is written: hanging it off the row a write already
+touches costs nothing extra to invalidate correctly, where a process cache
+needs its own eviction argued for separately, the way #191's own caches did.
+
+### Nullable, no default, and `summary_asof` as the only validity flag
+
+`best_streak`, `total_completed` and `summary_asof` are all nullable with no
+`DEFAULT`. `NOT NULL DEFAULT 0` would make a habit that has genuinely never
+been completed indistinguishable from one whose pair has never been computed —
+the same collapse the root `CLAUDE.md` forbids for `entryMap.get(date) ??
+UNSET`, in the schema this time. `summary_asof` alone decides validity: it
+holds the day the pair was computed FOR, so a stale pair sits beside a NULL
+stamp and is never served, and every pre-existing row upgrades to "invalidated"
+for free — there is no backfill and no migration that has to compute anything.
+
+### `<>`, never `<`
+
+`summaryCacheHit` compares the stamp against `summaryEnd` with equality, and a
+`<` reading like "at least this recent" is the wrong comparison to reach for.
+`summaryEnd` is the CALLER's day, not the server's, and an account used from
+two zones can move it BACKWARDS across a date boundary — a device west of the
+last one serves a `summaryEnd` earlier than a pair already stamped for
+tomorrow. `<` would call that pair "fresh enough" and keep serving it for the
+rest of that device's day. Equality is the only comparison under which a cache
+stamped with a day means the day it says.
+
+### The write-back is a write on a GET, and it must never bump `data_version`
+
+Recomputing a stale habit's pair and stamping it is a write inside a route
+whose method is GET. Cloud has exact precedent for that shape already: the
+device-zone middleware writes `users.device_time_zone` through bare `withUser`
+on every request and deliberately does not bump `data_version`, because it is
+an observation the server makes rather than a change to anything `/overview`
+reads. The write-back is the same kind of write for the same reason, and here
+the consequence of getting it wrong is sharper: bumping `data_version` inside
+`buildOverview` would invalidate the very memo entry this call is in the
+middle of filling, which does not settle into a stale-but-stable state — it is
+a rebuild loop that never converges, since every rebuild bumps the version the
+next rebuild has to beat.
+
+Cloud guards the write-back, because `withUser` is READ COMMITTED and a write
+can commit between the entry reads and the stamp — the same "version last"
+hazard the memo section above describes, one level in: writing the recomputed
+pair unconditionally would stamp TODAY's date over data read before a
+concurrent write, and the wrong figure would then survive until something else
+invalidates it. **The guard that shipped first was the account's
+`data_version`, and it could not hold; the next section is what replaced it and
+how the difference was measured.** Personal needs no such guard. `node:sqlite`'s
+`DatabaseSync` is synchronous, so the entry reads, the derivation and the
+stamp are one uninterrupted turn of the event loop — nothing can commit in
+between because nothing else can run at all. That holds only while nothing in
+the route AWAITS between the reads and the stamp, and the comment at the
+write-back says so; it is not a property of SQLite in general; it is a
+property of this route staying synchronous throughout.
+
+### The guard that could not hold, and the per-habit epoch that does
+
+The first guard was written as a predicate inside the write-back's own UPDATE:
+
+```sql
+AND (SELECT u.data_version FROM users u WHERE u.id = $1) = $6
+```
+
+It reads like a per-row check and it is not one. The subquery correlates to
+`$1` and to nothing on the habits scan, so the planner hoists it into an
+**InitPlan behind a One-Time Filter** — `EXPLAIN (VERBOSE)` shows the filter
+sitting ABOVE the scan, evaluated once, its answer cached in a `PARAM_EXEC`
+slot. That is fatal in exactly the case the guard exists for. When the
+statement blocks on a concurrent writer's row lock and resumes after that
+writer commits, Postgres re-runs the qual against the newly committed target
+tuple — EvalPlanQual — and **EPQ cannot re-run an InitPlan**. The statement
+resumed and stamped the stale figures anyway.
+
+Two interleavings were forced through the real routes, and both re-stamped:
+
+| | how it forms | needs EPQ? |
+|---|---|---|
+| R1 | the write-back blocks on a concurrent writer's clear, resumes after its commit, stamps anyway | yes |
+| R2 | the clear carried `AND summary_asof IS NOT NULL`, so with the stamp already NULL — the state after EVERY write — it wrote no row and took NO row lock; the write-back never blocked at all | no |
+
+R2 is the commoner one and it is the worse one, because there was nothing to
+compare either: the reader read NULL and the clear left NULL. Measured
+consequence, over `GET /overview` on a booted server: `totalCompleted=5`
+against a ground truth of 6, on every replica, until the calendar day rolled
+over. `test:summarycache` passed throughout — every one of its cases is
+SEQUENTIAL, and sequentially the predicate holds perfectly.
+
+Six candidates were measured against four forced interleavings before one was
+chosen. The two that failed are worth recording, because both read as obvious
+fixes:
+
+| candidate | result |
+|---|---|
+| fold `data_version` into the UPDATE's own `FROM` | **FAILS** — a non-target relation is re-scanned on the statement's ORIGINAL snapshot, and EPQ does not re-fetch it |
+| add a predicate on `h.summary_asof` | **FAILS** — it proves EPQ *does* re-check target columns, but in R2 the reader read NULL and the clear left NULL, so there is nothing to compare. Silent in the commoner case |
+| `FOR NO KEY UPDATE` on the users row | **HOLDS**, and unacceptable — it inverts the lock order against every ordinary write path and deadlocks with the WRITE as the victim (`40P01`) |
+| `h.xmin` | holds, and is a row version rather than a cache version: any unrelated column update refuses the write-back |
+| **per-habit `summary_epoch`** | **HOLDS**, and is what shipped |
+
+**The reason the epoch is the right answer rather than merely a working one:
+invalidation is already per-HABIT, so the validity marker has to be per-habit
+too.** An account-level counter was always the wrong grain — under it a tap on
+habit A refused the write-back for the other nineteen habits, which no write to
+A can invalidate. The clear becomes
+`SET summary_asof = NULL, summary_epoch = summary_epoch + 1`, the read path
+selects the column with the row it already fetches (`SELECT *`, so no extra
+query and no extra round trip), the guard becomes
+`AND h.summary_epoch = v.summary_epoch` — a predicate on the target relation's
+own column, joined against a parameter array, which is precisely the shape EPQ
+re-checks — and the `users` subquery goes away. Free on the read path, and
+stricter in the useful direction while looser in the wasteful one.
+
+**Dropping `AND summary_asof IS NOT NULL` is a cost paid knowingly.** That
+predicate made the clear write no row, no WAL and no transaction id when
+nothing was cached — the same trick the device-zone middleware's
+`IS DISTINCT FROM` uses — and it was the mechanism by which R2 was silent. The
+epoch is what a reader compares, so it has to advance whether or not there was
+a stamp to clear, and the row has to be written so that the lock exists at all.
+A dormant account now pays one row write per habit in scope per write where it
+previously paid none. It is bounded by the narrowing, and it stays
+HOT-eligible because neither column is in any index.
+
+One thing is deliberately NOT fixed by this: during a **rolling update** a
+replica on the previous release does not advance the epoch, so the guard is
+inert against its writes and its own write-back can still re-stamp. That is the
+hazard described above — i.e. what is already in production — and the reverse
+direction leaves the old replica exactly as broken as it was. Neither side is
+newly wrong, and both end with the last old replica. Keeping the `data_version`
+subquery as a second, weaker guard for the rollout window was considered and
+declined: a predicate that cannot hold is what shipped this bug, and leaving
+one in place invites the next reader to believe it.
+
+### One lock order, because the clear introduced four deadlocks
+
+The clear is a second statement inside a shared write wrapper, and adding one
+of those is a lock-order question before it is a performance question. Every
+mutating path in this edition reached `users` LAST, through the `data_version`
+bump — every path except `PUT /settings`, whose own `fn` writes `users` and only
+then reached the account-wide clear on `habits`:
+
+```
+tap      : habits -> users
+settings : users  -> habits (all)
+```
+
+Measured, one worker per role against a pre-#301 re-implementation with no
+clear in it, `SECS=8`:
+
+| pair | NEW (#301 as it stood) | pre-#301 |
+|---|---|---|
+| `settings x tap` | 7 deadlocks | 0 |
+| `tap x habitDel` | 8 | 0 |
+| `habitDel x habitDel` | 5 | 0 |
+| `catDel x habitPutCat` | 8 | 0 |
+| `reorder x settings` | 2 | 0 |
+
+Zero under the pre-PR shape in every scenario, and `catDel x habitPutCat`
+throughput collapsed from 7,731 completed operations to 84. Nothing in
+`habiterall-cloud/src/` or `shared/src/` handles `40P01` — `noteTimeout`
+matches `57014` and `25P03` only — so the victim was an unhandled **500** on a
+user's tap. `writeBackSummaries` appeared in most of the observed cycles, which
+means a **dashboard load** could be the victim.
+
+**The fix is one lock order everywhere, and it is achieved by running the clear
+BEFORE `fn` rather than after.** The clear and the bump were both issued after
+`fn` on a lock-hold argument — row locks held for the tail of a transaction are
+cheaper than row locks held for all of it — which is true and was the wrong
+thing to optimise. With the clear first, `habits` precedes `users` on every
+mutating path including `PUT /settings`, and the cycle is unconstructible
+rather than merely rarer.
+
+Pre-clearing is sound on every path, and each way it could have been unsound is
+a case rather than a worry. A habit CREATED inside `fn` did not exist to clear
+and has no cached pair (`summary_asof` NULL, `summary_epoch` 0). A habit DELETED
+inside `fn` is cleared a moment before it goes — a wasted row write, never a
+wrong answer. The entry write's foreign keys take `FOR KEY SHARE`, which does
+not conflict with the `RowExclusiveLock` the clear already holds on the same
+habits row. And nothing computes its id list inside `fn`: `habits` is an
+OPTION, decided before `fn` runs.
+
+The lock-hold cost is real and is accepted: one account's concurrent writes now
+queue on the clear at the top of the transaction rather than at the tail. One
+account's writes serialising against each other is a throughput note; two of
+them deadlocking is a 500.
+
+**Two clears were also narrowed, and one deliberately was not.**
+`DELETE /habits/:id` cleared the whole account, which was strictly wasted work
+— removing a habit cannot change another habit's cached pair — and was the sole
+cause of `habitDel x habitDel`. `POST /habits/reorder` cleared everything too;
+it is narrowed to the ids the request named rather than removed, because every
+write in this edition clears SOMETHING and a route that opted out would be the
+one place a field added to the pair later had no invalidation. The account-wide
+clear on a SETTINGS write STAYS: `atMostUnlogged` moves every at-most habit's
+`bestStreak` through `unansweredCounts`, so narrowing it would be silent and
+long-lived. It is the ordering above, not narrowing, that makes it safe.
+
+Measured after, same harness, same `SECS=8`, one worker per role:
+
+| pair | before | ordering only | ordering + narrowing |
+|---|---|---|---|
+| `settings x tap` | 7 | 2 | **0** |
+| `tap x habitDel` | 8 | 7 | **0** |
+| `habitDel x habitDel` | 5 | 0 | **0** |
+| `catDel x habitPutCat` | 8 (ok=84) | 0 (ok=6,977) | 4 (ok=3,825) |
+| `reorder x writeback` | 0 | 0 | **0** |
+| `reorder x settings` | 2 (ok=9,729) | 8 (ok=97) | 8 (ok=28) |
+
+Three pairs go to zero and stay there, and `catDel x habitPutCat`'s throughput
+recovers from 84 completed operations to between 3,825 and 6,977 — the collapse
+was the deadlocks, not the serialisation, since each one costs a full
+`deadlock_timeout` of blocking before it is detected.
+
+**Two pairs do not reach zero, and this is where the honest answer is "not
+yet".** Postgres names the same cycle in every remaining case, and it is not a
+`habits`-versus-`users` inversion at all — it is two statements taking
+**`habits` row locks in different ROW orders**:
+
+```
+Process 155: UPDATE habits SET summary_asof = NULL, summary_epoch = summary_epoch + 1
+              WHERE user_id = $1 AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))
+Process 157: UPDATE habits h SET best_streak = v.best_streak, ...
+              FROM (SELECT * FROM unnest($3::bigint[], ...)) v
+```
+
+`writeBackSummaries` walks the array `buildOverview` built, which is
+`ORDER BY position, id`. An un-narrowed clear has only a `user_id` predicate and
+no index leading on `user_id`, so it seq-scans and locks in ctid order. When
+those two orders disagree the cycle exists, and `reorder x settings` is the
+worst case precisely because `reorder` is permuting `position` while the
+write-back is reading it — so the two orders disagree continuously.
+
+Moving the clear to the front of the transaction **amplified** this pair rather
+than fixing it (2 deadlocks before, 8 after), because the clear is now the first
+statement of every write and so overlaps maximally with concurrent dashboard
+loads. That is a real regression in that scenario and it is recorded here rather
+than smoothed over: "one lock order, everywhere" is achieved between the two
+TABLES and is not yet achieved between the two multi-row statements on `habits`.
+
+### The remedy: the DISCARDABLE party declines to wait
+
+Two remedies were considered first and both were rejected, for reasons worth
+keeping. A `SELECT id ... ORDER BY id FOR UPDATE` pre-lock inside the clear is
+the documented idiom, and it puts a new statement on the write path — on every
+tap — to fix a problem a dashboard load causes. An index on
+`habits (user_id, id)` is write amplification on every habit write, and it buys
+a planner PREFERENCE rather than a guarantee.
+
+**The reframe that changes the design: a deadlock needs a wait-for CYCLE, so
+every party has to be waiting, and these two parties are not equals.** The clear
+is MANDATORY — correctness, on every write, and it must hold its locks to the
+COMMIT. The write-back is OPPORTUNISTIC — a cache stamp on a GET, and losing one
+costs exactly one recomputation. So the two never needed to agree on a row
+order. One of them needed to never wait, and it should be the discardable one.
+
+```sql
+WITH candidates AS (
+    SELECT id FROM habits
+     WHERE user_id = $1 AND id = ANY($3::bigint[])
+     ORDER BY id
+       FOR NO KEY UPDATE SKIP LOCKED
+)
+UPDATE habits h SET ... FROM (unnest(...)) v, candidates c
+ WHERE h.id = v.id AND h.id = c.id AND h.user_id = $1
+   AND h.summary_epoch = v.summary_epoch
+```
+
+One statement, no extra round trip, and nothing added to any mutating route. The
+CTE takes the row locks and drops anything already held; the outer UPDATE then
+only touches rows this transaction already holds, so it does not wait either.
+`FOR NO KEY UPDATE` rather than `FOR UPDATE` because the latter conflicts with
+the `FOR KEY SHARE` an `entries` foreign key takes, which would skip a habit
+merely because somebody was writing an entry against it.
+
+**Both halves are load-bearing, and the first version of this section said
+otherwise.** It claimed `SKIP LOCKED` did all the work and the sort was
+decoration. The mutation — remove `SKIP LOCKED`, keep the CTE and the sort —
+measured that wrong, and they fix different things. `ORDER BY id` is what
+removed the write-back-versus-clear cycle: without the CTE this statement locked
+in `ORDER BY position, id`, and `position` is the column `reorder` exists to
+permute, so its lock order was being actively scrambled by another route.
+`SKIP LOCKED` is what removed the WAITING, and the waiting was most of the cost.
+
+| pair | before any of this | ordering + narrowing | **+ `SKIP LOCKED`** | sort but NO `SKIP LOCKED` |
+|---|---|---|---|---|
+| `settings x tap` | 7 | 0 | **0** (ok=12,676) | 0 (ok=6,634) |
+| `tap x habitDel` | 8 | 0 | **0** | 0 |
+| `habitDel x habitDel` | 5 | 0 | **0** | 0 |
+| `catDel x habitPutCat` | 8 (ok=84) | 4 (ok=3,825) | **0** (ok=10,832) | 0 (ok=6,518) |
+| `reorder x writeback` | 0 | 0 | **0** (ok=15,326) | 0 |
+| `reorder x settings` | 2 (ok=9,729) | 8 (ok=28) | **3** (ok=12,505) | 9 (ok=16) |
+
+Five of six pairs reach zero, and four of them are now FASTER than the pre-#301
+control that had no clear at all. `reorder x settings` recovers from 28
+completed operations to 12,505 — a ~450x recovery — and from 8 deadlocks to 3.
+
+**It was not zero, and the three that remained were a different cycle.**
+`writeBackSummaries` was absent from every one of them: both parties were the
+clear itself, one narrowed (`reorder`) and one not (`settings`). Plans said why
+— BOTH multi-row clears seq-scan, so both locked in ctid order, and ctid order
+is not stable in a table being HOT-updated: two seq scans started at different
+moments see different line-pointer layouts. Postgres agreed, naming
+`while rechecking updated tuple (143,12)` in the deadlock context. `SKIP LOCKED`
+could not help there, because NEITHER party is discardable — both are mandatory
+invalidations, and a clear that skipped a contended row would be a habit left
+serving a figure from before the write.
+
+### ...and then the mandatory parties agreed on an order
+
+The two remedies rejected earlier were rejected for putting the cost in the
+wrong place, not for being the wrong mechanism. An extra `SELECT ... FOR UPDATE`
+round trip on every tap is a new statement on the write path; an index is write
+amplification for a planner preference. **A more explicit lock inside the
+statement that is already there is neither of those**, and it is the other half
+of what the write-back had just proved: order the acquisition.
+
+```sql
+WITH victims AS (
+    SELECT id FROM habits
+     WHERE user_id = $1 AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))
+     ORDER BY id
+       FOR NO KEY UPDATE
+)
+UPDATE habits h SET summary_asof = NULL, summary_epoch = summary_epoch + 1
+  FROM victims v WHERE h.id = v.id AND h.user_id = $1
+```
+
+One statement, one round trip. Any two clears now take `habits` rows in the same
+sequence and cannot form a cycle — **regardless of scan order**, which is the
+point, because the scan order was the thing that could not be relied on.
+
+`FOR NO KEY UPDATE` for two reasons, both checked rather than assumed. It is the
+strength this UPDATE takes anyway: the only unique indexes on `habits` are on
+`(id)` and `(id, user_id)`, and neither `summary_asof` nor `summary_epoch`
+appears in either, so no key column moves and the outer UPDATE re-locking a row
+the CTE already holds is free — confirmed by the throughput, which did not
+collapse. And it does not conflict with the `FOR KEY SHARE` an `entries` foreign
+key takes, so an entry write and a clear still do not block each other.
+
+| pair | before any of this | + `SKIP LOCKED` | **+ ordered clear** | pre-#301 control |
+|---|---|---|---|---|
+| `settings x tap` | 7 | 0 (ok=12,676) | **0** (ok=12,297) | 0 (ok=11,813) |
+| `tap x habitDel` | 8 | 0 (ok=8,893) | **0** (ok=8,727) | 0 (ok=10,419) |
+| `habitDel x habitDel` | 5 | 0 (ok=7,483) | **0** (ok=7,280) | 0 (ok=7,590) |
+| `catDel x habitPutCat` | 8 (ok=84) | 0 (ok=10,832) | **0** (ok=10,376) | 0 (ok=9,600) |
+| `reorder x writeback` | 0 | 0 (ok=15,326) | **0** (ok=11,524) | 0 (ok=13,522) |
+| `reorder x settings` | 2 (ok=9,729) | **3** (ok=12,505) | **0** (ok=14,528) | 0 (ok=15,298) |
+
+**Every pair is zero.** The explicit lock pass costs 2–4% on most pairs and ~25%
+on `reorder x writeback`, and it GAINS 16% on `reorder x settings` because the
+deadlocks it removes cost a full `deadlock_timeout` each. Mutation: drop the
+`ORDER BY id` and keep the CTE and the lock, and `reorder x settings` returns to
+8 deadlocks while every other pair stays at 0 — so the ORDERING is the mechanism
+and the CTE is only how it is expressed.
+
+**It also fixed `reorder x reorder`, which this issue had written off as
+pre-existing.** Measured 0 deadlocks against the pre-#301 control's 9, and 2,587
+completed operations against the control's 7. Not by design: the clear now runs
+FIRST and takes every one of the reorder's habit rows in id order, so it is an
+ordered gate in front of `POST /habits/reorder`'s own position UPDATE, which
+locks in whatever order the client sent. Two reorders serialise on the gate and
+never reach the unordered statement concurrently. Recorded because the earlier
+version of this section says that deadlock is not this issue's to fix, and that
+is now false.
+
+No blanket `40P01` retry was added; that is its own idempotency argument and it
+would have hidden all of this rather than answering it.
+
+### The rule the two steps establish together
+
+The two halves are not two tricks, they are one rule with two cases, and it is
+worth stating in the form a future statement added to a write path can be tested
+against:
+
+> **The discardable party skips; the mandatory parties agree on an order.**
+
+Decide first whether a statement's work can be LOST. `writeBackSummaries` is a
+cache stamp on a GET, so losing one costs a recomputation — that party takes
+`SKIP LOCKED` and leaves every cycle it might have been in, and the only thing to
+check afterwards is that the loss is temporary and coverage holds. The clear is
+correctness on every write, so it cannot skip anything — that party has to take
+its locks in a defined order, and the order has to be defined by the statement
+rather than inherited from a scan, because a scan's order is not stable under
+concurrent writes.
+
+Neither case is achieved by adding a statement to the write path, and both are
+achieved inside a statement already there.
+
+### What `SKIP LOCKED` costs, measured
+
+A skipped stamp is a cache miss, so the trade is only sound if misses are
+temporary and coverage stays high. Measured over 20 s on one account with 20
+habits, sampling the fraction of habits carrying a live stamp every 250 ms:
+
+| load | skipped by the row lock | refused by the epoch guard | steady coverage (2nd half) | min | recovery |
+|---|---|---|---|---|---|
+| 1 tapper, 2 loaders, 100 ms think (~10 taps/s) | 27.1% | 0.0% | **97.0%** | 95.0% | FULL |
+| 2 tappers, 4 loaders, no think (~790 taps/s) | 68.0% | 1.0% | **91.5%** | 85.0% | FULL |
+| ...and re-measured with the ordered clear below | 20.3% / 67.0% | 0.0% / 1.1% | **97.5%** / **92.6%** | 95.0% / 85.0% | FULL / FULL |
+
+The ordered clear did not cost the skip rate anything — it improved it slightly
+in both configurations, which is consistent with clears no longer stalling a
+full `deadlock_timeout` before being cancelled.
+
+The per-attempt skip rate is high and is the wrong number to read. What matters
+is coverage, and it holds at 97% under a load already an order of magnitude
+heavier than any real account, and at 91.5% under a synthetic 790 taps per
+second on a single user. The floor is 85%, never zero, and one quiet load
+restores 20/20 in both configurations — which is the property block 7 of
+`test:summaryrace` pins rather than assumes.
+
+**No account goes persistently unstamped.** The habit that stays unstamped under
+load is the one being WRITTEN, which a write invalidates anyway; a row only
+needs one load to land while it is unheld, and write transactions are short.
+There is no starvation mechanism, and the measured floor is consistent with
+that.
+
+`reorder x reorder` is separately PRE-EXISTING — two concurrent reorders lock
+the same rows in client-supplied orders and deadlock with or without any of
+this (35 new against 34 old) — and is not this issue's to fix.
+
+### The suite the two defects shipped underneath
+
+Both defects shipped under a green `test:summarycache`, and the reason is one
+sentence: **every case in it is sequential.** Sequentially the `data_version`
+subquery holds, and sequentially there is no second transaction to invert a
+lock order against. That file is still the right inventory — one case per write
+path — and it now says so about itself in a comment at the guard block.
+
+`test:summaryrace` is the other half. Its rule is that a concurrency claim
+needs a forced interleaving and a forced interleaving needs PROOF: each block
+stalls one transaction at a chosen point on an `pg_advisory_xact_lock` a third
+session holds, then reads `pg_stat_activity` / `pg_locks` and THROWS BY NAME
+if the other transaction is not actually queued behind it. A harness that
+silently ran sequentially would pass every assertion in it, which is exactly
+the failure it exists to prevent — and it caught one during development: the
+end-to-end block's interleaving genuinely did not form, because an uncommitted
+writer's clear is invisible and a `/overview` that begins against a live stamp
+is served the cached pair and issues no write-back at all. The hazard needs the
+reader to find the habit STALE first, which is the state every account's own
+last write leaves it in, so the block plants that state committed before the
+racing writer starts.
+
+Its lock-order block does not assert "no deadlock" — a scheduler can be lucky.
+It asserts WHERE the tap queues, from the catalog: waiting at the `habits`
+clear while holding NO lock on `entries`, because with the clear first it has
+not reached its entry write. With the clear last it waits at the `users` bump
+with its entry row already inserted, so the `entries` lock is the
+discriminator.
+
+### The three cache columns became four, and the stripper is a DENY list
+
+`stripSummaryCache` deletes named keys from rows that arrive via `SELECT *` and
+`RETURNING *`. That is the shape in which a new column SHIPS BY DEFAULT: add
+one to `habits` and all eight serialisation points start carrying it, with no
+code change and nothing red. It had already happened — a scratch
+`summary_epoch` reached the API payload underneath an assertion named, in full,
+"the three columns never reach a client", which enumerated the three it knew
+about.
+
+`summary_epoch` is on `SUMMARY_CACHE_COLUMNS` even though only cloud has the
+column, because a per-edition strip set is two places to forget one and
+stripping an absent key is free. Beside it, `test:plans` now demands that every
+column `habits` actually HAS appear in exactly one of three buckets —
+structural, habit field, or summary cache — reading the catalog rather than a
+list of names, so a migration that adds a column fails by name until its author
+classifies it. The stripper was deliberately NOT inverted to an allow-list;
+that is a larger change across both editions, and this is the cheap guard that
+makes forgetting loud.
+
+### The two defects found reviewing the salvaged draft
+
+An earlier run at this issue was killed by a spend limit with the cloud half
+uncommitted; it was transplanted verbatim in one commit and reviewed rather
+than trusted in the next, and this file records which wrong version shipped
+first the way it does everywhere else.
+
+**A stale habit was handed an empty 400-day slice.** Splitting the entry reads
+in two — the 400-day read scoped to fresh ids, the 1830-day read scoped to
+stale ones — is right, and it is what stops a stale habit fetching its own
+recent 400 days in both queries. But the per-habit read stayed
+`recentByHabit.get(h.id)`, which holds nothing for a stale habit, so
+`summaryStats` walked no entries and answered `score: 0, currentStreak: 0` for
+it. Every habit is stale on the first load of any day and after every write —
+exactly the load a user is watching — so this blanked the dashboard's two LIVE
+figures on that load, while `bestStreak` and `totalCompleted` beside them
+stayed correct, because those two came off the recompute rather than off the
+empty slice. A stale habit now filters its own recent slice out of the wide
+one it already holds (`all.filter`), which is also what master did before any
+of this existed.
+
+**`recomputeBestStreak` anchored the scan on `entries[0].date`** — the raw
+lexical minimum of a caller's `ORDER BY date` result — which is precisely the
+anchor #270/#300 replaced with `earliestRealDay` at both editions' `/overview`.
+Moving the streak scan into `shared/` is exactly where that fix could be lost,
+and it was: a row dated `2026-07-99` sorts first, opens the window there, and
+`boundedRange` rolls it past `summaryEnd` — every figure on the scan reads
+zero. Caching makes this strictly worse than it was at the route: a DERIVED
+zero is wrong until the row is fixed, where a STORED zero is wrong until
+something invalidates it, and nothing about `2026-07-99` ever changes on its
+own. The anchor is `earliestRealDay(entryMap.keys())` now, the same refusal
+`firstStatedAnswer` and `creditAnchor` already apply, which also means the
+function no longer depends on its caller's row order.
+
+**One of the two already had a test that caught it, and that is the part worth
+remembering.** The salvaged draft's own `test:summarycache` asserts that a
+cached load and an uncached load are the same payload key for key, and that
+assertion fails against the empty-slice bug — verified by putting the bug back
+and watching it go red. The draft was not missing the test; the run was killed
+before it ever executed one. A test that is written and never run has exactly
+the value of a test that cannot fail, and it is indistinguishable from one in
+a diff. The anchor defect had no test and now does.
+
+The parity assertion is also the shape to copy. Neither defect could have been
+caught by checking that the cached figures were right — both left
+`bestStreak` and `totalCompleted` correct and broke something else. What
+caught it was asserting that two paths to the same answer agree, which is the
+only assertion that does not have to predict which half the next bug lands in.
+
+### Round three: the one write site with NEITHER kind of coverage
+
+Rounds one and two found two missed `clearHabitSummary` calls and answered them
+with "behavioural tests per site plus a source guard, rather than by prose".
+Round three took that claim literally and mutation-tested every site named by
+it. One site had no coverage of either kind, and the two mechanisms were blind
+to the same line for two unrelated reasons.
+
+`apply-import.js`'s general entry write is the statement almost every imported
+entry goes through:
+
+```js
+const written = (yielding ? insertEntryIfAbsent : insertEntry)
+  .run(habitId, e.date, stored, '', notes);
+```
+
+Deleting its `clearHabitSummary(habitId)` left `npm test`, `test:summarycache`,
+`test:roundtrip`, `test:overview`, `test:apishape`, `test:awards` and
+`test:notify` all green.
+
+**The behavioural half.** `test:summarycache`'s six cases covered the entry PUT,
+the entry DELETE, `PUT /habits/:id`, both settings routes and `record()` — every
+site rounds one and two had argued about — and no import at all. The reachable
+failure is ordinary: restore a backup onto an account whose dashboard was loaded
+earlier the same day, and `/overview` reports the pre-import `bestStreak` and
+`totalCompleted` until the calendar day rolls over. Case 7 is that, in merge
+mode. Merge specifically, because replace mode deletes every row a stamp could
+live on and therefore cannot tell the call from its absence — the same reason
+the two `clearAllSummaries()` calls on the replace path are documented as inert.
+
+**The source-guard half, which is a NEW shape of the failure root `CLAUDE.md`
+already warns about.** That rule says a guard reading source text cannot see a
+renamed binding or an inverted comparison. This one could not see the CALL SITE:
+`WRITE_RE` required a statement's name immediately followed by `.run(`, and here
+the callee is a ternary and `.run(` is on the next line. Run over the file, the
+guard reported exactly one write site in `apply-import.js` — the skip insert at
+line 363 — so the window logic that round two spent its effort refining never
+got a chance to be generous or stingy about line 418. A guard that does not see
+a line is not a weak guard, it is an absent one, and it reads identically to a
+passing one.
+
+It had been noticed and then argued away. The guard's own comment named the
+regex blind spot and concluded "it DOES clear (three lines below), so this is
+not a live gap" — true as a reading of the code that day, and precisely the
+reasoning this file records being written down as complete three times while
+being wrong twice. What made it survive review is that the sentence next to it,
+"tests 1-6 above are the real coverage", was false for this site alone.
+
+The regex was widened in three narrow ways rather than one loose one, because
+"anything ending `.run(`" sweeps in every unrelated prepared statement in the
+file and turns the guard into noise: `insertEntryIfAbsent` joined the explicit
+name list (before `insertEntry`, since the alternation is ordered and the
+shorter name is a prefix of the longer), the match tolerates the rest of an
+expression up to `.run(` without crossing a `;`, and a continuation line is
+joined to its statement before the scan. Both halves were then mutation-proved:
+with the clear removed the behavioural assertion reads `1 vs 1` — serving the
+pre-import figure — and the guard names `apply-import.js:418`.
+
+The lesson generalises past this cache. **A source guard needs a test that it
+SEES what it claims to cover**, not only that what it sees is clean: the
+inventory it prints is the assertion, and an empty offender list means nothing
+until the denominator is known. Widening the regex is what closed it here; a
+guard asserting a COUNT of matched sites per file would have failed the moment
+the ternary was introduced.
+
+### And the anchor gained a test where the anchor lives
+
+`recomputeBestStreak` reverting to `entries[0].date` — the second of the two
+salvaged-draft defects above — was caught only by the route-level assertions
+#270 shipped, a suite away from the function the scan moved into. Verified
+rather than assumed: with the anchor reverted, `npm test` stays green and
+`test:overview` fails with `a phantom-dated row does not zero the route's own
+bestStreak scan`. Real coverage, and in the wrong place for a rule this file
+argues is now `shared/`'s to hold. `shared/test/summary-cache.test.js` pins it
+directly: a phantom `2026-05-99` beside a live five-day run, asserting 5, which
+the lexical anchor answers 0 for because `boundedRange` normalises May 99 to
+August 7 and opens an empty window past `summaryEnd`.
