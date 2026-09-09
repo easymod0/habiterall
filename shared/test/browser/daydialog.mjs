@@ -75,6 +75,13 @@ const BINDINGS = [
   'title', 'sub', 'booleanBlock', 'numericBlock',
   'notes', 'skip', 'clear', 'save', 'dialog', 'dayCountField', 'habitIcon',
   'dayHost',
+  // How this account spells an amount. Handed in for the reason every other
+  // name here is — the harness evals the function's SOURCE — and it cannot be
+  // the module's own, since that one is `formatAmount` bound to `convention()`
+  // and `ui/count-field.js` reaches for `document` at import time. `run` builds
+  // it from the REAL `formatAmount` over a convention the case chooses, so
+  // nothing here restates the formatting rule.
+  'showAmount',
 ];
 
 // The real rule, not a stub: `ui/toggle.js` is dependency-free precisely so it
@@ -87,12 +94,19 @@ const { isAvoided } = await import('../../public/ui/toggle.js');
 // nothing here ASSERTS the formatted heading: a stub returning '' would pass
 // these checks identically.
 const { formatDateLong, fromISOLocal } = await import('../../public/ui/dates.js');
+// The real formatter, not a stand-in: it is what `ui/day-dialog.js`'s own
+// `showAmount` closes over, and `ui/amount.js` has no imports at all, so it runs
+// under Node exactly as `ui/toggle.js` above does.
+const { formatAmount } = await import('../../public/ui/amount.js');
 
 /**
  * @param prefs the settings the dialog reads. Both default off, as the server
  *   does — this is the fake `ui/settings.js` for the sliced-out function.
+ * @param format which character this account's decimal point is, standing in
+ *   for `convention()`. `point` for every case that predates the goal being
+ *   spelled through the formatter at all.
  */
-function run(habit, date, value, isSkip, prefs = {}) {
+function run(habit, date, value, isSkip, prefs = {}, format = 'point') {
   const els = Object.fromEntries(BINDINGS.map((k) => [k, mkEl()]));
   els.dialog = { showModal() { this.open = true; } };
   // The amount control is a module of its own now (ui/count-field.js), so what
@@ -105,6 +119,7 @@ function run(habit, date, value, isSkip, prefs = {}) {
     focus() { this.focused = true; },
   };
   els.habitIcon = fakeHabitIcon;
+  els.showAmount = (n) => formatAmount(n, format);
 
   const doneBtn = { dataset: { action: 'done' }, _attrs: {},
     setAttribute(k,v){ this._attrs[k]=String(v); }, getAttribute(k){ return this._attrs[k]; } };
@@ -193,6 +208,31 @@ check('at_most: subtitle says "at most"', r.els.sub.textContent.includes('at mos
   r.els.sub.textContent);
 check('at_most: value 3 prefilled (not treated as skip)', r.els.dayCountField.shown === 3,
   String(r.els.dayCountField.shown));
+
+console.log('--- the goal is spelled the way this account spells an amount ---');
+/*
+ * The fourth surface of the same rule, and the one `targetLabel` could not
+ * reach: this subtitle is not a `targetLabel` caller — it says the direction in
+ * words rather than as `≤`, because it is a sentence about the day being edited
+ * — so on a comma account it read `at most 8.5` while `dayCountField.set`
+ * filled the box directly under it with `8,5`, through `formatAmount`.
+ *
+ * Two conventions over ONE habit, and only the second can fail: with the goal
+ * back to a raw `${habit.target_value}` the point case is still `8.5` and passes
+ * on itself, which is why the fractional comma case is here rather than a
+ * whole-number one. That is also why every case above needed no new expectation
+ * — `8` and `0` are spelled identically under both conventions, so the
+ * fixture's own literals (`at least 8 glasses`, `at most 0 cigs`) are as true
+ * through the formatter as they were beside it.
+ */
+const fraction = { id: 6, name: 'Reading', type: 'numerical', unit: 'pages',
+  target_value: 8.5, target_type: 'at_least' };
+r = run(fraction, '2026-03-15', 4, false, {}, 'point');
+check('point: the goal is spelled with a dot',
+  r.els.sub.textContent.includes('at least 8.5 pages'), r.els.sub.textContent);
+r = run(fraction, '2026-03-15', 4, false, {}, 'comma');
+check('comma: the same goal is spelled with a comma, as the box under it is',
+  r.els.sub.textContent.includes('at least 8,5 pages'), r.els.sub.textContent);
 
 console.log('--- skipped day ---');
 r = run(numHabit, '2026-03-17', 0, true);

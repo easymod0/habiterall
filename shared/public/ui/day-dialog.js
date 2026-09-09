@@ -7,9 +7,10 @@
  * which is what stops the two from depending on each other.
  */
 
+import { formatAmount } from '/shared/ui/amount.js';
 import { api } from '/shared/ui/api.js';
 import { habitIcon } from '/shared/ui/components.js';
-import { dayCountField } from '/shared/ui/count-field.js';
+import { convention, dayCountField } from '/shared/ui/count-field.js';
 import { formatDateLong, fromISOLocal } from '/shared/ui/dates.js';
 import * as settings from '/shared/ui/settings.js';
 import { emit, state } from '/shared/ui/store.js';
@@ -18,6 +19,26 @@ import { DAY, isAvoided, valueForState } from '/shared/ui/toggle.js';
 import { UNSET, YES } from '/shared/ui/values.js';
 
 const $ = (sel) => document.querySelector(sel);
+
+/**
+ * How this account spells an amount, for the subtitle's goal.
+ *
+ * The same one line `ui/detail.js` and `ui/dashboard.js` declare, for the same
+ * reason and with the same rule about when it is asked: never held, because the
+ * setting is a fact about the ACCOUNT and `auto` is a question about the DEVICE
+ * and either can change while this module is loaded (`convention`,
+ * `ui/count-field.js`). A third declaration rather than a new export from one of
+ * them, since an export under `shared/public/` costs every installed client its
+ * data cache.
+ *
+ * This subtitle is the FOURTH surface of the same rule and the one `targetLabel`
+ * could not reach: it is not a `targetLabel` caller — it spells the direction in
+ * words (`at most 8,5 cigs`, not `≤ 8,5 cigs`) because it is a sentence about
+ * the day being edited rather than a label — so a comma account read
+ * `at most 8.5` here while the box directly under it, filled by
+ * `dayCountField.set` through `formatAmount`, held `8,5`.
+ */
+const showAmount = (n) => formatAmount(n, convention());
 
 const dialog = $('#day-dialog');
 const title = $('#day-title');
@@ -104,7 +125,7 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '', host = 
 
   // Say what's being edited, and against what goal, so the input is unambiguous.
   const goal = numeric
-    ? `${habit.target_type === 'at_most' ? 'at most' : 'at least'} ${habit.target_value}` +
+    ? `${habit.target_type === 'at_most' ? 'at most' : 'at least'} ${showAmount(habit.target_value)}` +
       (habit.unit ? ` ${habit.unit}` : '')
     : '';
   sub.textContent = goal ? `${pretty} · target ${goal}` : pretty;

@@ -70,6 +70,29 @@ as of. Paging back a month restated the strength and the streak as of that month
 `summaryEnd` is `today()` in both editions' `/overview`. The detail view is the
 surface that answers "as of when", and it has its own range controls.
 
+**...so the list is fetched for ONE local day, and it asks again when that day
+ends.** `load()` records the browser's own date and `refreshIfDayChanged`
+refetches when the clock has moved past it, on a timer armed for the next local
+midnight and on `visibilitychange` — the same pair, and the same argument for
+needing both, as `ui/detail.js`'s day watch, restated here rather than shared
+because a helper either module could import would be a new export under
+`shared/public/` and so a `CACHE_VERSION` bump. Three things differ from the
+detail view's and each is the dashboard being the dashboard. It is a `load()`
+and never a `paint()`, because this view holds only the fortnight it asked for
+and the new day's column is one the server has never been asked about — a
+repaint would draw it empty and paint any tap on it back out. The day is
+recorded at the FETCH, because `paint()` runs here with no request behind it (a
+search keystroke, an optimistic repaint) and resolves `todayISO()` itself, so a
+record taken at the paint would call the page current for a window whose newest
+column has nothing in it. And it declines unless `dashboardShowing()`: `paint()`
+nulls `state.openHabitId` and unwinds the fragment, so firing under an open
+habit would navigate away from a page somebody is reading — which costs nothing,
+since every road back to the list emits `'reload'`. A PAGED grid is still
+refreshed, unlike the browser reminder's own `refresh` policy in `app.js`: that
+one declines a window that could not contain today, where this is about the
+row's figures, which `/overview` anchors on today however far back `end`
+reaches, and `load()` re-sends `state.gridEnd`.
+
 **Column count scales with viewport width**, not one breakpoint — 7 / 10 / 14 by
 width. At 768px the 14-column layout needed 668px of a 698px row and squeezed the
 habit name to zero.
@@ -613,6 +636,27 @@ and that boot must be an old-looking label rather than a TypeError in
 visible surfaces on a comma account, because a default nobody notices is how a
 call site comes to rely on it.
 
+**The FOURTH surface is not a `targetLabel` caller and needed the same rule
+separately.** The day editor's subtitle (`openDayDialog`, `ui/day-dialog.js`)
+says the direction in words — `target at most 8,5 cigs`, not `≤ 8,5 cigs` —
+because it is a sentence about the day being edited rather than a label, so it
+had its own template literal and read `at most 8.5` four lines above the amount
+box `dayCountField.set` had just filled with `8,5`. It declares the same
+`formatAmount(n, convention())` one-liner, now written in three modules for the
+reason it was written in two: a helper either could import would be a new export
+under `shared/public/`, and that is a `CACHE_VERSION` bump.
+
+**Two suites pin it and they pin different halves.** `daydialog.mjs` hands the
+formatter into the sliced-out function with every other free identifier and
+reads one FRACTIONAL target under both conventions, which pins the
+PASS-THROUGH — the fixture's `8` and `0` targets are spelled the same either
+way, so they could never have failed on this. It cannot see which formatter the
+module ASKS for: `convention()` replaced by a literal `'point'` passes every
+case in it with `typecheck` clean, measured. The WIRING is `countcheck.mjs`'s
+comma section, which opens the day editor from the calendar on an account
+already set to `comma` with a fractional target and requires `#day-sub` to end
+`at least 9,5 pages` and hold no `9.5`.
+
 **The target box submits what was typed; an untouched box submits what was
 stored.** Typing runs through `parseAmount`, bounded to `[1e-6, 1e12]` and
 quantised to six places exactly as a day's amount is; leaving the box alone
@@ -937,6 +981,24 @@ correct it. `refresh` runs one at a time and remembers the one that arrived
 mid-flight, so the last request is always issued after the last write; a stale
 reply can still flicker past on its way, which is a different (and much
 smaller) claim than the page settling wrong.
+
+**That flicker is still open, and what is open is wider than the flicker.**
+Two things were established when it was revisited and both are in
+`docs/decisions/dashboard-and-detail.md`. It is not purely cosmetic: while the
+stale render is on screen the head's Edit button is holding the pre-second-save
+habit again, which is the same revert on a one-round-trip window. And the fix
+the earlier note reached for — discard a reply issued before the last seed —
+is scoped to the one path `refresh` already serialises. **The eight other
+callers of `open()` are not serialised at all**: `changeZoom`, three segmented
+controls (the strength card's granularity, and History's granularity and mode)
+and the four cards whose `redraw` refetches — score, history, weekday-by-month
+and frequency. History's granularity is the reachable one, and the ONLY one,
+because it alone issues DIFFERENT urls (`?granularity=`); the other seven send
+the identical request, so a reply landing out of order renders the same payload
+against current state. There, the older reply landing last SETTLES the page on
+week buckets under a control reading month. One ticket on `open()` answers both — the `state.categoryReadSeq` shape
+above — and it is not a rename of that mechanism, because `open()`'s boolean
+return is load bearing at boot. Do not add the narrow counter.
 
 **A module owns its subtree, and `test/ui-modules.test.js` enforces it.** No
 element id may be reached for by two modules; `ui/views.js` exists because

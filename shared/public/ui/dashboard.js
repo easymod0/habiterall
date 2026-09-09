@@ -162,7 +162,65 @@ const listHost = {
   refresh: () => load(),
 };
 
+/**
+ * The browser's own local date at the moment the window on screen was FETCHED.
+ *
+ * The device's calendar day and never a named zone, for the reason
+ * `ui/detail.js` gives at its own `renderedDay`: `resolveTimeZone` asks where an
+ * ACCOUNT is, so a reminder goes out with nobody present, while every rendering
+ * decision here is the question `callerDay` answers for a write
+ * (`docs/decisions/timezones.md`).
+ *
+ * **Recorded at the FETCH and not at the paint, which is where this differs
+ * from the detail view's.** There a render is the only way a payload reaches the
+ * page; here `paint()` is cheap and runs with no request behind it — a search
+ * keystroke, a check-off's optimistic repaint, a `'change'` — and it resolves
+ * `todayISO()` itself. So the first keystroke after midnight would move the
+ * COLUMNS to the new day while `state.gridLoaded` still ends on the day before,
+ * and a record taken at the paint would then report the page as current for a
+ * window whose newest column has no data in it at all.
+ *
+ * Read before the request goes out and installed only when it succeeds, so a
+ * load that spans local midnight records the day it ASKED for. That is the safe
+ * direction: the watch fires once more and refetches, where recording the day it
+ * landed on would leave the page holding the previous day's window and nothing
+ * left to say so.
+ *
+ * **And "it succeeded" is not "it did not throw", which is the whole of the
+ * `state.offline` guard below.** A cached answer does not throw: `networkFirst`
+ * (`sw.js`) catches a failed or timed-out fetch and returns the last stored
+ * `/overview` as an ordinary 200 carrying `X-Habiterall-Offline: 1`, and
+ * `ui/api.js` answers that with `setOffline(true)` and then resolves with the
+ * payload like any other. Installed on that, this records "current for today"
+ * beside a `state.gridLoaded` that ends YESTERDAY — and both triggers then
+ * compare equal and return, so the timer will not act again for 24 hours and no
+ * tab switch will either, with every row showing yesterday's figures. One failed
+ * request is enough: a woken laptop whose Wi-Fi has not reassociated at the
+ * instant `visibilitychange` fires, and the tab is wrong until it is reloaded.
+ *
+ * It does NOT reliably heal itself, which is why this is a guard and not a
+ * comment. `api()` calls `setOffline` directly rather than through the watcher,
+ * and `ui/connectivity.js` says at `reportOffline` what that costs: the
+ * watcher's own `last` stays true, so a later successful probe is not a
+ * TRANSITION and the `'reload'` that would have refetched is never emitted.
+ *
+ * Skipping is the same safe direction as everything above — the page asks again
+ * at the next trigger — at the cost of one extra request per tab switch while an
+ * account is genuinely offline past midnight, which is the retry that state
+ * wants anyway. A boot whose FIRST load answers from cache leaves this null and
+ * the watch dormant until a load reaches the server, and that is right too: a
+ * page built from a cache of unknown age has no local day to have been drawn
+ * for.
+ *
+ * @type {string | null}
+ */
+let loadedDay = null;
+
 export async function load() {
+  // See `loadedDay`: the day this request is asking about, read before it goes
+  // out rather than after it lands.
+  const askedFor = todayISO();
+
   // The archive toggle is pointless until something has been archived, and this
   // is asked FIRST because the answer can decide which list to fetch below.
   const archived = await api('/habits?archived=true');
@@ -228,8 +286,95 @@ export async function load() {
   // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
   // the caller's own today, so asking is not knowing.
   state.gridLoaded = { start: data.start, end: data.end };
+  // ...and which local day that window was asked for, which is a different
+  // question: `end` is the PAGED position when there is one, so it says nothing
+  // about whether the clock has moved past what this page was built for.
+  //
+  // Not when the answer came out of the service worker's cache. `api()` has
+  // already set this flag by the time it resolves — a cached answer is a 200,
+  // not a throw — and recording a day for a payload that predates it disarms
+  // both triggers for the next 24 hours. See `loadedDay`.
+  if (!state.offline) loadedDay = askedFor;
 
   paint();
+}
+
+/**
+ * The list was fetched for a day that has ended — ask again.
+ *
+ * `load()` and not `paint()`, and this is the whole reason the dashboard needs
+ * its own watch rather than inheriting the detail view's: this page holds only
+ * the fortnight it asked for (`shared/public/CLAUDE.md`, "It fetches the window
+ * it is showing"), so the new day's column is one the server has never been
+ * asked about. A local repaint would draw it empty and then paint every tap on
+ * it back out on the next refetch.
+ *
+ * **Declines while another view is showing, and that is not tidiness.**
+ * `load()` ends in `paint()`, which nulls `state.openHabitId`, shows the list
+ * and unwinds the fragment — so firing this under an open habit or the category
+ * comparison would navigate away from the page somebody is reading, at midnight,
+ * with no gesture behind it. It is the same refusal, for the same reason, as the
+ * browser reminder's own `refresh` policy (`app.js`) and the `'reload'` guard in
+ * `settings-dialog.js`, and it costs nothing: every road back to the list —
+ * Back, the Home button, a `popstate` — emits `'reload'`, which lands in
+ * `load()` anyway.
+ *
+ * A PAGED grid is deliberately NOT refused, where the browser reminder refuses
+ * it. That refusal is about a window that could not contain today whatever the
+ * answer said; this one is about the figures on each row, which both editions'
+ * `/overview` anchors on `summaryEnd = today` however far back `end` reaches —
+ * so a paged grid goes stale at midnight exactly as an unpaged one does, and
+ * `load()` re-sends `state.gridEnd`, so the window the user paged to comes back
+ * unchanged.
+ */
+function refreshIfDayChanged() {
+  if (loadedDay === null || loadedDay === todayISO()) return;
+  if (!dashboardShowing()) return;
+  load().catch((e) => toast(e.message));
+}
+
+/**
+ * Ask again at the next local midnight — and on the way back to the tab.
+ *
+ * A restatement of `armDayWatch` in `ui/detail.js` rather than a shared helper,
+ * and the reason is the one `showAmount` above is written out in three modules
+ * for: a helper either of them could call would be a new export under
+ * `shared/public/`, which is a `CACHE_VERSION` bump and so costs every
+ * installed client its data cache.
+ * Six lines against that is the same trade #313 made. The two watches guard each
+ * other's blind spot rather than duplicating work — each one declines unless its
+ * own view is the one showing — and both are armed at `init()` whichever view
+ * boots, because either can be reached without a reload.
+ *
+ * **Not a poll.** One timer, armed for the next local midnight and re-armed from
+ * the clock each time it fires, so an open page costs one wake-up a day.
+ * `setHours(24, 0, 0, 0)` is the start of the next LOCAL day and so is DST-aware
+ * — a 23- or 25-hour calendar day gets the right instant, where `+ 86400000`
+ * would be an hour out twice a year.
+ *
+ * **Why the timer alone is not enough, and why the pair is.** A background tab
+ * clamps a timer to roughly one a minute, which is harmless — it fires late, and
+ * late is still after midnight — but a SUSPENDED device runs no timer at all,
+ * and a laptop closed at 23:00 and opened at 09:00 has no promise about when one
+ * armed for 00:00 is delivered. `visibilitychange` covers exactly that, and it
+ * is the trigger that matters: the staleness costs nothing until somebody LOOKS
+ * at the page. Both ask `refreshIfDayChanged`, which compares the date rather
+ * than trusting the schedule, so a timer that fires early (or twice) does
+ * nothing and neither does a tab switch on the same day — and a zone CHANGE is
+ * the same fact arriving by a different route.
+ */
+let dayTimer = 0;
+function armDayWatch() {
+  clearTimeout(dayTimer);
+  const next = new Date();
+  next.setHours(24, 0, 0, 0);
+  // A second past the boundary, so the handler cannot read `todayISO()` a
+  // millisecond before the day it was armed for has actually ended.
+  dayTimer = setTimeout(() => {
+    dayTimer = 0;
+    refreshIfDayChanged();
+    armDayWatch();
+  }, Math.max(1000, next.getTime() - Date.now() + 1000));
 }
 
 /**
@@ -891,4 +1036,16 @@ export function init() {
   // painting over it would navigate away from a page nobody had left.
   on('change', () => { if (dashboardShowing()) paint(); });
   on('reload', () => { load().catch((e) => toast(e.message)); });
+
+  // The grid is fetched for ONE local day and nothing else in the app corrects
+  // it: the browser reminder's refresh only runs with the `web` channel on and
+  // declines a paged grid, and `'reload'` fires on an offline→online transition
+  // (`ui/connectivity.js`) or on coming BACK to the list, neither of which is a
+  // tab that simply stayed here overnight. See `armDayWatch` for why this is a
+  // timer AND a visibility listener rather than either alone.
+  armDayWatch();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    refreshIfDayChanged();
+  });
 }

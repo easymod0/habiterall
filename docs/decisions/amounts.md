@@ -235,6 +235,46 @@ targets are whole numbers, so nothing observable turns on it. It passes the
 formatter anyway: the argument is about what a target IS, not about which
 targets happen to have a fractional part today.
 
+**And there is a FOURTH surface, which is not a `targetLabel` caller at all.**
+The day editor's subtitle — `Sunday, 15 March 2026 · target at most 8,5 cigs`
+(`openDayDialog`, `ui/day-dialog.js`) — spells the direction in WORDS rather
+than as `≤`, because it is a sentence about the day being edited and not a
+label, so it had its own template literal and `targetLabel` could not reach it.
+It is the worst of the four to get wrong: the amount box it describes is filled
+by `dayCountField.set` three lines later, through `formatAmount`, so the two
+spellings were four lines apart in one dialog. It takes the same
+`formatAmount(n, convention())` the other two declare, as a third declaration of
+that one line rather than a new export from either — an export under
+`shared/public/` is a `CACHE_VERSION` bump.
+
+**Two suites pin it and they pin different halves, which is this repo's
+DECISION-versus-WIRING split arriving in one small change.** `daydialog.mjs`
+slices `openDayDialog` out of its module and evals it, so the formatter is
+handed in with every other free identifier — built from the REAL `formatAmount`
+over a convention the case chooses, since `ui/count-field.js` reaches for
+`document` at import time and cannot be loaded there. That pins the
+PASS-THROUGH: the subtitle spells the goal with whatever formatter it is given,
+read as a fractional target under both conventions, and with the raw literal
+restored the comma case reports `target at least 8.5 pages` while the point case
+still passes on itself. What it cannot see is which formatter the MODULE asks
+for — `convention()` replaced by a literal `'point'` passes every case in it,
+with `typecheck` clean, which is measured rather than argued.
+
+So the wiring is pinned in `countcheck.mjs`'s comma section, where an account is
+already on `numberFormat: 'comma'` with a fractional target stored: the day
+editor is opened from the detail view's calendar and `#day-sub` must end
+`at least 9,5 pages` and contain no `9.5`. That is the assertion the literal
+mutation fails, and it is the only one that can.
+
+**The fixture's existing goal literals needed no change and that is worth saying
+rather than leaving to be rediscovered**: `daydialog.mjs` reads `at least 8
+glasses` and `at most 0 cigs`, and `8` and `0` are spelled identically under
+both conventions, so they are as true through the formatter as they were beside
+it — which also means they could never have failed on this. `countcheck.mjs`'s
+own `/at most 0/` waits are a different surface again: they read
+`#grid-count`'s hint, which is `count-field.js`'s and already went through
+`formatAmount`.
+
 **`countcheck.mjs`'s `dialogClosed` had to move in the same change.** That wait
 builds the label it expects, and #307 had it as a literal `≥ ${value} ${unit}` —
 correct only while every call site sits above the suite's comma section, which

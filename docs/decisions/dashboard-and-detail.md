@@ -759,6 +759,81 @@ page rather than assumed. The block asserts the strip's last column AND the
 calendar's last editable cell, because fixing one card alone would move the
 page from "one card is stale" to "one card jumps differently".
 
+### ...and so is the dashboard, where the day is also a REQUEST
+
+The same watch on the list, and it was left open above rather than missed: the
+detail view's fix names the dashboard as having its own version of it.
+
+The two are not the same defect, though, and the difference decides the shape.
+A habit's own page fetches its entries UNWINDOWED, so after midnight it holds
+every row it needs and is merely drawn wrong. The dashboard holds only the
+fortnight it asked `/overview` for — the section at the top of this file — so
+the new day's column is one the server has never been asked about. A local
+redraw there does not just leave the figures answering yesterday, it draws a
+column with no data behind it and paints any tap on it straight back out on the
+next refetch. So `refreshIfDayChanged` calls `load()`, and the browser suite
+asserts `state.gridLoaded.end` and not only the columns: a "fix" that repainted
+would move the columns correctly and is exactly what that assertion refuses
+(mutation-tested — `paint()` in place of `load()` reports
+`{"columns":"2026-09-10","end":"2026-09-09"}`).
+
+**The record is taken at the FETCH, not at the paint, and that is the other
+difference.** On a habit's page a render is the only way a payload reaches the
+screen, so `renderedDay` in `render()` says everything. `paint()` here is cheap
+and runs with no request behind it — a search keystroke, a check-off's
+optimistic repaint, a `'change'` — and it resolves `todayISO()` itself, so the
+first keystroke after midnight walks the columns onto the new day. A record
+taken there would then report the page as current for a window whose newest
+column is empty, and the watch would never fire. `loadedDay` is read before the
+request goes out and installed only if it succeeds, so a load spanning local
+midnight records the day it ASKED for — the safe direction, since the watch
+fires once more.
+
+**It declines while another view is showing, and the detail view's declines
+while the list is.** `load()` ends in `paint()`, which nulls
+`state.openHabitId`, shows the list and unwinds the fragment, so firing it under
+an open habit or the category comparison would navigate away from the page
+somebody is reading, at midnight, with no gesture behind it. The two watches
+therefore cover each other rather than duplicating work, and both are armed by
+`init()` whichever view booted, because either view can be reached without a
+reload. It costs nothing to decline: every road back to the list emits
+`'reload'`, which lands in `load()`.
+
+A PAGED grid is deliberately NOT refused here, where `app.js` refuses one for
+the browser reminder. That refusal is about a window that could not contain
+today whatever the answer said; this is about the figures on the row, which both
+editions' `/overview` anchors on `summaryEnd = today` however far back `end`
+reaches. `load()` re-sends `state.gridEnd`, so the window the user paged to
+comes back unchanged with its summaries current.
+
+**Restated rather than shared, and that is the `CACHE_VERSION` rule and not
+laziness.** A `refreshIfDayChanged` / `armDayWatch` pair either module could
+call would be a new export under `shared/public/`, which drops every installed
+client's data cache — the same trade `showAmount` is declared three times for.
+Six lines each.
+
+Pinned in `gridcheck.mjs`, with `calcheck.mjs`'s instruments: `window.setTimeout`
+wrapped from `Page.addScriptToEvaluateOnNewDocument` for the timer, and
+`Emulation.setTimezoneOverride` for the date. Three things about that block are
+worth knowing before changing it. It uses ONE page load for both triggers, which
+`calcheck` could not — the probe is installed before the block's only navigation
+— and the halves stay independently pinned because `visibilitychange` is
+dispatched for the first only and the second invokes only callbacks recorded
+before either zone move. The second move is BACKWARD, to the day the page
+originally loaded on (the two extremes are 26 hours apart, so the other one is
+always a different date), which is a flight west and is why the watch compares
+the date rather than testing that it advanced — and it means the timer half
+could pass having watched nothing if the `visibilitychange` half had failed, so
+the page being stale again is asked as its own check and ANDed into the timer's.
+And "a timer is armed for the next local midnight" is CONTEXT rather than the
+biting check: `app.js` inits both views whichever is showing, so two watches arm
+one each, and with the dashboard's `armDayWatch()` deleted that check still
+passes on the detail view's. Every match is fired and the REBUILD is what bites,
+because the detail view's callback returns at `state.openHabitId == null`.
+Attributing a timer to a module by its position in the recorded list would be a
+dependence on the order `app.js` inits its views, which no suite should be able
+to break.
+
 ### A memoised formatter does not outlive the zone it was built for
 
 Found while writing the midnight test, fixed after it: `ui/dates.js` memoised
@@ -986,6 +1061,105 @@ checks:
 
 — the head naming the first save while storage holds the second, and the
 reopened Edit box primed to write the first one back.
+
+### The flicker, looked at again and declined again — for a different reason
+
+The paragraph above records the residual and calls it cosmetic: a reply issued
+before the last seed still RENDERS on its way past, and only a newer request
+being promised behind it stops the page settling wrong. The generation counter
+that would discard it was written down rather than taken. Revisited
+deliberately, two things came out of it, and neither is the reason it was
+declined the first time.
+
+**It is a little more than a flicker.** `render(staleStats)` redraws the head,
+and the head's Edit button captures the habit it was drawn from — so between
+the stale render and the refetch `refreshAgain` has already promised, the Edit
+button is holding the pre-second-save habit AGAIN. That is exactly the revert
+this whole section exists to close, on a window one round trip long instead of
+two, and reachable only after two saves inside one refetch rather than after
+one save. Strictly rarer, and not a different KIND of defect. Say it that way
+round: "cosmetic" is what the first reading claimed, and the claim was too
+strong.
+
+**And the counter as specified would close the cheap half and make the
+expensive half look closed.** "A reply issued before the last seed" is scoped
+to this listener, and this listener is the one path already serialised —
+`refresh` never has two `open()`s in flight. What is NOT serialised is every
+other caller of `open()`, and there are **eight**, counted off the source
+rather than remembered: `changeZoom`; three segmented controls
+(`state.scoreGranularity` on the strength card, `state.granularity` and
+`state.historyMode` on History); and four cards whose `windowedChart` `redraw`
+refetches — score, history, weekday-by-month and frequency.
+
+Exactly one of the eight can settle the page WRONG, and saying which is the
+point of counting them. `open()` parameterises its request with
+`historyGranularity()` alone, so seven of the eight send the identical url and
+render from the same payload against whatever state is current when they land —
+an out-of-order reply there costs a redundant render and nothing else. History's
+granularity control is the exception: its two presses issue `?granularity=week`
+then `?granularity=month`, and the older reply landing last draws week buckets
+under a control that reads month, with nothing behind it to correct the page.
+That is a SETTLE, not a flicker, and it predates all of this — `refresh`'s own
+comment names "two fast presses on the History card's ‹ Earlier" as the hazard
+it was written for, and then the fix was applied to one caller.
+
+So the honest change is one ticket on `open()` itself — issue a number, install
+the render only while it is still the newest — which is the
+`state.categoryReadSeq` shape `shared/public/CLAUDE.md` already documents at
+length for `state.categories`, down to the rule for what has to take one. It is
+not a rename of that mechanism, because `open()` answers a BOOLEAN that is load
+bearing: `app.js`'s boot does `if (!await detail.open(opening.id)) await
+dashboard.load()`, and a superseded reply has no honest answer between the two
+— `true` claims a render that did not happen, `false` can send a boot that is
+fine to the dashboard. A third state, or a caller that stops asking. Either is
+a change to how this view is entered, with its own test proving a stale reply
+is DISCARDED rather than merely overtaken — which is a different assertion from
+the ordering block above, where the page is allowed to flicker and only its
+final state is judged.
+
+### A third option: a sticky seed, and why it is a candidate rather than the fix
+
+Raised in review and worth recording with its rebuttal, because it is the
+cheapest-looking of the three and touches neither `open()`'s return nor
+`refresh`. `seed` already holds the newest habit; remember it, and have
+`render()` overlay it whenever the ids match. No reply is discarded, no boolean
+is redefined, and the Edit-button revert above closes — the head and the button
+drawn with it hold the saved habit even while a stale payload is being drawn
+under them. It is not even a new SHAPE: `seed` already renders
+`{...lastStats, habit: {...lastStats.habit, ...saved}}`, so the page is already
+a blend of two payloads by design, and this only makes that blend outlive the
+one render.
+
+**The whole of it is the clearing rule, and that is the question it shares with
+the counter rather than escapes.** Two answers are reachable and each fails:
+
+- Clear on navigation (or not at all). Then the overlay outlives the server's
+  truth: rename the habit on the phone, and this page's next refetch — the
+  midnight watch, a tap's `host.refresh()`, a `'change'` from anywhere — draws
+  the server's new name and puts the local one back over it, indefinitely.
+  That converts a transient flicker into a silent permanent wrong value, which
+  is the exact trade this whole section is written to refuse, arriving through
+  the fix for it.
+- Clear when a render arrives from a request issued after the seed. That is
+  correct, and it is a generation comparison — the counter, relocated onto the
+  habit object and not otherwise different.
+
+**And it cannot reach the settle at all.** The overlay is about the habit's
+FIELDS; nothing in it can say which `/stats` payload should win, so History's
+granularity still settles the page on week buckets under a control reading
+month. Taking it would close the alarming-but-transient half and leave the
+quiet-but-permanent half untouched, which is the wrong half to close first —
+and a page whose head is visibly correct is a page nobody then looks at the
+chart under.
+
+So: still declined, and the overlay belongs IN the issue as a candidate
+implementation rather than beside it as a rider. Whichever is built, the test
+is the same one and it is not the ordering block's: hold a `/stats` open at the
+Response stage, save twice, release the older reply LAST, and assert the Edit
+box holds the newest habit at the moment the stale render lands — not merely
+after the refetch behind it has settled.
+
+Filed rather than done, and this paragraph is the file.
 
 ## The label-width estimator's mark-billing fix, and what it forced (#132)
 
