@@ -82,11 +82,13 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 | `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md`, `caching.md`, `phantom-dates.md` |
 | `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md`, `caching.md` |
-| `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md`, `caching.md` |
-| reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md` |
+| `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md`, `caching.md`, `sharing-and-rls.md` |
+| reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md`, `icons.md` |
 | `site/`, habiterall.ca | `site/CLAUDE.md` | `site.md` |
 | `examples/`, compose, env | `examples/CLAUDE.md` | `compose-and-env.md` |
-| settings, client mirrors | here, below | `settings-and-mirrors.md` |
+| settings, client mirrors, and what may never be one | here, below | `settings-and-mirrors.md`, `must-stay-fixed.md` |
+| a habit's `icon`, any tier | `shared/CLAUDE.md`, `android-native/CLAUDE.md` | `icons.md` |
+| performance, or "should this be another language" | `shared/CLAUDE.md` | `runtime.md`, `caching.md` |
 | `shared/test/browser/` | here, below | `testing.md` |
 
 ## Rules that reach everywhere

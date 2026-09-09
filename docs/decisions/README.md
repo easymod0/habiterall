@@ -34,12 +34,29 @@ are already answered here, usually because they were the first thing tried.
 | `categories.md` | one category per habit, `ON DELETE SET NULL`, uncategorised as a state, the case-fold divergence |
 | `caching.md` | the `/overview` memo and every bound in it, the shared eviction policy, the pool timeouts, `users.data_version` and the pool cliff, and the `Vary` that cost the offline dashboard |
 | `phantom-dates.md` | #270: why a date that is not a real day cannot anchor a window, the six sites it was closed at, why `2026-02-30` moving too is correct rather than collateral, and why Site F has a behavioural test only in personal |
+| `runtime.md` | #199: why the backend is Node, the four-language measurement and the caveat that undoes it, the three-consumer cost of a rewrite, and what would change the answer |
+| `must-stay-fixed.md` | #112 §3: the eleven premises that may never become settings, and what promotes a tunable into one |
+| `icons.md` | #66: the grapheme rule tier 1 settled, the one decision that shapes a preset set, the tier-2-on-Android question, the list tier 3 has to clear, and why "an uploaded icon can never reach a Discord reminder" is a gap in our sender rather than a never |
+| `sharing-and-rls.md` | #77: why sharing is expensive under one-owner RLS specifically, what has to be answered before any code, and the cheaper 80% |
 
-The first sixteen files are the original prose verbatim, sliced by topic and
-checked line-for-line against the pre-split `CLAUDE.md`; that split lost nothing.
-`testing.md` came later, when the browser-suite measurements had grown to a third
-of the root file's testing section with nowhere here to go. `site.md` came with
-`site/` itself, which is new work rather than moved prose.
+The **sixteen files dated 2026-08-17** are the original prose verbatim, sliced by
+topic and checked line-for-line against the pre-split `CLAUDE.md`; that split
+lost nothing. They were once the first sixteen rows of the table above and are
+not any more — it is grouped by subject rather than by date, so the sixteen are
+now scattered through it, and this paragraph names them by their commit instead.
+
+Everything after that date arrived with the work it describes rather than in a
+bulk move. `testing.md` came the next day, when the browser-suite measurements
+had grown to a third of the root file's testing section with nowhere here to go.
+`site.md` came with `site/` itself. `ntfy-answers.md`, `categories.md`,
+`caching.md` and `phantom-dates.md` each came with their change.
+
+The last four came from a third place: **open issues**. #203 found eight issues
+that were decision documents wearing an issue's clothes, and the cost of leaving
+them there is not tidiness — an issue is read as a thing somebody intends to
+build, so #112's list of things that must *never* be built sat under the
+`enhancement` label. Those four moved; the issues stay as their actionable slice,
+and #203 tracks the remaining four.
 
 ## Adding to this
 
