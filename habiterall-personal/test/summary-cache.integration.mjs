@@ -284,23 +284,93 @@ ck('THE assertion: the next load reports the NEW totalCompleted after a ' +
   'button press, not the stale one from before it',
   totalAfterPress === totalBeforePress + 1, `${totalAfterPress} vs ${totalBeforePress}`);
 
-/* ---- 7: a source guard for a write path added with NO clear at all -------
+/* ---- 7: a merge-mode import moves a cached pair -------------------------
+ *
+ * `apply-import.js`'s general entry write — `(yielding ? insertEntryIfAbsent
+ * : insertEntry).run(...)` — is the statement almost every imported entry
+ * goes through, and it clears only when it actually changed a row.
+ *
+ * **It had no coverage of either kind, and that was found by mutation rather
+ * than by reading.** Deleting its `clearHabitSummary(habitId)` left `npm
+ * test` and every one of this edition's suites green — including the source
+ * guard below, which cannot see the site at all because the callee is an
+ * expression and `.run(` lands on the next line. Two mechanisms, the same
+ * blind line: the guard's comment used to name the regex half and conclude
+ * "it DOES clear, so this is not a live gap", which was true only as a
+ * reading of the code that day, and is exactly the reasoning root CLAUDE.md
+ * says was written down as complete three times while being wrong twice.
+ *
+ * Restoring a backup onto an account whose dashboard was loaded earlier the
+ * same day is the ordinary way to reach it. Merge mode, because replace mode
+ * deletes every row a stamp could live on and so cannot discriminate this
+ * call from its absence — and with no settings block in the file either,
+ * since the route's settings restore fires `clearAllSummaries()` and would
+ * clear the stamp for a reason this case is not about (it is `replace`-only
+ * today, so this is belt-and-braces against that gate moving).
+ */
+
+const habitG = await post('/habits', { name: 'Import merge', type: 'boolean' });
+// `YES`, not 1: completion on a boolean habit is `value === YES` (2, Loop's
+// own encoding), and a 1 here stored a row that counted for nothing — which
+// made this case's own `sanity` line read 0 and is why that line is here.
+await put(`/habits/${habitG.id}/entries/${daysAgo(3)}`, { value: 2 });
+const stampImport = await overview(); // stamps habitG for today, totalCompleted 1
+const totalBeforeImport = stampImport.habits.find((h) => h.id === habitG.id)?.totalCompleted;
+ck('sanity: habitG is stamped for today with one completion behind it',
+  totalBeforeImport === 1 && rawHabit(habitG.id).summary_asof === daysAgo(0),
+  `${totalBeforeImport} / ${JSON.stringify(rawHabit(habitG.id).summary_asof)}`);
+
+// The account's own backup, narrowed to THIS habit and with one day added —
+// matched back by NAME, which is how merge mode finds an existing habit.
+// Exported rather than hand-written so the shape cannot drift from what
+// `/export` emits; narrowed so the entry counts below are this habit's and not
+// every fixture the six cases above left behind.
+const backup = await fetch(`${base}/api/export`).then((r) => r.json());
+delete backup.settings;
+backup.habits = backup.habits.filter((h) => h.name === 'Import merge');
+backup.habits[0].entries.push({ date: daysAgo(2), value: 2, status: '', notes: '' });
+
+const importRes = await fetch(`${base}/api/import?mode=merge`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: Buffer.from(JSON.stringify(backup)),
+});
+const importBody = await importRes.json();
+const importedRow = db.prepare(
+  `SELECT * FROM entries WHERE habit_id = ? AND date = ?`
+).get(habitG.id, daysAgo(2));
+ck('the merge import succeeded and the added day is actually in storage',
+  importRes.status === 200 && importBody.habitsMerged === 1 && importedRow?.value === 2,
+  `${importRes.status} ${JSON.stringify(importBody)} row=${JSON.stringify(importedRow)}`);
+
+ck('a merge-mode import that changed a row clears that habit\'s stamp',
+  rawHabit(habitG.id).summary_asof === null,
+  JSON.stringify(rawHabit(habitG.id)));
+
+const afterImport = await overview();
+const totalAfterImport = afterImport.habits.find((h) => h.id === habitG.id)?.totalCompleted;
+ck('THE assertion: the next load counts the imported day, rather than serving '
+  + 'the pre-import figure the row was stamped with',
+  totalAfterImport === 2, `${totalAfterImport} vs ${totalBeforeImport}`);
+
+/* ---- 8: a source guard for a write path added with NO clear at all -------
  *
  * SOURCE TEXT, not behaviour — root CLAUDE.md is explicit that this shape of
  * guard cannot see a renamed binding or an inverted comparison, only that
  * SOMETHING resembling a clear call sits near the write. It exists for one
  * thing only: a call site added later that calls none of the two functions
- * at all. Tests 1-6 above are the real coverage; this is a tripwire beside
+ * at all. Tests 1-7 above are the real coverage; this is a tripwire beside
  * them, not a replacement for either.
  *
- * **One live blind spot, named because a reader would otherwise assume it is
- * covered.** `apply-import.js`'s general entry write is
- * `(yielding ? insertEntryIfAbsent : insertEntry)\n  .run(...)` — the callee
- * is an expression and `.run(` lands on the next line, so `WRITE_RE` does not
- * match it and that site is invisible here. It DOES clear (three lines
- * below), so this is not a live gap, and the regex was left narrow rather
- * than widened to anything ending `.run(`, which would sweep in every
- * unrelated prepared statement in the file and make the guard noise.
+ * **`WRITE_RE` reaches a `.run(` dispatched off an EXPRESSION, and it has to.**
+ * The narrow version — the statement's name immediately followed by `.run(` on
+ * one line — could not see `apply-import.js`'s general entry write, which is
+ * the site test 7 exists for. Widening to "anything ending `.run(`" was
+ * rejected: it sweeps in every unrelated prepared statement and makes the
+ * guard noise. So the name list stays explicit and gained
+ * `insertEntryIfAbsent`, the match tolerates a ternary tail up to the `.run(`
+ * without crossing a `;`, and a continuation line is joined to its statement
+ * before the scan. Three narrow changes rather than one loose one.
  *
  * **It covers ONE of #184's two misses, not both, and the one it misses is
  * the likelier to recur.** The `record()` miss is an entry write spelled the
@@ -321,7 +391,15 @@ ck('THE assertion: the next load reports the NEW totalCompleted after a ' +
   const { dirname, join: pathJoin } = await import('node:path');
 
   const srcDir = pathJoin(dirname(fileURLToPath(import.meta.url)), '..', 'src');
-  const WRITE_RE = /\b(?:q\.)?(?:upsertEntry|deleteEntry|updateHabit|insertEntry)\.run\(/;
+  // The name list is explicit on purpose (see the comment above). What the
+  // middle group buys is the ternary form: `(yielding ? insertEntryIfAbsent :
+  // insertEntry).run(...)`, where the matched name is followed by more of the
+  // expression before `.run(`. Bounded by `[^;\n]*` so it cannot run past the
+  // end of the statement and pair a name with some later, unrelated `.run(`.
+  // `insertEntryIfAbsent` is listed BEFORE `insertEntry` because the
+  // alternation is ordered and the shorter name is a prefix of the longer.
+  const WRITE_RE =
+    /\b(?:q\.)?(?:upsertEntry|deleteEntry|updateHabit|insertEntryIfAbsent|insertEntry)\b[^;\n]*?\.run\(/;
   const CLEAR_RE = /clearHabitSummary\(|clearAllSummaries\(/;
   // Generous on both sides: the clear sits a handful of lines after the write
   // at every real call site today (immediately after, through a multi-line
@@ -344,7 +422,14 @@ ck('THE assertion: the next load reports the NEW totalCompleted after a ' +
   const unguarded = [];
   for (const file of readdirSync(srcDir).filter((f) => f.endsWith('.js'))) {
     const lines = readFileSync(pathJoin(srcDir, file), 'utf8').split('\n');
-    lines.forEach((line, i) => {
+    // A `.run(` on its own continuation line belongs to the statement above
+    // it, so the scan reads that pair as one line. Without this the general
+    // import write is invisible however wide `WRITE_RE` gets: the name is on
+    // line N and `.run(` on line N+1. The reported line number stays N, which
+    // is where a reader would go looking.
+    const joined = lines.map((line, i) =>
+      /^\s*\./.test(lines[i + 1] ?? '') ? `${line} ${lines[i + 1].trim()}` : line);
+    joined.forEach((line, i) => {
       if (!WRITE_RE.test(line)) return;
       const start = Math.max(0, i - LINES_BEFORE);
       let end = Math.min(lines.length, i + LINES_AFTER + 1);

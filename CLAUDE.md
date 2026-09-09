@@ -270,7 +270,13 @@ each of which has cost a release:
   pure function that pinned them. Assert the output that reached the platform.
 - **A guard that reads SOURCE TEXT cannot see a renamed binding or an inverted
   comparison.** Keep it for what it does catch — a call site that reads no
-  setting at all — and add a behavioural test beside it.
+  setting at all — and add a behavioural test beside it. **And check that it
+  SEES the sites it claims**: #184's guard matched a statement's name followed
+  by `.run(`, so `(yielding ? insertEntryIfAbsent : insertEntry)\n  .run(...)`
+  was not a weak match but no match, and the one write path in personal with no
+  behavioural case either read as clean. An empty offender list means nothing
+  until the denominator is known, so the inventory a guard prints is part of
+  its assertion.
 - **A SEQUENTIAL test cannot see a concurrency defect, and it passes loudly.**
   `test:summarycache` proved the summary-cache write-back's guard was read and
   compared; the guard was an InitPlan behind a One-Time Filter, so it could not

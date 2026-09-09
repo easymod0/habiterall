@@ -173,3 +173,50 @@ test('recomputeBestStreak honours creditFrom on a limit whose first answer is re
   // date dropped.
   assert.equal(best, 5);
 });
+
+test('recomputeBestStreak anchors on earliestRealDay, never the lexical minimum', () => {
+  // #270's last site, pinned where the scan now LIVES rather than only at the
+  // two routes that call it. The route-level assertions
+  // (`habiterall-personal/test/overview.integration.mjs`,
+  // `habiterall-cloud/test/api.integration.mjs`) came with #270 and do catch a
+  // revert — measured, not assumed — but they are a suite away from the
+  // function, and this is the one the anchor moved INTO. Its first draft took
+  // `entries[0].date`, reasoning that the query is `ORDER BY date`; caching
+  // makes that strictly worse than it was at the route, because a derived zero
+  // is wrong until the row is fixed while a STORED zero is wrong until
+  // something invalidates it, and nothing about `2026-05-99` ever changes.
+  //
+  // `2026-05-99` is not a day. It sorts BELOW every real row here, so the
+  // lexical minimum picks it; `boundedRange` then normalises it — a rollover,
+  // May 1 + 98 days — to `2026-08-07`, which is PAST `summaryEnd`, and the
+  // window it opens is empty. Hence 0 rather than a number that is merely a
+  // bit wrong, which is what makes this fixture discriminating.
+  const entries = [
+    { date: '2026-05-99', value: 2, status: '' },
+    // A live five-day run ending on `TODAY`. `value: 2` is `YES`
+    // (`shared/src/constants.js`) — a 1 stores a row that completes nothing on
+    // a boolean habit, and the assertion would read 0 for the wrong reason.
+    { date: '2026-06-01', value: 2, status: '' },
+    { date: '2026-06-02', value: 2, status: '' },
+    { date: '2026-06-03', value: 2, status: '' },
+    { date: '2026-06-04', value: 2, status: '' },
+    { date: '2026-06-05', value: 2, status: '' },
+  ];
+
+  assert.equal(
+    recomputeBestStreak(boolHabit, entries, { summaryEnd: TODAY, unlogged: 'miss' }),
+    5
+  );
+
+  // Order-independence, which is the other thing the fix bought: the anchor is
+  // a scan for a minimum rather than a read of a position, so a caller no
+  // longer silently depends on its query's `ORDER BY`. Reversed, the phantom
+  // is now at the END of the array — where `entries[0].date` would happen to
+  // give the right answer, so on its own this line proves nothing and it is
+  // here as the pair to the one above.
+  assert.equal(
+    recomputeBestStreak(boolHabit, [...entries].reverse(),
+      { summaryEnd: TODAY, unlogged: 'miss' }),
+    5
+  );
+});

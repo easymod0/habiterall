@@ -1298,3 +1298,80 @@ caught by checking that the cached figures were right — both left
 caught it was asserting that two paths to the same answer agree, which is the
 only assertion that does not have to predict which half the next bug lands in.
 
+### Round three: the one write site with NEITHER kind of coverage
+
+Rounds one and two found two missed `clearHabitSummary` calls and answered them
+with "behavioural tests per site plus a source guard, rather than by prose".
+Round three took that claim literally and mutation-tested every site named by
+it. One site had no coverage of either kind, and the two mechanisms were blind
+to the same line for two unrelated reasons.
+
+`apply-import.js`'s general entry write is the statement almost every imported
+entry goes through:
+
+```js
+const written = (yielding ? insertEntryIfAbsent : insertEntry)
+  .run(habitId, e.date, stored, '', notes);
+```
+
+Deleting its `clearHabitSummary(habitId)` left `npm test`, `test:summarycache`,
+`test:roundtrip`, `test:overview`, `test:apishape`, `test:awards` and
+`test:notify` all green.
+
+**The behavioural half.** `test:summarycache`'s six cases covered the entry PUT,
+the entry DELETE, `PUT /habits/:id`, both settings routes and `record()` — every
+site rounds one and two had argued about — and no import at all. The reachable
+failure is ordinary: restore a backup onto an account whose dashboard was loaded
+earlier the same day, and `/overview` reports the pre-import `bestStreak` and
+`totalCompleted` until the calendar day rolls over. Case 7 is that, in merge
+mode. Merge specifically, because replace mode deletes every row a stamp could
+live on and therefore cannot tell the call from its absence — the same reason
+the two `clearAllSummaries()` calls on the replace path are documented as inert.
+
+**The source-guard half, which is a NEW shape of the failure root `CLAUDE.md`
+already warns about.** That rule says a guard reading source text cannot see a
+renamed binding or an inverted comparison. This one could not see the CALL SITE:
+`WRITE_RE` required a statement's name immediately followed by `.run(`, and here
+the callee is a ternary and `.run(` is on the next line. Run over the file, the
+guard reported exactly one write site in `apply-import.js` — the skip insert at
+line 363 — so the window logic that round two spent its effort refining never
+got a chance to be generous or stingy about line 418. A guard that does not see
+a line is not a weak guard, it is an absent one, and it reads identically to a
+passing one.
+
+It had been noticed and then argued away. The guard's own comment named the
+regex blind spot and concluded "it DOES clear (three lines below), so this is
+not a live gap" — true as a reading of the code that day, and precisely the
+reasoning this file records being written down as complete three times while
+being wrong twice. What made it survive review is that the sentence next to it,
+"tests 1-6 above are the real coverage", was false for this site alone.
+
+The regex was widened in three narrow ways rather than one loose one, because
+"anything ending `.run(`" sweeps in every unrelated prepared statement in the
+file and turns the guard into noise: `insertEntryIfAbsent` joined the explicit
+name list (before `insertEntry`, since the alternation is ordered and the
+shorter name is a prefix of the longer), the match tolerates the rest of an
+expression up to `.run(` without crossing a `;`, and a continuation line is
+joined to its statement before the scan. Both halves were then mutation-proved:
+with the clear removed the behavioural assertion reads `1 vs 1` — serving the
+pre-import figure — and the guard names `apply-import.js:418`.
+
+The lesson generalises past this cache. **A source guard needs a test that it
+SEES what it claims to cover**, not only that what it sees is clean: the
+inventory it prints is the assertion, and an empty offender list means nothing
+until the denominator is known. Widening the regex is what closed it here; a
+guard asserting a COUNT of matched sites per file would have failed the moment
+the ternary was introduced.
+
+### And the anchor gained a test where the anchor lives
+
+`recomputeBestStreak` reverting to `entries[0].date` — the second of the two
+salvaged-draft defects above — was caught only by the route-level assertions
+#270 shipped, a suite away from the function the scan moved into. Verified
+rather than assumed: with the anchor reverted, `npm test` stays green and
+`test:overview` fails with `a phantom-dated row does not zero the route's own
+bestStreak scan`. Real coverage, and in the wrong place for a rule this file
+argues is now `shared/`'s to hold. `shared/test/summary-cache.test.js` pins it
+directly: a phantom `2026-05-99` beside a live five-day run, asserting 5, which
+the lexical anchor answers 0 for because `boundedRange` normalises May 99 to
+August 7 and opens an empty window past `summaryEnd`.
