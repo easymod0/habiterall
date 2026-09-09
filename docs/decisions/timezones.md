@@ -91,10 +91,12 @@ It did not become a module of its own because a new file under `shared/public/`
 has to join `sw.js`'s `SHELL` and bump `CACHE_VERSION`, which costs every
 installed client its data cache to buy one import.
 
-The Discord button handler keeps `resolveTimeZone` (`adapter.today`) and is not
-an exception to any of this: a press arrives from Discord, so there is no device
-making the request and no header to read — the account is the only thing there
-is to ask. What it fixes is that the two paths now AGREE in the ordinary case,
+The button handlers keep `resolveTimeZone` (`adapter.today`) and are not an
+exception to any of this: a press arrives from Discord, or from ntfy's own app
+on a phone, so there is no client of OURS making the request and no header to
+read — the account is the only thing there is to ask. (There is a device behind
+an ntfy press; it just is not one that sends `X-Habiterall-Timezone`, which is
+the same position and not a second one.) What it fixes is that the two paths now AGREE in the ordinary case,
 where they did not. Pressing Yes on Monday's reminder wrote the row while
 tapping Monday's cell in the browser answered 400, on the same account, the same
 day and the same storage, because one path resolved a zone and the other did

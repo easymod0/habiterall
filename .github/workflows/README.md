@@ -137,9 +137,12 @@ nothing to catch it.
 
 ### `ci.yml` — the main suite
 
-Seven jobs, all self-contained. Postgres comes from a service container, Chrome
+Eleven jobs, all self-contained. Postgres comes from a service container, Chrome
 is preinstalled on the runner, and the personal edition is started by the
-workflow itself.
+workflow itself. Seven of the eleven are the suites in the table below;
+`What changed` is the detector above them; and three — `Compose files`,
+`Website` and `Decision archive` — are ungated, because each guards
+DOCUMENTATION and a documentation-only pull request is the one it has to run on.
 
 Every job pins **Node 26**, the same major as both Dockerfiles and the
 `engines` floor. The three move together on purpose: a Dockerfile bump that
@@ -157,6 +160,15 @@ leaves the pins behind ships a runtime no job ever ran.
 
 No secrets. No variables. Nothing to enable beyond Actions itself.
 
+`Compose files` and `Website` are in the required list below; **`Decision
+archive` is not**, and that is a weaker position than it looks. It runs on a
+documentation-only pull request, where every gated job reports Success without
+running — so its red is the only red there is, and a check that is not required
+shows that red without preventing the merge. Being the last of the three
+outside the list is the argument for adding it, not against: it exists for
+changes whose whole diff is `.md`, which is precisely where nothing else is
+looking.
+
 ### Required checks on `master`
 
 A repository **ruleset** (Settings → Rules) guards the default branch. It is
@@ -167,11 +179,13 @@ what makes the absent push-to-master trigger safe, so the two are one decision:
 | Pull request required | yes — so there are no direct pushes to `master` |
 | Approvals | 0, and no CODEOWNERS — a solo maintainer cannot approve their own PR |
 | Merge methods | squash only |
-| Branch up to date before merging | **yes** (`strict`) — this is the load-bearing one |
+| Branch up to date before merging | **no** — `strict_required_status_checks_policy` is `false`, so a pull request can merge behind `master` |
 | Bypass actors | **none**, admins included |
 | Force push / deletion | blocked |
 
-The required checks are every job in both workflows:
+The required checks are most, but not all, of the jobs in both workflows — the
+three ungated documentation guards are the exception, and only two of them are
+in here:
 
 ```
 What changed              Multi-tenant isolation
@@ -180,7 +194,10 @@ Type check                Backup round-trip (personal)
 Browser suites            Docker images
 
 Android — what changed    Build APK
+Compose files             Website
 ```
+
+`Decision archive` is the one job in either workflow that is not on this list.
 
 Three things about that list are easy to get wrong.
 

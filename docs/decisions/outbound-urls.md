@@ -159,15 +159,38 @@ endpoint and the topic (which is also what lets an ntfy proxied under
 `/ntfy/` work), and the only header this builds is the optional `Authorization`,
 whose value is refused outright if it could not go in one.
 
-**It ships as `interactive: false`, and that is a decision rather than a gap.**
-ntfy can carry action buttons and they would work — as an HTTP request the
-SUBSCRIBER's device makes at this server, from wherever that phone is, carrying
-what the notification told it to. That is an unauthenticated inbound endpoint,
-which is exactly what `discord-gateway.js` exists to avoid, and the rule that
-saves the Discord buttons has no counterpart: *a press is authorised by the
-CHANNEL it came from* needs a channel to resolve an account from, and an ntfy
-topic is a URL somebody typed. A test pins the flag so turning it on has to be
-deliberate.
+**It SHIPPED as `interactive: false`, and that was a refusal of one half-design
+rather than a property of the channel.** ntfy can carry action buttons, and the
+version refused here was the obvious one: a button pointed at wherever the
+message says, answered by an endpoint that trusts whatever arrives. That is an
+unauthenticated inbound endpoint, which is what `discord-gateway.js` exists to
+avoid, and the rule that saves the Discord buttons has no counterpart — *a
+press is authorised by the CHANNEL it came from* needs a channel to resolve an
+account from, and an ntfy topic is a URL somebody typed.
+
+What was wrong was the sentence this paragraph used to end on, which read as
+"and so ntfy cannot have buttons". The inbound endpoint was never the blocker:
+un-AUTHENTICATED is not un-AUTHORISED, and a request may carry its own
+authority. The button now points at habiterall's own `POST
+/notify/ntfy/answer` carrying an HMAC over `(account, habit, date, action,
+value)` — keyed not by the instance secret but by a key DERIVED from it under
+a fixed label (`deriveKey`, `shared/src/ntfy-answer.js`), because that same
+secret signs the session cookie and a code an unauthenticated request can sit
+and hammer must not double as an oracle against session signing. And
+`CHANNELS.ntfy.interactive` is a predicate on `appUrl` — no public address,
+nowhere to post a code back to, no buttons — rather than a flag pinned at
+false.
+
+`docs/decisions/ntfy-answers.md` is that reversal in full, including what the
+capability does and does not buy. The topic still gates who can *see* a
+reminder, and the code rides INSIDE the reminder, in the button's URL: on
+ntfy.sh, which has no per-topic ACL, whoever can see one already holds its
+code. So the HMAC bounds what an answer may CHANGE — one account, one habit,
+one date, one action, no older than `MAX_ANSWER_AGE_DAYS` — and not who may
+give it. That is the shift stated rather than implied, which is also why
+`ntfyTopicUrl`'s help text in `ui/settings.js` tells the user in as many words
+that anyone who can see the topic can answer these reminders and not merely
+read them.
 
 Two smaller consequences. Both keys are **unportable** — a topic URL is a bearer
 capability exactly as a webhook is, and on a public ntfy it is a bearer
