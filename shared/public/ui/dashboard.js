@@ -216,15 +216,57 @@ const listHost = {
  */
 let loadedDay = null;
 
+/**
+ * Which `load()` is the current one, and so which reply may still be INSTALLED.
+ *
+ * `state.categoryReadSeq`'s shape (`ui/store.js`), extended to the rest of what
+ * a load writes rather than restated as a second mechanism beside it: take a
+ * number before the requests go out, install only while you still hold it.
+ * Nothing here is new in kind; what is new is that four more fields are covered
+ * by it.
+ *
+ * **Why it is a second COUNTER and not the same one.** `categoryReadSeq`
+ * answers "which view of the category LIST is newest", and three writers bump
+ * it that say nothing whatever about this list's habits — `refreshCategoryPicker`
+ * (every habit-dialog open), `moveCategory`'s optimistic splice, and the queued
+ * DELETE's optimistic removal. Gating `state.habits` on it would throw a
+ * dashboard load away because somebody opened a dialog or pressed ↑ on a
+ * category, with nothing left to re-issue it. Every `load()` bumps both, so the
+ * categories line below needs no second test: a newer load has already retired
+ * it through the counter it takes.
+ *
+ * **What this covers that `categoryReadSeq` deliberately does not.** That
+ * counter's own note says `habits` and `categorySummaries` are unticketed
+ * because neither has a writer that can be NEWER than the reply — true of a
+ * category mutation, and not true of a second `load()`. Two overlapping loads
+ * are ordinary: page back and press Today, or press Today while the midnight
+ * watch is out, and `/overview` answers two different windows in whatever order
+ * it answers them. The older landing last installed a paged window's entries
+ * under a grid `paint()` draws from the CURRENT `state.gridEnd` — today's
+ * columns, every one of them empty, because those days are outside the window
+ * that answered — plus a `state.gridLoaded` that says so and a `loadedDay` that
+ * disarms both midnight triggers for the next 24 hours.
+ *
+ * At module scope rather than on `state` for the reason `categoryReadSeq` gives
+ * for the opposite choice: the fields it protects are written in this file
+ * alone. A superseded load still `paint()`s, exactly as a superseded category
+ * read still repaints — a paint reads current state and can only re-confirm
+ * what is there; the ASSIGNMENTS are the half that can be stale.
+ */
+let loadSeq = 0;
+
 export async function load() {
   // See `loadedDay`: the day this request is asking about, read before it goes
   // out rather than after it lands.
   const askedFor = todayISO();
+  // See `loadSeq`. Taken before the first request rather than before
+  // `/overview`, because the archive read below installs a field too.
+  const ticket = ++loadSeq;
 
   // The archive toggle is pointless until something has been archived, and this
   // is asked FIRST because the answer can decide which list to fetch below.
   const archived = await api('/habits?archived=true');
-  state.hasArchived = archived.length > 0;
+  if (ticket === loadSeq) state.hasArchived = archived.length > 0;
 
   // Unarchiving the last archived habit empties the view you are standing in —
   // and `paint()` hides `#list-head` when nothing is archived, which is where
@@ -257,44 +299,50 @@ export async function load() {
   // before it goes out — see `categoryReadSeq` in `ui/store.js`.
   const categoryRead = ++state.categoryReadSeq;
   const data = await api(`/overview?${params}`);
-  state.habits = data.habits;
-  // The habit dialog's category picker reads this rather than fetching its
-  // own copy — every load already carries it. Installed only while this is
-  // still the newest read: `announce()` (ui/habit-dialog.js) sends every OTHER
-  // category mutation through `emit('reload')`, which lands here, and a
-  // category is created at `MAX(position) + 1` — so "add one, then press ↑ to
-  // move it up" puts an arrow press inside this request's own round trip as a
-  // matter of course. `/overview` computes every habit's window plus
-  // `categorySummaries` against a reorder's few `UPDATE`s, so it is the one
-  // likely to lose that race, and its answer knows nothing of the move.
-  //
-  // `habits` and `categorySummaries` are NOT guarded with it. Neither has a
-  // second writer that can be newer than this reply: a reorder moves no
-  // figure, and `categorySummaries` is read by id rather than by position
-  // (`sectionHeader` below), so an order this answer is stale about cannot
-  // reach either of them.
-  if (categoryRead === state.categoryReadSeq) state.categories = data.categories;
-  // Each grouped section's mean/spread, one row per category plus a trailing
-  // `id: null` for Uncategorised. `?archived=true` sends no such key at all —
-  // that mode has nothing active to average — and an older cached payload
-  // (the service worker's stale-while-revalidate) may hold none either, so
-  // this is read as `undefined` rather than assumed present; see `summarised`
-  // and `sectionHeader` below.
-  state.categorySummaries = data.categorySummaries;
-  // Recorded beside them, because `habit.entries` means anything only for the
-  // days this answer covered and nothing else in the payload says which those
-  // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
-  // the caller's own today, so asking is not knowing.
-  state.gridLoaded = { start: data.start, end: data.end };
-  // ...and which local day that window was asked for, which is a different
-  // question: `end` is the PAGED position when there is one, so it says nothing
-  // about whether the clock has moved past what this page was built for.
-  //
-  // Not when the answer came out of the service worker's cache. `api()` has
-  // already set this flag by the time it resolves — a cached answer is a 200,
-  // not a throw — and recording a day for a payload that predates it disarms
-  // both triggers for the next 24 hours. See `loadedDay`.
-  if (!state.offline) loadedDay = askedFor;
+  // Everything this reply installs, and nothing this reply does not — see
+  // `loadSeq`. A superseded load falls through to the `paint()` below, which
+  // redraws from state a newer load has already moved.
+  if (ticket === loadSeq) {
+    state.habits = data.habits;
+    // The habit dialog's category picker reads this rather than fetching its
+    // own copy — every load already carries it. Installed only while this is
+    // still the newest read: `announce()` (ui/habit-dialog.js) sends every OTHER
+    // category mutation through `emit('reload')`, which lands here, and a
+    // category is created at `MAX(position) + 1` — so "add one, then press ↑ to
+    // move it up" puts an arrow press inside this request's own round trip as a
+    // matter of course. `/overview` computes every habit's window plus
+    // `categorySummaries` against a reorder's few `UPDATE`s, so it is the one
+    // likely to lose that race, and its answer knows nothing of the move.
+    //
+    // Still its own test inside this one, and not folded into it: `loadSeq`
+    // says no NEWER LOAD has started, and this says no newer view of the
+    // category list has — which a reorder press or a habit-dialog open
+    // produces without any load at all. The implication runs one way only
+    // (every load bumps both), which is why the categories line keeps the
+    // narrower guard and `categorySummaries` beside it does not need one.
+    if (categoryRead === state.categoryReadSeq) state.categories = data.categories;
+    // Each grouped section's mean/spread, one row per category plus a trailing
+    // `id: null` for Uncategorised. `?archived=true` sends no such key at all —
+    // that mode has nothing active to average — and an older cached payload
+    // (the service worker's stale-while-revalidate) may hold none either, so
+    // this is read as `undefined` rather than assumed present; see `summarised`
+    // and `sectionHeader` below.
+    state.categorySummaries = data.categorySummaries;
+    // Recorded beside them, because `habit.entries` means anything only for the
+    // days this answer covered and nothing else in the payload says which those
+    // are. The SERVER's `start` / `end`, never the request's: `end` is clamped to
+    // the caller's own today, so asking is not knowing.
+    state.gridLoaded = { start: data.start, end: data.end };
+    // ...and which local day that window was asked for, which is a different
+    // question: `end` is the PAGED position when there is one, so it says nothing
+    // about whether the clock has moved past what this page was built for.
+    //
+    // Not when the answer came out of the service worker's cache. `api()` has
+    // already set this flag by the time it resolves — a cached answer is a 200,
+    // not a throw — and recording a day for a payload that predates it disarms
+    // both triggers for the next 24 hours. See `loadedDay`.
+    if (!state.offline) loadedDay = askedFor;
+  }
 
   paint();
 }

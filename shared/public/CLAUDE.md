@@ -982,23 +982,45 @@ mid-flight, so the last request is always issued after the last write; a stale
 reply can still flicker past on its way, which is a different (and much
 smaller) claim than the page settling wrong.
 
-**That flicker is still open, and what is open is wider than the flicker.**
-Two things were established when it was revisited and both are in
-`docs/decisions/dashboard-and-detail.md`. It is not purely cosmetic: while the
-stale render is on screen the head's Edit button is holding the pre-second-save
-habit again, which is the same revert on a one-round-trip window. And the fix
-the earlier note reached for — discard a reply issued before the last seed —
-is scoped to the one path `refresh` already serialises. **The eight other
-callers of `open()` are not serialised at all**: `changeZoom`, three segmented
-controls (the strength card's granularity, and History's granularity and mode)
-and the four cards whose `redraw` refetches — score, history, weekday-by-month
-and frequency. History's granularity is the reachable one, and the ONLY one,
-because it alone issues DIFFERENT urls (`?granularity=`); the other seven send
-the identical request, so a reply landing out of order renders the same payload
-against current state. There, the older reply landing last SETTLES the page on
-week buckets under a control reading month. One ticket on `open()` answers both — the `state.categoryReadSeq` shape
-above — and it is not a rename of that mechanism, because `open()`'s boolean
-return is load bearing at boot. Do not add the narrow counter.
+**That flicker was the visible half of a race `refresh` cannot reach, and it is
+a TICKET on the request that closes it — `openSeq` in `ui/detail.js`.** It was
+never purely cosmetic: while the stale render is on screen the head's Edit
+button is holding the pre-second-save habit again, which is the same revert on
+a one-round-trip window. And the narrow fix the earlier note reached for —
+discard a reply issued before the last seed — would have been scoped to the one
+path `refresh` already serialises. **The eight other callers of `open()` are
+not serialised at all**: `changeZoom`, three segmented controls (the strength
+card's granularity, and History's granularity and mode) and the four cards
+whose `redraw` refetches — score, history, weekday-by-month and frequency.
+History's granularity is the reachable one, and the ONLY one, because it alone
+issues DIFFERENT urls (`?granularity=`); the other seven send the identical
+request, so a reply landing out of order renders the same payload against
+current state. There, the older reply landing last SETTLED the page on week
+buckets under a control reading month.
+
+So the ticket sits on `open()` itself and answers both, and **`seed` bumps it**
+— an optimistic write of the thing the ticket protects, with no read of its
+own, exactly as `moveCategory`'s splice is, and the half without which the
+`refresh` path stays open (nothing NEWER takes a ticket there, because
+`refreshAgain` coalesces). `load()` (`ui/dashboard.js`) has the same shape and
+the same defect and takes its own, `loadSeq`, over `habits`,
+`categorySummaries`, `gridLoaded` and `loadedDay` — the fields
+`state.categoryReadSeq`'s own note calls unticketed because no category writer
+can be newer than the reply, which is true of a category writer and not of a
+second `load()`. **Three counters, one mechanism, three questions**: sharing
+one would let a habit-dialog open (which bumps `categoryReadSeq` through
+`refreshCategoryPicker`) discard a dashboard load or a habit's page.
+
+**A superseded reply is DISCARDED, and `open()`'s boolean was narrowed rather
+than given a third state.** It reports whether the habit ANSWERED, so `false`
+means only that the request failed — which is precisely what its one reader
+asks (`app.js`'s boot falls back to the list for a deep link naming a habit
+that will not open). A discard is not that: whatever superseded the call owns
+the screen. The values the function can return did not move, so a shell serving
+one version of `detail.js` over a cached `app.js` behaves the same either way
+round. `load()` needed none of this — no caller reads its result — and its
+superseded reply still `paint()`s, because a paint reads current state and can
+only re-confirm what is there.
 
 **A module owns its subtree, and `test/ui-modules.test.js` enforces it.** No
 element id may be reached for by two modules; `ui/views.js` exists because

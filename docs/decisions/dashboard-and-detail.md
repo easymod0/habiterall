@@ -1159,7 +1159,72 @@ Response stage, save twice, release the older reply LAST, and assert the Edit
 box holds the newest habit at the moment the stale render lands — not merely
 after the refetch behind it has settled.
 
-Filed rather than done, and this paragraph is the file.
+### The ticket, as built
+
+The counter, not the overlay, and on `open()` rather than on the seed:
+`openSeq` (`ui/detail.js`) is taken before the two round trips and compared
+immediately before `render()`. `seed` bumps it, which is the half a reader
+looking only at the settle would not think to check — `refresh` COALESCES a
+second save into the refetch already in flight, so no newer request takes a
+ticket to supersede the reply the first save issued, and without the bump the
+one-round-trip revert above survives every version of this fix.
+
+`load()` (`ui/dashboard.js`) had the same defect and takes its own, `loadSeq`,
+over `habits`, `categorySummaries`, `gridLoaded` and `loadedDay` — the fields
+`state.categoryReadSeq`'s own note leaves unticketed on the grounds that no
+category writer can be newer than the reply. True of a category writer, untrue
+of a second `load()`: two presses of the grid's ‹ are two `/overview`s for
+windows that do not overlap, and the older landing last installed its habits
+under columns `paint()` draws from the current `state.gridEnd`. Measured
+against the unfixed code with both replies held at the Response stage and the
+older released last: 33 answered cells of 40 became 14, under an unchanged
+range label.
+
+**Three counters, one mechanism, and they may not be merged.**
+`categoryReadSeq` is bumped by `refreshCategoryPicker`, `moveCategory`'s splice
+and the queued DELETE's optimistic removal — three writers that say nothing
+about a habit's stats or the dashboard's grid — so sharing it would let a
+habit-dialog open discard a `/stats` reply or a dashboard load. The two new
+ones live at module scope in the files that write them, which is
+`categoryReadSeq`'s own placement rule applied the other way round: it is on
+`state` because its field has writers in two modules and no owner.
+
+**What a discarded reply returns.** `open()`'s boolean was NARROWED rather than
+given a third state: it reports whether the habit answered, so `false` means
+only that the request failed. That is exactly what its one reader asks —
+`app.js`'s boot falls back to the list for a deep link naming a habit that will
+not open — and a discard is not that, because whatever superseded the call owns
+the screen. A third value was weighed and buys that reader nothing: neither
+`!== 'rendered'` (paint the list over the newer open) nor `=== 'failed'`
+(identical to what shipped) is a better answer, and it would leave `detail.open`
+and `categories.open`, the two adjacent lines of that boot, answering one
+question in two shapes. Note the values the function can actually return did
+not move — the old code answered `false` in the `catch` and `true` everywhere
+else — so a shell serving one version of `detail.js` over a cached `app.js`
+behaves the same either way round. `load()` needed none of this: no caller
+reads its result. Its superseded reply still `paint()`s, because a paint reads
+current state and can only re-confirm what is there — the rule
+`shared/public/CLAUDE.md` already states for a superseded category read.
+
+**Three checks, and each fails against a different mutation.** In
+`countcheck.mjs`, the two-saves block now asserts what each render DREW rather
+than only how the page settled: with the ticket removed it prints
+`drew ["Every day · ≥ 12.5 pages","Every day · ≥ 9.5 pages"] after the seed`,
+and with only `seed`'s bump removed it prints the same thing — which is what
+establishes that half as load bearing. A third block presses History's
+granularity twice inside one round trip and releases the older reply last;
+unfixed it reports `control reads "day" over ["2026: 59/60 (98%)"]`. In
+`paging.mjs`, the load block is the 33 → 14 measurement above.
+
+That block's drain loop had to change shape, and the change is the ticket's own
+signature: it used to release one reply and wait for the redraw it caused
+before releasing the next, which stalls the moment a reply is discarded rather
+than drawn — measured, it spent its whole deadline with the coalesced re-run
+still paused and reported `0 render(s) after the seed`. It stops on QUIET
+instead: three consecutive polls with nothing held. The quiet period is what
+keeps the mutation from passing, since the re-run is issued in `refresh`'s own
+`finally` milliseconds after the release and a loop stopping at the first empty
+`paused` would count one render in either world.
 
 ## The label-width estimator's mark-billing fix, and what it forced (#132)
 
