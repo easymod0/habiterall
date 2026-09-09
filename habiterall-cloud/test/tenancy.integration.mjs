@@ -609,6 +609,303 @@ try {
 } catch { plainNoCtx = -1; }
 check('no user and no scope still sees zero users', plainNoCtx === 0, `rows=${plainNoCtx}`);
 
+/* ---------- the property a transaction-mode pooler is owed (#201) ---------- */
+//
+// Everything above scopes itself with `set_config(..., true)`, and the third
+// argument is the whole of this block. TRANSACTION-LOCAL means Postgres unwinds
+// the setting at COMMIT; `false` — or an omitted third argument, which defaults
+// to it — means session-level, and `pg` has no reset query, so a client
+// released back to the pool is handed to the next borrower carrying whatever
+// session state it was left holding. Measured against this database rather than
+// assumed: a `set_config(..., false)` and a bare `SET` both read back intact
+// from the next checkout of the same client.
+//
+// That is why nothing above can see this defect. `app.user_id` is correct for
+// the whole of the transaction that set it, so every isolation attack in this
+// file still passes; the leak is entirely in what the NEXT request on that
+// connection inherits. Under RLS it is a cross-tenant read rather than a
+// leftover setting — `app_current_user_id()` is `NULLIF(current_setting(
+// 'app.user_id', true), '')::BIGINT`, so a survivor names a real account and
+// the borrower reads that account's rows without having asked for a user.
+//
+// It is also the property a transaction-mode connection POOLER is owed, which
+// is what #201 is about: such a pooler returns the server connection to its own
+// pool at COMMIT and may hand the next transaction a different backend
+// entirely, so a session-level setting has nowhere to survive to, while a
+// transaction-local one is exactly the unit it preserves. `withUser` folding
+// `BEGIN` and the `set_config` into one round trip (#188) is not allowed to
+// simplify the third argument away. See `habiterall-cloud/CLAUDE.md`.
+
+console.log('--- nothing a scoped transaction sets survives its connection ---');
+
+const backendPid = async (db) =>
+  (await db.query('SELECT pg_backend_pid()::int AS pid')).rows[0].pid;
+const scopingOn = async (db) => (await db.query(
+  `SELECT current_setting('app.user_id', true) AS user_id,
+          current_setting('app.scope', true) AS scope`)).rows[0];
+
+// The control INSIDE the transaction, first, and it is load-bearing in the one
+// direction nothing else here covers: a `set_config` that quietly stopped
+// setting anything at all would satisfy every "did not survive" check below.
+const inUser = await withUser(alice.id, async (db) => ({
+  pid: await backendPid(db), ...(await scopingOn(db)),
+}));
+check('control: app.user_id IS set inside withUser',
+  inUser.user_id === String(alice.id), `${inUser.user_id} alice=${alice.id}`);
+
+const afterUser = await withoutUser(async (db) => ({
+  pid: await backendPid(db),
+  ...(await scopingOn(db)),
+  habits: (await db.query('SELECT COUNT(*)::int c FROM habits')).rows[0].c,
+}));
+// The second control, and the one that decides whether this block observed
+// anything at all. Pinning the backend pid is what makes every check below a
+// statement about THAT connection; a fresh backend is clean whatever
+// `db/pool.js` does, which is a pass that means nothing.
+//
+// **PRECONDITION, and it is a precondition of this FILE rather than of `pg`.**
+// It holds because `pg`'s pool is strict LIFO — a released client is pushed and
+// a checkout pops — AND because nothing in this file ever has two helper calls
+// in flight at once, so every call reuses the one physical backend. The second
+// half is the fragile one. A `Promise.all` or any un-awaited helper call
+// ANYWHERE above here puts a second connection in the pool and this control
+// starts failing, correctly: it would no longer be observing the connection the
+// transaction used. If that happens, do not delete the pid assertion to make it
+// green — take the two checkouts under an explicitly held single client, or
+// give this block a pool of its own with `max: 1`. Reordering the file is the
+// same hazard in quieter form: it changes which connection each helper draws.
+check('control: the pool handed the SAME backend straight back out',
+  afterUser.pid === inUser.pid, `withUser=${inUser.pid} next=${afterUser.pid}`);
+// The empty string, not NULL: once a placeholder GUC exists on a session,
+// unwinding a transaction-local set returns it to `''` rather than removing it,
+// and `''` is the spelling `app_current_user_id()` maps to NULL. Both are
+// falsy, and a leaked account id is neither.
+check('app.user_id did not survive the transaction that set it',
+  !afterUser.user_id, JSON.stringify(afterUser.user_id));
+// The consequence rather than the mechanism, which is the assertion worth
+// having: a survivor names alice, alice owns habits, and so the next borrower
+// of this connection reads them through RLS having asked for no user.
+check('...so the next borrower of that connection reads no habits at all',
+  afterUser.habits === 0, `rows=${afterUser.habits}`);
+
+const inScope = await withNotifierScope(async (db) => ({
+  pid: await backendPid(db), ...(await scopingOn(db)),
+}));
+check('control: app.scope IS set inside withNotifierScope',
+  inScope.scope === 'notifier', JSON.stringify(inScope.scope));
+
+const afterScope = await withoutUser(async (db) => ({
+  pid: await backendPid(db),
+  ...(await scopingOn(db)),
+  users: (await db.query('SELECT COUNT(*)::int c FROM users')).rows[0].c,
+}));
+check('control: the same backend again, for the notifier scope',
+  afterScope.pid === inScope.pid, `scope=${inScope.pid} next=${afterScope.pid}`);
+check('app.scope did not survive its transaction either',
+  !afterScope.scope, JSON.stringify(afterScope.scope));
+// `app_is_notifier()` is `app_current_user_id() IS NULL AND app.scope =
+// 'notifier'`, and `withoutUser` satisfies the first half by construction — so
+// a leaked scope is the whole of what `users_notifier_scan` asks for. The check
+// a few lines above says a plain `withoutUser` enumerates nobody; this says it
+// of the connection a scan has just finished with, which is the only connection
+// it could ever have been false of.
+check('...so a plain withoutUser on that connection still enumerates nobody',
+  afterScope.users === 0, `users=${afterScope.users}`);
+
+/* ---------- and asked of every helper, not only the two driven above ------- */
+//
+// The two blocks above are behavioural and therefore narrow: they observe the
+// helpers they drive and nothing else. A `withUserWrite` that grew a `SET` of
+// its own, or a fifth helper added next year, is not something they can see.
+//
+// So the statements each helper actually ISSUES are read back off a fake
+// client. That is still behavioural — a renamed binding, an inverted argument
+// or a statement added anywhere in the helper reaches it, which reading the
+// source text for `set_config` would not — and it covers all four at once.
+//
+// The export list is the denominator, and it is asserted first. An empty
+// offender list says nothing until it is known what was searched, so a fifth
+// export fails this by name and has to be classified deliberately rather than
+// joining the module unexamined.
+//
+// **And the denominator is ONE list, which is the part worth being careful
+// about.** An earlier version of this block pinned the exports here and then
+// decided what to actually drive from a second, hand-written map below. The two
+// could drift in the one direction that matters: a fifth scoping helper turns
+// the export check red, and the cheapest way to make it green again is to add
+// the name here — at which point the helper is pinned, is never driven, and its
+// `set_config` calls are never scanned. The guard would then claim a coverage
+// it does not have, over precisely the leak it exists for. So every name in
+// `POOL_EXPORTS` must be classified as either DRIVEN or NOT-A-HELPER-BECAUSE,
+// nothing may be in both, and a name in neither fails by name.
+
+console.log('--- and no pool helper issues a session-level SET or set_config ---');
+
+const poolModule = await import('../src/db/pool.js');
+
+// How to call each transaction helper. Being in here is what gets an export's
+// statements captured and scanned, so this map — not the list below — is the
+// coverage.
+const DRIVE = {
+  withUser: () => poolModule.withUser(alice.id, async () => 'ok'),
+  withUserWrite: () => poolModule.withUserWrite(alice.id, async () => 'ok'),
+  withNotifierScope: () => poolModule.withNotifierScope(async () => 'ok'),
+  withoutUser: () => poolModule.withoutUser(async () => 'ok'),
+};
+
+// Everything else `db/pool.js` exports, each with the reason it takes no
+// connection and so has no statements to scan — a map rather than a set, the
+// same shape and for the same reason as `notMirrored` in the root `CLAUDE.md`.
+// Moving a helper in here to silence this block is then a written claim rather
+// than an omission, which is the residual this design keeps and accepts.
+const NOT_A_HELPER = {
+  pool: 'the Pool itself, not a function',
+  closePool: 'ends the pool; calling it here would break every check below',
+  poolGauge: 'reads counters off the pool object, issues no query',
+  poolTimeouts: 'returns the two configured numbers, issues no query',
+  isCategoryNameConflict: 'a pure predicate over an error object',
+};
+
+const POOL_EXPORTS = Object.keys(poolModule).sort();
+const classified = [...Object.keys(DRIVE), ...Object.keys(NOT_A_HELPER)];
+// A name the module exports that this block has not classified at all. This is
+// the check that a fifth helper cannot get past by being added to a list.
+const unclassified = POOL_EXPORTS.filter((k) => !classified.includes(k));
+check('every db/pool.js export is either driven here or has a written reason not to be',
+  unclassified.length === 0,
+  `unclassified=[${unclassified}] driven=[${Object.keys(DRIVE)}]`);
+// And the other three directions, so the two maps cannot rot against the module
+// or against each other: a stale entry naming an export that no longer exists,
+// and a name claimed by both maps at once.
+const stale = classified.filter((k) => !POOL_EXPORTS.includes(k));
+check('neither map names an export db/pool.js no longer has',
+  stale.length === 0, `stale=[${stale}]`);
+const bothWays = Object.keys(DRIVE).filter((k) => Object.hasOwn(NOT_A_HELPER, k));
+check('no export is claimed as both driven and not-a-helper',
+  bothWays.length === 0, `both=[${bothWays}]`);
+
+// `pool.connect` is stubbed rather than a real checkout taken, so the helper
+// runs its statements against something that records them instead of a
+// database. Restored in a `finally`: a leak here would silently decide every
+// check after it, and `pool.end()` below is one of them.
+const realConnect = pool.connect.bind(pool);
+const statementsOf = async (run) => {
+  /** @type {string[]} */
+  const sql = [];
+  pool.connect = async () => ({
+    // `pg` accepts BOTH `query(text, values)` and `query({text, values})`, and
+    // a bare `String(text)` on the second form yields `'[object Object]'` —
+    // after which every regex below sees nothing and the whole scan is green
+    // over a helper it never read. Nothing in this edition uses the config-object
+    // form today, which is exactly why it would go unnoticed if something
+    // started to.
+    // A third shape reaches neither branch and must not read as "no statements
+    // here" — it is pushed as a sentinel that fails the scan by name below.
+    query: async (text) => {
+      if (typeof text === 'string') sql.push(text);
+      else if (typeof text?.text === 'string') sql.push(text.text);
+      else sql.push(`UNREADABLE(${Object.prototype.toString.call(text)})`);
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  });
+  try { await run(); } finally { pool.connect = realConnect; }
+  return sql;
+};
+
+/** Every statement every driven helper issued, as `[helper, oneStatement]`. */
+const parts = [];
+for (const [helper, run] of Object.entries(DRIVE)) {
+  // Split on `;` because `withUser`'s fold is two statements in one string, and
+  // a `SET` hidden after the `set_config` would otherwise be invisible to a
+  // check anchored at the start of the string. None of these statements carries
+  // a semicolon inside a literal, so this only ever makes the scan sharper.
+  for (const sql of await statementsOf(run)) {
+    for (const part of sql.split(';')) parts.push([helper, part]);
+  }
+}
+console.log(`  ${parts.length} statement(s) across `
+  + `${Object.keys(DRIVE).length} driven helpers: ${Object.keys(DRIVE)}`);
+
+// No statement may be one this stub could not read — see the `UNREADABLE`
+// sentinel above. Left unchecked, an unreadable statement is indistinguishable
+// from a clean one to every regex below.
+const unreadable = parts.filter(([, part]) => part.includes('UNREADABLE('));
+check('every statement a helper issued was readable as SQL',
+  unreadable.length === 0, unreadable.map(([h, p]) => `${h}: ${p}`).join(' | '));
+
+// A `set_config` has to carry a LITERAL `true`. The third ARGUMENT is read,
+// rather than the word being searched for anywhere in the statement, so a
+// `true` elsewhere in the same string cannot cover for a `false` here — and an
+// omitted third argument, which is session-level too, is `undefined` and fails.
+const configCalls = parts.flatMap(([helper, part]) =>
+  [...part.matchAll(/set_config\s*\(([^()]*)\)/gi)].map((m) => [helper, m[0], m[1]]));
+// **The matcher's own blind spot, closed by counting.** `[^()]*` cannot span a
+// nested paren, so a `set_config('app.user_id', (SELECT ...), false)` would
+// match NOTHING — and an unmatched call leaves `notLocal` empty, which reads
+// exactly like a clean scan. Every literal occurrence is counted and the two
+// numbers compared, so a call the regex cannot parse fails here by name rather
+// than leaving silently.
+const rawConfigCount = parts.reduce(
+  (n, [, part]) => n + (part.match(/set_config/gi)?.length ?? 0), 0);
+check('every set_config occurrence was actually parsed by the matcher',
+  rawConfigCount === configCalls.length,
+  `occurrences=${rawConfigCount} parsed=${configCalls.length}`);
+
+// **Per-helper, and derived rather than listed.** `configCalls.length >= 2` was
+// slack against a true count of three and would have passed with a third of the
+// coverage gone. The rule instead comes out of the statements themselves: a
+// helper that OPENS A TRANSACTION is a helper that scopes it, so every helper
+// issuing a `BEGIN` must also issue a `set_config`. `withoutUser` opens none and
+// is correctly exempt without being named anywhere.
+const opensTx = [...new Set(parts.filter(([, p]) => /^\s*BEGIN\b/i.test(p)).map(([h]) => h))];
+const scopes = new Set(configCalls.map(([h]) => h));
+check('control: some driven helper opens a transaction at all',
+  opensTx.length > 0, `openers=[${opensTx}]`);
+const unscoped = opensTx.filter((h) => !scopes.has(h));
+check('every helper that opens a transaction also scopes it',
+  unscoped.length === 0, `opens but does not scope=[${unscoped}] openers=[${opensTx}]`);
+
+const notLocal = configCalls.filter(([, , args]) => args.split(',')[2]?.trim() !== 'true');
+check('every set_config a pool helper issues is transaction-local',
+  notLocal.length === 0, notLocal.map(([h, call]) => `${h}: ${call}`).join(' | '));
+
+// And no helper issues a session-level `SET`. Anchored at the start of a
+// statement, so `UPDATE habits h SET summary_asof = ...` inside `withUserWrite`
+// is not mistaken for one, and `SET LOCAL` — which unwinds at COMMIT exactly as
+// `set_config(..., true)` does — is allowed through by name.
+const sessionSets = parts.filter(([, part]) => /^\s*SET\s+(?!LOCAL\b)/i.test(part));
+check('no pool helper issues a session-level SET',
+  sessionSets.length === 0, sessionSets.map(([h, p]) => `${h}: ${p.trim()}`).join(' | '));
+
+// **What this block does NOT say — the KINDS, first.** It reads two statement
+// forms, `set_config` and a statement-leading `SET`, because those are the two
+// this edition uses. Postgres has more session state than that: `LISTEN`,
+// `PREPARE`, `CREATE TEMP TABLE`, a held cursor, and a SESSION advisory lock
+// each survive COMMIT and each is stranded by a transaction-mode pooler in
+// exactly the way this block exists to prevent. None of them appears anywhere
+// in `habiterall-cloud/src` today, which is why the scan is two forms and not a
+// growing allowlist — a list of dangerous statements is a list that rots, and
+// avoiding one is what the `DRIVE` / `NOT_A_HELPER` design above is for.
+//
+// The one to know about is the advisory lock, because it is the likeliest next
+// arrival: #194 is open, it is about a reminder tick that must run once across
+// replicas, and a Postgres advisory lock is the obvious answer. `pg_advisory_lock`
+// is SESSION-scoped and `pg_advisory_xact_lock` is the transaction-scoped one —
+// the same distinction this whole block is about, one function name over. If
+// that lands in a pool helper, nothing here will notice.
+//
+// **And what it does not say about the DENOMINATOR, which is the exports of one
+// module and not the edition.** "No pool HELPER leaks" and "this edition leaks
+// nothing onto a pooled connection" are different claims, and two call sites
+// sit in the gap: `connect-pg-simple` is handed the `Pool` itself
+// (`server.js`, `new PgStore({ pool, ... })`) and the health probe calls
+// `pool.query('SELECT 1')` directly (`server.js`, `createHealthProbe`). Both
+// bypass every helper here and neither is read by anything above. They are
+// quiet today — a session store issuing `SET` would be unusual and the probe is
+// one statement — but nothing in this file would notice if either changed, and
+// a reader should not take a green run as more than it is.
+
 await admin.end();
 await pool.end();
 console.log(fails === 0 ? '\nALL TENANCY CHECKS PASSED' : `\n${fails} TENANCY CHECK(S) FAILED`);
