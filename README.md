@@ -70,7 +70,9 @@ and an *at least* / *at most* goal, so both "drink 8 glasses" and "at most 0
 cigarettes" work.
 
 **An optional icon** — one emoji beside the habit's name, on every screen and in
-a Discord or ntfy reminder. It decorates the name, never replaces it.
+a Discord or ntfy reminder. It decorates the name, never replaces it. A picker
+beside the field offers a curated set to choose from, and typing or pasting any
+single character — including one the picker does not carry — still works.
 
 **Habits you are trying not to do** — set **Show this habit as** to *Something to
 avoid* and an *at most* habit reads the right way up: a clean day fills in the

@@ -628,6 +628,102 @@ for (const id of [creditHabit.id, lapseHabit.id, staleAnswerHabit.id, phantomAnc
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
 
+/* ---------- issue #224: a quick answer preserves that day's note ----------
+ *
+ * `parseEntry` now answers `notes: null` for a body that omits the key, and
+ * `entryWrite` carries that through to storage rather than collapsing it to
+ * `''` — the personal edition's own measurement, mirrored here against this
+ * route's own `upsertEntry`/`RETURNING notes`. Case 1 (a real button press,
+ * through `interactionAdapter().record`) lives in notify.integration.mjs,
+ * which has the real adapter this suite does not; every case here goes
+ * through a PUT that OMITS the key, since a test that writes a note and reads
+ * it straight back cannot fail. Habits of their own, deleted before the
+ * import-isolation count below, same as every other fixture in this block.
+ */
+console.log('\n--- notes survive an entry write that omits them (#224) ---');
+
+const NOTE_224 = 'coach said 10, only managed 8';
+const noteDay = isoDaysAgo(0);
+const mkNotesHabit = (name) => fetch(`${overviewBase}/api/habits`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name, type: 'numerical', unit: 'x' }),
+}).then((r) => r.json());
+// The body is read as text and parsed loosely on purpose: case 7 below is a
+// write that must not 500, and Express answers a 500 with an HTML error page —
+// so `r.json()` would reject and take the whole file down with a JSON syntax
+// error naming nothing, where `ck` can name the check that broke.
+const putNotes = (id, body) => fetch(`${overviewBase}/api/habits/${id}/entries/${noteDay}`, {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+}).then(async (r) => {
+  const text = await r.text();
+  try { return { status: r.status, body: JSON.parse(text) }; }
+  catch { return { status: r.status, body: text.slice(0, 200) }; }
+});
+
+// 2. PUT omitting the key preserves.
+const omitHabit224 = await mkNotesHabit('Notes omit 224');
+await putNotes(omitHabit224.id, { value: 2, notes: NOTE_224 });
+await putNotes(omitHabit224.id, { value: 2 });
+const omitRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [omitHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('a PUT that omits notes preserves the stored note',
+  omitRow?.notes === NOTE_224, JSON.stringify(omitRow));
+
+// 3. PUT notes:'' still clears.
+const clearHabit224 = await mkNotesHabit('Notes clear 224');
+await putNotes(clearHabit224.id, { value: 2, notes: NOTE_224 });
+await putNotes(clearHabit224.id, { value: 2, notes: '' });
+const clearRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [clearHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('an explicit empty notes still clears the stored note',
+  clearRow?.notes === '', JSON.stringify(clearRow));
+
+// 4. The echo is the row, not the request, on a preserve.
+const echoHabit224 = await mkNotesHabit('Notes echo 224');
+await putNotes(echoHabit224.id, { value: 2, notes: NOTE_224 });
+const echoOmit = await putNotes(echoHabit224.id, { value: 2 });
+ck('the response echoes the stored note, not the omitted request body',
+  echoOmit.body.notes === NOTE_224, JSON.stringify(echoOmit.body));
+
+// 5. The echo on a clear.
+const echoClear = await putNotes(echoHabit224.id, { value: 2, notes: '' });
+ck('the response echoes the cleared note',
+  echoClear.body.notes === '', JSON.stringify(echoClear.body));
+
+// 6. A skip preserves too, and the reply still reports the SKIP wire value.
+const skipHabit224 = await mkNotesHabit('Notes skip 224');
+await putNotes(skipHabit224.id, { value: 2, notes: NOTE_224 });
+const skipPut = await putNotes(skipHabit224.id, { status: 'skip' });
+const skipRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [skipHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('a skip preserves the stored note', skipRow?.notes === NOTE_224, JSON.stringify(skipRow));
+ck('...and the reply still reports the SKIP wire value',
+  skipPut.body.value === 3, JSON.stringify(skipPut.body));
+
+// 7. The OTHER half of the same bound parameter, stated. Every case above
+//    seeds a note first, so what each of them ASSERTS is the conflict clause;
+//    none of them names a day with NO row, which is where the VALUES-side
+//    COALESCE has to turn a NULL note into '' or the insert cannot satisfy
+//    `notes NOT NULL`. It is also the ordinary case — a first answer on a
+//    brand-new day, which is every tap-to-complete.
+const noRowHabit224 = await mkNotesHabit('Notes no row 224');
+const noRowPut = await putNotes(noRowHabit224.id, { value: 2 });
+ck('a PUT omitting notes on a day with NO row succeeds and answers an empty note',
+  noRowPut.status === 200 && noRowPut.body.notes === '', JSON.stringify(noRowPut));
+const noRow = await withUser(alice, (db) =>
+  db.query(`SELECT notes FROM entries WHERE habit_id = $1 AND date = $2`,
+    [noRowHabit224.id, noteDay]).then((r) => r.rows[0]));
+ck('...and the fresh row stores an empty note',
+  noRow?.notes === '', JSON.stringify(noRow));
+
+for (const id of [omitHabit224.id, clearHabit224.id, echoHabit224.id, skipHabit224.id,
+  noRowHabit224.id]) {
+  await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
+}
+
 // While the router is mounted, the other route added alongside it. The notify
 // suite exercises the storage behind this through `notifier.deliveryStatus`
 // directly, which would go on passing if the route itself were wired to the

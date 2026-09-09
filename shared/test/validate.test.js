@@ -549,9 +549,9 @@ test('the browser holds NO copy of the fold — the category picker asks the ser
 
 test('a boolean habit accepts only its sentinels', () => {
   assert.deepEqual(parseEntry(boolHabit, { value: 2 }, SENTINELS),
-    { value: 2, status: '', notes: '' });
+    { value: 2, status: '', notes: null });
   assert.deepEqual(parseEntry(boolHabit, { value: 0 }, SENTINELS),
-    { value: 0, status: '', notes: '' });
+    { value: 0, status: '', notes: null });
   assert.throws(() => parseEntry(boolHabit, { value: 42 }, SENTINELS), ValidationError);
 });
 
@@ -583,10 +583,39 @@ test('an explicit status wins for either habit type', () => {
   }
 });
 
-test('notes are clamped and always present', () => {
-  assert.equal(parseEntry(numHabit, { value: 1 }, SENTINELS).notes, '');
-  const long = parseEntry(numHabit, { value: 1, notes: 'n'.repeat(LIMITS.notes + 50) }, SENTINELS);
-  assert.equal(long.notes.length, LIMITS.notes);
+test('an omitted or null notes is absent, not an empty string', () => {
+  // Absent and explicitly empty must stay distinguishable past this point:
+  // storage reads null as "leave the row's note alone" and '' as "clear it".
+  assert.equal(parseEntry(numHabit, { value: 2 }, SENTINELS).notes, null);
+  assert.equal(parseEntry(numHabit, { value: 2, notes: null }, SENTINELS).notes, null);
+});
+
+test('a supplied notes is carried through, empty or not', () => {
+  assert.equal(parseEntry(numHabit, { value: 2, notes: '' }, SENTINELS).notes, '');
+  assert.equal(parseEntry(numHabit, { value: 2, notes: 'x' }, SENTINELS).notes, 'x');
+});
+
+test('a supplied note is still clamped at 500 characters', () => {
+  const long = parseEntry(numHabit, { value: 1, notes: 'n'.repeat(550) }, SENTINELS);
+  assert.equal(long.notes.length, 500);
+});
+
+test('entryWrite carries notes through unchanged, including null, on both branches', () => {
+  const ordinary = entryWrite(numHabit, { value: 2, status: '', notes: null }, SENTINELS);
+  assert.equal(ordinary.notes, null);
+
+  const skip = entryWrite(numHabit, { value: 0, status: 'skip', notes: null }, SENTINELS);
+  assert.equal(skip.notes, null);
+});
+
+test('entryWrite\'s reply never carries notes, on either branch', () => {
+  // The route cannot echo the request by accident once notes is not on the
+  // reply at all — it has to actively re-add it, from the stored row.
+  const ordinary = entryWrite(numHabit, { value: 2, status: '', notes: 'x' }, SENTINELS);
+  assert.equal('notes' in ordinary.reply, false);
+
+  const skip = entryWrite(numHabit, { value: 0, status: 'skip', notes: 'x' }, SENTINELS);
+  assert.equal('notes' in skip.reply, false);
 });
 
 /* ---------- answerBody: a reminder press, all the way to storage ---------- */

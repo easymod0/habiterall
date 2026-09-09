@@ -843,6 +843,122 @@ own behaviour on a trusted keypress, so a `new KeyboardEvent('keydown')` from
 script does not trigger it and a test built on one passes against the
 unguarded code. `categorycheck.mjs` drives CDP `Input.dispatchKeyEvent`.
 
+**The emoji picker is an ADDITION to the icon field, never a replacement, and
+`icon-field.js` is the sole owner of every `#icon-*` id.** The field stays a
+real, editable `<input name="icon">` because the OS picker (Win+. /
+Ctrl+Cmd+Space) lands its choice THERE, a paste from elsewhere is how an emoji
+not in any curated list arrives, and `parseIcon` deliberately accepts any
+grapheme — 運, ✓, a bare letter — that a ~200-entry list will never hold. A
+cell's click writes THE TEXT OF THE FIELD and nothing else: no hidden input, no
+module-level "selected" glyph that `iconField.value()` reads instead, because a
+preset arriving with #66 tier 2 has to be a *different field*, not a magic
+string smuggled through this one.
+
+`previewIcon` is a SECOND DECLARATION of `parseIcon`'s derivation — same strip
+set, same grapheme segmenter, same drop past `LIMITS.icon` — because
+`shared/src` is not served to the browser, exactly the `ui/values.js` ↔
+`src/constants.js` arrangement one level up. `test/icon-field.test.js` pins the
+two against each other behaviourally, over a shared example table, so they
+cannot quietly diverge. It decides what is DISPLAYED and nothing about what is
+STORED: the payload still sends the field's raw text, and `parseIcon` on the
+server is still the only authority on what a habit's icon becomes.
+
+The picker's search box is a text box inside `#habit-form` too, so it is the
+same Enter trap as the category boxes above, over a control this module owns
+instead — Enter there picks the FIRST matching cell rather than merely
+swallowing the key (a box where Enter does nothing is its own bug report) and
+calls `preventDefault()`. And while the panel is open, Escape closes the
+PANEL, not the `<dialog>` — `preventDefault` is what is load-bearing there,
+not `stopPropagation`: a `<dialog>`'s Escape-close is not a bubbling listener
+a `stopPropagation` could intercept, it is the keydown's own default action,
+so without `preventDefault` the first Escape a user presses to dismiss the
+picker closes the whole habit dialog too, losing everything typed into it.
+
+**That handler is bound to the DIALOG, guarded on the panel being open — not
+to the panel, which is where it obviously belongs and where it only half
+works.** `#icon-picker-toggle` sits beside the input and `#icon-picker` is a
+sibling AFTER it, so opening the picker with the mouse leaves focus on the
+TOGGLE, outside the panel: a keydown listener on the panel never runs, and
+Escape takes the whole dialog. The keyboard path — Tab into the panel, or the
+search box — is inside it and worked, which is exactly why the first version
+shipped and why the check that covered it (`feat4.mjs` (g)) could not see the
+hole: it focused `#icon-search` before pressing the key. Focusing the search
+box on open does not fix this either, since Shift+Tab puts the user back on
+the toggle with the panel still open. Case `g2` presses Escape from the
+toggle, and it needs a REAL CDP mouse press to get there — a synthetic
+`.click()` does not move focus, so a test built on one passes against the
+unfixed code.
+
+**Bound to the dialog, it runs for a press made ANYWHERE in the dialog — so
+what it may not do is restore focus unconditionally.** The guard is the PANEL
+being open, which says nothing about where the caret is: with the picker open,
+click into Description, type, press Escape, and an unconditional
+`els.toggle.focus()` yanks the caret off the box being typed in and onto a
+button, so the next keystrokes go nowhere and Escape-to-cancel needs two
+presses. The restore is therefore asked of `els.panel.contains(activeElement)
+|| activeElement === els.toggle` — the two places a picker-opened focus can
+be — and it is asked BEFORE `closePanel()`, because hiding an element that
+contains the focused node blurs it and by then the answer is always `<body>`.
+Cases `g` and `g2` cannot see this: both press Escape from inside the picker,
+which is exactly where restoring focus is right. `g3` is the case for it.
+
+**A press outside the panel dismisses it, and the TOGGLE is excluded from
+that.** Clicking into Name or Description used to leave 182 cells open over the
+form until Escape or a second press on the toggle. The exclusion is not
+defensive tidiness: the toggle has a click handler of its own, so a press on it
+runs both, and unexcluded one press is two state changes — on `pointerdown`
+this listener runs first, closes the panel, and the toggle's own handler then
+finds it hidden and reopens it, giving a toggle that opens and can never close.
+Bound on `click` the order inverts and the OPENING press cancels itself
+instead; there is no ordering that works without the exclusion, which is why
+`g5` presses the toggle three times rather than once. `contains` rather than
+`===`, because the press lands on the `<span>` holding the glyph.
+`pointerdown` rather than `click` so a press that ends as a drag still
+dismisses and so one event covers mouse and touch — the cost is in the tests,
+where a scripted `.click()` dispatches no `pointerdown` at all and a case built
+on one passes against a build with no dismissal in it, so `g4`/`g5` drive real
+CDP mouse presses exactly as `g2` does. It restores focus to nothing, which is
+the rule above met from the other side.
+
+**The grid is built on the FIRST picker open and not rebuilt after it.**
+`reset()` used to build all 182 cells on every habit-dialog open and
+`openPanel()` built all 182 again — measured by stamping the nodes, 0 of the
+first generation survived the panel opening, so a session that opened the
+picker paid for 364 `<button>`s and one that never opened it paid for 182.
+Measured after: 0 at page load, **0 after a habit-dialog open**, 182 on the
+first picker open, and all 182 still the same nodes after a second dialog open
+and a second picker open. `gridQuery` is the key and it is the QUERY, not "has
+this ever been built" — a session closed mid-search leaves a filtered grid
+behind, so the next open has to rebuild; keyed on merely being populated, the
+picker reopens showing the one cell that matched `hydrate`. Nothing about a
+cell depends on the habit or the current icon value (`renderGrid` reads the
+frozen dataset alone, and `.icon-cell` has no selected style for a value to
+light up), which is what makes the skip safe rather than only cheap — give a
+cell a per-habit appearance later and this cache is what has to learn about
+it. The one thing the old rebuild really did was park the roving tab stop back
+on cell 0, so `openPanel` now does that explicitly whether or not it rebuilt;
+without it, Tab into a reopened picker lands wherever the arrow keys left it
+last session.
+
+**And the field's hint is `aria-describedby`, not a wrapping label.** The hint
+had to leave the `<label>` when the input did (the label names ONLY the input,
+so the live-region caption and the toggle stay out of the accessible name),
+and a hint that is nobody's child reaches no assistive technology at all —
+measured through CDP's accessibility tree, the input's description was `null`.
+It carries an id and the input describes itself by it, which is a DESCRIPTION
+and not a name: measured again, name `"Icon"`, description the hint's own
+sentence. Do not fix a future version of this by putting the hint back inside
+the label; that is the accessible-name mutation this arrangement exists to
+avoid.
+
+`#icon-picker`'s `hidden` state and `#icon-search`'s value are static markup,
+wired once by `initIconField()` — nothing about closing and reopening the
+dialog touches either on its own, so a panel left open (and a query left
+typed) in one session was still open and still filtering the grid the next
+time the dialog opened, for a *different* habit. `iconField.set()` — called
+from `habit-dialog.js`'s `openDialog`, for every session — resets both, which
+is the one seam every dialog open already passes through.
+
 **A localised name is never indexed by a Gregorian field.** `getMonth()`,
 `getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
 `MONTHS[d.getMonth()]` or `String(d.getDate())` silently assumes the locale's

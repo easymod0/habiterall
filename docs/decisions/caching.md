@@ -1297,3 +1297,4 @@ caught by checking that the cached figures were right — both left
 `bestStreak` and `totalCompleted` correct and broke something else. What
 caught it was asserting that two paths to the same answer agree, which is the
 only assertion that does not have to predict which half the next bug lands in.
+
