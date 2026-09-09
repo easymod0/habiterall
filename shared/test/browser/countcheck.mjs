@@ -328,6 +328,31 @@ try {
   const targetBox = `document.querySelector('#habit-form [name=target_value]')`;
 
   /**
+   * What the dialog and the server actually hold, for the timeout below.
+   *
+   * `waitUntil` names what it WANTED and can say nothing whatever about what
+   * it got, and both CI sightings of this suite's flake (#305, #289) are that
+   * one line with nothing under it — from which a dialog that never opened, a
+   * Target box filled from a habit the page had not refetched yet, and a save
+   * that never reached storage are indistinguishable. Read in ONE evaluation
+   * so the four answers describe one instant, and the stored target read from
+   * `/api/habits` beside them so the page and the server can be told apart.
+   *
+   * Swallowed on its own account: a diagnostic that throws replaces the
+   * failure it is describing, which is worse than no diagnostic at all.
+   */
+  const dialogState = (name) => ev(`(async()=>{
+    const box = ${targetBox};
+    const list = await (await fetch('/api/habits')).json();
+    const h = list.find(x => x.name === ${JSON.stringify(name)});
+    return {
+      dialogOpen: document.getElementById('habit-dialog').open,
+      boxPresent: !!box,
+      boxValue: box ? box.value : null,
+      storedTarget: h ? h.target_value : null,
+    };})()`).catch((e) => ({ unreadable: e.message }));
+
+  /**
    * Open a habit's own page and press Edit — the habit dialog's edit path, the
    * way `categorycheck.mjs` already reaches it. `#btn-new` is the create path
    * and has no stored target to preserve.
@@ -341,6 +366,10 @@ try {
    * being checked, and then the failure has to be a named check rather than a
    * timeout in here. `.open === true` is enough on its own for that: the fill
    * is synchronous and `openDialog` does it before `showModal()`.
+   *
+   * The diagnostic hangs off the helper rather than off a call site because
+   * every caller reaches this same wait, and the thrown error is rethrown
+   * untouched — its sentence is what both issues and the CI logs quote.
    */
   const openHabitEdit = async (name, filled) => {
     await rowReady(name);
@@ -356,10 +385,15 @@ try {
       { what: `${name}'s own page` });
     await ev(`[...document.querySelectorAll('#view-detail button')]
       .find(b => b.textContent.trim() === 'Edit').click(); true`);
-    await waitUntil(ev,
-      `document.getElementById('habit-dialog').open === true`
-      + (filled === undefined ? '' : ` && ${targetBox}?.value === ${JSON.stringify(filled)}`),
-      { what: `the habit dialog${filled === undefined ? '' : ` filled with a target of "${filled}"`}` });
+    try {
+      await waitUntil(ev,
+        `document.getElementById('habit-dialog').open === true`
+        + (filled === undefined ? '' : ` && ${targetBox}?.value === ${JSON.stringify(filled)}`),
+        { what: `the habit dialog${filled === undefined ? '' : ` filled with a target of "${filled}"`}` });
+    } catch (err) {
+      console.log(`    when the wait gave up: ${JSON.stringify(await dialogState(name))}`);
+      throw err;
+    }
   };
 
   /** Replace whatever the Target box holds with `text`, as a keyboard would. */
@@ -374,9 +408,96 @@ try {
   };
 
   const submitDialog = () => ev(`document.getElementById('habit-form').requestSubmit(); true`);
-  const dialogClosed = () => waitUntil(ev,
-    `document.getElementById('habit-dialog').open === false`,
-    { what: 'the habit edit to save' });
+
+  /**
+   * The subtitle under the open habit's title, exactly as it reads now.
+   *
+   * Read BEFORE a submit and handed to `dialogClosed` below, which waits for
+   * it to stop reading that way. It throws rather than answering `null` when
+   * that page is not showing: a `before` of `null` would make the wait below
+   * satisfied by the first poll — a guard that has quietly stopped asserting
+   * is the whole failure mode this section is written around.
+   */
+  const habitSub = async () => {
+    const text = await ev(
+      `document.querySelector('#view-detail .habit-sub')?.textContent ?? null`);
+    if (text === null) {
+      throw new Error("no #view-detail .habit-sub to read — is a habit's own page showing?");
+    }
+    return text;
+  };
+
+  /**
+   * Wait for a save to land — in the STORE the page is drawing from, not only
+   * in `dialog.open`.
+   *
+   * The two are separate events and only the first used to be waited for.
+   * `saveHabit` calls `dialog.close()` and then `announce()`, which from a
+   * habit's own page emits `'change'`; `detail.js` answers that with a fresh
+   * `/stats` + `/entries` round trip and rebuilds the page from the reply. The
+   * Edit button is rebuilt with it, and it CAPTURES the habit it was drawn
+   * from — so until that render lands, pressing Edit calls
+   * `openDialog(theHabitBeforeTheSave)` and fills the Target box with the old
+   * value. Nothing about the dialog says so, and `habitNow()` cannot see it
+   * either: that is its own `fetch`, and it correctly reports the new target
+   * while the page is still holding the old one.
+   *
+   * What that produced is #305 / #289 — `openHabitEdit`'s fill wait spending
+   * its whole 20s on a string the box was never going to hold, roughly one
+   * suite instance in eight at eight `countcheck`s on two cores. This is the
+   * corollary the root CLAUDE.md states: a poll on a weak condition is worse
+   * than the sleep it replaced, because it returns the instant something
+   * unrelated is true.
+   *
+   * `.habit-sub` is asked rather than the button, because the head's subtitle
+   * is drawn from the SAME `habit` object the Edit listener closes over, in
+   * the same `render()` — so the page holding new habit data IS the button
+   * holding it, with no second thing to keep in step. That node is
+   * `[description, freqLabel, targetLabel]` joined (`detail.js`) and nothing
+   * else rewrites it, so "it CHANGED" is "a post-save render landed", which
+   * is the whole of what this has to establish.
+   *
+   * **And changed is all it may ask. A wait must not restate what the render
+   * is being checked to SAY.** The named check two lines below each call site
+   * is what reads the saved value back — `"8,5" ... is stored as 8.5, not
+   * 85` — and a wait that encodes 8.5 gets there first: reintroduce #156 and
+   * the page draws `≥ 85 pages`, this wait spends its whole 20s on a string
+   * the subtitle will never hold, throws to the file's top-level `catch`, and
+   * 24 later checks lose their verdicts — all of it reported as a timeout
+   * naming a target, where what the reader needs is the one named FAIL
+   * quoting the 85 that was stored. That is `settled()`'s
+   * rule immediately below — satisfied in BOTH worlds, so a regression fails
+   * BY NAME — and this is the same rule at the same distance from the same
+   * checks.
+   *
+   * Comparing against what the node HELD is also what disposes of the
+   * boundary problem, and that argument is kept because the value-encoding
+   * version is what gets proposed again. A computed label matched with
+   * `includes("≥ " + value)` ends nowhere: `dialogClosed(2)` is satisfied by
+   * the `≥ 20 pages` that was on screen BEFORE the save, and the wait then
+   * collapses to `dialog.open === false` — the guard failing open into
+   * exactly the flake it exists to stop. `endsWith`, plus the unit as the
+   * number's right-hand boundary, closes that hole and buys it by restating
+   * the expected value, which is the dearer of the two. A comparison against
+   * the previous text needs no boundary at all: any difference is a render,
+   * and no old text is a prefix, a suffix or a substring of ITSELF.
+   *
+   * The property that costs is the caller's: a save leaving the subtitle
+   * byte-identical would hang here for the full 20s. No caller does one —
+   * both move the target (20 → 8.5, then 8.5 → 0, which drops the label
+   * entirely) — and the colour-only edit further down, which would, goes
+   * through `settled()` already. A caller saving something this subtitle does
+   * not show needs its own wait on something that DOES move, not a widening
+   * of this one.
+   *
+   * @param {string} before  `.habit-sub`'s text, read before the submit
+   */
+  const dialogClosed = (before) => waitUntil(ev,
+    `(()=>{ const sub = document.querySelector('#view-detail .habit-sub');
+      return document.getElementById('habit-dialog').open === false
+        && !!sub && sub.textContent !== ${JSON.stringify(before)};})()`,
+    { what: 'the habit edit to save, and the page behind it to redraw away from'
+      + ` "${before}"` });
   // Satisfied in BOTH worlds — the hint filling in (refused) or the dialog
   // closing (submitted anyway) — so a regression fails the checks below BY
   // NAME rather than timing out inside `waitUntil` with nothing to read.
@@ -401,8 +522,9 @@ try {
 
   await openHabitEdit(target.name, String(target.target));
   await typeTarget('8,5');
+  let subBefore = await habitSub();
   await submitDialog();
-  await dialogClosed();
+  await dialogClosed(subBefore);
   let habit = await habitNow();
   check('"8,5" typed as a habit\'s TARGET is stored as 8.5, not 85',
     habit?.target_value === 8.5, JSON.stringify(habit));
@@ -481,8 +603,9 @@ try {
   // Leaves the dialog open on this habit, holding its stored target of "8.5"
   // — exactly what the block below expects to type over.
   await typeTarget('');
+  subBefore = await habitSub();
   await submitDialog();
-  await dialogClosed();
+  await dialogClosed(subBefore);
   habit = await habitNow();
   // Deliberately preserved behaviour, not an accident of `|| 0`: an empty
   // Target box is "a habit with no target", and it is asserted here so a later
