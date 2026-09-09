@@ -345,12 +345,15 @@ This is the `.cal-range` hazard recorded further up met a second time, on the
 sibling class, by a check that was green throughout — which is why the note in
 `shared/public/CLAUDE.md` now names both classes.
 
-**Still open and deliberately not touched here: #230**, the strip and the
-calendar card disagreeing about the same day offline. `writeDay` ends in a
-refetch that never runs with no network, so the strip's optimistic paint stands
-while the calendar keeps the value it was drawn with. It lives in the same
-files, and it is a different question: this change is about which WINDOW is
-drawn, that one about which VALUES are in it.
+**Scoped out here and open at the time: #230**, the strip and the calendar card
+disagreeing about the same day offline. `writeDay` ends in a refetch that never
+runs with no network, so the strip's optimistic paint stood while the calendar
+kept the value it was drawn with. It lives in the same files, and it was left
+alone because it is a different question: this change is about which WINDOW is
+drawn, that one about which VALUES are in it. **That framing held, and #230 has
+since shipped** — the WINDOW/VALUES split is still why these are three sections
+rather than one. See "The strip and the calendar agree on a tap (#230)" below,
+and the sentence in the `#274` section it corrects.
 
 ### The calendar pages the same way (#274)
 
@@ -469,18 +472,29 @@ starts the calendar at today. Five reasons, weighed in this order:
    discarded one are changes from that starting point; this is the smaller
    one.
 
-**#230 is not closed by this, and must not be read as closed.** #230 is the
-strip and the calendar disagreeing about a day's VALUE offline — `writeDay`
-ends in a refetch that never runs with no network, so an offline tap's
-optimistic paint can sit ahead of what the calendar last drew. This change is
-about which WINDOW is drawn, not which values are in it, and it does have one
-true side effect worth stating narrowly and not overclaiming: `draw()` closes
-over the same `entriesByDate` object `detailHost.edit` mutates optimistically,
-so a page press made AFTER an offline tap now draws the tapped value where
-before it would have redrawn nothing at all. Nothing redraws the calendar ON
-the tap itself, so the disagreement #230 names survives exactly as before
-until something pages or reopens — this narrows one path by which a stale
-value could be SEEN, it does not touch the disagreement #230 names.
+**#230 was not closed by this — and the "one true side effect" this paragraph
+originally stated so narrowly turned out to be the whole mechanism #230's own
+fix needed.** Kept in view rather than deleted, because the relationship
+between the two changes is the part that cannot be reconstructed from either
+diff alone. As written at the time: #230 is the strip and the calendar
+disagreeing about a day's VALUE offline; this change is about which WINDOW is
+drawn, not which values are in it; and its one side effect is that `draw()`
+closes over the same `entriesByDate` object `detailHost.edit` mutates
+optimistically, so a page press made AFTER an offline tap draws the tapped
+value where before it would have redrawn nothing at all. All of that was
+right, including the refusal to overclaim — nothing redrew the calendar ON the
+tap, so the disagreement survived until something paged or reopened.
+
+What the paragraph could not see is that "a local redraw reads the live maps"
+is not a side effect at all but the missing half of #230. #230's fix adds no
+drawing code: it gives `detailHost.repaint` a second caller for this same
+`draw`. So #274 made the calendar's redraw local, and what it left behind was a
+closure that draws current state from wherever it is called; #230 is the second
+place that calls it. Read the two
+together and the ordering was lucky rather than planned — had #230 been
+attempted first it would have had to build the local redraw itself, which is
+#274's whole body of argument. See "The strip and the calendar agree on a tap
+(#230)" below.
 
 **The service-worker measurement that makes the offline half of this real is
 the same one already recorded above, for the strip.** Devtools' network
@@ -491,6 +505,119 @@ every check written against the unfixed calendar would have passed for the
 same reason the strip's did. `Network.setBypassServiceWorker` is what makes
 the offline calendar checks in `calcheck.mjs` mean anything, for the reasons
 `stripcheck.mjs`'s own comment gives in full.
+
+### The strip and the calendar agree on a tap (#230)
+
+The two grids are drawings of ONE pair of maps. `render()` computes
+`entriesByDate` and `skipSet` once and stashes them at module scope
+(`openEntriesByDate` / `openSkipSet`, for the reason those declarations give),
+`detailHost.edit` mutates that pair before the write goes out, and
+`detailHost.repaint` redrew the strip's cells from it and nothing else. Online
+that was invisible: `writeDay` ends in `host.refresh()`, a refetch and a full
+rebuild, so the calendar caught up a beat later whether or not the repaint had
+ever touched it. Offline `api()` enqueues and THROWS, `host.refresh()` is never
+reached, and the two grids sat showing one date two ways until reconnect. So
+this was a redraw that was not happening rather than data that was missing, and
+the fix is one call added to `repaint`.
+
+**A whole-card redraw, not a cell-level one — a deliberate asymmetry with the
+strip.** `repaintCells` exists because the strip's own rebuild is two round
+trips and up to ten cards of SVG, and because touching no nodes keeps focus on
+the button just pressed. The calendar has no equivalent and should not grow
+one: `charts.js` owns what colour a day is — the ramp, the avoided inversion,
+the ghost tick, the run stroke, the `?` — and a per-cell entry point into that
+is a second declaration of the same decision, which is the drift the
+one-derivation rule behind `inRun` (#176) exists to prevent. Calling the card's
+own `draw` reuses the one that is already there, and it is affordable for
+exactly the reason #274's paging is affordable: nothing in the window needs the
+server, so a redraw is arithmetic and SVG with no request in it.
+
+**`draw` READS `state.calEnd` and never writes it, and that is the whole of why
+this cannot repeat #274.** #274 was a position committed before a redraw that
+could fail; a repaint commits nothing, because `shift` and `Today` remain the
+only writers. A tap therefore redraws the STORED position and leaves it where
+the user put it. The wrong version anyone reaches for first is redrawing at
+`todayISO()`, and it is invisible in the ordinary case — there is no stored
+position, so the window is today either way — while silently discarding a paged
+one the moment there is. `stripcheck.mjs` asserts both halves (the readout
+unmoved, and `state.calEnd` still holding what the press stored) against a
+calendar deliberately paged back first, because a check made at today would
+pass against both versions.
+
+**"The stored position" is the precise phrase, and "the window on screen" is
+not — they differ exactly when there is no stored position, which is the
+default.** `draw` resolves `state.calEnd ?? todayISO()` on every call and
+`calendarChart` recomputes its own `realToday` on every call, so with `calEnd`
+null a redraw is not a repaint of what was drawn before, it is today
+re-resolved. That is invisible except across local midnight, and nothing in the
+app cures the staleness first: the nudge's refresh declines while a habit is
+open (`app.js`'s `refresh` returns on `!dashboardShowing()`, and `nudge.js`'s
+own comment says so), and `'reload'` fires only on the outbox flush and the
+offline→online transition, neither of which a clock produces. So a page left
+open overnight has a strip showing yesterday's columns beside a calendar
+anchored on yesterday, and the next tap moves the calendar to today's window and
+rewrites `.cal-range` while `repaintCells` touches no nodes and the strip stays
+where it was. No wrong VALUE — the day tapped is painted correctly on both — but
+a new one-sided silent jump, of the same shape #230 just closed, one card
+further in. Stated rather than fixed: the honest repair is a midnight
+invalidation for the whole detail view, which is a different change from this
+one and reaches the strip, the tiles and every window on the page.
+
+**Notes ride along with nothing plumbed, and that is correct rather than
+convenient.** `draw` already closes over `notesByDate`, so a redraw hands
+`openDayDialog` the notes the card was built with. Nothing local can have moved
+them: `detailHost.edit` mutates `entriesByDate` and `skipSet` alone, and the
+only writer of a note is the day dialog, which ends in `emit('change')` — a
+refetch, not a repaint. Threading a fourth map through the repaint would have
+been a second thing to keep in step in exchange for nothing.
+
+**What the fix does not reach, and the run BANDS are the surprising one.**
+Strength, streaks, resilience and history are figures the server computed, so
+nothing local could move them offline — the same accepted staleness the
+dashboard row already has, and the same one `stripRuns` is declared with. The
+non-obvious consequence is inside the calendar itself: a cell is redrawn from
+the maps and is right, while the band behind a run comes from `stats.streaks`
+on the payload the page was built with. An offline tap closing a gap in a run
+paints the day and not the run it extended — and the ERASE case is the same
+mechanism read the other way, where a cell going blank leaves the connectors
+and the continuation stroke drawn straight through it, and `calendarChart`
+counts that newly-blank cell into `data-run-marks`, so an "In a run" legend
+swatch can APPEAR on a tap that removed an entry. That is a much narrower
+disagreement than the one #230 removed — between a cell and its own band rather
+than between two cards — and closing it means recomputing streaks in the
+browser, a second implementation of `shared/src/stats.js` that was scoped out
+of #230 explicitly and that the same #176 argument refuses.
+
+**The test could have passed for the wrong reason, and the guard against that
+is a write left in the OUTBOX.** The block is in `stripcheck.mjs` and not
+`calcheck.mjs` because the action is a tap on the strip. Asserting only that
+the calendar cell moved is not enough: if the write reaches the server,
+`host.refresh()` rebuilds the whole page and the calendar is right with no
+redraw in the code at all — which is precisely what the online
+'...and so does the calendar card' check further up that same file has always
+been passing on. So the block reads `state.pending` beside the cell, and a
+queued write is what says the redraw was local. Devtools network emulation
+alone suffices here, unlike the paging blocks above: only a WRITE has to fail,
+and `sw.js` returns early for every non-GET — the same asymmetry the
+service-worker note above records from the paging side.
+
+**Two neighbours scoped out, reported rather than fixed.** Editing a day from
+the CALENDAR offline is worse than the disagreement #230 removed, and worth
+sizing accurately: `saveDay` (`ui/day-dialog.js`) awaits the write and only then
+calls `dialog.close()` and `emit('change')`, so with no network `api()` stages
+the write in the outbox and throws `{queued: true}`, the `catch` toasts its
+"Saved offline — will sync when you reconnect", and neither the close nor the
+refetch is reached. The dialog therefore stays OPEN showing the old value while
+a toast says the change was saved, both grids paint the pre-edit day, and the
+write really will land on reconnect — so the app is telling the truth and
+showing three contradictions of it. Same maps, different mechanism (a broadcast
+refetch, not a host repaint), and a fix has to carry `notesByDate` where this
+one did not need to.
+Separately, any rebuild of the grid resets the roving tab stop `calendarChart`
+puts on its last cell, so a keyboard user who has arrowed to a day loses that
+position — already true of #274's paging, and now of a tap as well. It is a
+lost POSITION and not lost focus: on both paths the press is on a nav button or
+a strip cell, so focus is never inside the grid being rebuilt.
 
 ## The label-width estimator's mark-billing fix, and what it forced (#132)
 
