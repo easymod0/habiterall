@@ -10,9 +10,11 @@ import {
   calendarChart, frequencyChart, historyChart, MIN_STREAK, missDistributionChart,
   scoreChart, shade, streakChart, streakDates, survivalChart, weekdayChart, weekdayMonthChart,
 } from '/shared/charts.js';
+import { formatAmount } from '/shared/ui/amount.js';
 import { api } from '/shared/ui/api.js';
 import { calendarWindow, weeksForWidth } from '/shared/ui/calendar.js';
 import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
+import { convention } from '/shared/ui/count-field.js';
 import {
   card, cardInnerWidth, focusKeyOf, habitIcon, restoreFocus, segmented,
   subheading, windowedChart,
@@ -37,6 +39,19 @@ import * as views from '/shared/ui/views.js';
 // and then *listed* newest first, so this is "how many of your best runs to
 // show", not "how far down the leaderboard to go".
 const STREAK_LIMIT = 10;
+
+/**
+ * How this account spells an amount, for the head's `targetLabel`.
+ *
+ * Asked at the moment the label is built and never held, which is
+ * `convention()`'s own rule — the setting is a fact about the ACCOUNT and
+ * `auto` is a question about the DEVICE, and either can change while this
+ * module is loaded. `ui/dashboard.js` declares the same one line for its row
+ * and its starter presets: one expression over `count-field.js`'s single
+ * `convention()`, rather than a new export here, since an export under
+ * `shared/public/` costs every installed client its data cache.
+ */
+const showAmount = (n) => formatAmount(n, convention());
 
 /**
  * The history view's bucket and mode: a session override if the per-habit
@@ -143,6 +158,50 @@ const CELL_PX = 48;
 let openHabit = null;
 let openEntriesByDate = {};
 let openSkipSet = new Set();
+/**
+ * The notes this render drew, keyed by date — out at module scope for the
+ * reason the two maps above are, and now for a second one.
+ *
+ * It used to live only in `buildCalendarCard`'s closure, with nothing to plumb,
+ * because `detailHost.edit` moved `entriesByDate` and `skipSet` alone and a
+ * note could only be written through the day dialog, which refetches. The day
+ * dialog's QUEUED write is what changed that: offline there is no refetch, so
+ * the dialog's own optimistic edit has to move the note as well as the value,
+ * or the page paints a day whose note is one edit behind. The calendar's
+ * closure holds this same object, so a redraw hands `openDayDialog` the note
+ * that was just written rather than the one the card was built with.
+ */
+let openNotesByDate = {};
+/**
+ * The last payload `render()` drew, so it can be redrawn from without asking
+ * the server again.
+ *
+ * Two callers, and neither is a second source of truth: both re-render from
+ * exactly the reply this page was last built with, and both are followed (or
+ * accompanied) by the ordinary refetch.
+ *
+ * - `seed`, which redraws the head from the habit a save just stored, so the
+ *   Edit button behind the dialog stops holding the pre-save one.
+ * - the midnight rebuild, which needs to know WHICH local day the page on
+ *   screen was drawn for — `renderedDay` below.
+ *
+ * @type {any} the `/habits/:id/stats` reply
+ */
+let lastStats = null;
+/** @type {any[] | null} the `/habits/:id/entries` reply that went with it */
+let lastEntries = null;
+/**
+ * The browser's own local date at the moment `render()` last ran.
+ *
+ * The device's calendar day and never a named zone — `docs/decisions/
+ * timezones.md`: `resolveTimeZone` asks where an ACCOUNT is, for a reminder
+ * nobody is present for, while every rendering decision on this page is the
+ * question `callerDay` answers for a write. The strip draws its last column
+ * from this clock, `buildRecentDaysCard`'s `draw` resolves `todayISO()`, and
+ * so does `calendarChart`.
+ * @type {string | null}
+ */
+let renderedDay = null;
 /** Where the strip's cells were appended, so a repaint can find them. */
 let stripRoot = null;
 /**
@@ -199,12 +258,12 @@ const detailHost = {
     };
   },
 
-  edit(id, date, to) {
+  edit(id, date, to, note) {
     if (!openHabit || openHabit.id !== id) return () => {};
     // The maps THIS write is against, captured rather than named again when the
     // undo runs — and that is the whole of the rule below.
     //
-    // `render()` reassigns all three bindings wholesale (one habit's maps are
+    // `render()` reassigns all four bindings wholesale (one habit's maps are
     // never mutated into another's), so a closure over the NAMES restores into
     // whatever the page holds by the time it runs. The guard above cannot help:
     // it has already returned. Tap a cell, navigate to another habit while the
@@ -220,16 +279,32 @@ const detailHost = {
     // the maps too and passes that check. Identity of the map answers both.
     const entries = openEntriesByDate;
     const skips = openSkipSet;
+    const notes = openNotesByDate;
     const had = Object.hasOwn(entries, date) ? entries[date] : undefined;
     const wasSkip = skips.has(date);
+    const hadNote = Object.hasOwn(notes, date) ? notes[date] : undefined;
 
     if (to === 'clear') {
       delete entries[date];
+      // The note lives ON the row, so a DELETE takes it with it — `note` is
+      // not consulted here, because there is no row left for one to be
+      // attached to and the refetch will report none.
+      delete notes[date];
     } else {
       // `entryWrite` stores a skip as `{value: 0, status: 'skip'}`, so 0 is
       // what the refetch will report beside the status — the optimistic state
       // has to be the one that comes back, or the cell flickers on reload.
       entries[date] = to === 'skip' ? 0 : to;
+      // `undefined` is "this write says nothing about the note", which is
+      // every tap from a strip: `PUT /habits/:id/entries/:date` PRESERVES a
+      // note it was not asked to change (root `CLAUDE.md`), so a tap must not
+      // move the map either. The day dialog always states one, and an empty
+      // string is a stated clear — `render()` keys this map on `e.notes` being
+      // truthy, so a blank note is an ABSENT key rather than an empty one.
+      if (note !== undefined) {
+        if (note) notes[date] = note;
+        else delete notes[date];
+      }
     }
     if (to === 'skip') skips.add(date);
     else skips.delete(date);
@@ -238,12 +313,14 @@ const detailHost = {
       // Orphaned by a rebuild, so there is nothing here to undo: what replaced
       // these maps was read from the server, and the write being rolled back
       // never reached it. Restoring into the successor would be the corruption,
-      // not the repair. One test, because `render()` assigns the pair together.
+      // not the repair. One test, because `render()` assigns all four together.
       if (entries !== openEntriesByDate) return;
       if (had === undefined) delete entries[date];
       else entries[date] = had;
       if (wasSkip) skips.add(date);
       else skips.delete(date);
+      if (hadNote === undefined) delete notes[date];
+      else notes[date] = hadNote;
     };
   },
 
@@ -320,6 +397,123 @@ function refresh(id) {
     }
   })();
   return refreshing;
+}
+
+/**
+ * Redraw this page from a habit a write has just stored, without waiting for
+ * the refetch.
+ *
+ * **The window this closes.** `saveHabit` calls `dialog.close()` and then
+ * `announce()`, which from a habit's own page emits `'change'`; the listener in
+ * `init()` answers that with `/stats` and then `/entries` — two sequential
+ * round trips, the second of them the unwindowed one — and only then does
+ * `render()` run. The head's Edit button CAPTURES the habit it was drawn from,
+ * so until that render lands, pressing Edit opens the dialog on the PRE-SAVE
+ * habit; press Save without touching anything and, because `PUT /habits/:id`
+ * REPLACES, the user's own change is written back out. That is a data loss
+ * reachable by two ordinary presses, and it is what #305's flake was the test
+ * suite noticing (`countcheck.mjs`).
+ *
+ * So the page is drawn from the reply immediately, and the refetch that follows
+ * is a confirmation rather than the only source of truth. Not a gate on the
+ * Edit button and not a rework of how this view gets its data: the same
+ * `render()` runs, over the same payload, with one field replaced.
+ *
+ * **What is replaced, and what is merged.** `stats.habit` is the habit PLUS
+ * `unlogged_is_success`, which `/stats` resolves per request (`unansweredCounts`,
+ * server-side, because `shared/src` is not served here) and which `PUT
+ * /habits/:id` does not answer with — it is response-only and in no
+ * `*_HABIT_FIELDS` list. Assigning the reply wholesale would drop it, and a
+ * limit whose unlogged days count as kept would lose its ghost ticks and its
+ * faint calendar fills for the length of the refetch. So the reply is merged
+ * OVER the habit this page was built with: every field the write answered wins,
+ * and the one the write cannot speak for keeps the server's last answer — stale
+ * for one round trip if the edit changed `type`, `target_type` or
+ * `at_most_unlogged`, which is the same staleness every server-computed figure
+ * on this page already has after an optimistic tap.
+ *
+ * Everything else on the payload — the score, the streaks, the history — is
+ * last render's, unchanged, and is exactly what was on screen a moment ago.
+ *
+ * Declines unless it is looking at the same habit: `'change'` is also emitted
+ * for a habit saved from the dashboard or from another habit's page, and there
+ * is nothing here to seed from that.
+ *
+ * @param {any} habit the reply to the write, from `announce` (`habit-dialog.js`)
+ */
+function seed(habit) {
+  if (!habit || !lastStats || !lastEntries) return;
+  if (habit.id !== lastStats.habit?.id || habit.id !== state.openHabitId) return;
+  render({ ...lastStats, habit: { ...lastStats.habit, ...habit } }, lastEntries);
+}
+
+/**
+ * The page was drawn for a day that has ended — rebuild it.
+ *
+ * **The whole view and not the one card.** `buildRecentDaysCard`'s draw
+ * resolves `todayISO()`, `buildCalendarCard`'s does, `calendarChart` recomputes
+ * its own `realToday`, and every window on the page — the tiles' anchors, the
+ * strip's columns, what `/stats` was asked as-of — was frozen at render time
+ * the same way. Fixing one of those moves the page from "one card jumps" to
+ * "one card jumps differently", which is worse than the staleness: two grids
+ * over one dataset disagreeing about which day is today is indistinguishable
+ * from one of them being broken.
+ *
+ * A REFETCH rather than a local redraw from `lastStats`, for the reason
+ * `init()`'s `'change'` listener gives: nothing this view shows can be
+ * recomputed from what is in hand — the score, the streaks and the history are
+ * all computed as of a date the SERVER anchors from the caller's own zone
+ * (`callerDay`), so a local redraw would move the columns and leave every
+ * figure over them answering yesterday's question. Offline the refetch may
+ * fail, and then `open()` toasts and leaves the pre-midnight page up, which is
+ * the same answer every other refresh on this page gives with no network.
+ */
+function refreshIfDayChanged() {
+  if (state.openHabitId == null || renderedDay === null) return;
+  if (renderedDay === todayISO()) return;
+  refresh(state.openHabitId);
+}
+
+/**
+ * Ask again at the next local midnight — and on the way back to the tab.
+ *
+ * **Not a poll.** One timer, armed for the next local midnight and re-armed
+ * from the clock each time it fires, so an open page costs one wake-up a day
+ * and reads the clock once per wake. `setHours(24, 0, 0, 0)` is the start of
+ * the next LOCAL day and so is DST-aware: a 23- or 25-hour calendar day gets
+ * the right instant, where `+ 86400000` would be an hour out twice a year.
+ *
+ * **Why the timer alone is not enough, and why the pair is.** A timer is a
+ * promise about the running process: a background tab clamps it to roughly one
+ * a minute (harmless — it fires late, and late is still after midnight), but a
+ * SUSPENDED device is not running it at all, and a laptop closed at 23:00 and
+ * opened at 09:00 has no guarantee about when — or in what order — a timer
+ * armed for 00:00 is delivered. `visibilitychange` is what covers exactly that
+ * case, and it is the trigger that matters: the staleness costs nothing until
+ * somebody LOOKS at the page, and looking at it is the event. `ui/nudge.js`
+ * reaches the same conclusion for the same platform reasons, and this is a
+ * separate listener from its and from `ui/connectivity.js`'s, deliberately —
+ * folding unrelated concerns into one handler is how the next change to either
+ * breaks the other.
+ *
+ * Both triggers ask `refreshIfDayChanged`, which compares the date rather than
+ * trusting the schedule, so a timer that fires early (or twice) does nothing
+ * and neither does a tab switch on the same day. That is also what makes this
+ * right for a zone CHANGE — a laptop opened after a flight across the date line
+ * is the same fact arriving by a different route.
+ */
+let dayTimer = 0;
+function armDayWatch() {
+  clearTimeout(dayTimer);
+  const next = new Date();
+  next.setHours(24, 0, 0, 0);
+  // A second past the boundary, so the handler cannot read `todayISO()` a
+  // millisecond before the day it was armed for has actually ended.
+  dayTimer = setTimeout(() => {
+    dayTimer = 0;
+    refreshIfDayChanged();
+    armDayWatch();
+  }, Math.max(1000, next.getTime() - Date.now() + 1000));
 }
 
 /** Delete every `state.chartOffsets` key a predicate matches. */
@@ -466,11 +660,20 @@ function render(stats, entries) {
     entries.filter((e) => e.notes).map((e) => [e.date, e.notes])
   );
 
-  // The same three, where `detailHost` can reach them after this render has
+  // The same four, where `detailHost` can reach them after this render has
   // returned — see the note on those declarations.
   openHabit = habit;
   openEntriesByDate = entriesByDate;
   openSkipSet = skipSet;
+  openNotesByDate = notesByDate;
+
+  // What this page was drawn FROM, so it can be drawn again without asking:
+  // `seed` after a save, and the midnight rebuild. Recorded before anything is
+  // appended, so a throw part-way through leaves them describing this attempt
+  // rather than the render before it.
+  lastStats = stats;
+  lastEntries = entries;
+  renderedDay = todayISO();
 
   /* header */
   const head = document.createElement('div');
@@ -491,7 +694,7 @@ function render(stats, entries) {
   h2.append(document.createTextNode(habit.name));
   const sub = document.createElement('div');
   sub.className = 'habit-sub';
-  sub.textContent = [habit.description, freqLabel(habit), targetLabel(habit)]
+  sub.textContent = [habit.description, freqLabel(habit), targetLabel(habit, showAmount)]
     .filter(Boolean).join(' · ');
   titleWrap.append(h2, sub);
 
@@ -831,6 +1034,23 @@ function buildCalendarCard(
   // not freeze at the moment the card was built, or paging past today would
   // stop clamping to a stale "now".
   const draw = () => {
+    // Where keyboard navigation had got to, read off the grid this draw is
+    // about to replace and handed to the one that replaces it (#274 / #230).
+    //
+    // `calendarChart` puts `tabindex="0"` on the last editable cell of every
+    // build and `setRovingFocus` moves it from there as the arrows walk the
+    // grid — on an attribute of nodes this line is about to remove. So every
+    // rebuild used to send the tab stop back to the most recent day: paging,
+    // pressing Today, and now an offline strip tap through `repaint`. Asked
+    // BEFORE the removal, and of the DOM rather than of a variable, because
+    // the answer is whatever the user's last arrow press left behind and
+    // nothing here is told about those presses.
+    //
+    // Read as a DATE — see `calendarChart`'s own note on why not an index. A
+    // page moves the whole window, so the date is not in the next build and
+    // the last cell keeps the stop, exactly as today.
+    const tabStop = calCard.querySelector('.cal-cell[tabindex="0"]')
+      ?.getAttribute('data-date') ?? null;
     // Optional-chained on purpose: on the first draw neither node exists.
     calCard.querySelector('.chart-scroll')?.remove();
     calCard.querySelector('.legend')?.remove();
@@ -875,11 +1095,17 @@ function buildCalendarCard(
       endDate: calEnd,
       skips: skipSet,
       unknownMark: settings.get('questionMarks'),
+      tabStop,
       // Bands behind runs of 3+, so a good stretch reads as one thing rather
       // than a scatter of filled squares.
       streaks: stats.streaks,
+      // `detailHost` rides along for the same reason `openCountDialog` is
+      // handed one (`ui/day-strip.js`): two surfaces could open a day editor
+      // and only the one that opened it knows where an optimistic answer goes.
+      // It is what lets a QUEUED write close the dialog and repaint both grids
+      // instead of leaving them asserting the pre-edit day — see `saveDay`.
       onPick: (date) => openDayDialog(
-        habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date]
+        habit, date, entriesByDate[date], skipSet.has(date), notesByDate[date], detailHost
       ),
     });
     calScroll.append(calSvg);
@@ -1006,12 +1232,16 @@ function buildCalendarCard(
   // equivalent is per-draw only because `windowedChart` builds a new node each
   // time and it is the NODE that is being recorded there.
   //
-  // `notesByDate` rides along in this closure with nothing to plumb, and that
-  // is the right answer rather than a convenient one: nothing local mutates
-  // it — `detailHost.edit` moves `entriesByDate` and `skipSet` alone, and a
-  // note can only be written through the day dialog, which refetches — so a
-  // redraw hands `openDayDialog` the same notes the card was built with, which
-  // are still the notes the server last reported.
+  // `notesByDate` is in this closure and IS mutated now, which is a correction
+  // to what #230 recorded here. That note said nothing local moved it —
+  // `detailHost.edit` touched `entriesByDate` and `skipSet` alone, and a note
+  // could only be written through the day dialog, which refetches. The day
+  // dialog's OFFLINE write is the case that was missing: there is no refetch,
+  // so the dialog applies its own answer through `edit` — value, skip and note
+  // together — and this redraw then hands `openDayDialog` the note that was
+  // just written rather than the one the card was built with. It is the same
+  // object `render()` assigned to `openNotesByDate`, so there is one map and
+  // not two.
   calRedraw = draw;
 
   draw();
@@ -1312,5 +1542,45 @@ export function init() {
   // and the entry list both come from the server — so a 'change' is a refetch
   // rather than a repaint. 'reload' is deliberately not handled: it means "go
   // to the dashboard", which is the dashboard's business.
-  on('change', () => { if (state.openHabitId != null) open(state.openHabitId); });
+  //
+  // `habit` is whatever the mutator already had in hand, and is usually
+  // absent — see `emit` (`store.js`). When it is the habit a save just stored,
+  // the page is redrawn from it FIRST, synchronously, because the refetch below
+  // is two sequential round trips and the Edit button on screen holds the habit
+  // it was drawn from for all of them. `seed` declines anything that is not
+  // this habit.
+  //
+  // **`refresh`, not `open` — the seed is only sound if what overwrites it
+  // cannot be OLDER than it.** This line called `open()` directly, which is the
+  // one hazard `refresh` exists to remove: two of these in flight resolve in
+  // whatever order the server answers, and `/stats` is the heaviest computed
+  // route in the app. The seed is what makes two reachable, because it is what
+  // puts the stored habit in the Edit box, so a second save inside the first
+  // refetch is now an ordinary two presses rather than a race nobody could win
+  // — and if the FIRST reply lands last, `render()` draws the pre-second-save
+  // habit, the Edit button re-captures it, and one more Edit-then-Save writes
+  // the second save back out. Nothing would then refetch again to correct it.
+  // `refresh` never runs two, and `refreshAgain` remembers the one that arrived
+  // mid-flight, so the LAST request is always issued after the last write. A
+  // stale reply can still render on its way past — it is answered, and the page
+  // draws what it is given — but a newer request is already promised behind it,
+  // which is the difference between a page that flickers and a page that stays
+  // wrong. `countcheck.mjs` forces that interleaving with CDP rather than
+  // hoping for it.
+  on('change', (habit) => {
+    if (state.openHabitId == null) return;
+    seed(habit);
+    refresh(state.openHabitId);
+  });
+
+  // The page is drawn for one local day, and nothing else in the app corrects
+  // it: the nudge's refresh declines while a habit is open (`app.js`), and
+  // `'reload'` fires only on an offline→online transition
+  // (`ui/connectivity.js`). See `armDayWatch` for why this is a timer AND a
+  // visibility listener rather than either alone.
+  armDayWatch();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    refreshIfDayChanged();
+  });
 }

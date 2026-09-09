@@ -15,8 +15,10 @@
  * pages by slicing memory.
  */
 
+import { formatAmount } from '/shared/ui/amount.js';
 import { api } from '/shared/ui/api.js';
 import { focusKeyOf, habitIcon, restoreFocus } from '/shared/ui/components.js';
+import { convention } from '/shared/ui/count-field.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
 import { dateColumns, dayCells } from '/shared/ui/day-strip.js';
 import {
@@ -35,6 +37,13 @@ import { open as openHabit } from '/shared/ui/detail.js';
 import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 
 const $ = (sel) => document.querySelector(sel);
+
+/**
+ * How this account spells an amount, for `targetLabel` on a row and on a
+ * starter preset. Asked per call rather than held — see the identical
+ * declaration in `ui/detail.js`, which has the reason in full.
+ */
+const showAmount = (n) => formatAmount(n, convention());
 
 const grid = $('#grid');
 const gridHead = $('#grid-head');
@@ -562,7 +571,7 @@ function habitRow(habit, dates, todayIso, reorderable) {
   sub.className = 'habit-sub';
   const bits = [
     freqLabel(habit),
-    targetLabel(habit),
+    targetLabel(habit, showAmount),
     `${Math.round(habit.score * 100)}%`,
     habit.currentStreak > 0 ? `🔥 ${habit.currentStreak}` : '',
   ].filter(Boolean);
@@ -714,7 +723,7 @@ function renderStarters() {
 
     const sub = document.createElement('span');
     sub.className = 'starter-sub';
-    sub.textContent = [freqLabel(preset), targetLabel(preset)].filter(Boolean).join(' · ');
+    sub.textContent = [freqLabel(preset), targetLabel(preset, showAmount)].filter(Boolean).join(' · ');
 
     btn.append(dot, label, sub);
     btn.addEventListener('click', async () => {

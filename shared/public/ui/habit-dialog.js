@@ -133,8 +133,20 @@ let filledTargetText = '';
  * there. A reorder changes no figure `announce()`'s `'reload'` exists to
  * fetch, and `/overview` is a second writer of `state.categories` that can
  * land after this list has already moved again.
+ *
+ * **`habit` is the habit the SERVER accepted, passed on so the view behind
+ * this dialog can paint before its own refetch answers.** Only `saveHabit`
+ * has one to give; the four category call sites pass nothing and the listeners
+ * have to be right without it. What it buys is stated at `emit` (`store.js`)
+ * and at the listener in `ui/detail.js`: `'change'` is answered by two
+ * sequential round trips, and the Edit button behind this dialog CAPTURES the
+ * habit it was drawn from, so for the length of those two requests pressing
+ * Edit reopened the dialog on the pre-save habit — and Save from there, because
+ * `PUT /habits/:id` REPLACES, wrote the user's own change back out.
+ *
+ * @param {any} [habit] the reply to the write, never the form's own values
  */
-const announce = () => emit(dashboardShowing() ? 'reload' : 'change');
+const announce = (habit) => emit(dashboardShowing() ? 'reload' : 'change', habit);
 
 function categoryHint(message, isError = false) {
   const hint = $('#category-hint');
@@ -1058,7 +1070,13 @@ async function saveHabit(e) {
     // from a habit and on a background reconnect, mid-word. `dashboard.js`'s
     // archive toggle already works this way.
     if (!staysOnList(saved)) state.query = '';
-    announce();
+    // The reply rides along, never `payload`: `parseHabit` normalises as well
+    // as validates — it clamps `description`, resolves `icon` to one grapheme,
+    // reads `category_id` as a positive integer or null, and supplies a default
+    // for every field a partial write omitted — so what the account now HAS is
+    // what came back. `staysOnList` above already asks the reply for the same
+    // reason. See `announce`'s note for what the view does with it.
+    announce(saved);
   } catch (err) {
     toast(err.message);
     // A create that timed out is the one failure nobody here can classify: the

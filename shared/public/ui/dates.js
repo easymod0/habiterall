@@ -68,10 +68,46 @@ export function freqLabel(h) {
   return `${n}× per ${d} days`;
 }
 
-export function targetLabel(h) {
+/**
+ * A numerical habit's goal, as a line of prose: `≥ 8,5 pages`.
+ *
+ * **The number is spelled by the caller's `showAmount`, because a target is an
+ * AMOUNT and this app has one answer to how an amount is written.** It used to
+ * be a raw template literal, so a comma account read `≥ 8.5` in the detail
+ * head and on the dashboard row while `openDialog` — three lines away in the
+ * same render, through `formatAmount(storedTarget, convention())` — filled the
+ * Target box with `8,5`. Two spellings of one number on one screen is the
+ * defect that box's own comment names: "a box that reads 8,5 and writes 8.5
+ * back has told its owner they typed it wrong". `count-field.js`'s goal hint
+ * (`Target at most 8,5 pages`) already went through `formatAmount`; this was
+ * the surface left out.
+ *
+ * It is passed IN rather than looked up for the reason `formatAmount` itself
+ * takes a convention (`ui/amount.js`): this module has no imports at all —
+ * `shared/test/label-widths.mjs` reads its SOURCE, strips `export` and
+ * evaluates it in a page, and `dates.test.js` imports it under Node, where the
+ * absolute `/shared/...` specifiers the rest of `public/ui` uses do not
+ * resolve. A date helper reaching for a settings cache would end both.
+ *
+ * **The default is `String`, and it is mixed-version insurance rather than a
+ * convenience.** `shellFirst` is stale-while-revalidate, so an installed
+ * client can hold this module over a cached older `ui/detail.js` or
+ * `ui/dashboard.js` for one boot; without the default that boot is a
+ * `showAmount is not a function` inside `render()`, and with it the label is
+ * merely spelled the way it was spelled before. Every live caller passes one —
+ * `ui/detail.js`'s head, and both of `ui/dashboard.js`'s (the row and the
+ * starter preset) — and `countcheck.mjs` pins the two visible ones on a comma
+ * account, because a default nobody notices is exactly how a call site comes
+ * to rely on it.
+ *
+ * @param {any} h
+ * @param {(n: any) => string} [showAmount] how this account spells a number:
+ *   `formatAmount` bound to `convention()` (`ui/count-field.js`).
+ */
+export function targetLabel(h, showAmount = String) {
   if (h.type !== 'numerical') return '';
   const dir = h.target_type === 'at_most' ? '≤' : '≥';
-  return `${dir} ${h.target_value}${h.unit ? ' ' + h.unit : ''}`;
+  return `${dir} ${showAmount(h.target_value)}${h.unit ? ' ' + h.unit : ''}`;
 }
 
 /** Today, as a local 'YYYY-MM-DD'. */
@@ -104,10 +140,76 @@ export function addDaysISO(isoDate, n) {
  * header asks for a weekday per column on every paint.
  */
 
-const fmt = (opts) => {
-  let made = null;
-  return () => (made ??= new Intl.DateTimeFormat(undefined, opts));
+/**
+ * A number that changes when the device's UTC offset does.
+ *
+ * **Everything memoised below is only valid while the device's clock stays
+ * put**, and until this existed nothing said so. An `Intl.DateTimeFormat`
+ * resolves its zone when it is CONSTRUCTED, so a formatter built at page load
+ * goes on formatting in the zone the device has since left — a laptop carried
+ * across the date line, or an OS zone corrected by hand, and every caption,
+ * every range readout and every popover on the page is an offset out while the
+ * cells beside them are right. Measured on a habit's page after a zone move:
+ * the calendar's newest editable cell read `2026-09-10` under a range readout
+ * saying `→ 9 Sept 2026`, both ends of it a day behind, on one card.
+ *
+ * **The check is here, at the USE, rather than in a reset somebody has to
+ * remember to call.** Every path that redraws after a zone change reaches this
+ * defect — paging the calendar, a tap, a save, and (with no user act at all)
+ * the detail view's midnight rebuild — so an invalidator wired to one of them
+ * fixes that one and leaves the rest silently stale. A memo that drops itself
+ * when its precondition moves is the memo being correct.
+ *
+ * **`getTimezoneOffset()`, deliberately, and not `resolvedOptions().timeZone`.**
+ * This runs on the hot path — `formatDateShort` is asked once per calendar
+ * cell, ~740 of them at the widest zoom — and reading the zone NAME means
+ * constructing an `Intl` object, which is the very thing being memoised. An
+ * offset is a primitive read with no ICU behind it.
+ *
+ * Two known imprecisions, both harmless, and **neither is a reason to
+ * "tighten" this into a zone-name comparison**:
+ *
+ *  - it OVER-fires on a DST transition, where the offset moves but the zone
+ *    has not: ~10 formatters are rebuilt, twice a year, and the output is
+ *    identical either way;
+ *  - it UNDER-fires on a move between two zones sharing an offset —
+ *    `America/New_York` to `America/Toronto` — where nothing these formatters
+ *    produce would differ anyway.
+ *
+ * A counter and not a boolean flag: several memos consult this, and a flag
+ * that reset itself on the first read would leave every LATER memo holding its
+ * stale value for the same move.
+ */
+let seenOffset = new Date().getTimezoneOffset();
+let clockGen = 0;
+const clockNow = () => {
+  const offset = new Date().getTimezoneOffset();
+  if (offset !== seenOffset) {
+    seenOffset = offset;
+    clockGen += 1;
+  }
+  return clockGen;
 };
+
+/**
+ * Memoise something that is only good for as long as the device's clock is
+ * where it was — one primitive, so every cache in this file drops on the same
+ * question rather than each answering it in its own way.
+ */
+const perClock = (build) => {
+  let made = null;
+  let madeGen = -1;
+  return () => {
+    const gen = clockNow();
+    if (made === null || gen !== madeGen) {
+      made = build();
+      madeGen = gen;
+    }
+    return made;
+  };
+};
+
+const fmt = (opts) => perClock(() => new Intl.DateTimeFormat(undefined, opts));
 
 const narrowWeekday = fmt({ weekday: 'narrow' });
 const shortWeekday = fmt({ weekday: 'short' });
@@ -120,14 +222,39 @@ const yearOnly = fmt({ year: 'numeric' });
 const mediumDate = fmt({ year: 'numeric', month: 'short', day: 'numeric' });
 const numericDate = fmt({ year: 'numeric', month: 'numeric', day: 'numeric' });
 
-/** A reference week, so the seven labels can be asked for by `getDay()`. */
-const WEEK_SAMPLE = [4, 5, 6, 7, 8, 9, 10].map((d) => new Date(2026, 0, d));
+/**
+ * A reference week, so the seven labels can be asked for by `getDay()`.
+ *
+ * **Per-clock like the formatters, and it has to be, or invalidating them
+ * alone would ROTATE every weekday caption in the app by one.** These are
+ * local midnights: `new Date(2026, 0, 4)` is an INSTANT fixed by the zone the
+ * device was in when it was built, and a formatter rebuilt in a zone to the
+ * west renders that instant as the previous day. Measured under Node: the same
+ * instant is `Sunday` to a formatter built at `Etc/GMT+12` and `Monday` to one
+ * built at `Pacific/Kiritimati`. That is the exact defect `weekcheck.mjs`
+ * exists for, and it would have been INTRODUCED by fixing the formatters
+ * without this — the sample and the formatter have to move together, so they
+ * hang off one question.
+ */
+const referenceWeek = perClock(() => [4, 5, 6, 7, 8, 9, 10].map((d) => new Date(2026, 0, d)));
 
 // `Object.create(null)`, so a style of `__proto__` cannot resolve to
 // `Object.prototype` — the trap the root CLAUDE.md records for `SETTING_VALUES`.
 // Unreachable from the four literal call sites; it costs nothing to close.
-/** @type {Record<string, readonly string[]>} */
-const weekdayCache = Object.create(null);
+//
+// Per-clock because it is derived from two per-clock things — a cache is as
+// fresh as its inputs — and NOT because a stale one is observable today.
+// Freezing this alone changes no output and no test can fail on it: the names
+// are zone-invariant while the sample and the formatter move together, since
+// the pair always describes seven consecutive local days starting on a Sunday
+// and the WORDS come from the locale, which a zone change does not touch. It
+// is written this way so that a style whose output does depend on the zone — a
+// `timeZoneName`, say — cannot be added above and silently serve an answer
+// built for somewhere the device has left. Mutation-tested and honest about
+// it: the other two per-clock memos each fail a check when reverted, this one
+// does not.
+/** @type {() => Record<string, readonly string[]>} */
+const weekdayCache = perClock(() => Object.create(null));
 
 /**
  * Weekday names in one of `Intl`'s three widths, indexed by `getDay()`.
@@ -149,10 +276,14 @@ const weekdayCache = Object.create(null);
  * @returns {readonly string[]}
  */
 export function weekdayNames(style = 'short') {
-  if (weekdayCache[style]) return weekdayCache[style];
+  // One read of the cache, so the whole object — and therefore every style in
+  // it — belongs to the same clock generation as the sample and the formatter
+  // used below.
+  const cache = weekdayCache();
+  if (cache[style]) return cache[style];
   const f = style === 'long' ? longWeekday : style === 'narrow' ? narrowWeekday : shortWeekday;
-  weekdayCache[style] = Object.freeze(WEEK_SAMPLE.map((d) => f().format(d)));
-  return weekdayCache[style];
+  cache[style] = Object.freeze(referenceWeek().map((d) => f().format(d)));
+  return cache[style];
 }
 
 /**

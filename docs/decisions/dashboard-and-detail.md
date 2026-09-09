@@ -559,17 +559,22 @@ anchored on yesterday, and the next tap moves the calendar to today's window and
 rewrites `.cal-range` while `repaintCells` touches no nodes and the strip stays
 where it was. No wrong VALUE — the day tapped is painted correctly on both — but
 a new one-sided silent jump, of the same shape #230 just closed, one card
-further in. Stated rather than fixed: the honest repair is a midnight
-invalidation for the whole detail view, which is a different change from this
-one and reaches the strip, the tiles and every window on the page.
+further in. Stated rather than fixed at the time; **the midnight invalidation
+that section called for is now the day watch in `ui/detail.js`, and it is the
+whole view rather than this card** — see "A page is drawn for one local day"
+below.
 
-**Notes ride along with nothing plumbed, and that is correct rather than
-convenient.** `draw` already closes over `notesByDate`, so a redraw hands
-`openDayDialog` the notes the card was built with. Nothing local can have moved
-them: `detailHost.edit` mutates `entriesByDate` and `skipSet` alone, and the
-only writer of a note is the day dialog, which ends in `emit('change')` — a
-refetch, not a repaint. Threading a fourth map through the repaint would have
-been a second thing to keep in step in exchange for nothing.
+**Notes rode along with nothing plumbed, and that has since changed for one
+caller.** As #230 shipped, `draw` closed over `notesByDate` and a redraw handed
+`openDayDialog` the notes the card was built with, on the argument that nothing
+local could have moved them: `detailHost.edit` mutated `entriesByDate` and
+`skipSet` alone, and the only writer of a note was the day dialog, which ends
+in `emit('change')` — a refetch, not a repaint. That argument was sound and had
+one hole in it, which is the hole "Two neighbours scoped out" below names:
+OFFLINE the day dialog reaches no refetch at all. `edit` takes a fourth
+argument now and the map is at module scope beside the other two, so there is
+still one map rather than two — see "A queued day-write is not three
+untruths".
 
 **What the fix does not reach, and the run BANDS are the surprising one.**
 Strength, streaks, resilience and history are figures the server computed, so
@@ -601,7 +606,9 @@ alone suffices here, unlike the paging blocks above: only a WRITE has to fail,
 and `sw.js` returns early for every non-GET — the same asymmetry the
 service-worker note above records from the paging side.
 
-**Two neighbours scoped out, reported rather than fixed.** Editing a day from
+**Two neighbours scoped out at the time, both since fixed** — the sizing below
+is #230's own, kept because it is what the fixes were built against, and each
+paragraph now ends where the repair is recorded. Editing a day from
 the CALENDAR offline is worse than the disagreement #230 removed, and worth
 sizing accurately: `saveDay` (`ui/day-dialog.js`) awaits the write and only then
 calls `dialog.close()` and `emit('change')`, so with no network `api()` stages
@@ -612,12 +619,373 @@ a toast says the change was saved, both grids paint the pre-edit day, and the
 write really will land on reconnect — so the app is telling the truth and
 showing three contradictions of it. Same maps, different mechanism (a broadcast
 refetch, not a host repaint), and a fix has to carry `notesByDate` where this
-one did not need to.
+one did not need to. Fixed below, in "A queued day-write is not three
+untruths".
 Separately, any rebuild of the grid resets the roving tab stop `calendarChart`
 puts on its last cell, so a keyboard user who has arrowed to a day loses that
 position — already true of #274's paging, and now of a tap as well. It is a
 lost POSITION and not lost focus: on both paths the press is on a nav button or
-a strip cell, so focus is never inside the grid being rebuilt.
+a strip cell, so focus is never inside the grid being rebuilt. Fixed below, in
+"A rebuild keeps the roving tab stop".
+
+### A queued day-write is not three untruths
+
+`saveDay` (`ui/day-dialog.js`) now closes the dialog and repaints on a QUEUED
+write, which is what the strip's own tap path has always done. The shape is
+`host.edit` then `host.repaint` — the same two calls `writeDay` makes, and
+after #230 the second of them redraws the calendar beside the cells — reached
+through a host the opening page hands in, exactly as `openCountDialog` is
+handed one, because two surfaces could open a day editor and only the one that
+opened it knows where the answer goes.
+
+Three things about it are worth the words.
+
+**It edits AFTER the await, where `writeDay` edits before it, and that is not
+an inconsistency.** A TAP has to show the next state of the cycle immediately
+and roll back if the write turns out to have failed, so it paints first and
+keeps the undo `edit` returns. Here the dialog is modal, nothing else can read
+the maps in between, and by the time the answer is known there is nothing to
+decide — so the undo is discarded and never needed. The distinction that
+matters in both is the same one: only an UNSENT request carries `queued`, so
+anything answered is a real failure, and there the dialog stays open on the
+value the server still holds and says so.
+
+**`emit('change')` is deliberately not reached on that path.** It is a refetch,
+which offline cannot answer: it would toast a second failure, and it could
+rebuild the page out of the service worker's cached `/stats` and paint the
+queued write straight back out. `writeDay` never reaches `host.refresh()` for a
+queued tap for the same reason.
+
+**The note is the part #230 did not have to carry.** This write states a value
+(or a skip) AND a note, so `edit` takes a fourth argument: `undefined` means
+"this write says nothing about the note", which is every tap from a strip and
+matches `PUT /habits/:id/entries/:date` PRESERVING a note it was not asked to
+change; a string is a stated note, and `''` a stated clear, which is an ABSENT
+key in a map `render()` builds from `e.notes` being truthy. A `'clear'` takes
+the note with the row, because the note lives on the row. `ui/dashboard.js`'s
+host ignores the argument and needs no change: nothing opens the day editor
+over the list.
+
+The checks are in `calcheck.mjs` rather than `stripcheck.mjs` — the action is a
+press in the calendar's own day editor, and `stripcheck` was already the
+longest suite in the fleet, which is the floor the whole browser job sits on.
+They need `Network.setBypassServiceWorker` for the reason recorded twice above.
+Mutation-tested: reverting the `catch` to `toast(e.message)` alone fails five
+checks with the dialog open, both grids unmoved and the write in the outbox;
+dropping just the note argument fails exactly one, the reopened editor showing
+an empty note over a day that has otherwise been answered.
+
+### A rebuild keeps the roving tab stop
+
+`calendarChart` takes a `tabStop` — a DATE — and `draw` reads it off the outgoing
+grid before removing it. So a rebuild that still draws that day keeps the stop
+there, and one that does not falls back to the most recent editable cell,
+exactly as before.
+
+**A date and not an index into `cells`.** The array holds only the editable
+cells, so a window with future days in it has fewer of them and the "same"
+index is a different day. A date either is in the new window, where it is
+precisely where the user was, or it is not — which is what paging gets, since a
+page moves the whole window and leaves that day off the grid, and the most
+recent day is then the honest entry point rather than a position that no longer
+exists.
+
+**No cell-level repaint, which the #230 section above argues against on drift
+grounds.** This adds no drawing code at all: one option read where the tab
+stop was already being set, and one attribute read in `draw` before the removal
+that was already there. It reaches all three rebuild paths at once — paging,
+Today, and #230's own repaint — because all three are that one `draw`.
+
+What it does not reach is a FULL render (a refetch, a zoom press, the settings
+dialog): the card itself is replaced there, `calRedraw` is nulled and the
+outgoing grid is not this closure's to read. Keyboard focus is not restored
+across those either — calendar cells carry no `data-focus-key` — so nothing is
+lost that was previously kept.
+
+Pinned in `feat4.mjs`, beside the calendar-key checks, on a press of **Today**
+with `state.calEnd` still null: the window is then unchanged, so "the stop went
+back to the last cell" cannot be confused with "the window moved". The mutation
+— parking the stop unconditionally on `cells[cells.length - 1]` — fails exactly
+one check, naming the most recent day where the arrows had left an earlier one.
+
+### A page is drawn for one local day
+
+The midnight invalidation #230 said was the honest repair, done as it said: the
+whole detail view, not the one card. `render()` records the local date it drew
+for, and `refreshIfDayChanged` refetches the page when the browser's own
+calendar day has moved past it.
+
+**Whose day it is: the browser's own, and the archive was checked rather than
+assumed.** `docs/decisions/timezones.md` — `resolveTimeZone` asks where an
+ACCOUNT is, so that a reminder nobody is present for goes out at the right
+hour, and `callerDay` asks what day it is for the client making THIS request.
+A rendering decision is the second: the grid draws its last column from the
+device clock and never from a setting, which is why `app.js` hands `nudge.init`
+`today: todayISO` with a comment saying exactly that.
+
+**A refetch and not a local redraw**, even though `lastStats` is in hand for the
+save-seed above. Nothing this view shows can be recomputed from what it holds:
+the score, the streaks and the history are computed as of a date the server
+anchors from the caller's own zone, so a local redraw would move the columns
+and leave every figure over them answering yesterday's question. It goes
+through `refresh`, so it cannot race an in-flight reload, and offline `open()`
+toasts and leaves the pre-midnight page up — the same answer every other
+refresh on this page gives with no network.
+
+**A timer AND a visibility listener, and neither alone is enough.** The timer
+is armed for the next local midnight (`setHours(24, 0, 0, 0)`, so a 23- or
+25-hour calendar day gets the right instant where `+ 86400000` would be an hour
+out twice a year) and re-armed from the clock each time it fires: one wake-up a
+day, not a poll. A background tab clamps it to roughly one a minute, which is
+harmless — it fires late, and late is still after midnight — but a SUSPENDED
+device is not running it at all, and a laptop closed at 23:00 and opened at
+09:00 has no promise about when a timer armed for 00:00 arrives.
+`visibilitychange` covers exactly that, and it is the trigger that matters: the
+staleness costs nothing until somebody looks at the page, and looking at it is
+the event. `ui/nudge.js` reaches the same conclusion from the same platform
+facts. Both triggers ask the same predicate — has the local date moved off the
+one `render()` drew for — so a timer that fires early or twice does nothing,
+and a tab switch on the same day does nothing. That is also what makes this
+right for a zone CHANGE: a laptop opened after a flight across the date line is
+the same fact by a different route.
+
+Pinned in `calcheck.mjs`, and the clock is moved with CDP
+`Emulation.setTimezoneOverride` rather than a virtual clock or a `Date` stub.
+It changes the renderer's zone, so `new Date()`'s local fields move — which is
+what `todayISO()` reads and the question the page renders from. The two
+extremes are 26 hours apart, so at least one of them is a different calendar
+day whatever the machine's own date is, and the override is verified in the
+page rather than assumed. The block asserts the strip's last column AND the
+calendar's last editable cell, because fixing one card alone would move the
+page from "one card is stale" to "one card jumps differently".
+
+### A memoised formatter does not outlive the zone it was built for
+
+Found while writing the midnight test, fixed after it: `ui/dates.js` memoised
+each `Intl.DateTimeFormat` at module scope, and a formatter resolves its zone at
+CONSTRUCTION. So a device that changes zone kept rendering every caption, range
+readout and popover for the zone it had left, while everything derived from
+`new Date()` beside them was right. Measured on a habit's page: a newest
+editable calendar cell of `2026-09-10` under a readout saying
+`6 Jul 2025 → 9 Sept 2026` — both ends a day behind, on one card.
+
+**Where the check goes was the whole decision, and coverage decided it, not
+cost.** The shape that suggests itself is a `forgetFormatters()` called from
+`refreshIfDayChanged` — an explicit interface, and a partial fix wearing one:
+ANY post-zone-change redraw already reached this defect, so paging the calendar
+after landing in a new zone would go stale again with nothing to say why. The
+midnight watch above merely added the first trigger that fires with no user act.
+Putting the check at the USE covers every path by construction.
+
+It also costs no `CACHE_VERSION` bump, and that is the rule NOT APPLYING rather
+than being routed around: the stated hazard is a module link error from a stale
+shell holding a new static import, and this adds no file and no export. A third
+option — the export, reached by a dynamic `import()` so the link error is
+impossible — was refused as exactly the routing-around the first two are not.
+
+**The gate is the device's UTC offset**, compared against the offset the memo
+was built under, via a generation counter (`clockNow` / `perClock`). A counter
+and not a flag: several memos consult it, and a flag reset by the first reader
+leaves every later one holding its stale value for the same move.
+`getTimezoneOffset()` is a primitive read; `resolvedOptions().timeZone` was
+declined because reading the zone NAME constructs an `Intl` object, which is the
+thing being memoised, on a path asked once per calendar cell (~740 at the widest
+zoom). Two imprecisions, both harmless and both written at the gate so nobody
+tightens them away: it over-fires on a DST transition, where the offset moves
+and the zone has not, rebuilding ~10 formatters twice a year for identical
+output; and it under-fires between two zones sharing an offset, where nothing
+these formatters produce would differ.
+
+**Three memos hang off that one question, and the second one is why this was
+not a one-line change.** The formatters, the weekday cache, and the REFERENCE
+WEEK — seven `new Date(2026, 0, d)` built once at module load. Those are local
+midnights, so they are instants fixed by the zone the device was in: rebuild the
+formatter and keep the sample, and each renders as the PREVIOUS day. Measured
+under Node, the same instant is `Sunday` to a formatter built at `Etc/GMT+12`
+and `Monday` to one built at `Pacific/Kiritimati`. That is a rotation of every
+weekday caption in the app — the defect `weekcheck.mjs` exists for — and it
+would have been INTRODUCED by fixing the formatters alone.
+
+Pinned in both places. `dates.test.js` moves `process.env.TZ`, which Node
+re-reads on assignment, and is declared LAST in that file deliberately: the
+defect is a memo outliving the move, so against unfixed code the stale
+formatters leak into every test declared after it and three tests fail where one
+is the finding. It asserts Sunday-first in BOTH zones, which is not belt and
+braces — a sample frozen at module load was built in the RUNNER's zone, and
+formatting it elsewhere only rotates when the offset delta crosses midnight, so
+one zone leaves the reference-week half revertible with the suite green on some
+machines. Measured: with one zone, that mutation passed. `calcheck.mjs` asserts
+the range readout and the cells name the same day after the override, compared
+against each other rather than against a literal, since the readout is `Intl`
+prose in the runner's own locale and calendar.
+
+Mutation results, and one of them is a gap stated rather than covered: reverting
+the formatter memo fails one unit check (`actual: 'Jan 4, 2026'`) and the
+browser check (`{"readout":"6 Jul 2025 → 9 Sept 2026","newest":"2026-09-10"}`);
+reverting the reference week fails the unit check by name
+(`after moving back west: index 1 does not name the day getDay() calls 1`);
+reverting the weekday cache fails **nothing**, and cannot — the names are
+zone-invariant while the sample and the formatter move together, because the
+pair always describes seven consecutive local days from a Sunday and the words
+come from the locale. It is kept per-clock anyway, as a cache keyed to its
+inputs rather than to an argument about which of them happen to matter, and the
+comment there says both halves.
+
+The midnight block still reads dates out of `data-date` rather than off
+`.cal-range`, and that is now a deliberate choice rather than a workaround in
+force: a date is what it is asking for, and `data-date` is `todayISO()`'s own
+spelling where the readout is prose.
+
+The mutation is the visibility trigger doing nothing: two checks fail, with
+both grids still ending on the day before while the clock says otherwise.
+
+**The TIMER half is pinned too, and it needed no seam in the app.** The
+obvious blockers are real: `Emulation.setTimezoneOverride` moves the date but
+fires nothing and does not re-arm a `setTimeout` already pending, and no zone
+can be asked for "a few seconds before midnight" — the available offsets are
+quarter-hour steps, so the local SECONDS are whatever the real clock's are.
+What works instead is wrapping `window.setTimeout` from a
+`Page.addScriptToEvaluateOnNewDocument` script, exactly as `themesync.mjs`
+wraps `window.fetch`, recording every long timer and invoking the recorded
+callback at a chosen moment. It is the same function the platform would have
+called; it adds no production surface; and an app that stopped arming a timer
+fails the first check by name rather than leaving an exported hook nobody
+calls. An exported `fireDayWatch` was the alternative and was refused twice
+over — it is a new export under `shared/public/` and so a `CACHE_VERSION` bump,
+and it is a seam that exists only for its test.
+
+Three checks, and the middle one is the claim: a timer is armed for the next
+local midnight; firing it — with no `visibilitychange` dispatched anywhere —
+rebuilds the page for the new local day; and it re-arms for the next one,
+recomputed. The expectation is built from the local clock FIELDS rather than by
+calling `setHours(24, 0, 0, 0)`, which is the implementation's own expression,
+and compared as an absolute instant (`at + ms`) so the seconds between arming
+and reading cancel. Measured across the zone move, which is what makes the
+re-arm assertion sharp: **39,407,853 ms armed in the real zone, 61,007,420 ms
+after it**, each matching its own next local midnight to `off: 0`. A fixed
+`+ 86400000`, or a reused delay, is ruled out by either number.
+
+What that does NOT pin is a 23- or 25-hour day. The DST transition would have
+to fall between now and the next midnight in a zone this suite can name, which
+a run at an arbitrary moment cannot arrange; the hand-check stands for that
+case (fall-back fires an hour early and no-ops on the date compare; spring
+forward fires slightly late; `Math.max(1000, …)` covers a non-positive delta).
+What IS pinned is the property the DST reasoning rests on — that the arming
+targets local midnight rather than a fixed 24 hours.
+
+The mutation is deleting `armDayWatch()` from `init()`: three checks fail by
+name, printing `{"index":-1,...,"delays":[4000]}` — the app's only remaining
+long timer — and the visibility checks above stay green, which is the two
+triggers being independently pinned rather than one standing in for the other.
+The firing is guarded on a timer having been found, for the reason `settled` in
+the same file is bounded rather than a `waitUntil`: unguarded,
+`window.__armed[-1].fn()` throws out of the try block and costs the remaining
+checks their names, the `Emulation` override its reset, and the suite its exit
+line. A regression must be a named FAIL, never a harness error.
+
+### Edit, in the gap between a save and the refetch
+
+`saveHabit` closes the dialog and then `announce()`s; from a habit's own page
+that is `'change'`, which `ui/detail.js` answers with `/stats` and then
+`/entries` and only then a `render()`. The head's Edit button CAPTURES the
+habit it was drawn from, so in that gap pressing Edit opened the dialog on the
+PRE-SAVE habit — and Save from there, because `PUT /habits/:id` REPLACES, wrote
+the edit just made back out. Two ordinary presses, a silent revert.
+
+The fix seeds the page synchronously from the save: `announce` passes the reply
+on through `emit`, and the listener redraws from it before starting the
+refetch, which is then a confirmation rather than the only source of truth.
+Not a gate on the Edit button, and not a rework of how the view gets its data —
+the same `render()`, over the same payload, with one field replaced.
+
+**The seed is only sound if what overwrites it cannot be OLDER than it, and
+that took a second line.** The `'change'` listener called `open()` directly;
+it goes through `refresh` now, which is the guard that line was bypassing —
+`refresh`'s own comment is this bug, in its own words: "a later-started reload
+can finish first and leave OLDER data on screen". And the seed is what makes
+two of them reachable, because the seed is what puts the stored habit in the
+Edit box: a second save INSIDE the first refetch stopped being a race nobody
+could win and became two ordinary presses. With two outstanding, `/stats` — the
+heaviest computed route in the app — answers in whatever order it answers, and
+if the FIRST reply lands last then `render()` draws the pre-second-save habit,
+the Edit button re-captures it, and one more Edit-then-Save writes the second
+save back out. Nothing refetches again to correct it, so the page STAYS wrong:
+the loss this section is about, arriving after the gap instead of inside it.
+
+`refresh` never runs two, and `refreshAgain` remembers the one that arrived
+mid-flight, so the LAST request is always issued after the last write. Be
+precise about what that does and does not buy: a stale reply can still RENDER
+on its way past — it is an answered request and the page draws what it is
+given — but a newer request is already promised behind it. The difference is
+between a page that flickers and a page that stays wrong. Closing the flicker
+too would mean discarding a reply issued before the last seed, which is a
+generation counter on the payload and a different change; it is not needed for
+the loss, because the loss needs the page to SETTLE stale.
+
+Neither reviewer reached this and neither could have from the diff alone: the
+line is pre-existing, and it only becomes reachable once the seed makes the
+second save possible.
+
+**The seed is what the SERVER accepted, never the form.** `parseHabit`
+normalises as well as validates, so the reply is the truth; `staysOnList` on
+the line above already asks the reply for the same reason.
+
+**And it is merged over the habit the page was built with rather than assigned
+wholesale.** `stats.habit` carries `unlogged_is_success`, which `/stats`
+resolves per request and which `PUT /habits/:id` does not answer with — it is
+response-only, in no `*_HABIT_FIELDS` list. Assigning the reply would drop it,
+and a limit whose unlogged days count as kept would lose its ghost ticks and
+its faint calendar fills for the length of the refetch. Merged, every field the
+write answered wins and the one it cannot speak for keeps the server's last
+answer, stale for one round trip if the edit changed `type`, `target_type` or
+`at_most_unlogged` — the same staleness every server-computed figure on this
+page already has after an optimistic tap.
+
+**`emit` gained a payload, and it stays a hand-off rather than becoming a
+second channel.** It is the thing the mutator already HAS, nothing is stored,
+and every listener has to be right when it is absent, because most emitters
+send nothing. The alternative was a field on `state`, which would be a second
+source of truth for the habit outliving the emit that carried it.
+
+The dashboard path is unaffected and was checked: `announce()` emits `'reload'`
+when the dashboard is showing, which is a refetch of the list, and the payload
+goes unread there.
+
+Pinned in `countcheck.mjs`, which is where #305's flake was the suite noticing
+this window. The gap is milliseconds on a healthy machine, so it is HELD OPEN
+with CDP `Fetch` pausing `/stats` and never continuing it (`hangcheck.mjs`'s
+mechanism), with the worker bypassed so `networkFirst` cannot answer out of
+`DATA_CACHE`. The guard that makes the block mean anything is a resource-timing
+count of zero landed `/stats` responses: had the refetch arrived, the page
+would be right for a reason this block is not about. The mutation — dropping
+the `seed` call — fails two checks, both printing the pre-save target.
+
+**The ordering half has its own block, and the instrument had to change to
+`requestStage: 'Response'` — which is the only interesting thing about it.**
+Paused at the Request stage, which is right for the block above (there the
+point is that the request never arrives), the server has not seen the request
+yet, so releasing it after the second write answers from the database as it
+stands and the held reply is FRESH. Measured: with a request-stage pause the
+block passed against the unfixed code, reporting two refetches outstanding and
+a correct head — a test that could not fail, and one whose output looked like
+evidence. Paused at the Response stage the reply has already been computed, so
+the held answer is the one computed BEFORE the second save. Both replies are
+then released newest-first, one at a time and each DRAWN before the next is let
+go, which forces the worst legal interleaving rather than hoping for it — see
+`docs/decisions/testing.md` for the flake that taught the block the difference
+between a reply landing and a render happening. `outstanding` is reported beside
+the answer, because it is 2 under `open()` and 1 under `refresh` and that is the
+clearest single line about what changed. Reverting the one word fails two
+checks:
+
+    FAIL  the page settles on the LAST save even when the older refetch answers
+          after it :: {"head":"Every day · ≥ 12.5 pages","stored":9.5,
+          "statsLanded":2} (2 refetch(es) were outstanding, 2 released, 2 drawn)
+    FAIL  ...so Edit-then-Save from here cannot revert the second one :: "12.5"
+          (a revert reads as "12.5")
+
+— the head naming the first save while storage holds the second, and the
+reopened Edit box primed to write the first one back.
 
 ## The label-width estimator's mark-billing fix, and what it forced (#132)
 

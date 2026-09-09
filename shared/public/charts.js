@@ -172,6 +172,9 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     minStreak = MIN_STREAK,
     unknownMark = false, // draw '?' on days with no entry (`questionMarks`)
     weekStart = 'monday', // which day a column begins on
+    // Which day's cell keeps the roving tab stop — see where it is applied,
+    // below the grid loop.
+    tabStop = null,
   } = opts;
 
   const level = zoomLevel(zoom);
@@ -532,8 +535,27 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
 
   if (onPick && cells.length) {
     svg.setAttribute('role', 'grid');
-    // The most recent editable day is the entry point for keyboard users.
-    cells[cells.length - 1].setAttribute('tabindex', '0');
+    // The most recent editable day is the entry point for keyboard users —
+    // unless the caller says where the tab stop had already got to.
+    //
+    // `setRovingFocus` moves the stop as the arrows walk the grid, and it moves
+    // it on a DOM attribute of cells this function built, so every rebuild used
+    // to discard it and send the stop back to the last cell. That is one line
+    // of `draw` (`ui/detail.js`) away from three ordinary acts — paging (#274),
+    // pressing Today, and an offline strip tap redrawing the card (#230) — and
+    // it costs a keyboard user their place with nothing on screen saying so.
+    //
+    // A DATE and not an index. An index into `cells` is a position in a window
+    // that a rebuild may have changed the meaning of: the array holds only the
+    // editable cells, so a window with future days in it has fewer of them, and
+    // the "same" index is then a different day. A date either IS in the new
+    // window, where it is exactly where the user was, or it is not, where the
+    // fallback above is the honest answer — which is what paging gets, since a
+    // page moves the whole window and leaves that day off the grid.
+    const held = tabStop
+      ? cells.find((c) => c.getAttribute('data-date') === tabStop)
+      : null;
+    (held ?? cells[cells.length - 1]).setAttribute('tabindex', '0');
   }
 
   // What the legend under this grid has to describe is THIS window, and the

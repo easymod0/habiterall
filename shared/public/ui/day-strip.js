@@ -46,8 +46,14 @@
  * @typedef {object} StripHost
  * @property {(habitId: number) => any|null} habit  as this host holds it NOW
  * @property {(habitId: number, date: string) => DayCell} read
- * @property {(habitId: number, date: string, to: 'clear'|'skip'|number)
- *   => (() => void)} edit  apply to the host's own model; return an undo
+ * @property {(habitId: number, date: string, to: 'clear'|'skip'|number,
+ *   note?: string) => (() => void)} edit  apply to the host's own model; return
+ *   an undo. `note` is what the write SAYS about the day's note: absent means
+ *   it says nothing, which is every tap from a strip — `PUT
+ *   /habits/:id/entries/:date` preserves a note it was not asked to change, so
+ *   a tap must not move the host's copy either. The day editor states one
+ *   (`ui/day-dialog.js`), and `''` is a stated clear. `ui/dashboard.js`'s host
+ *   ignores it: nothing opens the day editor over the list.
  * @property {() => void} repaint            cheap and local
  * @property {() => Promise<void>} refresh   authoritative reload
  */

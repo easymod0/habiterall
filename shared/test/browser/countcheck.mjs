@@ -38,6 +38,21 @@ const send = (m, p = {}, s) => new Promise((res, rej) => {
   ws.send(JSON.stringify({ id, method: m, params: p, sessionId: s }));
 });
 
+/**
+ * Every `/stats` request CDP has stopped and is holding, oldest first.
+ *
+ * `Fetch.requestPaused` is an EVENT and carries no `id`, so the dispatcher
+ * below would drop it — and the last block in this file needs the requestIds
+ * to release them in a chosen ORDER rather than merely to make them wait. That
+ * is the difference between holding a gap open (the block before it) and
+ * forcing which of two answers lands last.
+ *
+ * Never drained by the handler: a block asks for what it is holding, releases
+ * what it wants and empties this itself, so nothing that arrives between two
+ * reads can be missed.
+ */
+const paused = [];
+
 try {
   const url = await devtoolsUrl(PORT, chrome);
   ws = new globalThis.WebSocket(url);
@@ -47,7 +62,10 @@ try {
     if (m.id && pend.has(m.id)) {
       const { res, rej } = pend.get(m.id); pend.delete(m.id);
       m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result);
+      return;
     }
+    // See `paused` above: an event, so it has no `id` to answer.
+    if (m.method === 'Fetch.requestPaused') paused.push(m.params);
   };
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
@@ -807,15 +825,410 @@ try {
   await reloadAndWaitForRow(ev, target.name, {
     reload: () => send('Page.navigate', { url: BASE }, sessionId),
   });
+
+  // ...and so does the PROSE beside the number, which is the half that was
+  // left out. `targetLabel` (`ui/dates.js`) was a raw template literal, so the
+  // dashboard row and the detail head read `≥ 8.5 pages` while the box three
+  // lines away in the same render held `8,5` — one number, two spellings, on
+  // one screen. Read on the dashboard first because that is what this reload
+  // landed on.
+  //
+  // The negative conjunct is not decoration: `includes('≥ 8,5 pages')` alone
+  // would pass on a row that somehow carried both, and the point is that the
+  // dot spelling is GONE from a comma account's screen.
+  const rowSub = await ev(`(() => [...document.querySelectorAll('#grid .habit-row')]
+    .find(r => r.querySelector('.habit-name').textContent.trim()
+      === ${JSON.stringify(target.name)})
+    ?.querySelector('.habit-sub')?.textContent ?? '')()`);
+  check("a comma account's dashboard row states the goal in its own spelling",
+    rowSub.includes('≥ 8,5 pages') && !rowSub.includes('8.5'), rowSub);
+
   await openHabitEdit(target.name);
   const shownTarget = await ev(`${targetBox}.value`);
   check('a comma account is shown the stored TARGET in its own spelling too',
     shownTarget === '8,5', shownTarget);
-  await ev(`document.getElementById('dialog-cancel').click(); true`);
+
+  // The two surfaces this bug was reported from, read in ONE evaluation and
+  // compared with each other rather than each against a literal — a unit test
+  // can pin `targetLabel` under both conventions and cannot say that the head
+  // and the box behind it AGREE. The head is drawn by `render()` from the same
+  // habit `openDialog` filled the box from, and until this change they
+  // disagreed about the one number both were describing.
+  const bothSurfaces = await ev(`(() => ({
+    head: document.querySelector('#view-detail .habit-sub')?.textContent ?? '',
+    box: ${targetBox}?.value ?? '',
+  }))()`);
+  check("the detail head and the Edit box agree about a comma account's target",
+    bothSurfaces.head.endsWith('≥ 8,5 pages') && bothSurfaces.box === '8,5',
+    JSON.stringify(bothSurfaces));
+
+  // A save from HERE, deliberately: it is what makes `dialogClosed`'s own
+  // save under a comma account, which the two above are not. It no longer has
+  // to defend the WAIT — `dialogClosed` compares the subtitle against what it
+  // previously held, so no expectation is spelled and no account can disagree
+  // with it. What it still buys is the assertion below: the page must redraw a
+  // retyped `9,5` in this account's own spelling, and the two call sites above
+  // sit on a point account and cannot say that.
+  const commaSubBefore = await habitSub();
+  await typeTarget('9,5');
+  await submitDialog();
+  await dialogClosed(commaSubBefore);
+  habit = await habitNow();
+  check('a comma account can retype its target, and the page redraws in its own '
+    + 'spelling', habit?.target_value === 9.5, JSON.stringify(habit));
+  check('...and that redraw is spelled with a comma, not a point',
+    (await habitSub()).includes('9,5'), await habitSub());
 
   await ev(`(async()=>{ await fetch('/api/settings', { method:'PUT',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ numberFormat: 'auto' }) }); })()`);
+
+  console.log('\n--- Edit, in the gap between the save and the refetch ---');
+  /*
+   * The window #305's flake was the suite noticing, asserted as the bug it is.
+   *
+   * `saveHabit` closes the dialog and then `announce()`s; from a habit's own
+   * page that is `'change'`, which `ui/detail.js` answers with `/stats` and
+   * then `/entries` — two sequential round trips, the second unwindowed — and
+   * only then a `render()`. The head's Edit button CAPTURES the habit it was
+   * drawn from, so in that gap pressing Edit used to open the dialog on the
+   * PRE-SAVE habit; press Save without touching anything and, because `PUT
+   * /habits/:id` REPLACES, the edit just made is written back out. Two ordinary
+   * presses, and the loss is silent.
+   *
+   * The gap is milliseconds on a healthy machine, so it is HELD OPEN rather
+   * than raced: CDP `Fetch` pauses `/stats` and never continues it, which is
+   * `hangcheck.mjs`'s mechanism. The service worker is bypassed for the reason
+   * `calcheck.mjs` records having measured — network interception does not
+   * reach the WORKER's own fetches, and with it in front `networkFirst` would
+   * answer `/stats` out of `DATA_CACHE`, the page would rebuild, and every
+   * check below would pass against the unfixed code.
+   *
+   * The page is opened BEFORE the pause: `openHabitEdit` needs the same
+   * `/stats` to get there at all.
+   */
+  await ev(`(async()=>{
+    const list = await (await fetch('/api/habits')).json();
+    const h = list.find(x => x.id === ${target.id});
+    await fetch('/api/habits/' + ${target.id}, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...h, target_value: ${target.target} }) });})()`);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
+  await openHabitEdit(target.name, String(target.target));
+
+  await send('Network.enable', {}, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: true }, sessionId);
+  await send('Fetch.enable',
+    { patterns: [{ urlPattern: '*/api/habits/*/stats*' }] }, sessionId);
+  // So the guard below counts THIS save's refetch and not the buffer's history.
+  await ev(`performance.clearResourceTimings(); true`);
+
+  await typeTarget('12,5');
+  await submitDialog();
+  // `dialog.open === false` alone, deliberately NOT `dialogClosed` — that wait
+  // now includes the head redrawing, which is half of what this block is
+  // testing, so using it here would turn a failure into a 20s timeout with the
+  // interesting values never printed.
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the habit dialog to close on Save' });
+
+  const inTheGap = await ev(`(async()=>{
+    const list = await (await fetch('/api/habits')).json();
+    const h = list.find(x => x.id === ${target.id});
+    return {
+      // Zero is the guard, and it is what makes the checks below mean anything:
+      // if the refetch had landed, the page would be right for a reason this
+      // block is not about and would pass with no seeding in the code at all.
+      statsLanded: performance.getEntriesByType('resource')
+        .filter(e => e.name.includes('/stats')).length,
+      stored: h ? h.target_value : null,
+      head: document.querySelector('#view-detail .habit-sub')?.textContent ?? '',
+    };})()`);
+  check('the save reached storage', inTheGap.stored === 12.5, JSON.stringify(inTheGap));
+  check('...and the refetch behind it is still out, so nothing has rebuilt from '
+    + 'the server', inTheGap.statsLanded === 0, JSON.stringify(inTheGap));
+  check('...yet the head already states the target that was saved',
+    inTheGap.head.endsWith('≥ 12.5 pages'), JSON.stringify(inTheGap));
+
+  // The check this whole block exists for. Pressing Edit here used to fill the
+  // box from the habit the last render captured — `20`, the value typed over —
+  // and Save from there reverted the user's own change.
+  await ev(`[...document.querySelectorAll('#view-detail button')]
+    .find(b => b.textContent.trim() === 'Edit').click(); true`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the habit dialog to reopen in the gap' });
+  const reopened = await ev(`${targetBox}.value`);
+  check('pressing Edit in that gap opens the dialog on the habit that was SAVED',
+    reopened === '12.5', `${JSON.stringify(reopened)} (typed 12,5 over `
+    + `${target.target}; a reverted edit reads as "${target.target}")`);
+
+  await ev(`document.getElementById('dialog-cancel').click(); true`);
+  await send('Fetch.disable', {}, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: false }, sessionId);
+
+  // And the seed is an early paint of the same fact rather than a second
+  // source of truth: with the network released, the refetch that follows lands
+  // and agrees. Asserted through a reload so the page is built from the server
+  // alone, with nothing seeded anywhere in it.
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
+  await openHabitEdit(target.name, '12.5');
+  const afterRefetch = await ev(`(() => ({
+    head: document.querySelector('#view-detail .habit-sub')?.textContent ?? '',
+    box: ${targetBox}?.value ?? '',
+  }))()`);
+  check('and a page built from the server alone says the same thing',
+    afterRefetch.head.endsWith('≥ 12.5 pages') && afterRefetch.box === '12.5',
+    JSON.stringify(afterRefetch));
+  await ev(`document.getElementById('dialog-cancel').click(); true`);
+
+  console.log('\n--- two saves, and the OLDER refetch landing last ---');
+  /*
+   * The same loss as the block above, arriving after the gap instead of inside
+   * it — and it is the seed that makes it reachable, because the seed is what
+   * lets the second save happen at all.
+   *
+   * Save once: the page paints the reply and the `'change'` listener starts a
+   * refetch. Press Edit inside that refetch — the box now correctly holds the
+   * habit that was just stored — and save again. There are now two refetches
+   * outstanding against `/stats`, the heaviest computed route in the app, and
+   * NOTHING orders their replies: `render()` runs on whichever lands last. If
+   * that is the first one, the head is drawn from the pre-second-save habit,
+   * the Edit button re-captures it, and one more Edit-then-Save writes the
+   * second save back out — `PUT /habits/:id` REPLACES. No further refetch is
+   * triggered by anything, so the page STAYS wrong.
+   *
+   * `refresh` (`ui/detail.js`) is what that listener has to go through, and its
+   * own comment is this bug: "a later-started reload can finish first and leave
+   * OLDER data on screen". It never runs two, and it remembers a request that
+   * arrived mid-flight, so the LAST request is issued after the last write.
+   *
+   * The ordering is forced rather than raced. CDP `Fetch` holds both replies —
+   * the same instrument the block above uses to hold a gap open — and they are
+   * released newest-first, one at a time, each one DRAWN before the next is
+   * let go, so the older answer is the one that renders last. That is the worst
+   * legal interleaving and it is the one this has to survive; a run that merely
+   * hoped for it would pass on either version most of the time. Under `refresh`
+   * there is only ever ONE outstanding, so "release the older last" is
+   * satisfied trivially and the coalesced re-run follows it — which is why
+   * `outstanding` is reported beside the answer.
+   */
+  const takePaused = async (want, ms = 8000) => {
+    for (let i = 0; i < Math.ceil(ms / 100); i++) {
+      if (paused.length >= want) return true;
+      await sleep(100);
+    }
+    return false;
+  };
+  const release = async (params) => {
+    // A response-stage pause is continued with `continueResponse`; the
+    // request-stage one the block above uses takes `continueRequest`. Chosen
+    // from what the event actually carried rather than from which pattern this
+    // file happens to have enabled last.
+    //
+    // Swallowed: a request whose page has moved on is already gone, and a
+    // throw here would replace the failure being described.
+    const how = params.responseStatusCode === undefined
+      ? 'Fetch.continueRequest'
+      : 'Fetch.continueResponse';
+    await send(how, { requestId: params.requestId }, sessionId).catch(() => {});
+  };
+
+  await ev(`(async()=>{
+    const list = await (await fetch('/api/habits')).json();
+    const h = list.find(x => x.id === ${target.id});
+    await fetch('/api/habits/' + ${target.id}, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...h, target_value: ${target.target} }) });})()`);
+  await reloadAndWaitForRow(ev, target.name, {
+    reload: () => send('Page.navigate', { url: BASE }, sessionId),
+  });
+  await openHabitEdit(target.name, String(target.target));
+
+  /*
+   * How many times this page has been REDRAWN, counted from outside it.
+   *
+   * `render()` (`ui/detail.js`) begins with `replaceChildren()` on
+   * `#view-detail` and then fills it synchronously, and nothing else in the app
+   * touches that node's direct children — so one `childList` batch on it is one
+   * render, and the observer fires once per render rather than once per card.
+   *
+   * **A COUNT, and deliberately not the head's text.** Every wait below is for
+   * an answer to have been drawn, and under the mutation this block exists to
+   * catch the first answer drawn is the one computed AFTER the second save —
+   * the same `≥ 9.5 pages` the seed has already painted. A wait on the subtitle
+   * CHANGING cannot see that render at all: it would spend its whole 20s and
+   * turn the named failure two screens down into a timeout with none of the
+   * interesting values printed, which is the trap the `dialogClosed` note
+   * above is about. What has to be waited for is that a render HAPPENED,
+   * whatever it happened to draw.
+   *
+   * Installed after the reload above, since nothing here navigates again.
+   */
+  await ev(`(()=>{
+    window.__renders = 0;
+    new MutationObserver(() => { window.__renders += 1; })
+      .observe(document.getElementById('view-detail'), { childList: true });
+    return true;})()`);
+  const renders = () => ev(`window.__renders`);
+  /** Wait for the next redraw after `from`, and answer the count it reached. */
+  const drawnAgain = async (from, what) => {
+    await waitUntil(ev, `window.__renders > ${from}`, { what });
+    return renders();
+  };
+
+  await send('Network.enable', {}, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: true }, sessionId);
+  paused.length = 0;
+  // **`requestStage: 'Response'`, and that is the whole of what makes the older
+  // reply actually OLDER.** Paused at the Request stage — which is right for
+  // the block above, where the point is that the request never arrives — the
+  // server has not seen it yet, so releasing it after the second write answers
+  // from the database as it stands and the reply is FRESH. Measured: with a
+  // request-stage pause this block passed against the unfixed code, reporting
+  // two refetches outstanding and a correct head. Paused at the Response stage
+  // the server has already computed the reply, so the held answer is the one
+  // computed BEFORE the second save, which is the thing that has to not win.
+  await send('Fetch.enable', {
+    patterns: [{ urlPattern: '*/api/habits/*/stats*', requestStage: 'Response' }],
+  }, sessionId);
+
+  // So the guard below can count the replies THIS block let through.
+  await ev(`performance.clearResourceTimings(); true`);
+
+  await typeTarget('12,5');
+  await submitDialog();
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the first save to close the dialog' });
+  check("the first save's refetch is outstanding and held",
+    await takePaused(1), `${paused.length} paused`);
+
+  // The press this is all about, and it only reaches the second save because
+  // the seed put the stored habit in the box — unseeded it would type over the
+  // pre-save target and the two saves would be one.
+  await ev(`[...document.querySelectorAll('#view-detail button')]
+    .find(b => b.textContent.trim() === 'Edit').click(); true`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the habit dialog to reopen between the two saves' });
+  const boxBetween = await ev(`${targetBox}.value`);
+  check('...and the box it reopens on holds the first save, not the fixture',
+    boxBetween === '12.5', JSON.stringify(boxBetween));
+
+  const beforeSecond = await renders();
+  await typeTarget('9,5');
+  await submitDialog();
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the second save to close the dialog' });
+  // The second save's own seed, and the POSITIVE half of the settle below.
+  // `announce` → `seed` → the refetch decision is one synchronous task, so a
+  // page that has drawn the second seed has already issued whatever refetch it
+  // is going to issue. Without this the sleep would be covering the app's
+  // reaction as well as the question being asked about it, which is the guess
+  // in both directions the root CLAUDE.md forbids.
+  const seeded = await drawnAgain(beforeSecond, "the second save's seed to paint");
+  // ...and what is LEFT is the exception that rule carves out: establishing
+  // that NO second refetch was issued, which has no predicate to poll. Under
+  // `refresh` none ever will be. Without it one is already out by the line
+  // above, and this is the margin its `Fetch.requestPaused` has to reach the
+  // runner over DevTools — too short and the mutation this block exists to
+  // catch releases a request nobody knew was held, in the wrong order, and
+  // passes with a correct-looking head.
+  await sleep(700);
+  const outstanding = paused.length;
+
+  /*
+   * Release what is held, NEWEST first, and let each answer be drawn before
+   * the next is let go — one reply in flight at a time, because two have no
+   * order and the order is the whole of what this block forces.
+   *
+   * The settle is two more renders, and it is two in EITHER world, which is
+   * what lets the mutation fail by NAME rather than time out: under `refresh`
+   * the held reply draws the pre-second-save habit and the coalesced re-run
+   * behind it draws the newest; without it the two independent refetches draw
+   * newest and then oldest. Two answers were computed either way, and each is
+   * drawn once.
+   *
+   * **What this replaces, and what it cost.** Both loops used to be durations
+   * — a 700ms settle after each release, then a bounded poll with a 500ms
+   * sleep in it — and the re-run was issued 16-20ms after the release, INSIDE
+   * that first settle, where a `paused.length = 0` written for the loop's own
+   * bookkeeping then dropped its requestId unreleased. The poll that followed
+   * had nothing to let through, spun its full six seconds, and the reply was
+   * finally freed by `Fetch.disable` — so the last two checks were decided by
+   * a photo finish between the page's `/entries` round trip and the
+   * assertion's own `fetch('/api/habits')`, measured at 3-4ms in the runs it
+   * won. That is the ~4% flake this block shipped with, and every failing
+   * instance reported the identical `statsLanded` and `outstanding` as a
+   * passing one, because the reply had landed and only the render had not.
+   */
+  let drawn = seeded;
+  let released = 0;
+  let awaitingRender = false;
+  const drainBy = Date.now() + 15_000;
+  while (drawn < seeded + 2 && Date.now() < drainBy) {
+    if (!awaitingRender && paused.length) {
+      await release(paused.pop());
+      released++;
+      awaitingRender = true;
+    }
+    await sleep(25);
+    const now = await renders();
+    if (now > drawn) { drawn = now; awaitingRender = false; }
+  }
+
+  await send('Fetch.disable', {}, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: false }, sessionId);
+
+  const settledOn = await ev(`(async()=>{
+    const list = await (await fetch('/api/habits')).json();
+    const h = list.find(x => x.id === ${target.id});
+    return {
+      head: document.querySelector('#view-detail .habit-sub')?.textContent ?? '',
+      stored: h ? h.target_value : null,
+      // Counted before the habits read above can add to it: only the stats
+      // route was paused here, and only it is counted.
+      statsLanded: performance.getEntriesByType('resource')
+        .filter(e => e.name.includes('/stats')).length,
+    };})()`);
+  check('both saves reached storage, the second one last',
+    settledOn.stored === 9.5, JSON.stringify(settledOn));
+  // **Every reply this block held has to have LANDED, or the checks below are
+  // vacuous.** `api()` abandons a request after ten seconds, and a held one on
+  // a loaded fleet can reach that: the older reply then never renders at all,
+  // the seeded head is left standing, and the assertion passes for the one
+  // reason it must not — the interleaving it exists to survive never happened.
+  // A shortfall is a failed GUARD rather than a quiet pass.
+  check('...and every held refetch actually answered, so the interleaving was '
+    + 'real', settledOn.statsLanded >= outstanding,
+    `${settledOn.statsLanded} landed of ${outstanding} held`);
+  // The other half of the same guard, and the one the flake needed: a reply
+  // can land — the resource timing above says so — with its render still a
+  // round trip away, and the check below would then be reading a page that
+  // has not finished answering. Two answers are drawn in BOTH worlds, so this
+  // is satisfied by the mutation as well and cannot swallow its verdict.
+  check('...and both of them were DRAWN, so the page had finished settling '
+    + 'before it was read', drawn === seeded + 2,
+    `${drawn - seeded} render(s) after the seed, ${released} reply(s) `
+    + `released, ${paused.length} still held`);
+  check('the page settles on the LAST save even when the older refetch answers '
+    + 'after it', settledOn.head.endsWith('≥ 9.5 pages'),
+    `${JSON.stringify(settledOn)} (${outstanding} refetch(es) were outstanding, `
+    + `${released} released, ${drawn - seeded} drawn)`);
+
+  // The head is the Edit button's own habit — same `render()`, same object —
+  // and this is the press that would spend a stale one. Asserted rather than
+  // inferred, because it is the loss itself rather than a symptom of it.
+  await ev(`[...document.querySelectorAll('#view-detail button')]
+    .find(b => b.textContent.trim() === 'Edit').click(); true`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the habit dialog to reopen after both saves' });
+  const boxAfter = await ev(`${targetBox}.value`);
+  check('...so Edit-then-Save from here cannot revert the second one',
+    boxAfter === '9.5', `${JSON.stringify(boxAfter)} (a revert reads as "12.5")`);
+  await ev(`document.getElementById('dialog-cancel').click(); true`);
 } catch (e) {
   console.log('ERROR:', e.message);
   fails++;

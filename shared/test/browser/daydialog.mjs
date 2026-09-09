@@ -59,10 +59,22 @@ const fakeHabitIcon = (habit) => {
   return span;
 };
 
-/** The module-level names openDayDialog reads, in one place. */
+/**
+ * The module-level names openDayDialog reads, in one place.
+ *
+ * `dayHost` is not an element and is not read by anything this suite asserts —
+ * it is the opening page's own day model, which `saveDay` uses to repaint after
+ * a QUEUED write. That is covered in a real browser, where there is an outbox,
+ * by `calcheck.mjs`'s "the day editor, offline" block; not `stripcheck.mjs`,
+ * which owns the STRIP's own offline tap (#230) and is the fleet's longest
+ * suite. It is here because `openDayDialog` ASSIGNS it, and a free identifier
+ * the harness does not hand in is a `ReferenceError` out of `new Function` for
+ * every case below.
+ */
 const BINDINGS = [
   'title', 'sub', 'booleanBlock', 'numericBlock',
   'notes', 'skip', 'clear', 'save', 'dialog', 'dayCountField', 'habitIcon',
+  'dayHost',
 ];
 
 // The real rule, not a stub: `ui/toggle.js` is dependency-free precisely so it
