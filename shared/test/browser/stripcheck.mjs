@@ -20,6 +20,10 @@
  *  - Offline, three taps advance the CYCLE rather than queueing the same write
  *    three times. That is the failure `writeDay`'s long comment exists to
  *    prevent, and it is invisible online because the refetch hides it.
+ *  - Offline, a tap on a cell moves the CALENDAR card for the same day (#230).
+ *    Invisible online for the same reason: `host.refresh()` rebuilds the whole
+ *    page, so the earlier '...and so does the calendar card' check passes
+ *    against a build whose `detailHost.repaint` never touches the calendar.
  *  - The in-run tick (#176) is asserted with `getComputedStyle`, not by reading
  *    `textContent` alone — the ghost tick and a filled cell can share a glyph
  *    and differ only in colour, opacity and background, none of which the fake
@@ -448,6 +452,149 @@ try {
   ck('two offline taps advance the cycle, rather than queueing the first twice',
      afterFlush !== null && afterFlush.value === 0,
      `cell showed ${JSON.stringify(offlineBox)}, server holds ${JSON.stringify(afterFlush)}`);
+
+  /* ---------- offline, the calendar agrees with the strip (#230) ---------- */
+
+  console.log('--- offline, the calendar follows the tap ---');
+  // The strip and the Calendar card are two drawings of ONE pair of maps
+  // (`entriesByDate` / `skipSet`, ui/detail.js), and a tap moves them before it
+  // writes. Online nothing said so: `writeDay` ends in `host.refresh()`, a
+  // refetch and a full rebuild, so the calendar caught up whether or not
+  // `detailHost.repaint` had ever touched it — which is exactly what the
+  // '...and so does the calendar card' check further up passes on. Offline
+  // `api()` enqueues and THROWS, so that refetch is never reached, and the
+  // grid went on painting the pre-tap day beside a strip cell for the same
+  // date that had already flipped.
+  //
+  // Only a real browser can see it: the write has to reach `api()`'s offline
+  // path, the tap is a real listener, and the assertion is the `fill` on an SVG
+  // cell of a page the app rendered. The fake-DOM suites drive `charts.js`
+  // directly and never run `ui/detail.js` at all.
+  await ev(`fetch('/api/habits/${seeded.habit}/entries/${seeded.day3}',
+    { method: 'DELETE' })`);
+  await openHabit();
+
+  // Scoped to the Calendar card by TITLE, never `document`: `windowedChart`
+  // gives every paging card the same `.cal-nav` and `.cal-range` classes the
+  // calendar uses, and Recent days is FIRST on the page — an unscoped query
+  // finds the strip's nav and reports it as the calendar's.
+  const calCard = `[...document.querySelectorAll('#view-detail .card')]
+    .find(c => c.querySelector('.card-title')?.textContent === 'Calendar')`;
+  const calFill = (date) => ev(`(() => {
+    const r = ${calCard}?.querySelector('.cal-cell[data-date="${date}"]');
+    return r ? (r.getAttribute('fill') ?? '') : null;})()`);
+  const calRange = () => ev(
+    `(${calCard}?.querySelector('.cal-range')?.textContent ?? '')`);
+  const calPageBack = () => ev(`(() => {
+    const b = [...(${calCard}?.querySelectorAll('.cal-nav button') ?? [])]
+      .find(b => b.textContent.includes('Earlier'));
+    if (!b || b.disabled) return false;
+    b.click(); return true;})()`);
+  // `state.calEnd` is where the card keeps its position, and #274 was this same
+  // card committing one around a redraw that could fail. Read from the store
+  // rather than inferred from the readout, because "did not move" and "was
+  // never written" are the two halves of that bug and only one of them shows.
+  const calEnd = () => ev(
+    `(async () => (await import('/shared/ui/store.js')).state.calEnd ?? null)()`);
+  const queued = () => ev(
+    `(async () => (await import('/shared/ui/store.js')).state.pending ?? 0)()`);
+
+  // The habit's OWN colour, read from the API. A done day on a boolean habit is
+  // `shade(color, 1)`, and `shade` returns its argument unchanged at `t >= 1` —
+  // so this string is the whole expected fill, and asserting it is what makes
+  // the check below about the two grids AGREEING rather than about the cell
+  // being non-empty. Deliberately not `shade(habit.color, 1)` imported into the
+  // page: `shade` is the function `charts.js` paints the cell with, so calling
+  // it here would compare the implementation against itself and stay green if
+  // its `t >= 1` branch ever changed. The four wrong answers this tells apart
+  // are all reachable — `var(--surface-2)` (skip), `var(--danger)` (slipped),
+  // `var(--grid-empty)` (untouched) and any `color-mix(...)` partial shade.
+  const habitColor = await ev(`(async () => {
+    const rows = await (await fetch('/api/habits')).json();
+    return rows.find(h => h.id === ${seeded.habit})?.color ?? null;
+  })()`);
+  ck('the habit under test has a colour to expect in the grid',
+     typeof habitColor === 'string' && habitColor.startsWith('#'),
+     JSON.stringify(habitColor));
+
+  const emptyBefore = await calFill(seeded.day3);
+  const rangeBefore = await calRange();
+  ck('the calendar draws the untouched day as an empty cell to start from',
+     emptyBefore === 'var(--grid-empty)', JSON.stringify(emptyBefore));
+
+  await send('Network.enable', {}, sessionId);
+  await send('Network.emulateNetworkConditions',
+    { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
+  await tap(seeded.day3, 1500);
+
+  const agreed = {
+    strip: await box(seeded.day3),
+    cal: await calFill(seeded.day3),
+    outbox: await queued(),
+    calEnd: await calEnd(),
+    range: await calRange(),
+  };
+
+  // The guard that makes the next check mean what it claims. If the write had
+  // reached the server, `host.refresh()` would have rebuilt the whole page and
+  // the calendar would be right for a reason this block is not about — it
+  // would then pass against a build with no calendar redraw in it at all. A
+  // write sitting in the OUTBOX is what says the redraw was local.
+  ck('the offline tap was queued rather than sent', agreed.outbox >= 1,
+     JSON.stringify(agreed));
+  ck('the strip cell flips, as it always did', agreed.strip === '✓',
+     JSON.stringify(agreed));
+  // The exact fill, not "something other than empty". The claim is that the two
+  // grids AGREE about the day, and a cell painted the skip grey or the slipped
+  // red disagrees with a strip cell reading ✓ just as loudly as an empty one —
+  // so a change making `edit` add the date to `skipSet` alongside a plain done,
+  // which is exactly the pair of structures moving together that this block
+  // exists to protect, must not be able to sit green here. Same reasoning as
+  // the #176 ghost-tick checks below, which tell two ✓ glyphs apart by colour
+  // rather than accepting either.
+  ck('...and offline the calendar cell for the SAME day flips with it, to the '
+     + "habit's own colour",
+     agreed.cal === habitColor,
+     `${JSON.stringify(agreed)} expected ${JSON.stringify(habitColor)}`);
+  ck('...having committed no calendar position of its own',
+     agreed.calEnd === null && agreed.range === rangeBefore,
+     `${JSON.stringify(agreed)} range before ${JSON.stringify(rangeBefore)}`);
+
+  // The other half of the #274 trap, and it is a REGRESSION guard rather than
+  // the biting check: unfixed there is no redraw, so nothing can move the
+  // window and this passes either way. It is here because the cheap wrong fix
+  // — redraw at `todayISO()` rather than at the STORED position — is invisible
+  // in the block above, where there is no stored position and `draw` resolves
+  // today anyway. Paging offline is local (#274), so the press needs no
+  // network of its own, and it is what puts a position there to preserve.
+  const calPaged = await calPageBack();
+  await sleep(700);
+  const pagedRange = await calRange();
+  const pagedEnd = await calEnd();
+  ck('the calendar pages back with no network, as #274 left it',
+     calPaged === true && pagedRange !== rangeBefore && pagedEnd !== null,
+     `${rangeBefore} -> ${pagedRange} (calEnd ${JSON.stringify(pagedEnd)})`);
+
+  await tap(seeded.day2, 1500);
+  const heldRange = await calRange();
+  const heldEnd = await calEnd();
+  ck('...and a tap redraws the STORED position rather than resetting it to '
+     + 'today or committing a new one',
+     heldRange === pagedRange && heldEnd === pagedEnd,
+     `range ${pagedRange} -> ${heldRange}, calEnd `
+     + `${JSON.stringify(pagedEnd)} -> ${JSON.stringify(heldEnd)}`);
+
+  await send('Network.emulateNetworkConditions',
+    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+  await sleep(2500);
+  await ev(`navigator.onLine`);
+  await sleep(2500);
+  // The optimistic redraw is only honest if the write it drew actually lands,
+  // which is the `unknowncheck.mjs` model this suite already follows: ask the
+  // API what the row says rather than believing the cell.
+  const day3Flushed = await stored(seeded.day3);
+  ck('and the queued write lands on reconnect, so the redraw told the truth',
+     day3Flushed !== null && day3Flushed.value === 2, JSON.stringify(day3Flushed));
 
   /* ---------- paging, and forgetting where it was ---------- */
 

@@ -158,6 +158,21 @@ let stripRoot = null;
  * @type {Set<string>}
  */
 let stripRuns = new Set();
+/**
+ * The calendar card's own `draw`, so a repaint can redraw the grid from the
+ * same maps the strip was repainted from (#230).
+ *
+ * A whole-card redraw rather than a `repaintCells` equivalent: `charts.js`
+ * owns how a calendar cell is painted, there is no per-cell entry point into
+ * it, and paging the card already costs exactly this — `draw` is what
+ * ‹ Earlier / Later › / Today call. The closure holds `calCard`, which a
+ * rebuild detaches, so this is assigned on every render and nulled by
+ * `render()` before the rebuild for the same reason `stripRoot` is: a tap must
+ * never redraw a card that is no longer on the page. Null while the account
+ * has the calendar hidden, and `repaint` then has nothing to do.
+ * @type {(() => void) | null}
+ */
+let calRedraw = null;
 
 /**
  * This page, as `ui/day-strip.js` reads and writes it.
@@ -239,6 +254,31 @@ const detailHost = {
   // on the button that was just pressed.
   repaint: () => {
     if (stripRoot && openHabit) repaintCells(stripRoot, detailHost, openHabit, stripRuns);
+    // The calendar draws the SAME `entriesByDate` / `skipSet` the strip reads,
+    // so `edit` above has already moved what it paints from — and online
+    // nothing needed saying, because `writeDay` ends in `host.refresh()` and a
+    // full rebuild caught the card up. OFFLINE `api()` enqueues and throws, so
+    // that refetch never runs and the grid went on painting the pre-tap day
+    // until the next reconnect (#230). This is the redraw that was missing, not
+    // data that was; every other figure on the page is server-computed and
+    // stays stale, which is the accepted staleness `stripRuns` is declared
+    // with — the run bands here come from `stats.streaks`, so they redraw from
+    // the same pre-tap reading the cells beside them do.
+    //
+    // `calRedraw` is the card's own `draw`, which READS `state.calEnd` and
+    // never writes it, so a repaint draws the STORED position and commits no
+    // new one (#274). Say it that way and not "the window on screen", because
+    // with no stored position — the default — `draw` resolves `todayISO()`
+    // afresh, and so does `calendarChart`. Left open across local midnight
+    // (nothing cures that: the nudge's refresh declines while a habit is open,
+    // and `'reload'` only fires offline→online) a tap therefore shifts the
+    // grid a day and rewrites `.cal-range`, while `repaintCells` touches no
+    // nodes and the strip keeps its pre-midnight columns. No wrong VALUE, but
+    // a one-sided jump of the same shape #230 closed. Stated, not fixed.
+    //
+    // Cheap enough for a tap for the reason paging is: nothing in the window
+    // needs a request.
+    calRedraw?.();
   },
 
   refresh: () => refresh(openHabit?.id),
@@ -410,9 +450,11 @@ function render(stats, entries) {
   const focused = focusKeyOf(document.activeElement);
   host.replaceChildren();
   // Nothing from the previous render survives it, and a stale node here would
-  // have `repaintCells` walking an orphan.
+  // have `repaintCells` walking an orphan — or, for `calRedraw`, appending a
+  // fresh grid to a card the rebuild has already detached.
   stripRoot = null;
   stripRuns = new Set();
+  calRedraw = null;
 
   const entriesByDate = Object.fromEntries(entries.map((e) => [e.date, e.value]));
   // Computed unconditionally, same as `entriesByDate` above, rather than only
@@ -956,6 +998,21 @@ function buildCalendarCard(
     zoomIn,
   );
   calHead.append(nav);
+
+  // Where `detailHost.repaint` finds this card's redraw — assigned on every
+  // render and nulled by `render()` before the rebuild, exactly as `stripRoot`
+  // is, and for the same reason. Assigned once rather than inside `draw`
+  // because `draw` is one closure for the life of the card; the strip's
+  // equivalent is per-draw only because `windowedChart` builds a new node each
+  // time and it is the NODE that is being recorded there.
+  //
+  // `notesByDate` rides along in this closure with nothing to plumb, and that
+  // is the right answer rather than a convenient one: nothing local mutates
+  // it — `detailHost.edit` moves `entriesByDate` and `skipSet` alone, and a
+  // note can only be written through the day dialog, which refetches — so a
+  // redraw hands `openDayDialog` the same notes the card was built with, which
+  // are still the notes the server last reported.
+  calRedraw = draw;
 
   draw();
 

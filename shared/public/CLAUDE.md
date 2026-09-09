@@ -262,11 +262,34 @@ through `cappedColumns`, NOT `gridColumns` — that function's 7/10/14 ladder
 exists to protect the dashboard's habit-name column, which this card does not
 have.
 
-**Offline, the strip and the calendar card disagree about a day until
-reconnect**, and that is accepted rather than missed. `writeDay` ends in a
-refetch, which offline never runs; every other figure on the page is
-server-computed, so nothing local could move them anyway. The same staleness
-the dashboard row already has offline.
+**Offline, the strip and the calendar card agree about a day (#230).** They draw
+one pair of maps, and a tap moves it before it writes, so `detailHost.repaint`
+redraws the calendar beside the cells rather than waiting on the refetch
+`writeDay` ends in — which offline never runs, which is why the two grids used
+to show one date two ways until reconnect. Both halves are nulled by `render()`
+before a rebuild, or a tap redraws a card that has been detached.
+
+**The redraw draws the STORED position, and re-resolves today when there is
+none** — not "the window on screen", which is the same sentence only while a
+position exists. `draw` reads `state.calEnd` and never writes it, so #274
+cannot repeat; but with `calEnd` null, which is the default, `draw` and
+`calendarChart` both resolve today afresh. A page left open across local
+midnight therefore has its calendar jump a day on the next tap while the strip
+keeps its pre-midnight columns, and nothing cures the staleness first: the
+nudge's refresh declines while a habit is open, and `'reload'` fires only
+offline→online. Same one-sided shape #230 closed, one card further in.
+
+**What the repaint cannot reach stays stale, and THAT is accepted rather than
+missed**: strength, streaks, resilience, history, awards, the weekday
+breakdowns and times-per-week are all figures the server computed, so nothing
+local could move them. The run BANDS are the non-obvious one, and the one to
+know before reading a screenshot — a calendar cell is redrawn from the maps and
+is right, while the band around it comes from `stats.streaks` on the payload the
+page was built with. So an offline tap closing a gap in a run paints the day and
+not the run it extended; and one ERASING a day leaves the connectors and the
+stroke drawn through a cell that is now blank, which also ticks `data-run-marks`
+up and can raise an "In a run" legend swatch. The same staleness the dashboard
+row already has offline, now narrowed to what genuinely needs the server.
 
 **The stored shape is `{id, on}[]`, not a bare list of the ids that are on**
 (#163). Membership and order are two different decisions — hiding a card and
