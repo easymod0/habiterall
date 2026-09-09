@@ -25,7 +25,11 @@ in `src/db/` or `src/auth.js`.
   names #188 as the change that must not undo it) — a pooler that hands a
   session to a different backend per transaction has nowhere for a session-level
   setting to survive to anyway, but a transaction-local one is exactly the unit
-  such a pooler preserves.
+  such a pooler preserves. **That compatibility is not unqualified, and the two
+  exceptions are under `/healthz` below**: the pool's two timeouts are session
+  parameters a transaction-mode pooler silently zeroes, and `withoutUser` is the
+  one helper that opens no transaction. Read that before telling anyone this
+  edition runs behind PgBouncer.
 - A query that forgets its `WHERE` clause therefore returns **nothing**. The
   isolation fails closed.
 - The app connects as `habiterall_app`: not the table owner, `NOBYPASSRLS`,
@@ -325,6 +329,68 @@ spelling. An unparseable value falls back *and warns*. `noteTimeout` logs
 than converting to a 503 that would tell the offline outbox to replay a write
 that cannot finish in the time allowed. `docs/decisions/caching.md` has the
 rest, including why 15 s is the open judgement call here.
+
+**Those two are the exception to the pooler compatibility claimed above, and
+behind a transaction-mode pooler they are LOST — measured, not reasoned.** The
+scoping in "The security model" is transaction-local on purpose, so a pooler
+that hands each transaction a different backend loses nothing by it. These two
+are different: they are session-level, and not as a `SET` a transaction could
+scope — `pg` puts them in the STARTUP PACKET, which is why `SHOW` against a real
+session is the only thing that can confirm them. Against PgBouncer **1.25.2**,
+`pool_mode = transaction`, with the same startup parameters `db/pool.js` sends:
+
+| in front of the app | result |
+|---|---|
+| nothing (direct) | connected, `statement_timeout=15s`, `idle_in_tx=30s` |
+| PgBouncer, default config | **refused**: `unsupported startup parameter: statement_timeout` |
+| PgBouncer, `track_extra_parameters` for both | connected, **both `0`** |
+| PgBouncer, `ignore_startup_parameters` for both | connected, **both `0`** |
+
+Checked on the first query, on a second, and inside a `BEGIN`. **Both settings
+accept the connection and both zero the values** — `ignore_startup_parameters`
+by discarding them, and `track_extra_parameters` because PgBouncer can only
+track a parameter Postgres REPORTS to the client and Postgres reports neither
+(`TimeZone` and `DateStyle` each produce a `ParameterStatus` message; both
+timeouts produce none). So there is no PgBouncer setting that carries these
+values through, and reaching for the second one because the first looked lossy
+buys nothing. The mechanism may change — PgBouncer has an unreleased path for a
+non-reported parameter named in the startup packet — so re-measure rather than
+trusting the table if the version moved.
+
+**The remedy is to put the values where the pooler is not in the path**, on the
+role or the database, which every backend it opens then inherits — verified
+through the same three PgBouncer configs, where it restores `15s`/`30s` on both
+of the connecting ones:
+
+```sql
+ALTER ROLE habiterall_app IN DATABASE habiterall SET statement_timeout = '15s';
+ALTER ROLE habiterall_app IN DATABASE habiterall
+  SET idle_in_transaction_session_timeout = '30s';
+```
+
+It applies to server connections opened AFTER the change, so an already-warm
+pooler has to be recycled before the check reads true.
+
+**And the failure is worse than silent: the app states the opposite.**
+`poolTimeouts()` is spread into the startup runtime line, so a misconfigured
+deployment logs `pg_statement_timeout_ms: 15000` on every boot while `SHOW`
+answers `0` — the one surface an operator would check to find this out is the
+surface that tells them the wrong thing. `noteTimeout`'s `pool_limit_ms` carries
+the same number into events that can then never fire. Nothing exercises any of
+this — neither edition ships a pooler and CI runs none — so this paragraph is
+the whole of the guard (#201).
+
+**A second thing this edition owes a pooler, and it is not the timeouts.** A
+transaction-mode pooler releases the server connection after every transaction,
+and an autocommit statement IS a transaction — so two consecutive statements
+issued outside an explicit `BEGIN` may land on DIFFERENT backends however firmly
+the caller holds one `PoolClient`. `withUser` and `withNotifierScope` both open
+a transaction and are therefore safe by construction. **`withoutUser` does
+not.** So the rule for it is: a `withoutUser` body issues one statement, or
+opens its own transaction. No call site breaks today — `upsertUser` is a single
+`SELECT provision_user(...)` — which is why this is a sentence here rather than
+a change in the code, and it is the thing to check before adding the second
+statement to that helper.
 
 **The route is mounted ABOVE `app.use(session(...))`, and that is a rule rather
 than a tidy-up.** It reads no session and never has, but below the middleware it
